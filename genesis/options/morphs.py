@@ -562,6 +562,14 @@ class FileMorph(Morph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether a link whose spatial inertia has to be estimated takes it from its visual geometry rather than its
+        collision geometry. Collision geometry is usually a deliberate simplification of the body (a convex hull, a
+        sphere around a fruit, capsules along a leg), so estimating from the visual shape lands much closer to the
+        real inertia; the cost is a slower first load, because an open visual mesh has to be closed before its
+        volume means anything (see ``watertighten``), and a visual shape that is decorative rather than
+        representative then skews the estimate. Set to False to estimate from collision geometry instead. Has no
+        effect on a link whose inertia the asset specifies. Defaults to True.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
@@ -600,6 +608,7 @@ class FileMorph(Morph):
     decompose_robot_error_threshold: float = Field(default=float("inf"), ge=0, allow_inf_nan=True)
     coacd_options: CoacdOptions | None = None
     recompute_inertia: StrictBool = False
+    inertia_from_visual: StrictBool = True
     align: StrictBool | None = None
     file_meshes_are_zup: StrictBool | None = True
     batch_fixed_verts: StrictBool = False
@@ -758,6 +767,14 @@ class Mesh(FileMorph, TetGenMixin):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether a link whose spatial inertia has to be estimated takes it from its visual geometry rather than its
+        collision geometry. Collision geometry is usually a deliberate simplification of the body (a convex hull, a
+        sphere around a fruit, capsules along a leg), so estimating from the visual shape lands much closer to the
+        real inertia; the cost is a slower first load, because an open visual mesh has to be closed before its
+        volume means anything (see ``watertighten``), and a visual shape that is decorative rather than
+        representative then skews the estimate. Set to False to estimate from collision geometry instead. Has no
+        effect on a link whose inertia the asset specifies. Defaults to True.
     merge_submeshes_for_collision : bool, optional
         Whether to merge submeshes for collision. Defaults to False. **This is only used for RigidEntity.**
     visualization : bool, optional
@@ -951,6 +968,14 @@ class MJCF(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether a link whose spatial inertia has to be estimated takes it from its visual geometry rather than its
+        collision geometry. Collision geometry is usually a deliberate simplification of the body (a convex hull, a
+        sphere around a fruit, capsules along a leg), so estimating from the visual shape lands much closer to the
+        real inertia; the cost is a slower first load, because an open visual mesh has to be closed before its
+        volume means anything (see ``watertighten``), and a visual shape that is decorative rather than
+        representative then skews the estimate. Set to False to estimate from collision geometry instead. Has no
+        effect on a link whose inertia the asset specifies. Defaults to True.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1086,6 +1111,14 @@ class URDF(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether a link whose spatial inertia has to be estimated takes it from its visual geometry rather than its
+        collision geometry. Collision geometry is usually a deliberate simplification of the body (a convex hull, a
+        sphere around a fruit, capsules along a leg), so estimating from the visual shape lands much closer to the
+        real inertia; the cost is a slower first load, because an open visual mesh has to be closed before its
+        volume means anything (see ``watertighten``), and a visual shape that is decorative rather than
+        representative then skews the estimate. Set to False to estimate from collision geometry instead. Has no
+        effect on a link whose inertia the asset specifies. Defaults to True.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1223,6 +1256,14 @@ class Drone(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether a link whose spatial inertia has to be estimated takes it from its visual geometry rather than its
+        collision geometry. Collision geometry is usually a deliberate simplification of the body (a convex hull, a
+        sphere around a fruit, capsules along a leg), so estimating from the visual shape lands much closer to the
+        real inertia; the cost is a slower first load, because an open visual mesh has to be closed before its
+        volume means anything (see ``watertighten``), and a visual shape that is decorative rather than
+        representative then skews the estimate. Set to False to estimate from collision geometry instead. Has no
+        effect on a link whose inertia the asset specifies. Defaults to True.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1569,6 +1610,14 @@ class USD(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether a link whose spatial inertia has to be estimated takes it from its visual geometry rather than its
+        collision geometry. Collision geometry is usually a deliberate simplification of the body (a convex hull, a
+        sphere around a fruit, capsules along a leg), so estimating from the visual shape lands much closer to the
+        real inertia; the cost is a slower first load, because an open visual mesh has to be closed before its
+        volume means anything (see ``watertighten``), and a visual shape that is decorative rather than
+        representative then skews the estimate. Set to False to estimate from collision geometry instead. Has no
+        effect on a link whose inertia the asset specifies. Defaults to True.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.

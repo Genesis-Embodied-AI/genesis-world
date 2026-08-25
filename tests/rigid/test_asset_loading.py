@@ -228,6 +228,8 @@ def test_parsing_inertia_defaults(
     degenerate_inertials,
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
+    simplified_collision_sphere,
+    simplified_collision_open_mesh,
     show_viewer,
     tol,
     caplog,
@@ -245,6 +247,8 @@ def test_parsing_inertia_defaults(
     SPHERE_INERTIA_PER_MASS = 2.0 * 0.06**2 / 5.0
     BOX_INERTIA_PER_MASS = 2.0 * 0.2**2 / 12.0
     GRAVITY = (0.0, 0.0, -9.81)
+    # Density is read back by the estimate assertions below, so it must be pinned rather than left to resolve.
+    RHO = 1000.0
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -405,6 +409,40 @@ def test_parsing_inertia_defaults(
     )
     stacked_tip.attach(stacked_middle, parent_link_name=stacked_middle.base_link.name, pos=(0.0, 0.0, 0.2))
     stacked_middle.attach(stacked_base, parent_link_name=stacked_base.base_link.name, pos=(0.0, 0.0, 0.2))
+    # A link whose collision geometry is a deliberate simplification of its visual mesh: the estimate must describe
+    # the body rather than the proxy, and 'inertia_from_visual' must be able to select the proxy back.
+    entity_from_visual = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=simplified_collision_sphere,
+            pos=(2.4, 1.0, 0.5),
+            align=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    entity_from_collision = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=simplified_collision_sphere,
+            pos=(3.2, 1.0, 0.5),
+            align=False,
+            inertia_from_visual=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
+    open_mesh_urdf, open_mesh_closed_volume = simplified_collision_open_mesh
+    entity_open_visual = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=open_mesh_urdf,
+            pos=(4.0, 1.0, 0.5),
+            align=False,
+        ),
+        material=gs.materials.Rigid(
+            rho=RHO,
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         scene.build()
@@ -465,6 +503,34 @@ def test_parsing_inertia_defaults(
 
     # Every asset above is parsed by MuJoCo, a zero or missing inertial included.
     assert not any("legacy URDF parser" in record.getMessage() for record in caplog.records)
+
+    # An estimated inertia describes the visual shape, so it matches the visual mesh integrated at the material
+    # density rather than the collision sphere standing in for it, and the mesh's own tensor rather than an
+    # analytical sphere's, which its faceting departs from.
+    visual_tmesh = entity_from_visual.base_link.vgeoms[0].vmesh.trimesh
+    assert_allclose(entity_from_visual.base_link.desc.mass, RHO * visual_tmesh.volume, tol=tol)
+    assert_allclose(
+        np.linalg.eigvalsh(entity_from_visual.base_link.desc.inertia),
+        np.linalg.eigvalsh(RHO * visual_tmesh.moment_inertia),
+        tol=tol,
+    )
+
+    # Opting out recovers the collision sphere, which encloses about half the volume of the mesh it stands in for.
+    collision_radius = entity_from_collision.base_link.geoms[0].data[0]
+    collision_mass = RHO * (4.0 / 3.0) * np.pi * collision_radius**3
+    assert_allclose(entity_from_collision.base_link.desc.mass, collision_mass, tol=tol)
+    assert_allclose(
+        np.linalg.eigvalsh(entity_from_collision.base_link.desc.inertia),
+        (2.0 / 5.0) * collision_mass * collision_radius**2,
+        tol=tol,
+    )
+
+    # An open visual mesh encloses no volume of its own, so it has to be closed before being integrated: the estimate
+    # recovers the volume the pipe bounds. Filling its convex hull instead, which is what an open mesh otherwise falls
+    # back to, would bore-and-all hand it almost three times that.
+    open_tmesh = entity_open_visual.base_link.vgeoms[0].vmesh.trimesh
+    assert not open_tmesh.is_watertight
+    assert_allclose(entity_open_visual.base_link.desc.mass, RHO * open_mesh_closed_volume, rtol=1e-2)
 
     # Resolving the center of mass to the link frame can place it outside the geometry, which stays worth reporting.
     # Only the link whose geometry is offset qualifies, once per copy of the robot.

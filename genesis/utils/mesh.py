@@ -464,6 +464,26 @@ def convex_decompose(mesh, coacd_options):
     return mesh_parts
 
 
+def watertighten_trimesh(tmesh, aggressiveness):
+    """Closed manifold wrap of a triangle soup, memoized on disk by (vertices, faces, aggressiveness).
+
+    `aggressiveness` is the integer 0..8 controlling the wrap's quadric-error decimation cost cutoff; see
+    `genesis.utils.watertighten.watertighten_mesh` for the full pipeline. The cache turns a repeated build on the
+    same geometry into a file read instead of a multi-second SDF + DC + QEM rebuild.
+    """
+    # Imported lazily because pulling in the wrap pipeline triggers Numba compilation, which every Genesis import
+    # would otherwise pay for whether or not any asset needs closing.
+    from .watertighten import watertighten_mesh
+
+    cache = get_wt_cache(tmesh.vertices, tmesh.faces, aggressiveness)
+    cached_mesh = cache.load()
+    if cached_mesh is None:
+        cached_mesh = watertighten_mesh(tmesh.vertices, tmesh.faces, aggressiveness=aggressiveness)
+        cache.save(cached_mesh)
+    verts, faces = cached_mesh
+    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+
+
 # 512 MiB of processed collision geometry. Sized by the geometry footprint actually retained (vertices and faces of
 # the cached meshes), so a few large assets or many small ones are both bounded without an arbitrary entry count.
 _COLLISION_GEOMS_CACHE = SizeCappedCache(max_bytes=512 * 1024 * 1024)
@@ -745,8 +765,6 @@ def _postprocess_collision_geoms_impl(
     # Nonconvex: watertighten each fused surface into a closed mesh so the grid SDF is reliable. The convex path skips
     # this (its hull / decomposition replaces the surface anyway, so an alpha-wrap would be wasted work).
     if not convexify and watertighten is not None:
-        from .watertighten import watertighten_mesh
-
         for g_info, is_fused in zip(g_infos, geoms_is_fused):
             # Fused geoms are always watertightened, as their sub-meshes may overlap while being individually
             # watertight. Other geoms are skipped if they are not generic meshes or already watertight or convex.
@@ -754,15 +772,7 @@ def _postprocess_collision_geoms_impl(
             if not is_fused and (g_info["type"] != gs.GEOM_TYPE.MESH or tmesh.is_watertight or tmesh.is_convex):
                 continue
 
-            # On-disk cache keyed by (vertices, faces, aggressiveness): a repeated build on the same geom is a file read
-            # instead of a multi-second SDF + DC + QEM rebuild.
-            cache = get_wt_cache(tmesh.vertices, tmesh.faces, watertighten)
-            cached_mesh = cache.load()
-            if cached_mesh is None:
-                cached_mesh = watertighten_mesh(tmesh.vertices, tmesh.faces, aggressiveness=watertighten)
-                cache.save(cached_mesh)
-            v_out, f_out = cached_mesh
-            fused = trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
+            fused = watertighten_trimesh(tmesh, watertighten)
             metadata = g_info["mesh"].metadata.copy()
             metadata["watertightened"] = True
             g_info["mesh"] = gs.Mesh.from_trimesh(mesh=fused, surface=gs.surfaces.Collision(), metadata=metadata)
