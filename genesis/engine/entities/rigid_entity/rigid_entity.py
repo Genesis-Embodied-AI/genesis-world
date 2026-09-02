@@ -3191,7 +3191,7 @@ class RigidEntity(KinematicEntity):
             case gs.EQUALITY_TYPE.CONNECT | gs.EQUALITY_TYPE.WELD:
                 objs_id = [self.get_link(obj_name).idx for obj_name in desc.objs_name]
             case gs.EQUALITY_TYPE.JOINT:
-                objs_id = [self.get_joint(obj_name).idx for obj_name in desc.objs_name]
+                objs_id = [self.get_joint(obj_name).idx if obj_name is not None else -1 for obj_name in desc.objs_name]
             case _:
                 gs.raise_exception(
                     f"Equality type {desc.type} not supported. Only CONNECT, JOINT, and WELD are supported."

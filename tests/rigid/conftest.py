@@ -210,6 +210,19 @@ def scaled_mjcf_joint_equalities():
 
 
 @pytest.fixture(scope="session")
+def single_joint_equality():
+    mjcf = ET.Element("mujoco", model="single_joint_equality")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name in ("target", "unrelated"):
+        body = ET.SubElement(worldbody, "body", name=f"{name}_body")
+        ET.SubElement(body, "joint", name=name, type="slide", axis="1 0 0")
+        ET.SubElement(body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "joint", name="fixed_target", joint1="target", polycoef="0.25 1 0 0 0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def scaled_urdf_mimic():
     robot = ET.Element("robot", name="scaled_urdf_mimic")
     ET.SubElement(robot, "link", name="base")

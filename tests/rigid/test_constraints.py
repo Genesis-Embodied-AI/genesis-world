@@ -91,6 +91,45 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("n_envs, batch_info", [(0, False), (2, True)])
+def test_equality_joint_without_joint2(show_viewer, single_joint_equality, n_envs, batch_info, tol):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+            enable_joint_limit=False,
+            batch_joints_info=batch_info,
+            batch_dofs_info=batch_info,
+        ),
+        show_viewer=show_viewer,
+    )
+    SCALE = 2.0
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=single_joint_equality,
+            scale=SCALE,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    TARGET_POSITION = 0.25
+    UNRELATED_POSITION = 1.0
+    (target_idx,) = entity.get_joint("target").qs_idx_local
+    (unrelated_idx,) = entity.get_joint("unrelated").qs_idx_local
+    qpos = entity.get_qpos()
+    qpos[..., unrelated_idx] = UNRELATED_POSITION * SCALE
+    entity.set_qpos(qpos)
+    for _ in range(80):
+        scene.step()
+
+    qpos = entity.get_qpos() / SCALE
+    assert_allclose(qpos[..., target_idx], TARGET_POSITION, atol=2e-3)
+    assert_allclose(qpos[..., unrelated_idx], UNRELATED_POSITION, tol=tol)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])

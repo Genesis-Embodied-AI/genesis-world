@@ -890,7 +890,9 @@ def parse_equalities(mj, scale):
         elif mj.eq_type[i_e] == mujoco.mjtEq.mjEQ_JOINT:
             eq_type = gs.EQUALITY_TYPE.JOINT
             follower_scale = scale if mj.jnt_type[objs_idx[0]] == mujoco.mjtJoint.mjJNT_SLIDE else 1.0
-            driver_scale = scale if mj.jnt_type[objs_idx[1]] == mujoco.mjtJoint.mjJNT_SLIDE else 1.0
+            driver_scale = (
+                scale if objs_idx[1] >= 0 and mj.jnt_type[objs_idx[1]] == mujoco.mjtJoint.mjJNT_SLIDE else 1.0
+            )
 
             # eq_data[0:5] stores a0..a4 in q_follower - q_follower0 = sum(a_k * (q_driver - q_driver0)^k).
             # A model scale transforms a_k to s_f * a_k / s_d**k, where s_f and s_d are scale for prismatic
