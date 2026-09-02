@@ -1286,17 +1286,18 @@ def func_equality_joint(
         if qd.static(rigid_config.batch_joints_info)
         else dyn_info.equalities.eq_obj1id[i_e, i_b]
     )
-    I_joint2 = (
-        [dyn_info.equalities.eq_obj2id[i_e, i_b], i_b]
-        if qd.static(rigid_config.batch_joints_info)
-        else dyn_info.equalities.eq_obj2id[i_e, i_b]
-    )
     i_qpos1 = dyn_info.joints.q_start[I_joint1]
-    i_qpos2 = dyn_info.joints.q_start[I_joint2]
     i_dof1 = dyn_info.joints.dof_start[I_joint1]
-    i_dof2 = dyn_info.joints.dof_start[I_joint2]
     I_dof1 = [i_dof1, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof1
-    I_dof2 = [i_dof2, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof2
+
+    i_joint2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+    i_dof2 = -1
+    diff = gs.qd_float(0.0)
+    if i_joint2 >= 0:
+        I_joint2 = [i_joint2, i_b] if qd.static(rigid_config.batch_joints_info) else i_joint2
+        i_qpos2 = dyn_info.joints.q_start[I_joint2]
+        i_dof2 = dyn_info.joints.dof_start[I_joint2]
+        diff = rigid_info.qpos[i_qpos2, i_b] - rigid_info.qpos0[i_qpos2, i_b]
 
     n_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
     qd.atomic_add(constraint_state.n_constraints_equality[i_b], 1)
@@ -1310,12 +1311,8 @@ def func_equality_joint(
             constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
 
     pos1 = rigid_info.qpos[i_qpos1, i_b]
-    pos2 = rigid_info.qpos[i_qpos2, i_b]
     ref1 = rigid_info.qpos0[i_qpos1, i_b]
-    ref2 = rigid_info.qpos0[i_qpos2, i_b]
 
-    # TODO: zero objid2
-    diff = pos2 - ref2
     pos = pos1 - ref1
     deriv = gs.qd_float(0.0)
 
@@ -1327,12 +1324,13 @@ def func_equality_joint(
             deriv = deriv + dyn_info.equalities.eq_data[i_e, i_b][i_5 + 1] * diff_power * (i_5 + 1)
 
     constraint_state.jac[n_con, i_dof1, i_b] = gs.qd_float(1.0)
-    constraint_state.jac[n_con, i_dof2, i_b] = -deriv
-    jac_qvel = (
-        constraint_state.jac[n_con, i_dof1, i_b] * dyn_state.dofs.vel[i_dof1, i_b]
-        + constraint_state.jac[n_con, i_dof2, i_b] * dyn_state.dofs.vel[i_dof2, i_b]
-    )
-    invweight = dyn_info.dofs.invweight[I_dof1] + dyn_info.dofs.invweight[I_dof2]
+    jac_qvel = dyn_state.dofs.vel[i_dof1, i_b]
+    invweight = dyn_info.dofs.invweight[I_dof1]
+    if i_joint2 >= 0:
+        I_dof2 = [i_dof2, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof2
+        constraint_state.jac[n_con, i_dof2, i_b] = -deriv
+        jac_qvel = jac_qvel - deriv * dyn_state.dofs.vel[i_dof2, i_b]
+        invweight = invweight + dyn_info.dofs.invweight[I_dof2]
 
     imp, aref = gu.imp_aref(sol_params, -qd.abs(pos), jac_qvel, pos)
 
@@ -1347,7 +1345,7 @@ def func_equality_joint(
     con_n_dofs = 0
     constraint_state.jac_dofs_idx[n_con, con_n_dofs, i_b] = i_dof1
     con_n_dofs += 1
-    if i_dof2 != i_dof1:
+    if i_joint2 >= 0 and i_dof2 != i_dof1:
         constraint_state.jac_dofs_idx[n_con, con_n_dofs, i_b] = i_dof2
         con_n_dofs += 1
     constraint_state.jac_n_dofs[n_con, i_b] = con_n_dofs

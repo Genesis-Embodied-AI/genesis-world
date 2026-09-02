@@ -170,10 +170,10 @@ class LinkDescription:
 
 @dataclass
 class EqualityDescription:
-    """Describe one constraint tying two links or two joints of an entity together, named as the asset names them."""
+    """Describe one constraint tying two objects, or one joint to a constant, using their asset names."""
 
     name: str
     type: EQUALITY_TYPE
-    objs_name: tuple[str, str]
+    objs_name: tuple[str, str | None]
     data: np.ndarray
     sol_params: np.ndarray

@@ -825,15 +825,15 @@ def kernel_manual_add_equality_constraints_bw(
 ):
     """Manual reverse of `add_equality_constraints` (JOINT + CONNECT + WELD).
 
-    * JOINT   - couples two scalar dofs via a quartic polynomial (1 row).
+    * JOINT   - constrains one scalar dof, optionally against another via a quartic polynomial (1 row).
     * CONNECT - 3 rows pinning `global_anchor1` to `global_anchor2` in world.
     * WELD    - 6 rows: 3 position + 3 orientation, all sharing a single
                 combined `pos_imp = ||all_error||` (6D).
 
     Accumulates into kinematic-state grads only (conservative):
         JOINT:
-            rigid_info.qpos.grad[i_qpos1], qpos.grad[i_qpos2]
-            dyn_state.dofs.vel.grad[i_dof1], vel.grad[i_dof2]
+            rigid_info.qpos.grad[i_qpos1], and qpos.grad[i_qpos2] when joint2 exists
+            dyn_state.dofs.vel.grad[i_dof1], and vel.grad[i_dof2] when joint2 exists
         CONNECT / WELD:
             dyn_state.links.{pos, quat, root_COM, cd_ang, cd_vel}.grad[link1 / link2]
             dyn_state.dofs.{cdof_ang, cdof_vel, cdofd_ang, cdofd_vel, vel}.grad over each link chain
@@ -841,13 +841,13 @@ def kernel_manual_add_equality_constraints_bw(
     `dyn_info.links.invweight`) are not differentiated.
 
     Forward recap (per equality of type JOINT):
-        diff = qpos[i_qpos2] - qpos0[i_qpos2]
+        diff = qpos[i_qpos2] - qpos0[i_qpos2], or 0 when joint2 is omitted
         pos_poly = a0 + a1 * diff + a2 * diff^2 + a3 * diff^3 + a4 * diff^4
         pos = qpos[i_qpos1] - qpos0[i_qpos1] - pos_poly
         deriv = d(pos_poly)/d(diff) = a1 + 2 * a2 * diff + 3 * a3 * diff^2 + 4 * a4 * diff^3
         jac[n_con, i_dof1] = 1.0
-        jac[n_con, i_dof2] = -deriv
-        jac_qvel = vel[i_dof1] - deriv * vel[i_dof2]
+        jac[n_con, i_dof2] = -deriv, when joint2 exists
+        jac_qvel = vel[i_dof1] - deriv * vel[i_dof2], with the second term omitted when joint2 is omitted
         imp, aref = imp_aref(sol_params, -|pos|, jac_qvel, pos)
             aref = -b * jac_qvel - k * imp * pos
         diag = max(invweight * (1 - imp) / imp, EPS); efc_D = 1/diag
@@ -874,22 +874,21 @@ def kernel_manual_add_equality_constraints_bw(
                     if qd.static(rigid_config.batch_joints_info)
                     else dyn_info.equalities.eq_obj1id[i_e, i_b]
                 )
-                I_joint2 = (
-                    [dyn_info.equalities.eq_obj2id[i_e, i_b], i_b]
-                    if qd.static(rigid_config.batch_joints_info)
-                    else dyn_info.equalities.eq_obj2id[i_e, i_b]
-                )
                 i_qpos1 = dyn_info.joints.q_start[I_joint1]
-                i_qpos2 = dyn_info.joints.q_start[I_joint2]
                 i_dof1 = dyn_info.joints.dof_start[I_joint1]
-                i_dof2 = dyn_info.joints.dof_start[I_joint2]
                 I_dof1 = [i_dof1, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof1
-                I_dof2 = [i_dof2, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof2
 
                 pos1 = rigid_info.qpos[i_qpos1, i_b]
-                pos2 = rigid_info.qpos[i_qpos2, i_b]
                 ref1 = rigid_info.qpos0[i_qpos1, i_b]
-                ref2 = rigid_info.qpos0[i_qpos2, i_b]
+                i_joint2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+                i_qpos2 = -1
+                i_dof2 = -1
+                diff = gs.qd_float(0.0)
+                if i_joint2 >= 0:
+                    I_joint2 = [i_joint2, i_b] if qd.static(rigid_config.batch_joints_info) else i_joint2
+                    i_qpos2 = dyn_info.joints.q_start[I_joint2]
+                    i_dof2 = dyn_info.joints.dof_start[I_joint2]
+                    diff = rigid_info.qpos[i_qpos2, i_b] - rigid_info.qpos0[i_qpos2, i_b]
 
                 a0 = dyn_info.equalities.eq_data[i_e, i_b][0]
                 a1 = dyn_info.equalities.eq_data[i_e, i_b][1]
@@ -897,20 +896,28 @@ def kernel_manual_add_equality_constraints_bw(
                 a3 = dyn_info.equalities.eq_data[i_e, i_b][3]
                 a4 = dyn_info.equalities.eq_data[i_e, i_b][4]
 
-                diff = pos2 - ref2
                 diff2 = diff * diff
                 diff3 = diff2 * diff
                 diff4 = diff3 * diff
                 pos = pos1 - ref1 - a0 - a1 * diff - a2 * diff2 - a3 * diff3 - a4 * diff4
                 deriv = a1 + 2.0 * a2 * diff + 3.0 * a3 * diff2 + 4.0 * a4 * diff3
                 d_deriv_d_diff = 2.0 * a2 + 6.0 * a3 * diff + 12.0 * a4 * diff2
+                if i_joint2 < 0:
+                    deriv = gs.qd_float(0.0)
+                    d_deriv_d_diff = gs.qd_float(0.0)
 
                 jac1 = gs.qd_float(1.0)
-                jac2 = -deriv
+                jac2 = gs.qd_float(0.0)
                 vel1 = dyn_state.dofs.vel[i_dof1, i_b]
-                vel2 = dyn_state.dofs.vel[i_dof2, i_b]
-                jac_qvel = jac1 * vel1 + jac2 * vel2
-                invweight = dyn_info.dofs.invweight[I_dof1] + dyn_info.dofs.invweight[I_dof2]
+                vel2 = gs.qd_float(0.0)
+                jac_qvel = jac1 * vel1
+                invweight = dyn_info.dofs.invweight[I_dof1]
+                if i_joint2 >= 0:
+                    I_dof2 = [i_dof2, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof2
+                    jac2 = -deriv
+                    vel2 = dyn_state.dofs.vel[i_dof2, i_b]
+                    jac_qvel = jac_qvel + jac2 * vel2
+                    invweight = invweight + dyn_info.dofs.invweight[I_dof2]
 
                 sol_params = dyn_info.equalities.sol_params[i_e, i_b]
                 imp, b_coef, k_coef, d_imp_d_imp_x = gu.imp_aref_grad(sol_params, pos)
@@ -923,7 +930,9 @@ def kernel_manual_add_equality_constraints_bw(
                 g_aref = constraint_state.dL_daref[n_con, i_b]
                 g_efc_D = constraint_state.dL_defc_D[n_con, i_b]
                 # jac[dof1] = 1.0 (constant) => no chain through dL_djac[n_con, i_dof1].
-                g_jac2 = constraint_state.dL_djac[n_con, i_dof2, i_b]
+                g_jac2 = gs.qd_float(0.0)
+                if i_joint2 >= 0:
+                    g_jac2 = constraint_state.dL_djac[n_con, i_dof2, i_b]
 
                 # ---- Partials ----
                 # aref = -b * jac_qvel - k * imp * pos
@@ -952,11 +961,12 @@ def kernel_manual_add_equality_constraints_bw(
 
                 # ---- Propagate ----
                 dyn_state.dofs.vel.grad[i_dof1, i_b] += dL_d_jac_qvel * jac1
-                dyn_state.dofs.vel.grad[i_dof2, i_b] += dL_d_jac_qvel * jac2
                 # qpos1 enters only via pos (d_pos/d_pos1 = 1).
                 rigid_info.qpos.grad[i_qpos1, i_b] += dL_d_pos
-                # qpos2 enters via pos (d_pos/d_pos2 = -deriv) and deriv (d_deriv/d_diff).
-                rigid_info.qpos.grad[i_qpos2, i_b] += dL_d_pos * (-deriv) + dL_d_deriv * d_deriv_d_diff
+                if i_joint2 >= 0:
+                    dyn_state.dofs.vel.grad[i_dof2, i_b] += dL_d_jac_qvel * jac2
+                    # qpos2 enters via pos (d_pos/d_pos2 = -deriv) and deriv (d_deriv/d_diff).
+                    rigid_info.qpos.grad[i_qpos2, i_b] += dL_d_pos * (-deriv) + dL_d_deriv * d_deriv_d_diff
             elif dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.CONNECT:
                 # ----------------------------------------------------------
                 # CONNECT: 3 rows pin global_anchor1 == global_anchor2.

@@ -147,6 +147,17 @@ def grad_hinge_pair_joint_eq_quadratic():
 
 
 @pytest.fixture(scope="session")
+def grad_hinge_joint_eq_constant():
+    mjcf = ET.Element("mujoco", model="hinge_joint_eq_constant")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    _add_hinge_arm(worldbody, "arm1", "0 0 0", name="j1")
+    _add_hinge_arm(worldbody, "arm2", "0.4 0 0", name="j2")
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "joint", joint1="j1", polycoef="0.25 1 0 0 0", solimp="0.95 0.99 0.001", solref="0.005 1")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def grad_connect_loop():
     # arm2 hangs off arm1 and the connect closes the loop within one kinematic tree: the constraint rows then share
     # arm1's dof across both chains (dedup path) and both anchors move with the chain (velocity-product bias).
