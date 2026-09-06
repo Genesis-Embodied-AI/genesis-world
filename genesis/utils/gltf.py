@@ -378,17 +378,17 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
                     continue  # Skip unsupported modes
 
                 # parse normals
-                if primitive.attributes.NORMAL:
+                if primitive.attributes.NORMAL is not None:
                     normals = get_glb_data_from_accessor(glb, primitive.attributes.NORMAL).astype(np.float32)
                 else:
                     normals = None
 
                 # parse uvs
                 if uv_used == 0:
-                    if primitive.attributes.TEXCOORD_0:
+                    if primitive.attributes.TEXCOORD_0 is not None:
                         uvs = get_glb_data_from_accessor(glb, primitive.attributes.TEXCOORD_0).astype(np.float32)
                 elif uv_used == 1:
-                    if primitive.attributes.TEXCOORD_1:
+                    if primitive.attributes.TEXCOORD_1 is not None:
                         uvs = get_glb_data_from_accessor(glb, primitive.attributes.TEXCOORD_1).astype(np.float32)
 
             points, normals = mu.apply_transform(mesh_transform, points, normals)

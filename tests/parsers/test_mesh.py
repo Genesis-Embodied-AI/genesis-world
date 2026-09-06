@@ -318,6 +318,44 @@ def test_glb_parse_geometry(glb_file, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("first_attribute", ["NORMAL", "TEXCOORD_0", "TEXCOORD_1"])
+def test_glb_parse_vertex_attributes(asset_tmp_path, tol, first_attribute):
+    # Authored shading normals differ from the triangle's geometric normal
+    mesh = trimesh.Trimesh(
+        vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        faces=[[0, 1, 2]],
+        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
+        visual=trimesh.visual.TextureVisuals(
+            uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
+            material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
+        ),
+        process=False,
+    )
+    glb_path = asset_tmp_path / f"vertex_attributes_{first_attribute}.glb"
+    mesh.export(glb_path, include_normals=True)
+    glb = pygltflib.GLTF2().load(glb_path)
+    primitive = glb.meshes[0].primitives[0]
+    attributes = primitive.attributes
+    first_accessor = attributes.NORMAL if first_attribute == "NORMAL" else attributes.TEXCOORD_0
+    # Reorder the accessor table while keeping every reference attached to its authored data
+    order = [first_accessor] + [i for i in range(len(glb.accessors)) if i != first_accessor]
+    glb.accessors = [glb.accessors[i] for i in order]
+    attributes.POSITION = order.index(attributes.POSITION)
+    attributes.NORMAL = order.index(attributes.NORMAL)
+    attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
+    primitive.indices = order.index(primitive.indices)
+    if first_attribute == "TEXCOORD_1":
+        attributes.TEXCOORD_1 = attributes.TEXCOORD_0
+        glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
+    glb.save_binary(str(glb_path))
+
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        str(glb_path), group_by_material=False, scale=None, is_mesh_zup=True, surface=gs.surfaces.Default()
+    )
+    check_gs_tm_meshes(gs_meshes[0], mesh, first_attribute, tol, tol)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("glb_file", ["glb/tycoon_draco_no_normal.glb", "glb/tycoon_with_normal_draco.glb"])
 def test_glb_draco_missing_normals_texcoord(glb_file):
     # Normals and tex_coord are not always present in GLB files, typically for Draco-compressed ones.
