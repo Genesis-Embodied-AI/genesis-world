@@ -290,10 +290,51 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-@pytest.mark.parametrize("glb_file", ["glb/combined_srt.glb", "glb/combined_transform.glb"])
-def test_glb_parse_geometry(glb_file, tol):
-    asset_path = get_hf_dataset(pattern=glb_file)
-    glb_file = os.path.join(asset_path, glb_file)
+@pytest.mark.parametrize(
+    "glb_file, accessor_zero_attribute",
+    [
+        ("glb/combined_srt.glb", None),
+        ("glb/combined_transform.glb", None),
+        (None, "NORMAL"),
+        (None, "TEXCOORD_0"),
+        (None, "TEXCOORD_1"),
+    ],
+)
+def test_glb_parse_geometry(glb_file, accessor_zero_attribute, asset_tmp_path, tol):
+    if accessor_zero_attribute is None:
+        asset_path = get_hf_dataset(pattern=glb_file)
+        glb_file = os.path.join(asset_path, glb_file)
+    else:
+        # Authored shading normals differ from the triangle's geometric normal
+        mesh = trimesh.Trimesh(
+            vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces=[[0, 1, 2]],
+            vertex_normals=[[1.0, 0.0, 0.0]] * 3,
+            visual=trimesh.visual.TextureVisuals(
+                uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
+                material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
+            ),
+            process=False,
+        )
+        glb_path = asset_tmp_path / f"vertex_attributes_{accessor_zero_attribute}.glb"
+        mesh.export(glb_path, include_normals=True)
+        glb = pygltflib.GLTF2().load(glb_path)
+        primitive = glb.meshes[0].primitives[0]
+        attributes = primitive.attributes
+        first_accessor = attributes.NORMAL if accessor_zero_attribute == "NORMAL" else attributes.TEXCOORD_0
+        # Reorder the accessor table while keeping every reference attached to its authored data
+        order = [first_accessor] + [i for i in range(len(glb.accessors)) if i != first_accessor]
+        glb.accessors = [glb.accessors[i] for i in order]
+        attributes.POSITION = order.index(attributes.POSITION)
+        attributes.NORMAL = order.index(attributes.NORMAL)
+        attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
+        primitive.indices = order.index(primitive.indices)
+        if accessor_zero_attribute == "TEXCOORD_1":
+            attributes.TEXCOORD_1 = attributes.TEXCOORD_0
+            glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
+        glb.save_binary(str(glb_path))
+        glb_file = str(glb_path)
+
     gs_meshes = gltf_utils.parse_mesh_glb(
         glb_file,
         group_by_material=False,
@@ -315,44 +356,6 @@ def test_glb_parse_geometry(glb_file, tol):
         mesh_name = gs_mesh.metadata["name"]
         tm_mesh = tm_meshes[mesh_name]
         check_gs_tm_meshes(gs_mesh, tm_mesh, mesh_name, tol, tol)
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("first_attribute", ["NORMAL", "TEXCOORD_0", "TEXCOORD_1"])
-def test_glb_parse_vertex_attributes(asset_tmp_path, tol, first_attribute):
-    # Authored shading normals differ from the triangle's geometric normal
-    mesh = trimesh.Trimesh(
-        vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-        faces=[[0, 1, 2]],
-        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
-        visual=trimesh.visual.TextureVisuals(
-            uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
-            material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
-        ),
-        process=False,
-    )
-    glb_path = asset_tmp_path / f"vertex_attributes_{first_attribute}.glb"
-    mesh.export(glb_path, include_normals=True)
-    glb = pygltflib.GLTF2().load(glb_path)
-    primitive = glb.meshes[0].primitives[0]
-    attributes = primitive.attributes
-    first_accessor = attributes.NORMAL if first_attribute == "NORMAL" else attributes.TEXCOORD_0
-    # Reorder the accessor table while keeping every reference attached to its authored data
-    order = [first_accessor] + [i for i in range(len(glb.accessors)) if i != first_accessor]
-    glb.accessors = [glb.accessors[i] for i in order]
-    attributes.POSITION = order.index(attributes.POSITION)
-    attributes.NORMAL = order.index(attributes.NORMAL)
-    attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
-    primitive.indices = order.index(primitive.indices)
-    if first_attribute == "TEXCOORD_1":
-        attributes.TEXCOORD_1 = attributes.TEXCOORD_0
-        glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
-    glb.save_binary(str(glb_path))
-
-    gs_meshes = gltf_utils.parse_mesh_glb(
-        str(glb_path), group_by_material=False, scale=None, is_mesh_zup=True, surface=gs.surfaces.Default()
-    )
-    check_gs_tm_meshes(gs_meshes[0], mesh, first_attribute, tol, tol)
 
 
 @pytest.mark.required
