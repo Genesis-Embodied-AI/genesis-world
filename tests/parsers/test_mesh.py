@@ -290,19 +290,26 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-@pytest.mark.parametrize("glb_file", ["glb/combined_srt.glb", "glb/combined_transform.glb"])
-def test_glb_parse_geometry(glb_file, tol):
-    asset_path = get_hf_dataset(pattern=glb_file)
-    glb_file = os.path.join(asset_path, glb_file)
+@pytest.mark.parametrize(
+    "glb_file, accessor_zero_attribute",
+    [
+        ("glb/combined_srt.glb", None),
+        ("glb/combined_transform.glb", None),
+        (None, "NORMAL"),
+        (None, "TEXCOORD_0"),
+        (None, "TEXCOORD_1"),
+    ],
+)
+def test_glb_parse_geometry(glb_path, tol):
     gs_meshes = gltf_utils.parse_mesh_glb(
-        glb_file,
+        glb_path,
         group_by_material=False,
         scale=None,
         is_mesh_zup=True,
         surface=gs.surfaces.Default(),
     )
 
-    tm_scene = trimesh.load(glb_file, process=False)
+    tm_scene = trimesh.load(glb_path, process=False)
     tm_meshes = {}
     for node_name in tm_scene.graph.nodes_geometry:
         transform, geometry_name = tm_scene.graph[node_name]

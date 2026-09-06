@@ -42,6 +42,43 @@ def mesh_urdf(mesh_path):
     return ET.tostring(robot, encoding="unicode")
 
 
+@pytest.fixture
+def glb_path(glb_file, accessor_zero_attribute, asset_tmp_path):
+    """Path to an existing GLB or a generated mesh with the selected attribute at accessor zero."""
+    if accessor_zero_attribute is None:
+        return os.path.join(get_hf_dataset(pattern=glb_file), glb_file)
+
+    # Authored shading normals differ from the triangle's geometric normal
+    mesh = trimesh.Trimesh(
+        vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        faces=[[0, 1, 2]],
+        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
+        visual=trimesh.visual.TextureVisuals(
+            uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
+            material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
+        ),
+        process=False,
+    )
+    path = asset_tmp_path / f"accessor_zero_{accessor_zero_attribute}.glb"
+    mesh.export(path, include_normals=True)
+    glb = pygltflib.GLTF2().load(path)
+    primitive = glb.meshes[0].primitives[0]
+    attributes = primitive.attributes
+    first_accessor = attributes.NORMAL if accessor_zero_attribute == "NORMAL" else attributes.TEXCOORD_0
+    # Reorder the accessor table while keeping every reference attached to its authored data
+    order = [first_accessor] + [i for i in range(len(glb.accessors)) if i != first_accessor]
+    glb.accessors = [glb.accessors[i] for i in order]
+    attributes.POSITION = order.index(attributes.POSITION)
+    attributes.NORMAL = order.index(attributes.NORMAL)
+    attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
+    primitive.indices = order.index(primitive.indices)
+    if accessor_zero_attribute == "TEXCOORD_1":
+        attributes.TEXCOORD_1 = attributes.TEXCOORD_0
+        glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
+    glb.save_binary(str(path))
+    return str(path)
+
+
 # Conversion from .usd to .glb significantly affects precision
 USD_COLOR_TOL = 1e-07
 
