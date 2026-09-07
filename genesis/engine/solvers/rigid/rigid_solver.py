@@ -1308,45 +1308,80 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 )
 
     def get_error_envs_mask(self):
+        """Return a mask selecting environments with a rigid-solver error.
+
+        An environment is flagged after the solver encounters an error such as a non-finite constraint force or
+        acceleration. The flag remains set until the environment state is reset.
+
+        If a flag remains set, a later `Scene.step` raises. For non-finite force and acceleration errors, batched
+        workloads can read this mask after each step and reset the affected environments before stepping again.
+
+        Returns
+        -------
+        error_envs_mask : torch.Tensor
+            Boolean tensor with one value per built environment. A non-parallelized scene returns one value.
+        """
         return qd_to_torch(self._errno) > 0
 
     def check_errno(self):
-        # FIXME: qd.atomic_or return value is broken on Metal — always returns 0.
+        """Raise if any environment is flagged as invalid."""
+        # FIXME: qd.atomic_or return value is broken on Metal - always returns 0.
         # See repro_metal_kernel_return.py. Falling back to numpy reduction.
         if gs.use_zerocopy or sys.platform == "darwin":
             errno = np.bitwise_or.reduce(qd_to_numpy(self._errno))
         else:
             errno = kernel_bit_reduction(self._errno)
+        if not errno:
+            return
+
+        envs_info = ""
+        if self.n_envs > 0:
+            envs_info = f" Environments in error: {np.nonzero(qd_to_numpy(self._errno))[0].tolist()}."
+
+        recovery_info = (
+            " Read RigidSolver.get_error_envs_mask() after each step and reset the environments it reports so the "
+            "rest of the batch can continue."
+            if self.n_envs > 0
+            else ""
+        )
 
         if errno & array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS:
             max_collision_pairs_broad = self.collider.collider_info.max_collision_pairs_broad[None]
             gs.raise_exception(
                 f"Exceeding max number of broad phase candidate contact pairs ({max_collision_pairs_broad}). "
-                f"Please increase the value of RigidSolver's option 'multiplier_collision_broad_phase'."
+                f"Please increase the value of RigidSolver's option 'multiplier_collision_broad_phase'.{envs_info}"
             )
         if errno & array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS:
             max_candidate_contacts = self.collider.collider_info.max_candidate_contacts[None]
             gs.raise_exception(
                 f"Exceeding max number of candidate contact points ({max_candidate_contacts}). Please increase the "
-                "value of RigidSolver's option 'max_collision_pairs'."
+                f"value of RigidSolver's option 'max_collision_pairs'.{envs_info}"
             )
         if errno & array_class.ErrorCode.OVERFLOW_CONTACTS:
             max_contacts = self.collider.collider_info.max_contacts[None]
             gs.raise_exception(
                 f"Exceeding max number of post-pruning contact points ({max_contacts}) supported by the constraint "
-                "solver. Please increase the value of RigidSolver's option 'max_contacts'."
+                f"solver. Please increase the value of RigidSolver's option 'max_contacts'.{envs_info}"
             )
         if errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
             gs.raise_exception(
                 "Collision detection reported a contact whose position, normal or penetration is not finite. This is a "
-                "solver-internal error, please report it."
+                f"solver-internal error, please report it.{envs_info}"
             )
         if errno & array_class.ErrorCode.INVALID_FORCE_NAN:
-            gs.raise_exception("Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep.")
+            gs.raise_exception(
+                f"Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep.{envs_info}"
+                f"{recovery_info}"
+            )
         if errno & array_class.ErrorCode.INVALID_ACC_NAN:
-            gs.raise_exception("Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep.")
+            gs.raise_exception(
+                f"Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep.{envs_info}"
+                f"{recovery_info}"
+            )
         if errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
-            gs.raise_exception("Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'.")
+            gs.raise_exception(
+                f"Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'.{envs_info}"
+            )
 
     def _kernel_detect_collision(self):
         self.collider.clear()

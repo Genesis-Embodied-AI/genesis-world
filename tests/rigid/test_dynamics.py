@@ -860,6 +860,59 @@ def test_cholesky_tiling(monkeypatch, tol):
 
 
 @pytest.mark.required
+def test_reset_envs_flagged_by_rigid_solver(show_viewer, tol):
+    N_STEPS = 15
+
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -1.5, 1.2),
+            camera_lookat=(0.0, 0.0, 0.4),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    robot = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    scene.build(n_envs=4)
+    solver = scene.rigid_solver
+
+    scene.step()
+    assert not solver.get_error_envs_mask().any()
+
+    # Use the public velocity setter as a deterministic trigger for the error path. Contact-heavy rollouts can reach
+    # the same error flag statistically, depending on the scene and hardware.
+    robot.set_dofs_velocity(velocity=torch.inf, envs_idx=1)
+    scene.step()
+    error_envs_mask = solver.get_error_envs_mask()
+    assert_equal(error_envs_mask, torch.tensor([False, True, False, False], device=gs.device))
+
+    scene.reset(envs_idx=error_envs_mask)
+    assert not solver.get_error_envs_mask().any()
+    # Advance beyond the periodic error-check interval to verify that the handled error does not raise later.
+    for _ in range(N_STEPS):
+        scene.step()
+    assert not solver.get_error_envs_mask().any()
+
+    qpos = robot.get_dofs_position()
+    assert torch.isfinite(qpos).all()
+    assert_allclose(qpos[2], qpos[0], tol=tol)
+    assert_allclose(qpos[3], qpos[0], tol=tol)
+
+    robot.set_dofs_velocity(velocity=torch.inf, envs_idx=2)
+    with pytest.raises(
+        gs.GenesisException,
+        match=r"Environments in error: \[2\]. Read RigidSolver.get_error_envs_mask\(\)",
+    ):
+        for _ in range(N_STEPS):
+            scene.step()
+
+
+@pytest.mark.required
 @pytest.mark.use_deterministic_algorithms(False)
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
