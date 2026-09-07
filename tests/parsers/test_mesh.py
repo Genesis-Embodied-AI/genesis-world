@@ -291,13 +291,13 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
 @pytest.mark.parametrize(
-    "glb_file, accessor_zero_attribute",
+    "glb_file",
     [
-        ("glb/combined_srt.glb", None),
-        ("glb/combined_transform.glb", None),
-        (None, "NORMAL"),
-        (None, "TEXCOORD_0"),
-        (None, "TEXCOORD_1"),
+        "glb/combined_srt.glb",
+        "glb/combined_transform.glb",
+        "normal_accessor_zero_glb",
+        "texcoord_0_accessor_zero_glb",
+        "texcoord_1_accessor_zero_glb",
     ],
 )
 def test_glb_parse_geometry(glb_path, tol):

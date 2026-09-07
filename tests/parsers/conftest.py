@@ -43,40 +43,12 @@ def mesh_urdf(mesh_path):
 
 
 @pytest.fixture
-def glb_path(glb_file, accessor_zero_attribute, asset_tmp_path):
-    """Path to an existing GLB or a generated mesh with the selected attribute at accessor zero."""
-    if accessor_zero_attribute is None:
+def glb_path(request, glb_file):
+    """The GLB a test parses. An asset-relative path resolves through the dataset. A bare name is the fixture
+    generating the file."""
+    if "/" in glb_file:
         return os.path.join(get_hf_dataset(pattern=glb_file), glb_file)
-
-    # Authored shading normals differ from the triangle's geometric normal
-    mesh = trimesh.Trimesh(
-        vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-        faces=[[0, 1, 2]],
-        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
-        visual=trimesh.visual.TextureVisuals(
-            uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
-            material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
-        ),
-        process=False,
-    )
-    path = asset_tmp_path / f"accessor_zero_{accessor_zero_attribute}.glb"
-    mesh.export(path, include_normals=True)
-    glb = pygltflib.GLTF2().load(path)
-    primitive = glb.meshes[0].primitives[0]
-    attributes = primitive.attributes
-    first_accessor = attributes.NORMAL if accessor_zero_attribute == "NORMAL" else attributes.TEXCOORD_0
-    # Reorder the accessor table while keeping every reference attached to its authored data
-    order = [first_accessor] + [i for i in range(len(glb.accessors)) if i != first_accessor]
-    glb.accessors = [glb.accessors[i] for i in order]
-    attributes.POSITION = order.index(attributes.POSITION)
-    attributes.NORMAL = order.index(attributes.NORMAL)
-    attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
-    primitive.indices = order.index(primitive.indices)
-    if accessor_zero_attribute == "TEXCOORD_1":
-        attributes.TEXCOORD_1 = attributes.TEXCOORD_0
-        glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
-    glb.save_binary(str(path))
-    return str(path)
+    return request.getfixturevalue(glb_file)
 
 
 # Conversion from .usd to .glb significantly affects precision
@@ -534,6 +506,69 @@ def fixed():
 def usd_scene(request, model_name, scale, fixed):
     """Build a USD scene from the USD file provided by the fixture named 'model_name'."""
     return build_usd_scene(request.getfixturevalue(model_name), scale=scale, fixed=fixed)
+
+
+def _build_textured_triangle_glb(asset_tmp_path, name):
+    """Export a textured triangle whose authored normals differ from its geometric normal, so a parser that drops them
+    and recomputes them from the geometry fails the normals comparison. Returns the loaded glTF document and its
+    path."""
+    mesh = trimesh.Trimesh(
+        vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        faces=[[0, 1, 2]],
+        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
+        visual=trimesh.visual.TextureVisuals(
+            uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
+            material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
+        ),
+        process=False,
+    )
+    path = str(asset_tmp_path / f"{name}.glb")
+    mesh.export(path, include_normals=True)
+    return pygltflib.GLTF2().load(path), path
+
+
+def _move_accessor_first(glb, accessor):
+    """Move the given accessor to index zero in the generated triangle, preserving its POSITION, NORMAL, TEXCOORD_0,
+    and indices references."""
+    order = [accessor] + [i for i in range(len(glb.accessors)) if i != accessor]
+    glb.accessors = [glb.accessors[i] for i in order]
+    primitive = glb.meshes[0].primitives[0]
+    attributes = primitive.attributes
+    attributes.POSITION = order.index(attributes.POSITION)
+    attributes.NORMAL = order.index(attributes.NORMAL)
+    attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
+    primitive.indices = order.index(primitive.indices)
+
+
+@pytest.fixture(scope="session")
+def normal_accessor_zero_glb(asset_tmp_path):
+    """Path to a GLB storing the vertex normals of its triangle at accessor zero."""
+    glb, path = _build_textured_triangle_glb(asset_tmp_path, "normal_accessor_zero")
+    _move_accessor_first(glb, glb.meshes[0].primitives[0].attributes.NORMAL)
+    glb.save_binary(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def texcoord_0_accessor_zero_glb(asset_tmp_path):
+    """Path to a GLB storing the first texture coordinate set of its triangle at accessor zero."""
+    glb, path = _build_textured_triangle_glb(asset_tmp_path, "texcoord_0_accessor_zero")
+    _move_accessor_first(glb, glb.meshes[0].primitives[0].attributes.TEXCOORD_0)
+    glb.save_binary(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def texcoord_1_accessor_zero_glb(asset_tmp_path):
+    """Path to a GLB whose base color texture reads the second texture coordinate set, stored at accessor zero."""
+    glb, path = _build_textured_triangle_glb(asset_tmp_path, "texcoord_1_accessor_zero")
+    primitive = glb.meshes[0].primitives[0]
+    _move_accessor_first(glb, primitive.attributes.TEXCOORD_0)
+    # glTF requires set 0 wherever set 1 exists, so set 1 aliases the accessor of set 0
+    primitive.attributes.TEXCOORD_1 = primitive.attributes.TEXCOORD_0
+    glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
+    glb.save_binary(path)
+    return path
 
 
 @pytest.fixture(scope="session")
