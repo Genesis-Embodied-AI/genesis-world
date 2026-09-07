@@ -1,5 +1,4 @@
 import io
-import os
 from contextlib import nullcontext
 
 import numpy as np
@@ -18,12 +17,9 @@ import genesis.utils.mesh as mu
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
-    check_gs_meshes,
-    check_gs_surfaces,
     check_gs_textures,
     check_gs_tm_meshes,
     check_gs_tm_textures,
-    extract_mesh,
 )
 
 
@@ -326,10 +322,8 @@ def test_glb_parse_geometry(glb_path, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("glb_file", ["glb/tycoon_draco_no_normal.glb", "glb/tycoon_with_normal_draco.glb"])
-def test_glb_draco_missing_normals_texcoord(glb_file):
+def test_glb_draco_missing_normals_texcoord(glb_path):
     # Normals and tex_coord are not always present in GLB files, typically for Draco-compressed ones.
-    asset_path = get_hf_dataset(pattern=glb_file)
-    glb_path = os.path.join(asset_path, glb_file)
     gs_meshes = gltf_utils.parse_mesh_glb(
         glb_path,
         group_by_material=False,
@@ -353,18 +347,16 @@ def test_glb_draco_missing_normals_texcoord(glb_file):
 
 @pytest.mark.required
 @pytest.mark.parametrize("glb_file", ["glb/chopper.glb"])
-def test_glb_parse_material(glb_file):
-    asset_path = get_hf_dataset(pattern=glb_file)
-    glb_file = os.path.join(asset_path, glb_file)
+def test_glb_parse_material(glb_path):
     gs_meshes = gltf_utils.parse_mesh_glb(
-        glb_file,
+        glb_path,
         group_by_material=True,
         scale=None,
         is_mesh_zup=True,
         surface=gs.surfaces.Default(),
     )
 
-    tm_scene = trimesh.load(glb_file, process=False)
+    tm_scene = trimesh.load(glb_path, process=False)
     tm_materials = {}
     for geometry_name in tm_scene.geometry:
         ts_mesh = tm_scene.geometry[geometry_name]
