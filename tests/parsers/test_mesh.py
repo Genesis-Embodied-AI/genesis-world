@@ -18,6 +18,7 @@ import genesis.utils.mesh as mu
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
+    NORMALIZED_TEXCOORD_UVS,
     check_gs_meshes,
     check_gs_surfaces,
     check_gs_textures,
@@ -339,6 +340,21 @@ def test_glb_draco_missing_normals_texcoord(glb_file):
         assert verts.shape[1] == 3, "Vertices should be 3D"
         assert faces.shape[0] > 0, "Mesh has no faces"
         assert faces.shape[1] == 3, "Faces should be triangles"
+
+
+@pytest.mark.required
+def test_glb_normalized_texcoord(normalized_texcoord_glb):
+    # Integer texture coordinates flagged as normalized encode [0, 1] and must not be read back at their raw scale
+    (gs_mesh,) = gltf_utils.parse_mesh_glb(
+        normalized_texcoord_glb,
+        group_by_material=False,
+        scale=None,
+        is_mesh_zup=True,
+        surface=gs.surfaces.Default(),
+    )
+    # The parser flips V to the image-space convention shared with trimesh
+    expected_uvs = NORMALIZED_TEXCOORD_UVS * (1.0, -1.0) + (0.0, 1.0)
+    assert_allclose(gs_mesh.trimesh.visual.uv, expected_uvs, tol=1.0 / np.iinfo(np.uint16).max)
 
 
 # ==================== Material/Texture Parsing Tests ====================

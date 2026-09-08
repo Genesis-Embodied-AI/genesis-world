@@ -79,7 +79,11 @@ def get_glb_data_from_accessor(glb, accessor_index):
             data_slice = buffer_data[start:end]
             array[i] = np.frombuffer(data_slice, dtype=dtype, count=num_components)
 
-    return array.reshape((count, *type_to_count[data_type][1]))
+    array = array.reshape((count, *type_to_count[data_type][1]))
+    if accessor.normalized:
+        # glTF stores normalized integer components as [0, 1] (unsigned) or [-1, 1] (signed) fixed point
+        array = np.maximum(array / np.iinfo(dtype).max, -1.0, dtype=np.float32)
+    return array
 
 
 def get_glb_image(glb, image_index, image_type=None):
