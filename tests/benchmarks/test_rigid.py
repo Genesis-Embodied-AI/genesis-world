@@ -330,7 +330,6 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
         ),
         rigid_options=gs.options.RigidOptions(
             iterations=10,
-            tolerance=1e-5,
             ls_iterations=20,
             **(dict(constraint_solver=solver) if solver is not None else {}),
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
@@ -357,6 +356,15 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
     init_qpos[2] = 1.0  # z position
     init_qpos[3] = 1.0  # quaternion w component
     robot.set_qpos(init_qpos)
+
+    # TODO: The model states no rotor inertia, and its wrist and ankle joints drive down to 4e-4 kg.m^2: the random
+    # torque below, applied to them or to the joints upstream, spins them by hundreds of rad/s within one step, which
+    # this timestep cannot integrate. Neither the actuator torque limits of the robot nor the rotor inertia and joint
+    # friction loss its MuJoCo Menagerie and Newton assets state (0.01 kg.m^2 and 0.3 N.m on every joint) keep the
+    # constraint solve finite over the millions of environment steps of a run, in Genesis as in MuJoCo. Every joint
+    # takes ten times that rotor inertia instead, pending a scenario within the reach of the timestep.
+    joints_dofs = [dof for joint in robot.joints if joint.type != gs.JOINT_TYPE.FREE for dof in joint.dofs_idx_local]
+    robot.set_dofs_armature(0.1, dofs_idx_local=joints_dofs)
 
     random_forces = torch.zeros((n_envs, robot.n_dofs), dtype=gs.tc_float, device=gs.device)
     max_force = 50.0
