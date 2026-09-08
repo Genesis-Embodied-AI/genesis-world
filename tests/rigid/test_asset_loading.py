@@ -739,7 +739,7 @@ def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["freeflyer_mjcf", "freeflyer_urdf"])
-def test_default_armature_freeflyer(xml_path):
+def test_default_armature(xml_path, two_trees_mjcf):
     DEFAULT_ARMATURE = 1000.0
 
     morph_class = gs.morphs.URDF if xml_path.endswith(".urdf") else gs.morphs.MJCF
@@ -750,24 +750,86 @@ def test_default_armature_freeflyer(xml_path):
     morph_without_armature = morph_class(
         file=xml_path,
         pos=(1.0, 0.0, 0.0),
+        default_armature=None,
     )
+    # One variant per environment, each weighing differently and asking its own default.
+    morphs_heterogeneous = [
+        morph_class(
+            file=xml_path,
+            pos=(2.0, 0.0, 0.0),
+            scale=1.0,
+            default_armature=DEFAULT_ARMATURE,
+        ),
+        morph_class(
+            file=xml_path,
+            pos=(2.0, 0.0, 0.0),
+            scale=2.0,
+            default_armature=None,
+        ),
+    ]
+
+    # An attached pair is one kinematic tree spanning two entities, only the mounted one asking a default, beside the
+    # same pair without any default.
+    carriers = []
+    for i_pair, default_armature in enumerate((DEFAULT_ARMATURE, None)):
+        carrier = morph_class(
+            file=xml_path,
+            pos=(3.0 + i_pair, 0.0, 0.0),
+            default_armature=None,
+        )
+        mounted = morph_class(
+            file=xml_path,
+            pos=(3.0 + i_pair, 0.0, 0.5),
+            default_armature=default_armature,
+        )
+        carriers.append((carrier, mounted))
 
     scene = gs.Scene()
     robot = scene.add_entity(morph)
     robot_without_armature = scene.add_entity(morph_without_armature)
-    scene.build()
+    robot_heterogeneous = scene.add_entity(morphs_heterogeneous)
+    # One entity holding two kinematic trees, only the first with a joint the default applies to.
+    robot_two_trees = scene.add_entity(
+        gs.morphs.MJCF(
+            file=two_trees_mjcf,
+            pos=(0.0, 3.0, 0.0),
+            default_armature=DEFAULT_ARMATURE,
+        )
+    )
+    robot_two_trees_reference = scene.add_entity(
+        gs.morphs.MJCF(
+            file=two_trees_mjcf,
+            pos=(0.0, 4.0, 0.0),
+            default_armature=None,
+        )
+    )
+    carrier, carrier_reference = [], []
+    for (carrier_morph, mounted_morph), pair in zip(carriers, (carrier, carrier_reference)):
+        pair.append(scene.add_entity(carrier_morph))
+        mounted_entity = scene.add_entity(mounted_morph)
+        mounted_entity.attach(pair[0], parent_link_name=pair[0].base_link.name, pos=(0.0, 0.0, 0.5))
+    (carrier,), (carrier_reference,) = carrier, carrier_reference
+    scene.build(n_envs=2)
 
     armature = robot.get_dofs_armature()
-    assert_allclose(armature[:6], 0.0, tol=gs.EPS)
-    assert_allclose(armature[6], DEFAULT_ARMATURE, tol=gs.EPS)
+    assert_allclose(armature[:, :6], 0.0, tol=gs.EPS)
+    assert_allclose(armature[:, 6], DEFAULT_ARMATURE, tol=gs.EPS)
+    assert_allclose(robot_without_armature.get_dofs_armature()[:, 6], 0.0, tol=gs.EPS)
     if xml_path.endswith(".xml"):
-        assert_allclose(armature[7], 42.0, tol=gs.EPS)
-        assert_allclose(armature[8], 0.0002, tol=gs.EPS)
+        assert_allclose(armature[:, 7], 42.0, tol=gs.EPS)
+        assert_allclose(armature[:, 8], 0.0002, tol=gs.EPS)
+    armature_heterogeneous = robot_heterogeneous.get_dofs_armature()
+    assert_allclose(armature_heterogeneous[0, 6], DEFAULT_ARMATURE, tol=gs.EPS)
+    assert_allclose(armature_heterogeneous[1, 6], 0.0, tol=gs.EPS)
 
-    # Rotor inertia adds to the effective inertia of the joint it is applied to, so it must lower the inverse weight
-    # the solver derives from it. An inverse weight parsed before the armature was applied leaves the rotor inertia
-    # out of every constraint it scales.
-    assert robot.get_dofs_invweight()[6] < robot_without_armature.get_dofs_invweight()[6]
+    # Rotor inertia lowers the inverse weight of its own joint and, through the inverse mass matrix of the tree, of
+    # every joint coupled to it, across attached entities included. An inverse weight parsed before the default was
+    # applied would miss it.
+    assert (robot.get_dofs_invweight()[:, 6:8] < robot_without_armature.get_dofs_invweight()[:, 6:8]).all()
+    assert (carrier.get_dofs_invweight()[:, 6:8] < carrier_reference.get_dofs_invweight()[:, 6:8]).all()
+    # The default reaches its own tree alone: the other tree of the entity keeps the parsed inverse weights.
+    assert (robot_two_trees.get_dofs_invweight()[:, 6] < robot_two_trees_reference.get_dofs_invweight()[:, 6]).all()
+    assert_equal(robot_two_trees.get_dofs_invweight()[:, 7:], robot_two_trees_reference.get_dofs_invweight()[:, 7:])
 
 
 @pytest.mark.slow  # ~200s

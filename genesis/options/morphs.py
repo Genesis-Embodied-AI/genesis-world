@@ -971,9 +971,11 @@ class MJCF(FileMorph):
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
         **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Defaults to 0.1 if MuJoCo compatibility is
-        disabled on the rigid solver, None otherwise.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     exclude_ground_plane : bool, optional
         Whether to exclude plane geometries authored directly under the MJCF worldbody if any. Defaults to False.
     """
@@ -1116,9 +1118,11 @@ class URDF(FileMorph):
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
         **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Defaults to 0.1 if MuJoCo compatibility is
-        disabled on the rigid solver, None otherwise.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     xacro_args : dict, optional
         Key-value pairs to override ``xacro:arg`` declarations in the xacro file
         (e.g. ``{"use_sim": "true", "arm_length": "0.5"}``). Only used for ``.xacro`` files. Defaults to ``{}``.
@@ -1255,9 +1259,11 @@ class Drone(FileMorph):
     links_to_keep : list of str, optional
         A list of link names that should not be skipped during link merging. Defaults to ().
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Defaults to 0.1 if MuJoCo compatibility is
-        disabled on the rigid solver, None otherwise.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     default_base_ang_damping_scale : float, optional
         Default angular damping applied on the floating base that will be rescaled by the total mass.
         None to disable. Default to 1e-5.
@@ -1588,8 +1594,10 @@ class USD(FileMorph):
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Default to 0.1.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1.
 
     Joint Dynamics Options
     ----------------------

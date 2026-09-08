@@ -36,6 +36,7 @@ from genesis.utils.sdf import SDF
 from ..base_solver import GravityMixin, MutatedLinks, Solver, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
+    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
@@ -397,6 +398,50 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._init_constraint_solver()
         self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
 
+        # Fill in the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. It is
+        # written to the armature field from the host once the parsed inverse weights stand, and a second refresh
+        # recomputes the ones it changes: those of every degree of freedom and link of the kinematic trees holding a
+        # defaulted joint. The parsed inverse weights stand everywhere else.
+        dofs_idx, dofs_default, dofs_link = [], [], []
+        for entity in self._entities:
+            rotor_links = [
+                link
+                for link in entity.links
+                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            ]
+            if not rotor_links:
+                continue
+            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
+            if entity.desc.variants:
+                variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            else:
+                variants_default = np.array([entity.main_morph.default_armature or 0.0])
+            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
+            if (envs_default <= 0.0).all():
+                continue
+            dofs_idx.extend(link.dof_start for link in rotor_links)
+            dofs_default.extend([envs_default] * len(rotor_links))
+            dofs_link.extend(rotor_links)
+        if dofs_idx:
+            # Field layout, batch last, since the arrays are written back as fields.
+            dofs_armature = qd_to_numpy(self.dyn_info.dofs.armature, transpose=False, copy=True)
+            is_default = (np.atleast_2d(dofs_armature[dofs_idx].T) <= 0.0).all(axis=0)
+            if is_default.any():
+                dofs_idx = np.array(dofs_idx)[is_default]
+                default_armature = np.stack(dofs_default, axis=1)[:, is_default]
+                dofs_armature[dofs_idx] = default_armature.T if self._options.batch_dofs_info else default_armature[0]
+                self.dyn_info.dofs.armature.from_numpy(dofs_armature)
+                roots_idx = {link.root_idx for link, is_dof_default in zip(dofs_link, is_default) if is_dof_default}
+                trees_links = [link for link in self.links if link.root_idx in roots_idx]
+                dofs_invweight = qd_to_numpy(self.dyn_info.dofs.invweight, transpose=False, copy=True)
+                dofs_invweight[[i_d for link in trees_links for i_d in range(link.dof_start, link.dof_end)]] = -1.0
+                self.dyn_info.dofs.invweight.from_numpy(dofs_invweight)
+                links_idx = [link.idx for link in trees_links]
+                links_invweight = qd_to_numpy(self.dyn_info.links.invweight, transpose=False, copy=True)
+                links_invweight[links_idx] = -1.0
+                self.dyn_info.links.invweight.from_numpy(links_invweight)
+                self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+
         # The constraint solver decides it has converged from quantities summed over the whole scene, and every DOF of
         # a link contributes a cost of the order of the link's mass. A link whose mass is a tolerance-fraction of the
         # scene total therefore contributes less than the tolerance, and the solve stops while that link still carries
@@ -488,6 +533,18 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # get_dofs_info reads from solver._options.batch_dofs_info.
         if self._enable_heterogeneous and self._use_hibernation:
             self._options.batch_dofs_info = True
+        # Likewise, the variants of a heterogeneous entity each state their own default armature (see build), which is
+        # per-env on every joint carrying a rotor whenever those defaults differ.
+        for entity in self._entities:
+            variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            if variants_default.size < 2 or np.ptp(variants_default) <= gs.EPS:
+                continue
+            has_rotor = any(
+                link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+                for link in entity.links
+            )
+            if has_rotor:
+                self._options.batch_dofs_info = True
 
         # sparse_solve=None resolves automatically: the skyline-envelope solver pays off on CPU only when the scene
         # has block structure, whereas a single dense-coupled tree gains nothing and pays the per-step envelope tax. An
@@ -810,88 +867,127 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _jacobi_mass_spread_bound(self):
         """Upper-bound the spread of the mass matrix diagonal over every configuration, from the model alone.
 
-        Each DOF's diagonal entry is bracketed without kinematics. A translational entry is exactly its per-DOF
-        armature plus the subtree mass. A rotational entry is the link the joint carries plus its descendants: with a
-        single joint the link's axis, anchor and centre of mass (COM) are fixed in its frame, so its own term
-        armature + a^T I_anchor a is exact for a revolute axis and bracketed by the principal inertias about the
-        anchor for free/spherical DOFs whose axes turn with the configuration; descendants add at least nothing, at
-        most their largest principal inertia plus their mass carried at an anchor-to-COM distance no configuration
-        exceeds (frame offsets summed along the chain, each joint anchor counted twice since a joint rotation swings
-        the child origin around it, and each prismatic descendant's full travel span, infinite when unlimited). The
-        largest upper bracket over the smallest lower one thus bounds the true diagonal spread at every configuration:
-        equilibration may enable for scenes whose reachable configurations stay better conditioned, never the reverse.
+        Each entry gets a lower and an upper bound that hold in every configuration. A translational entry is armature
+        plus subtree mass exactly. A rotational entry is at least armature plus the link inertia about its axis (the
+        smallest principal inertia for free and spherical DOFs), and at most the same with the largest principal inertia
+        plus, per descendant, its largest principal inertia and its mass times the squared anchor-to-COM distance no
+        configuration exceeds (frame offsets along the chain, each anchor twice, prismatic spans, infinite when
+        unlimited). A build-time default armature adds the value of the variant an entity takes to the entries it fills
+        in, and any variant may be dispatched to any environment, so the bounds are kept per variant of each entity and
+        the spread is the largest over every combination of variants across entities. That spread is at least the true
+        one, so the gate never leaves a scene that needs equilibration without it; its only error is to enable it for a
+        scene that does not, at a small runtime cost.
         """
-        links = [link for entity in self._entities for link in entity.links]
         children = {}
-        for link in links:
-            children.setdefault(link.parent_idx, []).append(link)
+        for entity in self._entities:
+            for link in entity.links:
+                children.setdefault(link.parent_idx, []).append(link)
 
-        lower, upper = [], []
-        for link in links:
-            if link.is_fixed:
-                continue
-            for joint in link.joints:
-                if joint.type == gs.JOINT_TYPE.FIXED:
+        # Per entity, the smallest lower bound and the largest upper bound over its entries, per variant.
+        entities_lower, entities_upper = [], []
+        for entity in self._entities:
+            rotor_links = [
+                link
+                for link in entity.links
+                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            ]
+            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
+            if entity.desc.variants:
+                variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            elif rotor_links:
+                variants_default = np.array([entity.main_morph.default_armature or 0.0])
+            else:
+                variants_default = np.zeros(1)
+            lower, upper = [], []
+            for link in entity.links:
+                if link.is_fixed:
                     continue
-                anchor = joint.pos
-                # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own term is
-                # exact only when this joint is its sole joint, since later chained joints re-rotate the link about
-                # their own anchors.
-                is_sole_joint = len(link.joints) == 1
-                if is_sole_joint:
-                    dist_com = {link.idx: np.linalg.norm(link.desc.inertial_pos - anchor)}
-                else:
-                    dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(link.desc.inertial_pos)}
-                dist_origin = {link.idx: np.linalg.norm(anchor)}
-                sub, stack = [], [link]
-                while stack:
-                    cur = stack.pop()
-                    sub.append(cur)
-                    for child in children.get(cur.idx, []):
-                        hop = np.linalg.norm(child.desc.pos) + 2.0 * sum(np.linalg.norm(j.pos) for j in child.joints)
-                        # A prismatic descendant carries the subtree outward by up to its full travel span (which
-                        # covers the offset from any zero configuration within limits); an unlimited slide makes the
-                        # upper bracket infinite and the gate enables.
-                        hop += sum(np.ptp(j.desc.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC)
-                        dist_origin[child.idx] = dist_origin[cur.idx] + hop
-                        dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.desc.inertial_pos)
-                        stack.append(child)
-                sub_mass = sum(l.desc.mass for l in sub)
-                eigvals = np.linalg.eigvalsh(link.desc.inertia)
-                rot_desc_upper = sum(
-                    np.linalg.eigvalsh(l.desc.inertia)[-1] + l.desc.mass * dist_com[l.idx] ** 2
-                    for l in sub
-                    if l is not link
-                )
-                # Carrying link's inertia about the anchor: exact along a fixed axis, principal bracket otherwise.
-                if is_sole_joint:
-                    R_inertial = gu.quat_to_R(link.desc.inertial_quat)
-                    inertia_com = R_inertial @ link.desc.inertia @ R_inertial.T
-                    offset_com = link.desc.inertial_pos - anchor
-                    rot_self_lower = eigvals[0]
-                    rot_self_upper = eigvals[-1] + link.desc.mass * np.dot(offset_com, offset_com)
-                else:
-                    inertia_com = None
-                    offset_com = None
-                    rot_self_lower = eigvals[0]
-                    rot_self_upper = eigvals[-1] + link.desc.mass * dist_com[link.idx] ** 2
-                for i_d, armature_d in enumerate(joint.desc.dofs_armature):
-                    if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
-                        lower.append(armature_d + sub_mass)
-                        upper.append(armature_d + sub_mass)
-                    elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
-                        axis = joint.desc.dofs_motion_ang[i_d]
-                        lever = np.cross(axis, offset_com)
-                        rot_self = axis @ inertia_com @ axis + link.desc.mass * np.dot(lever, lever)
-                        lower.append(armature_d + rot_self)
-                        upper.append(armature_d + rot_self + rot_desc_upper)
+                is_rotor = link in rotor_links
+                for joint in link.joints:
+                    if joint.type == gs.JOINT_TYPE.FIXED:
+                        continue
+                    anchor = joint.pos
+                    # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own term is
+                    # exact only when this joint is its sole joint, since later chained joints re-rotate the link about
+                    # their own anchors.
+                    is_sole_joint = len(link.joints) == 1
+                    if is_sole_joint:
+                        dist_com = {link.idx: np.linalg.norm(link.desc.inertial_pos - anchor)}
                     else:
-                        lower.append(armature_d + max(rot_self_lower, 0.0))
-                        upper.append(armature_d + rot_self_upper + rot_desc_upper)
-        lower = [val for val in lower if val > 0.0]
-        if not lower or not upper:
+                        dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(link.desc.inertial_pos)}
+                    dist_origin = {link.idx: np.linalg.norm(anchor)}
+                    sub, stack = [], [link]
+                    while stack:
+                        cur = stack.pop()
+                        sub.append(cur)
+                        for child in children.get(cur.idx, []):
+                            hop = np.linalg.norm(child.desc.pos) + 2.0 * sum(
+                                np.linalg.norm(j.pos) for j in child.joints
+                            )
+                            # A prismatic descendant carries the subtree outward by up to its full travel span (which
+                            # covers the offset from any zero configuration within limits); an unlimited slide makes the
+                            # upper bound infinite and the gate enables.
+                            hop += sum(
+                                np.ptp(j.desc.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC
+                            )
+                            dist_origin[child.idx] = dist_origin[cur.idx] + hop
+                            dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.desc.inertial_pos)
+                            stack.append(child)
+                    sub_mass = sum(l.desc.mass for l in sub)
+                    eigvals = np.linalg.eigvalsh(link.desc.inertia)
+                    rot_desc_upper = sum(
+                        np.linalg.eigvalsh(l.desc.inertia)[-1] + l.desc.mass * dist_com[l.idx] ** 2
+                        for l in sub
+                        if l is not link
+                    )
+                    # Carrying link's inertia about the anchor: exact along a fixed axis, otherwise between its smallest
+                    # and largest principal inertia.
+                    if is_sole_joint:
+                        R_inertial = gu.quat_to_R(link.desc.inertial_quat)
+                        inertia_com = R_inertial @ link.desc.inertia @ R_inertial.T
+                        offset_com = link.desc.inertial_pos - anchor
+                        rot_self_lower = eigvals[0]
+                        rot_self_upper = eigvals[-1] + link.desc.mass * np.dot(offset_com, offset_com)
+                    else:
+                        inertia_com = None
+                        offset_com = None
+                        rot_self_lower = eigvals[0]
+                        rot_self_upper = eigvals[-1] + link.desc.mass * dist_com[link.idx] ** 2
+                    for i_d, armature_d in enumerate(joint.desc.dofs_armature):
+                        if is_rotor and armature_d <= 0.0:
+                            armature = variants_default
+                        else:
+                            armature = np.full(variants_default.size, armature_d)
+                        if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
+                            lower.append(armature + sub_mass)
+                            upper.append(armature + sub_mass)
+                        elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
+                            axis = joint.desc.dofs_motion_ang[i_d]
+                            lever = np.cross(axis, offset_com)
+                            rot_self = axis @ inertia_com @ axis + link.desc.mass * np.dot(lever, lever)
+                            lower.append(armature + rot_self)
+                            upper.append(armature + rot_self + rot_desc_upper)
+                        else:
+                            lower.append(armature + max(rot_self_lower, 0.0))
+                            upper.append(armature + rot_self_upper + rot_desc_upper)
+            if lower:
+                lower, upper = np.array(lower), np.array(upper)
+                entities_lower.append(np.where(lower > 0.0, lower, np.inf).min(axis=0))
+                entities_upper.append(upper.max(axis=0))
+        if not entities_lower:
             return 0.0
-        return max(upper) / min(lower)
+
+        # The largest upper bound of a variant pairs with the smallest lower bound reachable alongside it: its own, or
+        # the one of any variant of another entity. A variant without a positive lower bound has no spread to speak of.
+        lower_min = np.array([entity_lower.min() for entity_lower in entities_lower])
+        mass_spread = 0.0
+        for i_e, (entity_lower, entity_upper) in enumerate(zip(entities_lower, entities_upper)):
+            lower_paired = np.minimum(entity_lower, np.delete(lower_min, i_e).min(initial=np.inf))
+            is_bounded = np.isfinite(lower_paired)
+            mass_spread_entity = np.zeros_like(entity_upper)
+            np.divide(entity_upper, lower_paired, out=mass_spread_entity, where=is_bounded)
+            mass_spread = max(mass_spread, mass_spread_entity.max())
+        return mass_spread
 
     def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True, in_place=False):
         # Every kinematic tree of the solver is recomputed. A change limited to some links is handled by the setter
@@ -1010,8 +1106,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
         link._build() from actual geom objects, using analytic formulas for primitives.
         """
-        from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
-
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue
