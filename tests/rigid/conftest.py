@@ -1073,6 +1073,24 @@ def freeflyer_mjcf():
 
 
 @pytest.fixture(scope="session")
+def two_trees_mjcf():
+    """Generate an MJCF model holding two kinematic trees, a free body with a hinged child each, the second hinge with
+    an authored armature."""
+    mjcf = ET.Element("mujoco", model="two_trees")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+        ET.SubElement(body, "joint", type="free")
+        ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+        ET.SubElement(body, "geom", type="sphere", size="0.05")
+        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0 0 0.1")
+        ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
+        ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
+        ET.SubElement(child, "geom", type="sphere", size="0.02")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def freeflyer_urdf():
     robot = ET.Element("robot", name="freeflyer")
     ET.SubElement(robot, "link", name="world")

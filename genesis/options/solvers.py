@@ -494,9 +494,11 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         Maximum number of iterations for the constraint solver; the solve exits early once its convergence tolerance
         is met, so this bound only binds on hard steps. Defaults to 50.
     tolerance : float, optional
-        Tolerance for the constraint solver. If None, resolved based on the floating-point precision selected via
-        `gs.init(precision=...)`: 1e-5 for single precision ("32") and 1e-8 for double precision ("64"). Defaults
-        to None.
+        Tolerance for the constraint solver: the solve stops once the cost improves between two iterations by less
+        than this fraction of a scene-wide scale. A smaller value converges resting contacts further, at the cost of
+        more iterations per step. If None, resolved based on the floating-point precision selected via
+        `gs.init(precision=...)`: 1e-7 for single precision ("32"), and for double precision ("64") 1e-9, or 1e-8
+        when 'enable_mujoco_compatibility' is set. Defaults to None.
     ls_iterations : int, optional
         Number of line search iterations for the constraint solver. Defaults to 50.
     ls_tolerance : float, optional

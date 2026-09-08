@@ -893,9 +893,10 @@ def test_inertial_property_setters(
             gs.morphs.Sphere(radius=0.02, pos=(0.0, 3.0, 0.3)),
         ],
     )
+    # The default armature follows each pair's build-time inertia, so the three routes to one mass meet only without it.
     authored, per_link, whole_entity = (
         scene.add_entity(
-            morph=gs.morphs.URDF(file=sliding_ball_pair(*masses), pos=(x, 0.0, 0.3)),
+            morph=gs.morphs.URDF(file=sliding_ball_pair(*masses), pos=(x, 0.0, 0.3), default_armature=0.0),
         )
         for x, masses in ((1.0, (1.0, 2.0)), (2.0, (1.0, 1.5)), (3.0, (0.5, 1.0)))
     )
