@@ -404,7 +404,10 @@ def parse_link(mj, i_l, scale):
         # See: https://mujoco.readthedocs.io/en/stable/XMLreference.html#actuator-general
         j_info["dofs_act_gain"] = np.zeros((n_dofs,), dtype=gs.np_float)
         j_info["dofs_act_bias"] = np.zeros((n_dofs, 3), dtype=gs.np_float)
-        j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (n_dofs, 1))
+        # Every bound the file states on the actuator force of the joint applies at once, so they are collected here
+        # and intersected below: the actuator's own force range, a motor's control range through its gear, and the
+        # joint-level 'actuatorfrcrange' MuJoCo clamps the joint with whatever drives it.
+        force_ranges = [np.array([-np.inf, np.inf])]
 
         i_a = -1
         try:
@@ -453,13 +456,17 @@ def parse_link(mj, i_l, scale):
                 j_info["dofs_act_bias"] = np.tile(gear * biasprm[:3] * scale**3, (n_dofs, 1)).astype(gs.np_float)
 
             if mj.actuator_forcelimited[i_a]:
-                j_info["dofs_force_range"] = np.tile(mj.actuator_forcerange[i_a], (n_dofs, 1))
+                force_ranges.append(mj.actuator_forcerange[i_a])
             if mj.actuator_ctrllimited[i_a] and biastype == mujoco.mjtBias.mjBIAS_NONE:
-                j_info["dofs_force_range"] = np.minimum(
-                    j_info["dofs_force_range"], np.tile(gear * mj.actuator_ctrlrange[i_a], (n_dofs, 1))
-                )
+                # A negative gear swaps the bounds.
+                force_ranges.append(np.sort(gear * mj.actuator_ctrlrange[i_a]))
         elif gs_type not in (gs.JOINT_TYPE.FIXED, gs.JOINT_TYPE.FREE):
             gs.logger.debug(f"(MJCF) No actuator found for joint `{j_info['name']}`")
+
+        if i_j != -1 and mj.jnt_actfrclimited[i_j]:
+            force_ranges.append(mj.jnt_actfrcrange[i_j])
+        force_ranges = np.array(force_ranges)
+        j_info["dofs_force_range"] = np.tile([force_ranges[:, 0].max(), force_ranges[:, 1].min()], (n_dofs, 1))
 
         j_infos.append(j_info)
 
