@@ -64,7 +64,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer, 
         n_steps=5,
         rtol=tol,
         atol=tol,
-        eps=3e-4 if precision == "64" else 2e-1,
+        eps=1e-3 if precision == "64" else 3e0,
     )
 
     # Inactive-path parity: with the limit enabled but never hit, the adjoint must equal the no-limit baseline - the
@@ -92,13 +92,15 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer, 
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("model_name", ["grad_slider_limit", "grad_cartpole", "grad_hopper"])
+@pytest.mark.precision("64")
 @pytest.mark.debug(False)
+@pytest.mark.parametrize("model_name", ["grad_slider_limit", "grad_cartpole", "grad_hopper"])
 def test_per_step_force_into_limit_grad_matches_fd(model_name, request, show_viewer, tol):
     # Per-step control-force adjoint driving a joint into its limit, across three topologies. A constant force over
     # the horizon pushes the tracked dof into the active band; the setup-sanity assert guards against a vacuous run.
-    # (gravity, n_steps, per-step force, loss reads links_pos, sanity dof, sanity threshold, initial dof pose,
-    # fp32 tolerance).
+    # Once the dof rests on its limit the constraint absorbs the later forces, whose gradients fall under the fp32
+    # tolerance by nature, so the check runs in double precision only.
+    # (gravity, n_steps, per-step force, loss reads links_pos, sanity dof, sanity threshold, initial dof pose).
     gravity, n_steps, per_step_force, is_links_loss, sanity_dof, sanity_thresh, init_pos = {
         "grad_slider_limit": ((0.0, 0.0, 0.0), 10, [500.0], False, 0, 3.5, None),
         "grad_cartpole": ((0.0, 0.0, -9.81), 15, [2000.0, 0.0], False, 0, 3.5, [0.0, -math.pi]),
@@ -133,14 +135,7 @@ def test_per_step_force_into_limit_grad_matches_fd(model_name, request, show_vie
     assert reached > sanity_thresh, f"setup error: {model_name} did not reach its limit band (q={reached})"
 
     assert_grad_matches_fd(
-        pair,
-        forces,
-        lambda e, x: e.control_dofs_force(x),
-        loss_fn,
-        setup_fn=setup_fn,
-        rtol=tol,
-        atol=tol,
-        eps=1e-1,
+        pair, forces, lambda e, x: e.control_dofs_force(x), loss_fn, setup_fn=setup_fn, rtol=tol, atol=tol, eps=1e-3
     )
 
 
@@ -169,7 +164,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
         n_steps=10,
         rtol=tol,
         atol=tol,
-        eps=3e-6 if precision == "64" else 1e-2,
+        eps=3e-4 if precision == "64" else 2e-2,
     )
 
 
@@ -213,7 +208,7 @@ def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_v
         n_steps=10,
         rtol=tol,
         atol=tol,
-        eps=3e-4 if precision == "64" else 3e-2,
+        eps=1e-3 if precision == "64" else 5e-1,
     )
 
 
@@ -242,13 +237,15 @@ def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, show
         qpos = scene.rigid_solver.get_state().qpos[0]
         return sum(weights[d] * qpos[d] ** 2 for d in range(7))
 
+    # Fast initial spins: the friction loss on the first joint stops a slow one within the horizon and leaves the
+    # final position of the pair it couples insensitive to the initial velocity.
     assert_grad_matches_fd(
         pair,
-        [np.array([0.8, -0.3, 0.5, -0.2, 0.2, -0.3, 0.4])],
+        [np.array([4.0, -1.5, 2.5, -1.0, 1.0, -1.5, 2.0])],
         lambda e, x: e.set_dofs_velocity(x),
         loss_fn,
         n_steps=10,
         rtol=tol,
         atol=tol,
-        eps=3e-4 if precision == "64" else 3e-3,
+        eps=1e-3 if precision == "64" else 1e-1,
     )

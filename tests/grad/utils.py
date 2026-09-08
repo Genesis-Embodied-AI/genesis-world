@@ -72,14 +72,15 @@ def make_diff_scene_pair(
 def assert_grad_matches_fd(
     pair, inputs, apply_fn, loss_fn, *, rtol, atol, eps, n_steps=None, setup_fn=None, step_fn=None
 ):
-    """Central finite-difference check of a tracked setter's reverse-mode gradient.
+    """Finite-difference check of a tracked setter's reverse-mode gradient, fourth order in the step.
 
     Input i of `inputs` is applied via `apply_fn(entity, x)` before step i and receives its own adjoint. The scene
     runs `n_steps` steps (default len(inputs)); extra steps run without re-applying. `setup_fn(scene, entity)` runs
     once after reset for untracked initialization; `step_fn(entity, i_step)` runs before every step on both scenes
     for undifferentiated per-step scenario commands (e.g. PD targets). The FD reference perturbs each input entry in
-    turn, so the cost is O(n_steps * total input size). rtol / atol / eps are per-scenario, pinned to the measured
-    finite-difference floor."""
+    turn, so the cost is O(n_steps * total input size). `eps` is per-scenario: the step whose measured
+    finite-difference floor is the lowest, since rounding noise shrinks with the step while the fourth-order
+    truncation error stays below it up to steps of order one."""
     base = [np.array(inp, dtype=np.float64) for inp in inputs]
     total_steps = len(base) if n_steps is None else n_steps
 
@@ -109,26 +110,27 @@ def assert_grad_matches_fd(
     for i_input in range(len(base)):
         fd_grad = np.zeros_like(base[i_input])
         for i_entry in range(base[i_input].size):
-            perturbed = []
-            for sign in (+1, -1):
-                pair.scene_fd.reset()
-                if setup_fn is not None:
-                    setup_fn(pair.scene_fd, pair.entity_fd)
-                for i_step in range(total_steps):
-                    if i_step < len(base):
-                        inp = base[i_step].copy()
-                        if i_step == i_input:
-                            inp.reshape(-1)[i_entry] += sign * eps
-                        apply_fn(pair.entity_fd, inp)
-                    if step_fn is not None:
-                        step_fn(pair.entity_fd, i_step)
-                    pair.scene_fd.step()
-                perturbed.append(float(loss_fn(pair.scene_fd, pair.entity_fd)))
-            fd_grad.reshape(-1)[i_entry] = (perturbed[0] - perturbed[1]) / (2.0 * eps)
+            # Richardson extrapolation of two central differences cancels the leading truncation term, so the step can
+            # grow past the rounding noise of the state without the truncation error taking over.
+            central = []
+            for step in (eps, 0.5 * eps):
+                perturbed = []
+                for sign in (+1, -1):
+                    pair.scene_fd.reset()
+                    if setup_fn is not None:
+                        setup_fn(pair.scene_fd, pair.entity_fd)
+                    for i_step in range(total_steps):
+                        if i_step < len(base):
+                            inp = base[i_step].copy()
+                            if i_step == i_input:
+                                inp.reshape(-1)[i_entry] += sign * step
+                            apply_fn(pair.entity_fd, inp)
+                        if step_fn is not None:
+                            step_fn(pair.entity_fd, i_step)
+                        pair.scene_fd.step()
+                    perturbed.append(float(loss_fn(pair.scene_fd, pair.entity_fd)))
+                central.append((perturbed[0] - perturbed[1]) / (2.0 * step))
+            fd_grad.reshape(-1)[i_entry] = (4.0 * central[1] - central[0]) / 3.0
         assert_allclose(
-            ana_grads[i_input],
-            fd_grad,
-            rtol=rtol,
-            atol=atol,
-            err_msg=f"input {i_input}: FD vs analytical mismatch",
+            ana_grads[i_input], fd_grad, rtol=rtol, atol=atol, err_msg=f"input {i_input}: FD vs analytical mismatch"
         )
