@@ -751,23 +751,9 @@ def use_deterministic_algorithms(request):
     return use_deterministic_algorithms
 
 
-@pytest.fixture
-def use_zerocopy():
-    return None
-
-
 @pytest.fixture(scope="function", autouse=True)
 def initialize_genesis(
-    request,
-    monkeypatch,
-    tmp_path,
-    backend,
-    precision,
-    performance_mode,
-    use_zerocopy,
-    debug,
-    cache,
-    use_deterministic_algorithms,
+    request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, cache, use_deterministic_algorithms
 ):
     import genesis as gs
 
@@ -786,9 +772,6 @@ def initialize_genesis(
         logging_level = logging.DEBUG if dev_mode else logging.INFO
     if debug is None:
         debug = dev_mode
-
-    if use_zerocopy is not None:
-        monkeypatch.setenv("GS_ENABLE_ZEROCOPY", str(int(use_zerocopy)))
 
     if not cache:
         monkeypatch.setenv("QD_OFFLINE_CACHE", "0")

@@ -12,8 +12,6 @@ from scipy.spatial.qhull import QhullError
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.simulator import RATE_CHECK_ERRNO
-from genesis.utils.array_class import RigidSimStaticConfig
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1054,6 +1052,8 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
 )
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_num_contact_overflow(scene_kind, max_collision_pairs, max_contacts, error_pattern, n_envs, show_viewer):
+    from genesis.engine.simulator import RATE_CHECK_ERRNO
+
     N_BOWLS = 4
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -1332,6 +1332,8 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
     #   - contact set    -> narrowphase / pruning
     #   - contact order  -> contact sort
     #   - dofs velocity  -> constraint solve
+    from genesis.utils.array_class import RigidSimStaticConfig
+
     if prefer_decomposed_solver is not None:
         init_orig = RigidSimStaticConfig.__init__
 

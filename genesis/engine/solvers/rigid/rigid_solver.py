@@ -1325,8 +1325,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def check_errno(self):
         """Raise for a solver error and list the affected environments in batched scenes."""
-        # FIXME: qd.atomic_or return value is broken on Metal - always returns 0.
-        # See repro_metal_kernel_return.py. Falling back to numpy reduction.
+        # FIXME: qd.atomic_or return value is broken on Metal - always returns 0. Falling back to numpy reduction.
         errno_by_env = None
         if gs.use_zerocopy or sys.platform == "darwin":
             errno_by_env = qd_to_numpy(self._errno, transpose=True)

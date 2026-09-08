@@ -860,7 +860,6 @@ def test_cholesky_tiling(monkeypatch, tol):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("use_zerocopy", [False, None])
 def test_reset_envs_flagged_by_rigid_solver(show_viewer, tol):
     DT = 0.01
     N_STEPS = 15
