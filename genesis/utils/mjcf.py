@@ -441,8 +441,11 @@ def parse_link(mj, i_l, scale):
         # See: https://mujoco.readthedocs.io/en/stable/XMLreference.html#actuator-general
         j_info["dofs_act_gain"] = np.zeros((n_dofs,), dtype=gs.np_float)
         j_info["dofs_act_bias"] = np.zeros((n_dofs, 3), dtype=gs.np_float)
-        j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (n_dofs, 1))
 
+        # Every bound the file states on the actuator force of the joint applies, one after the other in the order
+        # MuJoCo clamps: a motor's control range through its gear, the actuator's own force range, and the joint-level
+        # 'actuatorfrcrange' clamping whatever drives the joint. They are collected here and composed below.
+        force_ranges = []
         i_a = -1
         try:
             actuator_mask_j = (mj.actuator_trnid[:, 0] == i_j) & (mj.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT)
@@ -489,14 +492,22 @@ def parse_link(mj, i_l, scale):
                 j_info["dofs_act_gain"] = np.full((n_dofs,), float(gear * gainprm[0] * scale**3), dtype=gs.np_float)
                 j_info["dofs_act_bias"] = np.tile(gear * biasprm[:3] * scale**3, (n_dofs, 1)).astype(gs.np_float)
 
-            if mj.actuator_forcelimited[i_a]:
-                j_info["dofs_force_range"] = np.tile(mj.actuator_forcerange[i_a], (n_dofs, 1))
             if mj.actuator_ctrllimited[i_a] and biastype == mujoco.mjtBias.mjBIAS_NONE:
-                j_info["dofs_force_range"] = np.minimum(
-                    j_info["dofs_force_range"], np.tile(gear * mj.actuator_ctrlrange[i_a], (n_dofs, 1))
-                )
+                # A negative gear swaps the bounds.
+                force_ranges.append(np.sort(gear * mj.actuator_ctrlrange[i_a]))
+            if mj.actuator_forcelimited[i_a]:
+                force_ranges.append(mj.actuator_forcerange[i_a])
         elif gs_type not in (gs.JOINT_TYPE.FIXED, gs.JOINT_TYPE.FREE):
             gs.logger.debug(f"(MJCF) No actuator found for joint `{j_info['name']}`")
+
+        if i_j != -1 and mj.jnt_actfrclimited[i_j]:
+            force_ranges.append(mj.jnt_actfrcrange[i_j])
+        # Clamping the bounds themselves composes the clamps: overlapping ranges intersect, and a range lying past the
+        # previous one collapses the force onto its nearest bound, as clamping twice does.
+        force_range = np.array([-np.inf, np.inf])
+        for lower, upper in force_ranges:
+            force_range = np.clip(force_range, lower, upper)
+        j_info["dofs_force_range"] = np.tile(force_range, (n_dofs, 1))
 
         j_infos.append(j_info)
 
