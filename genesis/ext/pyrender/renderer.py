@@ -23,6 +23,7 @@ from .constants import (
     TextAlign,
 )
 from .font import FontCache
+from .jit_render import is_env_pass
 from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .shader_program import NormalShaderCache, ShaderProgramCache
@@ -80,9 +81,6 @@ class Renderer(object):
         self._program_cache = ShaderProgramCache()
         self._normal_program_cache = NormalShaderCache()
         self._font_cache = FontCache()
-        self._meshes = set()
-        self._mesh_textures = set()
-        self._shadow_textures = set()
         self._texture_alloc_idx = 0
 
         self._floor_texture_color = None
@@ -141,10 +139,16 @@ class Renderer(object):
             If :attr:`RenderFlags.OFFSCREEN` is set, the depth buffer
             in linear units.
         """
+        # A pass with the environments drawn side by side moves every environment-instanced primitive by its
+        # environment offset (see 'JITRenderer.env_offset_buffer'). A pass rendering the environments one at a time
+        # draws them where they are, so their lighting and shadows are the same in every environment.
+        is_grid = not is_env_pass(flags)
+
         # Update context with meshes and textures
         if is_first_pass:
-            self._update_context(scene, flags)
-            all_ready = self.jit.update(scene)
+            self.jit.update_context(scene, flags)
+            self.jit.update(scene)
+            all_ready = self.jit.set_lighting(scene, is_grid)
 
             # Flush queued buffer updates AFTER jit.update(scene) so that new
             # nodes created by set_primitive -> _add_to_context already have
@@ -180,12 +184,17 @@ class Renderer(object):
                         take_pass = True
                     elif isinstance(ln.light, PointLight) and flags & RenderFlags.SHADOWS_POINT:
                         take_pass = True
-                    if take_pass:
+                    # The shadow texture lives on the light, so one map serves every renderer of the scene (the
+                    # viewer window and each camera): it is rendered again once the scene changed or another
+                    # environment is drawn. The pass draws every opaque mesh in fill mode whatever the flags, so the
+                    # key is the scene revision and the environment alone.
+                    if take_pass and ln.light.shadow_map_revision != (scene.revision, env_idx):
                         if isinstance(ln.light, PointLight):
                             self._point_shadow_mapping_pass(scene, ln, flags, env_idx=env_idx)
                         else:
                             self._shadow_mapping_pass(scene, ln, flags, env_idx=env_idx)
                         glBindFramebuffer(GL_FRAMEBUFFER, 0)
+                        ln.light.shadow_map_revision = (scene.revision, env_idx)
 
             if flags & RenderFlags.REFLECTIVE_FLOOR:
                 self._floor_pass(scene, flags, env_idx=env_idx)
@@ -324,30 +333,6 @@ class Renderer(object):
 
         # Free fonts
         self._font_cache.clear()
-
-        # Free meshes
-        for mesh in self._meshes:
-            for p in mesh.primitives:
-                try:
-                    p.delete()
-                except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
-                    pass
-        self._meshes.clear()
-
-        # Free textures
-        for mesh_texture in self._mesh_textures:
-            try:
-                mesh_texture.delete()
-            except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
-                pass
-        self._mesh_textures.clear()
-
-        for shadow_texture in self._shadow_textures:
-            try:
-                shadow_texture.delete()
-            except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
-                pass
-        self._shadow_textures.clear()
 
         self._texture_alloc_idx = 0
 
@@ -548,6 +533,7 @@ class Renderer(object):
                 # Set the camera uniforms
                 program.set_uniform("V", V)
                 program.set_uniform("P", P)
+                program.set_uniform("env_offset_scale", 0.0 if is_env_pass(flags) else 1.0)
                 program.set_uniform("normal_magnitude", 0.05 * primitive.scale)
                 program.set_uniform("normal_color", np.array((0.1, 0.1, 1.0, 1.0)))
 
@@ -649,7 +635,7 @@ class Renderer(object):
         if primitive.poses is not None:
             n_instances = len(primitive.poses)
 
-        if primitive.env_shared or env_idx == -1:
+        if not primitive.is_env_instanced or env_idx == -1:
             if primitive.indices is not None:
                 glDrawElementsInstanced(
                     primitive.mode, primitive.indices.size, GL_UNSIGNED_INT, ctypes.c_void_p(0), n_instances
@@ -670,66 +656,6 @@ class Renderer(object):
     ###########################################################################
     # Context Management
     ###########################################################################
-
-    def _update_context(self, scene, flags):
-        # Get existing and new meshes
-        scene_meshes_new = scene.meshes.copy()
-        scene_meshes_old = self._meshes
-
-        # Remove from context old meshes that are now irrelevant
-        for mesh in scene_meshes_old - scene_meshes_new:
-            for p in mesh.primitives:
-                p.delete()
-
-        # Update set of meshes right away, so that the context can be cleaned up correctly in case of failure
-        self._meshes = scene_meshes_new
-
-        # Add new meshes to context
-        for mesh in scene_meshes_new - scene_meshes_old:
-            for p in mesh.primitives:
-                p._add_to_context()
-
-        # Update mesh textures
-        mesh_textures = set()
-        for m in scene_meshes_new:
-            for p in m.primitives:
-                mesh_textures |= p.material.textures
-
-        # Add new textures to context
-        for texture in mesh_textures - self._mesh_textures:
-            texture._add_to_context()
-
-        # Remove old textures from context
-        for texture in self._mesh_textures - mesh_textures:
-            texture.delete()
-
-        self._mesh_textures = mesh_textures.copy()
-
-        shadow_textures = set()
-        for l in scene.lights:
-            # Create if needed
-            active = False
-            if isinstance(l, DirectionalLight) and flags & RenderFlags.SHADOWS_DIRECTIONAL:
-                active = True
-            elif isinstance(l, PointLight) and flags & RenderFlags.SHADOWS_POINT:
-                active = True
-            elif isinstance(l, SpotLight) and flags & RenderFlags.SHADOWS_SPOT:
-                active = True
-
-            if active and l.shadow_texture is None:
-                l._generate_shadow_texture()
-            if l.shadow_texture is not None:
-                shadow_textures.add(l.shadow_texture)
-
-        # Add new textures to context
-        for texture in shadow_textures - self._shadow_textures:
-            texture._add_to_context()
-
-        # Remove old textures from context
-        for texture in self._shadow_textures - shadow_textures:
-            texture.delete()
-
-        self._shadow_textures = shadow_textures.copy()
 
     ###########################################################################
     # Texture Management
@@ -888,6 +814,7 @@ class Renderer(object):
             defines["WEIGHTS_0_LOC"] = buf_idx
             buf_idx += 1
         defines["INST_M_LOC"] = buf_idx
+        defines["INST_ENV_OFFSET_LOC"] = buf_idx + 4
 
         # Set up shadow mapping defines
         if flags & RenderFlags.SHADOWS_DIRECTIONAL:

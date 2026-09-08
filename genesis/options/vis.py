@@ -140,9 +140,15 @@ class VisOptions(Options):
         Whether to render shadow. Defaults to True.
     plane_reflection : bool
         Whether to render plane reflection. Defaults to False.
-    env_separate_rigid : bool
-        Whether to render all the rigid objects in batched environments in isolation or as part of the same scene.
-        This is only an option for Rasterizer. This behavior is enforced for BatchRender. Defaults to False.
+    split_envs : bool
+        Whether the cameras render each environment in its own world, split from the others, or all the environments
+        as if they shared one scene, laid out side by side as the interactive viewer shows them. Split, a camera returns
+        one image per rendered environment, stacked along a leading dimension, each drawn from the same viewpoint with
+        lighting and shadows identical in every environment, at the cost of one render per environment. Merged, a
+        camera returns one image of the whole grid from a viewpoint bound to one environment, which is cheaper and
+        shows the environments next to each other. This is only an option for Rasterizer, and applies to the scene
+        cameras, debug cameras included. Camera sensors and BatchRender always render the environments split. Defaults
+        to False.
     background_color : tuple of float, shape (3,)
         The color of the scene background.
     ambient_light : tuple of float, shape (3,)
@@ -182,7 +188,7 @@ class VisOptions(Options):
     show_cameras: StrictBool = False
     shadow: StrictBool = True
     plane_reflection: StrictBool = False
-    env_separate_rigid: StrictBool = False
+    split_envs: StrictBool = False
     background_color: UnitIntervalVec3Type = (0.04, 0.08, 0.12)
     ambient_light: UnitIntervalVec3Type = (0.1, 0.1, 0.1)
     visualize_mpm_boundary: StrictBool = False
@@ -208,4 +214,13 @@ class VisOptions(Options):
             if data.get("rendered_envs_idx") is not None:
                 raise ValueError("Cannot specify both 'n_rendered_envs' and 'rendered_envs_idx'.")
             data["rendered_envs_idx"] = tuple(range(n_rendered_envs))
+        env_separate_rigid = data.pop("env_separate_rigid", None)
+        if env_separate_rigid is not None:
+            gs.logger.warning(
+                "Viewer option 'env_separate_rigid' is deprecated and will be removed in a future release. "
+                "Please use 'split_envs' instead."
+            )
+            if data.get("split_envs") is not None:
+                raise ValueError("Cannot specify both 'env_separate_rigid' and 'split_envs'.")
+            data["split_envs"] = env_separate_rigid
         return data

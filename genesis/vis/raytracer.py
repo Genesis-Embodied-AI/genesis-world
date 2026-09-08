@@ -533,8 +533,12 @@ class Raytracer:
             self._scene.update_shape(self._shapes[shape_name])
 
     def update_rigid_batch(self, name, matrices):
-        for batch_index in self.rendered_envs_idx:
-            self.update_rigid(name, matrices[batch_index], batch_index)
+        """Place a rigid shape in every rendered environment from its transforms in each of them, laid out on the
+        environment grid as the raytracer draws the environments side by side."""
+        for env_i, batch_index in enumerate(self.rendered_envs_idx):
+            matrix = matrices[env_i].copy()
+            matrix[:3, 3] += self.visualizer.scene.envs_offset[batch_index]
+            self.update_rigid(name, matrix, batch_index)
 
     def add_deformable(self, name, batch_index=None):
         shape_name = name if batch_index is None else f"{name}_{batch_index}"
@@ -694,17 +698,17 @@ class Raytracer:
             if not solver.is_active:
                 continue
 
+            # One conversion of the geom poses per visual mode in use
+            geoms_T_by_mode = {}
             for entity in solver.entities:
-                if entity.surface.vis_mode == "visual":
-                    geoms = entity.vgeoms
-                    geoms_T = solver._vgeoms_render_T
-                else:
-                    geoms = entity.geoms
-                    geoms_T = solver._geoms_render_T
+                is_visual = entity.surface.vis_mode == "visual"
+                geoms = entity.vgeoms if is_visual else entity.geoms
+                if is_visual not in geoms_T_by_mode:
+                    geoms_T_by_mode[is_visual] = self.visualizer.context.rigid_geoms_T(solver, is_visual)
+                geoms_T = geoms_T_by_mode[is_visual]
 
                 for geom in geoms:
-                    geom_T = geoms_T[geom.idx]  # TODO: support batching
-                    self.update_rigid_batch(str(geom.uid), geom_T)
+                    self.update_rigid_batch(str(geom.uid), geoms_T[:, geom.idx])
 
         # MPM particles
         if self.sim.mpm_solver.is_active:

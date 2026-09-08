@@ -24,11 +24,13 @@ layout(location = JOINTS_0_LOC) in vec4 joints_0;
 layout(location = WEIGHTS_0_LOC) in vec4 weights_0;
 #endif
 layout(location = INST_M_LOC) in mat4 inst_m;
+layout(location = INST_ENV_OFFSET_LOC) in vec3 inst_env_offset;
 
 // Uniforms
 uniform mat4 M;
 uniform mat4 V;
 uniform mat4 P;
+uniform float env_offset_scale;
 
 // Outputs
 out vec3 frag_position;
@@ -55,8 +57,10 @@ out vec4 color_multiplier;
 
 void main()
 {
-    gl_Position = P * V * M * inst_m * vec4(position, 1);
-    frag_position = vec3(M * inst_m * vec4(position, 1.0));
+    vec4 world_position = M * inst_m * vec4(position, 1);
+    world_position.xyz += env_offset_scale * inst_env_offset;
+    gl_Position = P * V * world_position;
+    frag_position = world_position.xyz;
 
     mat4 N = transpose(inverse(M * inst_m));
 

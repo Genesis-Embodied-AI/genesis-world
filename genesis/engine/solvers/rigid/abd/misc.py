@@ -848,54 +848,6 @@ def func_clear_external_force(
 
 
 @qd.kernel(fastcache=True)
-def kernel_update_geoms_render_T(
-    geoms_render_T: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    EPS = rigid_info.EPS[None]
-
-    n_geoms = dyn_state.geoms.pos.shape[0]
-    _B = dyn_state.geoms.pos.shape[1]
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_g, i_b in qd.ndrange(n_geoms, _B):
-        geom_T = gu.qd_trans_quat_to_T(
-            dyn_state.geoms.pos[i_g, i_b] + rigid_info.envs_offset[i_b], dyn_state.geoms.quat[i_g, i_b], EPS
-        )
-        if (qd.abs(geom_T) < 1e20).all():
-            for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
-                geoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)
-
-
-@qd.kernel(fastcache=True)
-def kernel_update_vgeoms_render_T(
-    vgeoms_render_T: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    EPS = rigid_info.EPS[None]
-
-    n_vgeoms = dyn_info.vgeoms.link_idx.shape[0]
-    _B = dyn_state.links.pos.shape[1]
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_g, i_b in qd.ndrange(n_vgeoms, _B):
-        geom_T = gu.qd_trans_quat_to_T(
-            dyn_state.vgeoms.pos[i_g, i_b] + rigid_info.envs_offset[i_b], dyn_state.vgeoms.quat[i_g, i_b], EPS
-        )
-        if (qd.abs(geom_T) < 1e20).all():
-            for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
-                vgeoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)
-
-
-# --------------------------------------------------------------------------------------
-# Utility kernels and functions
-# --------------------------------------------------------------------------------------
-
-
-@qd.kernel(fastcache=True)
 def kernel_bit_reduction(tensor: qd.Tensor) -> qd.i32:
     flag = qd.i32(0)
     for i in range(tensor.shape[0]):

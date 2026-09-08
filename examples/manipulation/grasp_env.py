@@ -58,7 +58,7 @@ class GraspEnv:
                 constraint_solver=gs.constraint_solver.Newton,
             ),
             vis_options=gs.options.VisOptions(
-                env_separate_rigid=True,
+                split_envs=True,
                 rendered_envs_idx=list(range(min(10, self.num_envs))),
             ),
             viewer_options=gs.options.ViewerOptions(

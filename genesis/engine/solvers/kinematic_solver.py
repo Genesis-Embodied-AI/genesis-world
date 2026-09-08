@@ -63,7 +63,6 @@ from .rigid.abd.misc import (
     kernel_init_vgeom_fields,
     kernel_init_vvert_fields,
     kernel_update_heterogeneous_links_vgeom,
-    kernel_update_vgeoms_render_T,
 )
 
 if TYPE_CHECKING:
@@ -574,8 +573,6 @@ class KinematicSolver(Solver):
         )
 
     def _init_vgeom_fields(self):
-        self._vgeoms_render_T = np.empty((self.n_vgeoms_, self._B, 4, 4), dtype=np.float32)
-
         if self.n_vgeoms > 0:
             vgeoms = self.vgeoms
             kernel_init_vgeom_fields(
@@ -703,15 +700,6 @@ class KinematicSolver(Solver):
         for entity in self._entities:
             entity.reset_grad()
         self._queried_states.clear()
-
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- render -----------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def update_vgeoms_render_T(self):
-        kernel_update_vgeoms_render_T(
-            self._vgeoms_render_T, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------

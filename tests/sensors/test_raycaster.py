@@ -30,7 +30,7 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility):
             enable_mujoco_compatibility=enable_mujoco_compatibility,
         ),
         vis_options=gs.options.VisOptions(
-            env_separate_rigid=False,
+            split_envs=False,
             rendered_envs_idx=(0,),
         ),
         viewer_options=gs.options.ViewerOptions(

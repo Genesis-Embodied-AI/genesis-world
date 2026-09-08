@@ -169,7 +169,6 @@ class Viewer(pyglet.window.Window):
         auto_start=True,
         shadow=False,
         plane_reflection=False,
-        env_separate_rigid=False,
         plugins=None,
         enable_help_text=True,
         **kwargs,
@@ -214,7 +213,6 @@ class Viewer(pyglet.window.Window):
             "all_solid": False,
             "shadows": shadow,
             "plane_reflection": plane_reflection,
-            "env_separate_rigid": env_separate_rigid,
             "vertex_normals": False,
             "face_normals": False,
             "cull_faces": True,
@@ -680,6 +678,7 @@ class Viewer(pyglet.window.Window):
         if self._renderer is not None:
             try:
                 self._renderer.delete()
+                self.gs_context.jit.delete()
             except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
                 pass
         self._renderer = None
@@ -733,7 +732,7 @@ class Viewer(pyglet.window.Window):
         seg=False,
         normal=False,
         skip_markers=False,
-        env_separate_rigid=None,
+        split_envs=False,
     ):
         if not self.is_active:
             # A viewer in its own thread stores what ended it rather than raising it where nobody waits, so the call
@@ -745,10 +744,7 @@ class Viewer(pyglet.window.Window):
         self.render_flags["rgb"] = rgb
         self.render_flags["seg"] = seg
         self.render_flags["depth"] = depth
-        saved_env_separate_rigid = self.render_flags["env_separate_rigid"]
-        if env_separate_rigid is not None:
-            self.render_flags["env_separate_rigid"] = env_separate_rigid
-        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers)
+        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs)
         if self._run_in_thread:
             # Send offscreen request
             self._offscreen_event.set()
@@ -760,7 +756,6 @@ class Viewer(pyglet.window.Window):
         self.render_flags["rgb"] = True
         self.render_flags["seg"] = False
         self.render_flags["depth"] = False
-        self.render_flags["env_separate_rigid"] = saved_env_separate_rigid
         return self._offscreen_result
 
     def wait_until_initialized(self):
@@ -788,7 +783,7 @@ class Viewer(pyglet.window.Window):
 
             if self._offscreen_pending_render is not None:
                 # Extract request right away
-                camera, target, normal, skip_markers = self._offscreen_pending_render
+                camera, target, normal, skip_markers, split_envs = self._offscreen_pending_render
                 self._offscreen_pending_render = None
 
                 # Update context, just in case is not already done before
@@ -797,6 +792,7 @@ class Viewer(pyglet.window.Window):
                 self._offscreen_results = []
                 self.render_flags["offscreen"] = True
                 self.render_flags["skip_markers"] = skip_markers
+                self.render_flags["split_envs"] = split_envs
                 if target is self._renderer:
                     # The interactive window's own renderer tracks the OS window content area, which the OS may clamp
                     # below the requested resolution (e.g. a viewport larger than a macOS runner can allocate). Force
@@ -817,17 +813,19 @@ class Viewer(pyglet.window.Window):
                 self._offscreen_result = retval if retval else (None, None)
                 self.render_flags["offscreen"] = False
                 self.render_flags["skip_markers"] = False
+                self.render_flags["split_envs"] = False
 
             if self._run_in_thread:
                 self._offscreen_semaphore.release()
 
     def _flush_retired_renderers(self):
-        """Delete renderers retired by rebind(). Must run with the GL context current, before the
-        replacement renderer draws (see rebind)."""
+        """Delete renderers retired by rebind(), along with the meshes and textures of the context each was bound to.
+        Must run with the GL context current, before the replacement renderer draws (see rebind)."""
         while self._retired_renderers:
             renderer = self._retired_renderers.pop()
             try:
                 renderer.delete()
+                renderer.jit.delete()
             except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
                 pass
 
@@ -1098,7 +1096,7 @@ class Viewer(pyglet.window.Window):
             flags |= RenderFlags.SHADOWS_ALL
         if self.render_flags["plane_reflection"] and not self._is_software:
             flags |= RenderFlags.REFLECTIVE_FLOOR
-        if self.render_flags["env_separate_rigid"]:
+        if self.render_flags.get("split_envs", False):
             flags |= RenderFlags.ENV_SEPARATE
         if self.render_flags["vertex_normals"]:
             flags |= RenderFlags.VERTEX_NORMALS
@@ -1136,7 +1134,7 @@ class Viewer(pyglet.window.Window):
             renderer._program_cache = renderer._normal_program_cache
 
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
-            if self.render_flags["env_separate_rigid"]:
+            if self.render_flags.get("split_envs", False):
                 flags |= RenderFlags.ENV_SEPARATE
             if self.render_flags.get("skip_markers", False):
                 flags |= RenderFlags.SKIP_MARKERS

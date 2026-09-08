@@ -184,7 +184,7 @@ class Visualizer(RBC):
             self._batch_renderer.reset()
 
         if self._viewer is not None:
-            self._viewer.update(auto_refresh=True)
+            self._viewer.update(auto_refresh=True, force=True)
 
     def build(self):
         self._context.build(self._scene)
@@ -232,7 +232,6 @@ class Visualizer(RBC):
                     camera.update_following()
 
         if self._scene.rigid_solver.is_active:
-            self._scene.rigid_solver.update_geoms_render_T()
             self._scene.rigid_solver.update_vgeoms()
 
             # drone propellers
@@ -240,11 +239,8 @@ class Visualizer(RBC):
                 if isinstance(entity, gs.engine.entities.DroneEntity):
                     entity.update_propeller_vgeoms()
 
-            self._scene.rigid_solver.update_vgeoms_render_T()
-
         if self._scene.kinematic_solver.is_active:
             self._scene.kinematic_solver.update_vgeoms()
-            self._scene.kinematic_solver.update_vgeoms_render_T()
 
         if self._scene.mpm_solver.is_active:
             self._scene.mpm_solver.update_render_fields()

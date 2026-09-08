@@ -74,9 +74,7 @@ from .abd.misc import (
     kernel_init_vvert_fields,
     kernel_reset_hibernation,
     kernel_set_zero,
-    kernel_update_geoms_render_T,
     kernel_update_heterogeneous_link_info,
-    kernel_update_vgeoms_render_T,
     kernel_wakeup_coupled_links,
 )
 from .abd.forward_kinematics import (
@@ -1119,7 +1117,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def _init_geom_fields(self):
         self.geoms_init_AABB = self.rigid_info.geoms_init_AABB
-        self._geoms_render_T = np.empty((self.n_geoms_, self._B, 4, 4), dtype=np.float32)
 
         if self.n_geoms > 0:
             geoms = self.geoms
@@ -1712,13 +1709,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
             if self.sim.coupler.has_any_rigid_coupling:
                 self.substep(f)
-
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- render -----------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def update_geoms_render_T(self):
-        kernel_update_geoms_render_T(self._geoms_render_T, self.dyn_state, self.rigid_info, self.rigid_config)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------

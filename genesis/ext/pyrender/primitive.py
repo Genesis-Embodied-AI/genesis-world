@@ -85,8 +85,7 @@ class Primitive(object):
         vertex_mapping=None,
         double_sided=False,
         is_floor=False,
-        env_shared=True,
-        active_envs=None,
+        envs=None,
     ):
         if mode is None:
             mode = GLTF.TRIANGLES
@@ -107,10 +106,12 @@ class Primitive(object):
         self.vertex_mapping = vertex_mapping
         self.double_sided = double_sided
         self.is_floor = is_floor
-        self.env_shared = env_shared
-        # Per-environment visibility mask (bool array of length n_rendered_envs) for heterogeneous geoms whose variant
-        # is only present in a subset of environments. None means the primitive is drawn in every environment.
-        self.active_envs = active_envs
+        # The environments the instances belong to, among the rendered ones: None for a primitive drawn as is in every
+        # environment, an int for a primitive whose instances all stand in that environment, and a bool mask over the
+        # rendered environments for a primitive with one instance per environment, marking the environments it exists
+        # in. A pass drawing the environments side by side moves each instance by the offset of its environment (see
+        # 'JITRenderer.env_offset_buffer'), and a pass drawing one environment draws the instances standing in it.
+        self.envs = envs
 
         self._bounds = None
         self._bounds_0 = None
@@ -354,7 +355,19 @@ class Primitive(object):
             vertex_normal /= np.maximum(1e-10, np.linalg.norm(vertex_normal, axis=1, keepdims=True))
         return vertex_normal
 
-    def _add_to_context(self):
+    @property
+    def is_env_instanced(self):
+        """Whether instance k is the copy of environment k (see 'envs')."""
+        return isinstance(self.envs, np.ndarray)
+
+    @property
+    def env_idx(self):
+        """Index of the environment every instance stands in, None when they are shared or one per environment."""
+        return self.envs if isinstance(self.envs, (int, np.integer)) else None
+
+    def _add_to_context(self, env_offset_buffer=None):
+        """Upload the primitive to the GL context. 'env_offset_buffer' is the buffer of environment offsets to read the
+        instance offset attribute from; left unbound, the attribute holds the zero offset."""
         if self._vaid is not None:
             return
 
@@ -470,6 +483,22 @@ class Primitive(object):
             glEnableVertexAttribArray(idx)
             glVertexAttribPointer(idx, 4, GL_FLOAT, GL_FALSE, FLOAT_SZ * 4 * 4, ctypes.c_void_p(4 * FLOAT_SZ * i))
             glVertexAttribDivisor(idx, 1)
+
+        if env_offset_buffer is not None:
+            idx = self._inst_attr_start + 4
+            glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
+            glEnableVertexAttribArray(idx)
+            if self.is_env_instanced:
+                glVertexAttribPointer(idx, 3, GL_FLOAT, GL_FALSE, FLOAT_SZ * 3, ctypes.c_void_p(0))
+                glVertexAttribDivisor(idx, 1)
+            else:
+                # Every instance is in one environment: the attribute starts at its row and advances past the last
+                # instance only, so every instance reads that row
+                n_instances = len(self.poses) if self.poses is not None else 1
+                glVertexAttribPointer(
+                    idx, 3, GL_FLOAT, GL_FALSE, FLOAT_SZ * 3, ctypes.c_void_p(FLOAT_SZ * 3 * self.env_idx)
+                )
+                glVertexAttribDivisor(idx, max(n_instances, 1))
 
         #######################################################################
         # Fill element buffer

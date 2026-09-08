@@ -63,6 +63,7 @@ class Scene(object):
         # blended in an order that changes from one process to the next.
         self._node_ranks = {}
         self._node_rank_next = 0
+        self._revision = 0
 
         self.bg_color = bg_color
         self.ambient_light = ambient_light
@@ -147,6 +148,21 @@ class Scene(object):
     @property
     def meshes_updated(self):
         return self._meshes_updated
+
+    @property
+    def revision(self):
+        """int : Counter of the changes to what the scene draws.
+
+        It advances when a node is added or removed, when a mesh, a light or a node carrying them is moved, and when
+        a GPU buffer update is queued. A consumer keeps the revision it last synced to and repeats its preparation
+        (context bookkeeping, pose upload, shadow maps) only once the scene moved past it, so the renderers sharing
+        a scene do that work once per change.
+        """
+        return self._revision
+
+    def bump_revision(self):
+        """Advance the revision for a change made outside the scene API, such as a GPU buffer update."""
+        self._revision += 1
 
     @property
     def meshes(self):
@@ -247,6 +263,12 @@ class Scene(object):
             else:
                 self._bounds = np.zeros((2, 3))
         return self._bounds
+
+    @bounds.setter
+    def bounds(self, value):
+        """A renderer holding every mesh and pose stacked computes the bounds in one pass and stores them here, which
+        spares recomputing them node by node."""
+        self._bounds = value
 
     @property
     def centroid(self):
@@ -418,6 +440,7 @@ class Scene(object):
 
         self._path_cache = {}
         self._bounds = None
+        self._revision += 1
 
     def has_node(self, node):
         """Check if a node is already in the scene.
@@ -449,6 +472,7 @@ class Scene(object):
             parent.children.remove(node)
         self._path_cache = {}
         self._bounds = None
+        self._revision += 1
 
     def get_pose(self, node):
         """Get the world-frame pose of a node in the scene.
@@ -492,6 +516,9 @@ class Scene(object):
         node._matrix = pose
         if node.mesh is not None:
             self._bounds = None
+        # Moving a camera changes the viewpoint only. Moving a mesh or a light changes what every renderer draws.
+        if node.mesh is not None or node.light is not None:
+            self._revision += 1
 
     def reorder_vertices(self, node, vertices):
         if node.mesh is None or len(node.mesh.primitives) != 1:
@@ -520,6 +547,7 @@ class Scene(object):
         self._digraph = nx.DiGraph()
         self._digraph.add_node("world")
         self._path_cache = {}
+        self._revision += 1
 
     def _remove_node(self, node):
         """Remove a node and all its children from the scene.
