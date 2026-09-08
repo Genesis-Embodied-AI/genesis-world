@@ -10,7 +10,6 @@ import av
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.options.sensors import RasterizerCameraOptions
-from genesis.utils import set_random_seed
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array
 from genesis.utils.video_encoder import VideoEncoder
@@ -300,19 +299,15 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
     # Create image exporter
     exporter = FrameImageExporter(tmp_path)
 
-    # Initialize the simulation
-    set_random_seed(1)
-    for i in range(max(n_envs, 1)):
-        qpos = torch.zeros(robot.n_dofs, device=gs.device)
-        qpos[:2] = torch.as_tensor(np.random.rand(2), dtype=gs.tc_float, device=gs.device) - 0.5
-        qpos[2] = 1.0
-        qpos[3:6] = 0.5 * (torch.as_tensor(np.random.rand(3), dtype=gs.tc_float, device=gs.device) - 0.5)
-        qpos[6:] = torch.as_tensor(np.random.rand(robot.n_dofs - 6), dtype=gs.tc_float, device=gs.device) - 0.5
-        robot.set_dofs_position(qpos, envs_idx=([i] if n_envs else None))
-
-        qvel = torch.zeros(robot.n_dofs, device=gs.device)
-        qvel[:6] = torch.as_tensor(np.random.rand(6), dtype=gs.tc_float, device=gs.device) - 0.5
-        robot.set_dofs_velocity(qvel, envs_idx=([i] if n_envs else None))
+    # The robot tumbles in the air, nose up and pitching at 3 rad/s: the camera following it sees the body turn and the
+    # one on its head sees the horizon sweep, so every image of every camera changes by a few percent between frames.
+    qpos = torch.zeros(robot.n_dofs, device=gs.device)
+    qpos[2] = 1.0
+    qpos[4] = 1.0
+    robot.set_dofs_position(qpos)
+    qvel = torch.zeros(robot.n_dofs, device=gs.device)
+    qvel[4] = 3.0
+    robot.set_dofs_velocity(qvel)
 
     # Run a few simulation steps while monitoring the result
     cam_debug.start_recording(save_to_filename=(tmp_path / "video.mp4"))

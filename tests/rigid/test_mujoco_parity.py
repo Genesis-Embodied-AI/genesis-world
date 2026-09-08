@@ -249,6 +249,14 @@ def test_stickman(gs_sim, mj_sim, tol):
 def test_general_actuator(gs_sim, mj_sim, tol):
     (entity,) = gs_sim.entities
 
+    # The force range of a dof is the intersection of every bound the file states for it: the joint-level
+    # 'actuatorfrcrange', and for a motor its control range through the gear. The PD gains come from the actuator.
+    lower, upper = entity.get_dofs_force_range()
+    assert_allclose(lower, [-20.0, -np.inf, -4.0], tol=tol)
+    assert_allclose(upper, [20.0, np.inf, 4.0], tol=tol)
+    assert_allclose(entity.get_dofs_kp(dofs_idx_local=[0]), 100.0, tol=tol)
+    assert_allclose(entity.get_dofs_kv(dofs_idx_local=[0]), 2.0, tol=tol)
+
     # get_dofs_kp raises for all DOFs (joint 1 is non-PD-reducible from parser)
     with pytest.raises(gs.GenesisException):
         entity.get_dofs_kp()
@@ -282,9 +290,11 @@ def test_general_actuator(gs_sim, mj_sim, tol):
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
     init_paired_simulators(gs_sim, mj_sim, qpos=[0.2, 0.1, 0.0], qvel=[0.1, -0.1, 0.0])
 
+    # Both the PD joint (kp(100) * 0.3 rad = 30 N.m against its 20 N.m joint bound) and the motor (gear(5) * ctrl(1) =
+    # 5 N.m against its 4 N.m joint bound) saturate, so the step-by-step comparison exercises the clamp.
     mj_sim.data.ctrl[:] = [0.5, 0.3, 1.0]
     entity.control_dofs_position([0.5, 0.3, 0.0])
-    entity.control_dofs_force(5.0, dofs_idx_local=[2])  # motor: gear(5) * gainprm(1) * ctrl(1) = 5
+    entity.control_dofs_force(5.0, dofs_idx_local=[2])
 
     # Pre-step so that Genesis computes qf_applied (needed for data consistency checks)
     mj_sim.data.qpos[:] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]

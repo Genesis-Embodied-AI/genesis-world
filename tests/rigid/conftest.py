@@ -899,16 +899,18 @@ def general_actuator():
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
     body1 = ET.SubElement(worldbody, "body", name="link1", pos="0 0 1")
-    ET.SubElement(body1, "joint", name="hinge_pd", type="hinge", axis="0 1 0", damping="0.5")
+    ET.SubElement(body1, "joint", name="hinge_pd", type="hinge", axis="0 1 0", damping="0.5", actuatorfrcrange="-20 20")
     ET.SubElement(body1, "geom", type="capsule", size="0.05 0.3", mass="1.0")
     body2 = ET.SubElement(body1, "body", name="link2", pos="0 0 -0.6")
     ET.SubElement(body2, "joint", name="hinge_general", type="hinge", axis="0 1 0", damping="0.3")
     ET.SubElement(body2, "geom", type="capsule", size="0.04 0.2", mass="0.5")
     body3 = ET.SubElement(body2, "body", name="link3", pos="0 0 -0.4")
-    ET.SubElement(body3, "joint", name="hinge_motor", type="hinge", axis="0 1 0", damping="0.2")
+    ET.SubElement(
+        body3, "joint", name="hinge_motor", type="hinge", axis="0 1 0", damping="0.2", actuatorfrcrange="-4 4"
+    )
     ET.SubElement(body3, "geom", type="capsule", size="0.03 0.15", mass="0.3")
     actuator = ET.SubElement(mjcf, "actuator")
-    ET.SubElement(actuator, "position", name="act_pd", joint="hinge_pd", kp="100")
+    ET.SubElement(actuator, "position", name="act_pd", joint="hinge_pd", kp="100", kv="2")
     ET.SubElement(
         actuator,
         "general",
@@ -918,7 +920,7 @@ def general_actuator():
         biastype="affine",
         biasprm="0.5 -10 -1",
     )
-    ET.SubElement(actuator, "motor", name="act_motor", joint="hinge_motor", gear="5")
+    ET.SubElement(actuator, "motor", name="act_motor", joint="hinge_motor", gear="5", ctrlrange="-1 1")
     return mjcf
 
 
@@ -1070,6 +1072,24 @@ def freeflyer_mjcf():
     ET.SubElement(greatgrandchild, "inertial", pos="0 0 0", mass="0.1", diaginertia="0.0001 0.0001 0.0001")
     ET.SubElement(greatgrandchild, "geom", type="sphere", size="0.01")
     return mjcf
+
+
+@pytest.fixture(scope="session")
+def two_trees_mjcf():
+    """Generate an MJCF model holding two kinematic trees, a free body with a hinged child each, the second hinge with
+    an authored armature."""
+    mjcf = ET.Element("mujoco", model="two_trees")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+        ET.SubElement(body, "joint", type="free")
+        ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+        ET.SubElement(body, "geom", type="sphere", size="0.05")
+        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0 0 0.1")
+        ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
+        ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
+        ET.SubElement(child, "geom", type="sphere", size="0.02")
+    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")

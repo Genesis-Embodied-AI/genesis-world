@@ -36,6 +36,7 @@ from genesis.utils.sdf import SDF
 from ..base_solver import GravityMixin, MutatedLinks, Solver, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
+    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
@@ -379,14 +380,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.n_fixed_verts_ = max(1, self.n_fixed_verts)
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
 
-        # Resolve precision-dependent tolerance default. The convergence thresholds reference the scene's free-motion
-        # cost (see func_terminate_or_update_descent_batch), which stands an order of magnitude above the bare inertia
-        # for a metre-scale scene under standard gravity, so the ratio drops by as much to leave the thresholds where
-        # they stood. Reproducing the reference behaviour compares against the inertia and keeps its value.
+        # The solve stops once the cost improves by less than this fraction of a scene-wide scale that the heaviest
+        # entities set (see func_terminate_or_update_descent_batch), so a light body resting beside them only settles
+        # under a small fraction, and 1e-7 is the largest that does in single precision. Double precision has MuJoCo to
+        # compare against under compatibility and takes its value; otherwise its threshold references the free-motion
+        # cost, an order above the inertia the reference compares against, and the fraction drops by as much.
         if self._options.tolerance is None:
-            self._options.tolerance = 1e-5 if gs.qd_float == qd.f32 else 1e-8
-            if not self._enable_mujoco_compatibility:
-                self._options.tolerance *= 0.1
+            if gs.qd_float == qd.f32:
+                self._options.tolerance = 1e-7
+            else:
+                self._options.tolerance = 1e-8 if self._enable_mujoco_compatibility else 1e-9
 
         super().build()
 
@@ -399,12 +402,61 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._init_constraint_solver()
         self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
 
+        # Resolve the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. The
+        # default is a fraction of the mass matrix diagonal the refresh above has just assembled, so it is computed and
+        # written to the armature field from the host, and a second refresh recomputes the inverse weights it changes:
+        # those of every degree of freedom and link of the kinematic trees holding a defaulted joint. The parsed
+        # inverse weights stand everywhere else.
+        dofs_idx, dofs_ratio, dofs_link = [], [], []
+        for entity in self._entities:
+            rotor_links = [
+                link
+                for link in entity.links
+                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            ]
+            if not rotor_links:
+                continue
+            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
+            if entity.desc.variants:
+                ratios = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            else:
+                ratios = np.array([entity.main_morph.default_armature or 0.0])
+            ratio = ratios[_balanced_variant_mapping(ratios.size, self._B)]
+            if (ratio <= 0.0).all():
+                continue
+            dofs_idx.extend(link.dof_start for link in rotor_links)
+            dofs_ratio.extend([ratio] * len(rotor_links))
+            dofs_link.extend(rotor_links)
+        if dofs_idx:
+            # Field layout, batch last, since the arrays are written back as fields.
+            dofs_armature = qd_to_numpy(self.dyn_info.dofs.armature, transpose=False, copy=True)
+            is_default = (np.atleast_2d(dofs_armature[dofs_idx].T) <= 0.0).all(axis=0)
+            if is_default.any():
+                dofs_idx = np.array(dofs_idx)[is_default]
+                dofs_ratio = np.stack(dofs_ratio, axis=1)[:, is_default]
+                mass_mat_diag = np.atleast_2d(tensor_to_array(self.get_mass_mat().diagonal(dim1=-2, dim2=-1)))
+                default_armature = dofs_ratio * mass_mat_diag[:, dofs_idx]
+                dofs_armature[dofs_idx] = default_armature.T if self._options.batch_dofs_info else default_armature[0]
+                self.dyn_info.dofs.armature.from_numpy(dofs_armature)
+                roots_idx = {link.root_idx for link, is_dof_default in zip(dofs_link, is_default) if is_dof_default}
+                trees_links = [link for link in self.links if link.root_idx in roots_idx]
+                dofs_invweight = qd_to_numpy(self.dyn_info.dofs.invweight, transpose=False, copy=True)
+                dofs_invweight[[i_d for link in trees_links for i_d in range(link.dof_start, link.dof_end)]] = -1.0
+                self.dyn_info.dofs.invweight.from_numpy(dofs_invweight)
+                links_idx = [link.idx for link in trees_links]
+                links_invweight = qd_to_numpy(self.dyn_info.links.invweight, transpose=False, copy=True)
+                links_invweight[links_idx] = -1.0
+                self.dyn_info.links.invweight.from_numpy(links_invweight)
+                self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+
         # The constraint solver decides it has converged from quantities summed over the whole scene, and every DOF of
         # a link contributes a cost of the order of the link's mass. A link whose mass is a tolerance-fraction of the
         # scene total therefore contributes less than the tolerance, and the solve stops while that link still carries
-        # residual. The floor below follows the tolerance linearly, down to the resolution of the working precision in
-        # kilograms. The scene total is summed before the loop below folds each link into its parent, after which every
-        # entry holds the mass of a whole subtree, which is what the floor is compared against.
+        # residual. The floor below follows the tolerance linearly, down to the resolution of the working precision:
+        # relative to the scene total, since a tolerance below the precision resolves nothing further, and absolute at
+        # the smallest mass the precision holds, where 'finalize_inertial' clamps a link's mass. The scene total is
+        # summed before the loop below folds each link into its parent, after which every entry holds the mass of a
+        # whole subtree, which is what the floor is compared against.
         links_subtree_mass = np.atleast_2d(qd_to_numpy(self.dyn_info.links.inertial_mass, transpose=True, copy=True))
         movable_links_idx = np.flatnonzero([link.n_dofs > 0 for link in self.links])
         if movable_links_idx.size:
@@ -413,12 +465,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 if self.links[i_l].parent_idx >= 0:
                     links_subtree_mass[:, self.links[i_l].parent_idx] += links_subtree_mass[:, i_l]
             movable_links_mass = links_subtree_mass[:, movable_links_idx]
-            mass_floor = np.maximum(self._options.tolerance * total_mass, 0.2 * self._options.tolerance)[:, None]
+            mass_floor = np.maximum(max(self._options.tolerance, gs.EPS) * total_mass, gs.EPS)[:, None]
             i_b_min, i_l_min = np.unravel_index((movable_links_mass / mass_floor).argmin(), movable_links_mass.shape)
             mass_min = movable_links_mass[i_b_min, i_l_min]
-            if mass_min < mass_floor[i_b_min, 0]:
+            if mass_min <= mass_floor[i_b_min, 0]:
                 link = self.links[movable_links_idx[i_l_min]]
-                if gs.qd_float == qd.f32:
+                if mass_min <= gs.EPS:
+                    remedy = "Use 64-bit simulation precision."
+                elif gs.qd_float == qd.f32:
                     remedy = "Use 64-bit simulation precision or tighten the solver tolerance."
                 else:
                     remedy = "Tighten the solver tolerance."
@@ -490,6 +544,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # get_dofs_info reads from solver._options.batch_dofs_info.
         if self._enable_heterogeneous and self._use_hibernation:
             self._options.batch_dofs_info = True
+        # Likewise, the variants of a heterogeneous entity weigh differently, so the default armature they receive (see
+        # build) is per-env whenever one of them asks for it on a joint that carries a rotor.
+        for entity in self._entities:
+            has_default = any((variant.default_armature or 0.0) > 0.0 for variant in entity.desc.variants)
+            has_rotor = any(
+                link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+                for link in entity.links
+            )
+            if has_default and has_rotor:
+                self._options.batch_dofs_info = True
 
         # sparse_solve=None resolves automatically: the skyline-envelope solver pays off on CPU only when the scene
         # has block structure, whereas a single dense-coupled tree gains nothing and pays the per-step envelope tax. An
@@ -812,16 +876,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _jacobi_mass_spread_bound(self):
         """Upper-bound the spread of the mass matrix diagonal over every configuration, from the model alone.
 
-        Each DOF's diagonal entry is bracketed without kinematics. A translational entry is exactly its per-DOF
-        armature plus the subtree mass. A rotational entry is the link the joint carries plus its descendants: with a
-        single joint the link's axis, anchor and centre of mass (COM) are fixed in its frame, so its own term
-        armature + a^T I_anchor a is exact for a revolute axis and bracketed by the principal inertias about the
-        anchor for free/spherical DOFs whose axes turn with the configuration; descendants add at least nothing, at
-        most their largest principal inertia plus their mass carried at an anchor-to-COM distance no configuration
-        exceeds (frame offsets summed along the chain, each joint anchor counted twice since a joint rotation swings
-        the child origin around it, and each prismatic descendant's full travel span, infinite when unlimited). The
-        largest upper bracket over the smallest lower one thus bounds the true diagonal spread at every configuration:
-        equilibration may enable for scenes whose reachable configurations stay better conditioned, never the reverse.
+        Each entry gets a lower and an upper bound that hold in every configuration. A translational entry is armature
+        plus subtree mass exactly. A rotational entry is at least armature plus the link inertia about its axis (the
+        smallest principal inertia for free and spherical DOFs), and at most the same with the largest principal inertia
+        plus, per descendant, its largest principal inertia and its mass times the squared anchor-to-COM distance no
+        configuration exceeds (frame offsets along the chain, each anchor twice, prismatic spans, infinite when
+        unlimited). A build-time default armature raises the upper bound by its fraction. The largest upper bound over
+        the smallest lower one is at least the true spread, so the gate never leaves a scene that needs equilibration
+        without it; its only error is to enable it for a scene that does not, harmless at a small runtime cost.
         """
         links = [link for entity in self._entities for link in entity.links]
         children = {}
@@ -832,6 +894,15 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         for link in links:
             if link.is_fixed:
                 continue
+            # The largest default any variant of a heterogeneous entity asks, since each may ask its own. Only a scene
+            # or robot description file yields a rotor link, and those morphs state one.
+            default_ratio = 0.0
+            if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC):
+                desc = link.entity.desc
+                if desc.variants:
+                    default_ratio = max(variant.default_armature or 0.0 for variant in desc.variants)
+                else:
+                    default_ratio = link.entity.main_morph.default_armature or 0.0
             for joint in link.joints:
                 if joint.type == gs.JOINT_TYPE.FIXED:
                     continue
@@ -853,7 +924,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         hop = np.linalg.norm(child.desc.pos) + 2.0 * sum(np.linalg.norm(j.pos) for j in child.joints)
                         # A prismatic descendant carries the subtree outward by up to its full travel span (which
                         # covers the offset from any zero configuration within limits); an unlimited slide makes the
-                        # upper bracket infinite and the gate enables.
+                        # upper bound infinite and the gate enables.
                         hop += sum(np.ptp(j.desc.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC)
                         dist_origin[child.idx] = dist_origin[cur.idx] + hop
                         dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.desc.inertial_pos)
@@ -865,7 +936,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     for l in sub
                     if l is not link
                 )
-                # Carrying link's inertia about the anchor: exact along a fixed axis, principal bracket otherwise.
+                # Carrying link's inertia about the anchor: exact along a fixed axis, otherwise between its smallest and
+                # largest principal inertia.
                 if is_sole_joint:
                     R_inertial = gu.quat_to_R(link.desc.inertial_quat)
                     inertia_com = R_inertial @ link.desc.inertia @ R_inertial.T
@@ -878,18 +950,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     rot_self_lower = eigvals[0]
                     rot_self_upper = eigvals[-1] + link.desc.mass * dist_com[link.idx] ** 2
                 for i_d, armature_d in enumerate(joint.desc.dofs_armature):
+                    upper_scale = 1.0 if armature_d > 0.0 else 1.0 + default_ratio
                     if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
                         lower.append(armature_d + sub_mass)
-                        upper.append(armature_d + sub_mass)
+                        upper.append(upper_scale * (armature_d + sub_mass))
                     elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
                         axis = joint.desc.dofs_motion_ang[i_d]
                         lever = np.cross(axis, offset_com)
                         rot_self = axis @ inertia_com @ axis + link.desc.mass * np.dot(lever, lever)
                         lower.append(armature_d + rot_self)
-                        upper.append(armature_d + rot_self + rot_desc_upper)
+                        upper.append(upper_scale * (armature_d + rot_self + rot_desc_upper))
                     else:
                         lower.append(armature_d + max(rot_self_lower, 0.0))
-                        upper.append(armature_d + rot_self_upper + rot_desc_upper)
+                        upper.append(upper_scale * (armature_d + rot_self_upper + rot_desc_upper))
         lower = [val for val in lower if val > 0.0]
         if not lower or not upper:
             return 0.0
@@ -1012,8 +1085,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
         link._build() from actual geom objects, using analytic formulas for primitives.
         """
-        from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
-
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue

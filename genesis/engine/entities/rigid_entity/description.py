@@ -235,12 +235,20 @@ class KinematicVariantDescription:
 
     A heterogeneous entity holds one set of links and dispatches a variant per environment, so a variant is described
     beside those links rather than as an entity of its own.
+
+    'default_armature' is the default rotor inertia of its morph, None for a morph without one. Every joint a motor
+    could drive gets one, a revolute or prismatic joint moving a link on its own: a motor's rotor is real inertia, and
+    the constraint solve needs the armature for its stability anyway, so whether a joint is truly actuated, which the
+    asset file often leaves unspecified, is of no consequence. At build, every such degree of freedom whose armature
+    the asset leaves at zero receives that fraction of the joint-space sub-tree inertia it drives at the neutral
+    configuration, so the regularisation scales with the robot. Each variant asks its own, per environment.
     """
 
     init_qpos: np.ndarray
     offset_pos: np.ndarray
     offset_quat: np.ndarray
     links: list[KinematicVariantLinkDescription] = field(default_factory=list)
+    default_armature: float | None = None
 
 
 @dataclass
@@ -421,6 +429,8 @@ class KinematicEntityDescription(EntityDescription):
                 init_qpos=np.concatenate(init_qpos_chunks) if init_qpos_chunks else np.array([], dtype=gs.np_float),
                 offset_pos=self.links[0].offset_pos,
                 offset_quat=self.links[0].offset_quat,
+                # Only a scene or robot description file yields a robot link, and those morphs state a default armature.
+                default_armature=self.morphs[0].default_armature if any(l.is_robot for l in self.links) else None,
             )
         )
 
@@ -514,6 +524,7 @@ class KinematicEntityDescription(EntityDescription):
                         offset_pos=offset_pos,
                         offset_quat=offset_quat,
                         links=variant_links,
+                        default_armature=morph.default_armature,
                     )
                 )
 
@@ -806,14 +817,6 @@ class KinematicEntityDescription(EntityDescription):
                                 j_info_mj[name] = j_info_gs[name]
                             break
                 links_j_infos = links_j_infos_mj
-
-                # Must invalidate invweight if default rotor armature inertia has been specified
-                if morph.default_armature is not None:
-                    for link_j_infos in links_j_infos:
-                        for j_info in link_j_infos:
-                            if j_info["type"] not in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.FIXED):
-                                is_inertia_invalid = True
-                                break
 
                 # Take into account 'world' body if it was added automatically for our legacy URDF parser
                 if len(links_g_infos_mj) == len(links_g_infos) + 1:
