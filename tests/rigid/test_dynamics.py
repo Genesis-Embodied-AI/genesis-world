@@ -860,53 +860,61 @@ def test_cholesky_tiling(monkeypatch, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("use_zerocopy", [False, None])
 def test_reset_envs_flagged_by_rigid_solver(show_viewer, tol):
+    DT = 0.01
     N_STEPS = 15
+    VELOCITY = 0.2
 
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, -1.5, 1.2),
-            camera_lookat=(0.0, 0.0, 0.4),
+            camera_pos=(1.2, -1.2, 1.6),
+            camera_lookat=(0.0, 0.0, 0.9),
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
-    robot = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+    sphere = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 1.0),
+            radius=0.1,
         ),
+        vis_mode="collision",
     )
-    scene.build(n_envs=4)
+    scene.build(n_envs=4, env_spacing=(0.5, 0.5))
     solver = scene.rigid_solver
 
     scene.step()
     assert not solver.get_error_envs_mask().any()
 
-    # Use the public velocity setter as a deterministic trigger for the error path. Contact-heavy rollouts can reach
-    # the same error flag statistically, depending on the scene and hardware.
-    robot.set_dofs_velocity(velocity=torch.inf, envs_idx=1)
+    sphere.set_pos(pos=(0.1, 0.0, 1.0), envs_idx=2)
+    sphere.set_dofs_velocity(velocity=VELOCITY, dofs_idx_local=0, envs_idx=2)
+    pos_healthy = sphere.get_pos(envs_idx=2)
+    sphere.set_dofs_velocity(velocity=torch.inf, envs_idx=1)
     scene.step()
     error_envs_mask = solver.get_error_envs_mask()
     assert_equal(error_envs_mask, torch.tensor([False, True, False, False], device=gs.device))
+    assert_allclose(sphere.get_pos(envs_idx=2)[..., 0] - pos_healthy[..., 0], VELOCITY * DT, tol=tol)
 
+    pos_healthy = sphere.get_pos(envs_idx=2)
     scene.reset(envs_idx=error_envs_mask)
     assert not solver.get_error_envs_mask().any()
-    # Advance beyond the periodic error-check interval to verify that the handled error does not raise later.
+    assert_allclose(sphere.get_pos(envs_idx=2), pos_healthy, tol=tol)
+    # Advance past the periodic error check to exercise continued simulation after recovery
     for _ in range(N_STEPS):
         scene.step()
     assert not solver.get_error_envs_mask().any()
 
-    qpos = robot.get_dofs_position()
-    assert torch.isfinite(qpos).all()
-    assert_allclose(qpos[2], qpos[0], tol=tol)
-    assert_allclose(qpos[3], qpos[0], tol=tol)
+    assert torch.isfinite(sphere.get_dofs_position()).all()
+    assert_allclose(sphere.get_pos(envs_idx=3), sphere.get_pos(envs_idx=0), tol=tol)
+    assert_allclose(sphere.get_pos(envs_idx=2)[..., 0] - pos_healthy[..., 0], VELOCITY * DT * N_STEPS, tol=tol)
 
-    robot.set_dofs_velocity(velocity=torch.inf, envs_idx=2)
+    sphere.set_dofs_velocity(velocity=torch.inf, envs_idx=2)
     with pytest.raises(
         gs.GenesisException,
-        match=r"Environments in error: \[2\]. Read RigidSolver.get_error_envs_mask\(\)",
+        match=r"Environments reporting this error: \[2\]. Read RigidSolver.get_error_envs_mask\(\)",
     ):
         for _ in range(N_STEPS):
             scene.step()
