@@ -302,7 +302,10 @@ def parse_link(mj, i_l, scale):
     else:
         l_info["parent_idx"] = int(mj.body_parentid[i_l])
     l_info["root_idx"] = int(mj.body_rootid[i_l])
-    l_info["invweight"] = mj.body_invweight0[i_l]
+    # FIXME: MuJoCo 3.10 weighs a childless body sliding on the world along its own axes as 1 / mass, leaving out the
+    # armature and the two locked axes its general J M^-1 J^T path accounts for, so those weights are recomputed at build.
+    is_simple_slider = mj.body_simple[i_l] == 2
+    l_info["invweight"] = np.full((2,), -1.0) if is_simple_slider else mj.body_invweight0[i_l]
 
     jnt_adr = mj.body_jntadr[i_l]
     jnt_num = mj.body_jntnum[i_l]
@@ -348,7 +351,10 @@ def parse_link(mj, i_l, scale):
         j_info["quat"] = np.array([1.0, 0.0, 0.0, 0.0])
         j_info["init_qpos"] = np.array(mj.qpos0[mj_qpos_offset : (mj_qpos_offset + n_qs)])
         j_info["dofs_damping"] = mj.dof_damping[mj_dof_offset : (mj_dof_offset + n_dofs)]
-        j_info["dofs_invweight"] = mj.dof_invweight0[mj_dof_offset : (mj_dof_offset + n_dofs)]
+        if is_simple_slider:
+            j_info["dofs_invweight"] = np.full((n_dofs,), -1.0)
+        else:
+            j_info["dofs_invweight"] = mj.dof_invweight0[mj_dof_offset : (mj_dof_offset + n_dofs)]
         j_info["dofs_armature"] = mj.dof_armature[mj_dof_offset : (mj_dof_offset + n_dofs)]
         j_info["dofs_frictionloss"] = mj.dof_frictionloss[mj_dof_offset : (mj_dof_offset + n_dofs)]
         if mj.njnt > 0:

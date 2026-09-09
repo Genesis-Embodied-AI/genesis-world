@@ -9,6 +9,7 @@ from genesis.utils import mjcf as mju
 from genesis.utils.mesh import get_assets_dir
 
 from .assets import get_hf_dataset
+from .mujoco_parity import align_mujoco_invweight0
 
 
 @dataclass
@@ -74,6 +75,7 @@ def build_mujoco_sim(
     # meshes exactly. Midpoint integration branches on an exact ipos == 0 test, so the residuals would silently
     # route the two engines through different update rules; canonicalize the dust to zero.
     model.body_ipos[np.abs(model.body_ipos) < 1e-12] = 0.0
+    align_mujoco_invweight0(model)
     if native_ccd:
         model.opt.disableflags &= ~np.uint32(mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
     else:

@@ -11,6 +11,7 @@ from ..utils.mujoco_parity import (
     check_mujoco_data_consistency,
     check_mujoco_model_consistency,
     init_paired_simulators,
+    set_paired_inertial_properties,
     simulate_and_check_mujoco_consistency,
 )
 
@@ -53,13 +54,21 @@ def test_box_plane_dynamics(gs_sim, mj_sim, tol):
 
 @pytest.mark.required
 @pytest.mark.split_entities
-@pytest.mark.parametrize("model_name", ["two_free_boxes"])
+@pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
 @pytest.mark.parametrize("gs_solver, gs_integrator", [(gs.constraint_solver.Newton, gs.integrator.implicitfast)])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
-    # Mujoco holds the two boxes in one model while Genesis holds one entity per box. The mean inertia the constraint
+    # Mujoco holds the three boxes in one model while Genesis holds one entity per box. The mean inertia the constraint
     # solver scales its tolerances by is a scene aggregate, so it must come out the same however the same bodies are
-    # grouped into entities, which one entity per box is what tells apart.
+    # grouped into entities, which one entity per box is what tells apart. The sliding box carries an armature on a
+    # body MuJoCo weighs by a rule of its own, so its constraint weights hold the general rule both engines settle on.
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
+
+    # The runtime inertial setters derive the constraint weights and the mean inertia anew, which the model consistency
+    # check then holds against the constants MuJoCo recomputes for the same change.
+    set_paired_inertial_properties(
+        gs_sim, mj_sim, armature_ratio=3.0, mass_ratio=0.5, inertia_ratio=2.0, com_offset=(0.01, -0.02, 0.03)
+    )
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
 
 

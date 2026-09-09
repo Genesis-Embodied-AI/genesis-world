@@ -76,7 +76,7 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("model_name", ["two_free_boxes"])
+@pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_export_and_load_rigid(
     n_envs, xml_path, mimic_hinges, urdf_with_external_assets, xacro_robot, tmp_path, show_viewer, caplog
@@ -298,7 +298,7 @@ def test_export_and_load_rigid(
         stored = archive.read(MANIFEST_NAME).decode()
     assert str(tmp_path) not in stored
     assert str(get_assets_dir()) not in stored
-    assert '"two_free_boxes.xml"' in stored
+    assert '"free_boxes_and_slider.xml"' in stored
     # An entity's creation uses the description its build resolved, and that description carries the geometry.
     # Genesis therefore reads the asset file once and never again.
     Path(xml_path).unlink()

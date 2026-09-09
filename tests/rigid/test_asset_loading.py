@@ -739,7 +739,7 @@ def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["freeflyer_mjcf", "freeflyer_urdf"])
-def test_default_armature(xml_path, two_trees_mjcf):
+def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
     DEFAULT_ARMATURE = 1000.0
 
     morph_class = gs.morphs.URDF if xml_path.endswith(".urdf") else gs.morphs.MJCF
@@ -788,17 +788,17 @@ def test_default_armature(xml_path, two_trees_mjcf):
     robot = scene.add_entity(morph)
     robot_without_armature = scene.add_entity(morph_without_armature)
     robot_heterogeneous = scene.add_entity(morphs_heterogeneous)
-    # One entity holding two kinematic trees, only the first with a joint the default applies to.
-    robot_two_trees = scene.add_entity(
+    # One entity holding three kinematic trees, only the first with a joint the default applies to.
+    robot_trees = scene.add_entity(
         gs.morphs.MJCF(
-            file=two_trees_mjcf,
+            file=trees_and_slider_mjcf,
             pos=(0.0, 3.0, 0.0),
             default_armature=DEFAULT_ARMATURE,
         )
     )
-    robot_two_trees_reference = scene.add_entity(
+    robot_trees_reference = scene.add_entity(
         gs.morphs.MJCF(
-            file=two_trees_mjcf,
+            file=trees_and_slider_mjcf,
             pos=(0.0, 4.0, 0.0),
             default_armature=None,
         )
@@ -822,14 +822,18 @@ def test_default_armature(xml_path, two_trees_mjcf):
     assert_allclose(armature_heterogeneous[0, 6], DEFAULT_ARMATURE, tol=gs.EPS)
     assert_allclose(armature_heterogeneous[1, 6], 0.0, tol=gs.EPS)
 
-    # Rotor inertia lowers the inverse weight of its own joint and, through the inverse mass matrix of the tree, of
-    # every joint coupled to it, across attached entities included. An inverse weight parsed before the default was
-    # applied would miss it.
+    # Rotor inertia lowers the inverse weight of its own joint and, through the inverse mass matrix of the tree, of every
+    # joint coupled to it, attached entities included: a weight parsed before the default was applied would miss it.
     assert (robot.get_dofs_invweight()[:, 6:8] < robot_without_armature.get_dofs_invweight()[:, 6:8]).all()
     assert (carrier.get_dofs_invweight()[:, 6:8] < carrier_reference.get_dofs_invweight()[:, 6:8]).all()
-    # The default reaches its own tree alone: the other tree of the entity keeps the parsed inverse weights.
-    assert (robot_two_trees.get_dofs_invweight()[:, 6] < robot_two_trees_reference.get_dofs_invweight()[:, 6]).all()
-    assert_equal(robot_two_trees.get_dofs_invweight()[:, 7:], robot_two_trees_reference.get_dofs_invweight()[:, 7:])
+    # The default reaches its own tree alone: the other trees of the entity keep the inverse weights they were built with.
+    assert (robot_trees.get_dofs_invweight()[:, 6] < robot_trees_reference.get_dofs_invweight()[:, 6]).all()
+    assert_equal(robot_trees.get_dofs_invweight()[:, 7:], robot_trees_reference.get_dofs_invweight()[:, 7:])
+    # The slider is weighed like every other body (see the FIXME in genesis.utils.mjcf): 1 / (mass + armature) for its
+    # dof, a third of it for the translation of the link and none for its rotation.
+    slider_invweight = 1.0 / (1.0 + 0.3)
+    assert_allclose(robot_trees.get_dofs_invweight()[:, 14], slider_invweight, tol=tol)
+    assert_allclose(robot_trees.get_links_invweight()[:, 4], (slider_invweight / 3.0, 0.0), tol=tol)
 
 
 @pytest.mark.slow  # ~200s

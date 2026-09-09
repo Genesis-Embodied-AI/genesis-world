@@ -84,25 +84,22 @@ def box_plan():
     return mjcf
 
 
-def _build_free_box_model(model_name, boxes):
-    """Generate an MJCF model holding the given free boxes and nothing else, as (name, pos) pairs."""
-    mjcf = ET.Element("mujoco", model=model_name)
+@pytest.fixture(scope="session")
+def free_boxes_and_slider():
+    """Generate an MJCF model for two free boxes with an off-center inertial frame and a box sliding on the world along
+    one axis with a rotor armature, which Mujoco holds as one model."""
+    mjcf = ET.Element("mujoco", model="free_boxes_and_slider")
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    for name, pos in boxes:
+    for name, pos in (("box_left", "-0.5 0. 1."), ("box_right", "0.5 0. 1.")):
         body = ET.SubElement(worldbody, "body", name=name, pos=pos)
         ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+        ET.SubElement(body, "inertial", pos="0.01 -0.02 0.03", mass="64.", diaginertia="1.7 1.7 1.7")
         ET.SubElement(body, "joint", name=f"{name}_root", type="free")
+    body = ET.SubElement(worldbody, "body", name="box_slider", pos="0. 1. 1.")
+    ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+    ET.SubElement(body, "joint", name="box_slider_root", type="slide", axis="1 0 0", armature="0.1")
     return mjcf
-
-
-FREE_BOXES = (("box_left", "-0.5 0. 1."), ("box_right", "0.5 0. 1."))
-
-
-@pytest.fixture(scope="session")
-def two_free_boxes():
-    """Generate an MJCF model for two free boxes, which Mujoco holds as one model."""
-    return _build_free_box_model("two_free_boxes", FREE_BOXES)
 
 
 @pytest.fixture(scope="session")
@@ -1077,10 +1074,10 @@ def freeflyer_mjcf():
 
 
 @pytest.fixture(scope="session")
-def two_trees_mjcf():
-    """Generate an MJCF model holding two kinematic trees, a free body with a hinged child each, the second hinge with
-    an authored armature."""
-    mjcf = ET.Element("mujoco", model="two_trees")
+def trees_and_slider_mjcf():
+    """Generate an MJCF model holding three kinematic trees: a free body with a hinged child twice, the second hinge
+    with an authored armature, and a body sliding on the world along one axis with an authored armature."""
+    mjcf = ET.Element("mujoco", model="trees_and_slider")
     worldbody = ET.SubElement(mjcf, "worldbody")
     for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
         body = ET.SubElement(worldbody, "body", name=name, pos=pos)
@@ -1091,6 +1088,10 @@ def two_trees_mjcf():
         ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
         ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
         ET.SubElement(child, "geom", type="sphere", size="0.02")
+    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0 1")
+    ET.SubElement(slider, "joint", type="slide", axis="1 0 0", armature="0.3")
+    ET.SubElement(slider, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+    ET.SubElement(slider, "geom", type="sphere", size="0.05")
     return ET.tostring(mjcf, encoding="unicode")
 
 
