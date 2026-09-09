@@ -42,15 +42,6 @@ def mesh_urdf(mesh_path):
     return ET.tostring(robot, encoding="unicode")
 
 
-@pytest.fixture
-def glb_path(request, glb_file):
-    """The GLB a test parses. An asset-relative path resolves through the dataset. A bare name is the fixture
-    generating the file."""
-    if "/" in glb_file:
-        return os.path.join(get_hf_dataset(pattern=glb_file), glb_file)
-    return request.getfixturevalue(glb_file)
-
-
 # Conversion from .usd to .glb significantly affects precision
 USD_COLOR_TOL = 1e-07
 
