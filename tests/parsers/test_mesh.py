@@ -18,7 +18,7 @@ import genesis.utils.mesh as mu
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
-    NORMALIZED_TEXCOORD_UVS,
+    GLB_TEXCOORD_UVS,
     check_gs_meshes,
     check_gs_surfaces,
     check_gs_textures,
@@ -343,18 +343,20 @@ def test_glb_draco_missing_normals_texcoord(glb_file):
 
 
 @pytest.mark.required
-def test_glb_normalized_texcoord(normalized_texcoord_glb):
-    # Integer texture coordinates flagged as normalized encode [0, 1] and must not be read back at their raw scale
-    (gs_mesh,) = gltf_utils.parse_mesh_glb(
-        normalized_texcoord_glb,
-        group_by_material=False,
+def test_glb_texcoord(emissive_material_variants_glb):
+    # The first material samples the float set 0 and the second the normalized UNSIGNED_SHORT set 1, so both meshes
+    # must come back with the authored coordinates, V flipped to the image-space convention shared with trimesh
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        emissive_material_variants_glb,
+        group_by_material=True,
         scale=None,
         is_mesh_zup=True,
         surface=gs.surfaces.Default(),
     )
-    # The parser flips V to the image-space convention shared with trimesh
-    expected_uvs = NORMALIZED_TEXCOORD_UVS * (1.0, -1.0) + (0.0, 1.0)
-    assert_allclose(gs_mesh.trimesh.visual.uv, expected_uvs, tol=1.0 / np.iinfo(np.uint16).max)
+    assert len(gs_meshes) == 2
+    expected_uvs = GLB_TEXCOORD_UVS * (1.0, -1.0) + (0.0, 1.0)
+    for gs_mesh in gs_meshes:
+        assert_allclose(gs_mesh.trimesh.visual.uv, expected_uvs, tol=1.0 / np.iinfo(np.uint16).max)
 
 
 # ==================== Material/Texture Parsing Tests ====================
