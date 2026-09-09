@@ -114,7 +114,11 @@ def grad_slider_limit():
     mjcf = ET.Element("mujoco", model="slider_limit")
     worldbody = ET.SubElement(mjcf, "worldbody")
     body = ET.SubElement(worldbody, "body", name="cart", pos="0 0 0")
-    ET.SubElement(body, "joint", name="slider", type="slide", axis="1 0 0", range="-4 4", damping="0.0")
+    # A limit close to the origin keeps the rounding of the position under a finite difference small, and a soft one
+    # keeps the final position sensitive to a force applied at any step of a rollout that ends on it.
+    ET.SubElement(
+        body, "joint", name="slider", type="slide", axis="1 0 0", range="-0.5 0.5", damping="0.0", solreflimit="0.15 1"
+    )
     ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="1.0 1.0 1.0")
     ET.SubElement(body, "geom", type="box", size="0.25 0.25 0.1", contype="0", conaffinity="0")
     return ET.tostring(mjcf, encoding="unicode")
@@ -229,7 +233,10 @@ def grad_cartpole():
     mjcf = ET.Element("mujoco", model="cartpole")
     worldbody = ET.SubElement(mjcf, "worldbody")
     cart = ET.SubElement(worldbody, "body", name="cart", pos="0 0 0")
-    ET.SubElement(cart, "joint", name="slider", type="slide", axis="1 0 0", range="-4 4", damping="0.0")
+    # Same limit as grad_slider_limit, for the same reasons.
+    ET.SubElement(
+        cart, "joint", name="slider", type="slide", axis="1 0 0", range="-0.5 0.5", damping="0.0", solreflimit="0.15 1"
+    )
     ET.SubElement(cart, "inertial", pos="0 0 0", mass="1.0", diaginertia="1.0 1.0 1.0")
     ET.SubElement(cart, "geom", type="box", size="0.25 0.25 0.1", contype="0", conaffinity="0", rgba="0 0 0.8 1")
     pole = ET.SubElement(cart, "body", name="pole", pos="0 0 0")
