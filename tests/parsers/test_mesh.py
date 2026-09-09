@@ -18,7 +18,6 @@ import genesis.utils.mesh as mu
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
-    GLB_TEXCOORD_UVS,
     check_gs_meshes,
     check_gs_surfaces,
     check_gs_textures,
@@ -344,8 +343,7 @@ def test_glb_draco_missing_normals_texcoord(glb_file):
 
 @pytest.mark.required
 def test_glb_texcoord(emissive_material_variants_glb):
-    # The first material samples the float set 0 and the second the normalized UNSIGNED_SHORT set 1, so both meshes
-    # must come back with the authored coordinates, V flipped to the image-space convention shared with trimesh
+    # Material 0 reads the float set 0 and material 1 the normalized set 1, so both meshes carry the authored UVs
     gs_meshes = gltf_utils.parse_mesh_glb(
         emissive_material_variants_glb,
         group_by_material=True,
@@ -354,7 +352,8 @@ def test_glb_texcoord(emissive_material_variants_glb):
         surface=gs.surfaces.Default(),
     )
     assert len(gs_meshes) == 2
-    expected_uvs = GLB_TEXCOORD_UVS * (1.0, -1.0) + (0.0, 1.0)
+    # V is flipped to the image-space convention
+    expected_uvs = np.array([[0.125, 0.75], [0.375, 0.5], [0.625, 0.25]], dtype=np.float32)
     for gs_mesh in gs_meshes:
         assert_allclose(gs_mesh.trimesh.visual.uv, expected_uvs, tol=1.0 / np.iinfo(np.uint16).max)
 

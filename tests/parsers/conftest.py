@@ -48,9 +48,6 @@ USD_COLOR_TOL = 1e-07
 
 USD_NORMALS_TOL = 1e-02
 
-# Texture coordinates authored into the triangle of the emissive material variants GLB
-GLB_TEXCOORD_UVS = np.array([[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]], dtype=np.float32)
-
 
 # UsdPhysics declares every joint attribute as single precision, so an anchor, a limit or a drive gain authored in
 # double comes back rounded from a USD file and no parser can recover it. Comparing joints against the model they were
@@ -504,11 +501,13 @@ def usd_scene(request, model_name, scale, fixed):
 
 @pytest.fixture(scope="session")
 def emissive_material_variants_glb(asset_tmp_path):
-    """Path to a GLB with three materials, each on distinct base/emissive texCoord sets: a base-color atlas (red) on
-    texCoord 0 with an emissive atlas on texCoord 1, a flat base color with an emissive atlas on texCoord 1, and a
-    KHR_materials_unlit material whose red base atlas stands in for the unlit imagery. The red base atlas is index 0.
-    A triangle carries the first two materials as primitives, with the same texture coordinates stored as float in
-    set 0 and as normalized UNSIGNED_SHORT, an encoding glTF allows without any extension, in set 1."""
+    """Path to a GLB with three materials on distinct base/emissive texCoord sets and a triangle carrying two of them.
+
+    The materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base color
+    with an emissive atlas on texCoord 1, and a KHR_materials_unlit material whose red base atlas stands in for the
+    unlit imagery. The red base atlas is index 0. The triangle holds the first two materials as primitives, with the
+    same texture coordinates stored as float in set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows,
+    in set 1."""
     images = []
     for color in (np.array([220, 30, 30], np.uint8), np.array([30, 220, 30], np.uint8)):
         buffer = io.BytesIO()
@@ -516,11 +515,12 @@ def emissive_material_variants_glb(asset_tmp_path):
         images.append(buffer.getvalue())
 
     positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
-    uvs_uint16 = np.round(GLB_TEXCOORD_UVS * np.iinfo(np.uint16).max).astype(np.uint16)
+    uvs = np.array([[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]], dtype=np.float32)
+    uvs_uint16 = np.round(uvs * np.iinfo(np.uint16).max).astype(np.uint16)
 
     blob = b""
     buffer_views = []
-    for data in (*images, positions.tobytes(), GLB_TEXCOORD_UVS.tobytes(), uvs_uint16.tobytes()):
+    for data in (*images, positions.tobytes(), uvs.tobytes(), uvs_uint16.tobytes()):
         blob += b"\x00" * ((4 - len(blob) % 4) % 4)
         buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
         blob += data
