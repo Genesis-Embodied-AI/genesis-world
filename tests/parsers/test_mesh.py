@@ -447,6 +447,96 @@ def test_glb_parse_material(glb_file):
 
 
 @pytest.mark.required
+def test_glb_alpha_mode(tmp_path):
+    # Three materials share one base color texture whose alpha ramps up, the shape a cutout has along its edge. A
+    # masked material splits that ramp at its own cutoff, a blended one keeps it, and an opaque one discards it.
+    alpha = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+    rgba = np.full((1, len(alpha), 4), 255, dtype=np.uint8)
+    rgba[..., 3] = alpha
+    buffer = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buffer, format="PNG")
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    uvs = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    alpha_modes = {"masked": ("MASK", 0.6), "blended": ("BLEND", 0.5), "opaque": ("OPAQUE", 0.5)}
+    expected_opacities = {
+        # 0.6 of full opacity is 153, which falls between the third and the fourth texel
+        "masked": [0, 0, 0, 255, 255],
+        "blended": alpha,
+        "opaque": [255, 255, 255, 255, 255],
+    }
+
+    blob = b""
+    buffer_views = []
+    for data in (buffer.getvalue(), positions.tobytes(), uvs.tobytes()):
+        blob += b"\x00" * ((4 - len(blob) % 4) % 4)
+        buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
+        blob += data
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=[0])],
+        nodes=[pygltflib.Node(mesh=0)],
+        meshes=[
+            pygltflib.Mesh(
+                primitives=[
+                    pygltflib.Primitive(
+                        attributes=pygltflib.Attributes(POSITION=0, TEXCOORD_0=1), material=material_idx
+                    )
+                    for material_idx in range(len(alpha_modes))
+                ]
+            )
+        ],
+        materials=[
+            pygltflib.Material(
+                name=name,
+                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+                    baseColorTexture=pygltflib.TextureInfo(index=0, texCoord=0)
+                ),
+                alphaMode=alpha_mode,
+                alphaCutoff=alpha_cutoff,
+            )
+            for name, (alpha_mode, alpha_cutoff) in alpha_modes.items()
+        ],
+        textures=[pygltflib.Texture(source=0)],
+        images=[pygltflib.Image(bufferView=0, mimeType="image/png")],
+        accessors=[
+            pygltflib.Accessor(
+                bufferView=1,
+                componentType=pygltflib.FLOAT,
+                count=len(positions),
+                type="VEC3",
+                min=positions.min(axis=0).tolist(),
+                max=positions.max(axis=0).tolist(),
+            ),
+            pygltflib.Accessor(bufferView=2, componentType=pygltflib.FLOAT, count=len(uvs), type="VEC2"),
+        ],
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    )
+    gltf.set_binary_blob(blob)
+    glb_path = tmp_path / "alpha_modes.glb"
+    gltf.save_binary(str(glb_path))
+
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        str(glb_path),
+        group_by_material=True,
+        scale=None,
+        is_mesh_zup=True,
+        surface=gs.surfaces.Default(),
+    )
+
+    assert {gs_mesh.metadata["name"] for gs_mesh in gs_meshes} == set(alpha_modes)
+    for gs_mesh in gs_meshes:
+        material_name = gs_mesh.metadata["name"]
+        opacity_texture = gs_mesh.surface.opacity_texture
+        assert_equal(
+            opacity_texture.image_array[0],
+            expected_opacities[material_name],
+            err_msg=f"Opacity match failed for material {material_name}.",
+        )
+
+
+@pytest.mark.required
 def test_glb_shared_texture_not_duplicated(tmp_path):
     from genesis.vis.batch_renderer import GenesisGeomRetriever
 
