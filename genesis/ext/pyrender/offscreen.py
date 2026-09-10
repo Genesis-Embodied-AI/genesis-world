@@ -76,6 +76,7 @@ class OffscreenRenderer(object):
         plane_reflection=False,
         split_envs=False,
         skip_markers=False,
+        color_out=None,
     ):
         """Render a scene with the given set of flags.
 
@@ -85,6 +86,8 @@ class OffscreenRenderer(object):
             A scene to render.
         flags : int
             A bitwise or of one or more flags from :class:`.RenderFlags`.
+        color_out : ndarray, optional
+            The array the color buffer is read back into (see Renderer.render).
 
         Returns
         -------
@@ -137,7 +140,7 @@ class OffscreenRenderer(object):
         first_pass_done = False
         if rgb or depth or seg:
             flags |= RenderFlags.OFFSCREEN
-            retval = renderer.render(scene, flags, seg_node_map)
+            retval = renderer.render(scene, flags, seg_node_map, color_out=color_out)
             assert retval is not None
             first_pass_done = True
         else:

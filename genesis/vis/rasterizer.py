@@ -3,6 +3,7 @@ import os
 import sys
 
 import numpy as np
+import torch
 
 import OpenGL
 
@@ -22,12 +23,33 @@ from genesis.ext import pyrender
 from genesis.vis.camera import Camera
 
 
+class _CameraStaging:
+    """What the color readback of a camera goes through on its way to the cache tensor 'out' (see
+    Rasterizer.render_camera): the host buffer taking the rows bottom-up as the GL context delivers them, and for a
+    tensor on a device the scratch the buffer is transferred to, the row order reversing it, and the event of the last
+    transfer for a CUDA device."""
+
+    def __init__(self, out):
+        is_cuda = out.device.type == "cuda"
+        self.host = torch.empty(out.shape, dtype=torch.uint8, device="cpu", pin_memory=is_cuda)
+        self.scratch = None
+        self.rows_reversed = None
+        self.event = None
+        if out.device.type != "cpu":
+            self.scratch = torch.empty_like(out)
+            self.rows_reversed = torch.arange(out.shape[1] - 1, -1, -1, device=out.device)
+            if is_cuda:
+                self.event = torch.cuda.Event()
+
+
 class Rasterizer(RBC):
     def __init__(self, viewer, context):
         self._viewer = viewer
         self._context = context
         self._camera_nodes = dict()
         self._camera_targets = dict()
+        # Per camera, what the color readback goes through when the image goes to a cache tensor (see 'render_camera')
+        self._camera_staging = dict()
         self._offscreen = self._viewer is None
         self._renderer = None
         self._buffer_updates = None
@@ -65,15 +87,34 @@ class Rasterizer(RBC):
         else:
             self._viewer.close_offscreen(self._camera_targets[camera.uid])
         del self._camera_targets[camera.uid]
+        self._camera_staging.pop(camera.uid, None)
 
-    def render_camera(self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs):
+    def render_camera(
+        self, camera, rgb=True, depth=False, segmentation=False, normal=False, *, split_envs, rgb_out=None
+    ):
         """Render a camera. With 'split_envs', the environments are rendered one by one from the pose the camera
-        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side."""
+        holds in each, and stacked; otherwise one image is rendered of the environments laid out side by side.
+
+        'rgb_out' is a tensor to write the RGB image into and return in its stead, with a leading environment axis, of
+        one environment when the scene has none. The readback lands in a persistent host buffer shaped like it, from
+        which the image goes to the tensor in one pass: a strided copy flipping the rows for a tensor on the host, a
+        transfer of the pinned buffer to a device scratch followed by a gather flipping the rows for a CUDA tensor.
+        """
         # Update camera
         self.update_camera(camera)
 
         rgb_arr, depth_arr, seg_idxc_arr, normal_arr = None, None, None, None
         skip_markers = not camera.debug if isinstance(camera, Camera) else True
+        color_out = None
+        if rgb and rgb_out is not None:
+            staging = self._camera_staging.get(camera.uid)
+            if staging is None:
+                staging = _CameraStaging(rgb_out)
+                self._camera_staging[camera.uid] = staging
+            elif staging.event is not None:
+                # The host buffer is written again once the last transfer out of it is done
+                staging.event.synchronize()
+            color_out = staging.host.numpy()
         if self._offscreen:
             # Set the context
             self._renderer.make_current()
@@ -92,6 +133,7 @@ class Rasterizer(RBC):
                         plane_reflection=rgb and self._context.plane_reflection,
                         shadow=rgb and self._context.shadow,
                         skip_markers=skip_markers,
+                        color_out=color_out,
                     )
 
                 if segmentation:
@@ -123,6 +165,7 @@ class Rasterizer(RBC):
                     seg=False,
                     skip_markers=skip_markers,
                     split_envs=split_envs,
+                    color_out=color_out,
                 )
 
             if segmentation:
@@ -142,6 +185,15 @@ class Rasterizer(RBC):
 
         if rgb:
             rgb_arr = retval[0]
+            if rgb_out is not None:
+                if rgb_out.device.type == "cpu":
+                    np.copyto(rgb_out.numpy(), rgb_arr)
+                else:
+                    staging.scratch.copy_(staging.host, non_blocking=True)
+                    torch.index_select(staging.scratch, 1, staging.rows_reversed, out=rgb_out)
+                    if staging.event is not None:
+                        staging.event.record()
+                rgb_arr = rgb_out
         if depth:
             depth_arr = retval[int(rgb)]
         if normal:
@@ -187,6 +239,7 @@ class Rasterizer(RBC):
                 except (OpenGL.error.NullFunctionError, OSError):
                     pass
         self._camera_targets.clear()
+        self._camera_staging.clear()
 
     @property
     def viewer(self):

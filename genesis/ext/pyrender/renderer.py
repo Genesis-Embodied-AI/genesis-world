@@ -115,7 +115,7 @@ class Renderer(object):
     def point_size(self, value):
         self._point_size = float(value)
 
-    def render(self, scene, flags, seg_node_map=None, *, is_first_pass=True, force_skip_shadows=False):
+    def render(self, scene, flags, seg_node_map=None, *, color_out=None, is_first_pass=True, force_skip_shadows=False):
         """Render a scene with the given set of flags.
 
         Parameters
@@ -128,6 +128,10 @@ class Renderer(object):
             A map from :class:`.Node` objects to (3,) colors for each.
             If specified along with flags set to :attr:`.RenderFlags.SEG`,
             the color image will be a segmentation image.
+        color_out : (n_envs, h, w, 3) uint8 or (n_envs, h, w, 4) uint8, optional
+            If :attr:`RenderFlags.OFFSCREEN` is set, the array the color buffer is read back into, one entry of the
+            leading axis per environment rendered, a single one when they are drawn together, with the rows bottom-up
+            as the GL context delivers them. The color image returned is then a view of it.
 
         Returns
         -------
@@ -199,7 +203,13 @@ class Renderer(object):
             if flags & RenderFlags.REFLECTIVE_FLOOR:
                 self._floor_pass(scene, flags, env_idx=env_idx)
 
-            retval = self._forward_pass(scene, flags, seg_node_map=seg_node_map, env_idx=env_idx)
+            retval = self._forward_pass(
+                scene,
+                flags,
+                seg_node_map=seg_node_map,
+                env_idx=env_idx,
+                color_out=None if color_out is None else color_out[i],
+            )
             if retval is not None:
                 if retval_list is None:
                     retval_list = tuple([val] for val in retval)
@@ -220,7 +230,12 @@ class Renderer(object):
             return
 
         if use_env_idx:
-            retval_list = tuple(np.stack(val_list, axis=0) for val_list in retval_list)
+            # The color images were read back one behind the other into 'color_out', which the view stands for
+            has_color_out = color_out is not None and not flags & RenderFlags.DEPTH_ONLY
+            retval_list = tuple(
+                color_out[:, ::-1] if has_color_out and idx == 0 else np.stack(val_list, axis=0)
+                for idx, val_list in enumerate(retval_list)
+            )
         else:
             retval_list = tuple(val_list[0] for val_list in retval_list)
         return retval_list
@@ -366,7 +381,7 @@ class Renderer(object):
             env_idx=env_idx,
         )
 
-    def _forward_pass(self, scene, flags, seg_node_map=None, env_idx=-1):
+    def _forward_pass(self, scene, flags, seg_node_map=None, env_idx=-1, color_out=None):
         # Set up viewport for render
         self._configure_forward_pass_viewport(flags)
 
@@ -445,7 +460,7 @@ class Renderer(object):
 
         # If doing offscreen render, copy result from framebuffer and return
         if flags & RenderFlags.OFFSCREEN:
-            return self._read_main_framebuffer(scene, flags)
+            return self._read_main_framebuffer(scene, flags, color_out)
 
     def _marker_xray_pass(self, V, P, cam_pos, flags, screen_size, env_idx):
         """Render markers behind geometry with darkened transparency (X-ray effect)."""
@@ -1032,7 +1047,7 @@ class Renderer(object):
         self._main_db_ms = None
         self._main_fb_dims = (None, None)
 
-    def _read_main_framebuffer(self, scene, flags):
+    def _read_main_framebuffer(self, scene, flags, color_out):
         width, height = self._main_fb_dims
 
         if not (flags & RenderFlags.SEG or flags & RenderFlags.DEPTH_ONLY):
@@ -1059,7 +1074,7 @@ class Renderer(object):
             return (depth_im,)
 
         # Read color
-        color_im = self.jit.read_color_buf(width, height, flags & RenderFlags.RGBA)
+        color_im = self.jit.read_color_buf(width, height, flags & RenderFlags.RGBA, out=color_out)
 
         # Resize
         color_im = self._resize_image(color_im, antialias=not flags & RenderFlags.SEG)

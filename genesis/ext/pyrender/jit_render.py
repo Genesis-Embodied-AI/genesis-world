@@ -1248,15 +1248,10 @@ class JITRenderer:
                 depth_im = (z_near * z_far) / (z_far + z_near - depth_im * (z_far - z_near)) * 2
             return depth_im
 
-        @nb.jit(nb.uint8[:, :, :](nb.int32, nb.int32, nb.int32, self.gl.wrapper_type), cache=True)
-        def read_color_buf(width, height, rgba, gl):
-            if rgba:
-                buf = np.zeros((height, width, 4), np.uint8)
-                gl.glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, address_to_ptr(buf.ctypes.data))
-            else:
-                buf = np.zeros((height, width, 3), np.uint8)
-                gl.glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, address_to_ptr(buf.ctypes.data))
-            return buf[::-1, :, :]
+        @nb.jit(nb.none(nb.int32, nb.int32, nb.uint8[:, :, :], self.gl.wrapper_type), cache=True)
+        def read_color_buf(width, height, buf, gl):
+            gl_format = GL_RGBA if buf.shape[2] == 4 else GL_RGB
+            gl.glReadPixels(0, 0, width, height, gl_format, GL_UNSIGNED_BYTE, address_to_ptr(buf.ctypes.data))
 
         @nb.jit(nb.float32[:, :](nb.float32[:, :, :]), cache=True)
         def update_normal_flat(p):
@@ -1502,7 +1497,12 @@ class JITRenderer:
             self.gen_func_ptr()
         return self._read_depth_buf(weight, height, z_near, z_far, self.gl.wrapper_instance)
 
-    def read_color_buf(self, weight, height, rgba):
+    def read_color_buf(self, width, height, rgba, out=None):
+        """Read the color buffer of the bound framebuffer, into 'out' when given, a (height, width, 3 or 4) uint8 array
+        taking the rows bottom-up as the GL context delivers them, and return the image with its rows in order."""
+        if out is None:
+            out = np.empty((height, width, 4 if rgba else 3), np.uint8)
         if self._read_color_buf is None:
             self.gen_func_ptr()
-        return self._read_color_buf(weight, height, rgba, self.gl.wrapper_instance)
+        self._read_color_buf(width, height, out, self.gl.wrapper_instance)
+        return out[::-1]

@@ -733,6 +733,7 @@ class Viewer(pyglet.window.Window):
         normal=False,
         skip_markers=False,
         split_envs=False,
+        color_out=None,
     ):
         if not self.is_active:
             # A viewer in its own thread stores what ended it rather than raising it where nobody waits, so the call
@@ -744,7 +745,7 @@ class Viewer(pyglet.window.Window):
         self.render_flags["rgb"] = rgb
         self.render_flags["seg"] = seg
         self.render_flags["depth"] = depth
-        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs)
+        self._offscreen_pending_render = (camera_node, render_target, normal, skip_markers, split_envs, color_out)
         if self._run_in_thread:
             # Send offscreen request
             self._offscreen_event.set()
@@ -783,7 +784,7 @@ class Viewer(pyglet.window.Window):
 
             if self._offscreen_pending_render is not None:
                 # Extract request right away
-                camera, target, normal, skip_markers, split_envs = self._offscreen_pending_render
+                camera, target, normal, skip_markers, split_envs, color_out = self._offscreen_pending_render
                 self._offscreen_pending_render = None
 
                 # Update context, just in case is not already done before
@@ -802,14 +803,14 @@ class Viewer(pyglet.window.Window):
                     target.viewport_width, target.viewport_height = self._offscreen_viewport_size
                     try:
                         self.clear()
-                        retval = self._render(camera, target, normal)
+                        retval = self._render(camera, target, normal, color_out)
                     finally:
                         target.viewport_width, target.viewport_height = saved_viewport
                 else:
                     # A per-camera offscreen FBO is already sized to that camera's own resolution and is independent of
                     # the window, so its viewport is authoritative and must not be overridden with the window size.
                     self.clear()
-                    retval = self._render(camera, target, normal)
+                    retval = self._render(camera, target, normal, color_out)
                 self._offscreen_result = retval if retval else (None, None)
                 self.render_flags["offscreen"] = False
                 self.render_flags["skip_markers"] = False
@@ -1053,7 +1054,7 @@ class Viewer(pyglet.window.Window):
         az = self.viewer_flags["rotate_rate"] / self.viewer_flags["refresh_rate"]
         self._trackball.rotate(az, self.viewer_flags["rotate_axis"])
 
-    def _render(self, camera_node=None, renderer=None, normal=False):
+    def _render(self, camera_node=None, renderer=None, normal=False, color_out=None):
         """Render the scene into the framebuffer and flip."""
         scene = self.scene
         self._camera_node.matrix = self._trackball.pose.copy()
@@ -1124,7 +1125,7 @@ class Viewer(pyglet.window.Window):
 
         first_pass_done = False
         if self.render_flags["rgb"] or self.render_flags["depth"] or self.render_flags["seg"]:
-            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map)
+            retval = renderer.render(self.scene, flags, seg_node_map=seg_node_map, color_out=color_out)
             first_pass_done = True
         else:
             retval = ()

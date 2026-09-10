@@ -253,6 +253,7 @@ class Viewer(RBC):
         normal=False,
         skip_markers=False,
         split_envs=False,
+        color_out=None,
     ):
         return self._pyrender_viewer.render_offscreen(
             camera_node,
@@ -263,6 +264,7 @@ class Viewer(RBC):
             normal,
             skip_markers=skip_markers,
             split_envs=split_envs,
+            color_out=color_out,
         )
 
     def set_camera_pose(self, pose=None, pos=None, lookat=None):

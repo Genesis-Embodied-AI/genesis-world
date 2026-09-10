@@ -546,17 +546,15 @@ class RasterizerCameraSensor(
         self._ensure_camera_registered()
 
         self._shared_metadata.renderer.update_scene()
-        rgb_arr, _, _, _ = self._shared_metadata.renderer.render_camera(
-            self._camera_wrapper, rgb=True, depth=False, segmentation=False, normal=False, split_envs=True
+        self._shared_metadata.renderer.render_camera(
+            self._camera_wrapper,
+            rgb=True,
+            depth=False,
+            segmentation=False,
+            normal=False,
+            split_envs=True,
+            rgb_out=self._shared_metadata.image_cache[self._idx],
         )
-
-        # Ensure contiguous layout because the rendered array may have negative strides.
-        rgb_tensor = torch.from_numpy(np.ascontiguousarray(rgb_arr)).to(dtype=torch.uint8, device=gs.device)
-
-        if len(rgb_tensor.shape) == 3:
-            # Single environment rendered - add batch dimension.
-            rgb_tensor = rgb_tensor.unsqueeze(0)
-        self._shared_metadata.image_cache[self._idx][:] = rgb_tensor
 
 
 # ========================== Raytracer Camera Sensor ==========================
