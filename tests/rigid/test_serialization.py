@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import pickle
+import sys
 import xml.etree.ElementTree as ET
 import zipfile
 from copy import deepcopy
@@ -431,6 +432,9 @@ def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
     restored = gs.Scene.load(exported, vis_options=gs.options.VisOptions(show_world_frame=False))
     assert not restored.is_built
     assert not restored.options.vis.show_world_frame
+    # The viewer options are recorded as authored, whatever display and platform the scene was viewed with
+    assert restored.options.viewer.res is None
+    assert restored.options.viewer.run_in_thread is None
     assert restored.options.sim.dt == scene.options.sim.dt
     assert [entity.name for entity in restored.entities] == [entity.name for entity in scene.entities]
     # A scene destroyed while it records closes its log on the state it stopped at
@@ -454,6 +458,12 @@ def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
     scene.export(built)
     assert scene.options.rigid.max_contacts is not None
     assert gs.Scene.load(built).options.rigid.max_contacts == scene.options.rigid.max_contacts
+
+    # A file asking for a viewer thread opens on every platform, in the main thread where that is the only one
+    threaded_scene = gs.Scene(viewer_options=gs.options.ViewerOptions(run_in_thread=True))
+    threaded = tmp_path / f"threaded{SCENE_FORMAT}"
+    threaded_scene.export(threaded)
+    assert gs.Scene.load(threaded).options.viewer.run_in_thread is (None if sys.platform == "darwin" else True)
 
 
 @pytest.mark.required
