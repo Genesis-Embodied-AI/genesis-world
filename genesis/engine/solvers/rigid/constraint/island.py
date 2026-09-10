@@ -64,7 +64,8 @@ def func_equality_links(i_eq, i_b, n_links, dyn_info: array_class.DynInfo, rigid
     lb = -1
     if eq_type == gs.EQUALITY_TYPE.JOINT:
         la = func_joint_link(obj1, i_b, n_links, dyn_info, rigid_config)
-        lb = func_joint_link(obj2, i_b, n_links, dyn_info, rigid_config)
+        if obj2 >= 0:
+            lb = func_joint_link(obj2, i_b, n_links, dyn_info, rigid_config)
     else:
         la = obj1
         lb = obj2

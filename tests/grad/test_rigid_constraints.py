@@ -184,6 +184,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
     [
         ("grad_hinge_pair_joint_eq_linear", 1),
         ("grad_hinge_pair_joint_eq_quadratic", 1),
+        ("grad_hinge_joint_eq_constant", 1),
         ("grad_connect_loop", 3),
         ("grad_weld_pair", 6),
     ],

@@ -232,21 +232,21 @@ def mimic_hinges():
 
 
 @pytest.fixture(scope="session")
-def scaled_mjcf_joint_equalities():
+def scaled_mjcf_joint_equalities(single_joint_equality):
     mjcf = ET.Element("mujoco", model="scaled_mjcf_joint_equalities")
     worldbody = ET.SubElement(mjcf, "worldbody")
     equality = ET.SubElement(mjcf, "equality")
-    for driver_type, follower_type in (
-        ("hinge", "hinge"),
-        ("slide", "slide"),
-        ("slide", "hinge"),
-        ("hinge", "slide"),
+    for driver_type, follower_type, position_y in (
+        ("hinge", "hinge", -0.25),
+        ("slide", "slide", -0.5),
+        ("slide", "hinge", -0.75),
+        ("hinge", "slide", -1.0),
     ):
         pair_name = f"{driver_type}_{follower_type}"
-        driver_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_driver_body")
+        driver_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_driver_body", pos=f"0 {position_y} 0")
         ET.SubElement(driver_body, "joint", name=f"{pair_name}_driver", type=driver_type, axis="1 0 0")
         ET.SubElement(driver_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
-        follower_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_follower_body")
+        follower_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_follower_body", pos=f"0.15 {position_y} 0")
         ET.SubElement(follower_body, "joint", name=f"{pair_name}_follower", type=follower_type, axis="1 0 0")
         ET.SubElement(follower_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
         ET.SubElement(
@@ -257,6 +257,8 @@ def scaled_mjcf_joint_equalities():
             joint2=f"{pair_name}_driver",
             polycoef="0.2 0.4 -0.3 0.2 -0.1",
         )
+    worldbody.extend(single_joint_equality.find("worldbody"))
+    equality.extend(single_joint_equality.find("equality"))
     return ET.tostring(mjcf, encoding="unicode")
 
 

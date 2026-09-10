@@ -29,14 +29,17 @@ def test_equality_joint(gs_sim, mj_sim, gs_solver, tol):
 
 
 @pytest.mark.required
-def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
+@pytest.mark.parametrize("n_envs, is_batched", [(0, False), (2, True)])
+def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_envs, is_batched, tol):
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            gravity=(0.0, 0.0, 0.0),
-        ),
         rigid_options=gs.options.RigidOptions(
-            enable_collision=False,
-            enable_joint_limit=False,
+            batch_joints_info=is_batched,
+            batch_dofs_info=is_batched,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -0.75, 4.0),
+            camera_lookat=(1.0, -0.75, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
         ),
         show_viewer=show_viewer,
     )
@@ -47,7 +50,7 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
             scale=SCALE,
         ),
     )
-    scene.build()
+    scene.build(n_envs=n_envs)
 
     COEFFICIENTS = (0.2, 0.4, -0.3, 0.2, -0.1)
     DRIVER_POSITION = 0.5
@@ -64,22 +67,28 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
         ("slide_hinge", "slide", "hinge"),
         ("hinge_slide", "hinge", "slide"),
     )
+    TARGET_POSITION = 0.25
+    UNRELATED_POSITION = 1.0
     qpos = entity.get_qpos()
     for name, driver_type, follower_type in JOINT_PAIRS:
-        (driver_idx,) = entity.get_joint(f"{name}_driver").qs_idx_local
-        (follower_idx,) = entity.get_joint(f"{name}_follower").qs_idx_local
-        qpos[..., driver_idx] = DRIVER_POSITION * (SCALE if driver_type == "slide" else 1.0)
-        qpos[..., follower_idx] = FOLLOWER_POSITION * (SCALE if follower_type == "slide" else 1.0)
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        qpos[..., i_driver_q] = DRIVER_POSITION * (SCALE if driver_type == "slide" else 1.0)
+        qpos[..., i_follower_q] = FOLLOWER_POSITION * (SCALE if follower_type == "slide" else 1.0)
+    (i_target_q,) = entity.get_joint("target").qs_idx_local
+    (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
+    qpos[..., i_target_q] = TARGET_POSITION * SCALE
+    qpos[..., i_unrelated_q] = UNRELATED_POSITION * SCALE
     entity.set_qpos(qpos)
     scene.step()
 
     qpos = entity.get_qpos()
     for name, driver_type, follower_type in JOINT_PAIRS:
-        (driver_idx,) = entity.get_joint(f"{name}_driver").qs_idx_local
-        (follower_idx,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
         driver_scale = SCALE if driver_type == "slide" else 1.0
         follower_scale = SCALE if follower_type == "slide" else 1.0
-        driver_position = qpos[..., driver_idx] / driver_scale
+        driver_position = qpos[..., i_driver_q] / driver_scale
         expected_follower_position = (
             COEFFICIENTS[0]
             + COEFFICIENTS[1] * driver_position
@@ -87,7 +96,10 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
             + COEFFICIENTS[3] * driver_position**3
             + COEFFICIENTS[4] * driver_position**4
         )
-        assert_allclose(qpos[..., follower_idx] / follower_scale, expected_follower_position, tol=tol)
+        assert_allclose(qpos[..., i_follower_q] / follower_scale, expected_follower_position, tol=tol)
+
+    assert_allclose(qpos[..., i_target_q] / SCALE, TARGET_POSITION, tol=tol)
+    assert_allclose(qpos[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
 
 
 @pytest.mark.required

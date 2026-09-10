@@ -6,15 +6,16 @@ import shutil
 import subprocess
 import sys
 import warnings
+import xml.etree.ElementTree as ET
 from argparse import SUPPRESS
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
 
-import setproctitle
 import psutil
 import pyglet
 import pytest
+import setproctitle
 from _pytest.mark import Expression, MarkMatcher
 from PIL import Image
 from syrupy.extensions.image import PNGImageSnapshotExtension
@@ -70,6 +71,19 @@ IS_INTERACTIVE_VIEWER_AVAILABLE = has_display or has_egl
 
 TOL_SINGLE = 5e-5
 TOL_DOUBLE = 1e-9
+
+
+@pytest.fixture(scope="session")
+def single_joint_equality():
+    mjcf = ET.Element("mujoco", model="single_joint_equality")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, pos in (("target", "0 0 0"), ("unrelated", "0 0.25 0")):
+        body = ET.SubElement(worldbody, "body", name=f"{name}_body", pos=pos)
+        ET.SubElement(body, "joint", name=name, type="slide", axis="1 0 0")
+        ET.SubElement(body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "joint", name="fixed_target", joint1="target", polycoef="0.25 1 0 0 0")
+    return mjcf
 
 
 # Canonical skip reason registry.

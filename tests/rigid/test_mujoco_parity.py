@@ -17,6 +17,14 @@ from ..utils.mujoco_parity import (
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("model_name", ["single_joint_equality"])
+@pytest.mark.parametrize("gs_solver, gs_integrator", [(gs.constraint_solver.Newton, gs.integrator.implicitfast)])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_equality_joint_constant(gs_sim, mj_sim, tol):
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos=(0.0, 1.0), num_steps=50, tol=tol)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["box_plan"])
 @pytest.mark.parametrize(
     "gs_solver, gs_integrator",
