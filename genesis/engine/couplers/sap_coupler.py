@@ -212,6 +212,7 @@ class SAPCoupler(RBC):
             )
 
         self._rigid_compliant = False
+        self._has_equality_constraints = False
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -222,10 +223,6 @@ class SAPCoupler(RBC):
         self.contact_handlers = []
         self._enable_rigid_fem_contact &= self.rigid_solver.is_active and self.fem_solver.is_active
         self._enable_fem_self_tet_contact &= self.fem_solver.is_active
-
-        for equality in self.rigid_solver.equalities:
-            if equality.type == gs.EQUALITY_TYPE.JOINT and equality.eq_obj2id < 0:
-                gs.raise_exception("SAPCoupler does not support JOINT equality constraints without `joint2`.")
 
         init_tet_tables = False
 
@@ -276,6 +273,9 @@ class SAPCoupler(RBC):
             # TODO: Dynamically added constraints are not supported for now
             if self.rigid_solver.n_equalities > 0:
                 self._init_equality_constraint()
+                self._has_equality_constraints = any(
+                    equality.type == gs.EQUALITY_TYPE.JOINT for equality in self.rigid_solver.equalities
+                )
 
         if self._enable_rigid_fem_contact:
             self.rigid_fem_contact = RigidFemTriTetContactHandler(self.sim)
@@ -585,6 +585,7 @@ class SAPCoupler(RBC):
         self.compute_regularization(
             dofs_state=self.rigid_solver.dyn_state.dofs,
             entities_info=self.rigid_solver.dyn_info.entities,
+            equalities_info=self.rigid_solver.dyn_info.equalities,
             rigid_info=self.rigid_solver.rigid_info,
         )
 
@@ -633,7 +634,7 @@ class SAPCoupler(RBC):
         return has_contact, overflow
 
     def couple(self, i_step):
-        if self.has_contact:
+        if self.has_contact or self._has_equality_constraints:
             self.sap_solve(i_step)
             self.update_vel(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
 
@@ -847,12 +848,18 @@ class SAPCoupler(RBC):
         self,
         dofs_state: array_class.DofsState,
         entities_info: array_class.EntitiesInfo,
+        equalities_info: array_class.EqualitiesInfo,
         rigid_info: array_class.RigidInfo,
     ):
         for contact in qd.static(self.contact_handlers):
             contact.compute_regularization(entities_info=entities_info, rigid_info=rigid_info)
         if qd.static(self.rigid_solver.is_active and self.rigid_solver.n_equalities > 0):
-            self.equality_constraint_handler.compute_regularization(dofs_state=dofs_state)
+            self.equality_constraint_handler.compute_regularization(
+                dofs_state=dofs_state,
+                entities_info=entities_info,
+                equalities_info=equalities_info,
+                rigid_info=rigid_info,
+            )
 
     @qd.kernel
     def _init_sap_solve(self, i_step: qd.i32, dofs_state: array_class.DofsState):
@@ -1868,13 +1875,15 @@ class RigidConstraintHandler(BaseConstraintHandler):
         self.n_constraints = qd.field(gs.qd_int, shape=())
         self.constraint_type = qd.types.struct(
             batch_idx=gs.qd_int,  # batch index
+            equality_idx=gs.qd_int,  # index of the equality constraint
             i_dof1=gs.qd_int,  # index of the first DOF in the constraint
             i_dof2=gs.qd_int,  # index of the second DOF in the constraint
             sap_info=self.sap_constraint_info_type,  # SAP info for the constraint
         )
         self.constraints = self.constraint_type.field(shape=(self.max_constraints,))
-        self.Jt = qd.field(gs.qd_float, shape=(self.max_constraints, self.rigid_solver.n_dofs))
-        self.M_inv_Jt = qd.field(gs.qd_float, shape=(self.max_constraints, self.rigid_solver.n_dofs))
+        # One-component vectors let scalar equalities reuse the contact Jacobian mass solve.
+        self.Jt = qd.Vector.field(1, dtype=gs.qd_float, shape=(self.max_constraints, self.rigid_solver.n_dofs))
+        self.M_inv_Jt = qd.Vector.field(1, dtype=gs.qd_float, shape=(self.max_constraints, self.rigid_solver.n_dofs))
         self.W = qd.field(gs.qd_float, shape=(self.max_constraints,))
 
     @qd.kernel
@@ -1893,36 +1902,61 @@ class RigidConstraintHandler(BaseConstraintHandler):
             if equalities_info.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.JOINT:
                 i_c = qd.atomic_add(self.n_constraints[None], 1)
                 self.constraints[i_c].batch_idx = i_b
+                self.constraints[i_c].equality_idx = i_e
                 I_joint1 = (
                     [equalities_info.eq_obj1id[i_e, i_b], i_b]
                     if qd.static(rigid_config.batch_joints_info)
                     else equalities_info.eq_obj1id[i_e, i_b]
                 )
-                I_joint2 = (
-                    [equalities_info.eq_obj2id[i_e, i_b], i_b]
-                    if qd.static(rigid_config.batch_joints_info)
-                    else equalities_info.eq_obj2id[i_e, i_b]
-                )
                 i_dof1 = joints_info.dof_start[I_joint1]
-                i_dof2 = joints_info.dof_start[I_joint2]
+                i_joint2 = equalities_info.eq_obj2id[i_e, i_b]
+                i_dof2 = -1
+                if i_joint2 >= 0:
+                    I_joint2 = [i_joint2, i_b] if qd.static(rigid_config.batch_joints_info) else i_joint2
+                    i_dof2 = joints_info.dof_start[I_joint2]
                 self.constraints[i_c].i_dof1 = i_dof1
                 self.constraints[i_c].i_dof2 = i_dof2
                 self.constraints[i_c].sap_info.k = self.stiffness
                 self.constraints[i_c].sap_info.R_inv = dt2 * self.stiffness
                 self.constraints[i_c].sap_info.R = 1.0 / self.constraints[i_c].sap_info.R_inv
                 self.constraints[i_c].sap_info.v_hat = 0.0
-                self.Jt[i_c, i_dof1] = 1.0
-                self.Jt[i_c, i_dof2] = -1.0
 
     @qd.func
-    def compute_regularization(self, dofs_state: array_class.DofsState):
+    def compute_regularization(
+        self,
+        dofs_state: array_class.DofsState,
+        entities_info: array_class.EntitiesInfo,
+        equalities_info: array_class.EqualitiesInfo,
+        rigid_info: array_class.RigidInfo,
+    ):
         dt_inv = 1.0 / self.sim._substep_dt
         q = qd.static(dofs_state.pos)
-        sap_info = qd.static(self.constraints.sap_info)
+        constraints = qd.static(self.constraints)
+        sap_info = qd.static(constraints.sap_info)
         for i_c in range(self.n_constraints[None]):
-            i_b = self.constraints[i_c].batch_idx
-            g0 = q[self.constraints[i_c].i_dof1, i_b] - q[self.constraints[i_c].i_dof2, i_b]
-            self.constraints[i_c].sap_info.v_hat = -g0 * dt_inv
+            i_b = constraints[i_c].batch_idx
+            i_e = constraints[i_c].equality_idx
+            i_dof1 = constraints[i_c].i_dof1
+            i_dof2 = constraints[i_c].i_dof2
+            diff = gs.qd_float(0.0)
+            if i_dof2 >= 0:
+                diff = q[i_dof2, i_b]
+
+            g0 = q[i_dof1, i_b]
+            deriv = gs.qd_float(0.0)
+            for i_5 in range(5):
+                diff_power = diff**i_5
+                g0 -= diff_power * equalities_info.eq_data[i_e, i_b][i_5]
+                if i_5 < 4:
+                    deriv += equalities_info.eq_data[i_e, i_b][i_5 + 1] * diff_power * (i_5 + 1)
+
+            self.Jt[i_c, i_dof1][0] = 1.0
+            if i_dof2 >= 0:
+                self.Jt[i_c, i_dof2][0] = -deriv
+            sap_info[i_c].v_hat = -g0 * dt_inv
+
+        self.compute_delassus_world_frame(entities_info=entities_info, rigid_info=rigid_info)
+        for i_c in range(self.n_constraints[None]):
             W = self.compute_delassus(i_c)
             self.compute_constraint_regularization(sap_info, i_c, W, self.sim._substep_dt)
 
@@ -1939,7 +1973,7 @@ class RigidConstraintHandler(BaseConstraintHandler):
         )
         self.W.fill(0.0)
         for i_c, i_d in qd.ndrange(self.n_constraints[None], self.rigid_solver.n_dofs):
-            self.W[i_c] += self.M_inv_Jt[i_c, i_d] * self.Jt[i_c, i_d]
+            self.W[i_c] += self.M_inv_Jt[i_c, i_d][0] * self.Jt[i_c, i_d][0]
 
     @qd.func
     def compute_delassus(self, i_c):
@@ -1950,15 +1984,19 @@ class RigidConstraintHandler(BaseConstraintHandler):
         i_b = self.constraints[i_c].batch_idx
         i_dof1 = self.constraints[i_c].i_dof1
         i_dof2 = self.constraints[i_c].i_dof2
-        return x[i_b, i_dof1] - x[i_b, i_dof2]
+        value = self.Jt[i_c, i_dof1][0] * x[i_b, i_dof1]
+        if i_dof2 >= 0:
+            value += self.Jt[i_c, i_dof2][0] * x[i_b, i_dof2]
+        return value
 
     @qd.func
     def add_Jt_x(self, y, i_c, x):
         i_b = self.constraints[i_c].batch_idx
         i_dof1 = self.constraints[i_c].i_dof1
         i_dof2 = self.constraints[i_c].i_dof2
-        y[i_b, i_dof1] += x
-        y[i_b, i_dof2] -= x
+        y[i_b, i_dof1] += self.Jt[i_c, i_dof1][0] * x
+        if i_dof2 >= 0:
+            y[i_b, i_dof2] += self.Jt[i_c, i_dof2][0] * x
 
     @qd.func
     def compute_vc(self, i_c):
