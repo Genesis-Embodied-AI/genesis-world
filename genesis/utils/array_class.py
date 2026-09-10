@@ -419,14 +419,14 @@ class IslandSlices:
     start: qd.Tensor
 
 
-def get_slices(solver, is_active=True):
+def get_slices(solver, layout, is_active=True):
     _B = solver._B
     n_trees = solver.n_trees_
 
     return IslandSlices(
-        curr=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active)),
-        n=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active)),
-        start=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active)),
+        curr=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active), layout=layout if is_active else None),
+        n=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active), layout=layout if is_active else None),
+        start=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active), layout=layout if is_active else None),
     )
 
 
@@ -507,6 +507,9 @@ def get_island_state(solver, collider):
     # island_state itself holds only the partition maps and the per-island iteration state.
     rcm_active = solver.rigid_config.sparse_solve
     coop_active = solver.rigid_config.enable_cooperative_constraint_kernels
+    # Batch-first under the cooperative kernels, whose block serves one env: the lanes then read consecutive items of
+    # their env from consecutive addresses (see the constraint-state layouts in get_constraint_state).
+    island_layout = (1, 0) if solver.rigid_config.constraint_layout_batch_first else None
     n_classes = len(island_tile_caps(solver.rigid_config))
     max_candidate_contacts = max(collider.collider_info.max_candidate_contacts[None], 1)
     # Safe upper bound on active constraints, mirroring ConstraintSolver.len_constraints: rows_per_contact per
@@ -520,36 +523,52 @@ def get_island_state(solver, collider):
         1,
     )
     return IslandState(
-        trees_parent_idx=V(dtype=gs.qd_int, shape=(n_trees, _B)),
-        trees_island_idx=V(dtype=gs.qd_int, shape=(n_trees, _B)),
-        links_island_idx=V(dtype=gs.qd_int, shape=(n_links, _B)),
+        trees_parent_idx=V(dtype=gs.qd_int, shape=(n_trees, _B), layout=island_layout),
+        trees_island_idx=V(dtype=gs.qd_int, shape=(n_trees, _B), layout=island_layout),
+        links_island_idx=V(dtype=gs.qd_int, shape=(n_links, _B), layout=island_layout),
         n_islands=V(dtype=gs.qd_int, shape=(_B,)),
-        link_slices=get_slices(solver, solver._use_hibernation),
-        link_id=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_hibernation)),
-        dof_slices=get_slices(solver),
-        dof_id=V(dtype=gs.qd_int, shape=(n_dofs, _B)),
-        dof_local_pos=V(dtype=gs.qd_int, shape=(n_dofs, _B)),
-        dofs_island_idx=V(dtype=gs.qd_int, shape=(n_dofs, _B)),
-        dof_range_start=V(dtype=gs.qd_int, shape=(n_trees, _B)),
-        dof_env_start_local=V(dtype=gs.qd_int, shape=(n_dofs, _B)),
-        dof_env_col_end=V(dtype=gs.qd_int, shape=(n_dofs, _B)),
-        contact_slices=get_slices(solver, rcm_active),
-        contact_id=V(dtype=gs.qd_int, shape=maybe_shape((max_candidate_contacts, _B), rcm_active or coop_active)),
-        constraint_slices=get_slices(solver),
-        constraint_id=V(dtype=gs.qd_int, shape=(n_constraints_max, _B)),
-        constraint_island_idx=V(dtype=gs.qd_int, shape=(n_constraints_max, _B)),
+        link_slices=get_slices(solver, island_layout, solver._use_hibernation),
+        link_id=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((n_links, _B), solver._use_hibernation),
+            layout=island_layout if solver._use_hibernation else None,
+        ),
+        dof_slices=get_slices(solver, island_layout),
+        dof_id=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
+        dof_local_pos=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
+        dofs_island_idx=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
+        dof_range_start=V(dtype=gs.qd_int, shape=(n_trees, _B), layout=island_layout),
+        dof_env_start_local=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
+        dof_env_col_end=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
+        contact_slices=get_slices(solver, island_layout, rcm_active),
+        contact_id=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((max_candidate_contacts, _B), rcm_active or coop_active),
+            layout=island_layout if rcm_active or coop_active else None,
+        ),
+        constraint_slices=get_slices(solver, island_layout),
+        constraint_id=V(dtype=gs.qd_int, shape=(n_constraints_max, _B), layout=island_layout),
+        constraint_island_idx=V(dtype=gs.qd_int, shape=(n_constraints_max, _B), layout=island_layout),
         is_hibernated=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), solver._use_hibernation)),
         hibernated_next_link=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_hibernation)),
         factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), coop_active)),
         factor_worklist_i_island=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), coop_active)),
         factor_worklist_size=V(dtype=gs.qd_int, shape=maybe_shape((n_classes,), coop_active)),
-        rcm_tree_pos=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active)),
-        rcm_tree_degree=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active)),
-        rcm_tree_is_ordered=V(dtype=gs.qd_bool, shape=maybe_shape((n_trees, _B), rcm_active)),
-        rcm_tree_order=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active)),
-        inertia=V(dtype=gs.qd_float, shape=(n_trees, _B)),
-        improved=V(dtype=gs.qd_bool, shape=(n_trees, _B)),
-        ls_improvement=V(dtype=gs.qd_float, shape=(n_trees, _B)),
+        rcm_tree_pos=V(
+            dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
+        ),
+        rcm_tree_degree=V(
+            dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
+        ),
+        rcm_tree_is_ordered=V(
+            dtype=gs.qd_bool, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
+        ),
+        rcm_tree_order=V(
+            dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
+        ),
+        inertia=V(dtype=gs.qd_float, shape=(n_trees, _B), layout=island_layout),
+        improved=V(dtype=gs.qd_bool, shape=(n_trees, _B), layout=island_layout),
+        ls_improvement=V(dtype=gs.qd_float, shape=(n_trees, _B), layout=island_layout),
     )
 
 
