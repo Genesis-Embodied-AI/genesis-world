@@ -909,12 +909,14 @@ def apply_transform(transform, positions, normals=None):
 
     transformed_normals = normals
     if normals is not None:
-        rot_mat = transform[:3, :3]
-        if np.abs(3.0 - np.trace(rot_mat)) > gs.EPS**2:  # has rotation or scaling
-            transformed_normals = normals @ rot_mat
-            scale = np.linalg.norm(rot_mat, axis=1, keepdims=True)
-            if np.any(np.abs(scale - 1.0) > gs.EPS):  # has scale
-                transformed_normals /= np.linalg.norm(transformed_normals, axis=1, keepdims=True)
+        lin_mat = transform[:3, :3]
+        if not np.allclose(lin_mat, np.identity(3), atol=gs.EPS):  # has rotation or scaling
+            # A normal is a covector, so it maps through the cofactor matrix of the linear part, whose rows are the
+            # cross products of the other two rows. That matrix sends the cross product of two edges to the cross
+            # product of the transformed edges, keeping a normal perpendicular to its own triangle under any scaling.
+            cofactor_mat = np.cross(np.roll(lin_mat, -1, axis=0), np.roll(lin_mat, -2, axis=0))
+            transformed_normals = normals @ cofactor_mat
+            transformed_normals /= np.linalg.norm(transformed_normals, axis=1, keepdims=True)
 
     return transformed_positions, transformed_normals
 
