@@ -2312,15 +2312,32 @@ def func_hessian_direct_batch(
         for j_d in range(j_lo, i_d + 1):
             j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
             constraint_state.nt_H[i_b, i_dg, j_dg] = gs.qd_float(0.0)
-    # H += J.T @ D @ J by scattering each island constraint's rank update over the DOF pairs in its support
-    # (jac_dofs_idx), the triangle oriented by island-local position: the fill-reducing dof_id of the CPU skyline path
-    # is not globally monotonic, and every per-island factor/solve reads the block through the same orientation.
-    for i_lcon in range(con_n):
+    # H += J.T @ D @ J by blocks: the rows_per_contact consecutive rows sharing one support (a contact) scatter
+    # together, each pair of the support read and written once, oriented by island-local position like every
+    # per-island factor and solve read of the block (dof_id permutes the trees on the CPU skyline path).
+    n_rows = qd.static(rigid_config.rows_per_contact)
+    i_lcon = 0
+    while i_lcon < con_n:
         i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
-        # An inactive constraint contributes nothing to H; skip its whole scatter instead of multiplying by 0
-        if constraint_state.active[i_c, i_b]:
-            efc_D = constraint_state.efc_D[i_c, i_b]
-            jac_n = constraint_state.jac_n_dofs[i_c, i_b]
+        jac_n = constraint_state.jac_n_dofs[i_c, i_b]
+        n_block = 1
+        if i_lcon + n_rows <= con_n:
+            is_block = True
+            for i_r in qd.static(range(1, n_rows)):
+                i_cr = constraint_state.island.constraint_id[con_base + i_lcon + i_r, i_b]
+                if i_cr != i_c + i_r or constraint_state.jac_n_dofs[i_cr, i_b] != jac_n:
+                    is_block = False
+                else:
+                    for k in range(jac_n):
+                        if constraint_state.jac_dofs_idx[i_c, k, i_b] != constraint_state.jac_dofs_idx[i_cr, k, i_b]:
+                            is_block = False
+            if is_block:
+                n_block = n_rows
+        is_any_active = False
+        for i_r in range(n_block):
+            if constraint_state.active[i_c + i_r, i_b]:
+                is_any_active = True
+        if is_any_active:
             for i_d1_ in range(jac_n):
                 i_d1 = constraint_state.jac_dofs_idx[i_c, i_d1_, i_b]
                 for i_d2_ in range(i_d1_, jac_n):
@@ -2333,14 +2350,26 @@ def func_hessian_direct_batch(
                             >= constraint_state.island.dof_local_pos[i_d2, i_b]
                         ) != (i_d1 >= i_d2):
                             row, col = col, row
-                    contrib = constraint_state.jac[i_c, i_d1, i_b] * constraint_state.jac[i_c, i_d2, i_b] * efc_D
-                    # Each contribution carries its rows' scales so H assembles equilibrated; see nt_jacobi in
-                    # array_class.py.
-                    if qd.static(rigid_config.enable_jacobi_equilibration):
-                        contrib = (
-                            contrib * constraint_state.nt_jacobi[i_d1, i_b] * constraint_state.nt_jacobi[i_d2, i_b]
-                        )
-                    constraint_state.nt_H[i_b, row, col] = constraint_state.nt_H[i_b, row, col] + contrib
+                    h = constraint_state.nt_H[i_b, row, col]
+                    for i_r in range(n_block):
+                        i_cr = i_c + i_r
+                        if constraint_state.active[i_cr, i_b]:
+                            contrib = (
+                                constraint_state.jac[i_cr, i_d1, i_b]
+                                * constraint_state.jac[i_cr, i_d2, i_b]
+                                * constraint_state.efc_D[i_cr, i_b]
+                            )
+                            # Each contribution carries its rows' scales so H assembles equilibrated; see nt_jacobi in
+                            # array_class.py.
+                            if qd.static(rigid_config.enable_jacobi_equilibration):
+                                contrib = (
+                                    contrib
+                                    * constraint_state.nt_jacobi[i_d1, i_b]
+                                    * constraint_state.nt_jacobi[i_d2, i_b]
+                                )
+                            h = h + contrib
+                    constraint_state.nt_H[i_b, row, col] = h
+        i_lcon = i_lcon + n_block
     # H += M over the island's dofs, bounded by each dof's mass block (dofs_mass_block_start, mapped to local through
     # dof_local_pos): the mass couples no dofs across blocks, and a block lies within the envelope.
     for i_d in range(n):
