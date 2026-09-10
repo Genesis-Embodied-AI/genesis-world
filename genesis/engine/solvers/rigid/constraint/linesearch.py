@@ -551,25 +551,40 @@ def func_linesearch_islands_serial(
     ncone = nef
     if qd.static(rigid_config.enable_elliptic_friction):
         ncone = ncone + constraint_state.n_constraints_cone[i_b]
-    n_con = constraint_state.n_constraints[i_b]
 
-    for i_d1 in range(n_dofs):
-        mv = gs.qd_float(0.0)
-        for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
-            mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
-        constraint_state.mv[i_d1, i_b] = mv
-    # An env holding one island reads every row densely, whose loads carry no dependent index; the rows of several
-    # islands are read over their sparse support, whose cost follows the islands' sizes.
-    for i_c in range(n_con):
-        jv = gs.qd_float(0.0)
-        if n_islands == 1:
+    # mv = M @ search and jv = J @ search over the islands still moving, through the island lists. An env holding one
+    # island reads every row densely, whose loads carry no dependent index.
+    if n_islands == 1:
+        for i_d1 in range(n_dofs):
+            mv = gs.qd_float(0.0)
+            for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
+                mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
+            constraint_state.mv[i_d1, i_b] = mv
+        for i_c in range(constraint_state.n_constraints[i_b]):
+            jv = gs.qd_float(0.0)
             for i_d in range(n_dofs):
                 jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
-        else:
-            for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
-        constraint_state.jv[i_c, i_b] = jv
+            constraint_state.jv[i_c, i_b] = jv
+    else:
+        for i_island in range(n_islands):
+            if constraint_state.island.improved[i_island, i_b]:
+                dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
+                dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
+                for i_pos in range(dof_lo, dof_hi):
+                    i_d1 = constraint_state.island.dof_id[i_pos, i_b]
+                    mv = gs.qd_float(0.0)
+                    for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
+                        mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
+                    constraint_state.mv[i_d1, i_b] = mv
+                row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
+                row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
+                for i_pos in range(row_lo, row_hi):
+                    i_c = constraint_state.island.constraint_id[i_pos, i_b]
+                    jv = gs.qd_float(0.0)
+                    for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                        i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                        jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
+                    constraint_state.jv[i_c, i_b] = jv
 
     is_moved = False
     for i_island in range(n_islands):
