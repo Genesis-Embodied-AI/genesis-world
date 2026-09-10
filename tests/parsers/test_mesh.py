@@ -351,6 +351,88 @@ def test_glb_draco_missing_normals_texcoord(glb_file):
 
 
 @pytest.mark.required
+def test_glb_primitive_modes(tmp_path):
+    # Four nodes read the same five positions: a lone triangle, that triangle as a one-triangle strip, a
+    # three-triangle strip whose second triangle is wound the other way round, and a three-triangle fan pivoting on
+    # the first index. Each node is a mesh of its own whatever mode it declares.
+    positions = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float32
+    )
+    short_indices = np.array([0, 1, 2], dtype=np.uint32)
+    long_indices = np.array([0, 1, 2, 3, 4], dtype=np.uint32)
+    TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN = 4, 5, 6
+    primitives = {
+        "triangles": (TRIANGLES, 1),
+        "strip_one": (TRIANGLE_STRIP, 1),
+        "strip_three": (TRIANGLE_STRIP, 2),
+        "fan_three": (TRIANGLE_FAN, 2),
+    }
+    expected_faces = {
+        "triangles": [[0, 1, 2]],
+        "strip_one": [[0, 1, 2]],
+        "strip_three": [[0, 1, 2], [1, 3, 2], [2, 3, 4]],
+        "fan_three": [[0, 1, 2], [0, 2, 3], [0, 3, 4]],
+    }
+
+    blob = b""
+    buffer_views = []
+    for data in (positions.tobytes(), short_indices.tobytes(), long_indices.tobytes()):
+        blob += b"\x00" * ((4 - len(blob) % 4) % 4)
+        buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
+        blob += data
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=list(range(len(primitives))))],
+        nodes=[pygltflib.Node(mesh=i) for i in range(len(primitives))],
+        meshes=[
+            pygltflib.Mesh(
+                name=name,
+                primitives=[
+                    pygltflib.Primitive(attributes=pygltflib.Attributes(POSITION=0), indices=indices, mode=mode)
+                ],
+            )
+            for name, (mode, indices) in primitives.items()
+        ],
+        accessors=[
+            pygltflib.Accessor(
+                bufferView=0,
+                componentType=pygltflib.FLOAT,
+                count=len(positions),
+                type="VEC3",
+                min=positions.min(axis=0).tolist(),
+                max=positions.max(axis=0).tolist(),
+            ),
+            pygltflib.Accessor(
+                bufferView=1, componentType=pygltflib.UNSIGNED_INT, count=len(short_indices), type="SCALAR"
+            ),
+            pygltflib.Accessor(
+                bufferView=2, componentType=pygltflib.UNSIGNED_INT, count=len(long_indices), type="SCALAR"
+            ),
+        ],
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    )
+    gltf.set_binary_blob(blob)
+    glb_path = tmp_path / "primitive_modes.glb"
+    gltf.save_binary(str(glb_path))
+
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        str(glb_path),
+        group_by_material=False,
+        scale=None,
+        is_mesh_zup=True,
+        surface=gs.surfaces.Default(),
+    )
+
+    assert {gs_mesh.metadata["name"] for gs_mesh in gs_meshes} == set(primitives)
+    for gs_mesh in gs_meshes:
+        mesh_name = gs_mesh.metadata["name"]
+        assert_allclose(gs_mesh.trimesh.vertices, positions, tol=gs.EPS)
+        assert_equal(gs_mesh.trimesh.faces, expected_faces[mesh_name])
+
+
+@pytest.mark.required
 def test_glb_texcoord(emissive_material_variants_glb):
     # Material 0 reads the float set 0 and material 1 the normalized set 1, so both meshes carry the authored UVs
     gs_meshes = gltf_utils.parse_mesh_glb(
