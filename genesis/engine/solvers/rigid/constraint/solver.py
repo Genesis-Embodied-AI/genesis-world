@@ -2256,12 +2256,19 @@ def func_hessian_direct_batch(
         con_n_scale = constraint_state.island.constraint_slices.n[i_island, i_b]
         for i_d in range(n):
             i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
-            hess_diag = rigid_info.mass_mat[i_dg, i_dg, i_b]
-            for i_lcon in range(con_n_scale):
-                i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
-                if constraint_state.active[i_c, i_b]:
-                    hess_diag = hess_diag + constraint_state.efc_D[i_c, i_b] * constraint_state.jac[i_c, i_dg, i_b] ** 2
-            constraint_state.nt_jacobi[i_dg, i_b] = hess_diag
+            constraint_state.nt_jacobi[i_dg, i_b] = rigid_info.mass_mat[i_dg, i_dg, i_b]
+        # Each active row adds D * jac^2 to the diagonal of every dof of its support, the rows in list order so every dof
+        # sums its rows in that order. Walking the rows' supports costs their total size; a sweep of every dof of the
+        # island over every row of the island would read n_dofs * n_rows Jacobian entries, most of them structural zeros.
+        for i_lcon in range(con_n_scale):
+            i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+            if constraint_state.active[i_c, i_b]:
+                efc_D = constraint_state.efc_D[i_c, i_b]
+                for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                    i_dg = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                    constraint_state.nt_jacobi[i_dg, i_b] = (
+                        constraint_state.nt_jacobi[i_dg, i_b] + efc_D * constraint_state.jac[i_c, i_dg, i_b] ** 2
+                    )
         if qd.static(rigid_config.enable_elliptic_friction):
             n_rows_scale = qd.static(rigid_config.rows_per_contact)
             nef_scale = constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
