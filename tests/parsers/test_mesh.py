@@ -327,6 +327,25 @@ def test_glb_parse_geometry(request, glb_file, tol):
 
 
 @pytest.mark.required
+def test_glb_node_scale_normals(non_uniform_node_scale_glb):
+    # The normal of a flat triangle is the geometric normal of that triangle, whatever the node scales it by
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        non_uniform_node_scale_glb,
+        group_by_material=False,
+        scale=None,
+        is_mesh_zup=True,
+        surface=gs.surfaces.Default(),
+    )
+    assert len(gs_meshes) == 1
+    tm_mesh = gs_meshes[0].trimesh
+    triangle = tm_mesh.vertices[tm_mesh.faces[0]]
+    geometric_normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+    geometric_normal /= np.linalg.norm(geometric_normal)
+    # The authored normals are stored in a float accessor, so they round to float32 in the file
+    assert_allclose(tm_mesh.vertex_normals, geometric_normal, tol=np.finfo(np.float32).eps)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("glb_file", ["glb/tycoon_draco_no_normal.glb", "glb/tycoon_with_normal_draco.glb"])
 def test_glb_draco_missing_normals_texcoord(glb_file):
     # Normals and tex_coord are not always present in GLB files, typically for Draco-compressed ones.
