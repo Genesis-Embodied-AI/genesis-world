@@ -991,19 +991,9 @@ def _add_collision_constraints_per_contact(
             if qd.static(rigid_config.enable_rolling_friction):
                 contact_data_friction_rolling = collider_state.contact_data.friction_rolling[i_col, i_b]
 
+            n_con_head = collision_con_start + i_col_ * rows_per_contact
             for i_friction in range(rows_per_contact):
-                n, n_ang = _func_contact_row_direction(
-                    i_friction,
-                    contact_data_normal,
-                    d1,
-                    d2,
-                    contact_data_friction,
-                    contact_data_friction_torsional,
-                    contact_data_friction_rolling,
-                    rigid_config,
-                )
-
-                n_con = collision_con_start + i_col_ * rows_per_contact + i_friction
+                n_con = n_con_head + i_friction
                 if qd.static(rigid_config.sparse_solve):
                     for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
                         i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
@@ -1011,51 +1001,67 @@ def _add_collision_constraints_per_contact(
                 else:
                     for i_d in range(n_dofs):
                         constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-
-                same_root = (
-                    link_b > -1
-                    and dyn_info.links.root_idx[link_a_maybe_batch] == dyn_info.links.root_idx[link_b_maybe_batch]
-                )
-                con_n_dofs = 0
-                jac_qvel = gs.qd_float(0.0)
-                for i_ab in range(2):
-                    sign = gs.qd_float(-1.0)
-                    link = link_a
-                    if i_ab == 1:
-                        sign = gs.qd_float(1.0)
-                        link = link_b
-
-                    while link > -1:
-                        link_maybe_batch = [link, i_b] if qd.static(rigid_config.batch_links_info) else link
-
-                        # reverse order to make sure dofs in each row of self.jac_dofs_idx are strictly descending
-                        for i_d_ in range(dyn_info.links.n_dofs[link_maybe_batch]):
-                            i_d = dyn_info.links.dof_end[link_maybe_batch] - 1 - i_d_
-
-                            cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
-                            cdot_vel = dyn_state.dofs.cdof_vel[i_d, i_b]
-
-                            t_quat = gu.qd_identity_quat()
-                            t_pos = contact_data_pos - dyn_state.links.root_COM[link, i_b]
-                            _, vel = gu.qd_transform_motion_by_trans_quat(cdof_ang, cdot_vel, t_pos, t_quat)
-
-                            diff = sign * vel
+            # The rows of a contact share the point whose velocity each dof moves, so both kinematic chains are walked
+            # once: every dof's contribution to the point velocity is projected on each row's direction in turn, and
+            # the support built on the head row is copied to the others.
+            same_root = (
+                link_b > -1
+                and dyn_info.links.root_idx[link_a_maybe_batch] == dyn_info.links.root_idx[link_b_maybe_batch]
+            )
+            con_n_dofs = 0
+            for i_ab in range(2):
+                sign = gs.qd_float(-1.0)
+                link = link_a
+                if i_ab == 1:
+                    sign = gs.qd_float(1.0)
+                    link = link_b
+                while link > -1:
+                    link_maybe_batch = [link, i_b] if qd.static(rigid_config.batch_links_info) else link
+                    # reverse order to make sure dofs in each row of self.jac_dofs_idx are strictly descending
+                    for i_d_ in range(dyn_info.links.n_dofs[link_maybe_batch]):
+                        i_d = dyn_info.links.dof_end[link_maybe_batch] - 1 - i_d_
+                        cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
+                        cdot_vel = dyn_state.dofs.cdof_vel[i_d, i_b]
+                        t_quat = gu.qd_identity_quat()
+                        t_pos = contact_data_pos - dyn_state.links.root_COM[link, i_b]
+                        _, vel = gu.qd_transform_motion_by_trans_quat(cdof_ang, cdot_vel, t_pos, t_quat)
+                        diff = sign * vel
+                        for i_friction in range(rows_per_contact):
+                            n, n_ang = _func_contact_row_direction(
+                                i_friction,
+                                contact_data_normal,
+                                d1,
+                                d2,
+                                contact_data_friction,
+                                contact_data_friction_torsional,
+                                contact_data_friction_rolling,
+                                rigid_config,
+                            )
+                            n_con = n_con_head + i_friction
                             jac = diff @ n
                             if qd.static(rigid_config.enable_torsional_friction):
                                 # Unconditional fma on zero n_ang rows: see _add_friction_constraint.
                                 jac = jac + (sign * cdof_ang) @ n_ang
-                            jac_qvel = jac_qvel + jac * dyn_state.dofs.vel[i_d, i_b]
                             constraint_state.jac[n_con, i_d, i_b] = constraint_state.jac[n_con, i_d, i_b] + jac
-
-                            con_n_dofs = _append_relevant_dof(
-                                n_con, i_d, i_b, con_n_dofs, i_ab == 1 and same_root, constraint_state
-                            )
-
-                        link = dyn_info.links.parent_idx[link_maybe_batch]
-
+                        con_n_dofs = _append_relevant_dof(
+                            n_con_head, i_d, i_b, con_n_dofs, i_ab == 1 and same_root, constraint_state
+                        )
+                    link = dyn_info.links.parent_idx[link_maybe_batch]
+            _sort_relevant_dofs_descending(n_con_head, i_b, con_n_dofs, constraint_state, rigid_config)
+            for i_friction in range(rows_per_contact):
+                n_con = n_con_head + i_friction
                 constraint_state.jac_n_dofs[n_con, i_b] = con_n_dofs
-                _sort_relevant_dofs_descending(n_con, i_b, con_n_dofs, constraint_state, rigid_config)
-
+                if i_friction > 0:
+                    for i_d_ in range(con_n_dofs):
+                        constraint_state.jac_dofs_idx[n_con, i_d_, i_b] = constraint_state.jac_dofs_idx[
+                            n_con_head, i_d_, i_b
+                        ]
+            for i_friction in range(rows_per_contact):
+                n_con = n_con_head + i_friction
+                jac_qvel = gs.qd_float(0.0)
+                for i_d_ in range(con_n_dofs):
+                    i_d = constraint_state.jac_dofs_idx[n_con_head, i_d_, i_b]
+                    jac_qvel = jac_qvel + constraint_state.jac[n_con, i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
                 diag = gs.qd_float(0.0)
                 aref = gs.qd_float(0.0)
                 if qd.static(rigid_config.enable_elliptic_friction):
