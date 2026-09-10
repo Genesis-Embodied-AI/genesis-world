@@ -1987,16 +1987,15 @@ def func_compute_island_envelope(
             if col_min < constraint_state.island.dof_env_start_local[dof_base + ld, i_b]:
                 constraint_state.island.dof_env_start_local[dof_base + ld, i_b] = col_min
 
-    # Mass coupling: the kinematic-tree mask is directional (descendant -> ancestor) plus full intra-link, so check
-    # both orientations. DOFs are ascending, so the first coupled lower column is the smallest.
+    # Mass coupling: the smallest dof the mass matrix couples to each dof is a property of the kinematic tree
+    # (dofs_mass_envelope_start), and it lies in the same island, so its local position bounds the envelope directly.
     for ld in range(n):
         i_dg = constraint_state.island.dof_id[dof_base + ld, i_b]
-        for ld2 in range(ld):
-            j_dg = constraint_state.island.dof_id[dof_base + ld2, i_b]
-            if rigid_info.mass_parent_mask[i_dg, j_dg] > 0.5 or rigid_info.mass_parent_mask[j_dg, i_dg] > 0.5:
-                if ld2 < constraint_state.island.dof_env_start_local[dof_base + ld, i_b]:
-                    constraint_state.island.dof_env_start_local[dof_base + ld, i_b] = ld2
-                break
+        j_dg = rigid_info.dofs_mass_envelope_start[i_dg]
+        if j_dg < i_dg:
+            ld2 = constraint_state.island.dof_local_pos[j_dg, i_b]
+            if ld2 < constraint_state.island.dof_env_start_local[dof_base + ld, i_b]:
+                constraint_state.island.dof_env_start_local[dof_base + ld, i_b] = ld2
 
     # Transpose the envelope into per-column heights: col_end[c] = max row whose envelope reaches column c. The
     # column-oriented sweeps (rank-1 update, direct factor, backward substitution) iterate rows (c, col_end[c]]

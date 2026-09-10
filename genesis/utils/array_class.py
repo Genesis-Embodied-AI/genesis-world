@@ -256,6 +256,7 @@ class RigidInfo:
     # entities and kept contiguous by attach(). The assemble/factor/solve restrict to these bounds.
     dofs_mass_block_start: qd.Tensor
     dofs_mass_block_end: qd.Tensor
+    dofs_mass_envelope_start: qd.Tensor
     # DOF range spanned by the mass blocks rooted in each entity: a leading run merged into an earlier-rooted block is
     # excluded, and the last rooted block may extend into a merged child (empty range for a fully-merged child). Lets
     # the per-entity assemble/factor/solve iterate their blocks as one flat, autodiff-compatible loop over DOFs.
@@ -341,6 +342,7 @@ def get_rigid_info(solver, kinematic_only):
             links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
+            dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
             entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=()),
             entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
@@ -386,6 +388,7 @@ def get_rigid_info(solver, kinematic_only):
         links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
+        dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
         entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
