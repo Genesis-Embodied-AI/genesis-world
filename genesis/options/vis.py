@@ -1,9 +1,12 @@
+import sys
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, Sequence, Union
-from pydantic import StrictBool, StrictInt, Field, model_validator
+
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
 from genesis.datatypes import List
-from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, Vec3FType, UnitIntervalVec3Type
+from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, UnitIntervalVec3Type, Vec3FType
+from genesis.utils.serialization import ignore_invalid_load
 
 from .options import Options
 
@@ -29,8 +32,10 @@ class ViewerOptions(Options):
     res : tuple, shape (2,), optional
         The resolution of the viewer. If not set, will auto-compute using resolution of the connected display.
     run_in_thread : bool
-        Whether to run the viewer in a background thread. This option is not supported on MacOS. True by default if
-        available.
+        Whether to run the viewer in a background thread, where it stays responsive while the simulation is idle. If
+        None, it runs in a background thread wherever the platform supports it. MacOS only supports the main thread,
+        so asking for a background thread there raises an error. A scene file recording such a request is loaded
+        as asking for the platform default, so it opens on every platform.
     refresh_rate : int
         The rate (in frames per second) at which the viewer repaints on screen, and the framerate the video recorded
         from the viewer window is encoded at. Independent of the physics timestep, and of the framerate passed to
@@ -63,7 +68,10 @@ class ViewerOptions(Options):
     """
 
     res: PositiveVec2IType | None = None
-    run_in_thread: StrictBool | None = None
+    # MacOS serves the viewer window from its main thread only (see Visualizer).
+    run_in_thread: Annotated[
+        StrictBool | None, ignore_invalid_load((None, False) if sys.platform == "darwin" else (None, False, True))
+    ] = None
     refresh_rate: PositiveInt = 60
     realtime_factor: PositiveFloat | None = 1.0
     camera_pos: Vec3FType = (3.5, 0.5, 2.5)
