@@ -238,22 +238,33 @@ class RigidInfo:
     mass_mat_D_inv: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
     mass_mat_mask: qd.Tensor = of_kind(DataKind.STATE)
+    # The kinematic trees, the links sharing a root link (links.root_idx). Tree i_t is rooted at trees_root_idx[i_t],
+    # holds the trees_n_links[i_t] links of the span [trees_root_idx[i_t], trees_link_end[i_t]) whose root it is (the
+    # span may interleave links of 0-dof entities created between attached ones, so consumers gate each link on the
+    # root) and the contiguous dofs [trees_dof_start[i_t], trees_dof_start[i_t] + trees_n_dofs[i_t]). The trees
+    # carrying a dof come first, in ascending dof order, so the island partition (see island.py) lists the dofs of the
+    # trees it groups in ascending order; the dof-less trees (fixed bodies) follow in root order and join no island.
+    # links_tree_idx maps every link to its tree.
+    trees_root_idx: qd.Tensor
+    trees_link_end: qd.Tensor
+    trees_n_links: qd.Tensor
+    trees_dof_start: qd.Tensor
+    trees_n_dofs: qd.Tensor
+    links_tree_idx: qd.Tensor
     # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure
     # ends (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across
     # entities and kept contiguous by attach(). The assemble/factor/solve restrict to these bounds.
     dofs_mass_block_start: qd.Tensor
     dofs_mass_block_end: qd.Tensor
-    # One-past-the-last link of the kinematic tree rooted at each root link (root_idx == itself); unused for non-root
-    # links. The span may contain interleaved links of 0-DOF entities created between attached ones, so consumers gate
-    # each link on the tree's root. Underivable from the DOF bounds above: trailing fixed links carry no DOF.
-    links_tree_end: qd.Tensor
     # DOF range spanned by the mass blocks rooted in each entity: a leading run merged into an earlier-rooted block is
     # excluded, and the last rooted block may extend into a merged child (empty range for a fully-merged child). Lets
     # the per-entity assemble/factor/solve iterate their blocks as one flat, autodiff-compatible loop over DOFs.
     entities_mass_block_dof_start: qd.Tensor
     entities_mass_block_dof_end: qd.Tensor
-    meaninertia: qd.Tensor = of_kind(DataKind.INFO)
+    # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
+    # the dofs of its own link, within its mass block.
     mass_parent_mask: qd.Tensor
+    meaninertia: qd.Tensor = of_kind(DataKind.INFO)
     gravity: qd.Tensor = of_kind(DataKind.INFO)
     # Runtime constants
     substep_dt: qd.Tensor
@@ -322,9 +333,14 @@ def get_rigid_info(solver, kinematic_only):
             mass_mat_D_inv=V(dtype=gs.qd_float, shape=()),
             mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=()),
             mass_mat_mask=V(dtype=gs.qd_bool, shape=()),
+            trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+            trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+            trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+            trees_dof_start=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+            trees_n_dofs=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+            links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
-            links_tree_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=()),
             entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
@@ -362,9 +378,14 @@ def get_rigid_info(solver, kinematic_only):
         mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), needs_grad=requires_grad),
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
         mass_mat_mask=V(dtype=gs.qd_bool, shape=(solver.n_entities_, _B)),
+        trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+        trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+        trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+        trees_dof_start=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+        trees_n_dofs=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
+        links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
-        links_tree_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
         entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
