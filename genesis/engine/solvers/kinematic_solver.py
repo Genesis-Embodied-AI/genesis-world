@@ -387,7 +387,6 @@ class KinematicSolver(Solver):
             enable_joint_limit=False,
             box_box_detection=False,
             sparse_solve=False,
-            sparse_envelope=False,
             integrator=gs.integrator.approximate_implicitfast,
             solver_type=0,
         )

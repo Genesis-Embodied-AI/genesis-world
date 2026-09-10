@@ -62,6 +62,8 @@ def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
     # solver scales its tolerances by is a scene aggregate, so it must come out the same however the same bodies are
     # grouped into entities, which one entity per box is what tells apart. The sliding box carries an armature on a
     # body MuJoCo weighs by a rule of its own, so its constraint weights hold the general rule both engines settle on.
+    # Each box resting on the plane is an island of its own on both sides, a thousandfold apart in mass, so each one
+    # converges on its own inertia scale and the light box settles to the same rest as MuJoCo's.
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
 
     # The runtime inertial setters derive the constraint weights and the mean inertia anew, which the model consistency

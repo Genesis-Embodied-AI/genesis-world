@@ -86,15 +86,21 @@ def box_plan():
 
 @pytest.fixture(scope="session")
 def free_boxes_and_slider():
-    """Generate an MJCF model for two free boxes with an off-center inertial frame and a box sliding on the world along
-    one axis with a rotor armature, which Mujoco holds as one model."""
-    mjcf = ET.Element("mujoco", model="free_boxes_and_slider")
-    ET.SubElement(mjcf, "option", timestep="0.01")
-    worldbody = ET.SubElement(mjcf, "worldbody")
-    for name, pos in (("box_left", "-0.5 0. 1."), ("box_right", "0.5 0. 1.")):
-        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+    """Generate an MJCF model for two free boxes a thousandfold apart in mass resting on a plane, each with an off-
+    center inertial frame, and a box sliding on the world along one axis with a rotor armature.
+    """
+    mjcf = _build_plane_contact_model(
+        "free_boxes_and_slider", condim="3", friction="1. 0.5 0.5", plane_size="40. 40. 40."
+    )
+    worldbody = mjcf.find("worldbody")
+    # A yaw of its own per box spreads the corner contacts along x, which is what pairs them with MuJoCo's
+    for name, pos, euler, mass, inertia in (
+        ("box_left", "-0.5 0. 0.1999", "0. 0. 20.", "64.", "1.7 1.7 1.7"),
+        ("box_right", "0.5 0. 0.1999", "0. 0. -35.", "0.064", "0.0017 0.0017 0.0017"),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos, euler=euler)
         ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
-        ET.SubElement(body, "inertial", pos="0.01 -0.02 0.03", mass="64.", diaginertia="1.7 1.7 1.7")
+        ET.SubElement(body, "inertial", pos="0.01 -0.02 0.03", mass=mass, diaginertia=inertia)
         ET.SubElement(body, "joint", name=f"{name}_root", type="free")
     body = ET.SubElement(worldbody, "body", name="box_slider", pos="0. 1. 1.")
     ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
@@ -153,7 +159,7 @@ def tet_meshball():
     ET.SubElement(worldbody, "geom", name="tet", type="mesh", mesh="tet")
     # The first ball lands off the tetrahedron's symmetry plane: a centered drop leaves the deepest face an exact
     # tie between two mirror faces, whose resolution is platform rounding in both engines.
-    for i, pos in enumerate(("0.02 0 1.2", "0.3 0 1.2", "0.3 0.29 1.2")):
+    for i, pos in enumerate(("0.03 0 1.2", "0.3 0 1.2", "0.3 0.29 1.2")):
         body = ET.SubElement(worldbody, "body", name=f"ball{i + 1}", pos=pos)
         ET.SubElement(body, "joint", name=f"root{i + 1}", type="free")
         ET.SubElement(body, "geom", name=f"ball{i + 1}_geom", type="mesh", mesh="icosphere")

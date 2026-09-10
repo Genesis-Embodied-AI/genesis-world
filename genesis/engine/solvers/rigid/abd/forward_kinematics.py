@@ -143,7 +143,10 @@ def func_COM_links(
     for i_t in range(rigid_info.trees_root_idx.shape[0]):
         # A tree sleeps as a unit, so its root tells whether it is awake
         i_l_root = rigid_info.trees_root_idx[i_t]
-        if not (qd.static(rigid_config.use_hibernation) and dyn_state.links.is_hibernated[i_l_root, i_b]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+        if is_awake:
             func_COM_links_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 

@@ -821,10 +821,8 @@ def test_cholesky_tiling(monkeypatch, tol):
 
             rigid_solver_build_orig(self)
             self.rigid_config.enable_tiled_cholesky_mass_matrix = enable_tiled_cholesky
-            self.rigid_config.enable_tiled_cholesky_hessian = enable_tiled_cholesky
             if enable_tiled_cholesky:
                 self.rigid_config.tiled_n_dofs_per_entity = 32
-                self.rigid_config.tiled_n_dofs = 32
 
         monkeypatch.setattr("genesis.engine.solvers.RigidSolver.build", rigid_solver_build)
 
@@ -845,7 +843,6 @@ def test_cholesky_tiling(monkeypatch, tol):
         )
         scene.build(n_envs=2)
         assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_mass_matrix == enable_tiled_cholesky
-        assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_hessian == enable_tiled_cholesky
 
         scene.step()
         assert not scene.rigid_solver.get_error_envs_mask().any()
@@ -921,7 +918,6 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
         constraint_state.incr_n_changed,
         constraint_state.nt_H,
         constraint_state.nt_jacobi,
-        constraint_state.use_full_hessian,
         constraint_state.solver_iter_counter,
         constraint_state.improved,
         dofs.force,
@@ -995,7 +991,7 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
     scene.build(n_envs=2)
 
     assert scene.rigid_solver.n_dofs == 102
-    assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_hessian
+    assert scene.rigid_solver.rigid_config.island_tile_cap_last == 128
 
     scene.step()
     assert not scene.rigid_solver.get_error_envs_mask().any()

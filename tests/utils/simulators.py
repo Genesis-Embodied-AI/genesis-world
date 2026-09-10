@@ -182,4 +182,7 @@ def build_genesis_sim(
 
     scene.build()
 
+    # Genesis solves per island (see linesearch.py) and MuJoCo does when its islands are enabled
+    mj_sim.model.opt.disableflags &= ~np.uint32(mujoco.mjtDisableBit.mjDSBL_ISLAND)
+
     return scene.sim

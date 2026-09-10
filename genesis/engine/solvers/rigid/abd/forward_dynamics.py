@@ -178,7 +178,10 @@ def func_crb_fold(
     the tree walk of func_COM_links_tree. A tree sleeps as a unit, so its root tells whether it is awake.
     """
     i_l_root = rigid_info.trees_root_idx[i_t]
-    if not (qd.static(rigid_config.use_hibernation) and dyn_state.links.is_hibernated[i_l_root, i_b]):
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+    if is_awake:
         tree_end = rigid_info.trees_link_end[i_t]
         for k in range(tree_end - i_l_root):
             i_l = tree_end - 1 - k
@@ -1777,7 +1780,10 @@ def func_update_force(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
         i_l_root = rigid_info.trees_root_idx[i_t]
-        if not (qd.static(rigid_config.use_hibernation) and dyn_state.links.is_hibernated[i_l_root, i_b]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+        if is_awake:
             tree_end = rigid_info.trees_link_end[i_t]
             for k in range(tree_end - i_l_root):
                 i_l = tree_end - 1 - k

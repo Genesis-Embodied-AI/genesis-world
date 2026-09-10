@@ -225,11 +225,9 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
     contacts_link_a = torch.arange(n_boxes, device=gs.device).repeat_interleave(4)
     scene.build()
 
-    # The solver arms are provably exercised: one floating box is a single island on the dense monolith path, several
-    # turn islands on, and on GPU the cooperative decomposed arm engages once the chain reaches the 16-DOF threshold (3
-    # boxes); prefer_decomposed_solver is pinned by the test infra (1 on GPU, 0 on CPU).
+    # The solver arms are provably exercised: on GPU the cooperative decomposed arm engages once the chain reaches the
+    # 16-DOF threshold (3 boxes); prefer_decomposed_solver is pinned by the test infra (1 on GPU, 0 on CPU).
     rigid_solver = scene.sim.rigid_solver
-    assert rigid_solver._use_contact_island == (n_boxes > 1)
     if gs.backend != gs.cpu:
         assert rigid_solver.rigid_config.enable_cooperative_constraint_kernels == (6 * n_boxes >= 16)
         assert rigid_solver.rigid_config.prefer_decomposed_solver == (6 * n_boxes >= 16)
@@ -446,16 +444,16 @@ def test_static_hold_unaffected_by_press_on_separate_body(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize(
-    "sparse_solve, use_contact_island",
+    "sparse_solve",
     [
-        # Beyond the default arms, the explicit-sparse config pins the elliptic whole-env skyline factor (on CPU,
-        # with islands off so the skyline envelope owns the factorization) and the GPU sparse build (which must
-        # rebuild with the cone baked in each iteration since the CPU-only incremental cone update is compiled out).
-        (None, True),
-        (True, False),
+        # Beyond the default arms, the explicit-sparse config pins the elliptic per-island skyline factor on CPU (a lone
+        # box is a single island) and the GPU sparse build, which rebuilds with the cone baked in each iteration since
+        # the CPU-only incremental cone update is compiled out.
+        None,
+        True,
     ],
 )
-def test_elliptic_cone_coulomb_isotropy(sparse_solve, use_contact_island, show_viewer):
+def test_elliptic_cone_coulomb_isotropy(sparse_solve, show_viewer):
     # With the box yaw and the tangential center-of-mass force in independent random directions across parallel envs, a
     # box on a plane must slide above the Coulomb threshold |F_t| = mu*N and hold static below it, identically per env.
     GRAVITY = -9.81
@@ -471,7 +469,6 @@ def test_elliptic_cone_coulomb_isotropy(sparse_solve, use_contact_island, show_v
         rigid_options=gs.options.RigidOptions(
             friction_cone=gs.friction_cone.elliptic,
             sparse_solve=sparse_solve,
-            use_contact_island=use_contact_island,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.0, 1.0, 0.7),
