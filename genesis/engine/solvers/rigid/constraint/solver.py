@@ -5223,13 +5223,27 @@ def func_solve_init(
             for i_flat in range(_B * _K):
                 tid = i_flat % _K
                 i_b = i_flat // _K
-                sh_acc = qd.simt.block.SharedArray((7 * _K,), gs.qd_float)
-                sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
-                sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
                 if constraint_state.n_constraints[i_b] > 0:
-                    improved = linesearch.func_exit_islands_coop(
-                        i_b, tid, sh_acc, sh_pending, sh_alpha, constraint_state, rigid_info, rigid_config, certify=True
-                    )
+                    improved = False
+                    if qd.static(rigid_config.is_single_island):
+                        improved = linesearch.func_exit_single_island(
+                            i_b, tid, _K, constraint_state, rigid_info, rigid_config, is_coop=True, certify=True
+                        )
+                    else:
+                        sh_acc = qd.simt.block.SharedArray((7 * _K,), gs.qd_float)
+                        sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
+                        sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
+                        improved = linesearch.func_exit_islands_coop(
+                            i_b,
+                            tid,
+                            sh_acc,
+                            sh_pending,
+                            sh_alpha,
+                            constraint_state,
+                            rigid_info,
+                            rigid_config,
+                            certify=True,
+                        )
                     if tid == 0:
                         constraint_state.improved[i_b] = improved
         else:

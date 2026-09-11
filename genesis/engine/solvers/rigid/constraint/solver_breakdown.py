@@ -117,14 +117,22 @@ def _func_update_qfrc_constraint_per_dof(constraint_state: array_class.Constrain
         n_dofs, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-            # A dof of an island standing still keeps its value, see func_update_constraint_batch
-            i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
-            if constraint_state.island.improved[i_island, i_b]:
-                qfrc = gs.qd_float(0.0)
+            # A dof of an island standing still keeps its value, see func_update_constraint_batch. A single-island
+            # scene sums the env's rows by index, its one island holding every row in order.
+            is_island_moving = True
+            con_base = 0
+            con_n = constraint_state.n_constraints[i_b]
+            if qd.static(not rigid_config.is_single_island):
+                i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
+                is_island_moving = constraint_state.island.improved[i_island, i_b]
                 con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
                 con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+            if is_island_moving:
+                qfrc = gs.qd_float(0.0)
                 for i_lcon in range(con_n):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+                    i_c = con_base + i_lcon
+                    if qd.static(not rigid_config.is_single_island):
+                        i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
                     qfrc += constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
                 constraint_state.qfrc_constraint[i_d, i_b] = qfrc
 
@@ -156,8 +164,9 @@ def _func_islands_linesearch_and_apply(
     """Steps 1 to 4: the lockstep line search of every island of an env and the step applied, by the lanes of the env's
     block (see linesearch.py).
 
-    Without the cooperative kernels (a GPU where they are disabled, the arm pinned regardless) lane 0 runs the serial
-    sweeps.
+    A single-island scene runs the search of its one island by the lanes with the state in registers
+    (func_search_single_island). Without the cooperative kernels (a GPU where they are disabled, the arm pinned
+    regardless) lane 0 runs the serial sweeps.
     """
     _K = qd.static(32)
     _B = constraint_state.grad.shape[1]
@@ -165,13 +174,20 @@ def _func_islands_linesearch_and_apply(
     for i_flat in range(_B * _K):
         tid = i_flat % _K
         i_b = i_flat // _K
-        sh_acc = qd.simt.block.SharedArray((9 * _K,), gs.qd_float)
-        sh_alphas = qd.simt.block.SharedArray((3 * _K,), gs.qd_float)
-        sh_n_alphas = qd.simt.block.SharedArray((_K,), gs.qd_int)
-        sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
-        sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-            if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+            if qd.static(rigid_config.enable_cooperative_constraint_kernels and rigid_config.is_single_island):
+                linesearch.func_mv_jv_coop(i_b, tid, constraint_state, rigid_info)
+                is_moved = linesearch.func_search_single_island(
+                    i_b, tid, _K, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_coop=True
+                )
+                if tid == 0:
+                    constraint_state.improved[i_b] = is_moved
+            elif qd.static(rigid_config.enable_cooperative_constraint_kernels):
+                sh_acc = qd.simt.block.SharedArray((9 * _K,), gs.qd_float)
+                sh_alphas = qd.simt.block.SharedArray((3 * _K,), gs.qd_float)
+                sh_n_alphas = qd.simt.block.SharedArray((_K,), gs.qd_int)
+                sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
+                sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
                 is_moved = linesearch.func_linesearch_islands_coop(
                     i_b,
                     tid,
@@ -210,11 +226,17 @@ def _func_islands_update_search_direction(
     for i_flat in range(_B * _K):
         tid = i_flat % _K
         i_b = i_flat // _K
-        sh_acc = qd.simt.block.SharedArray((7 * _K,), gs.qd_float)
-        sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
-        sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-            if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+            if qd.static(rigid_config.enable_cooperative_constraint_kernels and rigid_config.is_single_island):
+                improved = linesearch.func_exit_single_island(
+                    i_b, tid, _K, constraint_state, rigid_info, rigid_config, is_coop=True, certify=False
+                )
+                if tid == 0:
+                    constraint_state.improved[i_b] = improved
+            elif qd.static(rigid_config.enable_cooperative_constraint_kernels):
+                sh_acc = qd.simt.block.SharedArray((7 * _K,), gs.qd_float)
+                sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
+                sh_alpha = qd.simt.block.SharedArray((_K,), gs.qd_float)
                 improved = linesearch.func_exit_islands_coop(
                     i_b, tid, sh_acc, sh_pending, sh_alpha, constraint_state, rigid_info, rigid_config, certify=False
                 )
