@@ -833,10 +833,10 @@ class ConstraintState:
     # TODO: Optimize storage to only allocate memory half of the Hessian matrix to sparse memory resources.
     nt_H: qd.Tensor
     # Per-DOF Jacobi scale s_i = 1/sqrt(diag(M + J^T D J)_i), at natural DOF id, refreshed ahead of every direct
-    # rebuild (func_jacobi_scale; 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
-    # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A unit diagonal keeps the Hessian's mixed-unit spread within float32's
-    # conditioning capability at any geometry scale and makes the bare-EPS pivot floor scale-relative. Only meaningful
-    # with enable_jacobi_equilibration.
+    # rebuild (func_jacobi_scale, 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
+    # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A
+    # unit diagonal keeps the Hessian's mixed-unit spread within float32's conditioning capability at any geometry
+    # scale and makes the bare-EPS pivot floor scale-relative. Only meaningful with enable_jacobi_equilibration.
     nt_jacobi: qd.Tensor
     # Diagonal of the persisted cone-free Hessian packed in nt_H's mirror slots (see nt_H). Only meaningful with
     # enable_cone_free_hessian_reuse.

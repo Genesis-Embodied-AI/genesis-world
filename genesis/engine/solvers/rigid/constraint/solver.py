@@ -2284,9 +2284,9 @@ def func_hessian_direct_batch(
         for i_d in range(n):
             i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
             constraint_state.nt_jacobi[i_dg, i_b] = rigid_info.mass_mat[i_dg, i_dg, i_b]
-        # Each active row adds D * jac^2 to the diagonal of every dof of its support, the rows in list order so every dof
-        # sums its rows in that order. Walking the rows' supports costs their total size; a sweep of every dof of the
-        # island over every row of the island would read n_dofs * n_rows Jacobian entries, most of them structural zeros.
+        # Each active row adds D * jac^2 to the diagonal of every dof of its support, the rows in list order so every
+        # dof sums its rows in that order. Walking the rows' supports costs their total size, where a sweep of every dof
+        # of the island over every row would read n_dofs * n_rows Jacobian entries, most of them structural zeros.
         for i_lcon in range(con_n_scale):
             i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
             if constraint_state.active[i_c, i_b]:
