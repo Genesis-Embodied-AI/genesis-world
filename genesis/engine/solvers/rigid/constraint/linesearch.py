@@ -608,6 +608,9 @@ def func_linesearch_islands_serial(
         if constraint_state.island.improved[i_island, i_b]:
             dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
             dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
+            if qd.static(rigid_config.is_single_island):
+                dof_lo = 0
+                dof_hi = constraint_state.search.shape[0]
             row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
             row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
             dof_base = constraint_state.island.dof_range_start[i_island, i_b]
@@ -745,6 +748,9 @@ def func_exit_islands_serial(
         if constraint_state.island.improved[i_island, i_b]:
             dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
             dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
+            if qd.static(rigid_config.is_single_island):
+                dof_lo = 0
+                dof_hi = constraint_state.search.shape[0]
             dof_base = constraint_state.island.dof_range_start[i_island, i_b]
             terms = qd.Vector.zero(gs.qd_float, 7)
             for i_pos in range(dof_lo, dof_hi):

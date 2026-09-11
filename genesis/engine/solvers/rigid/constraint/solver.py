@@ -1981,6 +1981,9 @@ def func_compute_island_envelope(
     """
     EPS = rigid_info.EPS[None]
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
@@ -2269,6 +2272,9 @@ def func_hessian_direct_batch(
     EPS = rigid_info.EPS[None]
 
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     # Self-contained scale refresh over the island's own DOFs and constraints: assembly consumes it below, and a
@@ -2462,6 +2468,9 @@ def func_island_assemble_factor_solve_tiled(
     EPS = rigid_info.EPS[None]
 
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
@@ -2726,6 +2735,9 @@ def func_island_hessian_assemble_block(
     Under Jacobi equilibration the block is scaled to unit diagonal afterwards, see nt_jacobi in array_class.py.
     """
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
     dof_base = constraint_state.island.dof_range_start[i_island, i_b]
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
@@ -3056,6 +3068,9 @@ def func_cholesky_factor_direct_batch(
     EPS = rigid_info.EPS[None]
 
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
     # Factor the island's block in place at its global DOF rows/cols (dof_id is ascending, so all accesses below
     # stay in the lower triangle). The factorization is confined to each row's skyline envelope
@@ -3299,6 +3314,9 @@ def func_apply_staged_rank_updates_island(
     EPS = rigid_info.EPS[None]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
 
     is_degenerated = False
     for ld in range(ld_start, n):
@@ -3368,6 +3386,9 @@ def func_rank_batch_update_island(
     [i_d * hessian_rank_update_batch + i_u]); the caller zeroes the island's entries once per attempt.
     """
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     signs = qd.Vector.zero(gs.qd_float, rigid_config.hessian_rank_update_batch)
     # Rows before the batch's first support DOF hold an exact zero in every working vector, so the sweep starts there.
     ld_start = n
@@ -3420,6 +3441,9 @@ def func_cone_rank_update_island(
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
 
     signs = qd.Vector.zero(gs.qd_float, B)
     for i_u in qd.static(range(2 * n_rows)):
@@ -3757,6 +3781,9 @@ def func_cholesky_solve_batch(
     by keyword (see the quadrants member-expansion note in func_solve_init).
     """
     n = constraint_state.island.dof_slices.n[i_island, i_b]
+    if qd.static(rigid_config.is_single_island):
+        # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
+        n = constraint_state.nt_H.shape[1]
     gbase = constraint_state.island.dof_range_start[i_island, i_b]
     is_dense_block = False
     if qd.static(not rigid_config.sparse_solve):
