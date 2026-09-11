@@ -17,6 +17,8 @@ from genesis.utils.misc import qd_to_torch, indices_to_mask, assign_indexed_tens
 from .island import (
     func_build_islands,
     func_build_islands_coop,
+    func_build_single_island,
+    func_build_single_island_coop,
     func_group_constraints_by_island,
     func_group_constraints_by_island_coop,
     func_sort_contacts,
@@ -1439,12 +1441,19 @@ def _sort_contacts_and_build_islands(
 
     Where the cooperative kernels run, a block serves each env: the lanes sort together (func_sort_contacts_coop), then
     build the partition together (func_build_islands_coop); elsewhere one thread per env does both. The order and the
-    partition are the same whichever way they are built, so the constraint order the caller assembles is too.
+    partition are the same whichever way they are built, so the constraint order the caller assembles is too. A
+    single-island scene writes its partition outright (func_build_single_island), off the CPU skyline path and
+    hibernation, which alone read the tree and link labels the full build resolves.
     """
     _B = constraint_state.jac.shape[2]
-    if qd.static(rigid_config.enable_tiled_island_seed):
+    has_trivial_partition = qd.static(
+        rigid_config.is_single_island and not rigid_config.sparse_solve and not rigid_config.use_hibernation
+    )
+    if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
         # Reset the per-class (env, island) work-list counters before the per-env builds append to them
-        N_CLASSES = qd.static(len(array_class.island_tile_caps(rigid_config)))
+        N_CLASSES = qd.static(
+            len(array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
+        )
         for i_class in range(N_CLASSES):
             constraint_state.island.factor_worklist_size[i_class] = 0
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):
@@ -1456,13 +1465,17 @@ def _sort_contacts_and_build_islands(
             if qd.static(collider_static_config.spatial_sort_supported):
                 func_sort_contacts_coop(i_b, tid, dyn_state, collider_state, constraint_state)
                 qd.simt.block.sync()
-            func_build_islands_coop(
-                i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
-            )
-            i_island = tid
-            while i_island < constraint_state.island.n_islands[i_b]:
-                func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
-                i_island = i_island + _K
+            if qd.static(has_trivial_partition):
+                func_build_single_island_coop(i_b, tid, constraint_state, rigid_info)
+            else:
+                func_build_islands_coop(
+                    i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+                )
+            if qd.static(not rigid_config.is_single_island):
+                i_island = tid
+                while i_island < constraint_state.island.n_islands[i_b]:
+                    func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
+                    i_island = i_island + _K
     else:
         qd.loop_config(
             name="sort_contacts_and_build_islands", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL)
@@ -1479,8 +1492,11 @@ def _sort_contacts_and_build_islands(
                     dyn_state.geoms.pos,
                     dyn_state.geoms.quat,
                 )
-            func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
-            if qd.static(rigid_config.enable_tiled_island_seed):
+            if qd.static(has_trivial_partition):
+                func_build_single_island(i_b, constraint_state, rigid_info)
+            else:
+                func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
                 for i_island in range(constraint_state.island.n_islands[i_b]):
                     func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
 
@@ -1491,7 +1507,9 @@ def func_append_factor_worklist(
 ):
     """Append island i_island of env i_b to the factor work-list of its size class, the smallest tile cap holding the
     island's dofs and the last class for the islands above every cap (see island_tile_caps)."""
-    CAPS = qd.static(array_class.island_tile_caps(rigid_config))
+    CAPS = qd.static(
+        array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last)
+    )
     N_CLASSES = qd.static(len(CAPS))
     region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
     n_island_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
@@ -2472,7 +2490,13 @@ def func_island_assemble_factor_solve_tiled(
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
-    gbase = constraint_state.island.dof_id[dof_base, i_b]
+    # The dof list of a single-island scene is the identity (its one island holds every dof in order), so its block
+    # is the whole of nt_H and its dofs read by index; another scene reads them through the list.
+    gbase = 0
+    is_contiguous = True
+    if qd.static(not rigid_config.is_single_island):
+        gbase = constraint_state.island.dof_id[dof_base, i_b]
+        is_contiguous = constraint_state.island.dof_id[dof_base + n - 1, i_b] == gbase + n - 1
 
     # The island's gathered DOFs are ascending, so the block is contiguous iff first and last span exactly n indices.
     # Within the class the block is staged into the shared tile, by tile copies when contiguous and gathered through
@@ -2480,7 +2504,6 @@ def func_island_assemble_factor_solve_tiled(
     # factors in nt_H global (no shared-memory DOF cap), so even a whole-body-sized island avoids the serial scalar
     # solve, and a scattered one falls back to the scalar per-island solve. Quadrants forbids `return` inside a runtime
     # branch, so these are an if/elif/elif.
-    is_contiguous = constraint_state.island.dof_id[dof_base + n - 1, i_b] == gbase + n - 1
     if n <= qd.static(max_dofs):
         # --- Stage the lower triangle of the island block into sh_L (local indices) ---
         N_BLOCKS = (n + T - 1) // T
@@ -2542,7 +2565,9 @@ def func_island_assemble_factor_solve_tiled(
         # --- Triangular solve grad -> Mgrad from sh_L (local indices; grad/Mgrad global through dof_id) ---
         k = tid
         while k < n:
-            gd = constraint_state.island.dof_id[dof_base + k, i_b]
+            gd = k
+            if qd.static(not rigid_config.is_single_island):
+                gd = constraint_state.island.dof_id[dof_base + k, i_b]
             sh_v[k] = constraint_state.grad[gd, i_b]
             # L factors the scaled block, so the solve wraps with nt_jacobi (see array_class.py).
             if qd.static(rigid_config.enable_jacobi_equilibration):
@@ -2574,7 +2599,9 @@ def func_island_assemble_factor_solve_tiled(
         # Write the solved Mgrad back to global memory (local sh_v -> global through dof_id)
         k = tid
         while k < n:
-            gd = constraint_state.island.dof_id[dof_base + k, i_b]
+            gd = k
+            if qd.static(not rigid_config.is_single_island):
+                gd = constraint_state.island.dof_id[dof_base + k, i_b]
             constraint_state.Mgrad[gd, i_b] = sh_v[k]
             if qd.static(rigid_config.enable_jacobi_equilibration):
                 constraint_state.Mgrad[gd, i_b] = sh_v[k] * constraint_state.nt_jacobi[gd, i_b]
@@ -2587,9 +2614,13 @@ def func_island_assemble_factor_solve_tiled(
         if write_L:
             i_r = tid
             while i_r < n:
-                gi = constraint_state.island.dof_id[dof_base + i_r, i_b]
+                gi = i_r
+                if qd.static(not rigid_config.is_single_island):
+                    gi = constraint_state.island.dof_id[dof_base + i_r, i_b]
                 for j in range(i_r + 1):
-                    gj = constraint_state.island.dof_id[dof_base + j, i_b]
+                    gj = j
+                    if qd.static(not rigid_config.is_single_island):
+                        gj = constraint_state.island.dof_id[dof_base + j, i_b]
                     constraint_state.nt_H[i_b, gi, gj] = sh_L[i_r, j]
                 i_r = i_r + T
             qd.simt.block.sync()
@@ -2723,12 +2754,12 @@ def func_island_hessian_assemble_block(
 ):
     """Assemble the Hessian block M + J.T @ D @ J of island i_island into nt_H by the block_dim lanes of a block.
 
-    Every lane owns entries of the block's lower triangle at the island's global dof rows and columns, the dofs indexed
-    by offset where the island's list holds consecutive dofs (see dof_range_start in IslandState) and read from the
-    list otherwise. The mass block is written first, then the rows are added row_tile at a time from the shared tiles
-    sh_jac (the rows' Jacobian over the island's dofs) and sh_D (their weights), each Jacobian entry read from global
-    memory once per block instead of once per Hessian entry. An island wider than sh_jac, above the last tile cap,
-    reads its Jacobian from global memory directly.
+    Every lane owns entries of the block's lower triangle at the island's global dof rows and columns, the dofs and rows
+    indexed directly in a single-island scene (whose lists are the identity), by offset where the island's list holds
+    consecutive dofs (see dof_range_start in IslandState) and read from the list otherwise. The mass block is written
+    first, then the rows are added row_tile at a time from the shared tiles sh_jac (the rows' Jacobian over the island's
+    dofs) and sh_D (their weights), each Jacobian entry read from global memory once per block instead of once per
+    Hessian entry. An island wider than sh_jac, above the last tile cap, reads its Jacobian from global memory directly.
 
     Under Jacobi equilibration the block is scaled to unit diagonal afterwards, see nt_jacobi in array_class.py.
     """
@@ -2744,8 +2775,11 @@ def func_island_hessian_assemble_block(
     i_tri = tid
     while i_tri < n_tri:
         i_d, j_d = linear_to_lower_tri(i_tri)
-        gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
-        gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
+        gi = i_d
+        gj = j_d
+        if qd.static(not rigid_config.is_single_island):
+            gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
+            gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
         constraint_state.nt_H[i_b, gi, gj] = rigid_info.mass_mat[gi, gj, i_b]
         i_tri = i_tri + block_dim
     is_staged = True
@@ -2760,12 +2794,18 @@ def func_island_hessian_assemble_block(
             while idx < n_rows * n:
                 i_r = idx // n
                 ld = idx % n
-                i_c = constraint_state.island.constraint_id[con_base + c0 + i_r, i_b]
-                gd = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + ld, dof_lo, dof_base, i_b)
+                i_c = con_base + c0 + i_r
+                if qd.static(not rigid_config.is_single_island):
+                    i_c = constraint_state.island.constraint_id[con_base + c0 + i_r, i_b]
+                gd = ld
+                if qd.static(not rigid_config.is_single_island):
+                    gd = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + ld, dof_lo, dof_base, i_b)
                 sh_jac[i_r, ld] = constraint_state.jac[i_c, gd, i_b]
                 idx = idx + block_dim
             if tid < n_rows:
-                i_c = constraint_state.island.constraint_id[con_base + c0 + tid, i_b]
+                i_c = con_base + c0 + tid
+                if qd.static(not rigid_config.is_single_island):
+                    i_c = constraint_state.island.constraint_id[con_base + c0 + tid, i_b]
                 sh_D[tid] = constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
             qd.simt.block.sync()
             i_tri = tid
@@ -2774,19 +2814,27 @@ def func_island_hessian_assemble_block(
                 h = gs.qd_float(0.0)
                 for i_r in range(n_rows):
                     h = h + sh_jac[i_r, i_d] * sh_jac[i_r, j_d] * sh_D[i_r]
-                gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
-                gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
+                gi = i_d
+                gj = j_d
+                if qd.static(not rigid_config.is_single_island):
+                    gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
+                    gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
                 constraint_state.nt_H[i_b, gi, gj] = constraint_state.nt_H[i_b, gi, gj] + h
                 i_tri = i_tri + block_dim
     else:
         i_tri = tid
         while i_tri < n_tri:
             i_d, j_d = linear_to_lower_tri(i_tri)
-            gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
-            gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
+            gi = i_d
+            gj = j_d
+            if qd.static(not rigid_config.is_single_island):
+                gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
+                gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
             h = constraint_state.nt_H[i_b, gi, gj]
             for i_lcon in range(con_n):
-                i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+                i_c = con_base + i_lcon
+                if qd.static(not rigid_config.is_single_island):
+                    i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
                 if constraint_state.active[i_c, i_b]:
                     h = (
                         h
@@ -2811,8 +2859,11 @@ def func_island_hessian_assemble_block(
         i_tri = tid
         while i_tri < n_tri:
             i_d, j_d = linear_to_lower_tri(i_tri)
-            gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
-            gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
+            gi = i_d
+            gj = j_d
+            if qd.static(not rigid_config.is_single_island):
+                gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
+                gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
             constraint_state.nt_H[i_b, gi, gj] = (
                 constraint_state.nt_H[i_b, gi, gj]
                 * constraint_state.nt_jacobi[gi, i_b]
@@ -2919,12 +2970,16 @@ def func_island_hessian_assemble_all(
     where the assembly costs one per row. A contiguous island above the last tile cap factors in place (see
     func_island_assemble_factor_solve_tiled), so its block is assembled anew; a scattered one assembles its own.
     """
-    N_CLASSES = qd.static(len(array_class.island_tile_caps(rigid_config)))
+    N_CLASSES = qd.static(
+        len(array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
+    )
     LAST_CAP = qd.static(rigid_config.island_tile_cap_last)
     BLOCK_DIM = qd.static(128)
     ROW_TILE = qd.static(32)
-    n_slots = constraint_state.island.factor_worklist_i_b.shape[0]
-    region = n_slots // N_CLASSES
+    # A single-island scene launches one block per env, for its island 0 (see func_island_tiled_factor_solve_all)
+    n_slots = constraint_state.n_constraints.shape[0]
+    if qd.static(not rigid_config.is_single_island):
+        n_slots = constraint_state.island.factor_worklist_i_b.shape[0]
     qd.loop_config(name="island_hessian_assemble", block_dim=BLOCK_DIM)
     for i in range(n_slots * BLOCK_DIM):
         i_work = i // BLOCK_DIM
@@ -2932,10 +2987,17 @@ def func_island_hessian_assemble_all(
         sh_scan = qd.simt.block.SharedArray((BLOCK_DIM // 32,), gs.qd_int)
         sh_jac = qd.simt.block.SharedArray((ROW_TILE, LAST_CAP), gs.qd_float)
         sh_D = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_float)
-        i_class = i_work // region
-        if i_work - i_class * region < constraint_state.island.factor_worklist_size[i_class]:
-            i_b = constraint_state.island.factor_worklist_i_b[i_work]
-            i_island = constraint_state.island.factor_worklist_i_island[i_work]
+        i_b = i_work
+        i_island = 0
+        is_listed = True
+        if qd.static(not rigid_config.is_single_island):
+            region = n_slots // N_CLASSES
+            i_class = i_work // region
+            is_listed = i_work - i_class * region < constraint_state.island.factor_worklist_size[i_class]
+            if is_listed:
+                i_b = constraint_state.island.factor_worklist_i_b[i_work]
+                i_island = constraint_state.island.factor_worklist_i_island[i_work]
+        if is_listed:
             if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
                 if constraint_state.island.improved[i_island, i_b]:
                     if qd.static(patch and rigid_config.has_island_above_tile_cap):
@@ -2998,54 +3060,68 @@ def func_island_tiled_factor_solve_all(
     reservation of a launch follows the islands it factors instead of the largest island that could ever form. All T
     lanes of a block read the same work item, so n_constraints/improved and the hibernation and contiguity branches are
     uniform and the per-island block.sync is well-formed."""
-    TILE_CAPS = qd.static(array_class.island_tile_caps(rigid_config))
+    TILE_CAPS = qd.static(
+        array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last)
+    )
     N_CLASSES = qd.static(len(TILE_CAPS))
-    region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
+    # A single-island scene launches the last class alone, one block per env for its island 0, and skips the
+    # work-list: the last cap is the env's dof count rounded up to the tile, or the shared-memory bound below it, and
+    # the lower caps are its halvings, so the env's island is a last-class island. Every other scene launches every
+    # class over its work-list region.
+    region = constraint_state.n_constraints.shape[0]
+    if qd.static(not rigid_config.is_single_island):
+        region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
     for i_class in qd.static(range(N_CLASSES)):
-        MAX_DOFS = qd.static(TILE_CAPS[i_class])
-        IS_LAST_CLASS = qd.static(i_class == N_CLASSES - 1)
-        T = qd.static(array_class.cholesky_tile_size_for(MAX_DOFS))
-        n_work = constraint_state.island.factor_worklist_size[i_class]
-        qd.loop_config(name="island_tiled_factor_solve", block_dim=T)
-        for i in range(region * T):
-            i_work = i // T
-            tid = i % T
-            sh_L = qd.simt.block.SharedArray((MAX_DOFS, MAX_DOFS + 1), gs.qd_float)
-            sh_v = qd.simt.block.SharedArray((MAX_DOFS,), gs.qd_float)
-            if i_work < n_work:
-                i_b = constraint_state.island.factor_worklist_i_b[i_class * region + i_work]
-                i_island = constraint_state.island.factor_worklist_i_island[i_class * region + i_work]
-                if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-                    # An island standing still (asleep, or converged in the iterations) keeps its factor and its solve
-                    if constraint_state.island.improved[i_island, i_b]:
-                        func_island_assemble_factor_solve_tiled(
-                            i_b,
-                            i_island,
-                            tid,
-                            sh_L,
-                            sh_v,
-                            constraint_state,
-                            dyn_info,
-                            rigid_info,
-                            rigid_config,
-                            qd.simt.Tile32x32 if qd.static(T == 32) else qd.simt.Tile16x16,
-                            T,
-                            MAX_DOFS,
-                            IS_LAST_CLASS,
-                            write_L,
-                        )
-                    elif qd.static(rigid_config.use_hibernation):
-                        if constraint_state.island.is_hibernated[i_island, i_b]:
-                            # A hibernated island, whose factor and solve are skipped for the whole step, carries a
-                            # zero gradient and search direction so that no stale direction steps its dofs. The
-                            # gradient is zeroed where it is computed (func_update_gradient_no_solve,
-                            # func_update_gradient_batch).
-                            dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
-                            i_d_ = tid
-                            while i_d_ < constraint_state.island.dof_slices.n[i_island, i_b]:
-                                i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
-                                constraint_state.Mgrad[i_d, i_b] = gs.qd_float(0.0)
-                                i_d_ = i_d_ + T
+        if qd.static(not rigid_config.is_single_island or i_class == N_CLASSES - 1):
+            MAX_DOFS = qd.static(TILE_CAPS[i_class])
+            IS_LAST_CLASS = qd.static(i_class == N_CLASSES - 1)
+            T = qd.static(array_class.cholesky_tile_size_for(MAX_DOFS))
+            n_work = region
+            if qd.static(not rigid_config.is_single_island):
+                n_work = constraint_state.island.factor_worklist_size[i_class]
+            qd.loop_config(name="island_tiled_factor_solve", block_dim=T)
+            for i in range(region * T):
+                i_work = i // T
+                tid = i % T
+                sh_L = qd.simt.block.SharedArray((MAX_DOFS, MAX_DOFS + 1), gs.qd_float)
+                sh_v = qd.simt.block.SharedArray((MAX_DOFS,), gs.qd_float)
+                if i_work < n_work:
+                    i_b = i_work
+                    i_island = 0
+                    if qd.static(not rigid_config.is_single_island):
+                        i_b = constraint_state.island.factor_worklist_i_b[i_class * region + i_work]
+                        i_island = constraint_state.island.factor_worklist_i_island[i_class * region + i_work]
+                    if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
+                        # An island standing still (asleep, or converged in the iterations) keeps its factor and solve
+                        if constraint_state.island.improved[i_island, i_b]:
+                            func_island_assemble_factor_solve_tiled(
+                                i_b,
+                                i_island,
+                                tid,
+                                sh_L,
+                                sh_v,
+                                constraint_state,
+                                dyn_info,
+                                rigid_info,
+                                rigid_config,
+                                qd.simt.Tile32x32 if qd.static(T == 32) else qd.simt.Tile16x16,
+                                T,
+                                MAX_DOFS,
+                                IS_LAST_CLASS,
+                                write_L,
+                            )
+                        elif qd.static(rigid_config.use_hibernation):
+                            if constraint_state.island.is_hibernated[i_island, i_b]:
+                                # A hibernated island, whose factor and solve are skipped for the whole step, carries a
+                                # zero gradient and search direction so that no stale direction steps its dofs. The
+                                # gradient is zeroed where it is computed (func_update_gradient_no_solve,
+                                # func_update_gradient_batch).
+                                dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+                                i_d_ = tid
+                                while i_d_ < constraint_state.island.dof_slices.n[i_island, i_b]:
+                                    i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+                                    constraint_state.Mgrad[i_d, i_b] = gs.qd_float(0.0)
+                                    i_d_ = i_d_ + T
 
 
 @qd.func
