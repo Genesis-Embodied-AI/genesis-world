@@ -2439,7 +2439,8 @@ def func_island_assemble_factor_solve_tiled(
     The call serves one size class of islands (see island_tile_caps), its tile of TileCls with tile_size lanes: an
     island of up to max_dofs dofs factors in the shared tile sh_L of max_dofs rows, and the last class also takes what
     no tile holds, the contiguous islands above max_dofs (factor in global memory) and the scattered ones above it
-    (scalar per-island solve on lane 0).
+    (scalar per-island solve on lane 0), two paths compiled only where an island can exceed the last cap (see
+    has_island_above_tile_cap in array_class.py).
 
     nt_H holds the island's Hessian block on entry, assembled or maintained by func_island_hessian_assemble_all. The
     two fallbacks above the last cap factor in place, so they consume the block: the graph assembles a contiguous one
@@ -2581,7 +2582,7 @@ def func_island_assemble_factor_solve_tiled(
                     constraint_state.nt_H[i_b, gi, gj] = sh_L[i_r, j]
                 i_r = i_r + T
             qd.simt.block.sync()
-    elif qd.static(is_last_class):
+    elif qd.static(is_last_class and rigid_config.has_island_above_tile_cap):
         if is_contiguous:
             # Contiguous island too large for the shared tile: factor with the same register-streaming tiled
             # algorithm, but keep L in nt_H global so there is no DOF cap. A T-threaded triangular solve then reads
@@ -2876,7 +2877,7 @@ def func_island_hessian_assemble_all(
             i_island = constraint_state.island.factor_worklist_i_island[i_work]
             if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
                 if constraint_state.island.improved[i_island, i_b]:
-                    if qd.static(patch):
+                    if qd.static(patch and rigid_config.has_island_above_tile_cap):
                         n = constraint_state.island.dof_slices.n[i_island, i_b]
                         if n <= LAST_CAP:
                             func_island_hessian_patch_block(
@@ -2886,6 +2887,10 @@ def func_island_hessian_assemble_all(
                             func_island_hessian_assemble_block(
                                 i_b, i_island, tid, constraint_state, rigid_info, rigid_config, BLOCK_DIM
                             )
+                    elif qd.static(patch):
+                        func_island_hessian_patch_block(
+                            i_b, i_island, tid, sh_scan, constraint_state, rigid_config, BLOCK_DIM
+                        )
                     else:
                         func_island_hessian_assemble_block(
                             i_b, i_island, tid, constraint_state, rigid_info, rigid_config, BLOCK_DIM

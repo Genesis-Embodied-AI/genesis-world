@@ -2866,6 +2866,8 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # global memory.
     island_tile_cap_first: int = 0
     island_tile_cap_last: int = 0
+    # Whether an island can hold more dofs than the last cap, which compiles the factor paths above it.
+    has_island_above_tile_cap: bool = False
     max_n_geoms_per_entity: int = -1
     n_entities: int = -1
     n_links: int = -1

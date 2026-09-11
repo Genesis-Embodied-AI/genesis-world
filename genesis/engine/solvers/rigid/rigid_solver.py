@@ -694,6 +694,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     tiled_n_dofs_per_block=tiled_n_dofs_per_block,
                     island_tile_cap_first=island_tile_cap_first,
                     island_tile_cap_last=island_tile_cap_last,
+                    # An island holds at most every dof of the scene, so below this bound the factor paths above the
+                    # last cap (see func_island_assemble_factor_solve_tiled) are dead code and stay uncompiled.
+                    has_island_above_tile_cap=self.n_dofs > island_tile_cap_last,
                 )
 
                 # Manually pin the solve arm only where the winner is determinable in advance AND confirmed across
