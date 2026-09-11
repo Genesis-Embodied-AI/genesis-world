@@ -81,23 +81,30 @@ def func_group_dof_range_start(i_b, tid, base, n_group, dof_lo, dof_hi, constrai
 
 @qd.func
 def func_row_p0_terms(
-    i_c, i_b, ne, nef, ncone, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_c,
+    i_b,
+    ne,
+    nef,
+    ncone,
+    constraint_state: array_class.ConstraintState,
+    rigid_config: qd.template(),
+    row_kind: qd.template(),
 ):
     """Linear and quadratic coefficients along the search direction, at alpha = 0, of one constraint row.
 
     The equality rows count apart (they never deactivate) and the active rows of any kind contribute, an elliptic cone
-    through its head row only.
+    through its head row only. row_kind names the row's class when the caller knows it (1 equality, 2 friction loss,
+    3 elliptic cone head, 4 contact or limit), 0 when the row's class is tested at runtime.
+
+    Returns the vector [linear, quadratic] of an equality row followed by [linear, quadratic] of a row of any kind.
     """
-    eq_1 = gs.qd_float(0.0)
-    eq_2 = gs.qd_float(0.0)
-    tot_1 = gs.qd_float(0.0)
-    tot_2 = gs.qd_float(0.0)
-    is_cone_row = False
-    if qd.static(rigid_config.enable_elliptic_friction):
-        is_cone_row = nef <= i_c and i_c < ncone
-    if is_cone_row:
+    terms = qd.Vector.zero(gs.qd_float, 4)
+    if qd.static(rigid_config.enable_elliptic_friction and row_kind in (0, 3)):
         n_rows = qd.static(rigid_config.rows_per_contact)
-        if (i_c - nef) % n_rows == 0:
+        is_cone_head = True
+        if qd.static(row_kind == 0):
+            is_cone_head = nef <= i_c and i_c < ncone and (i_c - nef) % n_rows == 0
+        if is_cone_head:
             rows_efc_D, rows_friction, con_mu, rows_jaref = constraint_solver._func_cone_head_load(
                 i_c, i_b, constraint_state, rigid_config
             )
@@ -107,34 +114,51 @@ def func_row_p0_terms(
             _cost_c, grad_c, hess_c = constraint_solver._func_cone_cost_along_alpha(
                 rows_jaref, rows_jv, 0.0, rows_efc_D, con_mu, rows_friction, rigid_config
             )
-            tot_1 = grad_c
-            tot_2 = 0.5 * hess_c
-    else:
-        Jaref_c = constraint_state.Jaref[i_c, i_b]
-        jv_c = constraint_state.jv[i_c, i_b]
-        D = constraint_state.efc_D[i_c, i_b]
-        qf_1 = D * (jv_c * Jaref_c)
-        qf_2 = D * (0.5 * jv_c * jv_c)
-        if i_c < ne:
-            eq_1 = qf_1
-            eq_2 = qf_2
-            tot_1 = qf_1
-            tot_2 = qf_2
-        elif i_c < nef:
+            terms[2] = grad_c
+            terms[3] = 0.5 * hess_c
+    if qd.static(row_kind in (0, 1)):
+        is_equality_row = True
+        if qd.static(row_kind == 0):
+            is_equality_row = i_c < ne
+        if is_equality_row:
+            Jaref_c = constraint_state.Jaref[i_c, i_b]
+            jv_c = constraint_state.jv[i_c, i_b]
+            D = constraint_state.efc_D[i_c, i_b]
+            terms[0] = D * (jv_c * Jaref_c)
+            terms[1] = D * (0.5 * jv_c * jv_c)
+            terms[2] = terms[0]
+            terms[3] = terms[1]
+    if qd.static(row_kind in (0, 2)):
+        is_friction_row = True
+        if qd.static(row_kind == 0):
+            is_friction_row = ne <= i_c and i_c < nef
+        if is_friction_row:
+            Jaref_c = constraint_state.Jaref[i_c, i_b]
+            jv_c = constraint_state.jv[i_c, i_b]
+            D = constraint_state.efc_D[i_c, i_b]
             f = constraint_state.efc_frictionloss[i_c, i_b]
             rf = constraint_state.diag[i_c, i_b] * f
+            qf_1 = D * (jv_c * Jaref_c)
+            qf_2 = D * (0.5 * jv_c * jv_c)
             linear_neg = Jaref_c <= -rf
             linear_pos = Jaref_c >= rf
             if linear_neg or linear_pos:
                 qf_1 = linear_neg * (-f * jv_c) + linear_pos * (f * jv_c)
                 qf_2 = 0.0
-            tot_1 = qf_1
-            tot_2 = qf_2
-        else:
+            terms[2] = qf_1
+            terms[3] = qf_2
+    if qd.static(row_kind in (0, 4)):
+        is_contact_row = True
+        if qd.static(row_kind == 0):
+            is_contact_row = i_c >= ncone
+        if is_contact_row:
+            Jaref_c = constraint_state.Jaref[i_c, i_b]
+            jv_c = constraint_state.jv[i_c, i_b]
+            D = constraint_state.efc_D[i_c, i_b]
             active = Jaref_c < 0
-            tot_1 = qf_1 * active
-            tot_2 = qf_2 * active
-    return eq_1, eq_2, tot_1, tot_2
+            terms[2] = D * (jv_c * Jaref_c) * active
+            terms[3] = D * (0.5 * jv_c * jv_c) * active
+    return terms
 
 
 @qd.func
@@ -148,54 +172,57 @@ def func_row_alpha_terms(
     ncone,
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
+    row_kind: qd.template(),
 ):
     """The (const, linear, quad) coefficient triple of one constraint row at each pending candidate step.
 
     The triples are taken at the first n_alphas candidates of alphas, in the shifted convention cost(alpha) - cost(0)
     (see ls_improvement in IslandState, array_class.py): an equality row contributes nothing (its terms sit in the
-    initialization sums), an elliptic cone contributes through its head row only.
+    initialization sums), an elliptic cone contributes through its head row only. row_kind names the row's class when
+    the caller knows it (2 friction loss, 3 elliptic cone head, 4 contact or limit), 0 when the row's class is tested
+    at runtime.
 
-    Returns the triples as t_0 (const per candidate), t_1 (linear), t_2 (quad), zero past n_alphas.
+    Returns the triples as one vector, candidate k at [3 * k, 3 * k + 3), zero past n_alphas.
     """
-    t_0 = qd.Vector.zero(gs.qd_float, 3)
-    t_1 = qd.Vector.zero(gs.qd_float, 3)
-    t_2 = qd.Vector.zero(gs.qd_float, 3)
-    is_cone_row = False
-    if qd.static(rigid_config.enable_elliptic_friction):
-        is_cone_row = i_c < ncone
-    if i_c < ne:
-        pass
-    elif i_c < nef:
-        Jaref_c = constraint_state.Jaref[i_c, i_b]
-        jv_c = constraint_state.jv[i_c, i_b]
-        D = constraint_state.efc_D[i_c, i_b]
-        f = constraint_state.efc_frictionloss[i_c, i_b]
-        r = constraint_state.diag[i_c, i_b]
-        qf_0 = D * (0.5 * Jaref_c * Jaref_c)
-        qf_1 = D * (jv_c * Jaref_c)
-        qf_2 = D * (0.5 * jv_c * jv_c)
-        rf = r * f
-        ln0 = Jaref_c <= -rf
-        lp0 = Jaref_c >= rf
-        cost0 = qf_0
-        if ln0 or lp0:
-            cost0 = ln0 * f * (-0.5 * rf - Jaref_c) + lp0 * f * (-0.5 * rf + Jaref_c)
-        for k in qd.static(range(3)):
-            if k < n_alphas:
-                x = Jaref_c + alphas[k] * jv_c
-                ln = x <= -rf
-                lp = x >= rf
-                ak_qf_0, ak_qf_1, ak_qf_2 = qf_0, qf_1, qf_2
-                if ln or lp:
-                    ak_qf_0 = ln * f * (-0.5 * rf - Jaref_c) + lp * f * (-0.5 * rf + Jaref_c)
-                    ak_qf_1 = ln * (-f * jv_c) + lp * (f * jv_c)
-                    ak_qf_2 = 0.0
-                t_0[k] = ak_qf_0 - cost0
-                t_1[k] = ak_qf_1
-                t_2[k] = ak_qf_2
-    elif is_cone_row:
+    terms = qd.Vector.zero(gs.qd_float, 9)
+    if qd.static(row_kind in (0, 2)):
+        is_friction_row = True
+        if qd.static(row_kind == 0):
+            is_friction_row = ne <= i_c and i_c < nef
+        if is_friction_row:
+            Jaref_c = constraint_state.Jaref[i_c, i_b]
+            jv_c = constraint_state.jv[i_c, i_b]
+            D = constraint_state.efc_D[i_c, i_b]
+            f = constraint_state.efc_frictionloss[i_c, i_b]
+            r = constraint_state.diag[i_c, i_b]
+            qf_0 = D * (0.5 * Jaref_c * Jaref_c)
+            qf_1 = D * (jv_c * Jaref_c)
+            qf_2 = D * (0.5 * jv_c * jv_c)
+            rf = r * f
+            ln0 = Jaref_c <= -rf
+            lp0 = Jaref_c >= rf
+            cost0 = qf_0
+            if ln0 or lp0:
+                cost0 = ln0 * f * (-0.5 * rf - Jaref_c) + lp0 * f * (-0.5 * rf + Jaref_c)
+            for k in qd.static(range(3)):
+                if k < n_alphas:
+                    x = Jaref_c + alphas[k] * jv_c
+                    ln = x <= -rf
+                    lp = x >= rf
+                    ak_qf_0, ak_qf_1, ak_qf_2 = qf_0, qf_1, qf_2
+                    if ln or lp:
+                        ak_qf_0 = ln * f * (-0.5 * rf - Jaref_c) + lp * f * (-0.5 * rf + Jaref_c)
+                        ak_qf_1 = ln * (-f * jv_c) + lp * (f * jv_c)
+                        ak_qf_2 = 0.0
+                    terms[3 * k] = ak_qf_0 - cost0
+                    terms[3 * k + 1] = ak_qf_1
+                    terms[3 * k + 2] = ak_qf_2
+    if qd.static(rigid_config.enable_elliptic_friction and row_kind in (0, 3)):
         n_rows = qd.static(rigid_config.rows_per_contact)
-        if (i_c - nef) % n_rows == 0:
+        is_cone_head = True
+        if qd.static(row_kind == 0):
+            is_cone_head = nef <= i_c and i_c < ncone and (i_c - nef) % n_rows == 0
+        if is_cone_head:
             rows_efc_D, rows_friction, con_mu, rows_jaref = constraint_solver._func_cone_head_load(
                 i_c, i_b, constraint_state, rigid_config
             )
@@ -208,36 +235,42 @@ def func_row_alpha_terms(
                     cost_diff_c, grad_c, hess_c = constraint_solver._func_cone_cost_diff_along_alpha(
                         rows_jaref, rows_jv, alpha_k, rows_efc_D, con_mu, rows_friction, rigid_config
                     )
-                    t_0[k] = cost_diff_c - grad_c * alpha_k + 0.5 * hess_c * alpha_k * alpha_k
-                    t_1[k] = grad_c - hess_c * alpha_k
-                    t_2[k] = 0.5 * hess_c
-    else:
-        Jaref_c = constraint_state.Jaref[i_c, i_b]
-        jv_c = constraint_state.jv[i_c, i_b]
-        D = constraint_state.efc_D[i_c, i_b]
-        qf_0 = D * (0.5 * Jaref_c * Jaref_c)
-        qf_1 = D * (jv_c * Jaref_c)
-        qf_2 = D * (0.5 * jv_c * jv_c)
-        act0 = gs.qd_bool(Jaref_c < 0)
-        for k in qd.static(range(3)):
-            if k < n_alphas:
-                act = gs.qd_bool(Jaref_c + alphas[k] * jv_c < 0)
-                t_0[k] = qf_0 * act - qf_0 * act0
-                t_1[k] = qf_1 * act
-                t_2[k] = qf_2 * act
-    return t_0, t_1, t_2
+                    terms[3 * k] = cost_diff_c - grad_c * alpha_k + 0.5 * hess_c * alpha_k * alpha_k
+                    terms[3 * k + 1] = grad_c - hess_c * alpha_k
+                    terms[3 * k + 2] = 0.5 * hess_c
+    if qd.static(row_kind in (0, 4)):
+        is_contact_row = True
+        if qd.static(row_kind == 0):
+            is_contact_row = i_c >= ncone
+        if is_contact_row:
+            Jaref_c = constraint_state.Jaref[i_c, i_b]
+            jv_c = constraint_state.jv[i_c, i_b]
+            D = constraint_state.efc_D[i_c, i_b]
+            qf_0 = D * (0.5 * Jaref_c * Jaref_c)
+            qf_1 = D * (jv_c * Jaref_c)
+            qf_2 = D * (0.5 * jv_c * jv_c)
+            act0 = gs.qd_bool(Jaref_c < 0)
+            for k in qd.static(range(3)):
+                if k < n_alphas:
+                    act = gs.qd_bool(Jaref_c + alphas[k] * jv_c < 0)
+                    terms[3 * k] = qf_0 * act - qf_0 * act0
+                    terms[3 * k + 1] = qf_1 * act
+                    terms[3 * k + 2] = qf_2 * act
+    return terms
 
 
 @qd.func
 def func_dof_p0_terms(i_d, i_b, dyn_state: array_class.DynState, constraint_state: array_class.ConstraintState):
-    """Per-dof terms of the line search initialization: squared search direction, squared gradient, and the Gauss
-    (unconstrained) linear and quadratic coefficients along the search direction."""
+    """Per-dof terms of the line search initialization, as the vector [squared search direction, squared gradient, Gauss
+    (unconstrained) linear coefficient, Gauss quadratic coefficient] along the search direction."""
     s = constraint_state.search[i_d, i_b]
-    return (
-        s * s,
-        constraint_state.grad[i_d, i_b] ** 2,
-        s * constraint_state.Ma[i_d, i_b] - s * dyn_state.dofs.force[i_d, i_b],
-        0.5 * s * constraint_state.mv[i_d, i_b],
+    return qd.Vector(
+        [
+            s * s,
+            constraint_state.grad[i_d, i_b] ** 2,
+            s * constraint_state.Ma[i_d, i_b] - s * dyn_state.dofs.force[i_d, i_b],
+            0.5 * s * constraint_state.mv[i_d, i_b],
+        ]
     )
 
 
@@ -270,29 +303,29 @@ def func_dof_exit_terms(i_d, i_b, constraint_state: array_class.ConstraintState,
 
 
 @qd.func
-def func_ls_state_init(sums, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
-    """Initialize one island's line search from its eight initialization sums (|s|^2, |g|^2, the Gauss linear and
-    quadratic coefficients, the equality ones, the all-rows ones), on the island's own inertia scale.
+def func_ls_state_init(sums_dofs, sums_rows, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
+    """Initialize one island's line search from its initialization sums over its dofs (see func_dof_p0_terms) and over
+    its rows (see func_row_p0_terms), on the island's own inertia scale.
 
     Returns the phase (3 with status 1 for a vanishing search direction), the gradient tolerance, the constant
     coefficients of every evaluation, the derivatives at alpha = 0 and the first trial step.
     """
     EPS = rigid_info.EPS[None]
-    snorm = qd.sqrt(sums[0])
+    snorm = qd.sqrt(sums_dofs[0])
     # The mass scale of the convergence tests, see func_exit_decision
     scale = inertia
     ls_ratio = rigid_info.tolerance[None] * rigid_info.ls_tolerance[None]
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         # The gradient norm carries the scale: the line search tolerance then follows the residual left to reduce
         # rather than the inertia, which a solve far from convergence would let dominate.
-        scale = qd.sqrt(sums[1])
+        scale = qd.sqrt(sums_dofs[1])
         LS_NOISE_RATIO = qd.static(10.0)
         ls_ratio = qd.max(ls_ratio, LS_NOISE_RATIO * EPS)
     gtol = ls_ratio * snorm * scale
-    base_1 = sums[2] + sums[4]
-    base_2 = sums[3] + sums[5]
-    p0_deriv_0 = sums[2] + sums[6]
-    p0_deriv_1 = 2.0 * (sums[3] + sums[7])
+    base_1 = sums_dofs[2] + sums_rows[0]
+    base_2 = sums_dofs[3] + sums_rows[1]
+    p0_deriv_0 = sums_dofs[2] + sums_rows[2]
+    p0_deriv_1 = 2.0 * (sums_dofs[3] + sums_rows[3])
     if p0_deriv_1 <= 0.0:
         p0_deriv_1 = EPS
     phase = 0
@@ -582,7 +615,8 @@ def func_linesearch_islands_serial(
     """Line search of every island of one env by a single thread, then the step applied.
 
     mv and jv are formed over the env, then each awake island is searched in turn, its state in registers, its sums and
-    evaluations sweeping its own dofs and rows through the island-ordered dof_id / constraint_id lists.
+    evaluations sweeping its own dofs and rows through the island-ordered dof_id / constraint_id lists, or by index in
+    a scene whose envs hold one island (is_single_island).
 
     Returns whether any island moved.
     """
@@ -593,6 +627,7 @@ def func_linesearch_islands_serial(
     ncone = nef
     if qd.static(rigid_config.enable_elliptic_friction):
         ncone = ncone + constraint_state.n_constraints_cone[i_b]
+    n_con = constraint_state.n_constraints[i_b]
 
     # mv = M @ search and jv = J @ search over the islands still moving, through the island lists. An env holding one
     # island reads every row densely, whose loads carry no dependent index.
@@ -615,34 +650,48 @@ def func_linesearch_islands_serial(
             row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
             dof_base = constraint_state.island.dof_range_start[i_island, i_b]
             row_base = func_list_range_start(constraint_state.island.constraint_id, row_lo, row_hi, i_b)
-            sums = qd.Vector.zero(gs.qd_float, 8)
+            sums_dofs = qd.Vector.zero(gs.qd_float, 4)
             for i_pos in range(dof_lo, dof_hi):
-                s_sq, g_sq, gauss_1, gauss_2 = func_dof_p0_terms(
-                    func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b),
-                    i_b,
-                    dyn_state,
-                    constraint_state,
-                )
-                sums[0] = sums[0] + s_sq
-                sums[1] = sums[1] + g_sq
-                sums[2] = sums[2] + gauss_1
-                sums[3] = sums[3] + gauss_2
-            for i_pos in range(row_lo, row_hi):
-                eq_1, eq_2, tot_1, tot_2 = func_row_p0_terms(
-                    func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b),
-                    i_b,
-                    ne,
-                    nef,
-                    ncone,
-                    constraint_state,
-                    rigid_config,
-                )
-                sums[4] = sums[4] + eq_1
-                sums[5] = sums[5] + eq_2
-                sums[6] = sums[6] + tot_1
-                sums[7] = sums[7] + tot_2
+                i_d = i_pos
+                if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                    i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                sums_dofs = sums_dofs + func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state)
+            sums_rows = qd.Vector.zero(gs.qd_float, 4)
+            if qd.static(rigid_config.is_single_island):
+                # The island holds every row of the env: one sweep per class in constraint order knows the class of
+                # every row statically and reads the rows by index, sparing the class test and list lookup per row.
+                for i_c in range(ne):
+                    sums_rows = sums_rows + func_row_p0_terms(
+                        i_c, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=1
+                    )
+                for i_c in range(ne, nef):
+                    sums_rows = sums_rows + func_row_p0_terms(
+                        i_c, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=2
+                    )
+                if qd.static(rigid_config.enable_elliptic_friction):
+                    n_rows = qd.static(rigid_config.rows_per_contact)
+                    for i_cone in range((ncone - nef) // n_rows):
+                        sums_rows = sums_rows + func_row_p0_terms(
+                            nef + i_cone * n_rows, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=3
+                        )
+                for i_c in range(ncone, n_con):
+                    sums_rows = sums_rows + func_row_p0_terms(
+                        i_c, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=4
+                    )
+            else:
+                for i_pos in range(row_lo, row_hi):
+                    sums_rows = sums_rows + func_row_p0_terms(
+                        func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b),
+                        i_b,
+                        ne,
+                        nef,
+                        ncone,
+                        constraint_state,
+                        rigid_config,
+                        row_kind=0,
+                    )
             phase, ls_result, gtol, base_1, base_2, p0_deriv_0, p0_deriv_1, alpha_0 = func_ls_state_init(
-                sums, constraint_state.island.inertia[i_island, i_b], rigid_info, rigid_config
+                sums_dofs, sums_rows, constraint_state.island.inertia[i_island, i_b], rigid_info, rigid_config
             )
             n_alphas = 1
             alphas = qd.Vector.zero(gs.qd_float, 3)
@@ -656,22 +705,44 @@ def func_linesearch_islands_serial(
             improvement = gs.qd_float(0.0)
             while phase < 3:
                 acc = qd.Vector.zero(gs.qd_float, 9)
-                for i_pos in range(row_lo, row_hi):
-                    t_0, t_1, t_2 = func_row_alpha_terms(
-                        func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b),
-                        i_b,
-                        n_alphas,
-                        alphas,
-                        ne,
-                        nef,
-                        ncone,
-                        constraint_state,
-                        rigid_config,
-                    )
-                    for k in qd.static(range(3)):
-                        acc[3 * k] = acc[3 * k] + t_0[k]
-                        acc[3 * k + 1] = acc[3 * k + 1] + t_1[k]
-                        acc[3 * k + 2] = acc[3 * k + 2] + t_2[k]
+                if qd.static(rigid_config.is_single_island):
+                    for i_c in range(ne, nef):
+                        acc = acc + func_row_alpha_terms(
+                            i_c, i_b, n_alphas, alphas, ne, nef, ncone, constraint_state, rigid_config, row_kind=2
+                        )
+                    if qd.static(rigid_config.enable_elliptic_friction):
+                        n_rows = qd.static(rigid_config.rows_per_contact)
+                        for i_cone in range((ncone - nef) // n_rows):
+                            acc = acc + func_row_alpha_terms(
+                                nef + i_cone * n_rows,
+                                i_b,
+                                n_alphas,
+                                alphas,
+                                ne,
+                                nef,
+                                ncone,
+                                constraint_state,
+                                rigid_config,
+                                row_kind=3,
+                            )
+                    for i_c in range(ncone, n_con):
+                        acc = acc + func_row_alpha_terms(
+                            i_c, i_b, n_alphas, alphas, ne, nef, ncone, constraint_state, rigid_config, row_kind=4
+                        )
+                else:
+                    for i_pos in range(row_lo, row_hi):
+                        acc = acc + func_row_alpha_terms(
+                            func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b),
+                            i_b,
+                            n_alphas,
+                            alphas,
+                            ne,
+                            nef,
+                            ncone,
+                            constraint_state,
+                            rigid_config,
+                            row_kind=0,
+                        )
                 (
                     phase,
                     n_alphas,
@@ -708,7 +779,9 @@ def func_linesearch_islands_serial(
             else:
                 is_moved = True
                 for i_pos in range(dof_lo, dof_hi):
-                    i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                    i_d = i_pos
+                    if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                        i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                     constraint_state.qacc[i_d, i_b] = (
                         constraint_state.qacc[i_d, i_b] + constraint_state.search[i_d, i_b] * res_alpha
                     )
@@ -719,7 +792,9 @@ def func_linesearch_islands_serial(
                         constraint_state.cg_prev_grad[i_d, i_b] = constraint_state.grad[i_d, i_b]
                         constraint_state.cg_prev_Mgrad[i_d, i_b] = constraint_state.Mgrad[i_d, i_b]
                 for i_pos in range(row_lo, row_hi):
-                    i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                    i_c = i_pos
+                    if qd.static(not rigid_config.is_single_island):
+                        i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                     constraint_state.Jaref[i_c, i_b] = (
                         constraint_state.Jaref[i_c, i_b] + constraint_state.jv[i_c, i_b] * res_alpha
                     )
@@ -754,12 +829,10 @@ def func_exit_islands_serial(
             dof_base = constraint_state.island.dof_range_start[i_island, i_b]
             terms = qd.Vector.zero(gs.qd_float, 7)
             for i_pos in range(dof_lo, dof_hi):
-                terms = terms + func_dof_exit_terms(
-                    func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b),
-                    i_b,
-                    constraint_state,
-                    rigid_config,
-                )
+                i_d = i_pos
+                if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                    i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                terms = terms + func_dof_exit_terms(i_d, i_b, constraint_state, rigid_config)
             inertia = constraint_state.island.inertia[i_island, i_b]
             improved = False
             cg_beta = gs.qd_float(0.0)
@@ -774,7 +847,9 @@ def func_exit_islands_serial(
                 improved_any = True
                 if qd.static(not certify):
                     for i_pos in range(dof_lo, dof_hi):
-                        i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                        i_d = i_pos
+                        if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                            i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                         if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
                             constraint_state.search[i_d, i_b] = -constraint_state.Mgrad[i_d, i_b]
                         else:
@@ -901,88 +976,73 @@ def func_linesearch_islands_coop(
             for i_g in range(n_group):
                 j_island = base + i_g
                 if constraint_state.island.improved[j_island, i_b]:
-                    sums_i = qd.Vector.zero(gs.qd_float, 8)
+                    sums_dofs_i = qd.Vector.zero(gs.qd_float, 4)
                     dof_lo_i = constraint_state.island.dof_slices.start[j_island, i_b]
                     dof_hi_i = dof_lo_i + constraint_state.island.dof_slices.n[j_island, i_b]
                     dof_base_i = constraint_state.island.dof_range_start[j_island, i_b]
                     i_pos = dof_lo_i + tid
                     while i_pos < dof_hi_i:
                         i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo_i, dof_base_i, i_b)
-                        s_sq, g_sq, gauss_1, gauss_2 = func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state)
-                        sums_i[0] = sums_i[0] + s_sq
-                        sums_i[1] = sums_i[1] + g_sq
-                        sums_i[2] = sums_i[2] + gauss_1
-                        sums_i[3] = sums_i[3] + gauss_2
+                        sums_dofs_i = sums_dofs_i + func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state)
                         i_pos = i_pos + _K
+                    sums_rows_i = qd.Vector.zero(gs.qd_float, 4)
                     row_lo_i = constraint_state.island.constraint_slices.start[j_island, i_b]
                     row_hi_i = row_lo_i + constraint_state.island.constraint_slices.n[j_island, i_b]
                     row_base_i = func_list_range_start(constraint_state.island.constraint_id, row_lo_i, row_hi_i, i_b)
                     i_pos = row_lo_i + tid
                     while i_pos < row_hi_i:
                         i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo_i, row_base_i, i_b)
-                        eq_1, eq_2, tot_1, tot_2 = func_row_p0_terms(
-                            i_c, i_b, ne, nef, ncone, constraint_state, rigid_config
+                        sums_rows_i = sums_rows_i + func_row_p0_terms(
+                            i_c, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=0
                         )
-                        sums_i[4] = sums_i[4] + eq_1
-                        sums_i[5] = sums_i[5] + eq_2
-                        sums_i[6] = sums_i[6] + tot_1
-                        sums_i[7] = sums_i[7] + tot_2
                         i_pos = i_pos + _K
-                    for k in qd.static(range(8)):
-                        total = qd.simt.subgroup.reduce_all_add_tiled(sums_i[k], 5)
+                    for k in qd.static(range(4)):
+                        total_dofs = qd.simt.subgroup.reduce_all_add_tiled(sums_dofs_i[k], 5)
+                        total_rows = qd.simt.subgroup.reduce_all_add_tiled(sums_rows_i[k], 5)
                         if tid == i_g:
-                            sh_acc[k * _K + tid] = total
+                            sh_acc[k * _K + tid] = total_dofs
+                            sh_acc[(4 + k) * _K + tid] = total_rows
             qd.simt.block.sync()
         else:
             for i_chunk in range((dof_hi - dof_lo + _K - 1) // _K):
                 i_pos = dof_lo + i_chunk * _K + tid
                 n_valid = qd.min(dof_hi - dof_lo - i_chunk * _K, _K)
                 i_slot = -1
-                s_sq = gs.qd_float(0.0)
-                g_sq = gs.qd_float(0.0)
-                gauss_1 = gs.qd_float(0.0)
-                gauss_2 = gs.qd_float(0.0)
+                terms_dofs = qd.Vector.zero(gs.qd_float, 4)
                 if i_pos < dof_hi:
                     i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                     i_slot = 0
                     if n_group > 1:
                         i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
                     if constraint_state.island.improved[base + i_slot, i_b]:
-                        s_sq, g_sq, gauss_1, gauss_2 = func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state)
+                        terms_dofs = func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state)
                 i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
                 i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
                 if tid == _K - 1:
                     i_slot_next = -1
-                func_segment_add(tid, i_slot, n_valid, s_sq, i_slot_prev, i_slot_next, sh_acc, 0)
-                func_segment_add(tid, i_slot, n_valid, g_sq, i_slot_prev, i_slot_next, sh_acc, 1)
-                func_segment_add(tid, i_slot, n_valid, gauss_1, i_slot_prev, i_slot_next, sh_acc, 2)
-                func_segment_add(tid, i_slot, n_valid, gauss_2, i_slot_prev, i_slot_next, sh_acc, 3)
+                for k in qd.static(range(4)):
+                    func_segment_add(tid, i_slot, n_valid, terms_dofs[k], i_slot_prev, i_slot_next, sh_acc, k)
                 qd.simt.block.sync()
             for i_chunk in range((row_hi - row_lo + _K - 1) // _K):
                 i_pos = row_lo + i_chunk * _K + tid
                 n_valid = qd.min(row_hi - row_lo - i_chunk * _K, _K)
                 i_slot = -1
-                eq_1 = gs.qd_float(0.0)
-                eq_2 = gs.qd_float(0.0)
-                tot_1 = gs.qd_float(0.0)
-                tot_2 = gs.qd_float(0.0)
+                terms_rows = qd.Vector.zero(gs.qd_float, 4)
                 if i_pos < row_hi:
                     i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                     i_slot = 0
                     if n_group > 1:
                         i_slot = constraint_state.island.constraint_island_idx[i_c, i_b] - base
                     if constraint_state.island.improved[base + i_slot, i_b]:
-                        eq_1, eq_2, tot_1, tot_2 = func_row_p0_terms(
-                            i_c, i_b, ne, nef, ncone, constraint_state, rigid_config
+                        terms_rows = func_row_p0_terms(
+                            i_c, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=0
                         )
                 i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
                 i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
                 if tid == _K - 1:
                     i_slot_next = -1
-                func_segment_add(tid, i_slot, n_valid, eq_1, i_slot_prev, i_slot_next, sh_acc, 4)
-                func_segment_add(tid, i_slot, n_valid, eq_2, i_slot_prev, i_slot_next, sh_acc, 5)
-                func_segment_add(tid, i_slot, n_valid, tot_1, i_slot_prev, i_slot_next, sh_acc, 6)
-                func_segment_add(tid, i_slot, n_valid, tot_2, i_slot_prev, i_slot_next, sh_acc, 7)
+                for k in qd.static(range(4)):
+                    func_segment_add(tid, i_slot, n_valid, terms_rows[k], i_slot_prev, i_slot_next, sh_acc, 4 + k)
                 qd.simt.block.sync()
 
         # The owner lane closes the initialization of its island and keeps the search state in registers
@@ -1003,11 +1063,13 @@ def func_linesearch_islands_coop(
         res_alpha = gs.qd_float(0.0)
         improvement = gs.qd_float(0.0)
         if is_active:
-            sums = qd.Vector.zero(gs.qd_float, 8)
-            for k in qd.static(range(8)):
-                sums[k] = sh_acc[k * _K + tid]
+            sums_dofs = qd.Vector.zero(gs.qd_float, 4)
+            sums_rows = qd.Vector.zero(gs.qd_float, 4)
+            for k in qd.static(range(4)):
+                sums_dofs[k] = sh_acc[k * _K + tid]
+                sums_rows[k] = sh_acc[(4 + k) * _K + tid]
             phase, ls_result, gtol, base_1, base_2, p0_deriv_0, p0_deriv_1, alpha_0 = func_ls_state_init(
-                sums, constraint_state.island.inertia[i_island, i_b], rigid_info, rigid_config
+                sums_dofs, sums_rows, constraint_state.island.inertia[i_island, i_b], rigid_info, rigid_config
             )
             alphas[0] = alpha_0
             n_alphas = 1
@@ -1040,13 +1102,18 @@ def func_linesearch_islands_coop(
                             i_c = func_list_item(
                                 constraint_state.island.constraint_id, i_pos, row_lo_i, row_base_i, i_b
                             )
-                            t_0, t_1, t_2 = func_row_alpha_terms(
-                                i_c, i_b, n_alphas_i, row_alphas, ne, nef, ncone, constraint_state, rigid_config
+                            acc_i = acc_i + func_row_alpha_terms(
+                                i_c,
+                                i_b,
+                                n_alphas_i,
+                                row_alphas,
+                                ne,
+                                nef,
+                                ncone,
+                                constraint_state,
+                                rigid_config,
+                                row_kind=0,
                             )
-                            for k in qd.static(range(3)):
-                                acc_i[3 * k] = acc_i[3 * k] + t_0[k]
-                                acc_i[3 * k + 1] = acc_i[3 * k + 1] + t_1[k]
-                                acc_i[3 * k + 2] = acc_i[3 * k + 2] + t_2[k]
                             i_pos = i_pos + _K
                         for k in qd.static(range(9)):
                             total = qd.simt.subgroup.reduce_all_add_tiled(acc_i[k], 5)
@@ -1058,9 +1125,7 @@ def func_linesearch_islands_coop(
                     i_pos = row_lo + i_chunk * _K + tid
                     n_valid = qd.min(row_hi - row_lo - i_chunk * _K, _K)
                     i_slot = -1
-                    t_0 = qd.Vector.zero(gs.qd_float, 3)
-                    t_1 = qd.Vector.zero(gs.qd_float, 3)
-                    t_2 = qd.Vector.zero(gs.qd_float, 3)
+                    terms = qd.Vector.zero(gs.qd_float, 9)
                     if i_pos < row_hi:
                         i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                         i_slot = 0
@@ -1070,7 +1135,7 @@ def func_linesearch_islands_coop(
                             row_alphas = qd.Vector(
                                 [sh_alphas[i_slot], sh_alphas[_K + i_slot], sh_alphas[2 * _K + i_slot]]
                             )
-                            t_0, t_1, t_2 = func_row_alpha_terms(
+                            terms = func_row_alpha_terms(
                                 i_c,
                                 i_b,
                                 sh_n_alphas[i_slot],
@@ -1080,15 +1145,14 @@ def func_linesearch_islands_coop(
                                 ncone,
                                 constraint_state,
                                 rigid_config,
+                                row_kind=0,
                             )
                     i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
                     i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
                     if tid == _K - 1:
                         i_slot_next = -1
-                    for k in qd.static(range(3)):
-                        func_segment_add(tid, i_slot, n_valid, t_0[k], i_slot_prev, i_slot_next, sh_acc, 3 * k)
-                        func_segment_add(tid, i_slot, n_valid, t_1[k], i_slot_prev, i_slot_next, sh_acc, 3 * k + 1)
-                        func_segment_add(tid, i_slot, n_valid, t_2[k], i_slot_prev, i_slot_next, sh_acc, 3 * k + 2)
+                    for k in qd.static(range(9)):
+                        func_segment_add(tid, i_slot, n_valid, terms[k], i_slot_prev, i_slot_next, sh_acc, k)
                     qd.simt.block.sync()
             if is_pending:
                 acc = qd.Vector.zero(gs.qd_float, 9)
