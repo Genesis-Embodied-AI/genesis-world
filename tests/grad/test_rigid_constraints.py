@@ -44,17 +44,17 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     on.entity_fd.set_dofs_velocity(100.0)
     for _ in range(60):
         on.scene_fd.step()
-    assert (on.scene_fd.rigid_solver.get_state().qpos[:, 0].abs() <= 4.5).all()
+    assert (on.scene_fd.rigid_solver.get_state().qpos[:, 0].abs() <= 1.5).all()
 
-    # Backward, with mixed per-environment activity: env 0 drives into the active |x|=4 limit while env 1 stays well
+    # Backward, with mixed per-environment activity: env 0 drives past the active |x|=0.5 limit while env 1 stays
     # inside it, so the adjoint solve faces different constraint counts in the same batch. Sanity-check the split.
     on.scene_fd.reset()
     on.entity_fd.set_dofs_velocity([[100.0], [2.0]])
     for _ in range(5):
         on.scene_fd.step()
     qpos_end = on.scene_fd.rigid_solver.get_state().qpos
-    assert abs(qpos_end[0, 0]) > 3.5
-    assert abs(qpos_end[1, 0]) < 1.0
+    assert abs(qpos_end[0, 0]) > 0.5
+    assert abs(qpos_end[1, 0]) < 0.5
 
     assert_grad_matches_fd(
         on,
@@ -105,8 +105,8 @@ def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precisio
     # (gravity, n_steps, per-step force, loss reads links_pos, sanity dof, sanity threshold, initial dof pose,
     # fp32 tolerance).
     gravity, n_steps, per_step_force, is_links_loss, sanity_dof, sanity_thresh, init_pos, fp32_tol = {
-        "grad_slider_limit": ((0.0, 0.0, 0.0), 10, [500.0], False, 0, 3.5, None, 1e-4),
-        "grad_cartpole": ((0.0, 0.0, -9.81), 15, [2000.0, 0.0], False, 0, 3.5, [0.0, -math.pi], 2e-4),
+        "grad_slider_limit": ((0.0, 0.0, 0.0), 10, [500.0], False, 0, 0.5, None, 1e-4),
+        "grad_cartpole": ((0.0, 0.0, -9.81), 15, [2000.0, 0.0], False, 0, 0.5, [0.0, -math.pi], 2e-4),
         "grad_hopper": ((0.0, 0.0, 0.0), 10, [0.0, 0.0, 0.0, 0.0, 0.0, 200.0], True, 5, 0.7, None, 5e-5),
     }[model_name]
 

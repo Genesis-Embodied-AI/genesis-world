@@ -422,7 +422,7 @@ def _parse_link(
                     joint_prim,
                     candidates=morph.joint_armature_attr_candidates,
                     attr_name="dofs_armature",
-                    default_value=morph.default_armature or 0.0,
+                    default_value=0.0,
                 ),
                 dtype=gs.np_float,
             )

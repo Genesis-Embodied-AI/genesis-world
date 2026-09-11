@@ -558,10 +558,6 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         allows, and what a model authoring its own values expects, at the cost of contacts that respond more abruptly. This parameter is called
         'timeconst' in Mujoco (https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters). Defaults to
         0.01.
-    use_contact_island : bool, optional
-        Whether to partition the constraint solve into independent per-island blocks. It has no effect on a scene that
-        is a single dense-coupled tree (one island) or is differentiable, where the dense whole-scene solve is used
-        regardless. Defaults to True.
     use_hibernation : bool, optional
         Whether to put bodies that have come to rest to sleep, so the solver skips them until they are disturbed. It
         quietly has no effect on a body that is differentiable, prunable, or under no-slip friction. Defaults to False.
@@ -626,7 +622,6 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     contact_pruning_tolerance: PositiveFloat | None = 0.02
     sparse_solve: StrictBool | None = None
     constraint_timeconst: PositiveFloat | None = 0.01
-    use_contact_island: StrictBool = True
     box_box_detection: StrictBool = False
 
     # hibernation threshold
@@ -647,10 +642,17 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     # broadphase configuration
     broadphase_traversal: gs.broadphase_traversal | None = None
 
-    def __init__(self, *, contact_resolve_time: float | None = None, **data):
+    def __init__(self, *, contact_resolve_time: float | None = None, use_contact_island: bool | None = None, **data):
         super().__init__(**data)
         if contact_resolve_time is not None:
             gs.logger.warning("'contact_resolve_time' is deprecated. Use 'constraint_timeconst' instead.")
+        if use_contact_island is not None:
+            if not use_contact_island:
+                gs.raise_exception(
+                    "'use_contact_island=False' is not supported: the constraint solver always solves the contact "
+                    "islands of the scene."
+                )
+            gs.logger.warning("'use_contact_island' is deprecated and has no effect.")
 
     def model_post_init(self, context):
         super().model_post_init(context)

@@ -181,12 +181,10 @@ def _get_model_mappings(
 def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     """Initialize the Genesis simulator and reset MuJoCo onto its exact state, ready for a step-by-step comparison."""
     gs_sim.scene.reset()
-    if qpos is not None or qvel is not None:
-        (gs_robot,) = gs_sim.entities
-        if qpos is not None:
-            gs_robot.set_qpos(qpos)
-        if qvel is not None:
-            gs_robot.set_dofs_velocity(qvel)
+    if qpos is not None:
+        gs_sim.rigid_solver.set_qpos(qpos)
+    if qvel is not None:
+        gs_sim.rigid_solver.set_dofs_velocity(qvel)
 
     # The consistency checks compare pre-step derived quantities (bias forces, smooth accelerations), which only a
     # dynamics pass populates on the Genesis side, mirroring the mj_forward call below.
@@ -203,6 +201,43 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     mj_sim.data.qpos[mj_qs_idx] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
     mj_sim.data.qvel[mj_dofs_idx] = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
     mujoco.mj_forward(mj_sim.model, mj_sim.data)
+
+
+def set_paired_inertial_properties(gs_sim, mj_sim, *, armature_ratio, mass_ratio, inertia_ratio, com_offset):
+    """Apply the same inertial change to both simulators, through the runtime setters on the Genesis side and through
+    the model fields and 'mj_setConst' on the MuJoCo side.
+
+    Every DOF armature and every body mass and inertia are scaled by the given ratios, and the center of mass of every
+    body MuJoCo compiled with a full mass matrix structure is shifted by 'com_offset' in its body frame. What the setters
+    derive from the change (inverse weights, mean inertia) can then be held against the constants MuJoCo recomputes.
+    """
+    gs_maps, mj_maps = _get_model_mappings(gs_sim, mj_sim)
+    gs_bodies_idx, _, _, gs_dofs_idx, _, _ = gs_maps
+    mj_bodies_idx, _, _, mj_dofs_idx, _, _ = mj_maps
+    model = mj_sim.model
+    # MuJoCo bakes a diagonal mass matrix structure for a body compiled with its inertial frame on the body frame, so a
+    # center of mass shifted at runtime has nowhere to couple: only the bodies compiled with the full structure take one.
+    gs_com_idx, mj_com_idx = [], []
+    for gs_i, mj_i in zip(gs_bodies_idx, mj_bodies_idx):
+        if not model.body_simple[mj_i]:
+            gs_com_idx.append(gs_i)
+            mj_com_idx.append(mj_i)
+
+    model.dof_armature[mj_dofs_idx] *= armature_ratio
+    model.body_mass[mj_bodies_idx] *= mass_ratio
+    model.body_inertia[mj_bodies_idx] *= inertia_ratio
+    model.body_ipos[mj_com_idx] += com_offset
+    # A body compiled with its inertial frame on the body frame keeps the flag that lets MuJoCo skip the offset.
+    model.body_sameframe[mj_com_idx] = mujoco.mjtSameFrame.mjSAMEFRAME_NONE
+    mujoco.mj_setConst(model, mj_sim.data)
+    align_mujoco_invweight0(model)
+
+    solver = gs_sim.rigid_solver
+    solver.set_dofs_armature(armature_ratio * solver.get_dofs_armature(dofs_idx=gs_dofs_idx), dofs_idx=gs_dofs_idx)
+    solver.set_links_mass(mass_ratio * solver.get_links_mass(links_idx=gs_bodies_idx), links_idx=gs_bodies_idx)
+    solver.set_links_inertia(inertia_ratio * solver.get_links_inertia(links_idx=gs_bodies_idx), links_idx=gs_bodies_idx)
+    links_com = tensor_to_array(solver.get_links_COM(links_idx=gs_com_idx)) + com_offset
+    solver.set_links_COM(links_com, links_idx=gs_com_idx)
 
 
 def get_mujoco_midpoint_dofs_mask(mj_sim):
@@ -249,6 +284,34 @@ def get_mujoco_midpoint_dofs_mask(mj_sim):
         start = 3 if (model.body_ipos[i_b] == 0.0).all() else 0
         mask[adr + start : adr + 6] = True
     return mask
+
+
+def align_mujoco_invweight0(model):
+    """Write into the model the constraint inverse weights of every body and DOF that MuJoCo's general rule gives.
+
+    That rule of 'mj_setConst' is the mean diagonal of J M^-1 J^T at the neutral configuration, over the translational
+    and the rotational rows of a body, and over the DOFs a joint moves together. MuJoCo leaves it aside for a body it
+    flags as simple (see the FIXME in genesis.utils.mjcf), so aligning the model on it has both engines simulate the
+    weights Genesis derives.
+    """
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    mass_mat_inv = np.zeros((model.nv, model.nv))
+    mujoco.mj_solveM(model, data, mass_mat_inv, np.eye(model.nv))
+    jac = np.zeros((6, model.nv))
+    for i_b in range(1, model.nbody):
+        mujoco.mj_jacBodyCom(model, data, jac[:3], jac[3:], i_b)
+        inv_inertia = jac @ mass_mat_inv @ jac.T
+        model.body_invweight0[i_b] = (np.trace(inv_inertia[:3, :3]) / 3.0, np.trace(inv_inertia[3:, 3:]) / 3.0)
+    dofs_invweight = np.diag(mass_mat_inv).copy()
+    for i_j in range(model.njnt):
+        i_d = model.jnt_dofadr[i_j]
+        if model.jnt_type[i_j] == mujoco.mjtJoint.mjJNT_FREE:
+            dofs_invweight[i_d : i_d + 3] = dofs_invweight[i_d : i_d + 3].mean()
+            dofs_invweight[i_d + 3 : i_d + 6] = dofs_invweight[i_d + 3 : i_d + 6].mean()
+        elif model.jnt_type[i_j] == mujoco.mjtJoint.mjJNT_BALL:
+            dofs_invweight[i_d : i_d + 3] = dofs_invweight[i_d : i_d + 3].mean()
+    model.dof_invweight0[:] = dofs_invweight
 
 
 def check_mujoco_model_consistency(
@@ -669,16 +732,33 @@ def check_mujoco_data_consistency(
         mj_efc_force = mj_sim.data.efc_force
         assert_allclose(gs_efc_force[gs_sidx], mj_efc_force[mj_sidx], atol=efc_atol, rtol=tol)
 
-        mj_iter = mj_sim.data.solver_niter[0] - 1
-        if gs_n_constraints and mj_iter >= 0:
-            gs_scale = 1.0 / (gs_meaninertia * max(1, gs_sim.rigid_solver.n_dofs))
-            gs_gradient = gs_scale * np.linalg.norm(
-                gs_sim.rigid_solver.constraint_solver.grad.to_numpy()[: gs_sim.rigid_solver.n_dofs, 0]
-            )
-            mj_gradient = mj_sim.data.solver.gradient[mj_iter]
+        # Solver statistics of the last iteration, per island (both engines solve per island, see build_genesis_sim),
+        # matched through the MuJoCo island of the island's first dof. A Genesis island without any constraint has no
+        # MuJoCo counterpart (its dofs sit outside every MuJoCo island) and is skipped.
+        gs_constraint_solver = gs_sim.rigid_solver.constraint_solver
+        gs_island_state = gs_constraint_solver.constraint_state.island
+        gs_grad = qd_to_numpy(gs_constraint_solver.grad, transpose=True)[0, : gs_sim.rigid_solver.n_dofs]
+        gs_islands_inertia = qd_to_numpy(gs_island_state.inertia, transpose=True)[0]
+        gs_islands_ls_improvement = qd_to_numpy(gs_island_state.ls_improvement, transpose=True)[0]
+        gs_n_islands = qd_to_numpy(gs_island_state.n_islands)[0]
+        gs_dofs_island = qd_to_numpy(gs_island_state.dofs_island_idx, transpose=True)[0]
+        gs_constraints_island = qd_to_numpy(gs_island_state.constraint_island_idx, transpose=True)[0, :gs_n_constraints]
+        gs_to_mj_dof = dict(zip(gs_dofs_idx, mj_dofs_idx))
+        for gs_island in range(gs_n_islands):
+            gs_island_dofs = np.flatnonzero(gs_dofs_island == gs_island)
+            mj_island = mj_sim.data.dof_island[gs_to_mj_dof[gs_island_dofs[0]]]
+            if mj_island < 0 or not gs_n_constraints:
+                continue
+            mj_iter = mj_sim.data.solver_niter[mj_island] - 1
+            if mj_iter < 0:
+                continue
+            mj_stat = mj_island * mujoco.mjNSOLVER + mj_iter
+            gs_scale = 1.0 / gs_islands_inertia[gs_island]
+            gs_gradient = gs_scale * np.linalg.norm(gs_grad[gs_island_dofs])
+            mj_gradient = mj_sim.data.solver.gradient[mj_stat]
             assert_allclose(gs_gradient, mj_gradient, tol=tol)
-            gs_improvement = gs_scale * gs_sim.rigid_solver.constraint_solver.ls_improvement[0]
-            mj_improvement = mj_sim.data.solver.improvement[mj_iter]
+            gs_improvement = gs_scale * gs_islands_ls_improvement[gs_island]
+            mj_improvement = mj_sim.data.solver.improvement[mj_stat]
 
             # Note that 'constraint_solver.active' refers to whether the quadratic part of a constraint is active,
             # unlike Mujoco that defines 'nactive' as the number of active constraints regardless of its type.
@@ -686,20 +766,20 @@ def check_mujoco_data_consistency(
             # cone rows are excluded from the per-row quadratic (handled as a coupled block) yet count as active in
             # Mujoco's stat, which engages a cone as a whole; counting every row of a cone that carries any force
             # translates Genesis's convention into Mujoco's.
-            gs_counted = gs_sim.rigid_solver.constraint_solver.active.to_numpy()[:gs_n_constraints, 0].copy()
-            gs_n_cone = gs_sim.rigid_solver.constraint_solver.n_constraints_cone.to_numpy()[0]
+            gs_counted = gs_constraint_solver.active.to_numpy()[:gs_n_constraints, 0].copy()
+            gs_n_cone = gs_constraint_solver.n_constraints_cone.to_numpy()[0]
             if gs_n_cone:
                 gs_nef = (
-                    gs_sim.rigid_solver.constraint_solver.n_constraints_equality.to_numpy()[0]
-                    + gs_sim.rigid_solver.constraint_solver.n_constraints_frictionloss.to_numpy()[0]
+                    gs_constraint_solver.n_constraints_equality.to_numpy()[0]
+                    + gs_constraint_solver.n_constraints_frictionloss.to_numpy()[0]
                 )
                 rows_per_contact = gs_sim.rigid_solver.rigid_config.rows_per_contact
                 gs_cone_rows = slice(gs_nef, gs_nef + gs_n_cone)
                 gs_cone_rows_counted = gs_counted[gs_cone_rows] | (np.abs(gs_efc_force[gs_cone_rows]) > 0.0)
                 gs_cones_counted = gs_cone_rows_counted.reshape(-1, rows_per_contact).any(axis=1)
                 gs_counted[gs_cone_rows] = np.repeat(gs_cones_counted, rows_per_contact)
-            gs_nactive = gs_counted.sum()
-            mj_native = mj_sim.data.solver.nactive[mj_iter]
+            gs_nactive = gs_counted[gs_constraints_island == gs_island].sum()
+            mj_native = mj_sim.data.solver.nactive[mj_stat]
             if not (gs_sim.rigid_solver.dyn_info.dofs.frictionloss.to_numpy() > gs.EPS).any():
                 assert mj_native == gs_nactive
 

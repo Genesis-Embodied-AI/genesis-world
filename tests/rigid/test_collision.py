@@ -420,6 +420,77 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
     assert_allclose(pos[..., 2], 0.015, atol=1e1 * tol)
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+@pytest.mark.parametrize("gjk_collision", [True, False])
+def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
+    YAW = 1.1
+    BOX_SIZE = 16.0
+    GEOM_SIZE = 0.016
+    # Collision tolerances scale with the smaller geom of a pair, rounding errors with its coordinates. A large size
+    # ratio thus drives the tolerance below the rounding error. The grazing box sits where its separation from the face
+    # is rounding noise, so contact detection must resolve the pair without any measurable depth to converge on. The
+    # pressed box checks that such a pair still yields a contact.
+    GRAZING_SPOT = (-3.36, 0.8)
+    PRESSED_SPOT = (-3.3, 0.8)
+    PRESSED_DEPTH = 0.25 * GEOM_SIZE
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=gjk_collision,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(6.6, 5.74, 8.85),
+            camera_lookat=(6.6, 5.63, 8.8),
+            camera_fov=30,
+        ),
+        show_viewer=show_viewer,
+    )
+    box = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5 * BOX_SIZE),
+            euler=(0.0, 0.0, math.degrees(YAW)),
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            fixed=True,
+        ),
+    )
+    geom_grazing = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 2.0 * BOX_SIZE),
+            size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    geom_pressed = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 3.0 * BOX_SIZE),
+            size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    scene.build()
+
+    face_offset = 0.5 * (BOX_SIZE + GEOM_SIZE)
+    face_normal = torch.tensor([math.cos(YAW), math.sin(YAW), 0.0], dtype=gs.tc_float, device=gs.device)
+    for geom, spot, depth in ((geom_grazing, GRAZING_SPOT, 0.0), (geom_pressed, PRESSED_SPOT, PRESSED_DEPTH)):
+        pos_local = torch.tensor([face_offset - depth, *spot], dtype=gs.tc_float, device=gs.device)
+        geom.set_pos(gu.transform_by_quat(pos_local, box.get_quat()) + box.get_pos())
+        geom.set_quat(box.get_quat())
+
+    scene.step()
+    contacts = scene.rigid_solver.collider.get_contacts()
+    assert_allclose((contacts["normal"] @ face_normal).abs(), 1.0, tol=tol)
+    is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
+    assert is_pressed.any()
+    assert_allclose(contacts["penetration"][is_pressed], PRESSED_DEPTH, tol=tol)
+    assert (contacts["penetration"][~is_pressed] >= 0.0).all()
+    assert (contacts["penetration"][~is_pressed] <= GEOM_SIZE).all()
+    offset = (geom_grazing.get_pos() - box.get_pos()) @ face_normal
+    assert face_offset - tol <= offset <= face_offset + GEOM_SIZE
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_robot_scaling_primitive_collision(show_viewer):

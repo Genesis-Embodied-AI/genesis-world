@@ -11,6 +11,7 @@ from ..utils.mujoco_parity import (
     check_mujoco_data_consistency,
     check_mujoco_model_consistency,
     init_paired_simulators,
+    set_paired_inertial_properties,
     simulate_and_check_mujoco_consistency,
 )
 
@@ -53,13 +54,23 @@ def test_box_plane_dynamics(gs_sim, mj_sim, tol):
 
 @pytest.mark.required
 @pytest.mark.split_entities
-@pytest.mark.parametrize("model_name", ["two_free_boxes"])
+@pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
 @pytest.mark.parametrize("gs_solver, gs_integrator", [(gs.constraint_solver.Newton, gs.integrator.implicitfast)])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
-    # Mujoco holds the two boxes in one model while Genesis holds one entity per box. The mean inertia the constraint
+    # Mujoco holds the three boxes in one model while Genesis holds one entity per box. The mean inertia the constraint
     # solver scales its tolerances by is a scene aggregate, so it must come out the same however the same bodies are
-    # grouped into entities, which one entity per box is what tells apart.
+    # grouped into entities, which one entity per box is what tells apart. The sliding box carries an armature on a
+    # body MuJoCo weighs by a rule of its own, so its constraint weights hold the general rule both engines settle on.
+    # Each box resting on the plane is an island of its own on both sides, a thousandfold apart in mass, so each one
+    # converges on its own inertia scale and the light box settles to the same rest as MuJoCo's.
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
+
+    # The runtime inertial setters derive the constraint weights and the mean inertia anew, which the model consistency
+    # check then holds against the constants MuJoCo recomputes for the same change.
+    set_paired_inertial_properties(
+        gs_sim, mj_sim, armature_ratio=3.0, mass_ratio=0.5, inertia_ratio=2.0, com_offset=(0.01, -0.02, 0.03)
+    )
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
 
 
@@ -249,6 +260,15 @@ def test_stickman(gs_sim, mj_sim, tol):
 def test_general_actuator(gs_sim, mj_sim, tol):
     (entity,) = gs_sim.entities
 
+    # The force range of a dof composes every bound the file states for it in the order MuJoCo clamps: for the motor
+    # its control range through the gear, then its own force range, which lies past the joint-level 'actuatorfrcrange'
+    # and so collapses the force onto that joint bound. The PD gains come from the actuator.
+    lower, upper = entity.get_dofs_force_range()
+    assert_allclose(lower, [-20.0, -np.inf, 4.0], tol=tol)
+    assert_allclose(upper, [20.0, np.inf, 4.0], tol=tol)
+    assert_allclose(entity.get_dofs_kp(dofs_idx_local=[0]), 100.0, tol=tol)
+    assert_allclose(entity.get_dofs_kv(dofs_idx_local=[0]), 2.0, tol=tol)
+
     # get_dofs_kp raises for all DOFs (joint 1 is non-PD-reducible from parser)
     with pytest.raises(gs.GenesisException):
         entity.get_dofs_kp()
@@ -282,9 +302,11 @@ def test_general_actuator(gs_sim, mj_sim, tol):
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
     init_paired_simulators(gs_sim, mj_sim, qpos=[0.2, 0.1, 0.0], qvel=[0.1, -0.1, 0.0])
 
+    # Both the PD joint (kp(100) * 0.3 rad = 30 N.m against its 20 N.m joint bound) and the motor (gear(5) * ctrl(1) =
+    # 5 N.m raised to its 6 N.m force floor, past its 4 N.m joint bound) saturate, so the comparison exercises the clamp.
     mj_sim.data.ctrl[:] = [0.5, 0.3, 1.0]
     entity.control_dofs_position([0.5, 0.3, 0.0])
-    entity.control_dofs_force(5.0, dofs_idx_local=[2])  # motor: gear(5) * gainprm(1) * ctrl(1) = 5
+    entity.control_dofs_force(5.0, dofs_idx_local=[2])
 
     # Pre-step so that Genesis computes qf_applied (needed for data consistency checks)
     mj_sim.data.qpos[:] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]

@@ -9,6 +9,7 @@ from genesis.utils import mjcf as mju
 from genesis.utils.mesh import get_assets_dir
 
 from .assets import get_hf_dataset
+from .mujoco_parity import align_mujoco_invweight0
 
 
 @dataclass
@@ -46,9 +47,7 @@ def build_mujoco_sim(
         asset_path = get_hf_dataset(pattern=xml_path)
         file = os.path.join(asset_path, xml_path)
 
-    model = mju.build_model(
-        file, discard_visual=True, default_armature=None, merge_fixed_links=merge_fixed_links, links_to_keep=()
-    )
+    model = mju.build_model(file, discard_visual=True, merge_fixed_links=merge_fixed_links, links_to_keep=())
 
     model.opt.solver = mj_solver
     model.opt.integrator = mj_integrator
@@ -76,6 +75,7 @@ def build_mujoco_sim(
     # meshes exactly. Midpoint integration branches on an exact ipos == 0 test, so the residuals would silently
     # route the two engines through different update rules; canonicalize the dust to zero.
     model.body_ipos[np.abs(model.body_ipos) < 1e-12] = 0.0
+    align_mujoco_invweight0(model)
     if native_ccd:
         model.opt.disableflags &= ~np.uint32(mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
     else:
@@ -181,5 +181,8 @@ def build_genesis_sim(
         link.desc.inertial_pos[np.abs(link.desc.inertial_pos) < 1e-12] = 0.0
 
     scene.build()
+
+    # Genesis solves per island (see linesearch.py) and MuJoCo does when its islands are enabled
+    mj_sim.model.opt.disableflags &= ~np.uint32(mujoco.mjtDisableBit.mjDSBL_ISLAND)
 
     return scene.sim

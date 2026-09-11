@@ -65,7 +65,6 @@ def get_model_name(file_path):
 def build_model(
     xml,
     discard_visual,
-    default_armature=None,
     merge_fixed_links=False,
     exclude_ground_plane=False,
     links_to_keep=(),
@@ -136,7 +135,7 @@ def build_model(
         for name in ("assetdir", "meshdir", "texturedir"):
             compiler.attrib[name] = str(Path(asset_path) / compiler.attrib.get(name, ""))
 
-        # Set default constraint solver time constant and motor armature.
+        # Set default constraint solver time constant.
         # Note that these default options are ignored when parsing URDF files.
         default = mjcf.find("default")
         if default is None:
@@ -153,41 +152,6 @@ def build_model(
                 # 0.0 cannot be used because it is considered as an error, so that it will fallback to the original
                 # default value...
                 group.attrib.setdefault(param_name, str(MIN_TIMECONST))
-        if default_armature is not None:
-            # The default rotor armature only fills in joints whose armature is authored neither on the element nor
-            # anywhere in their default class chain, so the values authored in the model file are always preserved.
-            # First scan the nested default classes: a class authors armature if itself or any ancestor class sets it.
-            has_armature_by_class = {}
-            default_stack = [(elem, False) for elem in mjcf.findall("default")]
-            while default_stack:
-                default_elem, has_armature = default_stack.pop()
-                joint_elem = default_elem.find("joint")
-                has_armature |= joint_elem is not None and "armature" in joint_elem.attrib
-                has_armature_by_class[default_elem.attrib.get("class", "main")] = has_armature
-                default_stack.extend((child, has_armature) for child in default_elem.findall("default"))
-            # Then walk the kinematic tree while tracking the childclass in effect to resolve each joint's class.
-            # Bodies may be nested under grouping meta-elements (frame, replicate) at any depth, and composite
-            # elements hold joint configuration subelements that take armature like regular joints.
-            for worldbody in mjcf.findall("worldbody"):
-                body_stack = [
-                    (elem, "main")
-                    for tag in ("body", "frame", "replicate", "composite")
-                    for elem in worldbody.findall(tag)
-                ]
-                while body_stack:
-                    body_elem, childclass = body_stack.pop()
-                    childclass = body_elem.attrib.get("childclass", childclass)
-                    for joint_elem in body_elem.findall("joint"):
-                        if joint_elem.attrib.get("type") == "free":
-                            continue
-                        joint_class = joint_elem.attrib.get("class", childclass)
-                        if not has_armature_by_class.get(joint_class, False):
-                            joint_elem.attrib.setdefault("armature", str(default_armature))
-                    body_stack.extend(
-                        (elem, childclass)
-                        for tag in ("body", "frame", "replicate", "composite")
-                        for elem in body_elem.findall(tag)
-                    )
 
         # Must pre-process URDF to overwrite default Mujoco compile flags
         if is_urdf_file:
@@ -274,7 +238,6 @@ def parse_xml(morph, surface, rigid_options=None):
     mj = build_model(
         file,
         not morph.visualization,
-        morph.default_armature,
         merge_fixed_links,
         exclude_ground_plane,
         links_to_keep,
@@ -339,7 +302,10 @@ def parse_link(mj, i_l, scale):
     else:
         l_info["parent_idx"] = int(mj.body_parentid[i_l])
     l_info["root_idx"] = int(mj.body_rootid[i_l])
-    l_info["invweight"] = mj.body_invweight0[i_l]
+    # FIXME: MuJoCo 3.10 weighs a childless body sliding on the world along its own axes as 1 / mass, leaving out the
+    # armature and the two locked axes its general J M^-1 J^T path accounts for, so those weights are recomputed at build.
+    is_simple_slider = mj.body_simple[i_l] == 2
+    l_info["invweight"] = np.full((2,), -1.0) if is_simple_slider else mj.body_invweight0[i_l]
 
     jnt_adr = mj.body_jntadr[i_l]
     jnt_num = mj.body_jntnum[i_l]
@@ -385,7 +351,10 @@ def parse_link(mj, i_l, scale):
         j_info["quat"] = np.array([1.0, 0.0, 0.0, 0.0])
         j_info["init_qpos"] = np.array(mj.qpos0[mj_qpos_offset : (mj_qpos_offset + n_qs)])
         j_info["dofs_damping"] = mj.dof_damping[mj_dof_offset : (mj_dof_offset + n_dofs)]
-        j_info["dofs_invweight"] = mj.dof_invweight0[mj_dof_offset : (mj_dof_offset + n_dofs)]
+        if is_simple_slider:
+            j_info["dofs_invweight"] = np.full((n_dofs,), -1.0)
+        else:
+            j_info["dofs_invweight"] = mj.dof_invweight0[mj_dof_offset : (mj_dof_offset + n_dofs)]
         j_info["dofs_armature"] = mj.dof_armature[mj_dof_offset : (mj_dof_offset + n_dofs)]
         j_info["dofs_frictionloss"] = mj.dof_frictionloss[mj_dof_offset : (mj_dof_offset + n_dofs)]
         if mj.njnt > 0:
@@ -441,8 +410,11 @@ def parse_link(mj, i_l, scale):
         # See: https://mujoco.readthedocs.io/en/stable/XMLreference.html#actuator-general
         j_info["dofs_act_gain"] = np.zeros((n_dofs,), dtype=gs.np_float)
         j_info["dofs_act_bias"] = np.zeros((n_dofs, 3), dtype=gs.np_float)
-        j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (n_dofs, 1))
 
+        # Every bound the file states on the actuator force of the joint applies, one after the other in the order
+        # MuJoCo clamps: a motor's control range through its gear, the actuator's own force range, and the joint-level
+        # 'actuatorfrcrange' clamping whatever drives the joint. They are collected here and composed below.
+        force_ranges = []
         i_a = -1
         try:
             actuator_mask_j = (mj.actuator_trnid[:, 0] == i_j) & (mj.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT)
@@ -489,14 +461,22 @@ def parse_link(mj, i_l, scale):
                 j_info["dofs_act_gain"] = np.full((n_dofs,), float(gear * gainprm[0] * scale**3), dtype=gs.np_float)
                 j_info["dofs_act_bias"] = np.tile(gear * biasprm[:3] * scale**3, (n_dofs, 1)).astype(gs.np_float)
 
-            if mj.actuator_forcelimited[i_a]:
-                j_info["dofs_force_range"] = np.tile(mj.actuator_forcerange[i_a], (n_dofs, 1))
             if mj.actuator_ctrllimited[i_a] and biastype == mujoco.mjtBias.mjBIAS_NONE:
-                j_info["dofs_force_range"] = np.minimum(
-                    j_info["dofs_force_range"], np.tile(gear * mj.actuator_ctrlrange[i_a], (n_dofs, 1))
-                )
+                # A negative gear swaps the bounds.
+                force_ranges.append(np.sort(gear * mj.actuator_ctrlrange[i_a]))
+            if mj.actuator_forcelimited[i_a]:
+                force_ranges.append(mj.actuator_forcerange[i_a])
         elif gs_type not in (gs.JOINT_TYPE.FIXED, gs.JOINT_TYPE.FREE):
             gs.logger.debug(f"(MJCF) No actuator found for joint `{j_info['name']}`")
+
+        if i_j != -1 and mj.jnt_actfrclimited[i_j]:
+            force_ranges.append(mj.jnt_actfrcrange[i_j])
+        # Clamping the bounds themselves composes the clamps: overlapping ranges intersect, and a range lying past the
+        # previous one collapses the force onto its nearest bound, as clamping twice does.
+        force_range = np.array([-np.inf, np.inf])
+        for lower, upper in force_ranges:
+            force_range = np.clip(force_range, lower, upper)
+        j_info["dofs_force_range"] = np.tile(force_range, (n_dofs, 1))
 
         j_infos.append(j_info)
 

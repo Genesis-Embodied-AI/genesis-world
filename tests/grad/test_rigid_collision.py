@@ -416,6 +416,27 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
             pos=(10, 10, 0.49),
         ),
     )
+    # A settled stack of three boxes forms one island whose dof list the solver reorders, and a pair stacked at first
+    # then set apart leaves the factor of their former coupling in place.
+    for i_box in range(3):
+        scene.add_entity(
+            gs.morphs.Box(
+                size=(1, 1, 1),
+                pos=(-10, 10, 0.5 + 1.0 * i_box),
+            ),
+        )
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(1, 1, 1),
+            pos=(10, -10, 0.5),
+        ),
+    )
+    top_box = scene.add_entity(
+        gs.morphs.Box(
+            size=(1, 1, 1),
+            pos=(10, -10, 1.5),
+        ),
+    )
     franka = scene.add_entity(
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
@@ -425,6 +446,9 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     rigid_solver = scene._sim.rigid_solver
     constraint_solver = rigid_solver.constraint_solver
 
+    for _ in range(25):
+        scene.step()
+    top_box.set_pos((10, -14, 0.49))
     franka.set_qpos([-1.0124, 1.5559, 1.3662, -1.6878, -1.5799, 1.7757, 1.4602, 0.04, 0.04])
 
     def constraint_solver_resolve():

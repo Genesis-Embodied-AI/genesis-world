@@ -66,7 +66,6 @@ from .rigid.abd.misc import (
     kernel_init_vgeom_fields,
     kernel_init_vvert_fields,
     kernel_update_heterogeneous_links_vgeom,
-    kernel_update_vgeoms_render_T,
 )
 
 if TYPE_CHECKING:
@@ -344,6 +343,10 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
+        # The kinematic trees (see trees_root_idx in array_class.py) are the links sharing a root
+        self._n_trees = len({link.root_idx for link in self.links})
+        self.n_trees_ = max(1, self._n_trees)
+
         # batch_links_info is required when heterogeneous simulation is used.
         # We must update options because get_links_info reads from solver._options.batch_links_info.
         if self._enable_heterogeneous:
@@ -395,7 +398,6 @@ class KinematicSolver(Solver):
             enable_joint_limit=False,
             box_box_detection=False,
             sparse_solve=False,
-            sparse_envelope=False,
             integrator=gs.integrator.approximate_implicitfast,
             solver_type=0,
         )
@@ -547,12 +549,35 @@ class KinematicSolver(Solver):
         self.dyn_state.dofs.force.fill(0)
 
     def _init_tree_fields(self):
-        """Initialize the fields describing the kinematic trees, which the kernels walk link by link."""
-        # The links come in build order, so the last one met for a root closes its tree.
-        links_tree_end = np.zeros(self.n_links_, dtype=gs.np_int)
-        for i_l, link in enumerate(self.links):
-            links_tree_end[link.root_idx] = i_l + 1
-        self.rigid_info.links_tree_end.from_numpy(links_tree_end)
+        """Initialize the fields describing the kinematic trees, which the kernels walk tree by tree.
+
+        The trees carrying a dof come first in ascending dof order, the dof-less ones after them in root order (see
+        trees_root_idx in array_class.py). The links come parent first, so the dofs of a tree form one contiguous range
+        and the trees are disjoint in dof space, whatever 0-dof links sit inside a span.
+        """
+        if self._n_trees:
+            links_root_idx = np.array([link.root_idx for link in self.links], dtype=gs.np_int)
+            links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
+            links_dof_start = np.array([link.dof_start for link in self.links], dtype=gs.np_int)
+            roots_idx, links_root_pos = np.unique(links_root_idx, return_inverse=True)
+            trees_n_dofs = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.add.at(trees_n_dofs, links_root_pos, links_n_dofs)
+            trees_dof_start = np.full(self._n_trees, self.n_dofs, dtype=gs.np_int)
+            dof_links = np.flatnonzero(links_n_dofs)
+            np.minimum.at(trees_dof_start, links_root_pos[dof_links], links_dof_start[dof_links])
+            trees_link_end = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.maximum.at(trees_link_end, links_root_pos, np.arange(1, self.n_links + 1, dtype=gs.np_int))
+            trees_n_links = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.add.at(trees_n_links, links_root_pos, 1)
+            trees_order = np.lexsort((np.where(trees_n_dofs > 0, trees_dof_start, roots_idx), trees_n_dofs == 0))
+            trees_rank = np.empty(self._n_trees, dtype=gs.np_int)
+            trees_rank[trees_order] = np.arange(self._n_trees, dtype=gs.np_int)
+            self.rigid_info.trees_root_idx.from_numpy(roots_idx[trees_order])
+            self.rigid_info.trees_link_end.from_numpy(trees_link_end[trees_order])
+            self.rigid_info.trees_n_links.from_numpy(trees_n_links[trees_order])
+            self.rigid_info.trees_dof_start.from_numpy(trees_dof_start[trees_order])
+            self.rigid_info.trees_n_dofs.from_numpy(trees_n_dofs[trees_order])
+            self.rigid_info.links_tree_idx.from_numpy(trees_rank[links_root_pos])
 
     def _init_link_fields(self):
         if self.links:
@@ -669,8 +694,6 @@ class KinematicSolver(Solver):
         )
 
     def _init_vgeom_fields(self):
-        self._vgeoms_render_T = np.empty((self.n_vgeoms_, self._B, 4, 4), dtype=np.float32)
-
         if self.n_vgeoms > 0:
             vgeoms = self.vgeoms
             kernel_init_vgeom_fields(
@@ -793,15 +816,6 @@ class KinematicSolver(Solver):
         for entity in self._entities:
             entity.reset_grad()
         self._queried_states.clear()
-
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- render -----------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def update_vgeoms_render_T(self):
-        kernel_update_vgeoms_render_T(
-            self._vgeoms_render_T, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------

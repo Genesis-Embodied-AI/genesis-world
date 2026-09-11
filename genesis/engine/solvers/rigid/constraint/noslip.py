@@ -117,32 +117,22 @@ def func_refresh_qacc_batch(
     """Recompute qacc = acc_smooth + M^{-1} J^T f from the current constraint forces, over one island.
 
     The force-update sweep maintains qacc incrementally; recomputing it exactly at the start of every iteration keeps
-    the accumulated floating-point drift bounded to a single sweep. Under the per-island solve, only the island's own
-    dofs and constraint rows are visited (mass blocks never straddle islands, and each block's first dof appears
-    exactly once in the island's dof list regardless of the skyline dof reorder); otherwise the whole env is one
-    island and the plain index ranges are used.
+    the accumulated floating-point drift bounded to a single sweep. Only the island's own dofs and constraint rows are
+    visited (mass blocks never straddle islands, and each block's first dof appears exactly once in the island's dof
+    list regardless of the skyline dof reorder).
     """
-    n_dofs = constraint_state.qfrc_constraint.shape[0]
-    n_rows = constraint_state.n_constraints[i_b]
-    dof_start = gs.qd_int(0)
-    row_start = gs.qd_int(0)
-    if qd.static(rigid_config.enable_per_island_solve):
-        n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-        n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
-        dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
-        row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
+    dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
 
     for i_d_ in range(n_dofs):
-        i_d = i_d_
-        if qd.static(rigid_config.enable_per_island_solve):
-            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+        i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
         constraint_state.qfrc_constraint[i_d, i_b] = gs.qd_float(0.0)
         constraint_state.qacc[i_d, i_b] = gs.qd_float(0.0)
 
     for i_c_ in range(n_rows):
-        i_c = i_c_
-        if qd.static(rigid_config.enable_per_island_solve):
-            i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+        i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
         force = constraint_state.efc_force[i_c, i_b]
         for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
             i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
@@ -151,9 +141,7 @@ def func_refresh_qacc_batch(
             )
 
     for i_d_ in range(n_dofs):
-        i_d = i_d_
-        if qd.static(rigid_config.enable_per_island_solve):
-            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+        i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
         # Solve each mass block once, when visiting its first dof (order-robust, unlike previous-block tracking,
         # since the island dof list may be permuted by the fill-reducing reorder).
         if i_d == rigid_info.dofs_mass_block_start[i_d]:
@@ -163,9 +151,7 @@ def func_refresh_qacc_batch(
             func_solve_mass_block(i_d, i_b, constraint_state.qacc, rigid_info)
 
     for i_d_ in range(n_dofs):
-        i_d = i_d_
-        if qd.static(rigid_config.enable_per_island_solve):
-            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+        i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
         constraint_state.qacc[i_d, i_b] = constraint_state.qacc[i_d, i_b] + dyn_state.dofs.acc_smooth[i_d, i_b]
 
 
@@ -179,8 +165,7 @@ def func_noslip_batch(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Matrix-free noslip force-update sweep over one island (the whole env counts as one island when the per-island
-    solve is off).
+    """Matrix-free noslip force-update sweep over one island.
 
     The dual residual of row r is res_r = A f + b = J_r * qacc - aref_r with qacc = acc_smooth + M^{-1} J^T f, so
     the sweep maintains qacc instead of materializing the dense dual matrix AR = J M^{-1} J^T: each force update
@@ -204,12 +189,9 @@ def func_noslip_batch(
     const_start = ne + nf
     const_end = const_start + qd.static(rigid_config.rows_per_contact) * collider_state.n_contacts[i_b]
 
-    n_rows = constraint_state.n_constraints[i_b]
-    row_start = gs.qd_int(0)
-    if qd.static(rigid_config.enable_per_island_solve):
-        n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-        n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
-        row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
+    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
 
     scale = 1.0 / (rigid_info.meaninertia[i_b] * qd.max(1.0, n_dofs))
 
@@ -223,9 +205,7 @@ def func_noslip_batch(
         # opposing pyramid-edge pair (j_efc, j_efc + 1) projected with the normal force fixed. Equality and joint
         # limit rows only contribute to the iter-0 improvement correction.
         for i_c_ in range(n_rows):
-            i_c = i_c_
-            if qd.static(rigid_config.enable_per_island_solve):
-                i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+            i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
 
             if i_iter == 0:
                 improvement += 0.5 * constraint_state.efc_force[i_c, i_b] ** 2 * constraint_state.diag[i_c, i_b]
@@ -419,16 +399,11 @@ def func_dual_finish_batch(
     """
     func_refresh_qacc_batch(i_b, i_island, dyn_state, constraint_state, rigid_info, rigid_config)
 
-    n_dofs = constraint_state.qfrc_constraint.shape[0]
-    dof_start = gs.qd_int(0)
-    if qd.static(rigid_config.enable_per_island_solve):
-        n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-        dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
 
     for i_d_ in range(n_dofs):
-        i_d = i_d_
-        if qd.static(rigid_config.enable_per_island_solve):
-            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+        i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
         dyn_state.dofs.acc[i_d, i_b] = constraint_state.qacc[i_d, i_b]
         dyn_state.dofs.qf_constraint[i_d, i_b] = constraint_state.qfrc_constraint[i_d, i_b]
         dyn_state.dofs.force[i_d, i_b] = dyn_state.dofs.qf_smooth[i_d, i_b] + constraint_state.qfrc_constraint[i_d, i_b]
@@ -445,34 +420,25 @@ def kernel_noslip(
     """Noslip pass: matrix-free force-update sweep followed by the dual finish, fused per island.
 
     The sweep is a sequential Gauss-Seidel process within an island; islands are independent (A is block-diagonal by
-    island and both phases touch only the island's own rows and dofs), so under the per-island solve each (env,
-    island) pair runs sweep and finish end-to-end in one thread, otherwise the whole env is one island swept by one
-    thread.
+    island and both phases touch only the island's own rows and dofs), so each (env, island) pair runs sweep and
+    finish end-to-end in one thread.
     """
     _B = constraint_state.jac.shape[2]
 
-    if qd.static(rigid_config.enable_per_island_solve):
-        # max_islands bounds the per-env island count (at most one island per link); the guard skips the unused tail.
-        # Iterate islands-major so that consecutive GPU lanes sweep the same island index across consecutive envs:
-        # envs are replicas of one scene, so lanes execute identical control flow (island sizes match) and the
-        # batch-contiguous field reads coalesce, instead of adjacent lanes diverging on different islands of one env.
-        max_islands = constraint_state.island.dof_slices.start.shape[0]
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_island, i_b in qd.ndrange(max_islands, _B):
-            if i_island < constraint_state.island.n_islands[i_b]:
-                run_island = True
-                if qd.static(rigid_config.use_hibernation):
-                    run_island = not constraint_state.island.is_hibernated[i_island, i_b]
-                if run_island:
-                    func_noslip_batch(
-                        i_b, i_island, dyn_state, collider_state, constraint_state, rigid_info, rigid_config
-                    )
-                    func_dual_finish_batch(i_b, i_island, dyn_state, constraint_state, rigid_info, rigid_config)
-    else:
-        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-        for i_b in range(_B):
-            func_noslip_batch(i_b, 0, dyn_state, collider_state, constraint_state, rigid_info, rigid_config)
-            func_dual_finish_batch(i_b, 0, dyn_state, constraint_state, rigid_info, rigid_config)
+    # max_islands bounds the per-env island count (at most one island per tree); the guard skips the unused tail.
+    # Iterate islands-major so that consecutive GPU lanes sweep the same island index across consecutive envs: envs
+    # are replicas of one scene, so lanes execute identical control flow (island sizes match) and the batch-contiguous
+    # field reads coalesce, instead of adjacent lanes diverging on different islands of one env.
+    max_islands = constraint_state.island.dof_slices.start.shape[0]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_island, i_b in qd.ndrange(max_islands, _B):
+        if i_island < constraint_state.island.n_islands[i_b]:
+            run_island = True
+            if qd.static(rigid_config.use_hibernation):
+                run_island = not constraint_state.island.is_hibernated[i_island, i_b]
+            if run_island:
+                func_noslip_batch(i_b, i_island, dyn_state, collider_state, constraint_state, rigid_info, rigid_config)
+                func_dual_finish_batch(i_b, i_island, dyn_state, constraint_state, rigid_info, rigid_config)
 
 
 @qd.func

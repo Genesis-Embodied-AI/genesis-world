@@ -46,7 +46,6 @@ def main():
         ),
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=3000,
-            use_contact_island=True,
             use_hibernation=True,
         ),
         profiling_options=gs.options.ProfilingOptions(

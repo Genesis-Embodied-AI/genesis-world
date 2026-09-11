@@ -211,20 +211,19 @@ def func_COM_links(
     """Compute the center of mass of every kinematic tree of one environment and the inertial of every link about it."""
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_l_ in (
-        range(rigid_info.n_awake_links[i_b])
-        if qd.static(rigid_config.use_hibernation)
-        else range(dyn_info.links.root_idx.shape[0])
-    ):
-        i_l = rigid_info.awake_links[i_l_, i_b] if qd.static(rigid_config.use_hibernation) else i_l_
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.root_idx[I_l] == i_l:
-            func_COM_links_tree(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_t in range(rigid_info.trees_root_idx.shape[0]):
+        # A tree sleeps as a unit, so its root tells whether it is awake
+        i_l_root = rigid_info.trees_root_idx[i_t]
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+        if is_awake:
+            func_COM_links_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
 def func_COM_links_tree(
-    i_l_root,
+    i_t,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -234,19 +233,21 @@ def func_COM_links_tree(
 ):
     """Compute the center of mass of one kinematic tree and the inertial of each of its links about it.
 
-    One call handles the whole tree whose root is this link, walking its link span and gating each link on that root
-    (see links_tree_end in array_class.py), so that a tree spanning several entities, one attached beneath another,
-    accumulates every link of its own before it divides. Mirrors the tree walk of func_crb_fold. The callers pass awake
-    roots, and a tree sleeps as a unit, so no link of it is hibernated here.
+    One call handles the whole tree, walking its link span and gating each link on its root (see trees_root_idx in
+    array_class.py), so that a tree spanning several entities, one attached beneath another, accumulates every link of
+    its own before it divides. Mirrors the tree walk of func_crb_fold. The callers pass awake trees, and a tree sleeps
+    as a unit, so no link of it is hibernated here.
     """
     EPS = rigid_info.EPS[None]
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
+    i_l_root = rigid_info.trees_root_idx[i_t]
+    i_l_end = rigid_info.trees_link_end[i_t]
 
     dyn_state.links.root_COM_bw[i_l_root, i_b].fill(0.0)
     dyn_state.links.mass_sum[i_l_root, i_b] = 0.0
 
-    for i_l in range(i_l_root, rigid_info.links_tree_end[i_l_root]):
+    for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root:
             mass = dyn_info.links.inertial_mass[I_l]
@@ -270,12 +271,12 @@ def func_COM_links_tree(
     else:
         dyn_state.links.root_COM[i_l_root, i_b] = dyn_state.links.i_pos_bw[i_l_root, i_b]
 
-    for i_l in range(i_l_root, rigid_info.links_tree_end[i_l_root]):
+    for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root:
             dyn_state.links.root_COM[i_l, i_b] = dyn_state.links.root_COM[i_l_root, i_b]
 
-    for i_l in range(i_l_root, rigid_info.links_tree_end[i_l_root]):
+    for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root:
             dyn_state.links.i_pos[i_l, i_b] = dyn_state.links.i_pos_bw[i_l, i_b] - dyn_state.links.root_COM[i_l, i_b]
@@ -293,7 +294,7 @@ def func_COM_links_tree(
                 rigid_info.EPS[None],
             )
 
-    for i_l in range(i_l_root, rigid_info.links_tree_end[i_l_root]):
+    for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root:
             if dyn_info.links.n_dofs[I_l] > 0:
@@ -346,7 +347,7 @@ def func_COM_links_tree(
                     dyn_state.links.j_pos[i_l, i_b] = dyn_state.links.j_pos_bw[i_l, i_j_, i_b]
                     dyn_state.links.j_quat[i_l, i_b] = dyn_state.links.j_quat_bw[i_l, i_j_, i_b]
 
-    for i_l in range(i_l_root, rigid_info.links_tree_end[i_l_root]):
+    for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root:
             if dyn_info.links.n_dofs[I_l] > 0:
@@ -1182,7 +1183,9 @@ def func_update_cartesian_space_tree(
     for i_l in range(i_l_start, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l:
-            func_COM_links_tree(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+            func_COM_links_tree(
+                rigid_info.links_tree_idx[i_l], i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
+            )
     for j_e in range(i_e, n_entities):
         if func_is_entity_in_tree(j_e, i_b, i_l_start, i_l_end, dyn_info, rigid_config):
             func_update_geoms_entity(

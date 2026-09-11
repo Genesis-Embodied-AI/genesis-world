@@ -403,8 +403,6 @@ def parse_urdf(morph, surface):
         j_info["dofs_frictionloss"] = np.full(j_info["n_dofs"], joint_friction)
         j_info["dofs_damping"] = np.full(j_info["n_dofs"], joint_damping)
         j_info["dofs_armature"] = np.zeros(j_info["n_dofs"])
-        if joint.joint_type not in ("floating", "fixed") and morph.default_armature is not None:
-            j_info["dofs_armature"] = np.full((j_info["n_dofs"],), morph.default_armature)
 
         kp = gu.default_dofs_kp(j_info["n_dofs"])
         kv = gu.default_dofs_kv(j_info["n_dofs"])
