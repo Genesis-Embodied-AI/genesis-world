@@ -32,16 +32,16 @@ def test_equality_joint(gs_sim, mj_sim, gs_solver, tol):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs, is_batched", [(0, False), (2, True)])
-def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_envs, is_batched, tol):
+@pytest.mark.parametrize("n_envs, batched", [(0, False), (2, True)])
+def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_envs, batched, tol):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
-            batch_joints_info=is_batched,
-            batch_dofs_info=is_batched,
+            batch_joints_info=batched,
+            batch_dofs_info=batched,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.0, -0.75, 4.0),
-            camera_lookat=(1.0, -0.75, 0.0),
+            camera_pos=(0.15, -0.75, 4.0),
+            camera_lookat=(0.15, -0.75, 0.0),
             camera_up=(0.0, 1.0, 0.0),
         ),
         show_viewer=show_viewer,

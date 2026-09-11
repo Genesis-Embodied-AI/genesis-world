@@ -847,7 +847,7 @@ def kernel_manual_add_equality_constraints_bw(
         deriv = d(pos_poly)/d(diff) = a1 + 2 * a2 * diff + 3 * a3 * diff^2 + 4 * a4 * diff^3
         jac[n_con, i_dof1] = 1.0
         jac[n_con, i_dof2] = -deriv, when joint2 exists
-        jac_qvel = vel[i_dof1] - deriv * vel[i_dof2], with the second term omitted when joint2 is omitted
+        jac_qvel = vel[i_dof1] - deriv * vel[i_dof2], the second term only when joint2 exists
         imp, aref = imp_aref(sol_params, -|pos|, jac_qvel, pos)
             aref = -b * jac_qvel - k * imp * pos
         diag = max(invweight * (1 - imp) / imp, EPS); efc_D = 1/diag

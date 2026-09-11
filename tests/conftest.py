@@ -11,13 +11,12 @@ from enum import Enum
 from io import BytesIO
 from pathlib import Path
 
-import pytest
-
-from _pytest.mark import Expression, MarkMatcher
-from PIL import Image
+import setproctitle
 import psutil
 import pyglet
-import setproctitle
+import pytest
+from _pytest.mark import Expression, MarkMatcher
+from PIL import Image
 from syrupy.extensions.image import PNGImageSnapshotExtension
 
 from tests.gpu_info import detect_gpu_backend

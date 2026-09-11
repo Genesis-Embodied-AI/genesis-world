@@ -509,8 +509,9 @@ class FileMorph(Morph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the file. An MJCF or URDF description built in memory is accepted as XML content in place of
+        the path, either as a string or as an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -631,6 +632,12 @@ class FileMorph(Morph):
                 if not os.path.exists(abs_file):
                     gs.raise_exception(f"File not found in either current directory or assets directory: '{file}'.")
                 data["file"] = abs_file
+        elif isinstance(file, (ET.Element, ET.ElementTree)):
+            # An element tree is XML content by construction, so it is serialized to the inline string form the loaders
+            # read without the parse round-trip above.
+            if isinstance(file, ET.ElementTree):
+                file = file.getroot()
+            data["file"] = ET.tostring(file, encoding="unicode")
 
         return data
 
@@ -895,8 +902,8 @@ class MJCF(FileMorph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the MJCF file, or the MJCF content itself as a string or an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -1033,8 +1040,8 @@ class URDF(FileMorph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the URDF file, or the URDF content itself as a string or an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
