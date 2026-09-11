@@ -228,7 +228,7 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_velocity, gs_robot.set_dofs_velocity, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_position, gs_robot.set_dofs_position, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_force_range, gs_robot.set_dofs_force_range, None),
-        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_limit, None, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_limit, gs_robot.set_dofs_limit, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_stiffness, None, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_invweight, None, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_armature, None, None),
