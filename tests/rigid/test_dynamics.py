@@ -186,7 +186,7 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
     if dynamics:
         for entity in scene.entities[1:]:
             entity.set_dofs_velocity(4.0 * np.random.rand(6))
-    num_steps = 850 if dynamics else 150
+    num_steps = 900 if dynamics else 150
     for i in range(num_steps):
         scene.step()
         if i > num_steps - 50:
