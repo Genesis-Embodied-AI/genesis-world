@@ -2839,34 +2839,30 @@ def func_island_hessian_assemble_all(
 ):
     """Assemble the Hessian block of every island of the work-list into nt_H ahead of the tiled factor.
 
-    One block of BLOCK_DIM lanes per work item strides over the same work-list as the factor
-    (func_island_hessian_assemble_block).
+    One block of BLOCK_DIM lanes per slot of the work-list the factor reads (func_island_hessian_assemble_block); the
+    slot count is the static bound on the island count, so the launch shape is fixed for CUDA-graph capture and a block
+    whose slot is past its class's current list exits at once.
 
     Under patch the blocks are maintained instead: each one is patched with the rows of the island whose active state
     flipped since the previous iteration (func_island_hessian_patch_block), a patch costing one pass per flipped row
     where the assembly costs one per row. A contiguous island above the last tile cap factors in place (see
     func_island_assemble_factor_solve_tiled), so its block is assembled anew; a scattered one assembles its own.
     """
-    N_BLOCKS = qd.static(max(1, rigid_config.island_factor_n_lanes // 32))
     N_CLASSES = qd.static(len(array_class.island_tile_caps(rigid_config)))
     LAST_CAP = qd.static(rigid_config.island_tile_cap_last)
     BLOCK_DIM = qd.static(128)
-    region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
+    n_slots = constraint_state.island.factor_worklist_i_b.shape[0]
+    region = n_slots // N_CLASSES
     qd.loop_config(name="island_hessian_assemble", block_dim=BLOCK_DIM)
-    for i in range(N_BLOCKS * BLOCK_DIM):
-        blk = i // BLOCK_DIM
+    for i in range(n_slots * BLOCK_DIM):
+        i_work = i // BLOCK_DIM
         tid = i % BLOCK_DIM
         sh_scan = qd.simt.block.SharedArray((BLOCK_DIM // 32,), gs.qd_int)
-        i_work = blk
-        n_work = N_CLASSES * region
-        while i_work < n_work:
-            i_class = i_work // region
-            i_b = -1
-            i_island = -1
-            if i_work - i_class * region < constraint_state.island.factor_worklist_size[i_class]:
-                i_b = constraint_state.island.factor_worklist_i_b[i_work]
-                i_island = constraint_state.island.factor_worklist_i_island[i_work]
-            if i_b >= 0 and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
+        i_class = i_work // region
+        if i_work - i_class * region < constraint_state.island.factor_worklist_size[i_class]:
+            i_b = constraint_state.island.factor_worklist_i_b[i_work]
+            i_island = constraint_state.island.factor_worklist_i_island[i_work]
+            if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
                 if constraint_state.island.improved[i_island, i_b]:
                     if qd.static(patch):
                         n = constraint_state.island.dof_slices.n[i_island, i_b]
@@ -2882,8 +2878,6 @@ def func_island_hessian_assemble_all(
                         func_island_hessian_assemble_block(
                             i_b, i_island, tid, constraint_state, rigid_info, rigid_config, BLOCK_DIM
                         )
-            qd.simt.block.sync()
-            i_work = i_work + N_BLOCKS
 
 
 @qd.func
@@ -2901,14 +2895,13 @@ def func_island_tiled_factor_solve_all(
     M*acc - force - qfrc (the no-solve gradient). write_L persists L into nt_H for a caller that reads the factor back
     (the monolith seed); the graph re-factors so it leaves it False.
 
-    Every launch is a static grid of island_factor_n_lanes lanes (see array_class.py) in blocks of the class's tile
-    size, grid-striding over the class's own work-list the partition build materialized, so the block count is
-    decoupled from the env count and CUDA-graph capture sees a fixed launch. Each launch reserves the shared tile of its
-    own class and sweeps the islands of that class alone, so the reservation of a launch follows the islands it factors
-    instead of the largest island that could ever form, and the blocks stay resident several to a streaming
-    multiprocessor. All T lanes of a block read the same work item, so n_constraints/improved and the hibernation and
-    contiguity branches are uniform and the per-island block.sync is well-formed."""
-    N_LANES = qd.static(rigid_config.island_factor_n_lanes)
+    Every launch is a grid of one block of the class's tile size per slot of the class's work-list region, the static
+    bound on its island count, so CUDA-graph capture sees a fixed launch and the hardware scheduler spreads the islands
+    over the streaming multiprocessors; a block whose slot is past the list the partition build materialized exits at
+    once. Each launch reserves the shared tile of its own class and sweeps the islands of that class alone, so the
+    reservation of a launch follows the islands it factors instead of the largest island that could ever form. All T
+    lanes of a block read the same work item, so n_constraints/improved and the hibernation and contiguity branches are
+    uniform and the per-island block.sync is well-formed."""
     TILE_CAPS = qd.static(array_class.island_tile_caps(rigid_config))
     N_CLASSES = qd.static(len(TILE_CAPS))
     region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
@@ -2916,16 +2909,14 @@ def func_island_tiled_factor_solve_all(
         MAX_DOFS = qd.static(TILE_CAPS[i_class])
         IS_LAST_CLASS = qd.static(i_class == N_CLASSES - 1)
         T = qd.static(array_class.cholesky_tile_size_for(MAX_DOFS))
-        N_BLOCKS = qd.static(max(1, N_LANES // T))
         n_work = constraint_state.island.factor_worklist_size[i_class]
         qd.loop_config(name="island_tiled_factor_solve", block_dim=T)
-        for i in range(N_BLOCKS * T):
-            blk = i // T
+        for i in range(region * T):
+            i_work = i // T
             tid = i % T
             sh_L = qd.simt.block.SharedArray((MAX_DOFS, MAX_DOFS + 1), gs.qd_float)
             sh_v = qd.simt.block.SharedArray((MAX_DOFS,), gs.qd_float)
-            i_work = blk
-            while i_work < n_work:
+            if i_work < n_work:
                 i_b = constraint_state.island.factor_worklist_i_b[i_class * region + i_work]
                 i_island = constraint_state.island.factor_worklist_i_island[i_class * region + i_work]
                 if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
@@ -2959,9 +2950,6 @@ def func_island_tiled_factor_solve_all(
                                 i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
                                 constraint_state.Mgrad[i_d, i_b] = gs.qd_float(0.0)
                                 i_d_ = i_d_ + T
-                # Fence the shared tile before this block reuses it for its next work item
-                qd.simt.block.sync()
-                i_work = i_work + N_BLOCKS
 
 
 @qd.func

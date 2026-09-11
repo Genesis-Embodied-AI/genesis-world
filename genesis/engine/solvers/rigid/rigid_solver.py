@@ -695,11 +695,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     tiled_n_dofs_per_block=tiled_n_dofs_per_block,
                     island_tile_cap_first=island_tile_cap_first,
                     island_tile_cap_last=island_tile_cap_last,
-                    # Persistent grid of the cooperative per-island factor+solve (see island_factor_n_lanes in
-                    # array_class.py): a block holds one warp, and a streaming multiprocessor keeps several warps
-                    # resident, so the grid holds four lanes per core. The count depends on the GPU alone, so the kernel
-                    # compiles once for any body or env count.
-                    island_factor_n_lanes=4 * max_tiled_envs,
                 )
 
                 # Manually pin the solve arm only where the winner is determinable in advance AND confirmed across

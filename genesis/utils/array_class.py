@@ -2862,10 +2862,6 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # global memory.
     island_tile_cap_first: int = 0
     island_tile_cap_last: int = 0
-    # Number of lanes of each launch of the cooperative per-island factor+solve, grid-striding over its class's
-    # (env, island) work-list in blocks of the class's tile size: static for CUDA-graph capture, independent of the env
-    # count, and sized to keep several warps resident per streaming multiprocessor.
-    island_factor_n_lanes: int = 32
     max_n_geoms_per_entity: int = -1
     n_entities: int = -1
     n_links: int = -1
