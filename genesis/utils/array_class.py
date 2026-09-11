@@ -2848,6 +2848,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # When True, the scene holds one dof-carrying kinematic tree, so an env forms at most one island and the
     # per-island passes of the solve read the env's plain dof and row ranges. See the rigid solver's resolution.
     is_single_island: bool = False
+    # When True, the seed kernel assembles the env's one Hessian block and the monolith factors it with the scalar
+    # dense Cholesky (see _kernel_solve_monolith), a single-island scene above the cooperative bound.
+    has_scalar_seed_factor: bool = False
     # When True, the constraint solver uses the GPU subgroup-cooperative kernel variants (warp-cooperative linesearch
     # refinement, per-friction constraint builder, cooperative mass-matrix assembly), together with the batch-first
     # tensor layouts they expect, eg (_B, len_constraints_) for Jaref / efc_D / ... which unlocks coalesced cross-lane

@@ -2985,7 +2985,8 @@ def func_cholesky_factor_direct_batch(
     global DOF rows/cols of nt_H[i_b].
 
     Beware the Hessian matrix is re-purposed to store its Cholesky factorization to spare memory resources. Only
-    the lower triangular part is updated, because the Hessian matrix is symmetric.
+    the lower triangular part is updated, because the Hessian matrix is symmetric. A single-island scene indexes its
+    dofs directly, its island holding every dof in order, except on the skyline path, which reorders them.
     """
     EPS = rigid_info.EPS[None]
 
@@ -2996,12 +2997,16 @@ def func_cholesky_factor_direct_batch(
     # (dof_env_start_local): a row's columns below its envelope start are structurally zero and fill-in stays
     # within the envelope, so a large island factors as a band instead of densely.
     for i_d in range(n):
-        i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
+        i_dg = i_d
+        if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+            i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
         i_start = constraint_state.island.dof_env_start_local[dof_base + i_d, i_b]
         hess_diag = constraint_state.nt_H[i_b, i_dg, i_dg]
         tmp = hess_diag
         for j_d in range(i_start, i_d):
-            j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
+            j_dg = j_d
+            if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
             tmp = tmp - constraint_state.nt_H[i_b, i_dg, j_dg] ** 2
         # Floored relative to the row's original diagonal; see the tiled factor's floor comment
         constraint_state.nt_H[i_b, i_dg, i_dg] = qd.sqrt(qd.max(tmp, EPS * qd.max(hess_diag, EPS)))
@@ -3013,10 +3018,14 @@ def func_cholesky_factor_direct_batch(
         for j_d in range(i_d + 1, j_d_end):
             j_start = constraint_state.island.dof_env_start_local[dof_base + j_d, i_b]
             if j_start <= i_d:
-                j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
+                j_dg = j_d
+                if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                    j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
                 dot = gs.qd_float(0.0)
                 for k_d in range(qd.max(i_start, j_start), i_d):
-                    k_dg = constraint_state.island.dof_id[dof_base + k_d, i_b]
+                    k_dg = k_d
+                    if qd.static(not rigid_config.is_single_island or rigid_config.sparse_solve):
+                        k_dg = constraint_state.island.dof_id[dof_base + k_d, i_b]
                     dot = dot + (constraint_state.nt_H[i_b, j_dg, k_dg] * constraint_state.nt_H[i_b, i_dg, k_dg])
                 constraint_state.nt_H[i_b, j_dg, i_dg] = (constraint_state.nt_H[i_b, j_dg, i_dg] - dot) * inv
 
@@ -4878,13 +4887,14 @@ def func_solve_init(
     n_dofs = dyn_state.dofs.acc_smooth.shape[0]
 
     # The one arm whose factor, gradient and convergence certificate are all seeded inside its own body (see
-    # _kernel_solve_monolith) rather than here: the GPU per-island monolith without the tiled seed self-inits per env,
-    # so every seed in this kernel routes around it. The decomposed arm only runs with the cooperative kernels, which
-    # imply the tiled seed, so the predicate holds for every arm this init can serve.
+    # _kernel_solve_monolith) rather than here: the GPU monolith without the tiled factor seed self-inits per env, so
+    # every seed in this kernel routes around it (the block assembly stays here where the tiled seed is on). The
+    # decomposed arm only runs with the cooperative kernels, which imply the tiled seed, so the predicate holds for
+    # every arm this init can serve.
     is_self_seeding = qd.static(
         rigid_config.solver_type == gs.constraint_solver.Newton
         and rigid_config.backend != gs.cpu
-        and not rigid_config.enable_tiled_island_seed
+        and (not rigid_config.enable_tiled_island_seed or rigid_config.has_scalar_seed_factor)
     )
 
     if qd.static(rigid_config.enable_mujoco_compatibility):
@@ -4980,10 +4990,11 @@ def func_solve_init(
         # (see _kernel_solve_graph), the coupled elliptic-cone block bracketed around the factor as the graph does. The
         # monolith keeps the cone in the L it persists, so the removal runs for the graph's seed alone.
         func_island_hessian_assemble_all(constraint_state, rigid_info, rigid_config)
-        func_update_gradient_no_solve(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
         func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False, is_enabled=True)
-        func_island_tiled_factor_solve_all(constraint_state, dyn_info, rigid_info, rigid_config, write_L)
-        func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=not write_L)
+        if qd.static(not rigid_config.has_scalar_seed_factor):
+            func_update_gradient_no_solve(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            func_island_tiled_factor_solve_all(constraint_state, dyn_info, rigid_info, rigid_config, write_L)
+            func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=not write_L)
     else:
         if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and not is_self_seeding):
             # Seed the initial Hessian factor. The decomposed arm has no self-init: its graph is linesearch-first, so
@@ -5147,14 +5158,17 @@ def _kernel_solve_monolith(
             if qd.static(
                 rigid_config.backend != gs.cpu
                 and rigid_config.solver_type == gs.constraint_solver.Newton
-                and not rigid_config.enable_tiled_island_seed
+                and (not rigid_config.enable_tiled_island_seed or rigid_config.has_scalar_seed_factor)
             ):
-                # A GPU without the tiled seed: func_solve_init skips its seed, so the monolith self-seeds each
-                # island's scalar factor + gradient + search here (once per step). With the tiled seed,
-                # func_solve_init already seeded the factor (L in nt_H).
-                func_hessian_and_cholesky_factor_direct_batch(
-                    i_b, constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
-                )
+                # A GPU without the tiled factor seed: func_solve_init leaves the factor to the monolith, which
+                # self-seeds each island's scalar factor + gradient + search here (once per step), the block already
+                # assembled into nt_H where the tiled seed is on (see has_scalar_seed_factor).
+                if qd.static(rigid_config.enable_tiled_island_seed):
+                    func_cholesky_factor_direct_batch(i_b, 0, constraint_state, rigid_info, rigid_config)
+                else:
+                    func_hessian_and_cholesky_factor_direct_batch(
+                        i_b, constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
+                    )
                 func_update_gradient_batch(i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
                 for i_d in range(n_dofs):
                     constraint_state.search[i_d, i_b] = -constraint_state.Mgrad[i_d, i_b]

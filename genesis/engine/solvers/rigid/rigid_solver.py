@@ -576,6 +576,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # dof-carrying tree forms at most one island per env, and the per-island passes read the env's plain ranges.
         trees_n_dofs = np.bincount([link.root_idx for link in self.links], [link.n_dofs for link in self.links])
         is_single_island = int((trees_n_dofs > 0).sum()) == 1
+        # Above the cooperative bound one thread per env saturates the GPU, where the scalar dense Cholesky of an env's
+        # one block beats the tiled factor, so the seed kernel assembles the block and the monolith factors it.
+        has_scalar_seed_factor = (
+            enable_tiled_island_seed and is_single_island and not enable_cooperative_constraint_kernels
+        )
         constraint_layout_batch_first = (
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
@@ -609,6 +614,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             is_single_island=is_single_island,
+            has_scalar_seed_factor=has_scalar_seed_factor,
             constraint_layout_batch_first=constraint_layout_batch_first,
         )
 
