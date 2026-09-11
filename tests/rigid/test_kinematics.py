@@ -906,12 +906,16 @@ def test_setters(show_viewer, tol):
     ghost_robot.set_dofs_position(torch.zeros(n_dofs, device=gs.device))
     # Boolean environment masks must update only the selected environment
     ghost_robot.set_dofs_position(
-        0.1,
-        dofs_idx_local=-1,
-        envs_idx=torch.tensor((False, True), device=gs.device),
+        position=0.1, dofs_idx_local=-1, envs_idx=torch.tensor((False, True), device=gs.device)
     )
-    assert_allclose(ghost_robot.get_vAABB()[0], ((-0.05, -0.05, -0.05), (0.15, 0.05, 0.05)), tol=tol)
-    assert_allclose(ghost_robot.get_vAABB()[1], ((-0.05, -0.05, -0.05), (0.25, 0.05, 0.05)), tol=tol)
+    assert_allclose(
+        ghost_robot.get_vAABB(),
+        desired=(
+            ((-0.05, -0.05, -0.05), (0.15, 0.05, 0.05)),
+            ((-0.05, -0.05, -0.05), (0.25, 0.05, 0.05)),
+        ),
+        tol=tol,
+    )
 
     ghost_robot.set_dofs_position(torch.zeros(n_dofs, device=gs.device))
     ghost_robot.set_dofs_position([0.1, -0.1], dofs_idx_local=-1)
@@ -944,6 +948,61 @@ def test_setters(show_viewer, tol):
     ghost_robot.set_dofs_velocity(DOFS_VELOCITY)
     assert_allclose(ghost_robot.get_links_vel(), deferred_links_vel, tol=tol)
     assert_allclose(ghost_robot.get_links_ang(), deferred_links_ang, tol=tol)
+
+    # Repeated position writes change world angular velocity while preserving the local spin
+    ghost_box.set_dofs_position(position=0.0)
+    ghost_box.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    for angle, angular_velocity in (
+        (np.pi / 2, (0.0, 1.0, 0.0)),
+        (np.pi, (-1.0, 0.0, 0.0)),
+        (0.0, (1.0, 0.0, 0.0)),
+    ):
+        ghost_box.set_dofs_position(position=0.0, dofs_idx_local=5)
+        ghost_box.set_dofs_position(angle, dofs_idx_local=5)
+        assert_allclose(ghost_box.get_links_vel(), 0.0, tol=tol)
+        for _ in range(2):
+            assert_allclose(ghost_box.get_links_ang(), angular_velocity, tol=tol)
+
+    # An eager subset velocity write after an all-env pose write leaves a mix of fresh and stale velocities
+    ghost_box.set_dofs_position(position=np.pi / 2, dofs_idx_local=5)
+    ghost_box.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 2.0, 0.0, 0.0], envs_idx=1)
+    assert_allclose(ghost_box.get_links_ang(), (((0.0, 1.0, 0.0),), ((0.0, 2.0, 0.0),)), tol=tol)
+
+    ghost_box.set_dofs_velocity(velocity=[0.5, -0.25, 0.0, 3.0, 0.0, 0.0], envs_idx=1)
+    for _ in range(2):
+        assert_allclose(ghost_box.get_links_vel(), (((0.0, 0.0, 0.0),), ((0.5, -0.25, 0.0),)), tol=tol)
+        assert_allclose(ghost_box.get_links_ang(), (((0.0, 1.0, 0.0),), ((0.0, 3.0, 0.0),)), tol=tol)
+    ghost_box.set_dofs_velocity(
+        torch.tensor((-0.25, 0.5, 0.0, 4.0, 0.0, 0.0), dtype=gs.tc_float, device=gs.device), envs_idx=envs_mask
+    )
+    for _ in range(2):
+        assert_allclose(ghost_box.get_links_vel(), (((-0.25, 0.5, 0.0),), ((0.5, -0.25, 0.0),)), tol=tol)
+        assert_allclose(ghost_box.get_links_ang(), (((0.0, 4.0, 0.0),), ((0.0, 3.0, 0.0),)), tol=tol)
+
+    ghost_box.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0], envs_idx=0, skip_forward=True)
+    ghost_box.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 2.0, 0.0, 0.0], envs_idx=1)
+    assert_allclose(ghost_box.get_links_vel(), 0.0, tol=tol)
+    assert_allclose(ghost_box.get_links_ang(), (((0.0, 1.0, 0.0),), ((0.0, 2.0, 0.0),)), tol=tol)
+
+    # Selected eager and deferred writes preserve the other environment's pose and spin
+    quat_identity, quat_quarter_turn, quat_half_turn = gu.xyz_to_quat(
+        torch.tensor(((0.0, 0.0, 0.0), (0.0, 0.0, np.pi / 2), (0.0, 0.0, np.pi)), dtype=gs.tc_float, device=gs.device)
+    )
+    ghost_box.set_quat(quat_half_turn, skip_forward=True)
+    ghost_box.set_quat(quat_quarter_turn, envs_idx=0)
+    ghost_box.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 2.0, 0.0, 0.0], envs_idx=1, skip_forward=True)
+    assert_allclose(ghost_box.get_links_ang(), (((0.0, 1.0, 0.0),), ((-2.0, 0.0, 0.0),)), tol=tol)
+    ghost_box.set_quat(quat_identity, envs_idx=envs_mask, skip_forward=True)
+    ghost_box.set_dofs_velocity(
+        torch.tensor((0.0, 0.0, 0.0, 3.0, 0.0, 0.0), dtype=gs.tc_float, device=gs.device),
+        envs_idx=envs_mask,
+        skip_forward=True,
+    )
+    for _ in range(2):
+        assert_allclose(ghost_box.get_links_ang(), (((3.0, 0.0, 0.0),), ((-2.0, 0.0, 0.0),)), tol=tol)
+    ghost_box.set_quat(quat_quarter_turn, envs_idx=envs_mask, zero_velocity=True)
+    assert_allclose(ghost_box.get_links_ang(), (((0.0, 0.0, 0.0),), ((-2.0, 0.0, 0.0),)), tol=tol)
+
     frozen_vaabb = [tensor_to_array(entity.get_vAABB()) for entity in scene.entities]
     for _ in range(5):
         scene.step()

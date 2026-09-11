@@ -966,8 +966,8 @@ def func_sync_dofs_position_to_qpos(
         if dyn_info.links.n_dofs[I_l] == 0:
             continue
 
-        dof_start = dyn_info.links.dof_start[I_l]
-        q_start = dyn_info.links.q_start[I_l]
+        i_d_start = dyn_info.links.dof_start[I_l]
+        i_q_start = dyn_info.links.q_start[I_l]
 
         i_j = dyn_info.links.joint_start[I_l]
         I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
@@ -978,36 +978,36 @@ def func_sync_dofs_position_to_qpos(
         elif joint_type == gs.JOINT_TYPE.FREE:
             xyz = qd.Vector(
                 [
-                    dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
-                    dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
-                    dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
+                    dyn_state.dofs.pos[0 + 3 + i_d_start, i_b],
+                    dyn_state.dofs.pos[1 + 3 + i_d_start, i_b],
+                    dyn_state.dofs.pos[2 + 3 + i_d_start, i_b],
                 ],
                 dt=gs.qd_float,
             )
             quat = gu.qd_xyz_to_quat(xyz)
 
-            for j in qd.static(range(3)):
-                rigid_info.qpos[j + q_start, i_b] = dyn_state.dofs.pos[j + dof_start, i_b]
+            for i_d_ in qd.static(range(3)):
+                rigid_info.qpos[i_d_ + i_q_start, i_b] = dyn_state.dofs.pos[i_d_ + i_d_start, i_b]
 
-            for j in qd.static(range(4)):
-                rigid_info.qpos[j + 3 + q_start, i_b] = quat[j]
+            for i_q_ in qd.static(range(4)):
+                rigid_info.qpos[i_q_ + 3 + i_q_start, i_b] = quat[i_q_]
         elif joint_type == gs.JOINT_TYPE.SPHERICAL:
             xyz = qd.Vector(
                 [
-                    dyn_state.dofs.pos[0 + dof_start, i_b],
-                    dyn_state.dofs.pos[1 + dof_start, i_b],
-                    dyn_state.dofs.pos[2 + dof_start, i_b],
+                    dyn_state.dofs.pos[0 + i_d_start, i_b],
+                    dyn_state.dofs.pos[1 + i_d_start, i_b],
+                    dyn_state.dofs.pos[2 + i_d_start, i_b],
                 ],
                 dt=gs.qd_float,
             )
             quat = gu.qd_xyz_to_quat(xyz)
             for i_q_ in qd.static(range(4)):
-                i_q = q_start + i_q_
+                i_q = i_q_start + i_q_
                 rigid_info.qpos[i_q, i_b] = quat[i_q_]
         else:  # (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
-            for i_d_ in range(dyn_info.links.dof_end[I_l] - dof_start):
-                i_q = q_start + i_d_
-                i_d = dof_start + i_d_
+            for i_d_ in range(dyn_info.links.dof_end[I_l] - i_d_start):
+                i_q = i_q_start + i_d_
+                i_d = i_d_start + i_d_
                 rigid_info.qpos[i_q, i_b] = rigid_info.qpos0[i_q, i_b] + dyn_state.dofs.pos[i_d, i_b]
 
 
@@ -1057,7 +1057,7 @@ def kernel_set_dofs_position_forward_kinematics(
         func_sync_dofs_position_to_qpos(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
     for i_b_ in range(envs_idx.shape[0]):
-        i_b = qd.cast(envs_idx[i_b_], qd.i32)
+        i_b = qd.cast(envs_idx[i_b_], gs.qd_int)
         func_forward_kinematics_batch(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
         func_COM_links(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 

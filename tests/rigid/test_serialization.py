@@ -562,7 +562,7 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("requires_grad", [False, True])
-def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_viewer):
+def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_viewer, tol):
     scene = checkpoint_scene
     box, arm, ghost = scene.entities[1], scene.entities[2], scene.entities[4]
     with pytest.raises(gs.GenesisException):
@@ -571,9 +571,13 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     arm.control_dofs_position([0.3, -0.3])
     for _ in range(20):
         scene.step()
-    # 'set_dofs_position' runs right before the state read and leaves the kinematic solver's forward-kinematics flags
-    # False. The record therefore carries False flags for that solver.
+    # The position write leaves kinematic link velocities stale, so the checkpoint must preserve their freshness masks
     ghost.set_dofs_position([0.1, 0.0, 0.0, 0.0, 0.0, 0.0])
+    if not requires_grad:
+        ghost.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+        envs_idx = 0 if n_envs else None
+        ghost.set_dofs_position(position=np.pi / 2, dofs_idx_local=5, envs_idx=envs_idx)
+        ghost.set_pos(pos=[0.0, 1.0, 0.0], envs_idx=envs_idx, skip_forward=True)
     if requires_grad:
         # A backward pass leaves gradients on the arrays, which the state carries. It also closes the forward run, so the
         # scene continues from its own state as the copies do.
@@ -595,6 +599,20 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
         qpos_grad = checkpoint.sim.solvers["RigidSolver"].arrays["rigid_info.qpos.grad"]
         assert_equal((tensor_to_array(qpos_grad) != 0.0).any(), True)
         scene.__setstate__(checkpoint)
+    if not requires_grad:
+        # Live reads and later writes must preserve the independently owned checkpoint's deferred state
+        assert_allclose(ghost.get_links_ang(envs_idx=envs_idx), desired=[0.0, 1.0, 0.0], tol=tol)
+        for checkpoint_saved in (checkpoint, deepcopy(checkpoint)):
+            for _ in range(2):
+                scene.__setstate__(checkpoint_saved)
+                assert_allclose(ghost.get_links_ang(envs_idx=envs_idx), desired=[0.0, 1.0, 0.0], tol=tol)
+                assert_allclose(ghost.get_links_pos(envs_idx=envs_idx), desired=[0.0, 1.0, 0.0], tol=tol)
+                if n_envs:
+                    assert_allclose(ghost.get_links_ang(envs_idx=1), desired=[1.0, 0.0, 0.0], tol=tol)
+                    assert_allclose(ghost.get_links_pos(envs_idx=1), desired=[0.1, 0.0, 0.0], tol=tol)
+                ghost.set_dofs_velocity(velocity=2.0, dofs_idx_local=3, envs_idx=envs_idx, skip_forward=True)
+                assert_allclose(ghost.get_links_ang(envs_idx=envs_idx), desired=[0.0, 2.0, 0.0], tol=tol)
+        scene.__setstate__(checkpoint)
     for _ in range(10):
         scene.step()
     landing_state = scene.sim.rigid_solver.get_state()
@@ -608,8 +626,8 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     twin_checkpoint = twin_scene.__getstate__()
     assert_equal(twin_checkpoint.sim.steps, checkpoint.sim.steps)
     for name, record in checkpoint.sim.solvers.items():
-        assert twin_checkpoint.sim.solvers[name].is_forward_pos_updated == record.is_forward_pos_updated
-        assert twin_checkpoint.sim.solvers[name].is_forward_vel_updated == record.is_forward_vel_updated
+        assert_equal(twin_checkpoint.sim.solvers[name].is_forward_pos_updated, record.is_forward_pos_updated)
+        assert_equal(twin_checkpoint.sim.solvers[name].is_forward_vel_updated, record.is_forward_vel_updated)
         for array_name, array in record.arrays.items():
             assert_equal(twin_checkpoint.sim.solvers[name].arrays[array_name], array)
     for _ in range(10):
@@ -637,6 +655,9 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     # A checkpoint file holds the whole state, so a scene loaded from it steps on where the original went
     loaded_scene = gs.Scene.load_checkpoint(checkpoint_path, show_viewer=show_viewer)
     assert_equal(loaded_scene.get_time(), read_time)
+    if not requires_grad:
+        assert_allclose(loaded_scene.entities[4].get_links_ang(envs_idx=envs_idx), desired=[0.0, 1.0, 0.0], tol=tol)
+        assert_allclose(loaded_scene.entities[4].get_links_pos(envs_idx=envs_idx), desired=[0.0, 1.0, 0.0], tol=tol)
     for _ in range(10):
         loaded_scene.step()
     resumed_state = loaded_scene.sim.rigid_solver.get_state()
@@ -705,12 +726,13 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
     with caplog.at_level("WARNING"):
         scene.build(n_envs=n_envs)
     assert "Recording the state alone" in " ".join(record.getMessage() for record in caplog.records)
+    ghost.set_dofs_velocity(velocity=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
     # The inputs of a step are recorded whether a setter or a pre-step callback writes them
     scene.register_pre_step_callback(lambda: arm.control_dofs_position([0.3 + 0.001 * scene.sim.cur_step_global, -0.3]))
     # A frame is the state a step starts from, so the record of frame i is read right before step i
     states, ghosts_pos, forces, times = [], [], [], []
     for i_step in range(N_STEPS):
-        ghost.set_dofs_position([0.01 * i_step, 0.0, 0.0, 0.0, 0.0, 0.0])
+        ghost.set_dofs_position(position=[0.01 * i_step, 0.0, 0.0, 0.0, 0.0, np.pi / 2])
         states.append(scene.sim.rigid_solver.get_state())
         ghosts_pos.append(ghost.get_links_pos())
         forces.append(box.get_contacts()["force_a"])
@@ -742,6 +764,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
         assert_equal(replayed_state.links_pos, state.links_pos)
         assert_equal(replayed_state.links_quat, state.links_quat)
         assert_equal(replay_scene.entities[4].get_links_pos(), ghost_pos)
+        assert_allclose(replay_scene.entities[4].get_links_ang(), [0.0, 1.0, 0.0], tol=tol)
         assert_equal(replay_scene.entities[1].get_contacts()["force_a"], force)
         assert_equal(replay_scene.get_time(), time)
         assert_equal(exact_trajectory.time(index), time)
@@ -758,6 +781,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
         assert_allclose(replayed_state.links_pos, state.links_pos, tol=tol)
         assert_allclose(replayed_state.links_quat, state.links_quat, tol=tol)
         assert_allclose(replay_scene.entities[4].get_links_pos(), ghost_pos, tol=tol)
+        assert_allclose(replay_scene.entities[4].get_links_ang(), [0.0, 1.0, 0.0], tol=tol)
 
     exact_trajectory.seek(N_STEPS - 1)
     replay_scene.step()
