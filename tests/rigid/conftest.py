@@ -232,6 +232,19 @@ def mimic_hinges():
 
 
 @pytest.fixture(scope="session")
+def single_joint_equality():
+    mjcf = ET.Element("mujoco", model="single_joint_equality")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, pos in (("target", "0 0 0"), ("unrelated", "0 0.25 0")):
+        body = ET.SubElement(worldbody, "body", name=f"{name}_body", pos=pos)
+        ET.SubElement(body, "joint", name=name, type="slide", axis="1 0 0")
+        ET.SubElement(body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "joint", name="fixed_target", joint1="target", polycoef="0.25 1 0 0 0")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
 def scaled_mjcf_joint_equalities(single_joint_equality):
     mjcf = ET.Element("mujoco", model="scaled_mjcf_joint_equalities")
     worldbody = ET.SubElement(mjcf, "worldbody")
@@ -259,7 +272,7 @@ def scaled_mjcf_joint_equalities(single_joint_equality):
         )
     worldbody.extend(single_joint_equality.find("worldbody"))
     equality.extend(single_joint_equality.find("equality"))
-    return ET.tostring(mjcf, encoding="unicode")
+    return mjcf
 
 
 @pytest.fixture(scope="session")

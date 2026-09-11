@@ -1,7 +1,10 @@
-import mujoco
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import pytest
 import torch
+
+import mujoco
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -46,7 +49,7 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_env
     SCALE = 2.0
     entity = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=scaled_mjcf_joint_equalities,
+            file=ET.tostring(scaled_mjcf_joint_equalities, encoding="unicode"),
             scale=SCALE,
         ),
     )
