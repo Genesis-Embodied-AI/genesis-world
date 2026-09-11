@@ -1,34 +1,12 @@
-import xml.etree.ElementTree as ET
-
 import numpy as np
 import pytest
 import torch
-
-import mujoco
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
-from ..utils.mujoco_parity import simulate_and_check_mujoco_consistency
-
-
-@pytest.mark.parametrize("model_name", ["mimic_hinges"])
-@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu])
-def test_equality_joint(gs_sim, mj_sim, gs_solver, tol):
-    # there is an equality constraint
-    assert gs_sim.rigid_solver.n_equalities == 1
-
-    qpos = np.array((0.0, -1.0))
-    qvel = np.array((1.0, -0.3))
-    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
-
-    # check if the two joints are equal
-    gs_qpos = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
-    assert_allclose(gs_qpos[0], gs_qpos[1], tol=tol)
 
 
 @pytest.mark.required
@@ -49,7 +27,7 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_env
     SCALE = 2.0
     entity = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=ET.tostring(scaled_mjcf_joint_equalities, encoding="unicode"),
+            file=scaled_mjcf_joint_equalities,
             scale=SCALE,
         ),
     )
@@ -103,37 +81,6 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_env
 
     assert_allclose(qpos[..., i_target_q] / SCALE, TARGET_POSITION, tol=tol)
     assert_allclose(qpos[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
-@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu])
-def test_equality_link(gs_sim, mj_sim, gs_solver, xml_path):
-    # Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
-    gs_sim.rigid_solver._enable_collision = False
-    mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
-
-    # Must the time constant of the constraints to improve numerical stability
-    TIME_CONSTANT = 0.02
-    for entity in gs_sim.entities:
-        for equality in entity.equalities:
-            equality.set_sol_params((TIME_CONSTANT, *tensor_to_array(equality.desc.sol_params)[1:]))
-    mj_sim.model.eq_solref[:, 0] = TIME_CONSTANT
-
-    # Randomize the initial condition for force convergence of the constraints
-    np.random.seed(0)
-    qpos = np.random.rand(gs_sim.rigid_solver.n_qs) * 0.1
-
-    # Note that the world frame in which weld constraint is computed is different between Mujoco and Genesis for sites.
-    # Mujoco is using site 1, whereas Genesis is using parent link frame of site 1 since it has no notion of site.
-    ignore_constraints = np.any(
-        (mj_sim.model.eq_objtype == mujoco.mjtObj.mjOBJ_SITE) & (mj_sim.model.eq_type == mujoco.mjtEq.mjEQ_WELD)
-    )
-    simulate_and_check_mujoco_consistency(
-        gs_sim, mj_sim, qpos, num_steps=300, tol=1e-7, ignore_constraints=ignore_constraints
-    )
 
 
 @pytest.mark.slow  # ~250s

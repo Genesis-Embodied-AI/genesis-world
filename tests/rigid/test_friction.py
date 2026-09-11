@@ -10,21 +10,6 @@ from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
-from ..utils.mujoco_parity import simulate_and_check_mujoco_consistency
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("model_name", ["hinge_slide"])
-@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu])
-def test_frictionloss(gs_sim, mj_sim, tol):
-    qvel = np.array([0.7, -0.9])
-    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qvel=qvel, num_steps=2000, tol=tol)
-
-    # Check that final velocity is almost zero
-    gs_qvel = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()
-    assert_allclose(gs_qvel, 0.0, tol=1e-2)
 
 
 @pytest.mark.required

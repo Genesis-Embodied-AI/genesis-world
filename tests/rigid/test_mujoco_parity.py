@@ -5,6 +5,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.mujoco_parity import (
@@ -26,6 +27,53 @@ def test_equality_joint(gs_sim, mj_sim, tol):
     (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
     qpos[i_unrelated_q] = 1.0
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos=qpos, num_steps=50, tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["mimic_hinges"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_equality_joint_mimic(gs_sim, mj_sim, tol):
+    assert gs_sim.rigid_solver.n_equalities == 1
+
+    qpos = np.array((0.0, -1.0))
+    qvel = np.array((1.0, -0.3))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
+
+    (entity,) = gs_sim.entities
+    qpos = entity.get_qpos()
+    assert_allclose(qpos[0], qpos[1], tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_equality_link(gs_sim, mj_sim):
+    # Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
+    gs_sim.rigid_solver._enable_collision = False
+    mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
+
+    # Set the time constant of the constraints on both engines to improve numerical stability
+    TIME_CONSTANT = 0.02
+    for entity in gs_sim.entities:
+        for equality in entity.equalities:
+            equality.set_sol_params((TIME_CONSTANT, *tensor_to_array(equality.desc.sol_params)[1:]))
+    mj_sim.model.eq_solref[:, 0] = TIME_CONSTANT
+
+    # Randomize the initial condition for force convergence of the constraints
+    np.random.seed(0)
+    qpos = np.random.rand(gs_sim.rigid_solver.n_qs) * 0.1
+
+    # Note that the world frame in which weld constraint is computed is different between Mujoco and Genesis for sites.
+    # Mujoco is using site 1, whereas Genesis is using parent link frame of site 1 since it has no notion of site.
+    ignore_constraints = np.any(
+        (mj_sim.model.eq_objtype == mujoco.mjtObj.mjOBJ_SITE) & (mj_sim.model.eq_type == mujoco.mjtEq.mjEQ_WELD)
+    )
+    simulate_and_check_mujoco_consistency(
+        gs_sim, mj_sim, qpos, num_steps=300, tol=1e-7, ignore_constraints=ignore_constraints
+    )
 
 
 @pytest.mark.required
@@ -82,6 +130,19 @@ def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
         gs_sim, mj_sim, armature_ratio=3.0, mass_ratio=0.5, inertia_ratio=2.0, com_offset=(0.01, -0.02, 0.03)
     )
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("model_name", ["hinge_slide"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_frictionloss(gs_sim, mj_sim, tol):
+    qvel = np.array([0.7, -0.9])
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qvel=qvel, num_steps=2000, tol=tol)
+
+    (entity,) = gs_sim.entities
+    assert_allclose(entity.get_dofs_velocity(), 0.0, tol=1e-2)
 
 
 @pytest.mark.required
