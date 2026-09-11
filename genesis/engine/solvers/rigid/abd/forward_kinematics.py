@@ -527,12 +527,7 @@ def func_update_geoms_entity(
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_g_ in (
-        # Dynamic inner loop for forward pass
-        range(dyn_info.entities.n_geoms[i_e])
-        if qd.static(not BW)
-        else qd.static(range(rigid_config.max_n_geoms_per_entity))  # Static inner loop for backward pass
-    ):
+    for i_g_ in range(dyn_info.entities.n_geoms[i_e]):
         i_g = dyn_info.entities.geom_start[i_e] + i_g_
         if qd.static(rigid_config.use_hibernation):
             if dyn_state.geoms.is_hibernated[i_g, i_b]:

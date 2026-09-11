@@ -722,15 +722,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 if gs.use_deterministic_algorithms and rigid_config.get("prefer_decomposed_solver", -1) == -1:
                     rigid_config["prefer_decomposed_solver"] = 1
 
-            # Add terms for static inner loops, use -1 if not requires_grad to avoid re-compilation
-            if self.sim.options.requires_grad:
-                rigid_config.update(
-                    max_n_geoms_per_entity=max(len(entity.geoms) for entity in self.entities) if self.links else 0,
-                    n_entities=self._n_entities,
-                    n_links=self._n_links,
-                    n_geoms=self._n_geoms,
-                )
-
         # Jacobi equilibration of the Newton system (see nt_jacobi in array_class.py): every factor, incremental
         # update and solve of every arm rides the scaled coordinates; the reference behaviour keeps the raw factor.
         # Enabled when the model's mass-diagonal spread bound (_jacobi_mass_spread_bound) exceeds what the working
