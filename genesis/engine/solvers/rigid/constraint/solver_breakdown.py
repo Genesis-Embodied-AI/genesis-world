@@ -274,9 +274,11 @@ def _kernel_solve_graph(
             # the coupled elliptic-cone block bracketed around the factor (see func_wrap_cone_hessian).
             solver.func_island_hessian_assemble_all(constraint_state, rigid_info, rigid_config, patch=True)
             solver.func_update_gradient_no_solve(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
-            solver.func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False)
-            solver.func_island_tiled_factor_solve_all(constraint_state, dyn_info, rigid_info, rigid_config)
-            solver.func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True)
+            solver.func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False, is_enabled=True)
+            solver.func_island_tiled_factor_solve_all(
+                constraint_state, dyn_info, rigid_info, rigid_config, write_L=False
+            )
+            solver.func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=True)
         else:
             _func_update_gradient(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
         _func_islands_update_search_direction(dyn_state, constraint_state, rigid_info, rigid_config)
@@ -302,10 +304,8 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
     The per-iteration factor/solve runs per island over the (env, island) work-list, an unpartitioned env being a
     single island spanning every dof.
     """
-    # This entrypoint statically IS the decomposed arm, so it owns its init: it forwards is_decomposed=True to
-    # func_solve_init, whose seed leaves nt_H holding the assembled Hessian the graph maintains (the monolith seed
-    # leaves the factor there instead).
-    solver.func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_decomposed=True)
+    # The graph maintains the assembled Hessian in nt_H, so the seed leaves it there (write_L=False).
+    solver.func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=False)
     if _n_iterations <= 0:
         return
     constraint_state.graph_counter.from_numpy(np.array(_n_iterations, dtype=np.int32))

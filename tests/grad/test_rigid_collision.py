@@ -458,7 +458,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
             rigid_solver.dyn_info,
             rigid_solver.rigid_info,
             rigid_solver.rigid_config,
-            is_decomposed=False,
+            write_L=True,
         )
         func_solve_body(
             rigid_solver.dyn_state,

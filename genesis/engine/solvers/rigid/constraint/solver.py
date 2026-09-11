@@ -2089,10 +2089,14 @@ def func_add_cone_hessian_block(
 
 @qd.func
 def func_wrap_cone_hessian(
-    constraint_state: array_class.ConstraintState, rigid_config: qd.template(), is_removal: qd.template()
+    constraint_state: array_class.ConstraintState,
+    rigid_config: qd.template(),
+    is_removal: qd.template(),
+    is_enabled,
 ):
     """Add (is_removal=False) or remove (is_removal=True) the coupled elliptic-cone Hessian block of every improved
-    env, a no-op unless the elliptic cone is active.
+    env, a no-op unless the elliptic cone is active and is_enabled holds. is_enabled is a runtime value: the seed
+    passes it the arm flag write_L it takes at runtime (see func_solve_init).
 
     Bracketing the per-island tiled factor+solve, which reads nt_H without consuming it, with add then remove lets the
     cone ride the incrementally maintained nt_H: the current cone block is present while the factor reads nt_H, then
@@ -2102,7 +2106,7 @@ def func_wrap_cone_hessian(
         _B = constraint_state.jac.shape[2]
         qd.loop_config(name="wrap_cone_hessian", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32)
         for i_b in range(_B):
-            if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
+            if is_enabled and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
                 func_add_cone_hessian_block(
                     i_b,
                     constraint_state,
@@ -2428,7 +2432,7 @@ def func_island_assemble_factor_solve_tiled(
     tile_size: qd.template(),
     max_dofs: qd.template(),
     is_last_class: qd.template(),
-    write_L: qd.template() = False,
+    write_L,
 ):
     """Barrier-free tiled Cholesky factor + triangular solve of one island's Newton system.
 
@@ -2573,7 +2577,7 @@ def func_island_assemble_factor_solve_tiled(
         # Persist the factor: store L's lower triangle (local sh_L) at the island's global dof rows and columns of
         # nt_H so a caller that reads L from nt_H instead of re-factoring (the monolith's incremental rank-1
         # iterations, see func_cholesky_solve_batch) finds it there.
-        if qd.static(write_L):
+        if write_L:
             i_r = tid
             while i_r < n:
                 gi = constraint_state.island.dof_id[dof_base + i_r, i_b]
@@ -2903,7 +2907,7 @@ def func_island_tiled_factor_solve_all(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    write_L: qd.template() = False,
+    write_L,
 ):
     """Barrier-free per-island factor + solve over the compact (env, island) work-list, one launch per island size
     class (see island_tile_caps).
@@ -4856,23 +4860,20 @@ def func_solve_init(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    is_decomposed: qd.template(),
+    write_L: bool,
 ):
-    # is_decomposed is a hardcoded constant forwarded by the dispatch entrypoint that calls this (the decomposed arm
-    # passes True, the monolith passes False). func_solve_init runs as a separate kernel before the perf-dispatcher
-    # picks an arm, so it CANNOT detect the arm itself - the entrypoint must declare it. The decomposed arm rebuilds
-    # the Hessian on its first graph iteration regardless, so it skips the init factor/gradient here entirely.
+    # write_L is the one thing the two solve arms ask differently of this init, at runtime so that the kernel compiles
+    # once for both: the monolith reads L back from nt_H in its incremental iterations, so its seed persists the
+    # factor there, while the decomposed graph maintains the assembled Hessian in nt_H and re-factors every iteration.
     _B = dyn_state.dofs.acc_smooth.shape[1]
     n_dofs = dyn_state.dofs.acc_smooth.shape[0]
 
     # The one arm whose factor, gradient and convergence certificate are all seeded inside its own body (see
     # _kernel_solve_monolith) rather than here: the GPU per-island monolith without the tiled seed self-inits per env,
-    # so every seed in this kernel routes around it. The perf dispatcher may serve the same simulation with either arm
-    # from one step to the next, so this predicate is a property of the entrypoint that launched this init (via
-    # is_decomposed), evaluated per instantiation.
+    # so every seed in this kernel routes around it. The decomposed arm only runs with the cooperative kernels, which
+    # imply the tiled seed, so the predicate holds for every arm this init can serve.
     is_self_seeding = qd.static(
         rigid_config.solver_type == gs.constraint_solver.Newton
-        and not is_decomposed
         and rigid_config.backend != gs.cpu
         and not rigid_config.enable_tiled_island_seed
     )
@@ -4968,15 +4969,12 @@ def func_solve_init(
         # tile, the same barrier-free factor the decomposed graph runs every iteration. The factor reads nt_H without
         # consuming it, so the graph starts from the assembled Hessian and maintains it from its first iteration on
         # (see _kernel_solve_graph), the coupled elliptic-cone block bracketed around the factor as the graph does. The
-        # monolith reads L back from nt_H in its incremental iterations, so it persists L instead (write_L=True).
+        # monolith keeps the cone in the L it persists, so the removal runs for the graph's seed alone.
         func_island_hessian_assemble_all(constraint_state, rigid_info, rigid_config)
         func_update_gradient_no_solve(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
-        func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False)
-        func_island_tiled_factor_solve_all(
-            constraint_state, dyn_info, rigid_info, rigid_config, write_L=qd.static(not is_decomposed)
-        )
-        if qd.static(is_decomposed):
-            func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True)
+        func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=False, is_enabled=True)
+        func_island_tiled_factor_solve_all(constraint_state, dyn_info, rigid_info, rigid_config, write_L)
+        func_wrap_cone_hessian(constraint_state, rigid_config, is_removal=True, is_enabled=not write_L)
     else:
         if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and not is_self_seeding):
             # Seed the initial Hessian factor. The decomposed arm has no self-init: its graph is linesearch-first, so
@@ -5173,12 +5171,12 @@ def _kernel_solve_monolith(
     )
 )
 def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations):
-    # This entrypoint statically IS the monolith arm, so it owns its init: it forwards is_decomposed=False to
-    # func_solve_init (which groups the constraints by island, factors, and seeds the gradient the packed-env body
-    # consumes), then runs the solve kernel. Keeping the init inside the entrypoint (rather than in resolve, before the
+    # This entrypoint statically IS the monolith arm, so it owns its init: func_solve_init groups the constraints by
+    # island, factors (persisting L in nt_H for the incremental iterations) and seeds the gradient the packed-env body
+    # consumes, then the solve kernel runs. Keeping the init inside the entrypoint (rather than in resolve, before the
     # dispatch) is what lets each arm declare its own init behavior - the dispatcher may run a different arm on the next
     # step during autotuning.
-    func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_decomposed=False)
+    func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=True)
     _kernel_solve_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations)
 
 
