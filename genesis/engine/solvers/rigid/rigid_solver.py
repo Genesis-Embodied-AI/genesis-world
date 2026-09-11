@@ -571,6 +571,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             gs.backend != gs.cpu and not self.sim.options.requires_grad and not sparse_solve and self.n_dofs >= 16
         )
         enable_cooperative_constraint_kernels = enable_tiled_island_seed and self._sim._B <= get_gpu_core_count()
+        # Dofs per kinematic tree, counted from the links here since _init_tree_fields runs once the fields this config
+        # sizes are allocated. A dof-less tree labels no island (see func_build_islands), so a scene holding one
+        # dof-carrying tree forms at most one island per env, and the per-island passes read the env's plain ranges.
+        trees_n_dofs = np.bincount([link.root_idx for link in self.links], [link.n_dofs for link in self.links])
+        is_single_island = int((trees_n_dofs > 0).sum()) == 1
         constraint_layout_batch_first = (
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
@@ -603,6 +608,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             ),
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
+            is_single_island=is_single_island,
             constraint_layout_batch_first=constraint_layout_batch_first,
         )
 
@@ -663,9 +669,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     island_tile_cap_last, island_tile_cap_last + 1
                 ):
                     island_tile_cap_last -= cholesky_tile_size
-                # The smallest dof-carrying tree is counted from the links here, as _init_tree_fields runs once the
-                # fields this config sizes are allocated.
-                trees_n_dofs = np.bincount([link.root_idx for link in self.links], [link.n_dofs for link in self.links])
                 min_tree_dofs = trees_n_dofs[trees_n_dofs > 0].min() if self.n_dofs else 0
                 island_tile_cap_first = cholesky_tile_size
                 while island_tile_cap_first < min_tree_dofs:

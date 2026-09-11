@@ -2845,6 +2845,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # When True, func_solve_init seeds every island's factor with the tiled per-island kernels at any env count. The
     # monolith self-seeds with the scalar per-island factor otherwise. See the rigid solver's resolution for the gating.
     enable_tiled_island_seed: bool = False
+    # When True, the scene holds one dof-carrying kinematic tree, so an env forms at most one island and the
+    # per-island passes of the solve read the env's plain dof and row ranges. See the rigid solver's resolution.
+    is_single_island: bool = False
     # When True, the constraint solver uses the GPU subgroup-cooperative kernel variants (warp-cooperative linesearch
     # refinement, per-friction constraint builder, cooperative mass-matrix assembly), together with the batch-first
     # tensor layouts they expect, eg (_B, len_constraints_) for Jaref / efc_D / ... which unlocks coalesced cross-lane

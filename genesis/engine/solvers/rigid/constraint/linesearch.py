@@ -529,6 +529,48 @@ def func_certify_decision(terms, inertia, rigid_info: array_class.RigidInfo, rig
 
 
 @qd.func
+def func_mv_jv_dense(i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+    """mv = M @ search over the mass blocks and jv = J @ search over every row and dof of one env, the dense read of an
+    env whose single island spans it (see is_single_island), whose loads carry no dependent index."""
+    n_dofs = constraint_state.search.shape[0]
+    for i_d1 in range(n_dofs):
+        mv = gs.qd_float(0.0)
+        for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
+            mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
+        constraint_state.mv[i_d1, i_b] = mv
+    for i_c in range(constraint_state.n_constraints[i_b]):
+        jv = gs.qd_float(0.0)
+        for i_d in range(n_dofs):
+            jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
+        constraint_state.jv[i_c, i_b] = jv
+
+
+@qd.func
+def func_mv_jv_islands(i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+    """mv and jv of the islands of one env still iterating, each row read over its sparse support, so the cost follows
+    the islands' sizes."""
+    for i_island in range(constraint_state.island.n_islands[i_b]):
+        if constraint_state.island.improved[i_island, i_b]:
+            dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
+            dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
+            for i_pos in range(dof_lo, dof_hi):
+                i_d1 = constraint_state.island.dof_id[i_pos, i_b]
+                mv = gs.qd_float(0.0)
+                for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
+                    mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
+                constraint_state.mv[i_d1, i_b] = mv
+            row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
+            row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
+            for i_pos in range(row_lo, row_hi):
+                i_c = constraint_state.island.constraint_id[i_pos, i_b]
+                jv = gs.qd_float(0.0)
+                for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                    i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                    jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
+                constraint_state.jv[i_c, i_b] = jv
+
+
+@qd.func
 def func_linesearch_islands_serial(
     i_b,
     dyn_state: array_class.DynState,
@@ -554,38 +596,13 @@ def func_linesearch_islands_serial(
 
     # mv = M @ search and jv = J @ search over the islands still moving, through the island lists. An env holding one
     # island reads every row densely, whose loads carry no dependent index.
-    if n_islands == 1:
-        for i_d1 in range(n_dofs):
-            mv = gs.qd_float(0.0)
-            for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
-                mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
-            constraint_state.mv[i_d1, i_b] = mv
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            jv = gs.qd_float(0.0)
-            for i_d in range(n_dofs):
-                jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
-            constraint_state.jv[i_c, i_b] = jv
+    if qd.static(rigid_config.is_single_island):
+        func_mv_jv_dense(i_b, constraint_state, rigid_info)
     else:
-        for i_island in range(n_islands):
-            if constraint_state.island.improved[i_island, i_b]:
-                dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
-                dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
-                for i_pos in range(dof_lo, dof_hi):
-                    i_d1 = constraint_state.island.dof_id[i_pos, i_b]
-                    mv = gs.qd_float(0.0)
-                    for i_d2 in range(rigid_info.dofs_mass_block_start[i_d1], rigid_info.dofs_mass_block_end[i_d1]):
-                        mv = mv + rigid_info.mass_mat[i_d1, i_d2, i_b] * constraint_state.search[i_d2, i_b]
-                    constraint_state.mv[i_d1, i_b] = mv
-                row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
-                row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
-                for i_pos in range(row_lo, row_hi):
-                    i_c = constraint_state.island.constraint_id[i_pos, i_b]
-                    jv = gs.qd_float(0.0)
-                    for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                        i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                        jv = jv + constraint_state.jac[i_c, i_d, i_b] * constraint_state.search[i_d, i_b]
-                    constraint_state.jv[i_c, i_b] = jv
-
+        if n_islands == 1:
+            func_mv_jv_dense(i_b, constraint_state, rigid_info)
+        else:
+            func_mv_jv_islands(i_b, constraint_state, rigid_info)
     is_moved = False
     for i_island in range(n_islands):
         if constraint_state.island.improved[i_island, i_b]:

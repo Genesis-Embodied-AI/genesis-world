@@ -4315,40 +4315,44 @@ def func_is_row_moving(i_c, i_b, constraint_state: array_class.ConstraintState, 
 
 
 @qd.func
-def func_qfrc_scatter_sparse(i_b, constraint_state: array_class.ConstraintState, skip_settled_islands: qd.template()):
+def func_qfrc_scatter_sparse(i_b, constraint_state: array_class.ConstraintState, walk_islands: qd.template()):
     """Accumulate qfrc_constraint = J^T @ efc_force of one env by scattering each row over its sparse support.
 
-    The dofs are cleared first. Under skip_settled_islands the rows and dofs are those of the islands still moving,
-    walked through the island lists (see func_update_constraint_batch).
+    The dofs are cleared first. Under walk_islands the rows and dofs are those of the islands still moving, walked
+    through the island lists by offset where a list holds consecutive indices (see func_update_constraint_batch).
     """
     n_dofs = constraint_state.qfrc_constraint.shape[0]
-    if qd.static(skip_settled_islands):
-        for i_island in range(constraint_state.island.n_islands[i_b]):
-            if constraint_state.island.improved[i_island, i_b]:
-                dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
-                dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
-                for i_pos in range(dof_lo, dof_hi):
-                    constraint_state.qfrc_constraint[constraint_state.island.dof_id[i_pos, i_b], i_b] = gs.qd_float(0.0)
-                row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
-                row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
-                for i_pos in range(row_lo, row_hi):
-                    i_c = constraint_state.island.constraint_id[i_pos, i_b]
-                    for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                        i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                        constraint_state.qfrc_constraint[i_d, i_b] = (
-                            constraint_state.qfrc_constraint[i_d, i_b]
-                            + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
-                        )
-    else:
-        for i_d in range(n_dofs):
-            constraint_state.qfrc_constraint[i_d, i_b] = gs.qd_float(0.0)
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
-                constraint_state.qfrc_constraint[i_d, i_b] = (
-                    constraint_state.qfrc_constraint[i_d, i_b]
-                    + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
-                )
+    n_groups = 1
+    if qd.static(walk_islands):
+        n_groups = constraint_state.island.n_islands[i_b]
+    for i_group in range(n_groups):
+        is_moving = True
+        row_lo = 0
+        row_hi = constraint_state.n_constraints[i_b]
+        row_base = 0
+        dof_lo = 0
+        dof_hi = n_dofs
+        dof_base = 0
+        if qd.static(walk_islands):
+            is_moving = constraint_state.island.improved[i_group, i_b] != 0
+            row_lo = constraint_state.island.constraint_slices.start[i_group, i_b]
+            row_hi = row_lo + constraint_state.island.constraint_slices.n[i_group, i_b]
+            row_base = linesearch.func_list_range_start(constraint_state.island.constraint_id, row_lo, row_hi, i_b)
+            dof_lo = constraint_state.island.dof_slices.start[i_group, i_b]
+            dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_group, i_b]
+            dof_base = constraint_state.island.dof_range_start[i_group, i_b]
+        if is_moving:
+            for i_pos in range(dof_lo, dof_hi):
+                i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                constraint_state.qfrc_constraint[i_d, i_b] = gs.qd_float(0.0)
+            for i_pos in range(row_lo, row_hi):
+                i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                    i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                    constraint_state.qfrc_constraint[i_d, i_b] = (
+                        constraint_state.qfrc_constraint[i_d, i_b]
+                        + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
+                    )
 
 
 @qd.func
@@ -4378,90 +4382,91 @@ def func_update_constraint_batch(
     """Active flags, constraint forces, qfrc_constraint and cost of one env from its current Jaref.
 
     Under skip_settled_islands the pass walks the rows and dofs of the islands still moving through the island lists
-    (constraint_id, dof_id, see IslandState): an island that stands still (see improved in IslandState) keeps its
-    values, its Jaref being frozen, and its rows show no flip to the incremental factor, whose changed-row scan runs
-    per moving island. The seed leaves it False and walks every row and dof, the island labels being resolved after
-    this pass there. The cost then sums the visited rows and dofs, which the iterations read nowhere; only the seed
-    compares costs."""
+    (constraint_id, dof_id, see IslandState), by offset where a list holds consecutive indices: an island that stands
+    still (see improved in IslandState) keeps its values, its Jaref being frozen, and its rows show no flip to the
+    incremental factor, whose changed-row scan runs per moving island. The seed leaves it False and walks the env's
+    plain ranges, the island labels being resolved after this pass there, and so does every pass of a scene holding one
+    island per env (see is_single_island), whose only island is the one still moving. The cost then sums the visited
+    rows and dofs, which the iterations read nowhere; only the seed compares costs."""
     n_dofs = constraint_state.qfrc_constraint.shape[0]
     n_con = constraint_state.n_constraints[i_b]
-    n_islands = constraint_state.island.n_islands[i_b]
+    walk_islands = qd.static(skip_settled_islands and not rigid_config.is_single_island)
+    n_groups = 1
+    if qd.static(walk_islands):
+        n_groups = constraint_state.island.n_islands[i_b]
 
     cost_i = gs.qd_float(0.0)
-
-    # Snapshot the previous active set in a separate pass BEFORE any active is recomputed: a coupled elliptic-cone
-    # head writes active for its two tangent rows, so capturing prev_active inline (per row, in the recompute loop)
-    # would read a tangent row's already-updated value once the head ran first, hiding its flip from the incremental
-    # factor's changed-constraint list. Pyramidal rows only write their own active, so they keep the fused inline
-    # snapshot below.
-    if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction):
-        if qd.static(skip_settled_islands):
-            for i_island in range(n_islands):
-                if constraint_state.island.improved[i_island, i_b]:
-                    row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
-                    row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
-                    for i_pos in range(row_lo, row_hi):
-                        i_c = constraint_state.island.constraint_id[i_pos, i_b]
-                        constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
-        else:
-            for i_c in range(n_con):
-                constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
-
-    # Beware 'active' does not refer to whether a constraint is active, but rather whether its quadratic cost is active
-    if qd.static(skip_settled_islands):
-        for i_island in range(n_islands):
-            if constraint_state.island.improved[i_island, i_b]:
-                row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
-                row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
+    for i_group in range(n_groups):
+        is_moving = True
+        row_lo = 0
+        row_hi = n_con
+        row_base = 0
+        if qd.static(walk_islands):
+            is_moving = constraint_state.island.improved[i_group, i_b] != 0
+            row_lo = constraint_state.island.constraint_slices.start[i_group, i_b]
+            row_hi = row_lo + constraint_state.island.constraint_slices.n[i_group, i_b]
+            row_base = linesearch.func_list_range_start(constraint_state.island.constraint_id, row_lo, row_hi, i_b)
+        if is_moving:
+            # Snapshot the previous active set in a separate pass BEFORE any active is recomputed: a coupled
+            # elliptic-cone head writes active for its two tangent rows, so capturing prev_active inline (per row, in
+            # the recompute loop) would read a tangent row's already-updated value once the head ran first, hiding its
+            # flip from the incremental factor's changed-constraint list. Pyramidal rows only write their own active,
+            # so they keep the fused inline snapshot below.
+            if qd.static(
+                rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction
+            ):
                 for i_pos in range(row_lo, row_hi):
-                    i_c = constraint_state.island.constraint_id[i_pos, i_b]
-                    cost_i = cost_i + _func_update_efc_force_body(i_c, i_b, constraint_state, rigid_config)
-    else:
-        for i_c in range(n_con):
-            cost_i = cost_i + _func_update_efc_force_body(i_c, i_b, constraint_state, rigid_config)
+                    i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                    constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
+            # Beware 'active' does not refer to whether a constraint is active, but rather whether its quadratic cost
+            # is active
+            for i_pos in range(row_lo, row_hi):
+                i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                cost_i = cost_i + _func_update_efc_force_body(i_c, i_b, constraint_state, rigid_config)
 
     # qfrc_constraint = J^T @ efc_force. The CPU skyline solve scatters each row over its sparse support, and so does an
     # env holding several islands, its cost following the islands' sizes, while one island spanning the env gathers
     # every dof over every row, whose loads carry no dependent index.
-    is_gathered = constraint_state.island.n_islands[i_b] == 1
     if qd.static(rigid_config.sparse_solve):
-        is_gathered = False
-    if is_gathered:
+        func_qfrc_scatter_sparse(i_b, constraint_state, walk_islands)
+    elif qd.static(rigid_config.is_single_island):
         func_qfrc_gather_dense(i_b, constraint_state)
     else:
-        func_qfrc_scatter_sparse(i_b, constraint_state, skip_settled_islands)
+        if constraint_state.island.n_islands[i_b] == 1:
+            func_qfrc_gather_dense(i_b, constraint_state)
+        else:
+            func_qfrc_scatter_sparse(i_b, constraint_state, walk_islands)
 
     # (Mx - Mx') * (x - x') over the dofs, D * (Jx - aref) ** 2 over the rows
-    if qd.static(skip_settled_islands):
-        for i_island in range(n_islands):
-            if constraint_state.island.improved[i_island, i_b]:
-                dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
-                dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
-                for i_pos in range(dof_lo, dof_hi):
-                    i_d = constraint_state.island.dof_id[i_pos, i_b]
-                    cost_i = cost_i + 0.5 * (Ma[i_d, i_b] - dyn_state.dofs.force[i_d, i_b]) * (
-                        qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b]
-                    )
-                row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
-                row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
-                for i_pos in range(row_lo, row_hi):
-                    i_c = constraint_state.island.constraint_id[i_pos, i_b]
-                    cost_i = cost_i + 0.5 * (
-                        constraint_state.Jaref[i_c, i_b] ** 2
-                        * constraint_state.efc_D[i_c, i_b]
-                        * constraint_state.active[i_c, i_b]
-                    )
-    else:
-        for i_d in range(n_dofs):
-            cost_i = cost_i + 0.5 * (Ma[i_d, i_b] - dyn_state.dofs.force[i_d, i_b]) * (
-                qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b]
-            )
-        for i_c in range(n_con):
-            cost_i = cost_i + 0.5 * (
-                constraint_state.Jaref[i_c, i_b] ** 2
-                * constraint_state.efc_D[i_c, i_b]
-                * constraint_state.active[i_c, i_b]
-            )
+    for i_group in range(n_groups):
+        is_moving = True
+        row_lo = 0
+        row_hi = n_con
+        row_base = 0
+        dof_lo = 0
+        dof_hi = n_dofs
+        dof_base = 0
+        if qd.static(walk_islands):
+            is_moving = constraint_state.island.improved[i_group, i_b] != 0
+            row_lo = constraint_state.island.constraint_slices.start[i_group, i_b]
+            row_hi = row_lo + constraint_state.island.constraint_slices.n[i_group, i_b]
+            row_base = linesearch.func_list_range_start(constraint_state.island.constraint_id, row_lo, row_hi, i_b)
+            dof_lo = constraint_state.island.dof_slices.start[i_group, i_b]
+            dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_group, i_b]
+            dof_base = constraint_state.island.dof_range_start[i_group, i_b]
+        if is_moving:
+            for i_pos in range(dof_lo, dof_hi):
+                i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                cost_i = cost_i + 0.5 * (Ma[i_d, i_b] - dyn_state.dofs.force[i_d, i_b]) * (
+                    qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b]
+                )
+            for i_pos in range(row_lo, row_hi):
+                i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                cost_i = cost_i + 0.5 * (
+                    constraint_state.Jaref[i_c, i_b] ** 2
+                    * constraint_state.efc_D[i_c, i_b]
+                    * constraint_state.active[i_c, i_b]
+                )
 
     cost[i_b] = cost_i
 
@@ -4682,15 +4687,22 @@ def func_update_gradient_batch(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    # The gradient of an island standing still is kept (see improved in IslandState), and a hibernated island carries
-    # a zero gradient and search direction, see func_island_tiled_factor_solve_all. Each island's dofs are walked
-    # through its dof list, so the pass costs the moving islands alone.
+    """Gradient of every island of one env that still iterates and its Newton direction Mgrad through the island's
+    factor, a hibernated island carrying zeros. The dofs are walked through the island list by offset where it holds
+    consecutive indices, and over the env's plain range in a scene holding one island per env (see is_single_island).
+    """
+    n_dofs = constraint_state.grad.shape[0]
     for i_island in range(constraint_state.island.n_islands[i_b]):
-        dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
-        dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
+        dof_lo = 0
+        dof_hi = n_dofs
+        dof_base = 0
+        if qd.static(not rigid_config.is_single_island):
+            dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
+            dof_hi = dof_lo + constraint_state.island.dof_slices.n[i_island, i_b]
+            dof_base = constraint_state.island.dof_range_start[i_island, i_b]
         if constraint_state.island.improved[i_island, i_b]:
             for i_pos in range(dof_lo, dof_hi):
-                i_d = constraint_state.island.dof_id[i_pos, i_b]
+                i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                 constraint_state.grad[i_d, i_b] = (
                     constraint_state.Ma[i_d, i_b]
                     - dyn_state.dofs.force[i_d, i_b]
@@ -4699,17 +4711,14 @@ def func_update_gradient_batch(
         elif qd.static(rigid_config.use_hibernation):
             if constraint_state.island.is_hibernated[i_island, i_b]:
                 for i_pos in range(dof_lo, dof_hi):
-                    i_d = constraint_state.island.dof_id[i_pos, i_b]
+                    i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                     constraint_state.grad[i_d, i_b] = gs.qd_float(0.0)
                     constraint_state.Mgrad[i_d, i_b] = gs.qd_float(0.0)
-
     if qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
         func_solve_mass_batch(
             i_b, constraint_state.grad, constraint_state.Mgrad, dyn_state, dyn_info, rigid_info, rigid_config
         )
-
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
-        # Mgrad = H^{-1} @ grad solved per island on each island's block (factored above)
         for i_island in range(constraint_state.island.n_islands[i_b]):
             if constraint_state.island.improved[i_island, i_b]:
                 func_cholesky_solve_batch(
