@@ -52,10 +52,10 @@ def func_list_range_start(ids: qd.Tensor, lo, hi, i_b):
 def func_list_item(ids: qd.Tensor, i_pos, lo, range_start, i_b):
     """Item at position i_pos of the id list ids[lo:...] of one env: an offset from ``range_start`` when the range is
     consecutive (see func_list_range_start), otherwise the list entry."""
-    i = range_start + (i_pos - lo)
+    i_item = range_start + (i_pos - lo)
     if range_start < 0:
-        i = ids[i_pos, i_b]
-    return i
+        i_item = ids[i_pos, i_b]
+    return i_item
 
 
 @qd.func
