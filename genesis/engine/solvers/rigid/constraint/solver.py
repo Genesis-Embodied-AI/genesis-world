@@ -2706,16 +2706,22 @@ def func_island_hessian_assemble_block(
     i_b,
     i_island,
     tid,
+    sh_jac,
+    sh_D,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     block_dim: qd.template(),
+    row_tile: qd.template(),
 ):
     """Assemble the Hessian block M + J.T @ D @ J of island i_island into nt_H by the block_dim lanes of a block.
 
-    Every lane accumulates one entry of the block's lower triangle over the island's rows, at the island's global dof
-    rows and columns, the dofs indexed by offset where the island's list holds consecutive dofs (see dof_range_start in
-    IslandState) and read from the list otherwise.
+    Every lane owns entries of the block's lower triangle at the island's global dof rows and columns, the dofs indexed
+    by offset where the island's list holds consecutive dofs (see dof_range_start in IslandState) and read from the
+    list otherwise. The mass block is written first, then the rows are added row_tile at a time from the shared tiles
+    sh_jac (the rows' Jacobian over the island's dofs) and sh_D (their weights), each Jacobian entry read from global
+    memory once per block instead of once per Hessian entry. An island wider than sh_jac, above the last tile cap,
+    reads its Jacobian from global memory directly.
 
     Under Jacobi equilibration the block is scaled to unit diagonal afterwards, see nt_jacobi in array_class.py.
     """
@@ -2730,18 +2736,56 @@ def func_island_hessian_assemble_block(
         i_d, j_d = linear_to_lower_tri(i_tri)
         gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
         gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
-        h = rigid_info.mass_mat[gi, gj, i_b]
-        for i_lcon in range(con_n):
-            i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
-            if constraint_state.active[i_c, i_b]:
-                h = (
-                    h
-                    + constraint_state.jac[i_c, gi, i_b]
-                    * constraint_state.jac[i_c, gj, i_b]
-                    * constraint_state.efc_D[i_c, i_b]
-                )
-        constraint_state.nt_H[i_b, gi, gj] = h
+        constraint_state.nt_H[i_b, gi, gj] = rigid_info.mass_mat[gi, gj, i_b]
         i_tri = i_tri + block_dim
+    is_staged = True
+    if qd.static(rigid_config.has_island_above_tile_cap):
+        is_staged = n <= qd.static(rigid_config.island_tile_cap_last)
+    if is_staged:
+        for i_chunk in range((con_n + row_tile - 1) // row_tile):
+            c0 = i_chunk * row_tile
+            n_rows = qd.min(row_tile, con_n - c0)
+            qd.simt.block.sync()
+            idx = tid
+            while idx < n_rows * n:
+                i_r = idx // n
+                ld = idx % n
+                i_c = constraint_state.island.constraint_id[con_base + c0 + i_r, i_b]
+                gd = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + ld, dof_lo, dof_base, i_b)
+                sh_jac[i_r, ld] = constraint_state.jac[i_c, gd, i_b]
+                idx = idx + block_dim
+            if tid < n_rows:
+                i_c = constraint_state.island.constraint_id[con_base + c0 + tid, i_b]
+                sh_D[tid] = constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
+            qd.simt.block.sync()
+            i_tri = tid
+            while i_tri < n_tri:
+                i_d, j_d = linear_to_lower_tri(i_tri)
+                h = gs.qd_float(0.0)
+                for i_r in range(n_rows):
+                    h = h + sh_jac[i_r, i_d] * sh_jac[i_r, j_d] * sh_D[i_r]
+                gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
+                gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
+                constraint_state.nt_H[i_b, gi, gj] = constraint_state.nt_H[i_b, gi, gj] + h
+                i_tri = i_tri + block_dim
+    else:
+        i_tri = tid
+        while i_tri < n_tri:
+            i_d, j_d = linear_to_lower_tri(i_tri)
+            gi = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + i_d, dof_lo, dof_base, i_b)
+            gj = linesearch.func_list_item(constraint_state.island.dof_id, dof_lo + j_d, dof_lo, dof_base, i_b)
+            h = constraint_state.nt_H[i_b, gi, gj]
+            for i_lcon in range(con_n):
+                i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+                if constraint_state.active[i_c, i_b]:
+                    h = (
+                        h
+                        + constraint_state.jac[i_c, gi, i_b]
+                        * constraint_state.jac[i_c, gj, i_b]
+                        * constraint_state.efc_D[i_c, i_b]
+                    )
+            constraint_state.nt_H[i_b, gi, gj] = h
+            i_tri = i_tri + block_dim
     if qd.static(rigid_config.enable_jacobi_equilibration):
         qd.simt.block.sync()
         i_d = tid
@@ -2868,6 +2912,7 @@ def func_island_hessian_assemble_all(
     N_CLASSES = qd.static(len(array_class.island_tile_caps(rigid_config)))
     LAST_CAP = qd.static(rigid_config.island_tile_cap_last)
     BLOCK_DIM = qd.static(128)
+    ROW_TILE = qd.static(32)
     n_slots = constraint_state.island.factor_worklist_i_b.shape[0]
     region = n_slots // N_CLASSES
     qd.loop_config(name="island_hessian_assemble", block_dim=BLOCK_DIM)
@@ -2875,6 +2920,8 @@ def func_island_hessian_assemble_all(
         i_work = i // BLOCK_DIM
         tid = i % BLOCK_DIM
         sh_scan = qd.simt.block.SharedArray((BLOCK_DIM // 32,), gs.qd_int)
+        sh_jac = qd.simt.block.SharedArray((ROW_TILE, LAST_CAP), gs.qd_float)
+        sh_D = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_float)
         i_class = i_work // region
         if i_work - i_class * region < constraint_state.island.factor_worklist_size[i_class]:
             i_b = constraint_state.island.factor_worklist_i_b[i_work]
@@ -2889,7 +2936,16 @@ def func_island_hessian_assemble_all(
                             )
                         elif constraint_state.island.dof_range_start[i_island, i_b] >= 0:
                             func_island_hessian_assemble_block(
-                                i_b, i_island, tid, constraint_state, rigid_info, rigid_config, BLOCK_DIM
+                                i_b,
+                                i_island,
+                                tid,
+                                sh_jac,
+                                sh_D,
+                                constraint_state,
+                                rigid_info,
+                                rigid_config,
+                                BLOCK_DIM,
+                                ROW_TILE,
                             )
                     elif qd.static(patch):
                         func_island_hessian_patch_block(
@@ -2897,7 +2953,16 @@ def func_island_hessian_assemble_all(
                         )
                     else:
                         func_island_hessian_assemble_block(
-                            i_b, i_island, tid, constraint_state, rigid_info, rigid_config, BLOCK_DIM
+                            i_b,
+                            i_island,
+                            tid,
+                            sh_jac,
+                            sh_D,
+                            constraint_state,
+                            rigid_info,
+                            rigid_config,
+                            BLOCK_DIM,
+                            ROW_TILE,
                         )
 
 
