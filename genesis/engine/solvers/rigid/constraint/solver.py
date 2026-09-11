@@ -1444,12 +1444,13 @@ def _sort_contacts_and_build_islands(
     partition are the same whichever way they are built, so the constraint order the caller assembles is too.
     """
     _B = constraint_state.jac.shape[2]
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
-        _K = qd.static(32)
+    if qd.static(rigid_config.enable_tiled_island_seed):
         # Reset the per-class (env, island) work-list counters before the per-env builds append to them
         N_CLASSES = qd.static(len(array_class.island_tile_caps(rigid_config)))
         for i_class in range(N_CLASSES):
             constraint_state.island.factor_worklist_size[i_class] = 0
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+        _K = qd.static(32)
         qd.loop_config(name="sort_contacts_and_build_islands", block_dim=_K)
         for i_flat in range(_B * _K):
             tid = i_flat % _K
@@ -1460,20 +1461,9 @@ def _sort_contacts_and_build_islands(
             func_build_islands_coop(
                 i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
             )
-            # Append this env's islands to the work-list of their size class, the smallest tile cap holding the
-            # island's dofs and the last class for the islands above every cap (see island_tile_caps).
-            CAPS = qd.static(array_class.island_tile_caps(rigid_config))
-            region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
             i_island = tid
             while i_island < constraint_state.island.n_islands[i_b]:
-                n_island_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-                i_class = N_CLASSES - 1
-                for k in qd.static(range(N_CLASSES - 2, -1, -1)):
-                    if n_island_dofs <= CAPS[k]:
-                        i_class = k
-                i_slot = i_class * region + qd.atomic_add(constraint_state.island.factor_worklist_size[i_class], 1)
-                constraint_state.island.factor_worklist_i_b[i_slot] = i_b
-                constraint_state.island.factor_worklist_i_island[i_slot] = i_island
+                func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
                 i_island = i_island + _K
     else:
         qd.loop_config(
@@ -1492,6 +1482,28 @@ def _sort_contacts_and_build_islands(
                     dyn_state.geoms.quat,
                 )
             func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            if qd.static(rigid_config.enable_tiled_island_seed):
+                for i_island in range(constraint_state.island.n_islands[i_b]):
+                    func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
+
+
+@qd.func
+def func_append_factor_worklist(
+    i_b, i_island, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+):
+    """Append island i_island of env i_b to the factor work-list of its size class, the smallest tile cap holding the
+    island's dofs and the last class for the islands above every cap (see island_tile_caps)."""
+    CAPS = qd.static(array_class.island_tile_caps(rigid_config))
+    N_CLASSES = qd.static(len(CAPS))
+    region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
+    n_island_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    i_class = N_CLASSES - 1
+    for k in qd.static(range(N_CLASSES - 2, -1, -1)):
+        if n_island_dofs <= CAPS[k]:
+            i_class = k
+    i_slot = i_class * region + qd.atomic_add(constraint_state.island.factor_worklist_size[i_class], 1)
+    constraint_state.island.factor_worklist_i_b[i_slot] = i_b
+    constraint_state.island.factor_worklist_i_island[i_slot] = i_island
 
 
 @qd.kernel(fastcache=True)
@@ -4849,15 +4861,15 @@ def func_solve_init(
     n_dofs = dyn_state.dofs.acc_smooth.shape[0]
 
     # The one arm whose factor, gradient and convergence certificate are all seeded inside its own body (see
-    # _kernel_solve_monolith) rather than here: the GPU per-island monolith with the cooperative kernels off
-    # self-inits per env, so every seed in this kernel routes around it. The perf dispatcher may serve the same
-    # simulation with either arm from one step to the next, so this predicate is a property of the entrypoint that
-    # launched this init (via is_decomposed), evaluated per instantiation.
+    # _kernel_solve_monolith) rather than here: the GPU per-island monolith without the tiled seed self-inits per env,
+    # so every seed in this kernel routes around it. The perf dispatcher may serve the same simulation with either arm
+    # from one step to the next, so this predicate is a property of the entrypoint that launched this init (via
+    # is_decomposed), evaluated per instantiation.
     is_self_seeding = qd.static(
         rigid_config.solver_type == gs.constraint_solver.Newton
         and not is_decomposed
         and rigid_config.backend != gs.cpu
-        and not rigid_config.enable_cooperative_constraint_kernels
+        and not rigid_config.enable_tiled_island_seed
     )
 
     if qd.static(rigid_config.enable_mujoco_compatibility):
@@ -4946,10 +4958,8 @@ def func_solve_init(
             func_group_constraints_by_island(i_b, constraint_state, rigid_config)
     constraint_state.solver_iter_counter[()] = 0
 
-    if qd.static(
-        rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_cooperative_constraint_kernels
-    ):
-        # The cooperative seed: every island's Hessian block assembled into nt_H, then factored and solved in its shared
+    if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_tiled_island_seed):
+        # The tiled seed: every island's Hessian block assembled into nt_H, then factored and solved in its shared
         # tile, the same barrier-free factor the decomposed graph runs every iteration. The factor reads nt_H without
         # consuming it, so the graph starts from the assembled Hessian and maintains it from its first iteration on
         # (see _kernel_solve_graph), the coupled elliptic-cone block bracketed around the factor as the graph does. The
@@ -5125,11 +5135,11 @@ def _kernel_solve_monolith(
             if qd.static(
                 rigid_config.backend != gs.cpu
                 and rigid_config.solver_type == gs.constraint_solver.Newton
-                and not rigid_config.enable_cooperative_constraint_kernels
+                and not rigid_config.enable_tiled_island_seed
             ):
-                # A GPU with the cooperative kernels off: func_solve_init skips its seed, so the monolith self-seeds
-                # each island's scalar factor + gradient + search here (once per step). With the cooperative kernels
-                # on, func_solve_init already seeded the factor (L in nt_H).
+                # A GPU without the tiled seed: func_solve_init skips its seed, so the monolith self-seeds each
+                # island's scalar factor + gradient + search here (once per step). With the tiled seed,
+                # func_solve_init already seeded the factor (L in nt_H).
                 func_hessian_and_cholesky_factor_direct_batch(
                     i_b, constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
                 )

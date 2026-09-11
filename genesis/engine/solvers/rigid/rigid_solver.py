@@ -559,20 +559,18 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # stride-n_envs access. Batched sweeps key their iteration-axis order on the same flag, so that iteration order
         # always follows the physical layout.
         #
-        # The subgroup-cooperative constraint kernels (and the batch-first layout they expect) win when per-env compute
-        # density amortizes the warp-per-env overhead, and lose when envs are sparse and many (the 1-thread-per-env path
-        # is already coalesced under (len_constraints_, _B)). They are also the layout the decomposed solve arm requires.
-        # Empirically the cooperative path wins from ~4096 envs at n_dofs >= ~18 and loses once the env dimension alone
-        # saturates the GPU, so the env bound is get_gpu_core_count() (the threshold envs_undersaturate uses below), not
-        # a fixed literal, combined with n_dofs >= 16. Sparse solve is excluded (the cooperative qfrc kernel and the
+        # The tiled per-island seed of the factor (see enable_tiled_island_seed in array_class.py) runs on GPU at any
+        # env count: the scalar per-island seed it replaces is a per-env thread walking O(n^3) dependent loads, which
+        # above the core count costs more than the whole Newton iteration body. The subgroup-cooperative body kernels
+        # (and the batch-first layout they expect, also the layout the decomposed solve arm requires) win when per-env
+        # compute density amortizes the warp-per-env overhead and lose once the env dimension alone saturates the GPU,
+        # so they add the get_gpu_core_count() env bound (the threshold envs_undersaturate uses below), winning from
+        # ~4096 envs at n_dofs >= ~18. Sparse solve is excluded from both (the cooperative qfrc kernel and the
         # flipped-layout jac readers are dense-only).
-        enable_cooperative_constraint_kernels = (
-            gs.backend != gs.cpu
-            and not self.sim.options.requires_grad
-            and not sparse_solve
-            and self._sim._B <= get_gpu_core_count()
-            and self.n_dofs >= 16
+        enable_tiled_island_seed = (
+            gs.backend != gs.cpu and not self.sim.options.requires_grad and not sparse_solve and self.n_dofs >= 16
         )
+        enable_cooperative_constraint_kernels = enable_tiled_island_seed and self._sim._B <= get_gpu_core_count()
         constraint_layout_batch_first = (
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
@@ -603,6 +601,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             parallel_init=(
                 gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
             ),
+            enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             constraint_layout_batch_first=constraint_layout_batch_first,
         )
