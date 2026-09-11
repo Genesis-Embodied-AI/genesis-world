@@ -888,6 +888,8 @@ def test_many_objects_collision(convexify, show_viewer, tol):
     asset_files = {name: f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in assets}
     objs = []
     obj_names = []
+    # Force numpy seed because the settled pile is extremely sensitive to the initial poses
+    np.random.seed(42)
     for i in range(80):
         gx, gy, gz = i % 4, (i // 4) % 4, i // 16
         name = assets[(gx + gy + gz) % len(assets)][0]
