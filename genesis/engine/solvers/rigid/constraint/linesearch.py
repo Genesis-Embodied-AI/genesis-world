@@ -563,6 +563,15 @@ def func_mv_jv_islands(i_b, constraint_state: array_class.ConstraintState, rigid
 
 
 @qd.func
+def func_block_sum(value):
+    """Sum value over the _K lanes of a block, every lane receiving the bits lane 0 holds."""
+    # The butterfly adds the same operands on the two lanes of every pair, but the compiler contracts the multiply that
+    # produced a lane's own operand into that add, so the two lanes round differently, and a decision every lane takes
+    # on the sum (the search rounds, the exit test) then diverges.
+    return qd.simt.subgroup.broadcast(qd.simt.subgroup.reduce_all_add_tiled(value, 5), qd.u32(0))
+
+
+@qd.func
 def func_row_p0_sums_by_class(
     i_b,
     i_first,
@@ -683,8 +692,8 @@ def func_search_single_island(
         sums_rows = func_row_p0_sums_by_class(i_b, tid, stride, ne, nef, ncone, n_con, constraint_state, rigid_config)
         if qd.static(is_coop):
             for k in qd.static(range(4)):
-                sums_dofs[k] = qd.simt.subgroup.reduce_all_add_tiled(sums_dofs[k], 5)
-                sums_rows[k] = qd.simt.subgroup.reduce_all_add_tiled(sums_rows[k], 5)
+                sums_dofs[k] = func_block_sum(sums_dofs[k])
+                sums_rows[k] = func_block_sum(sums_rows[k])
         phase, ls_result, gtol, base_1, base_2, p0_deriv_0, p0_deriv_1, alpha_0 = func_ls_state_init(
             sums_dofs, sums_rows, constraint_state.island.inertia[0, i_b], rigid_info, rigid_config
         )
@@ -698,7 +707,7 @@ def func_search_single_island(
         ls_it = 1
         res_alpha = gs.qd_float(0.0)
         improvement = gs.qd_float(0.0)
-        # Under is_coop the lanes hold identical state, the reductions handing every lane the same sums, so the
+        # Under is_coop the lanes hold identical state, the block sums handing every lane the same bits, so the
         # rounds are uniform across the block
         while phase < 3:
             acc = func_row_alpha_sums_by_class(
@@ -707,7 +716,7 @@ def func_search_single_island(
             if qd.static(is_coop):
                 for k in qd.static(range(9)):
                     if k < 3 * n_alphas:
-                        acc[k] = qd.simt.subgroup.reduce_all_add_tiled(acc[k], 5)
+                        acc[k] = func_block_sum(acc[k])
             (
                 phase,
                 n_alphas,
@@ -802,7 +811,7 @@ def func_exit_single_island(
         if qd.static(is_coop):
             # The Hager-Zhang terms stay zero under Newton, see func_dof_exit_terms
             for k in qd.static(range(7 if rigid_config.solver_type == gs.constraint_solver.CG else 2)):
-                terms[k] = qd.simt.subgroup.reduce_all_add_tiled(terms[k], 5)
+                terms[k] = func_block_sum(terms[k])
         inertia = constraint_state.island.inertia[0, i_b]
         cg_beta = gs.qd_float(0.0)
         if qd.static(certify):
