@@ -4547,7 +4547,9 @@ def func_qfrc_scatter_sparse(i_b, constraint_state: array_class.ConstraintState,
                 i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                 constraint_state.qfrc_constraint[i_d, i_b] = gs.qd_float(0.0)
             for i_pos in range(row_lo, row_hi):
-                i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                i_c = i_pos
+                if qd.static(walk_islands):
+                    i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                 for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
                     i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
                     constraint_state.qfrc_constraint[i_d, i_b] = (
@@ -4617,12 +4619,18 @@ def func_update_constraint_batch(
                 rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction
             ):
                 for i_pos in range(row_lo, row_hi):
-                    i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                    i_c = i_pos
+                    if qd.static(walk_islands):
+                        i_c = linesearch.func_list_item(
+                            constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b
+                        )
                     constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
             # Beware 'active' does not refer to whether a constraint is active, but rather whether its quadratic cost
             # is active
             for i_pos in range(row_lo, row_hi):
-                i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                i_c = i_pos
+                if qd.static(walk_islands):
+                    i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                 cost_i = cost_i + _func_update_efc_force_body(i_c, i_b, constraint_state, rigid_config)
 
     # qfrc_constraint = J^T @ efc_force. The CPU skyline solve scatters each row over its sparse support, and so does an
@@ -4662,7 +4670,9 @@ def func_update_constraint_batch(
                     qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b]
                 )
             for i_pos in range(row_lo, row_hi):
-                i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
+                i_c = i_pos
+                if qd.static(walk_islands):
+                    i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                 cost_i = cost_i + 0.5 * (
                     constraint_state.Jaref[i_c, i_b] ** 2
                     * constraint_state.efc_D[i_c, i_b]
