@@ -510,11 +510,15 @@ def get_island_state(solver, collider):
     # island_state itself holds only the partition maps and the per-island iteration state.
     rcm_active = solver.rigid_config.sparse_solve
     coop_active = solver.rigid_config.enable_cooperative_constraint_kernels
-    seed_active = solver.rigid_config.enable_tiled_island_seed
+    # The (env, island) work-lists of the tiled seed are read where an env can hold several islands (see
+    # func_island_tiled_factor_solve_all in solver.py)
+    worklist_active = solver.rigid_config.enable_tiled_island_seed and not solver.rigid_config.is_single_island
     # Batch-first under the cooperative kernels, whose block serves one env: the lanes then read consecutive items of
     # their env from consecutive addresses (see the constraint-state layouts in get_constraint_state).
     island_layout = (1, 0) if solver.rigid_config.constraint_layout_batch_first else None
-    n_classes = len(island_tile_caps(solver.rigid_config))
+    n_classes = len(
+        island_tile_caps(solver.rigid_config.island_tile_cap_first, solver.rigid_config.island_tile_cap_last)
+    )
     max_candidate_contacts = max(collider.collider_info.max_candidate_contacts[None], 1)
     # Safe upper bound on active constraints, mirroring ConstraintSolver.len_constraints: rows_per_contact per
     # contact + joint-limit/frictionloss (<= n_dofs each) + equality rows (<= 6 each). The equality term must use the
@@ -555,9 +559,9 @@ def get_island_state(solver, collider):
         constraint_island_idx=V(dtype=gs.qd_int, shape=(n_constraints_max, _B), layout=island_layout),
         is_hibernated=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), solver._use_hibernation)),
         hibernated_next_link=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_hibernation)),
-        factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), seed_active)),
-        factor_worklist_i_island=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), seed_active)),
-        factor_worklist_size=V(dtype=gs.qd_int, shape=maybe_shape((n_classes,), seed_active)),
+        factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),
+        factor_worklist_i_island=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),
+        factor_worklist_size=V(dtype=gs.qd_int, shape=maybe_shape((n_classes,), worklist_active)),
         rcm_tree_pos=V(
             dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
         ),
@@ -2874,10 +2878,6 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     island_tile_cap_last: int = 0
     # Whether an island can hold more dofs than the last cap, which compiles the factor paths above it.
     has_island_above_tile_cap: bool = False
-    max_n_geoms_per_entity: int = -1
-    n_entities: int = -1
-    n_links: int = -1
-    n_geoms: int = -1
 
     @property
     def rows_per_contact(self) -> int:
@@ -2912,15 +2912,15 @@ def cholesky_tile_size_for(n_dofs):
     return 16 if (n_dofs <= 16 or 32 < n_dofs <= 48) else 32
 
 
-def island_tile_caps(rigid_config):
+def island_tile_caps(cap_first, cap_last):
     """Ascending dof caps of the shared tiles of the cooperative per-island factor+solve, see island_tile_cap_first:
     the doublings of the first cap below the last one, then the last one."""
     caps = []
-    cap = rigid_config.island_tile_cap_first
-    while cap < rigid_config.island_tile_cap_last:
+    cap = cap_first
+    while cap < cap_last:
         caps.append(cap)
         cap *= 2
-    caps.append(rigid_config.island_tile_cap_last)
+    caps.append(cap_last)
     return tuple(caps)
 
 

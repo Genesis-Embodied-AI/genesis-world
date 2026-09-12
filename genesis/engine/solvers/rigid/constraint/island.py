@@ -59,16 +59,16 @@ def func_equality_links(i_eq, i_b, n_links, dyn_info: array_class.DynInfo, rigid
     obj1 = dyn_info.equalities.eq_obj1id[i_eq, i_b]
     obj2 = dyn_info.equalities.eq_obj2id[i_eq, i_b]
     eq_type = dyn_info.equalities.eq_type[i_eq, i_b]
-    la = -1
-    lb = -1
+    i_l_a = -1
+    i_l_b = -1
     if eq_type == gs.EQUALITY_TYPE.JOINT:
-        la = func_joint_link(obj1, i_b, n_links, dyn_info, rigid_config)
+        i_l_a = func_joint_link(obj1, i_b, n_links, dyn_info, rigid_config)
         if obj2 >= 0:
-            lb = func_joint_link(obj2, i_b, n_links, dyn_info, rigid_config)
+            i_l_b = func_joint_link(obj2, i_b, n_links, dyn_info, rigid_config)
     else:
-        la = obj1
-        lb = obj2
-    return la, lb
+        i_l_a = obj1
+        i_l_b = obj2
+    return i_l_a, i_l_b
 
 
 @qd.func
@@ -405,6 +405,56 @@ def func_build_islands(
 
     if qd.static(rigid_config.sparse_solve):
         func_reorder_island_dofs(i_b, collider_state, constraint_state, rigid_info)
+
+
+@qd.func
+def func_build_single_island(i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+    """Write the partition of one env of a single-island scene serially: one island holding every dof in order.
+
+    The lists are the identity and the island's inertia the trace of the mass matrix. Reserved for scenes off the CPU
+    skyline path and hibernation, which alone read the tree and link labels (see _sort_contacts_and_build_islands in
+    solver.py).
+    """
+    n_dofs = constraint_state.island.dof_id.shape[0]
+    constraint_state.island.n_islands[i_b] = 1
+    constraint_state.island.dof_slices.start[0, i_b] = 0
+    constraint_state.island.dof_slices.n[0, i_b] = n_dofs
+    constraint_state.island.dof_slices.curr[0, i_b] = n_dofs
+    constraint_state.island.dof_range_start[0, i_b] = 0
+    inertia = gs.qd_float(0.0)
+    for i_d in range(n_dofs):
+        constraint_state.island.dof_id[i_d, i_b] = i_d
+        constraint_state.island.dof_local_pos[i_d, i_b] = i_d
+        constraint_state.island.dofs_island_idx[i_d, i_b] = 0
+        inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
+    constraint_state.island.inertia[0, i_b] = inertia
+
+
+@qd.func
+def func_build_single_island_coop(
+    i_b, tid, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
+):
+    """Write the partition of one env of a single-island scene with the _K lanes of its block, see
+    func_build_single_island."""
+    _K = qd.static(32)
+    n_dofs = constraint_state.island.dof_id.shape[0]
+    if tid == 0:
+        constraint_state.island.n_islands[i_b] = 1
+        constraint_state.island.dof_slices.start[0, i_b] = 0
+        constraint_state.island.dof_slices.n[0, i_b] = n_dofs
+        constraint_state.island.dof_slices.curr[0, i_b] = n_dofs
+        constraint_state.island.dof_range_start[0, i_b] = 0
+    inertia = gs.qd_float(0.0)
+    i_d = tid
+    while i_d < n_dofs:
+        constraint_state.island.dof_id[i_d, i_b] = i_d
+        constraint_state.island.dof_local_pos[i_d, i_b] = i_d
+        constraint_state.island.dofs_island_idx[i_d, i_b] = 0
+        inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
+        i_d = i_d + _K
+    inertia = qd.simt.subgroup.reduce_all_add_tiled(inertia, 5)
+    if tid == 0:
+        constraint_state.island.inertia[0, i_b] = inertia
 
 
 @qd.func
