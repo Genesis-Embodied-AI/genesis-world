@@ -671,8 +671,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 # The cooperative per-island solve stages one island's tile in shared memory, in size classes (see
                 # island_tile_cap_first in array_class.py): the last cap is the largest tile-size multiple that fits in
                 # GPU shared memory (precision-aware), no larger than tiled_n_dofs. An island holds at least one
-                # tree, so a class below the smallest tree never holds an island and the first cap starts at that
-                # tree.
+                # tree, so a class below the smallest tree never holds an island: the first cap starts at that tree.
                 island_tile_cap_last = tiled_n_dofs
                 while island_tile_cap_last > cholesky_tile_size and not fits_in_gpu_shared_memory(
                     island_tile_cap_last, island_tile_cap_last + 1

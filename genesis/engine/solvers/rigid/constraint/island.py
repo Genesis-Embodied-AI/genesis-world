@@ -321,10 +321,12 @@ def func_build_islands(
         if i_ta >= 0 and i_tb >= 0:
             func_union_trees(i_ta, i_tb, i_b, constraint_state)
 
+    # The tree arrays hold one padding slot in a scene without a tree (see n_trees_), which carries no dof and labels
+    # no island
     n_islands = 0
     for i_t in range(n_trees):
         constraint_state.island.trees_island_idx[i_t, i_b] = -1
-        if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t:
+        if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t and rigid_info.trees_n_dofs[i_t] > 0:
             constraint_state.island.trees_island_idx[i_t, i_b] = n_islands
             n_islands = n_islands + 1
     for i_t in range(n_trees):
@@ -541,7 +543,8 @@ def func_build_islands_coop(
         i_t = i_chunk * _K + tid
         is_root = 0
         if i_t < n_trees:
-            if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t:
+            # The padding slot of a tree-less scene labels no island, see func_build_islands
+            if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t and rigid_info.trees_n_dofs[i_t] > 0:
                 is_root = 1
         roots_incl = qd.simt.subgroup.inclusive_add(is_root)
         if is_root == 1:

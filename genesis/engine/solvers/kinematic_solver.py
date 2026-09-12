@@ -466,12 +466,11 @@ class KinematicSolver(Solver):
         self.dyn_state.dofs.force.fill(0)
 
     def _init_tree_fields(self):
-        """Initialize the fields describing the kinematic roots and trees, which the kernels walk one at a time.
+        """Initialize the fields describing the kinematic roots and trees (see roots_link_idx and trees_root_idx in
+        array_class.py).
 
-        The roots come in link order (see roots_link_idx in array_class.py) and the trees in ascending dof order (see
-        trees_root_idx). The links come parent first and each branch occupies a contiguous index range, so the dofs of
-        a tree form one contiguous range and the trees are disjoint in dof space, whatever static links sit inside a
-        span.
+        The links come parent first and each branch occupies a contiguous index range, so the dofs of a tree form one
+        contiguous range and the trees are disjoint in dof space.
         """
         if self._n_roots:
             links_root_idx = np.array([link.root_idx for link in self.links], dtype=gs.np_int)

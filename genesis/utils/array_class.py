@@ -238,20 +238,17 @@ class RigidInfo:
     mass_mat_D_inv: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
     mass_mat_mask: qd.Tensor = of_kind(DataKind.STATE)
-    # The kinematic roots, the links sharing a root link (links.root_idx, the top link of the parent chain). Root i_r
-    # is the link roots_link_idx[i_r] and spans the links [roots_link_idx[i_r], roots_link_end[i_r]) whose root it is
-    # (the span may interleave links of other roots created between attached entities, so consumers gate each link on
-    # the root). links_root_rank maps every link to its root. The composite inertia and the center of mass are walked
-    # per root, and every link's inertial is expressed about the center of mass of its root.
+    # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. Root i_r spans the links
+    # [roots_link_idx[i_r], roots_link_end[i_r]) whose root it is (a span may interleave links of other roots, so the
+    # walks gate each link on its root), links_root_rank maps a link to its root. The composite inertia and the center
+    # of mass are per root.
     roots_link_idx: qd.Tensor
     roots_link_end: qd.Tensor
     links_root_rank: qd.Tensor
-    # The kinematic trees, the moving links a chain of moving joints connects: a static link (reaching the world
-    # through fixed joints alone) belongs to no tree, so the branches hanging from a fixed base are as many trees.
-    # Tree i_t is rooted at trees_root_idx[i_t], its topmost moving link, holds the trees_n_links[i_t] links of the
-    # span [trees_root_idx[i_t], trees_link_end[i_t]) that links_tree_idx (-1 for a static link) maps to it, and the
-    # contiguous dofs [trees_dof_start[i_t], trees_dof_start[i_t] + trees_n_dofs[i_t]). The trees come in ascending
-    # dof order, so the island partition (see island.py) lists the dofs of the trees it groups in ascending order.
+    # Kinematic trees: the links a chain of moving joints connects, so a static link belongs to none (links_tree_idx
+    # -1) and each branch of a fixed base is a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
+    # [trees_root_idx[i_t], trees_link_end[i_t]) mapped to it and the contiguous dofs [trees_dof_start[i_t],
+    # trees_dof_start[i_t] + trees_n_dofs[i_t]), in ascending dof order. The islands are built on the trees.
     trees_root_idx: qd.Tensor
     trees_link_end: qd.Tensor
     trees_n_links: qd.Tensor
