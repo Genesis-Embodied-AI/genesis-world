@@ -1,12 +1,12 @@
 import io
 import itertools
 import logging
-import sys
+import math
 import threading
 import time
 from collections import defaultdict
 from collections.abc import Sequence
-from functools import cached_property, partial
+from functools import partial
 from typing import Any, Callable, TypeVar
 
 import numpy as np
@@ -50,6 +50,7 @@ LOGGER = logging.getLogger(__name__)
 MPL_PLOTTER_RESCALE_MIN_X = 0.5
 MPL_PLOTTER_RESCALE_RATIO_X = 0.15
 MPL_PLOTTER_RESCALE_RATIO_Y = 0.15
+MPL_PLOTTER_WINDOW_REFRESH_PERIOD = 0.1
 
 COLORS = itertools.cycle(("r", "g", "b", "c", "m", "y"))
 
@@ -70,22 +71,9 @@ class BasePlotter(Recorder):
 
         self.video_writer = None
         if self._options.save_to_filename:
-
-            def _get_video_frame_buffer(plotter):
-                # Wait for the plotter to produce a frame. When the plotter runs in a background thread,
-                # it may have already dequeued data but not yet appended the rendered frame to the buffer.
-                # When not threaded, frames are produced synchronously before this call, so an empty
-                # buffer means something went wrong — the None check handles that case too.
-                while not plotter._frames_buffer:
-                    if plotter._processor_thread is None or not plotter._processor_thread.is_alive():
-                        gs.raise_exception(
-                            f"[{type(plotter).__name__}] No frame available and plotter thread is not running."
-                        )
-                    time.sleep(0.01)
-                return plotter._frames_buffer.pop(0)
-
+            # The plotter renders its frame on the stepping thread before the writer samples it, so one is there
             self.video_writer = self._manager.add_recorder(
-                data_func=partial(_get_video_frame_buffer, self),
+                data_func=partial(self._frames_buffer.pop, 0),
                 rec_options=gs.recorders.VideoFile(
                     filename=self._options.save_to_filename,
                     hz=self._options.hz,
@@ -280,6 +268,7 @@ class BasePyQtPlotter(BasePlotter):
 
     @property
     def run_in_thread(self) -> bool:
+        # Qt widgets are driven from the thread that owns the application, which is the stepping thread here
         return False
 
     def get_image_array(self):
@@ -375,7 +364,7 @@ class BaseMPLPlotter(BasePlotter):
         self.fig: plt.Figure | None = None
         self.axes: list[plt.Axes] = []
         self._background: Any = None
-        self._lock = threading.Lock()
+        self.window_refresh_time = -math.inf
 
         # matplotlib figsize uses inches
         dpi = mpl.rcParams.get("figure.dpi", 100)
@@ -412,14 +401,24 @@ class BaseMPLPlotter(BasePlotter):
 
     def on_resize(self, event=None):
         """Re-cache the blit background after a resize."""
-        with self._lock:
-            if self.fig is not None and self.axes:
-                self._cache_background()
+        if self.fig is not None and self.axes:
+            self._cache_background()
 
     def _show_fig(self):
         if self._options.show_window:
             self.fig.show()
             gs.logger.info(f"[{type(self).__name__}] created matplotlib window")
+
+    def flush_events(self):
+        """Repaint the plot window with the latest drawing, at most once per MPL_PLOTTER_WINDOW_REFRESH_PERIOD."""
+        # Repainting the window costs about as much as drawing the figure, while the samples arrive at the simulation
+        # rate, which may run far ahead of real time. The drawing stays in the canvas, so a skipped repaint is caught
+        # up by the next one.
+        now = time.perf_counter()
+        if now - self.window_refresh_time < MPL_PLOTTER_WINDOW_REFRESH_PERIOD:
+            return
+        self.fig.canvas.flush_events()
+        self.window_refresh_time = now
 
     def cleanup(self):
         """Clean up matplotlib resources."""
@@ -452,20 +451,21 @@ class BaseMPLPlotter(BasePlotter):
         """
         from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-        self._lock.acquire()
         if isinstance(self.fig.canvas, FigureCanvasAgg):
             # Read internal buffer
             width, height = self.fig.canvas.get_width_height(physical=True)
-            rgba_array_flat = np.frombuffer(self.fig.canvas.buffer_rgba(), dtype=np.uint8)
-            rgb_array = rgba_array_flat.reshape((height, width, 4))[..., :3]
+            # The alpha channel is read as padding, so that the resampling below skips premultiplying it.
+            img = Image.frombuffer("RGBX", (width, height), self.fig.canvas.buffer_rgba())
 
-            # Rescale image if necessary
-            if (width, height) != tuple(self._options.window_size):
-                img = Image.fromarray(rgb_array)
-                img = img.resize(self._options.window_size, resample=Image.BILINEAR)
-                rgb_array = np.asarray(img)
-            else:
-                rgb_array = rgb_array.copy()
+            # Rescale image if necessary. A high-DPI canvas holds a whole multiple of the window size along each axis,
+            # which PIL reduces much faster than it resamples to an arbitrary size.
+            window_width, window_height = self._options.window_size
+            if (width, height) != (window_width, window_height):
+                if width % window_width == 0 and height % window_height == 0:
+                    img = img.reduce((width // window_width, height // window_height))
+                else:
+                    img = img.resize((window_width, window_height), resample=Image.BOX)
+            rgb_array = np.asarray(img.convert("RGB"))
         else:
             # Slower but more generic fallback only if necessary
             buffer = io.BytesIO()
@@ -473,22 +473,14 @@ class BaseMPLPlotter(BasePlotter):
             buffer.seek(0)
             img = Image.open(buffer)
             rgb_array = np.asarray(img.convert("RGB"))
-        self._lock.release()
 
         return rgb_array
 
-    @cached_property
+    @property
     def run_in_thread(self) -> bool:
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-
-        if sys.platform == "darwin":
-            return False
-        if self._is_built:
-            assert self.fig is not None
-            # All Agg-based backends derives from the surfaceless Agg backend, so 'isinstance' cannot be used to
-            # discriminate the latter from others.
-            return type(self.fig.canvas) is FigureCanvasAgg
-        return not self._options.show_window
+        # Drawing is Python code, so it cannot overlap the stepping thread's hold on the interpreter lock: a worker
+        # thread only adds the per-sample queue transfer and the switching between threads, which slows stepping down.
+        return False
 
 
 @register_recording(MPLLinePlotterOptions)
@@ -504,6 +496,7 @@ class MPLLinePlotter(BaseMPLPlotter):
         self.lines: dict[str, list[plt.Line2D]] = {}
         self.caches_bbox: list[Any] = []
         self.cache_xmax: float = -1
+        self.x_max_plot: float = -1
 
         # Create figure and subplots
         n_subplots = len(self.line_plot.subplot_structure)
@@ -547,8 +540,6 @@ class MPLLinePlotter(BaseMPLPlotter):
         super().process(data, cur_time)
 
     def _update_plot(self):
-        self._lock.acquire()
-
         # Update limits for each subplot if necessary
         limits_changed = False
         if len(self.line_plot.x_data) > 1:
@@ -566,16 +557,17 @@ class MPLLinePlotter(BaseMPLPlotter):
                         must_update_limit_y = True
                 subplots_ylim_data.append(subplot_ylim_data)
 
-            # Next, adjust the limits on x-axis if they must be extended or adjusting y-axis is already planned
+            # Next, adjust the limits on x-axis if they must be extended or adjusting y-axis is already planned. The
+            # upper limit is kept as set here, since the axis reports it padded and a comparison against the padded
+            # value would call for a rescale on every sample.
             x_limits_changed = False
-            x_min_plot, x_max_plot = ax.get_xlim()
             x_min_data, x_max_data = self.line_plot.x_data[0], self.line_plot.x_data[-1]
-            if must_update_limit_y or x_min_plot < 0.0 or x_max_plot < x_max_data:
+            if must_update_limit_y or self.x_max_plot < x_max_data:
                 x_min_plot = max(0.0, x_min_data)
-                x_max_plot = x_max_data + max(
+                self.x_max_plot = x_max_data + max(
                     MPL_PLOTTER_RESCALE_RATIO_X * (x_max_data - x_min_data), MPL_PLOTTER_RESCALE_MIN_X
                 )
-                ax.set_xlim((x_min_plot - gs.EPS, x_max_plot + gs.EPS))
+                ax.set_xlim((x_min_plot - gs.EPS, self.x_max_plot + gs.EPS))
                 x_limits_changed = True
 
             # Finally, adjust the limits on y-axis if either x- or y-axis must be extended
@@ -612,8 +604,7 @@ class MPLLinePlotter(BaseMPLPlotter):
             # Blit the updated subplot
             self.fig.canvas.blit(ax.bbox)
 
-        self.fig.canvas.flush_events()
-        self._lock.release()
+        self.flush_events()
 
     def cleanup(self):
         super().cleanup()
@@ -621,6 +612,7 @@ class MPLLinePlotter(BaseMPLPlotter):
         self.lines.clear()
         self.caches_bbox.clear()
         self.cache_xmax = -1
+        self.x_max_plot = -1
 
 
 @register_recording(MPLImagePlotterOptions)
@@ -663,7 +655,7 @@ class MPLImagePlotter(BaseMPLPlotter):
         self.ax.draw_artist(self.image_plot)
         self.fig.canvas.blit(self.ax.bbox)
 
-        self.fig.canvas.flush_events()
+        self.flush_events()
 
     def cleanup(self):
         super().cleanup()
@@ -815,42 +807,39 @@ class MPLVectorFieldPlotter(BaseMPLPlotter):
         if is_twist and twist_all.shape != vectors_all.shape:
             return
 
-        with self._lock:
-            # Blit the whole figure, not per-axes: a stroke clipped at an axes box can bleed a pixel past it, and a
-            # per-axes blit never restores that sliver, so it would accumulate as residue.
-            self.fig.canvas.restore_region(self._background)
-            for i_ax, (ax, scatter, quiver, vectors) in enumerate(
-                zip(self.axes, self._scatters, self._quivers, vectors_all)
-            ):
-                magnitudes = np.linalg.norm(vectors, axis=-1)
-                xy, uv = _project_to_plane(self._normal, self._positions, vectors)
-                scatter.set_offsets(xy)
-                scatter.set_array(magnitudes)
-                quiver.set_offsets(xy)
-                quiver.set_UVC(*(uv * self._scale_factor).T)
-                quiver.set_array(magnitudes)
-                ax.draw_artist(scatter)
-                ax.draw_artist(quiver)
-                if is_twist:
-                    arcs, heads = self._twist_arcs[i_ax], self._twist_heads[i_ax]
-                    twist = twist_all[i_ax] @ self._normal
-                    radius = self._twist_scale_factor * np.abs(twist)
-                    direction = self._twist_sign * np.sign(twist)
-                    # 270-degree arc per taxel; the open quarter marks the rotation and leaves room for the head.
-                    ang = direction[:, None] * np.linspace(0.0, 1.5 * np.pi, 16)[None, :]
-                    xs = xy[:, 0][:, None] + radius[:, None] * np.cos(ang)
-                    ys = xy[:, 1][:, None] + radius[:, None] * np.sin(ang)
-                    segments = np.stack((xs, ys), axis=-1)
-                    arcs.set_segments(list(segments))
-                    arcs.set_array(twist)
-                    heads.set_offsets(segments[:, -2])
-                    heads.set_UVC(
-                        segments[:, -1, 0] - segments[:, -2, 0], segments[:, -1, 1] - segments[:, -2, 1], twist
-                    )
-                    ax.draw_artist(arcs)
-                    ax.draw_artist(heads)
-            self.fig.canvas.blit(self.fig.bbox)
-            self.fig.canvas.flush_events()
+        # Blit the whole figure, not per-axes: a stroke clipped at an axes box can bleed a pixel past it, and a
+        # per-axes blit never restores that sliver, so it would accumulate as residue.
+        self.fig.canvas.restore_region(self._background)
+        for i_ax, (ax, scatter, quiver, vectors) in enumerate(
+            zip(self.axes, self._scatters, self._quivers, vectors_all)
+        ):
+            magnitudes = np.linalg.norm(vectors, axis=-1)
+            xy, uv = _project_to_plane(self._normal, self._positions, vectors)
+            scatter.set_offsets(xy)
+            scatter.set_array(magnitudes)
+            quiver.set_offsets(xy)
+            quiver.set_UVC(*(uv * self._scale_factor).T)
+            quiver.set_array(magnitudes)
+            ax.draw_artist(scatter)
+            ax.draw_artist(quiver)
+            if is_twist:
+                arcs, heads = self._twist_arcs[i_ax], self._twist_heads[i_ax]
+                twist = twist_all[i_ax] @ self._normal
+                radius = self._twist_scale_factor * np.abs(twist)
+                direction = self._twist_sign * np.sign(twist)
+                # 270-degree arc per taxel; the open quarter marks the rotation and leaves room for the head.
+                ang = direction[:, None] * np.linspace(0.0, 1.5 * np.pi, 16)[None, :]
+                xs = xy[:, 0][:, None] + radius[:, None] * np.cos(ang)
+                ys = xy[:, 1][:, None] + radius[:, None] * np.sin(ang)
+                segments = np.stack((xs, ys), axis=-1)
+                arcs.set_segments(list(segments))
+                arcs.set_array(twist)
+                heads.set_offsets(segments[:, -2])
+                heads.set_UVC(segments[:, -1, 0] - segments[:, -2, 0], segments[:, -1, 1] - segments[:, -2, 1], twist)
+                ax.draw_artist(arcs)
+                ax.draw_artist(heads)
+        self.fig.canvas.blit(self.fig.bbox)
+        self.flush_events()
 
     def cleanup(self):
         super().cleanup()
