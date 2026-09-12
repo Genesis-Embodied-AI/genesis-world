@@ -50,6 +50,7 @@ backend: _gs_backend | None = None
 use_ndarray: bool | None = None
 use_zerocopy: bool | None = None
 use_deterministic_algorithms: bool | None = None
+debug: bool | None = None
 EPS: float | None = None
 
 
@@ -165,6 +166,7 @@ def init(
     # Reproducing a rollout means settling the runtime-measured choices the simulation would otherwise keep revisiting
     # (see prefer_decomposed_solver in rigid_solver.py), at the cost of the throughput they were buying, hence opt-in.
     globals()["use_deterministic_algorithms"] = use_deterministic_algorithms
+    globals()["debug"] = debug
 
     # Define the right dtypes in accordance with selected backend and precision
     global qd_float, np_float, tc_float

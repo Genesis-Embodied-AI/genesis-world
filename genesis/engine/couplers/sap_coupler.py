@@ -223,6 +223,10 @@ class SAPCoupler(RBC):
         self._enable_rigid_fem_contact &= self.rigid_solver.is_active and self.fem_solver.is_active
         self._enable_fem_self_tet_contact &= self.fem_solver.is_active
 
+        for equality in self.rigid_solver.equalities:
+            if equality.type == gs.EQUALITY_TYPE.JOINT and equality.eq_obj2id < 0:
+                gs.raise_exception("SAPCoupler does not support JOINT equality constraints without `joint2`.")
+
         init_tet_tables = False
 
         if self.fem_solver.is_active:
@@ -353,7 +357,7 @@ class SAPCoupler(RBC):
         self.rigid_volume_elems_geom_idx = qd.field(gs.qd_int, shape=(self.n_rigid_volume_elems,))
         self.rigid_volume_elems_geom_idx.from_numpy(rigid_volume_elems_geom_idx_np)
         # FIXME: Convert collision_pair_idx to field here because SAPCoupler cannot support ndarray/field switch yet
-        np_collision_pair_idx = self.rigid_solver.collider._collider_info.collision_pair_idx.to_numpy()
+        np_collision_pair_idx = self.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()
         self.rigid_collision_pair_idx = qd.field(gs.qd_int, shape=np_collision_pair_idx.shape)
         self.rigid_collision_pair_idx.from_numpy(np_collision_pair_idx)
         self.rigid_pressure_field = qd.field(gs.qd_float, shape=(self.n_rigid_volume_verts,))

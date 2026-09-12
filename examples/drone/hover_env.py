@@ -40,10 +40,9 @@ class HoverEnv:
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=self.dt,
-                substeps=2,
             ),
             rigid_options=gs.options.RigidOptions(
-                dt=self.dt,
+                dt=self.dt / 2,
                 enable_collision=True,
                 enable_joint_limit=True,
                 constraint_solver=gs.constraint_solver.Newton,

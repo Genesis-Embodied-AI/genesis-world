@@ -31,7 +31,7 @@ class JointAnimator:
         self.rigid_solver.set_dofs_kp(gu.default_dofs_kp(self.rigid_solver.n_dofs))
 
     def animate(self, scene: gs.Scene):
-        t = scene.t * scene.dt
+        t = tensor_to_array(scene.get_time())
         theta = np.pi * t + self.init_phase
         target = (self.joint_upper + self.joint_lower + (self.joint_upper - self.joint_lower) * np.sin(theta)) / 2
         self.rigid_solver.control_dofs_position(target)

@@ -201,7 +201,7 @@ def _plot_tactile_sensor(
         title, scale_factor, max_magnitude, twist_scale_factor, twist_max_magnitude, read_field = vector_field_setup[
             sensor_type
         ]
-        scene.start_recording(
+        scene.add_recorder(
             read_field,
             gs.recorders.MPLVectorFieldPlot(
                 title=title,
@@ -221,7 +221,7 @@ def _plot_tactile_sensor(
         "depth": ("ContactDepthProbe max depth", "depth", lambda r: float(r.max())),
         "contact": ("ContactProbe taxels in contact", "# taxels", lambda r: float(r.sum())),
     }[sensor_type]
-    scene.start_recording(
+    scene.add_recorder(
         lambda: tuple(reduce_fn(sensor.read()[i]) for i in range(n_envs)),
         gs.recorders.MPLLinePlot(
             labels=env_titles,
@@ -231,30 +231,6 @@ def _plot_tactile_sensor(
             title=title,
         ),
     )
-
-
-def _print_sensor_reading(
-    sensor_type: str, sensor: "Sensor", t: float, plot_normal: tuple[float, float, float]
-) -> None:
-    data = sensor.read()
-    if sensor_type == "elastomer":
-        magnitude = torch.linalg.norm(data, dim=-1)
-        if magnitude.max() > gs.EPS:
-            print(f"t={t:.2f}s  max|displacement|={magnitude.max():.5f}")
-    elif sensor_type == "depth":
-        max_depth = data.max()
-        if max_depth > gs.EPS:
-            print(f"t={t:.2f}s  max depth={max_depth:.4f}")
-    elif sensor_type == "contact":
-        n_contact = int(data.sum())
-        if n_contact > 0:
-            print(f"t={t:.2f}s  taxels in contact={n_contact}")
-    elif sensor_type in ("kinematic", "proximity"):
-        # |twist| is the plotted torque about the view normal (the twist_scalar spin term); print it to calibrate.
-        force_mag = torch.linalg.norm(data.force, dim=-1).max()
-        twist_mag = (data.torque @ data.torque.new_tensor(plot_normal)).abs().max()
-        if force_mag > gs.EPS:
-            print(f"t={t:.2f}s  max|F|={force_mag:.4f}  max|twist|={twist_mag:.5f}")
 
 
 def main() -> None:
@@ -477,7 +453,9 @@ def main() -> None:
 
     try:
         while is_running:
-            t = scene.t * scene.dt
+            # Every environment of this scene runs the same schedule, so one of them stands for the clock printed
+            # and compared below.
+            t = float(scene.get_time(envs_idx=0))
             if args.vis:
                 if args.set_pos:
                     obj.set_pos(obj_target_pos)
@@ -485,7 +463,25 @@ def main() -> None:
                 else:
                     obj.control_dofs_position(gu.quat_to_xyz(obj_target_quat), dofs_idx_local=slice(3, 6))
                     obj.control_dofs_position(obj_target_pos, dofs_idx_local=slice(0, 3))
-            _print_sensor_reading(args.sensor, sensor, t, probe_normal_axis)
+            data = sensor.read()
+            if args.sensor == "elastomer":
+                magnitude = torch.linalg.norm(data, dim=-1)
+                if magnitude.max() > gs.EPS:
+                    print(f"t={t:.2f}s  max|displacement|={magnitude.max():.5f}")
+            elif args.sensor == "depth":
+                max_depth = data.max()
+                if max_depth > gs.EPS:
+                    print(f"t={t:.2f}s  max depth={max_depth:.4f}")
+            elif args.sensor == "contact":
+                n_contact = int(data.sum())
+                if n_contact > 0:
+                    print(f"t={t:.2f}s  taxels in contact={n_contact}")
+            elif args.sensor in ("kinematic", "proximity"):
+                # |twist| is the plotted torque about the view normal (the twist_scalar spin term); print to calibrate.
+                force_mag = torch.linalg.norm(data.force, dim=-1).max()
+                twist_mag = (data.torque @ data.torque.new_tensor(probe_normal_axis)).abs().max()
+                if force_mag > gs.EPS:
+                    print(f"t={t:.2f}s  max|F|={force_mag:.4f}  max|twist|={twist_mag:.5f}")
 
             scene.step()
 

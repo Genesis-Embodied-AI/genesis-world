@@ -110,17 +110,21 @@ class Options(RBC, BaseModel):
         gs.raise_exception_from(trace_msg, None)
 
     def model_copy_from(self, other: BaseModel, override: bool = False) -> Self:
+        # 'dict(self)' keeps a nested option object intact, where 'model_dump' recurses it into a plain dict. The
+        # construction below performs no validation, so it would keep such a dict as a dict.
         self_fields = set(self.__class__.model_fields)
-        other_dump = other.model_dump()
-        other_dump = {k: v for k, v in other_dump.items() if k in self_fields}
-        self_dump = self.model_dump()
+        other_dump = {k: v for k, v in dict(other).items() if k in self_fields}
+        self_dump = dict(self)
         # Do not include default None
         for field, value in tuple(self_dump.items()):
             if value is None and field not in self.model_fields_set:
                 del self_dump[field]
         merged = {**self_dump, **other_dump} if override else {**other_dump, **self_dump}
-        # Cannot use 'self.model_copy(update=merged)' because it bypasses validators
-        return self.__class__(**merged)
+        # Constructing the copy would mark every merged field as set, including the ones filled in from 'other',
+        # while 'model_fields_set' tells a value the user gave from a default. 'model_construct' takes that set
+        # explicitly and still runs 'model_post_init'. It performs no validation, which the merged values have no need
+        # of: they were validated, and the defaults among them resolved, as 'self' and 'other' were built.
+        return self.__class__.model_construct(_fields_set=set(self.model_fields_set), **merged)
 
     def __repr__colorized__(self) -> str:
         repr_items = tuple(self.__repr_args__())

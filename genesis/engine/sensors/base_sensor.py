@@ -177,7 +177,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
 
     _options_cls: ClassVar[type]
     _metadata_cls: ClassVar[type]
-    _return_data_class: ClassVar[type] = tuple
+    _return_data_cls: ClassVar[type] = tuple
     # Cross-type shared context class declared as the second ``Sensor[...]`` parameter; ``NoneType`` (declared as
     # ``None``) means this sensor type consumes no shared context.
     _shared_context_cls: ClassVar[type] = type(None)
@@ -200,7 +200,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
                 if len(args) >= 3 and not isinstance(args[2], TypeVar):
                     cls._metadata_cls = args[2]
                 if len(args) >= 4 and not isinstance(args[3], TypeVar):
-                    cls._return_data_class = args[3]
+                    cls._return_data_cls = args[3]
                 break
         # Strict contract: overriding `_post_process` requires overriding `_get_intermediate_format` and/or
         # `_get_intermediate_dtype`. The intermediate buffer must be a distinct buffer regardless of whether its
@@ -494,7 +494,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         Automatically read and process sensor data. See RecorderOptions for more details.
 
         Data from `sensor.read()` is used. If the sensor data needs to be preprocessed before passing to the recorder,
-        consider using `scene.start_recording()` instead with a custom data function.
+        consider using `scene.add_recorder()` instead with a custom data function.
 
         Parameters
         ----------
@@ -529,7 +529,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
 
         if len(return_values) == 1:
             return return_values[0]
-        return self._return_data_class(*return_values)
+        return self._return_data_cls(*return_values)
 
     def _sanitize_envs_idx(self, envs_idx) -> torch.Tensor:
         return self._manager._sim._scene._sanitize_envs_idx(envs_idx)

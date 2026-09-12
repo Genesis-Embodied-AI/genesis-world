@@ -1,4 +1,5 @@
-from typing import List, Set
+from contextlib import contextmanager
+from typing import Iterator, List, Set
 
 import genesis as gs
 from pxr import Sdf, Usd, UsdPhysics
@@ -9,6 +10,7 @@ from .usd_context import (
     find_joints_in_range,
     find_rigid_bodies_in_range,
     resolve_rigid_body_link_path,
+    usd_context,
 )
 from .usd_utils import UnionFind
 
@@ -121,77 +123,75 @@ def _find_connected_components(stage: Usd.Stage, all_joints: List[Usd.Prim]) -> 
     return [(joints, links) for joints, links in component_roots.values() if joints]
 
 
-def parse_usd_stage(morph: gs.morphs.USD) -> List[gs.morphs.USD]:
+@contextmanager
+def parse_usd_stage(morph: gs.morphs.USD) -> Iterator[List[gs.morphs.USD]]:
     """
     Parse a USD stage and extract all rigid entities (articulations and rigid bodies) as separate USD morphs.
 
-    This function uses a graph-based approach to identify connected components:
-    - Joints are edges, links (rigid bodies referenced by joints) are nodes
-    - Each connected component becomes one articulation entity
-    - Pure rigid bodies (not referenced by any joint) become separate entities
-
-    Joint prims are not stored on morphs; they are deduced dynamically when each
-    entity is parsed via parse_usd_rigid_entity.
+    This function uses a graph-based approach to identify connected components: joints are edges, links (rigid bodies
+    referenced by joints) are nodes, each connected component becomes one articulation entity, and pure rigid bodies
+    (not referenced by any joint) become separate entities. Joint prims are not stored on morphs; they are deduced
+    dynamically when each entity is parsed via parse_usd_rigid_entity.
 
     Parameters
     ----------
-    stage : gs.morphs.USD
-        The USD morph containing the stage to parse. The morph must have a valid `usd_ctx`
-        attribute that provides access to the USD context.
+    morph : gs.morphs.USD
+        The USD morph naming the stage to parse.
 
-    Returns
-    -------
+    Yields
+    ------
     morphs: List[gs.morphs.USD]
-        A list of USD morphs, one for each rigid entity found in the stage. Each morph is
-        a copy of the input stage with its `prim_path` set to the topmost common ancestor
-        of all links in the component. The list is guaranteed to be non-empty (raises
-        an exception if no entities are found).
+        A list of USD morphs, one for each rigid entity found in the stage. Each morph is a copy of the input stage with
+        its `prim_path` set to the topmost common ancestor of all links in the component. The list is guaranteed to be
+        non-empty (raises an exception if no entities are found). The stage stays open for the block, so the entities
+        added from these morphs inside it are parsed from that one opening (see 'usd_context').
     """
-    context: UsdContext = morph.usd_ctx
-    usd_stage: Usd.Stage = context.stage
+    with usd_context(morph.file) as context:
+        usd_stage: Usd.Stage = context.stage
 
-    # Find all joints in the stage
-    all_joints = find_joints_in_range(Usd.PrimRange(usd_stage.GetPseudoRoot()))
+        # Find all joints in the stage
+        all_joints = find_joints_in_range(Usd.PrimRange(usd_stage.GetPseudoRoot()))
 
-    # Find all rigid bodies in the stage (prune children when rigid body is found)
-    all_rigid_bodies = find_rigid_bodies_in_range(Usd.PrimRange(usd_stage.GetPseudoRoot()))
+        # Find all rigid bodies in the stage (prune children when rigid body is found)
+        all_rigid_bodies = find_rigid_bodies_in_range(Usd.PrimRange(usd_stage.GetPseudoRoot()))
 
-    # Extract links referenced by joints (only rigid bodies)
-    links_referenced_by_joints = extract_links_referenced_by_joints(usd_stage, all_joints, check_rigid_body=True)
+        # Extract links referenced by joints (only rigid bodies)
+        links_referenced_by_joints = extract_links_referenced_by_joints(usd_stage, all_joints, check_rigid_body=True)
 
-    morphs: List[gs.morphs.USD] = []
-    components: List[tuple[List[Usd.Prim], Set[str]]] = []
-    # Process connected components (articulations)
-    if all_joints:
-        components = _find_connected_components(usd_stage, all_joints)
-        for component_joints, component_links in components:
-            # Find topmost common ancestor of all links in this component
-            link_paths = list(component_links)
-            common_ancestor_path = _find_common_ancestor_path(link_paths)
-            common_ancestor_prim = usd_stage.GetPrimAtPath(common_ancestor_path)
+        morphs: List[gs.morphs.USD] = []
+        components: List[tuple[List[Usd.Prim], Set[str]]] = []
+        # Process connected components (articulations)
+        if all_joints:
+            components = _find_connected_components(usd_stage, all_joints)
+            for component_joints, component_links in components:
+                # Find topmost common ancestor of all links in this component
+                link_paths = list(component_links)
+                common_ancestor_path = _find_common_ancestor_path(link_paths)
+                common_ancestor_prim = usd_stage.GetPrimAtPath(common_ancestor_path)
 
-            assert common_ancestor_prim.IsValid(), f"Invalid common ancestor path: {common_ancestor_path}"
+                assert common_ancestor_prim.IsValid(), f"Invalid common ancestor path: {common_ancestor_path}"
 
-            # Create morph for this connected component
+                # Create morph for this connected component
+                entity_morph = morph.model_copy()
+                entity_morph.prim_path = common_ancestor_path
+                morphs.append(entity_morph)
+
+        # Process pure rigid bodies (not referenced by joints)
+        # Links referenced by joints are already part of articulations, so exclude them
+        pure_rigid_bodies = all_rigid_bodies - links_referenced_by_joints
+
+        for rigid_body_path in pure_rigid_bodies:
             entity_morph = morph.model_copy()
-            entity_morph.prim_path = common_ancestor_path
+            entity_morph.prim_path = rigid_body_path
             morphs.append(entity_morph)
 
-    # Process pure rigid bodies (not referenced by joints)
-    # Links referenced by joints are already part of articulations, so exclude them
-    pure_rigid_bodies = all_rigid_bodies - links_referenced_by_joints
+        if not morphs:
+            gs.raise_exception("No entities found in USD stage.")
 
-    for rigid_body_path in pure_rigid_bodies:
-        entity_morph = morph.model_copy()
-        entity_morph.prim_path = rigid_body_path
-        morphs.append(entity_morph)
+        num_articulations = len(components) if all_joints else 0
+        gs.logger.debug(
+            f"Found {len(morphs)} rigid entity(ies) from USD stage: {num_articulations} articulation(s), "
+            f"{len(pure_rigid_bodies)} pure rigid body(ies)."
+        )
 
-    if not morphs:
-        gs.raise_exception("No entities found in USD stage.")
-
-    num_articulations = len(components) if all_joints else 0
-    gs.logger.debug(
-        f"Found {len(morphs)} rigid entity(ies) from USD stage: {num_articulations} articulation(s), {len(pure_rigid_bodies)} pure rigid body(ies)."
-    )
-
-    return morphs
+        yield morphs

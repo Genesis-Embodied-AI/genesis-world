@@ -1,5 +1,14 @@
 import enum
 
+URDF_FORMAT = ".urdf"
+XACRO_FORMAT = ".xacro"
+MJCF_FORMAT = ".xml"
+# Root tags identifying the format of inline XML content passed as 'FileMorph.file'.
+XML_ROOT_TAG_TO_FORMAT = {"mujoco": MJCF_FORMAT, "robot": URDF_FORMAT}
+GLTF_FORMATS = (".glb", ".gltf")
+MESH_FORMATS = (".obj", ".stl", ".dae", *GLTF_FORMATS)
+USD_FORMATS = (".usd", ".usda", ".usdc", ".usdz")
+
 # dynamic loading
 ACTIVE = 1
 INACTIVE = 0

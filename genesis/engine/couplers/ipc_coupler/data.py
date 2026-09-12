@@ -66,9 +66,9 @@ class IPCCouplingData:
         self.abd_body_idx_by_link = abd_body_idx_by_link
         self.links_idx = [link.idx for link in links]
         self.link_to_idx_local = {link: i for i, link in enumerate(links)}
-        self.links_mass = np.array([link.inertial_mass for link in links], dtype=gs.np_float)
+        self.links_mass = np.array([link.desc.mass for link in links], dtype=gs.np_float)
         if links:
-            self.links_inertia_i = np.stack([link.inertial_i for link in links], axis=0, dtype=gs.np_float)
+            self.links_inertia_i = np.stack([link.desc.inertia for link in links], axis=0, dtype=gs.np_float)
         else:
             self.links_inertia_i = np.empty((0, 0, 3, 3), dtype=gs.np_float)
 

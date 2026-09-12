@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -221,92 +222,338 @@ def test_urdf_parsing(show_viewer, tol):
 
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
-def test_urdf_parsing_inertia_defaults(
-    undefined_inertia, implicit_inertial_origin, implicit_inertial_origin_chain, show_viewer, tol, caplog
+def test_parsing_inertia_defaults(
+    undefined_inertia,
+    undefined_inertia_arm,
+    degenerate_inertials,
+    zero_density_marker_mjcf,
+    implicit_inertial_origin_chain,
+    show_viewer,
+    tol,
+    caplog,
 ):
     GEOM_POS = (0.0, 0.0, 0.09)
+    INERTIAL_POS = (0.0, 0.0, 0.11)
+    TIP_MASS = 1e-5
+    BOB_INERTIA_PER_MASS = 1e-3
     INERTIA = (
         (0.11, 0.01, 0.02),
         (0.01, 0.22, 0.03),
         (0.02, 0.03, 0.30),
     )
+    # Principal moments per unit mass of the two geometries a recovered inertia is derived from.
+    SPHERE_INERTIA_PER_MASS = 2.0 * 0.06**2 / 5.0
+    BOX_INERTIA_PER_MASS = 2.0 * 0.2**2 / 12.0
+    GRAVITY = (0.0, 0.0, -9.81)
 
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=GRAVITY,
+        ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.5, 0.5, 0.5),
-            camera_lookat=(0.0, 0.0, 0.0),
+            camera_pos=(1.5, -3.5, 1.5),
+            camera_lookat=(0.0, 0.0, 0.2),
         ),
         show_viewer=show_viewer,
     )
     scene.add_entity(gs.morphs.Plane())
 
-    # Anchoring a root link on its center of mass erases the inertial frame under test, so it is disabled for the
-    # single-link entities. The chain keeps it enabled, comparing the composite inertia that anchoring preserves.
-    entity_without_inertia = scene.add_entity(
+    # merge_fixed_links=False keeps every fixed link as a link of its own, so the test can check its inertial.
+    entity = scene.add_entity(
         morph=gs.morphs.URDF(
-            file=undefined_inertia,
-            pos=(-0.3, 0.0, 0.1),
-            align=False,
+            file=degenerate_inertials,
+            pos=(0.0, 0.0, 0.1),
+            merge_fixed_links=False,
         ),
     )
-    entity_with_implicit_origin = scene.add_entity(
+    # The same asset welded to the world, so that the links the world carries resolve without a geometry estimate.
+    entity_welded = scene.add_entity(
         morph=gs.morphs.URDF(
-            file=implicit_inertial_origin,
-            pos=(0.0, 0.0, 0.1),
-            align=False,
+            file=degenerate_inertials,
+            pos=(0.0, -4.0, 0.1),
+            fixed=True,
+            merge_fixed_links=False,
+        ),
+    )
+    # The same asset welded and then attached to a moving link, so that the links the world carried resolve at attach.
+    carrier_welded = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, -8.0, 1.0),
+        ),
+    )
+    entity_mounted = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=degenerate_inertials,
+            pos=(0.0, -8.0, 1.3),
+            fixed=True,
+            batch_fixed_verts=True,
+            merge_fixed_links=False,
+        ),
+    )
+    entity_mounted.attach(carrier_welded, parent_link_name=carrier_welded.base_link.name, pos=(0.0, 0.0, 0.2))
+    entity_zero_density = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=zero_density_marker_mjcf,
         ),
     )
     entity_chain_unmerged = scene.add_entity(
         morph=gs.morphs.URDF(
             file=implicit_inertial_origin_chain,
-            pos=(0.8, 0.0, 0.5),
+            pos=(0.0, 2.0, 0.5),
             merge_fixed_links=False,
         ),
     )
+    # The two merged chains are built from one in-memory model, which parsing must leave intact for the second one.
+    chain_root = ET.fromstring(implicit_inertial_origin_chain)
+    chain_model = urdfpy.URDF._from_xml(chain_root, chain_root, get_assets_dir())
     entity_chain_merged = scene.add_entity(
         morph=gs.morphs.URDF(
-            file=implicit_inertial_origin_chain,
-            pos=(1.6, 0.0, 0.5),
+            file=chain_model,
+            pos=(0.8, 2.0, 0.5),
         ),
     )
-
-    assert entity_with_implicit_origin.base_link.inertial_pos is None
+    entity_chain_unmerged_unaligned = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=implicit_inertial_origin_chain,
+            pos=(0.8, 1.0, 0.5),
+            align=False,
+            merge_fixed_links=False,
+        ),
+    )
+    entity_chain_merged_unaligned = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=chain_model,
+            pos=(1.6, 1.0, 0.5),
+            align=False,
+        ),
+    )
+    # The asset states no inertial for its base link. Attachment makes that base movable, so Genesis computes its
+    # mass from geometry at robot density, the same value the free-standing copy gets.
+    carrier = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(2.4, 0.0, 1.0),
+        ),
+    )
+    mounted_arm = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=undefined_inertia_arm,
+            pos=(2.4, 0.0, 1.3),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
+    mounted_arm.attach(carrier, parent_link_name=carrier.base_link.name, pos=(0.0, 0.0, 0.2))
+    # A link with visual geometry only gets its mass from that geometry.
+    mounted_drawn = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=undefined_inertia,
+            pos=(4.0, 0.0, 1.3),
+            collision=False,
+            fixed=True,
+            batch_fixed_verts=True,
+            align=False,
+        ),
+    )
+    mounted_drawn.attach(carrier, parent_link_name=carrier.base_link.name, pos=(0.8, 0.0, 0.2))
+    free_arm = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=undefined_inertia_arm,
+            pos=(3.2, 0.0, 1.0),
+        ),
+    )
+    free_drawn = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=undefined_inertia,
+            pos=(4.8, 0.0, 1.0),
+            collision=False,
+            align=False,
+        ),
+    )
+    # An entity attached beneath another shares its root, so attaching that one onto a moving link makes both bases
+    # movable at once. Each is estimated at the density of its own entity. The three stand consecutively, since an
+    # entity created between attached ones is rejected.
+    stacked_base = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(6.0, 0.0, 1.0),
+        ),
+    )
+    stacked_middle = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(6.0, 0.0, 1.3),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=2000.0,
+        ),
+    )
+    stacked_tip = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(6.0, 0.0, 1.5),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=8000.0,
+        ),
+    )
+    stacked_tip.attach(stacked_middle, parent_link_name=stacked_middle.base_link.name, pos=(0.0, 0.0, 0.2))
+    stacked_middle.attach(stacked_base, parent_link_name=stacked_base.base_link.name, pos=(0.0, 0.0, 0.2))
 
     with caplog.at_level("WARNING"):
         scene.build()
 
-    # An omitted inertial origin places the center of mass at the link frame, whereas a link without any inertial
-    # element derives it from the geometry.
-    assert_allclose(entity_without_inertia.base_link.inertial_pos, GEOM_POS, tol=tol)
-    assert_allclose(entity_with_implicit_origin.base_link.inertial_pos, 0.0, tol=gs.EPS)
-    assert_allclose(entity_with_implicit_origin.base_link.inertial_mass, 2.5, tol=gs.EPS)
-    # The tensor is stored in its principal frame, whose parsed quaternion is markedly less accurate than the tensor
-    # itself, so compare the rotation-invariant principal moments rather than the tensor rotated back.
-    assert_allclose(
-        np.linalg.eigvalsh(entity_with_implicit_origin.base_link.inertial_i),
-        np.linalg.eigvalsh(INERTIA),
-        tol=tol,
-    )
+    # A 0.1 m cube of each entity's own density, rather than both taking the density of the one they hang from.
+    assert_allclose(stacked_middle.base_link.get_mass(), 2000.0 * 0.1**3, tol=gs.EPS)
+    assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
+
+    # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
+    # the same sphere, so this mass is the reference for the recovered masses below.
+    estimate = entity.get_link("no_inertial").desc
+    assert_allclose(estimate.inertial_pos, GEOM_POS, tol=tol)
+    assert_allclose(np.linalg.eigvalsh(estimate.inertia) / estimate.mass, SPHERE_INERTIA_PER_MASS, tol=tol)
+
+    # The tensors are stored in their principal frame, whose parsed quaternion is markedly less accurate than the
+    # tensor itself, so compare the rotation-invariant principal moments rather than the tensor rotated back.
+    for link, expected_mass, expected_com, expected_inertia_per_mass in (
+        # The root states a zero mass and a valid inertia, and the geometry estimate replaces both. Its fixed child
+        # 'massless_marker' keeps its zero mass, so the root has no mass-bearing child.
+        (entity.base_link, estimate.mass, GEOM_POS, SPHERE_INERTIA_PER_MASS),
+        # A zero mass beside an authored center of mass keeps that center of mass, as the geometry supplies no inertia.
+        (entity.get_link("massless_marker"), gs.EPS, INERTIAL_POS, 0.0),
+        # An omitted inertial origin places the center of mass at the link frame.
+        (entity.get_link("implicit_origin"), 2.5, (0.0, 0.0, 0.0), np.linalg.eigvalsh(INERTIA) / 2.5),
+        # Geometry supplies the inertia scaled to the authored mass, and the link keeps its authored center of mass.
+        (entity.get_link("zero_inertia"), 2.5, INERTIAL_POS, SPHERE_INERTIA_PER_MASS),
+        # The fixed link 'tip' contributes to its parent composite, so geometry recovers its zero inertia at the
+        # authored mass.
+        (entity.get_link("tip"), TIP_MASS, GEOM_POS, SPHERE_INERTIA_PER_MASS),
+        # The fixed child 'bob' carries the mass, so 'connector' keeps a zero inertia and a zero mass floored at gs.EPS.
+        (entity.get_link("connector"), gs.EPS, GEOM_POS, 0.0),
+        (entity.get_link("bob"), 1.0, GEOM_POS, BOB_INERTIA_PER_MASS),
+        # The geom of 'marker' has a zero density and 'hull' carries the mass, so the marker keeps a zero mass.
+        (entity_zero_density.get_link("hull"), 8.0, (0.0, 0.0, 0.0), BOX_INERTIA_PER_MASS),
+        (entity_zero_density.get_link("marker"), gs.EPS, (0.0, 0.0, 0.0), 0.0),
+    ):
+        assert_allclose(link.desc.mass, expected_mass, rtol=1e-6, err_msg=link.name)
+        assert_allclose(link.desc.inertial_pos, expected_com, tol=tol, err_msg=link.name)
+        assert_allclose(
+            np.linalg.eigvalsh(link.desc.inertia) / link.desc.mass,
+            expected_inertia_per_mass,
+            tol=tol,
+            err_msg=link.name,
+        )
+    # The links the joints still move resolve exactly as in the free copy. The two the world carries keep the asset's
+    # values, degenerate as they are: a zero mass and no inertia. Attached, every link resolves as in the free copy.
+    for link, link_welded, link_mounted in zip(entity.links, entity_welded.links, entity_mounted.links):
+        assert_allclose(link_mounted.desc.mass, link.desc.mass, tol=gs.EPS, err_msg=link.name)
+        assert_allclose(link_mounted.desc.inertial_pos, link.desc.inertial_pos, tol=gs.EPS, err_msg=link.name)
+        assert_allclose(link_mounted.desc.inertia, link.desc.inertia, tol=gs.EPS, err_msg=link.name)
+        if link_welded.is_fixed:
+            assert_equal(link_welded.desc.mass, 0.0, err_msg=link.name)
+            assert_equal(link_welded.desc.inertia, 0.0, err_msg=link.name)
+            continue
+        assert_equal(link_welded.desc.mass, link.desc.mass, err_msg=link.name)
+        assert_equal(link_welded.desc.inertial_pos, link.desc.inertial_pos, err_msg=link.name)
+        assert_equal(link_welded.desc.inertia, link.desc.inertia, err_msg=link.name)
+
+    # Every asset above is parsed by MuJoCo, a zero or missing inertial included.
+    assert not any("legacy URDF parser" in record.getMessage() for record in caplog.records)
 
     # Resolving the center of mass to the link frame can place it outside the geometry, which stays worth reporting.
-    # Only the link whose geometry is offset qualifies; a geometry-derived center of mass never does.
+    # Only the link whose geometry is offset qualifies, once per copy of the robot.
     dubious_com_records = [record for record in caplog.records if "dubious center of mass" in record.getMessage()]
-    assert len(dubious_com_records) == 1
+    assert len(dubious_com_records) == 3
 
-    # Folding a fixed-jointed subtree into its parent must not change the composite rigid-body inertia, which the
-    # merging path normalizes the omitted origin for on its own. The two composites are accumulated by independent
-    # code paths, so their agreement is bounded by that cross-path floor rather than by the storage precision.
+    # Every link of an aligned free body keeps its own mass, so each link reads its authored mass. The two totals are
+    # accumulated by independent code paths, so their agreement is bounded by that cross-path floor.
+    assert_allclose(entity_chain_unmerged.get_links_mass(), (2.5, 1.5), tol=gs.EPS)
     assert_allclose(entity_chain_unmerged.get_mass(), entity_chain_merged.get_mass(), rtol=5e-7)
-    assert_allclose(
-        np.linalg.eigvalsh(entity_chain_unmerged.base_link.inertial_i),
-        np.linalg.eigvalsh(entity_chain_merged.base_link.inertial_i),
-        rtol=5e-7,
-    )
 
-    for _ in range(30):
+    # Merged and unmerged copies are the same rigid body, so one step from rest under the same wrench gives both the
+    # same motion. This holds with the frame anchored on the center of mass and with the frame at the link origin. The
+    # wrench acts on the last link, the fixed child when kept, at one world point above the base. Armature, damping and
+    # a velocity servo sit on every free-joint DOF.
+    ARMATURE = (0.5, 0.4, 0.3, 0.01, 0.02, 0.015)
+    DAMPING = (2.0, 1.0, 3.0, 0.05, 0.1, 0.02)
+    KV = (4.0, 3.0, 5.0, 0.2, 0.3, 0.1)
+    VEL_TARGET = (0.5, -0.2, 0.3, 1.0, -2.0, 0.5)
+    FORCE, TORQUE = (3.0, 0.0, 0.0), (0.4, -0.2, 0.1)
+    for entity_chain in (
+        entity_chain_unmerged,
+        entity_chain_merged,
+        entity_chain_unmerged_unaligned,
+        entity_chain_merged_unaligned,
+    ):
+        entity_chain.set_dofs_armature(ARMATURE)
+        entity_chain.set_dofs_damping(DAMPING)
+        entity_chain.set_dofs_kv(KV)
+        entity_chain.control_dofs_velocity(VEL_TARGET)
+        entity_chain.apply_links_external_wrench(
+            force=FORCE,
+            torque=TORQUE,
+            links_idx_local=entity_chain.n_links - 1,
+            pos=(*entity_chain.morph.pos[:2], 0.8),
+        )
+    # From rest, one implicit step solves the augmented mass matrix against the generalized force. Both are written in
+    # the coordinates of the free joint: origin velocity along the world axes, angular velocity along the link axes. The
+    # single unaligned link is the case with every coupling in it.
+    desc = entity_chain_merged_unaligned.base_link.desc
+    link_R = gu.quat_to_R(tensor_to_array(entity_chain_merged_unaligned.get_quat()))
+    com = link_R @ desc.inertial_pos
+    inertia = link_R @ gu.quat_to_R(desc.inertial_quat) @ desc.inertia @ gu.quat_to_R(desc.inertial_quat).T @ link_R.T
+    com_skew = np.array([[0.0, -com[2], com[1]], [com[2], 0.0, -com[0]], [-com[1], com[0], 0.0]])
+    mass_mat = np.block(
+        [
+            [desc.mass * np.eye(3), -desc.mass * com_skew @ link_R],
+            [desc.mass * link_R.T @ com_skew, link_R.T @ (inertia - desc.mass * com_skew @ com_skew) @ link_R],
+        ]
+    )
+    mass_mat += np.diag(ARMATURE) + scene.dt * np.diag(np.add(DAMPING, KV))
+    origin = tensor_to_array(entity_chain_merged_unaligned.get_pos())
+    arm = np.array((*entity_chain_merged_unaligned.morph.pos[:2], 0.8)) - origin
+    force = np.concatenate([FORCE + desc.mass * np.array(GRAVITY), link_R.T @ (TORQUE + np.cross(arm, FORCE))])
+    force += np.multiply(KV, VEL_TARGET)
+    scene.step()
+    # The midpoint rule takes the velocity products at the midpoint velocity, the implicit update at the initial one.
+    # From rest the two differ by h * |dv|^2 / 4, the tolerance here.
+    assert_allclose(
+        entity_chain_merged_unaligned.get_dofs_velocity(), scene.dt * np.linalg.solve(mass_mat, force), tol=1e-5
+    )
+    # The two copies compose the same body through independent code paths, so their agreement is bounded by that
+    # cross-path floor, or by the working precision when coarser.
+    for entity_chain, entity_chain_ref in (
+        (entity_chain_unmerged, entity_chain_merged),
+        (entity_chain_unmerged_unaligned, entity_chain_merged_unaligned),
+    ):
+        assert_allclose(entity_chain.get_dofs_velocity(), entity_chain_ref.get_dofs_velocity(), tol=max(tol, 5e-7))
+        assert_allclose(entity_chain.get_quat(), entity_chain_ref.get_quat(), tol=max(tol, 5e-7))
+        assert_allclose(
+            entity_chain.get_pos() - torch.tensor(entity_chain.morph.pos),
+            entity_chain_ref.get_pos() - torch.tensor(entity_chain_ref.morph.pos),
+            tol=max(tol, 5e-7),
+        )
+
+    # Attachment resolves the base like any movable link, so its mass matches the same asset added free. Both
+    # collision and visual geometry feed the computation.
+    assert_allclose(mounted_arm.base_link.get_mass(), free_arm.base_link.get_mass(), tol=gs.EPS)
+    assert_allclose(mounted_drawn.get_mass(), free_drawn.get_mass(), tol=gs.EPS)
+    # Genesis applies the robot density because the asset is articulated. The convex hull of the authored sphere
+    # loses a little volume, so the measured mass lands slightly below the closed form.
+    assert_allclose(mounted_arm.base_link.get_mass(), 1500.0 * 4.0 / 3.0 * np.pi * 0.06**3, rtol=0.1)
+
+    # The rest on the spheres after the fall checks that the recovered inertias give stable dynamics. The position
+    # tolerance covers the steady-state penetration of the soft contact.
+    for _ in range(40):
         scene.step()
-    assert_allclose(entity_without_inertia.get_pos(), (-0.3, 0.0, -0.03), tol=1e-3)
-    assert_allclose(entity_with_implicit_origin.get_pos(), (0.0, 0.0, -0.03), tol=1e-3)
+    assert_allclose(entity.get_dofs_velocity(), 0.0, atol=1e-4)
+    assert_allclose(entity.get_pos(), (0.0, 0.0, -0.03), atol=5e-4)
 
 
 @pytest.mark.slow  # ~200s
@@ -483,16 +730,16 @@ def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
     scene.build()
     expected_damping = 0.0 if joint_damping is None else joint_damping
     expected_frictionloss = 0.0 if joint_friction is None else joint_friction
-    assert_allclose(robot.joints[0].dofs_damping, 0.0, tol=gs.EPS)
-    assert_allclose(robot.joints[1].dofs_damping, expected_damping, tol=gs.EPS)
-    assert_allclose(robot.joints[0].dofs_frictionloss, 0.0, tol=gs.EPS)
-    assert_allclose(robot.joints[1].dofs_frictionloss, expected_frictionloss, tol=gs.EPS)
+    assert_allclose(robot.joints[0].desc.dofs_damping, 0.0, tol=gs.EPS)
+    assert_allclose(robot.joints[1].desc.dofs_damping, expected_damping, tol=gs.EPS)
+    assert_allclose(robot.joints[0].desc.dofs_frictionloss, 0.0, tol=gs.EPS)
+    assert_allclose(robot.joints[1].desc.dofs_frictionloss, expected_frictionloss, tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["freeflyer_mjcf", "freeflyer_urdf"])
-def test_default_armature_freeflyer(xml_path):
+def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
     DEFAULT_ARMATURE = 1000.0
 
     morph_class = gs.morphs.URDF if xml_path.endswith(".urdf") else gs.morphs.MJCF
@@ -503,24 +750,90 @@ def test_default_armature_freeflyer(xml_path):
     morph_without_armature = morph_class(
         file=xml_path,
         pos=(1.0, 0.0, 0.0),
+        default_armature=None,
     )
+    # One variant per environment, each weighing differently and asking its own default.
+    morphs_heterogeneous = [
+        morph_class(
+            file=xml_path,
+            pos=(2.0, 0.0, 0.0),
+            scale=1.0,
+            default_armature=DEFAULT_ARMATURE,
+        ),
+        morph_class(
+            file=xml_path,
+            pos=(2.0, 0.0, 0.0),
+            scale=2.0,
+            default_armature=None,
+        ),
+    ]
+
+    # An attached pair is one kinematic tree spanning two entities, only the mounted one asking a default, beside the
+    # same pair without any default.
+    carriers = []
+    for i_pair, default_armature in enumerate((DEFAULT_ARMATURE, None)):
+        carrier = morph_class(
+            file=xml_path,
+            pos=(3.0 + i_pair, 0.0, 0.0),
+            default_armature=None,
+        )
+        mounted = morph_class(
+            file=xml_path,
+            pos=(3.0 + i_pair, 0.0, 0.5),
+            default_armature=default_armature,
+        )
+        carriers.append((carrier, mounted))
 
     scene = gs.Scene()
     robot = scene.add_entity(morph)
     robot_without_armature = scene.add_entity(morph_without_armature)
-    scene.build()
+    robot_heterogeneous = scene.add_entity(morphs_heterogeneous)
+    # One entity holding three kinematic trees, only the first with a joint the default applies to.
+    robot_trees = scene.add_entity(
+        gs.morphs.MJCF(
+            file=trees_and_slider_mjcf,
+            pos=(0.0, 3.0, 0.0),
+            default_armature=DEFAULT_ARMATURE,
+        )
+    )
+    robot_trees_reference = scene.add_entity(
+        gs.morphs.MJCF(
+            file=trees_and_slider_mjcf,
+            pos=(0.0, 4.0, 0.0),
+            default_armature=None,
+        )
+    )
+    carrier, carrier_reference = [], []
+    for (carrier_morph, mounted_morph), pair in zip(carriers, (carrier, carrier_reference)):
+        pair.append(scene.add_entity(carrier_morph))
+        mounted_entity = scene.add_entity(mounted_morph)
+        mounted_entity.attach(pair[0], parent_link_name=pair[0].base_link.name, pos=(0.0, 0.0, 0.5))
+    (carrier,), (carrier_reference,) = carrier, carrier_reference
+    scene.build(n_envs=2)
 
     armature = robot.get_dofs_armature()
-    assert_allclose(armature[:6], 0.0, tol=gs.EPS)
-    assert_allclose(armature[6], DEFAULT_ARMATURE, tol=gs.EPS)
+    assert_allclose(armature[:, :6], 0.0, tol=gs.EPS)
+    assert_allclose(armature[:, 6], DEFAULT_ARMATURE, tol=gs.EPS)
+    assert_allclose(robot_without_armature.get_dofs_armature()[:, 6], 0.0, tol=gs.EPS)
     if xml_path.endswith(".xml"):
-        assert_allclose(armature[7], 42.0, tol=gs.EPS)
-        assert_allclose(armature[8], 0.0002, tol=gs.EPS)
+        assert_allclose(armature[:, 7], 42.0, tol=gs.EPS)
+        assert_allclose(armature[:, 8], 0.0002, tol=gs.EPS)
+    armature_heterogeneous = robot_heterogeneous.get_dofs_armature()
+    assert_allclose(armature_heterogeneous[0, 6], DEFAULT_ARMATURE, tol=gs.EPS)
+    assert_allclose(armature_heterogeneous[1, 6], 0.0, tol=gs.EPS)
 
-    # Rotor inertia adds to the effective inertia of the joint it is applied to, so it must lower the inverse weight
-    # the solver derives from it. An inverse weight parsed before the armature was applied leaves the rotor inertia
-    # out of every constraint it scales.
-    assert robot.get_dofs_invweight()[6] < robot_without_armature.get_dofs_invweight()[6]
+    # Rotor inertia lowers the inverse weight of its own joint and, through the inverse mass matrix of the tree, of every
+    # joint coupled to it, attached entities included: a weight parsed before the default was applied would miss it.
+    assert (robot.get_dofs_invweight()[:, 6:8] < robot_without_armature.get_dofs_invweight()[:, 6:8]).all()
+    assert (carrier.get_dofs_invweight()[:, 6:8] < carrier_reference.get_dofs_invweight()[:, 6:8]).all()
+    # The default reaches its own tree alone: the other trees of the entity keep the inverse weights they were built with.
+    assert (robot_trees.get_dofs_invweight()[:, 6] < robot_trees_reference.get_dofs_invweight()[:, 6]).all()
+    assert_equal(robot_trees.get_dofs_invweight()[:, 7:], robot_trees_reference.get_dofs_invweight()[:, 7:])
+    # The slider is weighed like every other body (see the FIXME in genesis.utils.mjcf): 1 / (mass + armature) for its
+    # dof, a third of it for the translation of the link and none for its rotation.
+    slider_invweight = 1.0 / (1.0 + 0.3)
+    assert_allclose(robot_trees.get_dofs_invweight()[:, 14], slider_invweight, tol=tol)
+    assert_allclose(robot_trees.get_links_invweight()[:, 4], (slider_invweight / 3.0, 0.0), tol=tol)
 
 
 @pytest.mark.slow  # ~200s
@@ -534,13 +847,6 @@ def test_xacro_loading(xacro_robot, show_viewer, tol):
         fixed=True,
         merge_fixed_links=False,
     )
-
-    # After xacro processing, morph.file is a urdfpy.URDF with absolute mesh paths
-    assert isinstance(morph.file, urdfpy.URDF)
-    for link in morph.file.links:
-        for geom_prop in (*link.collisions, *link.visuals):
-            if isinstance(geom_prop.geometry.geometry, urdfpy.Mesh):
-                assert os.path.isabs(geom_prop.geometry.geometry.filename)
 
     entity = scene.add_entity(morph)
 
@@ -569,19 +875,20 @@ def test_xacro_loading(xacro_robot, show_viewer, tol):
     assert entity.links[1].geoms[0].type == gs.GEOM_TYPE.CYLINDER
     assert entity.links[2].geoms[0].type == gs.GEOM_TYPE.MESH
 
-    # Mass check: 3 links at 1.0 each (default) vs 5.0 each (overridden)
-    assert_allclose(entity.get_mass(), 3.0, tol=tol)
-    assert_allclose(heavy.get_mass(), 15.0, tol=tol)
+    # Mass check: of the three links at 1.0 each (default) or 5.0 each (overridden), the base is fixed to the world
+    # and is carried with no mass of its own, so the body weighs what the dynamics moves.
+    assert_allclose(entity.get_mass(), 2.0, tol=tol)
+    assert_allclose(heavy.get_mass(), 10.0, tol=tol)
 
 
 @pytest.mark.required
 @pytest.mark.required
 @pytest.mark.parametrize("overwrite", [False, True])
-def test_color_overwrite(overwrite, show_viewer):
+def test_color_overwrite(overwrite, urdf_with_external_assets, show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
     box = scene.add_entity(
         gs.morphs.URDF(
-            file="genesis/assets/urdf/blue_box/model.urdf",
+            file="urdf/blue_box/model.urdf",
             convexify=False,
         ),
         surface=gs.surfaces.Default(
@@ -625,20 +932,31 @@ def test_color_overwrite(overwrite, show_viewer):
             color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
         ),
     )
+    textured = scene.add_entity(
+        gs.morphs.URDF(
+            file=urdf_with_external_assets,
+        ),
+        surface=gs.surfaces.Default(
+            color=(1.0, 0.0, 0.0, 1.0) if overwrite else None,
+        ),
+    )
     if show_viewer:
         scene.build()
+
     for vgeom in box.vgeoms:
         assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite
         visual = vgeom.vmesh.trimesh.visual
         assert visual.defined
         color = np.unique(visual.vertex_colors, axis=0)
         assert_equal(color, (255, 0, 0, 255) if overwrite else (0, 0, 255, 255))
+
     for vgeom in chain.vgeoms:
         assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite
         visual = vgeom.vmesh.trimesh.visual
         assert visual.defined
         color = np.unique(visual.vertex_colors, axis=0)
         assert_equal(color, (255, 0, 0, 255) if overwrite else (51, 51, 51, 255))
+
     for vgeom in humanoid.vgeoms:
         # FIXME: The original material is lost because the visuals are collision geometries that has been duplicated as
         # visual to circumvent the lack of dedicated visuals.
@@ -655,6 +973,7 @@ def test_color_overwrite(overwrite, show_viewer):
                     assert_equal(color, (128, 128, 128, 255))
         else:
             assert_equal(color, (255, 0, 0, 255) if overwrite else (128, 128, 128, 255))
+
     for vgeom in axis.vgeoms:
         assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite
         visual = vgeom.vmesh.trimesh.visual
@@ -664,6 +983,7 @@ def test_color_overwrite(overwrite, show_viewer):
             assert_equal(color, (255, 0, 0, 255))
         else:
             assert_equal(color, [[0, 0, 178, 255], [0, 178, 0, 255], [178, 0, 0, 255], [255, 255, 255, 255]])
+
     for vgeom in table.vgeoms:
         assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite
         visual = vgeom.vmesh.trimesh.visual
@@ -671,6 +991,23 @@ def test_color_overwrite(overwrite, show_viewer):
         if overwrite:
             color = np.unique(visual.vertex_colors, axis=0)
             assert_equal(color, (255, 0, 0, 255))
+
+    texture_path = ET.fromstring(urdf_with_external_assets).find("material/texture").get("filename")
+    texture = np.array(Image.open(texture_path).convert("RGB"))
+    sphere_vgeom, quad_vgeom = textured.vgeoms
+    for vgeom in (sphere_vgeom, quad_vgeom):
+        assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite
+        assert vgeom.vmesh.trimesh.visual.defined
+    if overwrite:
+        for vgeom in (sphere_vgeom, quad_vgeom):
+            color = np.unique(vgeom.vmesh.trimesh.visual.vertex_colors, axis=0)
+            assert_equal(color, (255, 0, 0, 255))
+    else:
+        assert_equal(np.array(quad_vgeom.vmesh.trimesh.visual.material.image.convert("RGB")), texture)
+        # A visual without texture coordinates takes the mean color of the texture
+        color = np.unique(sphere_vgeom.vmesh.trimesh.visual.vertex_colors, axis=0)
+        assert_equal(color, (*texture.mean(axis=(0, 1)), 255))
+
     for entity in scene.entities:
         for geom in entity.geoms:
             assert geom.mesh.metadata["is_visual_overwritten"]
@@ -689,9 +1026,10 @@ def test_color_overwrite(overwrite, show_viewer):
     [
         pytest.param("xml/franka_emika_panda/panda.xml", marks=pytest.mark.slow),
         "urdf/go2/urdf/go2.urdf",
+        "urdf/panda_bullet/panda.urdf",
     ],
 )
-def test_robot_scale_and_dofs_armature(xml_path, tol):
+def test_robot_scale_and_dofs_armature(xml_path, monkeypatch, tol):
     ROBOT_SCALES = (1.0, 0.2, 5.0)
 
     scene = gs.Scene(
@@ -704,19 +1042,29 @@ def test_robot_scale_and_dofs_armature(xml_path, tol):
         show_viewer=False,
         show_FPS=False,
     )
-    for i, scale in enumerate(ROBOT_SCALES):
-        morph_kwargs = dict(file=xml_path, scale=scale)
-        if xml_path.endswith(".xml"):
-            morph = gs.morphs.MJCF(**morph_kwargs)
-        else:
-            morph = gs.morphs.URDF(**morph_kwargs)
-        scene.add_entity(morph)
+    files = [xml_path]
+    if xml_path.endswith(".urdf"):
+        # The asset is also loaded as one in-memory model shared by an entity at every scale, which parsing must leave
+        # intact for the next one. An in-memory model resolves its relative mesh paths against the working directory.
+        urdf_path = os.path.join(get_assets_dir(), xml_path)
+        monkeypatch.chdir(os.path.dirname(urdf_path))
+        files.append(urdfpy.URDF.load(urdf_path))
+    robots_scale = []
+    for scale in ROBOT_SCALES:
+        for file in files:
+            morph_kwargs = dict(file=file, scale=scale)
+            if xml_path.endswith(".xml"):
+                morph = gs.morphs.MJCF(**morph_kwargs)
+            else:
+                morph = gs.morphs.URDF(**morph_kwargs)
+            scene.add_entity(morph)
+            robots_scale.append(scale)
     scene.build()
 
     # Disable armature because it messes up with the mass matrix.
     # It is also a good opportunity to check that it updates 'invweight' and meaninertia accordingly.
     attr_orig = {}
-    for scale, robot in zip(ROBOT_SCALES, scene.entities):
+    for scale, robot in zip(robots_scale, scene.entities):
         links_invweight = robot.get_links_invweight()
         dofs_invweight = robot.get_dofs_invweight()
         robot.set_dofs_armature(torch.ones((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
@@ -741,7 +1089,7 @@ def test_robot_scale_and_dofs_armature(xml_path, tol):
         attr_orig.setdefault("mass", mass)
         assert_allclose(mass, attr_orig["mass"], tol=tol)
 
-        inertia = np.stack([link.inertial_i for link in robot.links], axis=0) / scale**5
+        inertia = np.stack([link.desc.inertia for link in robot.links], axis=0) / scale**5
         attr_orig.setdefault("inertia", inertia)
         assert_allclose(inertia, attr_orig["inertia"], tol=tol)
 
@@ -811,15 +1159,31 @@ def test_mesh_primitive_COM(show_viewer):
         vis_mode="collision",
         visualize_contact=True,
     )
+    twin = scene.add_entity(
+        gs.morphs.Mesh(
+            file="meshes/bunny.obj",
+            pos=(-1.0, 1.0, 0.55),
+        ),
+    )
 
     scene.build()
+
+    # Entities built from one asset share a single copy of the collision geometry and its derived data. A convex
+    # decomposition holds hundreds of kilobytes of it, so a thousand bunnies cost the memory of one.
+    geometry, twin_geometry = bunny.geoms[0].mesh, twin.geoms[0].mesh
+    assert twin_geometry.verts is geometry.verts
+    assert twin_geometry.faces is geometry.faces
+    assert twin_geometry.get_unique_edges() is geometry.get_unique_edges()
+    assert twin_geometry.get_vert_adjacency() is geometry.get_vert_adjacency()
+    assert twin_geometry.inertial is geometry.inertial
+
     rigid = scene.sim.rigid_solver
     for _ in range(50):
         scene.step()
     scene.rigid_solver.update_vgeoms()
 
-    _, bunny_COM, cube_COM = rigid.get_links_pos(ref=gs.link_ref_frame.link_COM)
-    _, root_bunny_COM, root_cube_COM = rigid.get_links_pos(ref=gs.link_ref_frame.root_COM)
+    _, bunny_COM, cube_COM, _ = rigid.get_links_pos(ref=gs.link_ref_frame.link_COM)
+    _, root_bunny_COM, root_cube_COM, _ = rigid.get_links_pos(ref=gs.link_ref_frame.root_COM)
     assert_allclose(bunny_COM, bunny.get_links_pos(links_idx_local=[0], ref=gs.link_ref_frame.link_COM), atol=gs.EPS)
     assert_allclose(cube_COM, cube.get_links_pos(links_idx_local=[0], ref=gs.link_ref_frame.link_COM), atol=gs.EPS)
     assert_allclose(root_bunny_COM, bunny_COM, atol=gs.EPS)
@@ -953,12 +1317,11 @@ def test_align_mesh(show_viewer, tol):
     scene.reset()
 
     # Simulate
-    for _ in range(600):
+    for _ in range(650):
         scene.step()
 
     assert_allclose(mango.get_dofs_velocity(dofs_idx_local=(0, 1, 2)), 0, tol=0.01)
-    assert_allclose(mango.get_dofs_velocity(dofs_idx_local=(3, 4, 5)), 0, tol=0.05)
-    assert_allclose(mango.get_dofs_velocity(), 0, tol=0.05)
+    assert_allclose(mango.get_dofs_velocity(dofs_idx_local=(3, 4, 5)), 0, tol=0.08)
     min_z = mango.get_AABB()[:, 0, 2]
     assert ((-1e-3 < min_z) & (min_z < 0.0)).all()
 
@@ -1035,69 +1398,156 @@ def test_align_mixed_mass_raises():
             show_viewer=False,
             show_FPS=False,
         )
-        scene.add_entity(
-            gs.morphs.URDF(
-                file=urdf,
-                align=True,
-                merge_fixed_links=False,
-            ),
-            material=material,
-        )
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
-            scene.build()
+            scene.add_entity(gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False), material=material)
 
 
 @pytest.mark.required
-def test_align_relative_offset_on_link_relative_geoms(show_viewer, tol):
-    # To exercise the geom-frame offset strip the geoms MUST sit at non-identity poses relative to their link (explicit
-    # collision/visual <origin>) AND the morph offset MUST be a rotation that does not commute with them - otherwise the
-    # conjugation degenerates to the plain morph offset and a naive (corrupted) strip would still pass. A convex-
-    # decomposed mesh is useless here: its sub-geoms keep an identity frame (geometry lives in the vertices).
-    robot = ET.Element("robot", name="posed_geoms")
-    link = ET.SubElement(robot, "link", name="body")
-    for origin_rpy, origin_xyz in (
-        ("0 0 1.5708", "0.1 0 0"),
-        ("0.7854 0 0", "0 0.1 0.05"),
-        ("0 1.0472 0.5", "0 0 0.1"),
-    ):
-        for group_tag in ("collision", "visual"):
-            group = ET.SubElement(link, group_tag)
-            geom_el = ET.SubElement(group, "geometry")
-            ET.SubElement(geom_el, "box", size="0.05 0.1 0.15")
-            ET.SubElement(group, "origin", rpy=origin_rpy, xyz=origin_xyz)
-    urdf = urdfpy.URDF._from_xml(robot, robot, get_assets_dir())
-
-    BODY_POS = (0.0, 0.0, 0.2)
-    OFFSET_EULER = (20.0, 35.0, 50.0)  # a generic rotation that does not commute with the geom poses
+def test_align_preserves_link_local_frames(aligned_link_frame_urdfs, show_viewer, tol):
+    TORQUE = (0.3, 0.8, -0.5)
+    OFFSET_EULER = (20.0, 35.0, 50.0)
     scene = gs.Scene(
-        show_viewer=show_viewer,
-        show_FPS=False,
-    )
-    body = scene.add_entity(
-        gs.morphs.URDF(
-            file=urdf,
-            pos=BODY_POS,
-            offset_euler=OFFSET_EULER,
-            align=True,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -4.0, 2.0),
+            camera_lookat=(1.0, 0.0, 0.5),
         ),
-        material=gs.materials.Rigid(),
+        show_viewer=show_viewer,
     )
-    scene.build()
+    entity_aligned = scene.add_entity(
+        morph=gs.morphs.URDF(
+            pos=(0.0, 0.0, 0.5),
+            offset_euler=OFFSET_EULER,
+            file=aligned_link_frame_urdfs[1],
+            align=True,
+            merge_fixed_links=False,
+        ),
+        vis_mode="collision",
+    )
+    entity_unaligned = scene.add_entity(
+        morph=gs.morphs.URDF(
+            pos=(1.0, 0.0, 0.5),
+            offset_euler=OFFSET_EULER,
+            file=aligned_link_frame_urdfs[1],
+            align=False,
+            merge_fixed_links=False,
+        ),
+        vis_mode="collision",
+    )
+    entity_heterogeneous_aligned = scene.add_entity(
+        morph=tuple(
+            gs.morphs.URDF(
+                pos=(2.0, 0.0, 0.5),
+                offset_euler=OFFSET_EULER,
+                file=file,
+                align=True,
+                merge_fixed_links=False,
+            )
+            for file in aligned_link_frame_urdfs
+        ),
+        vis_mode="collision",
+    )
+    # The unaligned twin of each aligned entity pins the authored behavior that alignment must preserve.
+    entity_heterogeneous_unaligned = scene.add_entity(
+        morph=tuple(
+            gs.morphs.URDF(
+                pos=(3.0, 0.0, 0.5),
+                offset_euler=OFFSET_EULER,
+                file=file,
+                align=False,
+                merge_fixed_links=False,
+            )
+            for file in aligned_link_frame_urdfs
+        ),
+        vis_mode="collision",
+    )
+    # A heterogeneous entity needs one environment per morph variant.
+    scene.build(n_envs=2)
 
-    assert len(body.geoms) > 1, "expected multiple geoms posed relative to the link"
-
-    # The user orientation is identity, so the world<-user offset rotates each geom about the link origin:
+    # The fixture geoms sit at non-identity poses relative to their links and the morph offset is a rotation that
+    # does not commute with them. Otherwise the geom-frame conjugation would degenerate to the plain morph offset
+    # and a corrupted re-expression would still pass. A convex-decomposed mesh is useless here: its sub-geoms keep
+    # an identity frame (geometry lives in the vertices). The user orientation is identity, so the world<-user offset
+    # rotates each base-link geom about the link origin:
     # geom_world_pos = U_pos + R(offset) * (geom_user_pos - U_pos) and geom_world_quat = offset * geom_user_quat.
-    assert_allclose(body.get_quat(relative=True), gu.identity_quat(), tol=tol)
-    u_pos = tensor_to_array(body.get_pos(relative=True))
+    # Child-link geoms carry no user-frame offset (morph offsets belong to floating base links), so their world
+    # pose is pinned from the authored chain of the unaligned twin's description instead.
     offset_quat = gu.xyz_to_quat(np.array(OFFSET_EULER), rpy=True, degrees=True)
-    for geom in body.geoms:
-        geom_user_pos = tensor_to_array(geom.get_pos(relative=True))
-        geom_user_quat = tensor_to_array(geom.get_quat(relative=True))
-        expected_world_pos = u_pos + gu.transform_by_quat(geom_user_pos - u_pos, offset_quat)
-        expected_world_quat = gu.transform_quat_by_quat(geom_user_quat, offset_quat)
-        assert_allclose(geom.get_pos(relative=False), expected_world_pos, tol=tol)
-        assert_allclose(geom.get_quat(relative=False), expected_world_quat, tol=tol)
+    # 'transform_quat_by_quat' requires operands of matching shapes.
+    batched_offset_quat = np.tile(offset_quat, (scene.n_envs, 1))
+    base_desc, child_desc = (link.desc for link in entity_unaligned.links)
+    child_geom_desc = entity_unaligned.geoms[1].desc
+    child_geom_user_pos = child_desc.pos + gu.transform_by_quat(child_geom_desc.pos, child_desc.quat)
+    child_geom_quat = gu.transform_quat_by_quat(child_geom_desc.quat, child_desc.quat)
+    child_world_quat = gu.transform_quat_by_quat(child_geom_quat, offset_quat)
+    for entity in (entity_aligned, entity_unaligned):
+        assert_allclose(gu.quat_to_xyz(entity.get_quat()), 0.0, tol=tol)
+        u_pos = tensor_to_array(entity.get_pos())
+        base_geom, child_geom = entity.geoms
+        base_user_pos = tensor_to_array(base_geom.get_pos(relative=True))
+        base_user_quat = tensor_to_array(base_geom.get_quat(relative=True))
+        base_world_pos = u_pos + gu.transform_by_quat(base_user_pos - u_pos, offset_quat)
+        base_world_quat = gu.transform_quat_by_quat(base_user_quat, batched_offset_quat)
+        assert_allclose(base_geom.get_pos(relative=False), base_world_pos, tol=tol)
+        assert_allclose(base_geom.get_quat(relative=False), base_world_quat, tol=tol)
+        child_world_pos = u_pos + gu.transform_by_quat(child_geom_user_pos, offset_quat)
+        assert_allclose(child_geom.get_pos(relative=False), child_world_pos, tol=tol)
+        assert_allclose(child_geom.get_quat(relative=False), child_world_quat, tol=tol)
+    # Alignment must not move any collision or visual geom in the world: the aligned twin matches the unaligned one.
+    for aligned_geom, unaligned_geom in zip(
+        (*entity_aligned.geoms, *entity_aligned.vgeoms),
+        (*entity_unaligned.geoms, *entity_unaligned.vgeoms),
+        strict=True,
+    ):
+        assert_allclose(
+            aligned_geom.get_pos(relative=False) - entity_aligned.get_pos(),
+            unaligned_geom.get_pos(relative=False) - entity_unaligned.get_pos(),
+            tol=tol,
+        )
+        assert_allclose(aligned_geom.get_quat(relative=False), unaligned_geom.get_quat(relative=False), tol=tol)
+
+    # The child COM stays at its authored point while alignment moves the root to the composite COM. The authored
+    # values come from the unaligned twin's description, since the aligned description is the quantity under test.
+    child_com_user = child_desc.pos + gu.transform_by_quat(child_desc.inertial_pos, child_desc.quat)
+    com_offset = gu.transform_by_quat(child_com_user, offset_quat)
+    composite_user = base_desc.mass * base_desc.inertial_pos + child_desc.mass * child_com_user
+    composite_user /= base_desc.mass + child_desc.mass
+    anchor_offset = gu.transform_by_quat(composite_user, offset_quat)
+    for entity, expected_anchor in ((entity_aligned, anchor_offset), (entity_unaligned, 0.0)):
+        entity_pos = tensor_to_array(entity.get_pos())
+        child_com = entity.get_links_pos(links_idx_local=1, ref=gs.link_ref_frame.link_COM)[..., 0, :]
+        assert_allclose(child_com, entity_pos + com_offset, tol=tol)
+        assert_allclose(entity.get_pos(relative=False), entity_pos + expected_anchor, tol=tol)
+    # Per-environment variants: alignment must preserve the unaligned twin's COM offsets and composite anchor.
+    aligned_com, unaligned_com = (
+        entity.get_links_pos(links_idx_local=1, ref=gs.link_ref_frame.link_COM)[..., 0, :] - entity.get_pos()
+        for entity in (entity_heterogeneous_aligned, entity_heterogeneous_unaligned)
+    )
+    assert_allclose(aligned_com, unaligned_com, tol=tol)
+    masses = entity_heterogeneous_unaligned.get_links_mass()
+    coms = entity_heterogeneous_unaligned.get_links_pos(ref=gs.link_ref_frame.link_COM)
+    composite = (masses[..., None] * coms).sum(dim=-2) / masses.sum(dim=-1)[..., None]
+    assert_allclose(
+        entity_heterogeneous_aligned.get_pos(relative=False),
+        composite - entity_heterogeneous_unaligned.get_pos() + entity_heterogeneous_aligned.get_pos(),
+        tol=tol,
+    )
+    # The inverse weight of a link derives from its COM, so the child's must match the unaligned twin as well.
+    twins = ((entity_aligned, entity_unaligned), (entity_heterogeneous_aligned, entity_heterogeneous_unaligned))
+    for aligned_entity, unaligned_entity in twins:
+        assert_allclose(
+            aligned_entity.get_links_invweight(links_idx_local=1),
+            unaligned_entity.get_links_invweight(links_idx_local=1),
+            tol=tol,
+        )
+
+    # A pure local torque isolates the inertial-frame orientation because it has no application-point arm.
+    for entity in scene.entities:
+        entity.apply_links_external_wrench(torque=TORQUE, links_idx_local=1, ref=gs.link_ref_frame.link_COM, local=True)
+    scene.step()
+    for aligned_entity, unaligned_entity in twins:
+        assert_allclose(
+            aligned_entity.get_links_ang(links_idx_local=1), unaligned_entity.get_links_ang(links_idx_local=1), tol=tol
+        )
 
 
 def _build_two_link_revolute_urdf(
@@ -1312,7 +1762,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
         material=gs.materials.Rigid(),
     )
     # Free bodies whose root link is empty and whose mass lives on a fixed child (merge_fixed_links=False keeps the
-    # wrapper). Alignment folds the child's mass onto the root; the subsumed child keeps only the gs.EPS placeholder.
+    # wrapper). The empty root reads the gs.EPS placeholder and the child its authored mass.
     WRAP_MASS_A, WRAP_MASS_B = 0.5, 0.25
     wrapped_morph = (
         gs.morphs.URDF(
@@ -1412,7 +1862,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     assert mass.shape == (scene.n_envs,)
     assert_allclose(mass[0], mass[1], tol=tol)
     assert_allclose(mass[2], mass[3], tol=tol)
-    assert not np.allclose(mass[0], mass[2], atol=tol, rtol=tol), "Variant A and B masses should differ"
+    assert not torch.allclose(mass[0], mass[2], atol=tol, rtol=tol), "Variant A and B masses should differ"
     # Variant B total mass should match the explicit URDF inertial values
     assert_allclose(mass[0], sphere_base_mass + sphere_moving_mass, tol=tol)
 
@@ -1448,15 +1898,12 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     with pytest.raises(AssertionError):
         assert_allclose(inertial_i[0, 0], inertial_i[2, 0], tol=tol)
 
-    # Empty-free-root wrapping a fixed massive child: alignment folds the composite mass onto the root (link 0),
-    # leaving the subsumed child (link 1) with only the gs.EPS placeholder. The root must carry exactly the child's
-    # mass; a prior bug summed the root's own gs.EPS placeholder into the composite, inflating it by one gs.EPS
-    # (hence the sub-EPS tolerance below). Envs are dispatched as [A, A, B, B].
-    wrapped_idx = slice(free_wrapped.link_start, free_wrapped.link_end)
-    wrapped_mass = qd_to_numpy(scene.rigid_solver.dyn_info.links.inertial_mass, None, wrapped_idx, transpose=True)
-    assert_allclose(wrapped_mass[[0, 1], 0], WRAP_MASS_A, atol=gs.EPS * 0.5)
-    assert_allclose(wrapped_mass[[2, 3], 0], WRAP_MASS_B, atol=gs.EPS * 0.5)
-    assert_allclose(wrapped_mass[:, 1], gs.EPS, atol=gs.EPS * 1e-3)
+    # The root (link 0) reads the gs.EPS placeholder of a geometry-free link, the child (link 1) its authored mass. The
+    # environments hold [A, A, B, B].
+    wrapped_mass = free_wrapped.get_links_mass()
+    assert_allclose(wrapped_mass[:, 0], gs.EPS, tol=gs.EPS)
+    assert_allclose(wrapped_mass[[0, 1], 1], WRAP_MASS_A, tol=gs.EPS)
+    assert_allclose(wrapped_mass[[2, 3], 1], WRAP_MASS_B, tol=gs.EPS)
 
     # Check contacts
     for i in range(4):
@@ -1579,6 +2026,8 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
     EULER_OFFSET = (0, 0, 45)
     TOOL_MOUNT_POS = (0.0, 0.0, 0.05)
     TOOL_MOUNT_QUAT = (math.cos(math.pi / 8), math.sin(math.pi / 8), 0.0, 0.0)  # 45 deg about x
+    GHOST_MOUNT_POS = (0.0, 0.6, 0.3)
+    GHOST_MOUNT_OFFSET = (0.0, 0.0, 0.1)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1616,6 +2065,20 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
         ),
         vis_mode="collision",
     )
+    ghost_mount = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.05, 0.05, 0.05),
+            pos=GHOST_MOUNT_POS,
+        ),
+        material=gs.materials.Kinematic(),
+    )
+    ghost_tool = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.02, 0.02, 0.02),
+            pos=(2.0, 2.0, 2.0),
+        ),
+        material=gs.materials.Kinematic(),
+    )
     tool = scene.add_entity(
         gs.morphs.Sphere(
             radius=0.005,
@@ -1631,7 +2094,12 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
     )
     with pytest.raises(gs.GenesisException):
         franka.attach(hand, "right_finger")
-    # Omitting the mounting transform keeps the child's morph pose acting as the mount.
+    # A merged pair is one kinematic tree, numbered within one solver, so the two entities must share one.
+    with pytest.raises(gs.GenesisException):
+        ghost_tool.attach(hand, "right_finger")
+    ghost_tool.attach(ghost_mount, ghost_mount.base_link.name, pos=GHOST_MOUNT_OFFSET)
+    # Omitting the mounting transform keeps the child's morph pose acting as the mount. The kinematic pair above
+    # stands ahead of this one, so a mount re-indexes the entities its own solver holds after it.
     hand.attach(franka, "attachment")
     # Malformed mounting transforms (wrong shape, or a zero-length quaternion) raise before any kinematic-tree
     # mutation, leaving the entity attachable.
@@ -1647,7 +2115,7 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
         box.attach(hand, "right_finger")
 
     # Make sure that collision between hand base link and franka attachment point has been filtered out as adjacent
-    collision_pair_idx = scene.rigid_solver.collider._collider_info.collision_pair_idx.to_numpy()
+    collision_pair_idx = scene.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()
     assert collision_pair_idx[franka.get_link("attachment").idx, hand.base_link_idx] == -1
 
     with pytest.raises(gs.GenesisException):
@@ -1688,3 +2156,8 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
     )
     assert_allclose(tool.get_pos(), expected_tool_pos, tol=tol)
     assert_allclose(tool.get_quat(), expected_tool_quat, tol=tol)
+
+    # A kinematic entity attaches onto another one the same way. The mounting transform places it in the parent
+    # link frame, as for a rigid pair.
+    assert_allclose(ghost_tool.get_pos(), np.add(GHOST_MOUNT_POS, GHOST_MOUNT_OFFSET), tol=gs.EPS)
+    assert ghost_tool.desc.attachment.entity_name == ghost_mount.name

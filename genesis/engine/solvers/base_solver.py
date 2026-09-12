@@ -1,19 +1,29 @@
-import dataclasses
 import enum
 import functools
 import inspect
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Callable
 
-import quadrants as qd
 import numpy as np
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.misc import qd_to_torch, sanitize_index, tensor_to_array
 from genesis.engine.entities.base_entity import Entity
-from genesis.engine.states import QueriedStates
+from genesis.engine.materials.base import Material
+from genesis.engine.states import QueriedStates, SolverCheckpoint
 from genesis.repr_base import RBC
+from genesis.utils.misc import (
+    assign_indexed_tensor,
+    broadcast_tensor,
+    indices_to_mask,
+    qd_to_numpy,
+    qd_to_torch,
+    sanitize_index,
+    tensor_to_array,
+)
 
 
 if TYPE_CHECKING:
@@ -183,15 +193,133 @@ class Subscriber:
         self._pending.clear()
 
 
+class TimeBasedMixin:
+    """Integration interval of one solver, and the number of substeps it implies per scene step.
+
+    Mixed into every solver whose options carry a `dt`.
+    """
+
+    _substeps: int
+    _substep_dt: float
+
+    def __init__(self, scene, sim, options):
+        """Compute how many substeps this solver runs per scene step, from the interval it integrates over.
+
+        The count is `SimOptions.dt` divided by the interval the options of this solver ask for. A solver whose `dt`
+        was left unset takes `SimOptions.substeps` instead. Since the substep loop advances every solver together,
+        `Simulator.build` then checks that the active solvers all end up on the same count.
+        """
+        super().__init__(scene, sim, options)
+        self._substeps = max(1, round(sim.dt / options.dt)) if "dt" in options.model_fields_set else sim.substeps
+        self._substep_dt = sim.dt / self._substeps
+
+    @property
+    def dt(self):
+        """Duration of one scene step, in seconds, which this solver covers in `substeps` substeps."""
+        return self._sim.dt
+
+    @property
+    def substep_dt(self):
+        return self._substep_dt
+
+    @property
+    def substeps(self):
+        """The number of times this solver integrates per scene step."""
+        return self._substeps
+
+
+class GravityMixin:
+    """Gravity of one solver: the buffer storing it, and the accessors reading and writing it.
+
+    Mixed into every solver whose options carry a gravity vector.
+    """
+
+    _gravity: "qd.Tensor | None" = None
+
+    def _build_gravity(self, gravity=None, *, as_field: bool = False):
+        """Allocate the buffer storing this solver's gravity and fill it with the value from the options.
+
+        Called once, at build time, every environment getting the same value. Pass `gravity` to reuse a buffer the
+        solver already declares among its own arrays, as the rigid solver does with `RigidInfo.gravity`, so that
+        `set_gravity` and the kernels read the same memory. Leave it out to have one allocated here. Pass
+        `as_field=True` for a solver whose kernels access gravity as an attribute of the solver object, which quadrants
+        supports for a field only. A solver holding no entity gets no buffer, and its accessors then raise.
+        """
+        # FIXME: a field is what a kernel taking the solver as a template can read, since Quadrants resolves no
+        # ndarray attribute of a @qd.data_oriented class in kernel scope. Two ways out, either of which retires the
+        # as_field flag: adding ndarray support to that resolution, or migrating the solver to a frozen dataclass so
+        # its ndarrays are predeclared. Until then the buffer is only allocated for a solver with an entity, since a
+        # field costs an SNode tree that Quadrants never gives back short of qd.reset().
+        if not self.is_active:
+            return
+        shape = (self._B,)
+        if gravity is None:
+            if as_field:
+                gravity = qd.tensor(gs.qd_vec3, shape, backend=qd.Backend.FIELD)
+            else:
+                gravity = array_class.V(gs.qd_vec3, shape)
+        self._gravity = gravity
+        self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
+
+    @gs.assert_built
+    def set_gravity(self, gravity, envs_idx=None):
+        """
+        Set the gravity acting on the bodies of this solver, in m/s^2.
+
+        Parameters
+        ----------
+        gravity : array_like, shape (3,) or (n_envs, 3)
+            The gravity vector, one per environment when several are named.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        if self._gravity is None:
+            gs.raise_exception(f"{type(self).__name__} holds no body for a gravity to act on.")
+        # Indices are not checked on purpose: deciding to raise means reading a comparison back from the device, which
+        # syncs, and this may run every step.
+        if gs.use_zerocopy:
+            envs_mask = indices_to_mask(envs_idx)
+            gravity_t = qd_to_torch(self._gravity, transpose=True, copy=False)
+            assign_indexed_tensor(
+                gravity_t, envs_mask, broadcast_tensor(gravity, gs.tc_float, gravity_t[envs_mask].shape)
+            )
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+            return
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        gravity = broadcast_tensor(gravity, gs.tc_float, (len(envs_idx), 3), ("envs_idx", ""))
+        kernel_set_gravity(gravity.contiguous(), envs_idx, self._gravity)
+
+    def get_gravity(self, envs_idx=None):
+        """
+        Get the gravity acting on the bodies of this solver, in m/s^2.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
+
+        Returns
+        -------
+        gravity : torch.Tensor, shape (3,) or (n_envs, 3)
+            The gravity vector of each environment.
+        """
+        if self._gravity is None:
+            gs.raise_exception(f"{type(self).__name__} holds no body for a gravity to act on.")
+        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=True)
+        return tensor[0] if self._sim.n_envs == 0 else tensor
+
+
 class Solver(RBC):
+    # The material of the entities this solver simulates, None for a solver holding no entity of its own
+    material_cls: type[Material] | None = None
+
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
         self._sim = sim
         self._scene = scene
-        self._dt: float = options.dt
-        self._substep_dt: float = options.dt / sim.substeps
-        self._init_gravity = getattr(options, "gravity", None)
-        self._gravity = None
+        self._options = options
         self._entities: list[Entity] = gs.List()
 
         # Queue of solver-level states queried during the current backward window. Solvers that surface solver-state
@@ -199,8 +327,6 @@ class Solver(RBC):
         # here to lift entries owned by a `SimState`, preventing `collect_output_grads` from accumulating adjoints twice
         # through both the simulator-level and the per-solver loop.
         self._queried_states = QueriedStates()
-
-        self.data_manager = None
 
         # force fields
         self._ffs = list()
@@ -232,97 +358,34 @@ class Solver(RBC):
 
     def build(self):
         self._B = self._sim._B
-        if self._init_gravity is not None:
-            gravity = np.tile(np.asarray(self._init_gravity, dtype=gs.np_float), (self._B, 1))
-            self._gravity = array_class.V(gs.qd_vec3, (self._B,))
-            self._gravity.from_numpy(gravity)
 
-    @gs.assert_built
-    def set_gravity(self, gravity, envs_idx=None):
-        if self._gravity is None:
-            gs.logger.debug("Gravity is not defined, skipping `set_gravity`.")
-            return
+    @property
+    def data(self) -> Iterator[array_class.DataItem]:
+        """Yield every array and static config the solver holds, tagged by kind (see 'DataKind'), under the dotted name
+        a checkpoint and a trajectory frame use for it.
+        """
+        gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        gravity = torch.as_tensor(gravity, dtype=gs.tc_float, device=gs.device).expand((len(envs_idx), 3)).contiguous()
-        assert gravity.shape == (len(envs_idx), 3), "Input gravity array should match (n_envs, 3)"
-        gravity_arg = self._gravity if type(self._gravity) is qd.VectorTensor else qd.wrap(self._gravity)
-        _kernel_set_gravity(gravity, envs_idx, gravity_arg)
+    def __getstate__(self) -> SolverCheckpoint:
+        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore.
 
-    def get_gravity(self, envs_idx=None):
-        tensor = qd_to_torch(self._gravity, envs_idx, transpose=True, copy=True)
-        return tensor[0] if self.n_envs == 0 else tensor
+        The state is what 'data' yields of the kinds a checkpoint carries (see 'CHECKPOINT_KINDS'), copied where it
+        lives: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
+        process off the host, and as numpy arrays otherwise.
+        """
+        read = qd_to_torch if gs.use_zerocopy else qd_to_numpy
+        arrays = {}
+        configs = {}
+        for name, value, kind in self.data:
+            if kind == array_class.DataKind.CONFIG:
+                configs[name] = value
+            elif kind in array_class.CHECKPOINT_KINDS:
+                arrays[name] = read(value, copy=True)
+        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=array_class.CHECKPOINT_KINDS)
 
-    def _iter_data_manager_tensors(self):
-        """Yield (store name, tensor) for every tensor reachable from the data manager, descending through the
-        nested per-component dataclasses."""
-
-        def walk(prefix, struct):
-            if dataclasses.is_dataclass(struct):
-                for field in dataclasses.fields(struct):
-                    yield from walk(f"{prefix}.{field.name}", getattr(struct, field.name))
-            elif isinstance(struct, (qd.Tensor, qd.Field, qd.Ndarray)):
-                yield prefix, struct
-
-        for attr_name, struct in self.data_manager.__dict__.items():
-            yield from walk(f"{self.__class__.__name__}.data_manager.{attr_name}", struct)
-
-    def dump_ckpt_to_numpy(self) -> dict[str, np.ndarray]:
-        arrays: dict[str, np.ndarray] = {}
-
-        for attr_name, value in self.__dict__.items():
-            if not isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
-                continue
-
-            key_base = ".".join((self.__class__.__name__, attr_name))
-            data = value.to_numpy()
-
-            # StructField -> data is a dict: flatten each member
-            if isinstance(data, dict):
-                for sub_name, sub_arr in data.items():
-                    arrays[f"{key_base}.{sub_name}"] = sub_arr
-            else:
-                arrays[key_base] = data
-
-        if self.data_manager is not None:
-            for store_name, sub_arr in self._iter_data_manager_tensors():
-                arrays[store_name] = sub_arr.to_numpy()
-
-        return arrays
-
-    def load_ckpt_from_numpy(self, arr_dict: dict[str, np.ndarray]) -> None:
-        for attr_name, value in self.__dict__.items():
-            if not isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
-                continue
-
-            key_base = ".".join((self.__class__.__name__, attr_name))
-            member_prefix = key_base + "."
-
-            # ---- StructField: gather its members -----------------------------
-            member_items = {}
-            for saved_key, saved_arr in arr_dict.items():
-                if saved_key.startswith(member_prefix):
-                    sub_name = saved_key[len(member_prefix) :]
-                    member_items[sub_name] = saved_arr
-
-            if member_items:  # we found at least one sub-member
-                value.from_numpy(member_items)
-                continue
-
-            # ---- Ordinary field ---------------------------------------------
-            if key_base not in arr_dict:
-                continue  # nothing saved for this attribute
-
-            arr = arr_dict[key_base]
-            value.from_numpy(arr)
-
-        # if it has data_manager, add it to the arrays
-        if self.data_manager is not None:
-            for store_name, sub_arr in self._iter_data_manager_tensors():
-                if store_name in arr_dict:
-                    sub_arr.from_numpy(arr_dict[store_name])
-                else:
-                    gs.logger.warning(f"Failed to load {store_name}. Not found in stored arrays.")
+    def __setstate__(self, state: SolverCheckpoint) -> None:
+        """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
+        array_class.fill_data((item for item in self.data if item.kind in state.kinds), state.arrays)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -341,20 +404,8 @@ class Solver(RBC):
         return self._sim
 
     @property
-    def dt(self):
-        return self._dt
-
-    @property
     def is_built(self):
         return self._scene._is_built
-
-    @property
-    def substep_dt(self):
-        return self._substep_dt
-
-    @property
-    def gravity(self):
-        return self._gravity.to_numpy() if self._gravity is not None else None
 
     @property
     def entities(self) -> list[Entity]:
@@ -364,15 +415,19 @@ class Solver(RBC):
     def n_entities(self):
         return len(self._entities)
 
+    @property
+    def force_fields(self) -> list:
+        return self._ffs
+
     def _repr_brief(self):
         repr_str = f"{self.__repr_name__()}: {self._uid}, n_entities: {self.n_entities}"
         return repr_str
 
 
 @qd.kernel
-def _kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
-    # qd.Tensor annotation accepts qd.Tensor wrappers, raw qd.field(), and raw qd.ndarray(). Subclass solvers store
-    # _gravity as raw qd.field(); base_solver stores it as qd.Tensor.
+def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
+    # The qd.Tensor annotation accepts both forms the buffer is allocated in: a field, for a solver whose kernels
+    # reach gravity through the solver itself, and an ndarray for every other one (see _build_gravity).
     for i_b_ in range(envs_idx.shape[0]):
         for j in qd.static(range(3)):
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]

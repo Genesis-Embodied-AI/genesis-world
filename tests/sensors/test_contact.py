@@ -10,7 +10,7 @@ from ..utils.assertions import assert_allclose
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_gravity_force(n_envs, show_viewer, tol):
+def test_gravity_force(free_box, n_envs, show_viewer, tol):
     GRAVITY = -10.0
     BIAS = (0.1, 0.2, 0.3)
     NOISE = 0.01
@@ -43,12 +43,11 @@ def test_gravity_force(n_envs, show_viewer, tol):
     )
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(1.0, 1.0, 1.0),  # volume = 1 m^3
+        morph=gs.morphs.MJCF(
+            file=free_box((0.5, 0.5, 0.5), 1),  # volume = 1 m^3, mass = 1.0 kg
             pos=(0.0, 0.0, 0.55),
-        ),
-        material=gs.materials.Rigid(
-            rho=1.0,  # mass = 1.0 kg
+            align=False,
+            default_armature=0.0,
         ),
         surface=gs.surfaces.Default(
             color=(1.0, 0.0, 0.0, 1.0),
@@ -122,7 +121,7 @@ def test_gravity_force(n_envs, show_viewer, tol):
 
     # Move CoM to get unbalanced forces on each contact points
     box_com_offset = (0.3, 0.1, 0.0)
-    box.set_COM_shift(box_com_offset)
+    box.set_links_COM(box_com_offset)
 
     # Rotate the box make sure the force is correctly computed in local frame
     box_2.set_dofs_position((np.pi / 2, np.pi / 4, np.pi / 2), dofs_idx_local=slice(3, None))

@@ -38,10 +38,12 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
     v1_a = gs.tensor(v1, dtype=gs.tc_float, requires_grad=True)
     loss_h1_a = run_segment(scene_a, robot_a, v1_a)
     qpos_mid_a = read_qpos(scene_a)
+    time_mid_a = scene_a.get_time().clone()
     scene_a.backward(loss_h1_a)
-    # backward consumes the input buffer, so the step / substep counters (which index it) reset to 0 while the
-    # restored physics state carries over; horizon 2 records a fresh tape from 0.
-    assert scene_a.t == 0 and scene_a._sim._cur_substep_global == 0
+    # backward restores the physics state it snapshotted, so the clocks describing it come back too, while the substep
+    # counter indexes the input buffer that was consumed and rewinds to 0 for the tape horizon 2 records.
+    assert_allclose(scene_a.get_time(), time_mid_a, tol=gs.EPS)
+    assert scene_a._sim._cur_substep_global == 0
     grad1_a = tensor_to_array(v1_a.grad).copy()
 
     v2_a = gs.tensor(v2, dtype=gs.tc_float, requires_grad=True)
@@ -114,6 +116,9 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
             chassis_pos = robot.get_state().pos.squeeze()
         loss = torch.linalg.norm(chassis_pos)
         loss.backward()
+        # Rebuilding a checkpoint window replays steps the environments already simulated, so the clock has to follow
+        # the physics the backward pass rewinds instead of counting that replay as newly simulated time.
+        assert_allclose(scene.get_time(), 0.0, tol=gs.EPS)
         grads.append(ctrl.grad.detach().clone())
         ctrl.grad.zero_()
         assert (grads[-1][..., :3].abs() > gs.EPS).all()

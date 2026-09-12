@@ -5,14 +5,75 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.mujoco_parity import (
     check_mujoco_data_consistency,
     check_mujoco_model_consistency,
     init_paired_simulators,
+    set_paired_inertial_properties,
     simulate_and_check_mujoco_consistency,
 )
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("model_name", ["scaled_mjcf_joint_equalities"])
+@pytest.mark.parametrize("gs_solver, gs_integrator", [(gs.constraint_solver.Newton, gs.integrator.implicitfast)])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_equality_joint(gs_sim, mj_sim, tol):
+    (entity,) = gs_sim.entities
+    qpos = entity.get_qpos()
+    (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
+    qpos[i_unrelated_q] = 1.0
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos=qpos, num_steps=50, tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["mimic_hinges"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_equality_joint_mimic(gs_sim, mj_sim, tol):
+    assert gs_sim.rigid_solver.n_equalities == 1
+
+    qpos = np.array((0.0, -1.0))
+    qvel = np.array((1.0, -0.3))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
+
+    (entity,) = gs_sim.entities
+    qpos = entity.get_qpos()
+    assert_allclose(qpos[0], qpos[1], tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_equality_link(gs_sim, mj_sim):
+    # Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
+    gs_sim.rigid_solver._enable_collision = False
+    mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
+
+    # Set the time constant of the constraints on both engines to improve numerical stability
+    TIME_CONSTANT = 0.02
+    for entity in gs_sim.entities:
+        for equality in entity.equalities:
+            equality.set_sol_params((TIME_CONSTANT, *tensor_to_array(equality.desc.sol_params)[1:]))
+    mj_sim.model.eq_solref[:, 0] = TIME_CONSTANT
+
+    # Randomize the initial condition for force convergence of the constraints
+    np.random.seed(0)
+    qpos = np.random.rand(gs_sim.rigid_solver.n_qs) * 0.1
+
+    # Note that the world frame in which weld constraint is computed is different between Mujoco and Genesis for sites.
+    # Mujoco is using site 1, whereas Genesis is using parent link frame of site 1 since it has no notion of site.
+    ignore_constraints = np.any(
+        (mj_sim.model.eq_objtype == mujoco.mjtObj.mjOBJ_SITE) & (mj_sim.model.eq_type == mujoco.mjtEq.mjEQ_WELD)
+    )
+    simulate_and_check_mujoco_consistency(
+        gs_sim, mj_sim, qpos, num_steps=300, tol=1e-7, ignore_constraints=ignore_constraints
+    )
 
 
 @pytest.mark.required
@@ -49,6 +110,41 @@ def test_box_plane_dynamics(gs_sim, mj_sim, tol):
     qpos = np.concatenate((cube_pos, cube_quat))
     qvel = np.random.rand(6) * 0.2
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=150, tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.split_entities
+@pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
+@pytest.mark.parametrize("gs_solver, gs_integrator", [(gs.constraint_solver.Newton, gs.integrator.implicitfast)])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
+    # Mujoco holds the three boxes in one model while Genesis holds one entity per box. The mean inertia the constraint
+    # solver scales its tolerances by is a scene aggregate, so it must come out the same however the same bodies are
+    # grouped into entities, which one entity per box is what tells apart. The sliding box carries an armature on a
+    # body MuJoCo weighs by a rule of its own, so its constraint weights hold the general rule both engines settle on.
+    # Each box resting on the plane is an island of its own on both sides, a thousandfold apart in mass, so each one
+    # converges on its own inertia scale and the light box settles to the same rest as MuJoCo's.
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
+
+    # The runtime inertial setters derive the constraint weights and the mean inertia anew, which the model consistency
+    # check then holds against the constants MuJoCo recomputes for the same change.
+    set_paired_inertial_properties(
+        gs_sim, mj_sim, armature_ratio=3.0, mass_ratio=0.5, inertia_ratio=2.0, com_offset=(0.01, -0.02, 0.03)
+    )
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("model_name", ["hinge_slide"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_frictionloss(gs_sim, mj_sim, tol):
+    qvel = np.array([0.7, -0.9])
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qvel=qvel, num_steps=2000, tol=tol)
+
+    (entity,) = gs_sim.entities
+    assert_allclose(entity.get_dofs_velocity(), 0.0, tol=1e-2)
 
 
 @pytest.mark.required
@@ -237,6 +333,15 @@ def test_stickman(gs_sim, mj_sim, tol):
 def test_general_actuator(gs_sim, mj_sim, tol):
     (entity,) = gs_sim.entities
 
+    # The force range of a dof composes every bound the file states for it in the order MuJoCo clamps: for the motor
+    # its control range through the gear, then its own force range, which lies past the joint-level 'actuatorfrcrange'
+    # and so collapses the force onto that joint bound. The PD gains come from the actuator.
+    lower, upper = entity.get_dofs_force_range()
+    assert_allclose(lower, [-20.0, -np.inf, 4.0], tol=tol)
+    assert_allclose(upper, [20.0, np.inf, 4.0], tol=tol)
+    assert_allclose(entity.get_dofs_kp(dofs_idx_local=[0]), 100.0, tol=tol)
+    assert_allclose(entity.get_dofs_kv(dofs_idx_local=[0]), 2.0, tol=tol)
+
     # get_dofs_kp raises for all DOFs (joint 1 is non-PD-reducible from parser)
     with pytest.raises(gs.GenesisException):
         entity.get_dofs_kp()
@@ -270,9 +375,11 @@ def test_general_actuator(gs_sim, mj_sim, tol):
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
     init_paired_simulators(gs_sim, mj_sim, qpos=[0.2, 0.1, 0.0], qvel=[0.1, -0.1, 0.0])
 
+    # Both the PD joint (kp(100) * 0.3 rad = 30 N.m against its 20 N.m joint bound) and the motor (gear(5) * ctrl(1) =
+    # 5 N.m raised to its 6 N.m force floor, past its 4 N.m joint bound) saturate, so the comparison exercises the clamp.
     mj_sim.data.ctrl[:] = [0.5, 0.3, 1.0]
     entity.control_dofs_position([0.5, 0.3, 0.0])
-    entity.control_dofs_force(5.0, dofs_idx_local=[2])  # motor: gear(5) * gainprm(1) * ctrl(1) = 5
+    entity.control_dofs_force(5.0, dofs_idx_local=[2])
 
     # Pre-step so that Genesis computes qf_applied (needed for data consistency checks)
     mj_sim.data.qpos[:] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]

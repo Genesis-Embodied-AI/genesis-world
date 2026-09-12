@@ -15,13 +15,14 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from PIL import Image, UnidentifiedImageError
 from requests.exceptions import HTTPError
 
-from genesis.options.morphs import GLTF_FORMATS, MESH_FORMATS, MJCF_FORMAT, URDF_FORMAT, USD_FORMATS
+from genesis.constants import GLTF_FORMATS, MESH_FORMATS, MJCF_FORMAT, URDF_FORMAT, USD_FORMATS
+from genesis.recorders.trajectory import TRAJECTORY_FORMAT
 
 REPOSITY_URL = "Genesis-Embodied-AI/Genesis"
 DEFAULT_BRANCH_NAME = "main"
 
 HUGGINGFACE_ASSETS_REVISION = "990a727788f11e34ad006c69bf769303b20cb11c"
-HUGGINGFACE_SNAPSHOT_REVISION = "106c05a1c4170d058b96d22851ce4c5f0244a364"
+HUGGINGFACE_SNAPSHOT_REVISION = "519310fcbac96f345ed7c46caeff9f9776e846fd"
 
 MESH_EXTENSIONS = (".mtl", *MESH_FORMATS, *GLTF_FORMATS, *USD_FORMATS)
 IMAGE_EXTENSIONS = (".png", ".jpg")
@@ -135,7 +136,7 @@ def get_hf_dataset(
                     continue
 
                 ext = path.suffix.lower()
-                if ext not in (URDF_FORMAT, MJCF_FORMAT, *IMAGE_EXTENSIONS, *MESH_EXTENSIONS):
+                if ext not in (URDF_FORMAT, MJCF_FORMAT, TRAJECTORY_FORMAT, *IMAGE_EXTENSIONS, *MESH_EXTENSIONS):
                     continue
 
                 has_files = True

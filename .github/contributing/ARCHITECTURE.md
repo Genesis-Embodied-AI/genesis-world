@@ -55,6 +55,15 @@ Entities are physical objects in the simulation:
 
 Location: `genesis/engine/entities/`
 
+### Descriptions
+
+An entity is created from a description: a dataclass holding everything its solver simulates it with, defined beside the entity that consumes it (`genesis/engine/entities/rigid_entity/description.py` for rigid and kinematic entities). Creation is two steps, each owned by the class it concerns:
+
+- the description class resolves the morphs, material and surface into a description (`RigidEntityDescription.resolve`), which is where assets are read and post-processed;
+- the entity class builds itself from the description alone (`RigidEntity.__init__`), so a description loaded from a file and one resolved from assets take the same path.
+
+`Scene.export` writes the description of every entity, obtained through `Entity.desc`, beside the scene options. `Scene.load` creates each entity from its description through the solver simulating its material (`Solver.add_entity` given `desc`), attachments included, since a description names only entities created before it. A kind of entity gains export support by defining its description class, returning it from `desc`, and having its solver's `add_entity` build from a given description, with no change to the scene. The serialization facility alone reduces every absolute path a value holds to the name of the asset, so no option or mesh redacts anything itself.
+
 ## Morphs
 
 Morphs define geometry and initial pose (solver-agnostic):
@@ -74,7 +83,7 @@ Location: `genesis/options/morphs.py`
 
 ## Materials
 
-Materials define physical properties and determine which solver handles the entity:
+Materials define physical properties and determine which solver handles the entity: each solver declares the material class it simulates (`Solver.material_cls`).
 
 ```python
 gs.materials.Rigid(rho=1000)

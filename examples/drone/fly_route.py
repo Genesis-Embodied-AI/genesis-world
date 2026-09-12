@@ -7,7 +7,7 @@ from genesis.vis.camera import Camera
 from quadcopter_controller import DronePIDController
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.drone_entity import DroneEntity
+    from genesis.engine.entities import DroneEntity
 
 
 base_rpm = 14468.429183500699

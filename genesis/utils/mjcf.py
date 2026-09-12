@@ -13,6 +13,7 @@ from trimesh.visual.texture import TextureVisuals
 from PIL import Image
 
 import genesis as gs
+from genesis.constants import XACRO_FORMAT
 from genesis.ext import urdfpy
 
 from . import geom as gu
@@ -64,7 +65,6 @@ def get_model_name(file_path):
 def build_model(
     xml,
     discard_visual,
-    default_armature=None,
     merge_fixed_links=False,
     exclude_ground_plane=False,
     links_to_keep=(),
@@ -72,8 +72,10 @@ def build_model(
     if isinstance(xml, (str, Path, urdfpy.URDF)):
         if isinstance(xml, urdfpy.URDF):
             is_urdf_file = True
-            asset_path = get_assets_dir()
-            root = xml._unparse(asset_path)
+            # An in-memory model resolves its relative mesh paths against the working directory, as the URDF pass does
+            # (see parse_urdf in urdf.py), so that both passes read the same files.
+            asset_path = os.getcwd()
+            root = xml.to_xml()
             mjcf = ET.SubElement(root, "mujoco")
         else:
             # Make sure that it is pointing to a valid XML content (either file path or string)
@@ -133,7 +135,7 @@ def build_model(
         for name in ("assetdir", "meshdir", "texturedir"):
             compiler.attrib[name] = str(Path(asset_path) / compiler.attrib.get(name, ""))
 
-        # Set default constraint solver time constant and motor armature.
+        # Set default constraint solver time constant.
         # Note that these default options are ignored when parsing URDF files.
         default = mjcf.find("default")
         if default is None:
@@ -150,41 +152,6 @@ def build_model(
                 # 0.0 cannot be used because it is considered as an error, so that it will fallback to the original
                 # default value...
                 group.attrib.setdefault(param_name, str(MIN_TIMECONST))
-        if default_armature is not None:
-            # The default rotor armature only fills in joints whose armature is authored neither on the element nor
-            # anywhere in their default class chain, so the values authored in the model file are always preserved.
-            # First scan the nested default classes: a class authors armature if itself or any ancestor class sets it.
-            has_armature_by_class = {}
-            default_stack = [(elem, False) for elem in mjcf.findall("default")]
-            while default_stack:
-                default_elem, has_armature = default_stack.pop()
-                joint_elem = default_elem.find("joint")
-                has_armature |= joint_elem is not None and "armature" in joint_elem.attrib
-                has_armature_by_class[default_elem.attrib.get("class", "main")] = has_armature
-                default_stack.extend((child, has_armature) for child in default_elem.findall("default"))
-            # Then walk the kinematic tree while tracking the childclass in effect to resolve each joint's class.
-            # Bodies may be nested under grouping meta-elements (frame, replicate) at any depth, and composite
-            # elements hold joint configuration subelements that take armature like regular joints.
-            for worldbody in mjcf.findall("worldbody"):
-                body_stack = [
-                    (elem, "main")
-                    for tag in ("body", "frame", "replicate", "composite")
-                    for elem in worldbody.findall(tag)
-                ]
-                while body_stack:
-                    body_elem, childclass = body_stack.pop()
-                    childclass = body_elem.attrib.get("childclass", childclass)
-                    for joint_elem in body_elem.findall("joint"):
-                        if joint_elem.attrib.get("type") == "free":
-                            continue
-                        joint_class = joint_elem.attrib.get("class", childclass)
-                        if not has_armature_by_class.get(joint_class, False):
-                            joint_elem.attrib.setdefault("armature", str(default_armature))
-                    body_stack.extend(
-                        (elem, childclass)
-                        for tag in ("body", "frame", "replicate", "composite")
-                        for elem in body_elem.findall(tag)
-                    )
 
         # Must pre-process URDF to overwrite default Mujoco compile flags
         if is_urdf_file:
@@ -193,7 +160,7 @@ def build_model(
             # Merge fixed links if requested
             if merge_fixed_links:
                 robot = uu.merge_fixed_links(robot, links_to_keep)
-                root = robot._to_xml(None, asset_path)
+                root = robot.to_xml()
                 root.append(mjcf)
 
             # Enforce some compiler options
@@ -206,12 +173,12 @@ def build_model(
                 autolimits="true",
             )
 
-            # Bound mass and inertia if necessary
-            if not all(link.inertial is not None for link in robot.links):
-                compiler.attrib |= dict(
-                    boundmass=str(MIN_TIMECONST),
-                    boundinertia=str(MIN_TIMECONST),
-                )
+            # MuJoCo rejects a moving body whose mass or inertia is below 'mjMINVAL'. Bounding both at that value keeps
+            # a zero or missing inertial compilable, and the placeholder is discarded below.
+            compiler.attrib |= dict(
+                boundmass=str(mujoco.mjMINVAL),
+                boundinertia=str(mujoco.mjMINVAL),
+            )
 
             # Resolve relative mesh paths
             for elem in root.findall(".//mesh"):
@@ -231,11 +198,18 @@ def build_model(
             if is_urdf_file:
                 # Discard placeholder inertias that were used to avoid parsing failure
                 for link in robot.links:
-                    if link.inertial is None:
-                        body = mj.body(link.name)
+                    inertial = link.inertial
+                    mass = (inertial.mass or 0.0) if inertial is not None else 0.0
+                    is_inertia_defined = inertial is not None and np.linalg.norm(inertial.inertia, np.inf) > 0.0
+                    if mass > 0.0 and is_inertia_defined:
+                        continue
+                    body = mj.body(link.name)
+                    body.mass[:] = mass
+                    # Keep non-zero authored inertia with invalid diagonal so the consistency check reports it
+                    if not is_inertia_defined:
                         body.inertia[:] = 0.0
-                        body.mass[:] = 0.0
-                        body.invweight0[:] = 0.0
+                    # invweight0 derives from placeholder mass and inertia; zero triggers recomputation
+                    body.invweight0[:] = 0.0
 
                 # Set default constraint solver time constant
                 mj.jnt_solref[:, 0] = MIN_TIMECONST
@@ -256,12 +230,14 @@ def parse_xml(morph, surface, rigid_options=None):
         merge_fixed_links = morph.merge_fixed_links
         links_to_keep = morph.links_to_keep
 
-    # Build model from XML (either URDF or MJCF)
+    # Build model from XML (either URDF or MJCF). A XACRO file is expanded into its URDF model here, by the parser
+    # reading it, so that the morph keeps the file provided by the user: an option holds what it was created with, and
+    # the expanded model is only ever read by the parsers.
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
+    file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
     mj = build_model(
-        morph.file,
+        file,
         not morph.visualization,
-        morph.default_armature,
         merge_fixed_links,
         exclude_ground_plane,
         links_to_keep,
@@ -273,7 +249,7 @@ def parse_xml(morph, surface, rigid_options=None):
     #     gs.logger.warning("(MJCF) Tendon not supported")
 
     # Parse all geometries grouped by parent joint (or world)
-    links_g_infos = parse_geoms(mj, morph.scale, surface, morph.file)
+    links_g_infos = parse_geoms(mj, morph.scale, surface, file)
 
     # Parse all bodies (links and joints)
     l_infos, links_j_infos = parse_links(mj, morph.scale)
@@ -326,7 +302,10 @@ def parse_link(mj, i_l, scale):
     else:
         l_info["parent_idx"] = int(mj.body_parentid[i_l])
     l_info["root_idx"] = int(mj.body_rootid[i_l])
-    l_info["invweight"] = mj.body_invweight0[i_l]
+    # FIXME: MuJoCo 3.10 weighs a childless body sliding on the world along its own axes as 1 / mass, leaving out the
+    # armature and the two locked axes its general J M^-1 J^T path accounts for, so those weights are recomputed at build.
+    is_simple_slider = mj.body_simple[i_l] == 2
+    l_info["invweight"] = np.full((2,), -1.0) if is_simple_slider else mj.body_invweight0[i_l]
 
     jnt_adr = mj.body_jntadr[i_l]
     jnt_num = mj.body_jntnum[i_l]
@@ -372,7 +351,10 @@ def parse_link(mj, i_l, scale):
         j_info["quat"] = np.array([1.0, 0.0, 0.0, 0.0])
         j_info["init_qpos"] = np.array(mj.qpos0[mj_qpos_offset : (mj_qpos_offset + n_qs)])
         j_info["dofs_damping"] = mj.dof_damping[mj_dof_offset : (mj_dof_offset + n_dofs)]
-        j_info["dofs_invweight"] = mj.dof_invweight0[mj_dof_offset : (mj_dof_offset + n_dofs)]
+        if is_simple_slider:
+            j_info["dofs_invweight"] = np.full((n_dofs,), -1.0)
+        else:
+            j_info["dofs_invweight"] = mj.dof_invweight0[mj_dof_offset : (mj_dof_offset + n_dofs)]
         j_info["dofs_armature"] = mj.dof_armature[mj_dof_offset : (mj_dof_offset + n_dofs)]
         j_info["dofs_frictionloss"] = mj.dof_frictionloss[mj_dof_offset : (mj_dof_offset + n_dofs)]
         if mj.njnt > 0:
@@ -428,8 +410,11 @@ def parse_link(mj, i_l, scale):
         # See: https://mujoco.readthedocs.io/en/stable/XMLreference.html#actuator-general
         j_info["dofs_act_gain"] = np.zeros((n_dofs,), dtype=gs.np_float)
         j_info["dofs_act_bias"] = np.zeros((n_dofs, 3), dtype=gs.np_float)
-        j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (n_dofs, 1))
 
+        # Every bound the file states on the actuator force of the joint applies, one after the other in the order
+        # MuJoCo clamps: a motor's control range through its gear, the actuator's own force range, and the joint-level
+        # 'actuatorfrcrange' clamping whatever drives the joint. They are collected here and composed below.
+        force_ranges = []
         i_a = -1
         try:
             actuator_mask_j = (mj.actuator_trnid[:, 0] == i_j) & (mj.actuator_trntype == mujoco.mjtTrn.mjTRN_JOINT)
@@ -476,14 +461,22 @@ def parse_link(mj, i_l, scale):
                 j_info["dofs_act_gain"] = np.full((n_dofs,), float(gear * gainprm[0] * scale**3), dtype=gs.np_float)
                 j_info["dofs_act_bias"] = np.tile(gear * biasprm[:3] * scale**3, (n_dofs, 1)).astype(gs.np_float)
 
-            if mj.actuator_forcelimited[i_a]:
-                j_info["dofs_force_range"] = np.tile(mj.actuator_forcerange[i_a], (n_dofs, 1))
             if mj.actuator_ctrllimited[i_a] and biastype == mujoco.mjtBias.mjBIAS_NONE:
-                j_info["dofs_force_range"] = np.minimum(
-                    j_info["dofs_force_range"], np.tile(gear * mj.actuator_ctrlrange[i_a], (n_dofs, 1))
-                )
+                # A negative gear swaps the bounds.
+                force_ranges.append(np.sort(gear * mj.actuator_ctrlrange[i_a]))
+            if mj.actuator_forcelimited[i_a]:
+                force_ranges.append(mj.actuator_forcerange[i_a])
         elif gs_type not in (gs.JOINT_TYPE.FIXED, gs.JOINT_TYPE.FREE):
             gs.logger.debug(f"(MJCF) No actuator found for joint `{j_info['name']}`")
+
+        if i_j != -1 and mj.jnt_actfrclimited[i_j]:
+            force_ranges.append(mj.jnt_actfrcrange[i_j])
+        # Clamping the bounds themselves composes the clamps: overlapping ranges intersect, and a range lying past the
+        # previous one collapses the force onto its nearest bound, as clamping twice does.
+        force_range = np.array([-np.inf, np.inf])
+        for lower, upper in force_ranges:
+            force_range = np.clip(force_range, lower, upper)
+        j_info["dofs_force_range"] = np.tile(force_range, (n_dofs, 1))
 
         j_infos.append(j_info)
 
@@ -491,7 +484,7 @@ def parse_link(mj, i_l, scale):
     # Note that the mass matrix of a poly-articulated robot does not scale trivially as it is a copnfiguration-depends
     # mixing of s ** 3 factor for masses and s ** 5 factor for inertia tensors. As a result, it is much simpler to
     # consider invweight indefined, which will trigger recomputation at build time.
-    if abs(1.0 - scale) > gs.EPS:
+    if abs(1.0 - scale) > np.finfo(np.double).eps:
         l_info["pos"] *= scale
         l_info["inertial_pos"] *= scale
         l_info["inertial_mass"] *= scale**3
@@ -888,8 +881,16 @@ def parse_equalities(mj, scale):
             eq_info["type"] = gs.EQUALITY_TYPE.WELD
             eq_info["data"][:6] *= scale
         elif mj.eq_type[i_e] == mujoco.mjtEq.mjEQ_JOINT:
-            # y -y0 = a0 + a1 * (x-x0) + a2 * (x-x0)^2 + a3 * (x-x0)^3 + a4 * (x-x0)^4
             eq_info["type"] = gs.EQUALITY_TYPE.JOINT
+            follower_scale = scale if mj.jnt_type[objs_idx[0]] == mujoco.mjtJoint.mjJNT_SLIDE else 1.0
+            driver_scale = (
+                scale if objs_idx[1] >= 0 and mj.jnt_type[objs_idx[1]] == mujoco.mjtJoint.mjJNT_SLIDE else 1.0
+            )
+
+            # eq_data[0:5] stores a0..a4 in q_follower - q_follower0 = sum(a_k * (q_driver - q_driver0)^k).
+            # A model scale transforms a_k to s_f * a_k / s_d**k, where s_f and s_d are scale for prismatic
+            # coordinates and 1.0 for revolute coordinates.
+            eq_info["data"][:5] *= follower_scale / driver_scale ** np.arange(5)
         else:
             gs.raise_exception(f"Unsupported MJCF equality type: {mj.eq_type[i_e]}")
 

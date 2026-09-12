@@ -36,23 +36,15 @@ def func_matvec_Ap(
     # tmp = J v
     for i_c in range(constraint_state.n_constraints[i_b]):
         jv = gs.qd_float(0.0)
-        if qd.static(rigid_config.sparse_solve):
-            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                jv += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_p[i_d, i_b]
-        else:
-            for i_d in range(n_dofs):
-                jv += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_p[i_d, i_b]
+        for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+            i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+            jv += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_p[i_d, i_b]
         # only active constraints contribute
         jv *= constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
         # out += J^T (D * J v)
-        if qd.static(rigid_config.sparse_solve):
-            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                constraint_state.bw_Ap[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * jv
-        else:
-            for i_d in range(n_dofs):
-                constraint_state.bw_Ap[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * jv
+        for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+            i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+            constraint_state.bw_Ap[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * jv
 
 
 @qd.func
@@ -112,7 +104,7 @@ def func_solve_adjoint_u_cg_batch(
             constraint_state.bw_p[i_d, i_b] = constraint_state.bw_r[i_d, i_b] + beta * constraint_state.bw_p[i_d, i_b]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_solve_adjoint_u(
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -144,42 +136,25 @@ def kernel_solve_adjoint_u(
                 # directly and never touches nt_H.
                 func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
             else:
-                # Reuse the forward's Cholesky decomposition A = L * L^T to solve A u = g. The stored L factors the
-                # scaled Hessian, so the right-hand side is pre-scaled and u unscaled at the end (see nt_jacobi in
-                # array_class.py); the intermediate z equals the unscaled L^-1 g exactly.
-                # z = L^{-1} g  (forward substitution); saved to bw_r
-                for i_d in range(n_dofs):
-                    z = constraint_state.dL_dqacc[i_d, i_b]
-                    if qd.static(rigid_config.enable_jacobi_equilibration):
-                        z = z * constraint_state.nt_jacobi[i_d, i_b]
-                    for j_d in range(i_d):
-                        z -= constraint_state.nt_H[i_b, i_d, j_d] * constraint_state.bw_r[j_d, i_b]
-                    z /= constraint_state.nt_H[i_b, i_d, i_d]
-                    constraint_state.bw_r[i_d, i_b] = z
-
-                # u = L^{-T} z  (back substitution)
-                for i_d_ in range(n_dofs):
-                    i_d = n_dofs - 1 - i_d_
-                    u = constraint_state.bw_r[i_d, i_b]
-                    for j_d in range(i_d + 1, n_dofs):
-                        u -= constraint_state.nt_H[i_b, j_d, i_d] * constraint_state.bw_u[j_d, i_b]
-                    u /= constraint_state.nt_H[i_b, i_d, i_d]
-                    constraint_state.bw_u[i_d, i_b] = u
-                if qd.static(rigid_config.enable_jacobi_equilibration):
-                    for i_d in range(n_dofs):
-                        constraint_state.bw_u[i_d, i_b] = (
-                            constraint_state.bw_u[i_d, i_b] * constraint_state.nt_jacobi[i_d, i_b]
-                        )
+                # Reuse the forward's Cholesky factor A = L L^T through the forward's own solve, which reads L per
+                # island where the per-island factor wrote it (see func_cholesky_solve_batch).
+                for i_island in range(constraint_state.island.n_islands[i_b]):
+                    solver.func_cholesky_solve_batch(
+                        i_b,
+                        i_island,
+                        rhs=constraint_state.dL_dqacc,
+                        out=constraint_state.bw_u,
+                        constraint_state=constraint_state,
+                        rigid_config=rigid_config,
+                    )
     else:
         # CG solver for A * u = g (parallelized over the batch dimension).
         for i_b in range(_B):
             func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
-@qd.kernel
-def kernel_compute_gradients(
-    constraint_state: array_class.ConstraintState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
-):
+@qd.kernel(fastcache=True)
+def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
     r"""
     Compute gradients of the loss with respect to the input variables to this solver. Note that we use the intermediate
     adjoint vector [u] computed in [kernel_solve_adjoint_u] to compute these gradients.
@@ -209,31 +184,24 @@ def kernel_compute_gradients(
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         constraint_state.dL_dforce[i_d, i_b] = gs.qd_float(0.0)
 
-    # Ju, w, y
+    # Ju, w, y. Every Jacobian product runs over the row's support (jac_dofs_idx), as the forward's do: an entry
+    # outside it is structurally zero and moves nothing, so its gradient is zero.
     for i_b in range(_B):
         # Ju
         for i_c in range(constraint_state.n_constraints[i_b]):
             s = gs.qd_float(0.0)
-            if qd.static(rigid_config.sparse_solve):
-                for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                    i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                    s += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_u[i_d, i_b]
-            else:
-                for i_d in range(n_dofs):
-                    s += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_u[i_d, i_b]
+            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                s += constraint_state.jac[i_c, i_d, i_b] * constraint_state.bw_u[i_d, i_b]
             constraint_state.bw_Ju[i_c, i_b] = s
 
         # w = J qacc - aref
         # y = D \odot w
         for i_c in range(constraint_state.n_constraints[i_b]):
             t = gs.qd_float(0.0)
-            if qd.static(rigid_config.sparse_solve):
-                for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                    i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                    t += constraint_state.jac[i_c, i_d, i_b] * constraint_state.qacc[i_d, i_b]
-            else:
-                for i_d in range(n_dofs):
-                    t += constraint_state.jac[i_c, i_d, i_b] * constraint_state.qacc[i_d, i_b]
+            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                t += constraint_state.jac[i_c, i_d, i_b] * constraint_state.qacc[i_d, i_b]
             constraint_state.bw_w[i_c, i_b] = t - constraint_state.aref[i_c, i_b]
             constraint_state.bw_y[i_c, i_b] = constraint_state.efc_D[i_c, i_b] * constraint_state.bw_w[i_c, i_b]
 
@@ -260,29 +228,19 @@ def kernel_compute_gradients(
                 # J: -[u * y^T + qacc * (D \odot (Ju))^T]
                 DJu_i = constraint_state.efc_D[i_c, i_b] * constraint_state.bw_Ju[i_c, i_b]
                 y_i = constraint_state.bw_y[i_c, i_b]
+                for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                    i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                    constraint_state.dL_djac[i_c, i_d, i_b] += -(
+                        constraint_state.bw_u[i_d, i_b] * y_i + constraint_state.qacc[i_d, i_b] * DJu_i
+                    )
 
-                if qd.static(rigid_config.sparse_solve):
-                    for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                        i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                        constraint_state.dL_djac[i_c, i_d, i_b] += -(
-                            constraint_state.bw_u[i_d, i_b] * y_i + constraint_state.qacc[i_d, i_b] * DJu_i
-                        )
-                else:
-                    for i_d in range(n_dofs):
-                        constraint_state.dL_djac[i_c, i_d, i_b] += -(
-                            constraint_state.bw_u[i_d, i_b] * y_i + constraint_state.qacc[i_d, i_b] * DJu_i
-                        )
-
-        # M: -u * qacc^T
-        n_entities = dyn_info.entities.n_links.shape[0]
-        for i_e in range(n_entities):
-            s = dyn_info.entities.dof_start[i_e]
-            e = dyn_info.entities.dof_end[i_e]
-            for i in range(s, e):
-                for j in range(s, e):
-                    val0 = -constraint_state.bw_u[i, i_b] * constraint_state.qacc[j, i_b]
-                    val1 = -constraint_state.bw_u[j, i_b] * constraint_state.qacc[i, i_b]
-                    constraint_state.dL_dM[i, j, i_b] += (val0 + val1) * 0.5  # symmetrize
+        # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
+        # outside them is structurally zero and moves nothing, so its gradient is zero.
+        for i in range(n_dofs):
+            for j in range(rigid_info.dofs_mass_block_start[i], rigid_info.dofs_mass_block_end[i]):
+                val0 = -constraint_state.bw_u[i, i_b] * constraint_state.qacc[j, i_b]
+                val1 = -constraint_state.bw_u[j, i_b] * constraint_state.qacc[i, i_b]
+                constraint_state.dL_dM[i, j, i_b] += (val0 + val1) * 0.5  # symmetrize
 
 
 @qd.kernel(fastcache=True)
@@ -825,15 +783,15 @@ def kernel_manual_add_equality_constraints_bw(
 ):
     """Manual reverse of `add_equality_constraints` (JOINT + CONNECT + WELD).
 
-    * JOINT   - couples two scalar dofs via a quartic polynomial (1 row).
+    * JOINT   - constrains one scalar dof, optionally against another via a quartic polynomial (1 row).
     * CONNECT - 3 rows pinning `global_anchor1` to `global_anchor2` in world.
     * WELD    - 6 rows: 3 position + 3 orientation, all sharing a single
                 combined `pos_imp = ||all_error||` (6D).
 
     Accumulates into kinematic-state grads only (conservative):
         JOINT:
-            rigid_info.qpos.grad[i_qpos1], qpos.grad[i_qpos2]
-            dyn_state.dofs.vel.grad[i_dof1], vel.grad[i_dof2]
+            rigid_info.qpos.grad[i_qpos1], and qpos.grad[i_qpos2] when joint2 exists
+            dyn_state.dofs.vel.grad[i_dof1], and vel.grad[i_dof2] when joint2 exists
         CONNECT / WELD:
             dyn_state.links.{pos, quat, root_COM, cd_ang, cd_vel}.grad[link1 / link2]
             dyn_state.dofs.{cdof_ang, cdof_vel, cdofd_ang, cdofd_vel, vel}.grad over each link chain
@@ -841,13 +799,13 @@ def kernel_manual_add_equality_constraints_bw(
     `dyn_info.links.invweight`) are not differentiated.
 
     Forward recap (per equality of type JOINT):
-        diff = qpos[i_qpos2] - qpos0[i_qpos2]
+        diff = qpos[i_qpos2] - qpos0[i_qpos2], or 0 when joint2 is omitted
         pos_poly = a0 + a1 * diff + a2 * diff^2 + a3 * diff^3 + a4 * diff^4
         pos = qpos[i_qpos1] - qpos0[i_qpos1] - pos_poly
         deriv = d(pos_poly)/d(diff) = a1 + 2 * a2 * diff + 3 * a3 * diff^2 + 4 * a4 * diff^3
         jac[n_con, i_dof1] = 1.0
-        jac[n_con, i_dof2] = -deriv
-        jac_qvel = vel[i_dof1] - deriv * vel[i_dof2]
+        jac[n_con, i_dof2] = -deriv, when joint2 exists
+        jac_qvel = vel[i_dof1] - deriv * vel[i_dof2], the second term only when joint2 exists
         imp, aref = imp_aref(sol_params, -|pos|, jac_qvel, pos)
             aref = -b * jac_qvel - k * imp * pos
         diag = max(invweight * (1 - imp) / imp, EPS); efc_D = 1/diag
@@ -874,22 +832,21 @@ def kernel_manual_add_equality_constraints_bw(
                     if qd.static(rigid_config.batch_joints_info)
                     else dyn_info.equalities.eq_obj1id[i_e, i_b]
                 )
-                I_joint2 = (
-                    [dyn_info.equalities.eq_obj2id[i_e, i_b], i_b]
-                    if qd.static(rigid_config.batch_joints_info)
-                    else dyn_info.equalities.eq_obj2id[i_e, i_b]
-                )
                 i_qpos1 = dyn_info.joints.q_start[I_joint1]
-                i_qpos2 = dyn_info.joints.q_start[I_joint2]
                 i_dof1 = dyn_info.joints.dof_start[I_joint1]
-                i_dof2 = dyn_info.joints.dof_start[I_joint2]
                 I_dof1 = [i_dof1, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof1
-                I_dof2 = [i_dof2, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof2
 
                 pos1 = rigid_info.qpos[i_qpos1, i_b]
-                pos2 = rigid_info.qpos[i_qpos2, i_b]
                 ref1 = rigid_info.qpos0[i_qpos1, i_b]
-                ref2 = rigid_info.qpos0[i_qpos2, i_b]
+                i_joint2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+                i_qpos2 = -1
+                i_dof2 = -1
+                diff = gs.qd_float(0.0)
+                if i_joint2 >= 0:
+                    I_joint2 = [i_joint2, i_b] if qd.static(rigid_config.batch_joints_info) else i_joint2
+                    i_qpos2 = dyn_info.joints.q_start[I_joint2]
+                    i_dof2 = dyn_info.joints.dof_start[I_joint2]
+                    diff = rigid_info.qpos[i_qpos2, i_b] - rigid_info.qpos0[i_qpos2, i_b]
 
                 a0 = dyn_info.equalities.eq_data[i_e, i_b][0]
                 a1 = dyn_info.equalities.eq_data[i_e, i_b][1]
@@ -897,7 +854,6 @@ def kernel_manual_add_equality_constraints_bw(
                 a3 = dyn_info.equalities.eq_data[i_e, i_b][3]
                 a4 = dyn_info.equalities.eq_data[i_e, i_b][4]
 
-                diff = pos2 - ref2
                 diff2 = diff * diff
                 diff3 = diff2 * diff
                 diff4 = diff3 * diff
@@ -906,11 +862,17 @@ def kernel_manual_add_equality_constraints_bw(
                 d_deriv_d_diff = 2.0 * a2 + 6.0 * a3 * diff + 12.0 * a4 * diff2
 
                 jac1 = gs.qd_float(1.0)
-                jac2 = -deriv
+                jac2 = gs.qd_float(0.0)
                 vel1 = dyn_state.dofs.vel[i_dof1, i_b]
-                vel2 = dyn_state.dofs.vel[i_dof2, i_b]
-                jac_qvel = jac1 * vel1 + jac2 * vel2
-                invweight = dyn_info.dofs.invweight[I_dof1] + dyn_info.dofs.invweight[I_dof2]
+                vel2 = gs.qd_float(0.0)
+                jac_qvel = jac1 * vel1
+                invweight = dyn_info.dofs.invweight[I_dof1]
+                if i_joint2 >= 0:
+                    I_dof2 = [i_dof2, i_b] if qd.static(rigid_config.batch_dofs_info) else i_dof2
+                    jac2 = -deriv
+                    vel2 = dyn_state.dofs.vel[i_dof2, i_b]
+                    jac_qvel = jac_qvel + jac2 * vel2
+                    invweight = invweight + dyn_info.dofs.invweight[I_dof2]
 
                 sol_params = dyn_info.equalities.sol_params[i_e, i_b]
                 imp, b_coef, k_coef, d_imp_d_imp_x = gu.imp_aref_grad(sol_params, pos)
@@ -923,7 +885,9 @@ def kernel_manual_add_equality_constraints_bw(
                 g_aref = constraint_state.dL_daref[n_con, i_b]
                 g_efc_D = constraint_state.dL_defc_D[n_con, i_b]
                 # jac[dof1] = 1.0 (constant) => no chain through dL_djac[n_con, i_dof1].
-                g_jac2 = constraint_state.dL_djac[n_con, i_dof2, i_b]
+                g_jac2 = gs.qd_float(0.0)
+                if i_joint2 >= 0:
+                    g_jac2 = constraint_state.dL_djac[n_con, i_dof2, i_b]
 
                 # ---- Partials ----
                 # aref = -b * jac_qvel - k * imp * pos
@@ -952,11 +916,12 @@ def kernel_manual_add_equality_constraints_bw(
 
                 # ---- Propagate ----
                 dyn_state.dofs.vel.grad[i_dof1, i_b] += dL_d_jac_qvel * jac1
-                dyn_state.dofs.vel.grad[i_dof2, i_b] += dL_d_jac_qvel * jac2
                 # qpos1 enters only via pos (d_pos/d_pos1 = 1).
                 rigid_info.qpos.grad[i_qpos1, i_b] += dL_d_pos
-                # qpos2 enters via pos (d_pos/d_pos2 = -deriv) and deriv (d_deriv/d_diff).
-                rigid_info.qpos.grad[i_qpos2, i_b] += dL_d_pos * (-deriv) + dL_d_deriv * d_deriv_d_diff
+                if i_joint2 >= 0:
+                    dyn_state.dofs.vel.grad[i_dof2, i_b] += dL_d_jac_qvel * jac2
+                    # qpos2 enters via pos (d_pos/d_pos2 = -deriv) and deriv (d_deriv/d_diff).
+                    rigid_info.qpos.grad[i_qpos2, i_b] += dL_d_pos * (-deriv) + dL_d_deriv * d_deriv_d_diff
             elif dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.CONNECT:
                 # ----------------------------------------------------------
                 # CONNECT: 3 rows pin global_anchor1 == global_anchor2.

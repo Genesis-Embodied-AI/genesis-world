@@ -76,8 +76,8 @@ def build_entity_joint_data(entity: "RigidEntity", free_joint_pos_limit: float) 
             for i in range(joint.n_qs):
                 name = joint.name if joint.n_qs == 1 else f"{joint.name}[{i}]"
                 q_names.append(name)
-                lo = float(joint.dofs_limit[i, 0])
-                hi = float(joint.dofs_limit[i, 1])
+                lo = float(joint.desc.dofs_limit[i, 0])
+                hi = float(joint.desc.dofs_limit[i, 1])
                 if not np.isfinite(lo):
                     lo = -1e6
                 if not np.isfinite(hi):

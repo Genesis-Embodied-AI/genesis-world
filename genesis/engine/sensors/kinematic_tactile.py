@@ -1022,7 +1022,7 @@ class ContactDepthProbeSensor(
                 shared_metadata.filter_links_idx,
                 shared_metadata.sensor_geoms_idx,
                 shared_metadata.sensor_n_geoms,
-                solver.collider._collider_state,
+                solver.collider.collider_state,
             )
             _kernel_contact_depth_probe(
                 shared_metadata.probe_sensor_idx,
@@ -1039,7 +1039,7 @@ class ContactDepthProbeSensor(
                 measured_cols_b,
                 solver.dyn_state,
                 solver.dyn_info,
-                solver.collider._collider_info,
+                solver.collider.collider_info,
             )
         else:
             _kernel_build_sensor_contact_idx(
@@ -1047,7 +1047,7 @@ class ContactDepthProbeSensor(
                 shared_metadata.filter_links_idx,
                 shared_metadata.sensor_contacts_idx,
                 shared_metadata.sensor_n_contacts,
-                solver.collider._collider_state,
+                solver.collider.collider_state,
             )
             B, n_sensors = shared_metadata.sensor_n_contacts.shape
             mask_shape = (B, n_sensors, solver.n_geoms)
@@ -1058,7 +1058,7 @@ class ContactDepthProbeSensor(
                 shared_metadata.sensor_contacts_idx,
                 shared_metadata.sensor_n_contacts,
                 shared_metadata.sensor_candidate_geom_mask,
-                solver.collider._collider_state,
+                solver.collider.collider_state,
             )
             collision_bvh_contexts = shared_context.collision_bvh_contexts
             entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]
@@ -1295,7 +1295,7 @@ class KinematicTaxelSensor(
                 shared_metadata.filter_links_idx,
                 shared_metadata.sensor_geoms_idx,
                 shared_metadata.sensor_n_geoms,
-                solver.collider._collider_state,
+                solver.collider.collider_state,
             )
             _kernel_kinematic_taxel(
                 shared_metadata.probe_sensor_idx,
@@ -1319,8 +1319,8 @@ class KinematicTaxelSensor(
                 solver.dyn_state,
                 solver.dyn_info,
                 solver.rigid_info,
-                solver.collider._collider_info,
-                solver.collider._collider_static_config,
+                solver.collider.collider_info,
+                solver.collider.collider_config,
                 gs.EPS,
                 measured_equals_gt,
             )
@@ -1330,7 +1330,7 @@ class KinematicTaxelSensor(
                 shared_metadata.filter_links_idx,
                 shared_metadata.sensor_contacts_idx,
                 shared_metadata.sensor_n_contacts,
-                solver.collider._collider_state,
+                solver.collider.collider_state,
             )
             B, n_sensors = shared_metadata.sensor_n_contacts.shape
             mask_shape = (B, n_sensors, solver.n_geoms)
@@ -1341,7 +1341,7 @@ class KinematicTaxelSensor(
                 shared_metadata.sensor_contacts_idx,
                 shared_metadata.sensor_n_contacts,
                 shared_metadata.sensor_candidate_geom_mask,
-                solver.collider._collider_state,
+                solver.collider.collider_state,
             )
             collision_bvh_contexts = shared_context.collision_bvh_contexts
             entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]

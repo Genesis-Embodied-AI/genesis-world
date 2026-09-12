@@ -1,46 +1,31 @@
 import inspect
-import math
-import os
 from functools import wraps
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Hashable
+from typing import TYPE_CHECKING, Hashable
 
 import numpy as np
 import torch
-import trimesh
 
 import genesis as gs
 from genesis.constants import link_ref_frame
-from genesis.engine.materials.base import Material
-from genesis.engine.mesh import InertialProperties
 from genesis.engine.states.entities import RigidEntityState
-from genesis.options.morphs import Morph
-from genesis.options.surfaces import Surface
 from genesis.typing import UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
-from genesis.utils import mesh as mu
-from genesis.utils import mjcf as mju
-from genesis.utils import terrain as tu
-from genesis.utils import urdf as uu
-from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_numpy, qd_to_torch, tensor_to_array
+from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_to_torch, tensor_to_array
 
 from ..base_entity import Entity
+from .description import (
+    KinematicAttachmentDescription,
+    KinematicEntityDescription,
+    RigidEntityDescription,
+    RigidEqualityDescription,
+    RigidLinkDescription,
+)
+from .inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT, compose_inertial_from_g_infos, finalize_inertial
 from .rigid_equality import RigidEquality
 from .rigid_geom import RigidGeom
 from .rigid_joint import RigidJoint
-from .rigid_link import (
-    RHO_MUJOCO,
-    RHO_OBJECT,
-    RHO_ROBOT,
-    GeomInertialInfo,
-    KinematicLink,
-    LinkInertial,
-    LinkInertialInfo,
-    RigidLink,
-    compose_inertial_from_g_infos,
-    compose_inertial_properties,
-    finalize_inertial,
-)
+from .rigid_link import KinematicLink, RigidLink
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
@@ -93,72 +78,33 @@ class KinematicEntity(Entity):
     # override typing
     _solver: "KinematicSolver"
 
-    def __init__(
-        self,
-        scene: "Scene",
-        solver: "KinematicSolver",
-        material: Material,
-        morph: Morph,
-        surface: Surface,
-        idx: int,
-        idx_in_solver,
-        link_start: int,
-        joint_start: int,
-        q_start: int,
-        dof_start: int,
-        vgeom_start: int,
-        vvert_start: int,
-        vface_start: int,
-        custom_vvert_start: int,
-        custom_vface_start: int,
-        morph_heterogeneous: list[Morph] | None = None,
-        name: str | None = None,
-    ):
+    _description_cls = KinematicEntityDescription
+
+    def __init__(self, scene: "Scene", solver: "KinematicSolver", idx: int, desc: KinematicEntityDescription):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
-        self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
+        self._desc = desc
+        self._morph_heterogeneous = desc.morphs[1:]
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
 
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        super().__init__(idx, scene, desc.morphs[0], solver, desc.material, desc.surface, name=desc.name)
+        # The scene names an entity as it is added, so the description takes the name the entity received
+        desc.name = self._name
 
-        self._idx_in_solver = idx_in_solver
-        self._link_start: int = link_start
-        self._joint_start: int = joint_start
-        self._q_start = q_start
-        self._dof_start = dof_start
-        self._vgeom_start = vgeom_start
-        self._vvert_start = vvert_start
-        self._vface_start = vface_start
-        self._custom_vvert_start = custom_vvert_start
-        self._custom_vface_start = custom_vface_start
+        # Where this entity's links, joints and geoms begin in the solver: right after those of the entities it holds
+        self._idx_in_solver = solver.n_entities
+        self._link_start: int = solver.n_links
+        self._joint_start: int = solver.n_joints
+        self._q_start = solver.n_qs
+        self._dof_start = solver.n_dofs
+        self._vgeom_start = solver.n_vgeoms
+        self._vvert_start = solver.n_vverts
+        self._vface_start = solver.n_vfaces
+        self._custom_vvert_start = solver.n_custom_vverts
+        self._custom_vface_start = solver.n_custom_vfaces
 
         self._is_built: bool = False
         self._is_attached: bool = False
-        self._variant_init_qpos: list[np.ndarray] | None = None
-
-        # Per-link world<-user pose offset (morph 'offset_pos'/'offset_quat' composed with the link's inertial
-        # alignment), keyed by local link index; only root links carry one (children stay identity), so a multi-root
-        # entity keeps a distinct offset per root. The base link's is mirrored into '_offset_pos'/'_offset_quat' for the
-        # heterogeneous-variant seed; the solver gathers them into per-link tensors at build.
-        self._links_offset_pos: dict[int, np.ndarray] = {}
-        self._links_offset_quat: dict[int, np.ndarray] = {}
-        self._offset_pos = np.array(self._morph.offset_pos, dtype=gs.np_float)
-        self._offset_quat = np.array(self._morph.offset_quat, dtype=gs.np_float)
-
-        # Transient per-link, per-variant load-time inertial info (see 'LinkInertialInfo'), computed at load from
-        # the (then-available) parsed geometry, consumed by 'RigidLink._build' (geometry hint) and the align anchor.
-        # Dropped after '_align_free_roots'; never persisted, since the geometry it derives from is irrelevant to a
-        # kinematic entity once built. Indexed by link-local position (link.idx - link_start), matching the link order
-        # and the '_links_offset_*' arrays: '_align_link' appends one entry per link in build order, the heterogeneous
-        # loop appends variants.
-        self._links_inertial_info: list[list[LinkInertialInfo]] = []
-
-        # Per-variant base-link offset for heterogeneous entities, primary first and aligned with '_variant_init_qpos'
-        self._variant_offset_pos: list[np.ndarray] | None = None
-        self._variant_offset_quat: list[np.ndarray] | None = None
-
-        self.terrain_hf: np.ndarray | None = None
-        self.terrain_scale: np.ndarray | None = None
-        self._terrain_height_field: torch.Tensor | None = None
+        self._is_vverts_overridden: bool = False
 
         self._load_model()
 
@@ -187,195 +133,14 @@ class KinematicEntity(Entity):
     def init_ckpt(self):
         pass
 
-    def _load_morph(self, morph: Morph):
-        """Load a single morph into the entity."""
-        if isinstance(morph, gs.morphs.Mesh):
-            self._load_mesh(morph, self._surface)
-        elif isinstance(morph, (gs.morphs.MJCF, gs.morphs.URDF, gs.morphs.Drone, gs.morphs.USD)):
-            self._load_scene(morph, self._surface)
-        elif isinstance(morph, gs.morphs.Primitive):
-            self._load_primitive(morph, self._surface)
-        elif isinstance(morph, gs.morphs.Terrain):
-            self._load_terrain(morph, self._surface)
-        else:
-            gs.raise_exception(f"Unsupported morph: {morph}.")
-
-        # Load heterogeneous variants (if any)
-        self._load_heterogeneous_morphs()
-
-    def _load_heterogeneous_morphs(self):
-        """Load heterogeneous morphs (additional geometry variants for parallel environments).
-
-        Each variant is loaded as additional geoms/vgeoms attached to links.
-        Variant tracking (geom/vgeom ranges, inertial) is stored on the Link itself.
-        """
-        if not self._enable_heterogeneous:
-            return
-
-        # The per-variant offset and inertial alignment are tracked for a single root only; a multi-root entity (one
-        # MJCF/URDF with several free root bodies) would cross-contaminate the roots' offsets and init poses.
-        if sum(link.parent_idx == -1 for link in self._links) > 1:
-            gs.raise_exception("Heterogeneous morphs are not supported on multi-root entities.")
-
-        # Init variant tracking on ALL links
-        for link in self._links:
-            link._init_variant_tracking()
-
-        # Track per-variant init_qpos and base-link offset for per-environment dispatch (primary first). Each variant
-        # accumulates its own below so an asymmetric variant is aligned exactly like its homogeneous equivalent.
-        self._variant_init_qpos = [self.init_qpos]
-        self._variant_offset_pos = [self._offset_pos]
-        self._variant_offset_quat = [self._offset_quat]
-
-        n_links = len(self._links)
-
-        # Load additional heterogeneous variants
-        for morph in self._morph_heterogeneous:
-            if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
-                # Parse variant scene file
-                morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
-                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
-
-                # Validate that the variant has the same joint structure as the primary
-                if len(v_l_infos) != n_links:
-                    gs.raise_exception(
-                        f"Heterogeneous variant has {len(v_l_infos)} links, "
-                        f"but primary has {n_links}. All variants must have the same link count."
-                    )
-                for i_l, (link, v_j_infos) in enumerate(zip(self._links, v_links_j_infos)):
-                    primary_joints = link.joints
-                    if len(v_j_infos) != len(primary_joints):
-                        gs.raise_exception(
-                            f"Heterogeneous variant link {i_l} has {len(v_j_infos)} joints, "
-                            f"but primary has {len(primary_joints)}."
-                        )
-                    for p_joint, v_j_info in zip(primary_joints, v_j_infos):
-                        if p_joint.name != v_j_info["name"]:
-                            gs.raise_exception(
-                                f"Joint name mismatch at link {i_l}: primary has '{p_joint.name}', "
-                                f"variant has '{v_j_info['name']}'. All variants must have the same joint names."
-                            )
-                        if p_joint.type != v_j_info["type"]:
-                            gs.raise_exception(
-                                f"Joint type mismatch for '{p_joint.name}': primary has {p_joint.type}, "
-                                f"variant has {v_j_info['type']}."
-                            )
-                        if p_joint.n_dofs != v_j_info["n_dofs"]:
-                            gs.raise_exception(
-                                f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
-                                f"variant has {v_j_info['n_dofs']}."
-                            )
-
-                # Post-process each link's geoms. The COM/principal-axis anchoring of the floating base is deferred to
-                # '_align_free_roots' after build (where the finalized per-variant composite inertia is known); here
-                # only the morph pose offset is composed into the variant's init_qpos and offset.
-                offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
-                offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
-                cg_vg_infos = []
-                for v_l_info, v_j_infos, v_g_infos in zip(v_l_infos, v_links_j_infos, v_links_g_infos):
-                    is_robot = v_l_info.get("is_robot", np.array(False, dtype=np.bool_))
-                    cg_infos, vg_infos = self._postprocess_geoms_info(morph, v_g_infos, is_robot)
-                    cg_vg_infos.append((cg_infos, vg_infos))
-
-                # Extract variant's init_qpos from parsed joint infos, composing the morph offset into the free joint so
-                # relative getters report the variant's user frame.
-                variant_init_qpos_parts = []
-                for v_l_info, v_j_infos in zip(v_l_infos, v_links_j_infos):
-                    is_root = v_l_info["parent_idx"] == -1
-                    for j_info in v_j_infos:
-                        qpos = j_info["init_qpos"]
-                        if is_root and j_info["type"] == gs.JOINT_TYPE.FREE:
-                            init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
-                                np.array(morph.offset_pos, dtype=gs.np_float),
-                                np.array(morph.offset_quat, dtype=gs.np_float),
-                                qpos[:3],
-                                qpos[3:7],
-                            )
-                            qpos = np.concatenate([init_pos, init_quat])
-                        variant_init_qpos_parts.append(qpos)
-                if variant_init_qpos_parts:
-                    self._variant_init_qpos.append(np.concatenate(variant_init_qpos_parts))
-                else:
-                    self._variant_init_qpos.append(np.array([]))
-                self._variant_offset_pos.append(offset_pos)
-                self._variant_offset_quat.append(offset_quat)
-
-                # Add geoms per link and stash this variant's finalized inertia for the align anchor.
-                recompute = morph.recompute_inertia
-                for i_link, (link, v_l_info, (cg_infos, vg_infos)) in enumerate(
-                    zip(self._links, v_l_infos, cg_vg_infos)
-                ):
-                    self._add_heterogeneous_variant(link, cg_infos, vg_infos)
-                    self._on_heterogeneous_scene_variant_loaded(link, morph, v_l_info)
-                    self._links_inertial_info[i_link].append(
-                        self._finalize_inertial(
-                            None if recompute else v_l_info.get("inertial_mass"),
-                            None if recompute else v_l_info.get("inertial_pos"),
-                            None if recompute else v_l_info.get("inertial_quat"),
-                            None if recompute else v_l_info.get("inertial_i"),
-                            cg_infos,
-                            vg_infos,
-                            v_l_info.get("is_robot", False),
-                        )
-                    )
-
-            elif isinstance(morph, (gs.morphs.Mesh, gs.morphs.Primitive)):
-                if isinstance(morph, gs.morphs.Mesh):
-                    g_infos = self._load_mesh(morph, self._surface, load_geom_only_for_heterogeneous=True)
-                else:
-                    g_infos = self._load_primitive(morph, self._surface, load_geom_only_for_heterogeneous=True)
-                if morph.fixed != self._morph.fixed:
-                    gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
-                cg_infos, vg_infos = self._postprocess_geoms_info(morph, g_infos, is_robot=False)
-
-                # The COM/principal-axis anchoring is deferred to '_align_free_roots' after build; compose only the
-                # morph pose offset here.
-                offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
-                offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
-
-                self._add_heterogeneous_variant(self._links[0], cg_infos, vg_infos)
-                # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
-                self._links_inertial_info[0].append(
-                    self._finalize_inertial(None, None, None, None, cg_infos, vg_infos, is_robot=False)
-                )
-
-                if morph.fixed:
-                    init_qpos = np.array((), dtype=gs.np_float)
-                else:
-                    init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
-                        np.array(morph.offset_pos, dtype=gs.np_float),
-                        np.array(morph.offset_quat, dtype=gs.np_float),
-                        np.array(morph.pos, dtype=gs.np_float),
-                        np.array(morph.quat, dtype=gs.np_float),
-                    )
-                    init_qpos = np.concatenate([init_pos, init_quat])
-                self._variant_init_qpos.append(init_qpos)
-                self._variant_offset_pos.append(offset_pos)
-                self._variant_offset_quat.append(offset_quat)
-            else:
-                gs.raise_exception(
-                    f"Heterogeneous morphs only support URDF, MJCF, Primitive, and Mesh, got: {type(morph).__name__}."
-                )
-
-        # For multi-link entities, reassign indices and recompute variant ranges
-        if len(self._links) > 1:
-            self._reassign_heterogeneous_indices()
-
-    def _add_heterogeneous_variant(self, link, cg_infos, vg_infos):
-        """Add a heterogeneous variant's visual geoms to a link.
+    def _add_heterogeneous_variant(self, link, v_link):
+        """Give a link the geoms one variant describes for it. A kinematic entity holds visual geoms alone.
 
         RigidEntity overrides to additionally add collision geoms.
         """
-        for g_info in vg_infos:
-            link._add_vgeom(
-                vmesh=g_info["vmesh"],
-                init_pos=g_info.get("pos", gu.zero_pos()),
-                init_quat=g_info.get("quat", gu.identity_quat()),
-            )
-        link._record_variant_vgeom_range(len(vg_infos))
-
-    def _on_heterogeneous_scene_variant_loaded(self, link, morph, v_l_info):
-        """Hook for subclasses after a scene variant's geoms have been added to a link."""
+        for g_desc in v_link.vgeoms:
+            link._add_vgeom(g_desc)
+        link._record_variant_vgeom_range(len(v_link.vgeoms))
 
     def _reassign_heterogeneous_indices(self):
         """Reassign vgeom indices for multi-link heterogeneous entities.
@@ -406,528 +171,23 @@ class KinematicEntity(Entity):
                 vgeom_cursor += count
 
     def _load_model(self):
+        """Create the links, joints and geoms the description holds (see 'KinematicEntityDescription')."""
         self._links = gs.List()
         self._joints = gs.List()
+        for l_desc in self._desc.links:
+            self._add_link(l_desc)
 
-        self._load_morph(self._morph)
+        if self._desc.variants:
+            # Init variant tracking on ALL links
+            for link in self._links:
+                link._init_variant_tracking()
+            for v_desc in self._desc.variants:
+                for link, v_link in zip(self._links, v_desc.links):
+                    self._add_heterogeneous_variant(link, v_link)
 
-    def _load_primitive(self, morph, surface, load_geom_only_for_heterogeneous=False):
-        if morph.fixed:
-            joint_type = gs.JOINT_TYPE.FIXED
-            n_qs = 0
-            n_dofs = 0
-            init_qpos = np.array([])
-        else:
-            joint_type = gs.JOINT_TYPE.FREE
-            n_qs = 7
-            n_dofs = 6
-            init_qpos = np.concatenate([morph.pos, morph.quat])
-
-        metadata: dict[str, Any] = {"texture_path": None}
-
-        if isinstance(morph, gs.options.morphs.Box):
-            extents = np.array(morph.size)
-            tmesh = mu.create_box(extents=extents)
-            cmesh = tmesh
-            geom_data = extents
-            geom_type = gs.GEOM_TYPE.BOX
-            link_name_prefix = "box"
-        elif isinstance(morph, gs.options.morphs.Sphere):
-            tmesh = mu.create_sphere(radius=morph.radius)
-            cmesh = tmesh
-            geom_data = np.array([morph.radius])
-            geom_type = gs.GEOM_TYPE.SPHERE
-            link_name_prefix = "sphere"
-        elif isinstance(morph, gs.options.morphs.Cylinder):
-            tmesh = mu.create_cylinder(radius=morph.radius, height=morph.height)
-            cmesh = tmesh
-            geom_data = np.array([morph.radius, morph.height])
-            geom_type = gs.GEOM_TYPE.CYLINDER
-            link_name_prefix = "cylinder"
-        elif isinstance(morph, gs.options.morphs.Plane):
-            metadata["texture_path"] = mu.DEFAULT_PLANE_TEXTURE_PATH
-            tmesh, cmesh = mu.create_plane(
-                normal=morph.normal,
-                plane_size=morph.plane_size,
-                tile_size=morph.tile_size,
-                color_or_texture=metadata["texture_path"],
-            )
-            geom_data = np.array(morph.normal)
-            geom_type = gs.GEOM_TYPE.PLANE
-            link_name_prefix = "plane"
-        else:
-            gs.raise_exception("Unsupported primitive shape")
-
-        # contains one visual geom (vgeom) and one collision geom (geom)
-        g_infos = []
-        if morph.visualization:
-            g_infos.append(
-                dict(contype=0, conaffinity=0, vmesh=gs.Mesh.from_trimesh(tmesh, surface=surface, metadata=metadata))
-            )
-        if (morph.contype or morph.conaffinity) and morph.collision:
-            g_infos.append(
-                dict(
-                    contype=morph.contype,
-                    conaffinity=morph.conaffinity,
-                    mesh=gs.Mesh.from_trimesh(cmesh, surface=gs.surfaces.Collision()),
-                    type=geom_type,
-                    data=geom_data,
-                    sol_params=gu.default_solver_params(),
-                )
-            )
-
-        # For heterogeneous simulation, only return geometry info without creating link/joint
-        if load_geom_only_for_heterogeneous:
-            return g_infos
-
-        self._add_by_info(
-            l_info=dict(
-                is_robot=False,
-                name=f"{link_name_prefix}_baselink",
-                pos=np.array(morph.pos),
-                quat=np.array(morph.quat),
-                inertial_pos=None,  # we will compute the COM later based on the geometry
-                inertial_quat=gu.identity_quat(),
-                parent_idx=-1,
-            ),
-            j_infos=[
-                dict(
-                    name=f"{link_name_prefix}_baselink_joint",
-                    n_qs=n_qs,
-                    n_dofs=n_dofs,
-                    type=joint_type,
-                    init_qpos=init_qpos,
-                )
-            ],
-            g_infos=g_infos,
-            morph=morph,
-            surface=surface,
-        )
-        return g_infos
-
-    def _load_mesh(self, morph, surface, load_geom_only_for_heterogeneous=False):
-        # Load meshes
-        meshes = gs.Mesh.from_morph_surface(morph, surface)
-
-        link_pos, link_quat = map(np.array, (morph.pos, morph.quat))
-
-        if morph.fixed:
-            joint_type = gs.JOINT_TYPE.FIXED
-            n_qs = 0
-            n_dofs = 0
-            init_qpos = np.array([])
-        else:
-            joint_type = gs.JOINT_TYPE.FREE
-            n_qs = 7
-            n_dofs = 6
-            init_qpos = np.concatenate([link_pos, link_quat])
-
-        g_infos = []
-        if morph.visualization:
-            for mesh in meshes:
-                g_infos.append(dict(contype=0, conaffinity=0, vmesh=mesh, pos=gu.zero_pos(), quat=gu.identity_quat()))
-        if morph.collision:
-            if morph.merge_submeshes_for_collision and len(meshes) > 1:
-                # Merge every submesh into a single collision geom if requested.
-                collision_groups = [list(meshes)]
-            else:
-                # A source mesh node split into several visual materials is one physical body, so its submeshes are
-                # merged into a single collision geom rather than split per material. Pieces meant to collide
-                # separately must be authored as separate nodes. Meshes with no source node are each their own body.
-                collision_groups = []
-                groups_by_node = {}
-                for mesh in meshes:
-                    node_index = mesh.metadata.get("node_index")
-                    if node_index is None:
-                        collision_groups.append([mesh])
-                        continue
-                    group = groups_by_node.get(node_index)
-                    if group is None:
-                        group = groups_by_node[node_index] = []
-                        collision_groups.append(group)
-                    group.append(mesh)
-
-            for group in collision_groups:
-                if len(group) == 1:
-                    mesh = group[0]
-                else:
-                    tmesh = trimesh.util.concatenate([submesh.trimesh for submesh in group])
-                    mesh = gs.Mesh.from_trimesh(mesh=tmesh, surface=gs.surfaces.Collision())
-                g_infos.append(
-                    dict(
-                        contype=morph.contype,
-                        conaffinity=morph.conaffinity,
-                        mesh=mesh,
-                        type=gs.GEOM_TYPE.MESH,
-                        sol_params=gu.default_solver_params(),
-                        pos=gu.zero_pos(),
-                        quat=gu.identity_quat(),
-                    )
-                )
-
-        # For heterogeneous simulation, only return geometry info without creating link/joint
-        if load_geom_only_for_heterogeneous:
-            return g_infos
-
-        link_name = os.path.basename(morph.file).replace(".", "_")
-
-        self._add_by_info(
-            l_info=dict(is_robot=False, name=f"{link_name}_baselink", pos=link_pos, quat=link_quat, parent_idx=-1),
-            j_infos=[
-                dict(name=f"{link_name}_baselink_joint", n_qs=n_qs, n_dofs=n_dofs, type=joint_type, init_qpos=init_qpos)
-            ],
-            g_infos=g_infos,
-            morph=morph,
-            surface=surface,
-        )
-        return g_infos
-
-    def _load_terrain(self, morph, surface):
-        vmesh, mesh, terrain_hf = tu.parse_terrain(morph, surface)
-        self.terrain_scale = np.array((morph.horizontal_scale, morph.vertical_scale), dtype=gs.np_float)
-        self.terrain_hf = terrain_hf * self.terrain_scale[1]
-        # Collider storage covers only the first collision terrain; height queries support every terrain entity,
-        # including kinematic ones.
-        self._terrain_height_field = torch.as_tensor(self.terrain_hf, dtype=gs.tc_float, device=gs.device)
-
-        g_infos = []
-        if morph.visualization:
-            g_infos.append(dict(contype=0, conaffinity=0, vmesh=vmesh))
-        if morph.collision:
-            g_infos.append(
-                dict(
-                    contype=1,
-                    conaffinity=1,
-                    mesh=mesh,
-                    type=gs.GEOM_TYPE.TERRAIN,
-                    sol_params=gu.default_solver_params(),
-                )
-            )
-
-        self._add_by_info(
-            l_info=dict(
-                is_robot=False,
-                name="baselink",
-                pos=np.array(morph.pos),
-                quat=np.array(morph.quat),
-                inertial_pos=None,
-                inertial_quat=gu.identity_quat(),
-                inertial_i=None,
-                inertial_mass=None,
-                parent_idx=-1,
-                invweight=None,
-            ),
-            j_infos=[dict(name="joint_baselink", n_qs=0, n_dofs=0, type=gs.JOINT_TYPE.FIXED)],
-            g_infos=g_infos,
-            morph=morph,
-            surface=surface,
-        )
-
-    def _parse_scene(self, morph, surface):
-        # Whether the parsed inverse weight has been invalidated, either because the inertia it derives from was
-        # replaced, or because it was never trustworthy in the first place. It is applied once, after every reason
-        # to invalidate has been collected.
-        is_inertia_invalid = False
-
-        # Mujoco's unified MJCF+URDF parser is not good enough for now to be used for loading both MJCF and URDF files.
-        # First, it would happen when loading visual meshes having supported format (i.e. Collada files '.dae').
-        # Second, it does not take into account URDF 'mimic' joint constraints. However, it does a better job at
-        # initialized undetermined physics parameters.
-        if isinstance(morph, gs.morphs.MJCF):
-            # Mujoco's unified MJCF+URDF parser systematically for MJCF files
-            l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, surface, self._solver._options)
-        elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
-            # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
-            # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
-            l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, surface)
-
-            # Mujoco's unified MJCF+URDF parser for only link, joints, and collision geometries properties
-            morph_ = morph.model_copy(update=dict(visualization=False))
-            try:
-                # Mujoco's unified MJCF+URDF parser for URDF files.
-                # Note that Mujoco URDF parser completely ignores equality constraints.
-                l_infos_mj, links_j_infos_mj, links_g_infos_mj, _ = mju.parse_xml(morph_, surface)
-
-                # Unset link inertial properties that are actually undefined to force recomputation by genesis
-                if not morph._enable_mujoco_compatibility:
-                    for l_info_gs in l_infos:
-                        for l_info_mj in l_infos_mj:
-                            if l_info_gs["name"] == l_info_mj["name"]:
-                                for key, value in l_info_gs.items():
-                                    if value is None:
-                                        l_info_mj[key] = None
-                                        is_inertia_invalid = True
-                                break
-                l_infos = l_infos_mj
-
-                # Mujoco is not parsing actuators properties
-                for j_info_gs in chain.from_iterable(links_j_infos):
-                    for j_info_mj in chain.from_iterable(links_j_infos_mj):
-                        if j_info_mj["name"] == j_info_gs["name"]:
-                            for name in ("dofs_force_range", "dofs_armature", "dofs_act_gain", "dofs_act_bias"):
-                                j_info_mj[name] = j_info_gs[name]
-                            break
-                links_j_infos = links_j_infos_mj
-
-                # Must invalidate invweight if default rotor armature inertia has been specified
-                if morph.default_armature is not None:
-                    for link_j_infos in links_j_infos:
-                        for j_info in link_j_infos:
-                            if j_info["type"] not in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.FIXED):
-                                is_inertia_invalid = True
-                                break
-
-                # Take into account 'world' body if it was added automatically for our legacy URDF parser
-                if len(links_g_infos_mj) == len(links_g_infos) + 1:
-                    assert not links_g_infos_mj[0]
-                    links_g_infos.insert(0, [])
-                assert len(links_g_infos_mj) == len(links_g_infos)
-
-                # Update collision geometries, ignoring fake" visual geometries returned by Mujoco, (which is using
-                # collision as visual to avoid loading mesh files), and keeping the true visual geometries provided
-                # by our custom legacy URDF parser.
-                # Note that the Kinematic tree ordering is stable between Mujoco and Genesis (Hopefully!).
-                for link_g_infos, link_g_infos_mj in zip(links_g_infos, links_g_infos_mj):
-                    # Remove collision geometries from our legacy URDF parser
-                    for i_g, g_info in tuple(enumerate(link_g_infos))[::-1]:
-                        is_col = g_info["contype"] or g_info["conaffinity"]
-                        if is_col:
-                            del link_g_infos[i_g]
-
-                    # Add visual geometries from Mujoco's unified MJCF+URDF parser
-                    for g_info in link_g_infos_mj:
-                        is_col = g_info["contype"] or g_info["conaffinity"]
-                        if is_col:
-                            link_g_infos.append(g_info)
-            except (ValueError, AssertionError) as e:
-                gs.logger.warning(
-                    "Falling back to legacy URDF parser. Default values of physics properties may be off:\n"
-                    + str(e).replace("\n", " - ")
-                )
-        elif isinstance(morph, gs.morphs.USD):
-            from genesis.utils.usd import parse_usd_rigid_entity
-
-            # Unified parser handles both articulations and rigid bodies
-            l_infos, links_j_infos, links_g_infos, eqs_info = parse_usd_rigid_entity(morph, surface)
-
-        # Make sure that the inertia matrix of all links is valid
-        if not morph.recompute_inertia:
-            for l_info in l_infos:
-                inertia_i = l_info.get("inertial_i")
-                if inertia_i is None:
-                    continue
-
-                # Compute eigenvalues of inertia matrix after enforcing symmetry
-                inertia_diag, Q = np.linalg.eigh(0.5 * (inertia_i + inertia_i.T))
-
-                # Make sure that all eigenvalues are positive, ignoring rounding errors
-                if (inertia_diag < -gs.EPS).any():
-                    gs.raise_exception(
-                        f"Inertia matrix of link '{l_info['name']}' not positive definite (eigenvalues: {inertia_diag})."
-                    )
-
-                # Make sure that the inertia matrix is physically valid (nothing to do with numerical conditioning)
-                if any(
-                    inertia_diag[i] + inertia_diag[(i + 1) % 3] < inertia_diag[(i + 2) % 3] * (1.0 - 1e-6) - 1e-9
-                    for i in range(3)
-                ):
-                    gs.raise_exception(
-                        f"Inertia matrix of link '{l_info['name']}' does not satisfy A+B>=C for all permutations "
-                        f"(eigenvalues: {inertia_diag}). Please fix manually you morph file '{morph.file}' or specify "
-                        "`recompute_inertia=True`."
-                    )
-
-                # Make sure that the inertia matrix is symmetric with positive eigenvalues
-                l_info["inertial_i"] = Q @ np.diag(np.maximum(inertia_diag, 0.0)) @ Q.T
-
-        # Remove any "virtual" root link that was not present in the original file morph.
-        # Mujoco unified parser and our legacy parser have different behaviors.
-        # * Mujoco unified parser always adds a root 'world' link if it does not exist, and fuse all fixed links from
-        #   root to first articulated body.
-        # * Our legacy parser adds a root 'world' link if the root joint is not a fixed joint in file morph.
-        # Remove this virtual world link if the child has a free joint (the free joint absorbs the full pose into
-        # 'init_qpos' regardless of pos/quat), or if the child has an identity transform.
-        base_j_info, base_g_info = links_j_infos[0], links_g_infos[0]
-        if len(l_infos) > 1 and (sum(j_info["n_dofs"] for j_info in base_j_info) == 0) and not base_g_info:
-            child_has_freejoint = any(j_info["type"] == gs.JOINT_TYPE.FREE for j_info in links_j_infos[1])
-            child_is_identity = (np.abs(l_infos[1]["pos"]) < gs.EPS).all() and (
-                np.abs(l_infos[1]["quat"] - (1, 0, 0, 0)) < gs.EPS
-            ).all()
-            if child_has_freejoint or child_is_identity:
-                del l_infos[0], links_j_infos[0], links_g_infos[0]
-                for l_info in l_infos:
-                    l_info["parent_idx"] = max(l_info["parent_idx"] - 1, -1)
-                    if "root_idx" in l_info:
-                        l_info["root_idx"] = max(l_info["root_idx"] - 1, -1)
-
-        # URDF is a robot description file so all links have same root_idx
-        if isinstance(morph, gs.morphs.URDF) and not morph._enable_mujoco_compatibility:
-            for l_info in l_infos:
-                l_info["root_idx"] = 0
-
-        # Genesis requires links associated with free joints to be attached to the world directly
-        for l_info, link_j_infos in zip(l_infos, links_j_infos):
-            if all(j_info["type"] == gs.JOINT_TYPE.FREE for j_info in link_j_infos):
-                l_info["parent_idx"] = -1
-
-        # Add free floating joint at root if necessary
-        if (
-            (isinstance(morph, gs.morphs.Drone) or (isinstance(morph, gs.morphs.URDF) and not morph.fixed))
-            and links_j_infos
-            and sum(j_info["n_dofs"] for j_info in links_j_infos[0]) == 0
-        ):
-            # Define free joint
-            j_info = dict()
-            j_info["name"] = "root_joint"
-            j_info["type"] = gs.JOINT_TYPE.FREE
-            j_info["n_qs"] = 7
-            j_info["n_dofs"] = 6
-            j_info["init_qpos"] = np.concatenate([gu.zero_pos(), gu.identity_quat()])
-            j_info["pos"] = gu.zero_pos()
-            j_info["quat"] = gu.identity_quat()
-            j_info["dofs_motion_ang"] = np.eye(6, 3, -3)
-            j_info["dofs_motion_vel"] = np.eye(6, 3)
-            j_info["dofs_limit"] = np.tile([-np.inf, np.inf], (6, 1))
-            j_info["dofs_stiffness"] = np.zeros(6)
-            j_info["dofs_invweight"] = np.zeros(6)
-            j_info["dofs_frictionloss"] = np.zeros(6)
-            j_info["dofs_damping"] = np.zeros(6)
-            if isinstance(morph, gs.morphs.Drone):
-                # FIXME: This pattern not ideal because the inertial mass may be unknown at this point.
-                mass_tot = sum(l_info.get("inertial_mass") or 0.0 for l_info in l_infos)
-                j_info["dofs_damping"][3:] = mass_tot * morph.default_base_ang_damping_scale
-            j_info["dofs_armature"] = np.zeros(6)
-            j_info["dofs_act_gain"] = np.zeros((6,), dtype=gs.np_float)
-            j_info["dofs_act_bias"] = np.zeros((6, 3), dtype=gs.np_float)
-            j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (6, 1))
-            links_j_infos[0] = [j_info]
-
-            # The base link is now moving, which merges every kinematic tree connected to it into a single tree rooted
-            # at it. Parser-provided root indices assume a base welded to the world, so recompute them by propagating
-            # each parent's root (parents precede children); links with no parent root their own tree.
-            for i_l, l_info in enumerate(l_infos):
-                if "root_idx" in l_info:
-                    parent_idx = l_info["parent_idx"]
-                    l_info["root_idx"] = l_infos[parent_idx]["root_idx"] if parent_idx != -1 else i_l
-
-            # Must invalidate invweight for all child links and joints because the root joint was fixed when it was
-            # initially computed. Re-initialize it to some strictly negative value to trigger recomputation in solver.
-            for i_l in range(len(l_infos)):
-                l_infos[i_l]["invweight"] = np.full((2,), fill_value=-1.0)
-                for j_info in links_j_infos[i_l]:
-                    j_info["dofs_invweight"] = np.full((j_info["n_dofs"],), fill_value=-1.0)
-
-        # Force recomputing inertial information based on geometry if ill-defined for some reason.
-        # A moving link needs a well-defined inertia only for its own rigid body; a rigidly-attached (fixed-joint) child
-        # folds its mass into the parent's composite-rigid-body inertia.
-        has_links_subtree_mass = [
-            bool(link_g_infos) or (l_info.get("inertial_mass") or 0.0) > 0.0
-            for link_g_infos, l_info in zip(links_g_infos, l_infos)
-        ]
-        for i in reversed(range(len(l_infos))):
-            parent_idx = l_infos[i]["parent_idx"]
-            if parent_idx >= 0 and all(j_info["type"] == gs.JOINT_TYPE.FIXED for j_info in links_j_infos[i]):
-                has_links_subtree_mass[parent_idx] |= has_links_subtree_mass[i]
-
-        for i, (l_info, link_g_infos, link_j_infos, has_link_subtree_mass) in enumerate(
-            zip(l_infos, links_g_infos, links_j_infos, has_links_subtree_mass)
-        ):
-            # Fixed links are subsumed into their parent's composite; only moving links need a well-defined inertia.
-            if all(j_info["type"] == gs.JOINT_TYPE.FIXED for j_info in link_j_infos):
-                continue
-            if not (
-                (l_info.get("inertial_mass") is None or l_info["inertial_mass"] <= 0.0)
-                or (l_info.get("inertial_i") is None or (np.diag(l_info["inertial_i"]) <= 0.0).any())
-            ):
-                continue
-
-            # The own inertia is degenerate, so the parsed inverse weight (derived from it) must be recomputed
-            # regardless of how the mass is resolved below.
-            is_inertia_invalid = True
-
-            # A geometry-less moving link whose rigidly-attached (fixed-joint) subtree carries the mass keeps its
-            # (near-)zero own inertia: the composite-rigid-body inertia is finite, so leave it as parsed. Otherwise
-            # recompute from its own geometry, warning only when nothing in the rigid subtree provides mass.
-            if not link_g_infos and has_link_subtree_mass:
-                continue
-            if not link_g_infos:
-                gs.logger.warning(
-                    f"Moving link '{l_info['name']}' has no mass, inertia or geometry, and no rigidly-attached "
-                    "child provides any. Setting its mass to 'gs.EPS'."
-                )
-            elif l_info.get("inertial_mass") is not None or l_info.get("inertial_i") is not None:
-                gs.logger.debug(
-                    f"Invalid or undefined inertia for link '{l_info['name']}'. Force recomputing it based on geometry."
-                )
-            l_info["inertial_i"] = None
-        if is_inertia_invalid:
-            for l_info, link_j_infos in zip(l_infos, links_j_infos):
-                l_info["invweight"] = np.full((2,), fill_value=-1.0)
-                for j_info in link_j_infos:
-                    j_info["dofs_invweight"] = np.full((j_info["n_dofs"],), fill_value=-1.0)
-
-        # Check if there is something weird with the options
-        non_physical_fieldnames = ("dofs_frictionloss", "dofs_damping", "dofs_armature")
-        for j_info in (
-            j_info for link_j_infos in links_j_infos for j_info in link_j_infos if j_info["type"] == gs.JOINT_TYPE.FREE
-        ):
-            if not all((j_info[name] < gs.EPS).all() for name in non_physical_fieldnames if name in j_info):
-                gs.logger.warning(
-                    "Some free joint has non-zero frictionloss, damping or armature parameters. Beware it is "
-                    "non-physical."
-                )
-
-        # Define a flag that determines whether the link at hand is associated with a robot.
-        # Note that 0d array is used rather than native type because this algo requires mutable objects.
-        for l_info, link_j_infos in zip(l_infos, links_j_infos):
-            if not link_j_infos or all(j_info["type"] == gs.JOINT_TYPE.FIXED for j_info in link_j_infos):
-                if l_info["parent_idx"] >= 0:
-                    l_info["is_robot"] = l_infos[l_info["parent_idx"]]["is_robot"]
-                else:
-                    l_info["is_robot"] = np.array(False, dtype=np.bool_)
-            elif all(j_info["type"] == gs.JOINT_TYPE.FREE for j_info in link_j_infos):
-                l_info["is_robot"] = np.array(False, dtype=np.bool_)
-            else:
-                l_info["is_robot"] = np.array(True, dtype=np.bool_)
-                if l_info["parent_idx"] >= 0:
-                    l_infos[l_info["parent_idx"]]["is_robot"][()] = True
-
-        # Apply morph pos and quat if specified
-        for l_info, link_j_infos in zip(l_infos, links_j_infos):
-            if l_info["parent_idx"] < 0:
-                if morph.pos is not None or morph.quat is not None:
-                    gs.logger.debug("Applying offset to base link's pose with user provided value in morph.")
-                    pos = np.asarray(l_info.get("pos", (0.0, 0.0, 0.0)))
-                    quat = np.asarray(l_info.get("quat", (1.0, 0.0, 0.0, 0.0)))
-                    if morph.pos is None:
-                        pos_offset = np.zeros((3,))
-                    else:
-                        pos_offset = np.asarray(morph.pos)
-                    if morph.quat is None:
-                        quat_offset = np.array((1.0, 0.0, 0.0, 0.0))
-                    else:
-                        quat_offset = np.asarray(morph.quat)
-                    l_info["pos"], l_info["quat"] = gu.transform_pos_quat_by_trans_quat(
-                        pos, quat, pos_offset, quat_offset
-                    )
-
-                for j_info in link_j_infos:
-                    if j_info["type"] == gs.JOINT_TYPE.FREE:
-                        # in this case, l_info['pos'] and l_info['quat'] are actually not used in solver,
-                        # but this initial value will be reflected
-                        j_info["init_qpos"] = np.concatenate([l_info["pos"], l_info["quat"]])
-
-        # Exclude joints with 0 dofs to align with Mujoco
-        links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
-
-        return l_infos, links_j_infos, links_g_infos, eqs_info
-
-    def _load_scene(self, morph, surface):
-        l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, surface)
-
-        # Add (link, joints, geoms) tuples sequentially
-        for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
-            self._add_by_info(l_info, link_j_infos, link_g_infos, morph, surface)
+            # For multi-link entities, reassign indices and recompute variant ranges
+            if len(self._links) > 1:
+                self._reassign_heterogeneous_indices()
 
     def _build(self):
         for link in self._links:
@@ -938,492 +198,65 @@ class KinematicEntity(Entity):
         self._vgeoms = self.vgeoms
         self._is_built = True
 
-        # The per-link inertia (and per heterogeneous variant) is now finalized, so anchor each aligned free root at
-        # its fixed subtree center of mass and principal axes. Must run before the solver reads the link poses and
-        # inertia. Defined here on the base class so kinematic and rigid entities anchor identically: a kinematic
-        # entity is commonly used to visualize the target reference motion a rigid entity tracks, so the two coexist
-        # and the same qpos must map to the same world pose for both.
-        self._align_free_roots()
+    def _create_joints(self, j_descs, link_idx, joint_start):
+        """Create the RigidJoint objects of one link from its described joints.
 
-    def _align_free_roots(self):
-        """Anchor each aligned free root at the center of mass and principal axes of its fixed subtree.
-
-        Runs after build, so it composes the finalized inertia the solver's mass matrix uses, and applies the anchoring
-        per heterogeneous variant (each variant's own inertia and geoms). This delivers the 'align' option's promise (a
-        COM-centered, principal-axis frame, which also conditions the constraint solve) for mesh and fixed-child
-        bodies, not just primitives, while keeping a heterogeneous entity bit-identical to its variants' separate
-        entities.
-        """
-        for root in self._links:
-            if root.parent_idx != -1 or not root.aligned:
-                continue
-
-            # Gather the fixed subtree (root + transitive n_dofs == 0 descendants) and each link's pose in the root
-            # frame; links are in build order so a parent is always visited before its children. A DOF-bearing
-            # descendant makes the root an articulated chain rather than a single rigid body: its joint-space mass is
-            # not diagonal and the frames of its moving children are not re-expressed here, so such roots are skipped.
-            pose_in_root = {root.idx: (gu.zero_pos(), gu.identity_quat())}
-            subtree = [root]
-            articulated = False
-            for link in self._links:
-                if link is root or link.parent_idx not in pose_in_root:
-                    continue
-                if link.n_dofs != 0:
-                    articulated = True
-                    break
-                pose_in_root[link.idx] = gu.transform_pos_quat_by_trans_quat(
-                    np.asarray(link.pos, dtype=gs.np_float),
-                    np.asarray(link.quat, dtype=gs.np_float),
-                    *pose_in_root[link.parent_idx],
-                )
-                subtree.append(link)
-            if articulated:
-                continue
-
-            # Anchor each variant on its own finalized inertia (from the load-time stash, available to kinematic and
-            # rigid entities alike) and geoms. Composing the fixed subtree's inertia and shifting the body frame to its
-            # COM and principal axes re-expresses the variant's geoms (so the world geometry is unchanged), folds the
-            # composite into the variant's dynamics inertia (rigid only) and into its offset and init_qpos.
-            root_local = root.idx - self._link_start
-            is_heterogeneous = root._variant_vgeom_ranges is not None
-            for v in range(len(self._links_inertial_info[root_local])):
-                inertial_info = []
-                mass_explicit = set()
-                composite_links = []
-                for link in subtree:
-                    props, is_mass_explicit, _ = self._links_inertial_info[link.idx - self._link_start][v]
-                    if props.mass < gs.EPS:
-                        continue
-                    composite_links.append(link)
-                    mass_explicit.add(is_mass_explicit)
-                    rot = gu.quat_to_R(props.quat)
-                    inertia_in_link = rot @ props.inertia @ rot.T
-                    inertial_info.append(
-                        GeomInertialInfo(
-                            InertialProperties(props.mass, props.com, inertia_in_link), *pose_in_root[link.idx]
-                        )
-                    )
-
-                # The composite center of mass and principal axes are density-independent only if every contributing
-                # link's mass comes from the same source (see 'LinkInertialInfo.is_mass_explicit'). Mixing explicit
-                # and estimated masses would make the anchor density-dependent, and a kinematic entity has no density
-                # to fall back on, so alignment could differ from the rigid counterpart. Require all-or-none and raise
-                # otherwise.
-                if None in mass_explicit:
-                    gs.raise_exception(
-                        f"Entity '{self.uid}': a link of an aligned free body mixes geoms with and without an "
-                        "authored density. Author a density on all of its geoms or none of them."
-                    )
-                if len(mass_explicit) > 1:
-                    gs.raise_exception(
-                        f"Entity '{self.uid}': an aligned free body mixes explicit (mass or authored per-geom "
-                        "densities) and geometry-estimated link masses. Specify the mass or density of all of its "
-                        "links or none of them."
-                    )
-                if not inertial_info:
-                    continue
-                mass_total, com_root, inertia_root = compose_inertial_properties(inertial_info)
-                if mass_total <= gs.EPS:
-                    continue
-                principal_R = uu.principal_axes_rot(inertia_root)
-                principal_quat = gu.R_to_quat(principal_R)
-                inertia_diag = principal_R.T @ inertia_root @ principal_R
-
-                # Re-express the variant's geoms across the subtree so the body frame can move to (com_root, principal
-                # axes) while the world geometry stays fixed: bring each geom to the root frame, undo the anchoring
-                # there, bring it back to its link frame. The static link poses are not moved (they are shared across
-                # heterogeneous variants). A kinematic link has only visual geoms; a rigid link has both.
-                for link in subtree:
-                    link_pos, link_quat = pose_in_root[link.idx]
-                    if is_heterogeneous:
-                        vgeom_start, vgeom_end = link._variant_vgeom_ranges[v]
-                        geoms = [vg for vg in link.vgeoms if vgeom_start <= vg.idx < vgeom_end]
-                        if isinstance(link, RigidLink):
-                            geom_start, geom_end = link._variant_geom_ranges[v]
-                            geoms += [g for g in link.geoms if geom_start <= g.idx < geom_end]
-                    elif isinstance(link, RigidLink):
-                        geoms = [*link.geoms, *link.vgeoms]
-                    else:
-                        geoms = list(link.vgeoms)
-                    for geom in geoms:
-                        pos, quat = gu.transform_pos_quat_by_trans_quat(
-                            geom._init_pos, geom._init_quat, link_pos, link_quat
-                        )
-                        pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, com_root, principal_quat)
-                        pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, link_pos, link_quat)
-                        geom._init_pos, geom._init_quat = pos, quat
-                        geom._init_pos_tc = torch.from_numpy(pos).to(device=gs.device, dtype=gs.tc_float)
-                        geom._init_quat_tc = torch.from_numpy(quat).to(device=gs.device, dtype=gs.tc_float)
-
-                # Fold the composite (diagonal, COM-centered) into the dynamics inertia.
-                # Rescale the unit-density estimate to the link masses.
-                if isinstance(root, RigidLink):
-                    # Sum the dynamics masses of exactly the links that contributed to 'mass_total'; the massless
-                    # links skipped above (a geometry-less link carries only the 'gs.EPS' placeholder) must not
-                    # inflate the composite.
-                    real_total = sum(
-                        float(link._variant_inertial[v][0] if is_heterogeneous else link.inertial_mass)
-                        for link in composite_links
-                    )
-                    scale = real_total / mass_total
-                    zero_pos, identity_quat = gu.zero_pos(), gu.identity_quat()
-                    for link in subtree:
-                        if link is root:
-                            props = LinkInertial(real_total, zero_pos, identity_quat, scale * inertia_diag)
-                        else:
-                            props = LinkInertial(gs.EPS, zero_pos, identity_quat, np.zeros((3, 3), dtype=gs.np_float))
-                        if is_heterogeneous:
-                            link._variant_inertial[v] = props
-                        else:
-                            link._inertial_mass, link._inertial_pos, link._inertial_quat, link._inertial_i = props
-
-                # Fold the anchoring into the offset (relative getters keep reporting the user frame) and the root
-                # free-joint init_qpos (the body frame moves to old_pose o (com_root, principal), keeping the
-                # re-expressed geoms in world).
-                if is_heterogeneous:
-                    off_pos, off_quat = self._variant_offset_pos[v], self._variant_offset_quat[v]
-                    self._variant_offset_pos[v] = gu.transform_by_trans_quat(com_root, off_pos, off_quat)
-                    self._variant_offset_quat[v] = gu.transform_quat_by_quat(principal_quat, off_quat)
-                    # The solver broadcasts '_links_offset_*' (not '_variant_offset_*') when all variants share an
-                    # offset, so keep the base link offset in sync with the primary variant's aligned offset.
-                    if v == 0:
-                        self._links_offset_pos[root_local] = self._variant_offset_pos[0]
-                        self._links_offset_quat[root_local] = self._variant_offset_quat[0]
-                        if root_local == 0:
-                            self._offset_pos = self._variant_offset_pos[0]
-                            self._offset_quat = self._variant_offset_quat[0]
-                    qpos = self._variant_init_qpos[v]
-                    new_pos = gu.transform_by_trans_quat(com_root, qpos[:3], qpos[3:7])
-                    new_quat = gu.transform_quat_by_quat(principal_quat, qpos[3:7])
-                    qpos[:3], qpos[3:7] = new_pos, new_quat
-                else:
-                    off_pos, off_quat = self._links_offset_pos[root_local], self._links_offset_quat[root_local]
-                    self._links_offset_pos[root_local] = gu.transform_by_trans_quat(com_root, off_pos, off_quat)
-                    self._links_offset_quat[root_local] = gu.transform_quat_by_quat(principal_quat, off_quat)
-                    if root_local == 0:
-                        self._offset_pos, self._offset_quat = self._links_offset_pos[0], self._links_offset_quat[0]
-                    for joint in root.joints:
-                        if joint.type == gs.JOINT_TYPE.FREE:
-                            new_pos = gu.transform_by_trans_quat(com_root, joint._init_qpos[:3], joint._init_qpos[3:7])
-                            new_quat = gu.transform_quat_by_quat(principal_quat, joint._init_qpos[3:7])
-                            joint._init_qpos = np.concatenate([new_pos, new_quat])
-                    root._pos = gu.transform_by_trans_quat(com_root, np.asarray(root.pos, dtype=gs.np_float), root.quat)
-                    root._quat = gu.transform_quat_by_quat(principal_quat, np.asarray(root.quat, dtype=gs.np_float))
-
-        # The load-time inertial info was only needed for the build-time estimates and the anchors; drop it now that
-        # the alignment lives in the persistent geometry, offset and init_qpos.
-        self._links_inertial_info = []
-
-    def _create_joints(self, j_infos, link_idx, joint_start):
-        """Create RigidJoint objects from joint info dicts.
-
-        Shared by KinematicEntity._add_by_info and RigidEntity._add_by_info.
+        Both '_add_link' overrides call this, so a kinematic and a rigid link build their joints the same way.
         """
         joints = gs.List()
         self._joints.append(joints)
-        for i_j_, j_info in enumerate(j_infos):
-            n_dofs = j_info["n_dofs"]
-
-            sol_params = np.array(j_info.get("sol_params", gu.default_solver_params()), copy=True)
-            if (
-                len(sol_params.shape) == 2
-                and sol_params.shape[0] == 1
-                and (sol_params[0][3] >= 1.0 or sol_params[0][2] >= sol_params[0][3])
-            ):
-                gs.logger.warning(
-                    f"Joint {j_info['name']}'s sol_params {sol_params[0]} look not right, change to default."
+        for i_j_, j_desc in enumerate(j_descs):
+            if j_desc.dofs_motion_ang is None or j_desc.dofs_motion_vel is None:
+                gs.raise_exception(
+                    f"Joint '{j_desc.name}' holds {j_desc.n_dofs} degrees of freedom, whose motion axes the asset "
+                    "must describe."
                 )
-                sol_params = gu.default_solver_params()
-
-            dofs_motion_ang = j_info.get("dofs_motion_ang")
-            if dofs_motion_ang is None:
-                if n_dofs == 6:
-                    dofs_motion_ang = np.eye(6, 3, -3)
-                elif n_dofs == 0:
-                    dofs_motion_ang = np.zeros((0, 3))
-                else:
-                    assert False
-
-            dofs_motion_vel = j_info.get("dofs_motion_vel")
-            if dofs_motion_vel is None:
-                if n_dofs == 6:
-                    dofs_motion_vel = np.eye(6, 3)
-                elif n_dofs == 0:
-                    dofs_motion_vel = np.zeros((0, 3))
-                else:
-                    assert False
 
             joint = RigidJoint(
                 entity=self,
-                name=j_info["name"],
                 idx=joint_start + i_j_,
                 link_idx=link_idx,
                 q_start=self.n_qs + self._q_start,
                 dof_start=self.n_dofs + self._dof_start,
-                n_qs=j_info["n_qs"],
-                n_dofs=n_dofs,
-                type=j_info["type"],
-                pos=j_info.get("pos", gu.zero_pos()),
-                quat=j_info.get("quat", gu.identity_quat()),
-                init_qpos=j_info.get("init_qpos", np.zeros(n_dofs)),
-                sol_params=sol_params,
-                dofs_motion_ang=dofs_motion_ang,
-                dofs_motion_vel=dofs_motion_vel,
-                dofs_limit=j_info.get("dofs_limit", np.tile([[-np.inf, np.inf]], [n_dofs, 1])),
-                dofs_invweight=j_info.get("dofs_invweight", np.zeros(n_dofs)),
-                dofs_frictionloss=j_info.get("dofs_frictionloss", np.zeros(n_dofs)),
-                dofs_stiffness=j_info.get("dofs_stiffness", np.zeros(n_dofs)),
-                dofs_damping=j_info.get("dofs_damping", np.zeros(n_dofs)),
-                dofs_armature=j_info.get("dofs_armature", np.zeros(n_dofs)),
-                dofs_act_gain=j_info.get("dofs_act_gain", np.zeros(n_dofs)),
-                dofs_act_bias=j_info.get("dofs_act_bias", np.zeros((n_dofs, 3))),
-                dofs_force_range=j_info.get("dofs_force_range", np.tile([[-np.inf, np.inf]], [n_dofs, 1])),
+                desc=j_desc,
             )
             joints.append(joint)
 
         return joints
 
-    def _add_by_info(self, l_info, j_infos, g_infos, morph, surface):
-        if len(j_infos) > 1 and any(j_info["type"] in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.FIXED) for j_info in j_infos):
-            raise ValueError(
-                "Compounding joints of types 'FREE' or 'FIXED' with any other joint on the same body not supported"
-            )
-
-        parent_idx = l_info["parent_idx"]
+    def _add_link(self, l_desc):
+        """Create one link from a description the resolution completed, with the joints and geoms it carries."""
+        parent_idx = l_desc.parent_idx
         if parent_idx >= 0:
             parent_idx += self._link_start
-        root_idx = l_info.get("root_idx")
+        root_idx = l_desc.root_idx
         if root_idx is not None and root_idx >= 0:
             root_idx += self._link_start
         link_idx = self.n_links + self._link_start
         joint_start = self.n_joints + self._joint_start
 
-        cg_infos, vg_infos = self._postprocess_geoms_info(morph, g_infos, l_info.get("is_robot", False))
-        self._align_link(l_info, j_infos, cg_infos, vg_infos, morph, link_idx)
-
-        joints = self._create_joints(j_infos, link_idx, joint_start)
+        joints = self._create_joints(l_desc.joints, link_idx, joint_start)
 
         # Add child link
         link = KinematicLink(
             entity=self,
-            name=l_info["name"],
             idx=link_idx,
+            parent_idx=parent_idx,
+            root_idx=root_idx,
             joint_start=joint_start,
-            n_joints=len(j_infos),
+            n_joints=len(l_desc.joints),
             vgeom_start=self.n_vgeoms + self._vgeom_start,
             vvert_start=self.n_vverts + self._vvert_start,
             vface_start=self.n_vfaces + self._vface_start,
-            pos=l_info["pos"],
-            quat=l_info["quat"],
-            parent_idx=parent_idx,
-            root_idx=root_idx,
-            aligned=l_info.get("aligned", False),
+            desc=l_desc,
         )
         self._links.append(link)
 
         # Add visual geometries
-        for g_info in vg_infos:
-            link._add_vgeom(
-                vmesh=g_info["vmesh"],
-                init_pos=g_info.get("pos", gu.zero_pos()),
-                init_quat=g_info.get("quat", gu.identity_quat()),
-            )
+        for g_desc in l_desc.vgeoms:
+            link._add_vgeom(g_desc)
 
         return link, joints
-
-    def _postprocess_geoms_info(self, morph, g_infos, is_robot):
-        """
-        Split g_infos into (cg_infos, vg_infos) collision and visual lists, then
-        post-process collision meshes (convexification / decomposition).
-        Used for both normal loading and heterogeneous simulation.
-        """
-        # An explicitly set material density overrides any asset-authored per-geom density, as material friction does
-        # for authored frictions. Dropping the keys up front keeps the align anchor, its all-or-none source check,
-        # and the build-time inertial estimate consistently uniform-density.
-        if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
-            for g_info in g_infos:
-                g_info.pop("density", None)
-
-        cg_infos, vg_infos = [], []
-        for g_info in g_infos:
-            is_col = g_info["contype"] or g_info["conaffinity"]
-            if morph.collision and is_col:
-                cg_infos.append(g_info)
-            if morph.visualization and not is_col:
-                vg_infos.append(g_info)
-
-        # Post-process all collision meshes at once.
-        # Destroying the original geometries should be avoided if possible as it will change the way objects
-        # interact with the world due to only computing one contact point per convex geometry. The idea is to
-        # check if each geometry can be convexified independently without resorting on convex decomposition.
-        # If so, the original geometries are preserve. If not, then they are all merged as one. Following the
-        # same approach as before, the resulting geometry is convexify without resorting on convex decomposition
-        # if possible. Mergeing before falling back directly to convex decompositio is important as it gives one
-        # last chance to avoid it. Moreover, it tends to reduce the final number of collision geometries. In
-        # both cases, this improves runtime performance, numerical stability and compilation time.
-        if isinstance(morph, gs.options.morphs.FileMorph):
-            # Choose the appropriate convex decomposition error threshold depending on whether the link at hand
-            # is associated with a robot.
-            # The rational behind it is that performing convex decomposition for robots is mostly useless because
-            # the non-physical part that is added to the original geometries to convexify them are generally inside
-            # the mechanical structure and not interacting directly with the outer world. On top of that, not only
-            # iy increases the memory footprint and compilation time, but also the simulation speed (marginally).
-            if is_robot:
-                decompose_error_threshold = morph.decompose_robot_error_threshold
-            else:
-                decompose_error_threshold = morph.decompose_object_error_threshold
-
-            # A collision geom may carry per-geom post-processing overrides (a USD MeshCollisionAPI approximation
-            # hint sets "convexify"/"decimate"/"decompose_error_threshold"), with the morph options as defaults for
-            # whatever is left unset. Post-processing merges geoms within a call, so each set of effective options
-            # gets its own call; geoms without overrides share one, preserving the whole-entity merge behavior.
-            # Thresholds match under gs.EPS tolerance so float noise cannot split a group.
-            cg_infos_by_options: list[tuple[tuple, list]] = []
-            for g_info in cg_infos:
-                convexify = g_info.pop("convexify", morph.convexify)
-                decimate = g_info.pop("decimate", morph.decimate)
-                threshold = g_info.pop("decompose_error_threshold", decompose_error_threshold)
-                for options, options_cg_infos in cg_infos_by_options:
-                    if options[:2] == (convexify, decimate) and math.isclose(options[2], threshold, abs_tol=gs.EPS):
-                        options_cg_infos.append(g_info)
-                        break
-                else:
-                    cg_infos_by_options.append(((convexify, decimate, threshold), [g_info]))
-
-            cg_infos = []
-            for (convexify, decimate, threshold), options_cg_infos in cg_infos_by_options:
-                cg_infos += mu.postprocess_collision_geoms(
-                    options_cg_infos,
-                    decimate,
-                    morph.decimate_face_num,
-                    morph.decimate_aggressiveness,
-                    convexify,
-                    threshold,
-                    morph.coacd_options,
-                    morph.watertighten,
-                )
-
-        # Randomize collision mesh colors. This is especially useful to check convex decomposition.
-        for g_info in cg_infos:
-            mesh = g_info["mesh"]
-            mesh.set_color((*np.random.rand(3), 0.7))
-
-        return cg_infos, vg_infos
-
-    def _finalize_inertial(
-        self, explicit_mass, explicit_com, explicit_quat, explicit_inertia, cg_infos, vg_infos, is_robot
-    ):
-        """Compute a link's load-time inertial data (see 'LinkInertialInfo').
-
-        The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density,
-        so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
-        by 'RigidLink._build' uses the resolved material density as fallback instead, and falls back to the visual
-        geoms for a link without collision geometry.
-        """
-        if cg_infos:
-            hint = compose_inertial_from_g_infos(cg_infos, rho=1.0)
-        else:
-            hint = InertialProperties(0.0, np.zeros(3, dtype=gs.np_float), np.zeros((3, 3), dtype=gs.np_float))
-        props = finalize_inertial(
-            explicit_mass, explicit_com, explicit_quat, explicit_inertia, *hint, clamp_min_mass=False
-        )
-        if explicit_mass is not None and explicit_mass > 0.0:
-            is_mass_explicit = True
-        else:
-            geoms_with_density = sum(g_info.get("density") is not None for g_info in cg_infos)
-            if geoms_with_density == 0:
-                is_mass_explicit = False
-            elif geoms_with_density == len(cg_infos):
-                is_mass_explicit = True
-            else:
-                is_mass_explicit = None
-
-        dynamics_hint = None
-        if isinstance(self.material, gs.materials.Rigid):
-            rho = self.material.rho
-            if rho is None:
-                if self._solver._enable_mujoco_compatibility:
-                    rho = RHO_MUJOCO
-                else:
-                    rho = RHO_ROBOT if is_robot else RHO_OBJECT
-            hint_g_infos = cg_infos if cg_infos else vg_infos
-            if hint_g_infos:
-                dynamics_hint = compose_inertial_from_g_infos(hint_g_infos, rho)
-            else:
-                dynamics_hint = InertialProperties(
-                    0.0, np.zeros(3, dtype=gs.np_float), np.zeros((3, 3), dtype=gs.np_float)
-                )
-        return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)
-
-    def _align_link(self, l_info, j_infos, cg_infos, vg_infos, morph, link_idx):
-        """Carry the morph pose offset into a root link and record its offset, and stash each link's finalized inertia.
-
-        Only root (floating-base) links carry the morph 'offset_pos'/'offset_quat' and the 'aligned' flag; the resulting
-        body-frame offset is stored in '_links_offset_*' so the relative getters report the user's original pose.
-        Separately, every link's finalized inertia (explicit values, else from its collision geometry) is computed here
-        - the one point where the collision geometry is available to both kinematic and rigid entities - and stashed
-        transiently so '_align_free_roots' can derive the COM/principal anchor identically for both.
-        """
-        # Stash the finalized local inertia of this link (primary variant). recompute_inertia discards explicit values
-        # for non-world-fixed links, exactly as RigidLink._build does; an aligned free body's subtree is never
-        # world-fixed, so it suffices to honor the morph flag here.
-        recompute = isinstance(morph, gs.options.morphs.FileMorph) and morph.recompute_inertia
-        self._links_inertial_info.append(
-            [
-                self._finalize_inertial(
-                    None if recompute else l_info.get("inertial_mass"),
-                    None if recompute else l_info.get("inertial_pos"),
-                    None if recompute else l_info.get("inertial_quat"),
-                    None if recompute else l_info.get("inertial_i"),
-                    cg_infos,
-                    vg_infos,
-                    l_info.get("is_robot", False),
-                )
-            ]
-        )
-
-        if l_info["parent_idx"] != -1:
-            return
-
-        # Compose the morph pose offset into the root link's world pose. The solver strips the matching offset in
-        # relative getters, so the user frame is unchanged.
-        offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
-        offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
-        l_info["pos"], l_info["quat"] = gu.transform_pos_quat_by_trans_quat(
-            offset_pos, offset_quat, l_info["pos"], l_info["quat"]
-        )
-
-        align = morph.align if isinstance(morph, gs.options.morphs.FileMorph) else False
-        if align is None:
-            # Auto: True for basic rigid objects (root with free joint only, no articulated descendants). A link
-            # mixing geoms with and without an authored density (see 'LinkInertialInfo.is_mass_explicit') quietly
-            # declines auto-alignment; asking for it with an explicit align=True raises at build instead.
-            geoms_with_density = sum(g_info.get("density") is not None for g_info in cg_infos)
-            align = (
-                not bool(l_info.get("is_robot", False))
-                and all(j_info["type"] == gs.JOINT_TYPE.FREE for j_info in j_infos)
-                and geoms_with_density in (0, len(cg_infos))
-            )
-
-        # A free body opting into alignment (or any primitive, which is inherently principal-axis and COM-centered) has
-        # an exactly-diagonal joint-space mass matrix once anchored. The COM/principal-axis anchoring itself is deferred
-        # to '_align_free_roots' after build, where the finalized composite inertia of the fixed subtree is known and
-        # can be applied per heterogeneous variant. Here only the morph pose offset is composed (child link poses are
-        # defined relative to it); the anchoring transform is folded in later.
-        l_info["aligned"] = any(j_info["type"] == gs.JOINT_TYPE.FREE for j_info in j_infos) and (
-            align or isinstance(morph, gs.options.morphs.Primitive)
-        )
-
-        # Refresh the free joint init_qpos to reflect the composed world pose.
-        for j_info in j_infos:
-            if j_info["type"] == gs.JOINT_TYPE.FREE:
-                j_info["init_qpos"] = np.concatenate([l_info["pos"], l_info["quat"]])
-
-        # Record the body-frame offset; the base link's also seeds the heterogeneous-variant offset.
-        if not self._links_offset_quat:
-            self._offset_pos, self._offset_quat = offset_pos, offset_quat
-        self._links_offset_pos[link_idx - self._link_start] = offset_pos
-        self._links_offset_quat[link_idx - self._link_start] = offset_quat
 
     @gs.assert_unbuilt
     def attach(
@@ -1470,7 +303,7 @@ class KinematicEntity(Entity):
                 gs.raise_exception(f"Mounting 'pos' must have shape (3,), got {mount_pos.shape}.")
             if mount_quat.shape != (4,):
                 gs.raise_exception(f"Mounting 'quat' must have shape (4,) (w, x, y, z), got {mount_quat.shape}.")
-            if np.linalg.norm(mount_quat) < gs.EPS:
+            if np.linalg.norm(mount_quat) == 0.0:
                 gs.raise_exception("Mounting 'quat' cannot be a zero-length quaternion.")
             mount_quat = gu.normalize(mount_quat)
 
@@ -1479,6 +312,14 @@ class KinematicEntity(Entity):
 
         if parent_entity is self:
             gs.raise_exception("Cannot attach entity to itself.")
+
+        # The attach merges the pair into one kinematic tree. A tree is numbered within the solver that simulates
+        # it, so one solver must simulate both entities.
+        if parent_entity.solver is not self._solver:
+            gs.raise_exception(
+                f"Parent entity is simulated by '{type(parent_entity.solver).__name__}' while this entity is "
+                f"simulated by '{type(self._solver).__name__}'. Attaching across solvers is not supported."
+            )
 
         if parent_entity.idx > self.idx:
             gs.raise_exception("Parent entity must be instantiated before child entity.")
@@ -1536,7 +377,8 @@ class KinematicEntity(Entity):
 
             base_link._n_joints = 0
             self._joints[0].clear()
-            for entity in self._solver.entities[(self.idx + 1) :]:
+            # Indexed within the solver, since a scene index counts the entities of every solver.
+            for entity in self._solver.entities[(self._idx_in_solver + 1) :]:
                 entity._joint_start -= n_base_joints
                 entity._dof_start -= n_base_dofs
                 entity._q_start -= n_base_qs
@@ -1563,22 +405,60 @@ class KinematicEntity(Entity):
 
         # Re-root the whole tree hanging from this entity's base link - scene-wide, because entities previously
         # attached into this one already share its root and must follow it (chained attaches may run in any order);
-        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight.
+        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight. A
+        # link is fixed when its own joints and every joint above it are fixed, the base link's being gone, so the
+        # flag follows the parent link's down the tree, which the link order walks parents first.
         for link in self._solver.links:
             if link.root_idx == base_link.idx:
+                was_fixed = link.is_fixed
                 link._root_idx = parent_link.root_idx
-                link._is_fixed &= parent_link.is_fixed
-                link._invweight = None
+                link._is_fixed = self._solver.links[link.parent_idx].is_fixed and all(
+                    joint.type is gs.JOINT_TYPE.FIXED for joint in link.joints
+                )
+
+                # The attach moves this link into another kinematic tree, so its old tree's inverse weight no longer
+                # applies. The sentinel makes the solver recompute it during its refresh.
+                link.desc.invweight = np.full((2,), fill_value=-1.0, dtype=gs.np_float)
+
+                # Inertial resolution skips the geometry estimate for a world-carried link (see '_describe_link'), so a
+                # link that starts moving recomputes it from its geoms at the density its entity simulates. Values the
+                # asset states still win over the estimate.
+                if was_fixed and not link.is_fixed and isinstance(link.desc, RigidLinkDescription):
+                    desc = link.desc
+                    # An entity attached beneath this one shares its root, so the density comes from the link's own
+                    # entity rather than from this one.
+                    rho = link.entity.material.rho
+                    if rho is None:
+                        if self._solver._enable_mujoco_compatibility:
+                            rho = RHO_MUJOCO
+                        else:
+                            rho = RHO_ROBOT if desc.is_robot else RHO_OBJECT
+                    # A geom description holds the fields a parse states it with, so one composition serves either.
+                    hint = compose_inertial_from_g_infos([vars(g_desc) for g_desc in (desc.geoms or desc.vgeoms)], rho)
+                    # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so
+                    # this resolves it exactly as '_describe_link' resolves a moving link.
+                    desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
+                        desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *hint
+                    )
+
+        # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,
+        # and the attached links now extend that body. Its frame and qpos stay where they are, so the anchor stops
+        # standing for the body: the mass block keeps its off-diagonal terms and the midpoint pass turns the body about
+        # its actual center of mass (see '_init_tree_fields' and 'func_midpoint_is_aligned').
+        root_link.desc.is_aligned = False
 
         # Apply the explicit mounting transform. Forward kinematics interprets the base link's local pose relative to
         # its (new) parent link, so overwriting it here mounts the entity at (pos, quat) in the parent link frame.
         # Compose with the morph frame offset exactly as '_align_link' does for the morph pose at load time, so the
         # relative pose getters keep stripping the offset correctly.
         if is_mounting:
-            base_link._pos, base_link._quat = gu.transform_pos_quat_by_trans_quat(
-                self._offset_pos, self._offset_quat, mount_pos, mount_quat
+            base_link.desc.pos, base_link.desc.quat = gu.transform_pos_quat_by_trans_quat(
+                base_link.desc.offset_pos, base_link.desc.offset_quat, mount_pos, mount_quat
             )
 
+        self._desc.attachment = KinematicAttachmentDescription(
+            entity_name=parent_entity.name, link_name=parent_link.name
+        )
         self._is_attached = True
 
     # ------------------------------------------------------------------------------------
@@ -1850,8 +730,9 @@ class KinematicEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         relative : bool, optional
-            Whether to report the position in the user frame, with the morph pose offset and inertial alignment
-            stripped, rather than the world frame used by the solver. Defaults to True.
+            Whether to report the position of the authored link origin rather than of the internal link origin used by
+            the solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat'
+            and, on a free root link with 'align=True', by the inertial alignment. Defaults to True.
 
         Returns
         -------
@@ -1870,8 +751,9 @@ class KinematicEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         relative : bool, optional
-            Whether to report the orientation in the user frame, with the morph pose offset and inertial alignment
-            stripped, rather than the world frame used by the solver. Defaults to True.
+            Whether to report the orientation of the authored link origin rather than of the internal link origin used
+            by the solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat'
+            and, on a free root link with 'align=True', by the inertial alignment. Defaults to True.
 
         Returns
         -------
@@ -1881,7 +763,7 @@ class KinematicEntity(Entity):
         return self._solver.get_links_quat(self.base_link_idx, envs_idx, relative=relative)[..., 0, :]
 
     @gs.assert_built
-    def get_vel(self, envs_idx=None):
+    def get_vel(self, envs_idx=None, *, relative=True):
         """
         Returns linear velocity of the entity's base link.
 
@@ -1889,13 +771,19 @@ class KinematicEntity(Entity):
         ----------
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
+        relative : bool, optional
+            Whether to report the velocity of the authored link origin rather than of the internal link origin used by
+            the solver. The internal link origin is the authored one moved by the world-frame vector 'd'. That
+            displacement composes the morph 'offset_pos' / 'offset_quat' and, on a free root link with 'align=True', the
+            inertial alignment. Both readings are expressed in world coordinates and differ by the transport 'omega x
+            d'. Defaults to True.
 
         Returns
         -------
         vel : torch.Tensor, shape (3,) or (n_envs, 3)
             The linear velocity of the entity's base link.
         """
-        return self._solver.get_links_vel(self.base_link_idx, envs_idx)[..., 0, :]
+        return self._solver.get_links_vel(self.base_link_idx, envs_idx, relative=relative)[..., 0, :]
 
     @gs.assert_built
     def get_ang(self, envs_idx=None):
@@ -1926,8 +814,10 @@ class KinematicEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         relative : bool, optional
-            If True, return the user-frame position with the morph pose offset stripped (matching the morph 'pos'); if
-            False, return the world-frame position used by the solver. Defaults to True.
+            Whether to report the position of the authored link origin, which is where the morph 'pos' placed it, rather
+            than of the internal link origin used by the solver. The internal link origin is the authored one moved by
+            the morph 'offset_pos' / 'offset_quat' and, on a free root link with 'align=True', by the inertial
+            alignment. Defaults to True.
 
         Returns
         -------
@@ -1949,8 +839,10 @@ class KinematicEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         relative : bool, optional
-            If True, return the user-frame orientation with the morph pose offset stripped (matching the morph
-            'quat'/'euler'); if False, return the world-frame orientation used by the solver. Defaults to True.
+            Whether to report the orientation of the authored link origin, which is where the morph 'quat' / 'euler'
+            placed it, rather than of the internal link origin used by the solver. The internal link origin is the
+            authored one moved by the morph 'offset_pos' / 'offset_quat' and, on a free root link with 'align=True', by
+            the inertial alignment. Defaults to True.
 
         Returns
         -------
@@ -1997,44 +889,7 @@ class KinematicEntity(Entity):
         return torch.stack((aabbs[..., 0, :].min(dim=-2).values, aabbs[..., 1, :].max(dim=-2).values), dim=-2)
 
     @gs.assert_built
-    def get_terrain_height(self, positions, envs_idx=None):
-        """
-        Return terrain surface heights in meters at world-frame x-y positions.
-
-        Heights match the piecewise-planar surface on which rigid bodies rest. Terrain translation, yaw, and
-        environment-specific poses are applied to the query. Positions up to one grid cell outside the terrain are
-        clamped to its edge. Terrain tilt up to 0.001 radians from world vertical is treated as numerical noise. The
-        query returns not-a-number (NaN) heights for positions containing NaN or infinity, positions farther outside,
-        and terrains with greater tilt.
-
-        Parameters
-        ----------
-        positions : array_like
-            World-frame x-y positions in meters, with shape (2,), (n_points, 2), or
-            (n_selected_envs, n_points, 2). A two-dimensional array is shared across the selected environments; use a
-            three-dimensional array for environment-specific positions. A leading dimension of 1 in the
-            three-dimensional form is also treated as shared.
-        envs_idx : None | array_like, optional
-            The indices of the environments. If None, all environments will be considered. Defaults to None.
-
-        Returns
-        -------
-        heights : torch.Tensor
-            World-frame surface heights in meters. The point dimension is preserved except for an explicit `(2,)`
-            input, and an environment dimension is prepended in a parallelized scene.
-
-        Raises
-        ------
-        GenesisException
-            If the entity type or the shape of `positions` is unsupported.
-        """
-        if self.terrain_hf is None:
-            gs.raise_exception("`get_terrain_height()` is only supported for terrain entities.")
-
-        return self._solver.get_terrain_height(positions, self.base_link_idx, envs_idx)
-
-    @gs.assert_built
-    def get_links_vel(self, links_idx_local=None, envs_idx=None):
+    def get_links_vel(self, links_idx_local=None, envs_idx=None, *, relative=True):
         """
         Returns linear velocity of all the entity's links expressed at a given reference position in world coordinates.
 
@@ -2044,6 +899,12 @@ class KinematicEntity(Entity):
             The indices of the links. Defaults to None.
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
+        relative : bool, optional
+            Whether to report the velocity of the authored link origin rather than of the internal link origin used by
+            the solver. The internal link origin is the authored one moved by the world-frame vector 'd'. That
+            displacement composes the morph 'offset_pos' / 'offset_quat' and, on a free root link with 'align=True', the
+            inertial alignment. Both readings are expressed in world coordinates and differ by the transport 'omega x
+            d'. Defaults to True.
 
         Returns
         -------
@@ -2051,7 +912,7 @@ class KinematicEntity(Entity):
             The linear velocity of all the entity's links.
         """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        return self._solver.get_links_vel(links_idx, envs_idx)
+        return self._solver.get_links_vel(links_idx, envs_idx, relative=relative)
 
     @gs.assert_built
     def get_links_ang(self, links_idx_local=None, envs_idx=None):
@@ -2088,8 +949,9 @@ class KinematicEntity(Entity):
         zero_velocity : bool, optional
             Whether to zero the velocity of all the entity's dofs. Defaults to False.
         relative : bool, optional
-            Whether 'pos' is expressed in the user frame, with the morph pose offset and inertial alignment applied on
-            top to reach the world frame used by the solver, rather than directly in the world frame. Defaults to True.
+            Whether 'pos' places the authored link origin rather than directly the internal link origin used by the
+            solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
+            a free root link with 'align=True', by the inertial alignment. Defaults to True.
         skip_forward : bool, optional
             Whether to skip forward kinematics after setting position. Defaults to False.
         """
@@ -2119,8 +981,9 @@ class KinematicEntity(Entity):
         zero_velocity : bool, optional
             Whether to zero the velocity of all the entity's dofs. Defaults to False.
         relative : bool, optional
-            Whether 'quat' is expressed in the user frame, with the morph pose offset and inertial alignment applied on
-            top to reach the world frame used by the solver, rather than directly in the world frame. Defaults to True.
+            Whether 'quat' orients the authored link origin rather than directly the internal link origin used by the
+            solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
+            a free root link with 'align=True', by the inertial alignment. Defaults to True.
         skip_forward : bool, optional
             Whether to skip forward kinematics after setting quaternion. Defaults to False.
         """
@@ -2365,6 +1228,15 @@ class KinematicEntity(Entity):
         """All morphs of the entity (main morph + heterogeneous variants if any)."""
         return gs.List((self._morph, *self._morph_heterogeneous))
 
+    @property
+    def desc(self) -> KinematicEntityDescription:
+        """The description this entity was built from, holding the values its resolution decided.
+
+        Every link and constraint was built from one of the descriptions here and keeps it, so a change made
+        through either is visible here.
+        """
+        return self._desc
+
     def _repr_morph(self):
         if self._enable_heterogeneous:
             return f"{len(self.morphs)} morph variants"
@@ -2473,6 +1345,7 @@ class KinematicEntity(Entity):
             gs.raise_exception(
                 "'set_vverts' requires the entity's morph to be created with 'enable_custom_vverts=True'."
             )
+        self._is_vverts_overridden = True
         self._solver.set_vverts(
             self._custom_vvert_start,
             self._custom_vvert_start + self.n_vverts,
@@ -2530,25 +1403,33 @@ class KinematicEntity(Entity):
         """The base joint of the entity"""
         return self._joints[0][0]
 
-    def _init_q_limit(self):
-        if self.n_dofs == 0:
-            return
+    @property
+    @gs.assert_built
+    def q_limit(self):
+        """The build-time positional limits of the entity's generalised coordinates, lower row then upper row.
 
-        # Joint limits in q space, also read by path planning.
-        q_limit_lower = []
-        q_limit_upper = []
+        A joint holding its orientation as a quaternion, a free or a ball joint, contributes the unit bounds of that
+        quaternion, which is normalized rather than limited.
+        """
+        return self._q_limit
+
+    def _init_q_limit(self):
+        q_limit_lower, q_limit_upper = [], []
         for joint in self.joints:
-            if joint.type == gs.JOINT_TYPE.FREE:
-                q_limit_lower.append(joint.dofs_limit[:3, 0])
-                q_limit_lower.append(-np.ones(4))  # quaternion lower bound
-                q_limit_upper.append(joint.dofs_limit[:3, 1])
-                q_limit_upper.append(np.ones(4))  # quaternion upper bound
-            elif joint.type == gs.JOINT_TYPE.FIXED:
-                pass
-            else:
-                q_limit_lower.append(joint.dofs_limit[:, 0])
-                q_limit_upper.append(joint.dofs_limit[:, 1])
-        self.q_limit = np.stack(
+            if joint.type in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.SPHERICAL):
+                # A quaternion takes four of the coordinates of such a joint; whatever remains is a translation,
+                # carried by the first of its degrees of freedom.
+                n_translation = joint.n_qs - 4
+                q_limit_lower += [joint.desc.dofs_limit[:n_translation, 0], -np.ones(4)]
+                q_limit_upper += [joint.desc.dofs_limit[:n_translation, 1], np.ones(4)]
+            elif joint.type != gs.JOINT_TYPE.FIXED:
+                q_limit_lower.append(joint.desc.dofs_limit[:, 0])
+                q_limit_upper.append(joint.desc.dofs_limit[:, 1])
+        if not q_limit_lower:
+            # An entity that no degree of freedom moves holds no coordinate, hence a limit of width zero.
+            self._q_limit = np.zeros((2, self.n_qs), dtype=gs.np_float)
+            return
+        self._q_limit = np.stack(
             (np.concatenate(q_limit_lower), np.concatenate(q_limit_upper)), axis=0, dtype=gs.np_float
         )
 
@@ -2896,105 +1777,37 @@ class RigidEntity(KinematicEntity):
         material: gs.materials.Rigid
         _solver: "RigidSolver"
 
-    def __init__(
-        self,
-        scene: "Scene",
-        solver: "RigidSolver",
-        material: Material,
-        morph: Morph,
-        surface: Surface,
-        idx: int,
-        idx_in_solver,
-        link_start: int = 0,
-        joint_start: int = 0,
-        q_start=0,
-        dof_start=0,
-        geom_start=0,
-        cell_start=0,
-        vert_start=0,
-        free_verts_state_start=0,
-        fixed_verts_state_start=0,
-        face_start=0,
-        edge_start=0,
-        vgeom_start=0,
-        vvert_start=0,
-        vface_start=0,
-        custom_vvert_start=0,
-        custom_vface_start=0,
-        equality_start=0,
-        visualize_contact: bool = False,
-        morph_heterogeneous: list[Morph] | None = None,
-        name: str | None = None,
-    ):
-        self._geom_start = geom_start
-        self._cell_start = cell_start
-        self._vert_start = vert_start
-        self._face_start = face_start
-        self._edge_start = edge_start
-        self._free_verts_state_start = free_verts_state_start
-        self._fixed_verts_state_start = fixed_verts_state_start
-        self._equality_start = equality_start
+    _description_cls = RigidEntityDescription
+
+    def __init__(self, scene: "Scene", solver: "RigidSolver", idx: int, desc: RigidEntityDescription):
+        self._geom_start = solver.n_geoms
+        self._cell_start = solver.n_cells
+        self._vert_start = solver.n_verts
+        self._face_start = solver.n_faces
+        self._edge_start = solver.n_edges
+        self._free_verts_state_start = solver.n_free_verts
+        self._fixed_verts_state_start = solver.n_fixed_verts
+        self._equality_start = 0
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
-        self._visualize_contact: bool = visualize_contact
+        self._visualize_contact: bool = desc.visualize_contact
 
-        self._batch_fixed_verts: bool = morph.batch_fixed_verts
+        self._batch_fixed_verts: bool = desc.morphs[0].batch_fixed_verts
 
-        super().__init__(
-            scene,
-            solver,
-            material,
-            morph,
-            surface,
-            idx,
-            idx_in_solver,
-            link_start,
-            joint_start,
-            q_start,
-            dof_start,
-            vgeom_start,
-            vvert_start,
-            vface_start,
-            custom_vvert_start,
-            custom_vface_start,
-            morph_heterogeneous,
-            name,
-        )
+        super().__init__(scene, solver, idx, desc)
 
-    def _add_heterogeneous_variant(self, link, cg_infos, vg_infos):
+    def _add_heterogeneous_variant(self, link, v_link):
         # Add collision geometries
         coup_links = self.material.coup_links
-        for g_info in cg_infos:
-            friction = self.material.friction
-            if friction is None:
-                friction = g_info.get("friction", gu.default_friction())
-            friction_torsional = self.material.friction_torsional
-            if friction_torsional is None:
-                friction_torsional = g_info.get("friction_torsional", gu.default_friction_torsional())
-            friction_rolling = self.material.friction_rolling
-            if friction_rolling is None:
-                friction_rolling = g_info.get("friction_rolling", gu.default_friction_rolling())
+        for g_desc in v_link.geoms:
             needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
-            link._add_geom(
-                mesh=g_info["mesh"],
-                init_pos=g_info.get("pos", gu.zero_pos()),
-                init_quat=g_info.get("quat", gu.identity_quat()),
-                type=g_info["type"],
-                friction=friction,
-                friction_torsional=friction_torsional,
-                friction_rolling=friction_rolling,
-                sol_params=g_info["sol_params"],
-                data=g_info.get("data"),
-                needs_coup=needs_coup,
-                contype=g_info["contype"],
-                conaffinity=g_info["conaffinity"],
-            )
+            link._add_geom(g_desc, needs_coup=needs_coup)
 
         # Add visual geoms and record vgeom range via parent
-        super()._add_heterogeneous_variant(link, cg_infos, vg_infos)
+        super()._add_heterogeneous_variant(link, v_link)
 
         # Record geom range on the link (vgeom range already recorded by parent)
-        link._record_variant_geom_range(len(cg_infos))
+        link._record_variant_geom_range(len(v_link.geoms))
 
     def _reassign_heterogeneous_indices(self):
         """Reassign collision and visual geom indices for multi-link heterogeneous entities."""
@@ -3040,20 +1853,6 @@ class RigidEntity(KinematicEntity):
                 link._variant_geom_ranges.append((geom_cursor, geom_cursor + count))
                 geom_cursor += count
 
-    def _on_heterogeneous_scene_variant_loaded(self, link, morph, v_l_info):
-        """Store parsed inertial from the variant file for use during link._build()."""
-        if link._variant_scene_inertial is None:
-            link._variant_scene_inertial = []
-        link._variant_scene_inertial.append(
-            (
-                morph,
-                v_l_info.get("inertial_mass"),
-                v_l_info.get("inertial_pos"),
-                v_l_info.get("inertial_quat"),
-                v_l_info.get("inertial_i"),
-            )
-        )
-
     def _load_model(self):
         self._equalities = gs.List()
         # MJCF and USD express in-model collision filtering (MJCF '<contact><exclude>', USD CollisionGroup /
@@ -3062,38 +1861,122 @@ class RigidEntity(KinematicEntity):
         # masks happen not to overlap (e.g. the ground plane).
         self._is_local_collision_mask = isinstance(self._morph, (gs.morphs.MJCF, gs.morphs.USD))
 
-        super()._load_model()
-
-    def _load_scene(self, morph, surface):
+        # Imported here since the couplers import the rigid entity package
         from genesis.engine.couplers import IPCCoupler
-
-        l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, surface)
 
         # Make sure that the entity is not object
         if (
             isinstance(self.sim.coupler, IPCCoupler)
             and self.material.coup_type == "ipc_only"
-            and any(l_info["is_robot"] for l_info in l_infos)
+            and any(l_desc.is_robot for l_desc in self._desc.links)
         ):
             gs.raise_exception("`RigidMaterial.coup_type='ipc_only'` only supported by rigid non-articulated objects.")
 
-        # Add (link, joints, geoms) tuples sequentially
-        for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
-            self._add_by_info(l_info, link_j_infos, link_g_infos, morph, surface)
+        super()._load_model()
 
         # Add equality constraints sequentially
-        for eq_info in eqs_info:
-            self._add_equality(
-                name=eq_info["name"],
-                type=eq_info["type"],
-                objs_name=eq_info["objs_name"],
-                data=eq_info["data"],
-                sol_params=eq_info["sol_params"],
-            )
+        for e_desc in self._desc.equalities:
+            self._add_equality(e_desc)
+
+    def attach(
+        self,
+        parent_entity,
+        parent_link_name: str | None = None,
+        pos: Vec3FType | None = None,
+        quat: UnitVec4FType | None = None,
+    ):
+        """Attach this entity beneath a link of another one (see KinematicEntity.attach), the slots of its collision
+        vertices following the fixed flags the attach leaves."""
+        super().attach(parent_entity, parent_link_name, pos, quat)
+
+        # This entity's links and geoms move between the free and fixed pools, and the rigid entities created after it
+        # shift behind them
+        n_free_verts = self._free_verts_state_start
+        n_fixed_verts = self._fixed_verts_state_start
+        for entity in self._solver.entities[self._idx_in_solver :]:
+            if isinstance(entity, RigidEntity):
+                entity._free_verts_state_start = n_free_verts
+                entity._fixed_verts_state_start = n_fixed_verts
+                for link in entity.links:
+                    is_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
+                    link._verts_state_start = n_fixed_verts if is_fixed_pool else n_free_verts
+                    for geom in link.geoms:
+                        if is_fixed_pool:
+                            geom._verts_state_start = n_fixed_verts
+                            n_fixed_verts += geom.n_verts
+                        else:
+                            geom._verts_state_start = n_free_verts
+                            n_free_verts += geom.n_verts
+
+    def _add_link(self, l_desc):
+        """Create one link from a description the resolution completed, with the joints and geoms it carries."""
+        parent_idx = l_desc.parent_idx
+        if parent_idx >= 0:
+            parent_idx += self._link_start
+        root_idx = l_desc.root_idx
+        if root_idx is not None and root_idx >= 0:
+            root_idx += self._link_start
+        link_idx = self.n_links + self._link_start
+        joint_start = self.n_joints + self._joint_start
+        free_verts_start, fixed_verts_start = self._free_verts_state_start, self._fixed_verts_state_start
+        for link in self.links:
+            if link.is_fixed and not self._batch_fixed_verts:
+                fixed_verts_start += link.n_verts
+            else:
+                free_verts_start += link.n_verts
+
+        joints = self._create_joints(l_desc.joints, link_idx, joint_start)
+
+        # Add child link
+        link = RigidLink(
+            entity=self,
+            idx=link_idx,
+            parent_idx=parent_idx,
+            root_idx=root_idx,
+            joint_start=joint_start,
+            n_joints=len(l_desc.joints),
+            geom_start=self.n_geoms + self._geom_start,
+            cell_start=self.n_cells + self._cell_start,
+            vert_start=self.n_verts + self._vert_start,
+            face_start=self.n_faces + self._face_start,
+            edge_start=self.n_edges + self._edge_start,
+            free_verts_state_start=free_verts_start,
+            fixed_verts_state_start=fixed_verts_start,
+            vgeom_start=self.n_vgeoms + self._vgeom_start,
+            vvert_start=self.n_vverts + self._vvert_start,
+            vface_start=self.n_vfaces + self._vface_start,
+            visualize_contact=self.visualize_contact,
+            desc=l_desc,
+        )
+        self._links.append(link)
+
+        # Add visual geometries
+        for g_desc in l_desc.vgeoms:
+            link._add_vgeom(g_desc)
+        coup_links = self.material.coup_links
+        for g_desc in l_desc.geoms:
+            needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
+            link._add_geom(g_desc, needs_coup=needs_coup)
+
+        return link, joints
 
     def _build(self):
         self._n_geoms = self.n_geoms
         self._geoms = self.geoms
+
+        # A link the world carries holds None where its asset states nothing (see 'RigidLinkDescription'). The solver
+        # stores a value for every link, and the inertial of such a link never enters the dynamics, so zero it is.
+        for link in self._links:
+            if link.is_fixed:
+                desc = link.desc
+                if desc.mass is None:
+                    desc.mass = 0.0
+                if desc.inertial_pos is None:
+                    desc.inertial_pos = gu.zero_pos()
+                if desc.inertial_quat is None:
+                    desc.inertial_quat = gu.identity_quat()
+                if desc.inertia is None:
+                    desc.inertia = np.zeros((3, 3), dtype=gs.np_float)
 
         super()._build()
 
@@ -3115,134 +1998,23 @@ class RigidEntity(KinematicEntity):
 
         self._init_q_limit()
 
-    def _add_by_info(self, l_info, j_infos, g_infos, morph, surface):
-        if len(j_infos) > 1 and any(j_info["type"] in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.FIXED) for j_info in j_infos):
-            raise ValueError(
-                "Compounding joints of types 'FREE' or 'FIXED' with any other joint on the same body not supported"
-            )
-
-        parent_idx = l_info["parent_idx"]
-        if parent_idx >= 0:
-            parent_idx += self._link_start
-        root_idx = l_info.get("root_idx")
-        if root_idx is not None and root_idx >= 0:
-            root_idx += self._link_start
-        link_idx = self.n_links + self._link_start
-        joint_start = self.n_joints + self._joint_start
-        free_verts_start, fixed_verts_start = self._free_verts_state_start, self._fixed_verts_state_start
-        for link in self.links:
-            if link.is_fixed and not self._batch_fixed_verts:
-                fixed_verts_start += link.n_verts
-            else:
-                free_verts_start += link.n_verts
-
-        # Split and convexify collision geometry. Must be done before alignment so that
-        # convexified geoms are used to compute the inertia frame.
-        cg_infos, vg_infos = self._postprocess_geoms_info(morph, g_infos, l_info.get("is_robot", False))
-
-        # Carry the morph pose offset into root links and align them to their collision-geometry COM/principal axes.
-        self._align_link(l_info, j_infos, cg_infos, vg_infos, morph, link_idx)
-
-        joints = self._create_joints(j_infos, link_idx, joint_start)
-
-        # Add child link
-        link = RigidLink(
-            entity=self,
-            name=l_info["name"],
-            idx=link_idx,
-            joint_start=joint_start,
-            n_joints=len(j_infos),
-            geom_start=self.n_geoms + self._geom_start,
-            cell_start=self.n_cells + self._cell_start,
-            vert_start=self.n_verts + self._vert_start,
-            face_start=self.n_faces + self._face_start,
-            edge_start=self.n_edges + self._edge_start,
-            free_verts_state_start=free_verts_start,
-            fixed_verts_state_start=fixed_verts_start,
-            vgeom_start=self.n_vgeoms + self._vgeom_start,
-            vvert_start=self.n_vverts + self._vvert_start,
-            vface_start=self.n_vfaces + self._vface_start,
-            pos=l_info["pos"],
-            quat=l_info["quat"],
-            inertial_pos=l_info.get("inertial_pos"),
-            inertial_quat=l_info.get("inertial_quat"),
-            inertial_i=l_info.get("inertial_i"),
-            inertial_mass=l_info.get("inertial_mass"),
-            parent_idx=parent_idx,
-            root_idx=root_idx,
-            invweight=l_info.get("invweight"),
-            visualize_contact=self.visualize_contact,
-            is_robot=l_info.get("is_robot", root_idx != -1),
-            aligned=l_info.get("aligned", False),
-        )
-        self._links.append(link)
-
-        if not link.is_fixed and isinstance(morph, gs.options.morphs.FileMorph) and morph.recompute_inertia:
-            link._inertial_pos = None
-            link._inertial_quat = None
-            link._inertial_i = None
-            link._inertial_mass = None
-
-        # Add visual geometries
-        for g_info in vg_infos:
-            link._add_vgeom(
-                vmesh=g_info["vmesh"],
-                init_pos=g_info.get("pos", gu.zero_pos()),
-                init_quat=g_info.get("quat", gu.identity_quat()),
-            )
-
-        # Add collision geometries
-        coup_links = self.material.coup_links
-        for g_info in cg_infos:
-            friction = self.material.friction
-            if friction is None:
-                friction = g_info.get("friction", gu.default_friction())
-            friction_torsional = self.material.friction_torsional
-            if friction_torsional is None:
-                friction_torsional = g_info.get("friction_torsional", gu.default_friction_torsional())
-            friction_rolling = self.material.friction_rolling
-            if friction_rolling is None:
-                friction_rolling = g_info.get("friction_rolling", gu.default_friction_rolling())
-            needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
-            link._add_geom(
-                mesh=g_info["mesh"],
-                init_pos=g_info.get("pos", gu.zero_pos()),
-                init_quat=g_info.get("quat", gu.identity_quat()),
-                type=g_info["type"],
-                friction=friction,
-                friction_torsional=friction_torsional,
-                friction_rolling=friction_rolling,
-                sol_params=g_info["sol_params"],
-                data=g_info.get("data"),
-                needs_coup=needs_coup,
-                contype=g_info["contype"],
-                conaffinity=g_info["conaffinity"],
-            )
-
-        return link, joints
-
-    def _add_equality(self, name, type, objs_name, data, sol_params):
-        objs_id = []
-        for obj_name in objs_name:
-            if type == gs.EQUALITY_TYPE.CONNECT:
-                obj_id = self.get_link(obj_name).idx
-            elif type == gs.EQUALITY_TYPE.JOINT:
-                obj_id = self.get_joint(obj_name).idx
-            elif type == gs.EQUALITY_TYPE.WELD:
-                obj_id = self.get_link(obj_name).idx
-            else:
-                gs.raise_exception(f"Equality type {type} not supported. Only CONNECT, JOINT, and WELD are supported.")
-            objs_id.append(obj_id)
+    def _add_equality(self, desc: RigidEqualityDescription):
+        match desc.type:
+            case gs.EQUALITY_TYPE.CONNECT | gs.EQUALITY_TYPE.WELD:
+                objs_id = [self.get_link(obj_name).idx for obj_name in desc.objs_name]
+            case gs.EQUALITY_TYPE.JOINT:
+                objs_id = [self.get_joint(obj_name).idx if obj_name is not None else -1 for obj_name in desc.objs_name]
+            case _:
+                gs.raise_exception(
+                    f"Equality type {desc.type} not supported. Only CONNECT, JOINT, and WELD are supported."
+                )
 
         equality = RigidEquality(
             entity=self,
-            name=name,
             idx=self.n_equalities + self._equality_start,
-            type=type,
             eq_obj1id=objs_id[0],
             eq_obj2id=objs_id[1],
-            eq_data=data,
-            sol_params=sol_params,
+            desc=desc,
         )
         self._equalities.append(equality)
         return equality
@@ -3473,9 +2245,11 @@ class RigidEntity(KinematicEntity):
             'RigidEntity' may comprise several physical sub-entities, each a kinematic sub-tree with at most one free
             joint at its root. Defaults to 'link_origin'.
         relative : bool, optional
-            If True, strip the morph pose offset to return the user-frame position; this only affects
-            ref=gs.link_ref_frame.link_origin, since the offset is defined on the link origin. If False, return the
-            world frame. Defaults to True.
+            Whether to report the position of the authored link origin rather than of the internal link origin used by
+            the solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat'
+            and, on a free root link with 'align=True', by the inertial alignment. Only
+            'ref=gs.link_ref_frame.link_origin' is affected, since the offset is defined on the link origin. Defaults to
+            True.
 
         Returns
         -------
@@ -3486,7 +2260,9 @@ class RigidEntity(KinematicEntity):
         return self._solver.get_links_pos(links_idx, envs_idx, ref=ref, relative=relative)
 
     @gs.assert_built
-    def get_links_vel(self, links_idx_local=None, envs_idx=None, *, ref: link_ref_frame = link_ref_frame.link_origin):
+    def get_links_vel(
+        self, links_idx_local=None, envs_idx=None, *, ref: link_ref_frame = link_ref_frame.link_origin, relative=True
+    ):
         """
         Returns linear velocity of all the entity's links expressed at a given reference position in world coordinates.
 
@@ -3499,6 +2275,12 @@ class RigidEntity(KinematicEntity):
         ref: gs.link_ref_frame, optional
             The reference point used to express the velocity of each link: its origin ('link_origin') or its center of
             mass ('link_COM'). Defaults to 'link_origin'.
+        relative : bool, optional
+            Whether to report the velocity of the authored link origin rather than of the internal link origin used by
+            the solver. The internal link origin is the authored one moved by the world-frame vector 'd'. That
+            displacement composes the morph 'offset_pos' / 'offset_quat' and, on a free root link with 'align=True', the
+            inertial alignment. Both readings are expressed in world coordinates and differ by the transport 'omega x
+            d'. Only 'ref=gs.link_ref_frame.link_origin' is affected. Defaults to True.
 
         Returns
         -------
@@ -3506,12 +2288,33 @@ class RigidEntity(KinematicEntity):
             The linear velocity of all the entity's links.
         """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        return self._solver.get_links_vel(links_idx, envs_idx, ref=ref)
+        return self._solver.get_links_vel(links_idx, envs_idx, ref=ref, relative=relative)
 
     @gs.assert_built
-    def get_links_acc(self, links_idx_local=None, envs_idx=None):
+    def get_links_acc(self, links_idx_local=None, envs_idx=None, *, relative=True):
+        """
+        Returns classical linear acceleration of all the entity's links expressed at their origin in world coordinates.
+
+        Parameters
+        ----------
+        links_idx_local : None | array_like
+            The indices of the links. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        relative : bool, optional
+            Whether to report the acceleration of the authored link origin rather than of the internal link origin used
+            by the solver. The internal link origin is the authored one moved by the world-frame vector 'd'. That
+            displacement composes the morph 'offset_pos' / 'offset_quat' and, on a free root link with 'align=True', the
+            inertial alignment. Both readings are expressed in world coordinates and differ by the transport 'alpha x d
+            + omega x (omega x d)'. Defaults to True.
+
+        Returns
+        -------
+        acc : torch.Tensor, shape (n_links, 3) or (n_envs, n_links, 3)
+            The classical linear acceleration of all the entity's links.
+        """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        return self._solver.get_links_acc(links_idx, envs_idx)
+        return self._solver.get_links_acc(links_idx, envs_idx, relative=relative)
 
     @gs.assert_built
     def get_links_acc_ang(self, links_idx_local=None, envs_idx=None):
@@ -3563,12 +2366,95 @@ class RigidEntity(KinematicEntity):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    def get_links_inertial_mass(self, links_idx_local=None, envs_idx=None):
+    def get_links_mass(self, links_idx_local=None, envs_idx=None):
+        """
+        Get the mass of each link, in kg.
+
+        Parameters
+        ----------
+        links_idx_local : None | array_like, optional
+            The indices of the links on this entity. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
+
+        Returns
+        -------
+        mass : torch.Tensor, shape (n_links,) or (n_envs, n_links)
+            The mass of each link, per environment for a scene whose link info is batched.
+        """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        return self._solver.get_links_inertial_mass(links_idx, envs_idx)
+        return self._solver.get_links_mass(links_idx, envs_idx)
+
+    @gs.assert_built
+    def get_links_COM(self, links_idx_local=None, envs_idx=None):
+        """
+        Get the center of mass (COM) of each link, as an offset in its local frame.
+
+        That local frame is the one specified by the morph, except for a floating-base link loaded with `align=True`:
+        Genesis then moves its origin onto the center of mass and rotates its axes onto the principal axes of inertia,
+        so the offset returned for such a link is zero.
+
+        Parameters
+        ----------
+        links_idx_local : None | array_like, optional
+            The indices of the links on this entity. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
+
+        Returns
+        -------
+        com : torch.Tensor, shape (n_links, 3) or (n_envs, n_links, 3)
+            The center of mass of each link, per environment for a scene whose link info is batched.
+        """
+        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
+        return self._solver.get_links_COM(links_idx, envs_idx)
+
+    @gs.assert_built
+    def get_links_inertia(self, links_idx_local=None, envs_idx=None):
+        """
+        Get the inertia matrix of each link, expressed in its inertial frame.
+
+        Parameters
+        ----------
+        links_idx_local : None | array_like, optional
+            The indices of the links on this entity. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
+
+        Returns
+        -------
+        inertia : torch.Tensor, shape (n_links, 3, 3) or (n_envs, n_links, 3, 3)
+            The inertia matrix of each link, per environment for a scene whose link info is batched.
+        """
+        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
+        return self._solver.get_links_inertia(links_idx, envs_idx)
 
     @gs.assert_built
     def get_links_invweight(self, links_idx_local=None, envs_idx=None):
+        """
+        Get the constraint inverse weights of each link: one for forces, one for torques.
+
+        The constraint solver models contacts, joint limits and equalities softly, and the regularization it adds to a
+        row is proportional to the inverse weights of the links that row couples. That normalizes the row by the
+        acceleration a unit impulse produces on them, so these weights change the solution the solve converges to. In
+        practice, they are tuned to make the solver parameters independent of how heavy the bodies are. These
+        regularization parameters are computed from the mass, the center of mass and the inertia of a link, and from the
+        armature of the degrees of freedom between it and the root of its tree, and are recomputed whenever one of these
+        quantities changes.
+
+        Parameters
+        ----------
+        links_idx_local : None | array_like, optional
+            The indices of the links on this entity. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
+
+        Returns
+        -------
+        invweight : torch.Tensor, shape (n_links, 2) or (n_envs, n_links, 2)
+            The translational and rotational inverse weight of each link, per environment for a scene whose link info
+            is batched.
+        """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
         return self._solver.get_links_invweight(links_idx, envs_idx)
 
@@ -3592,8 +2478,9 @@ class RigidEntity(KinematicEntity):
             Whether to zero the velocity of all the entity's dofs. Defaults to True. This is a safety measure after a
             sudden change in entity pose.
         relative : bool, optional
-            Whether 'pos' is expressed in the user frame, with the morph pose offset and inertial alignment applied on
-            top to reach the world frame used by the solver, rather than directly in the world frame. Defaults to True.
+            Whether 'pos' places the authored link origin rather than directly the internal link origin used by the
+            solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
+            a free root link with 'align=True', by the inertial alignment. Defaults to True.
         skip_forward : bool, optional
             Whether to skip forward kinematics after setting position. Defaults to False.
         """
@@ -3625,8 +2512,9 @@ class RigidEntity(KinematicEntity):
             Whether to zero the velocity of all the entity's dofs. Defaults to True. This is a safety measure after a
             sudden change in entity pose.
         relative : bool, optional
-            Whether 'quat' is expressed in the user frame, with the morph pose offset and inertial alignment applied on
-            top to reach the world frame used by the solver, rather than directly in the world frame. Defaults to True.
+            Whether 'quat' orients the authored link origin rather than directly the internal link origin used by the
+            solver. The internal link origin is the authored one moved by the morph 'offset_pos' / 'offset_quat' and, on
+            a free root link with 'align=True', by the inertial alignment. Defaults to True.
         skip_forward : bool, optional
             Whether to skip forward kinematics after setting quaternion. Defaults to False.
         """
@@ -3791,6 +2679,26 @@ class RigidEntity(KinematicEntity):
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         self._solver.set_dofs_force_range(lower, upper, dofs_idx, envs_idx)
+
+    @gs.assert_built
+    def set_dofs_limit(self, lower, upper, dofs_idx_local=None, envs_idx=None):
+        """
+        Set the positional limits for the entity's dofs.
+
+        Parameters
+        ----------
+        lower : array_like
+            The lower positional limits.
+        upper : array_like
+            The upper positional limits.
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to set. If None, all dofs will be set. Note that these are local indices, not
+            scene-level indices. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        self._solver.set_dofs_limit(lower, upper, dofs_idx, envs_idx)
 
     @gs.assert_built
     def set_dofs_stiffness(self, stiffness, dofs_idx_local=None, envs_idx=None):
@@ -4176,10 +3084,10 @@ class RigidEntity(KinematicEntity):
     def get_potential_energy(self, envs_idx=None) -> torch.Tensor:
         """Get the total potential energy of the entity in Joules [J] (gravitational + joint springs).
 
-        Gravity contributes ``-sum_i(m_i * g^T * p_i)`` over the entity's links, where ``p_i`` is the center-of-mass
-        position of link *i* and ``g`` is the gravity vector obtained from the solver. Its joint springs contribute
-        ``0.5 * sum_d(stiffness_d * (q_d - q0_d)^2)``, the elastic energy stored by holding each DOF away from its
-        neutral position.
+        Gravity contributes ``-sum_i(m_i * g^T * p_i)`` over the links of the entity free to move, where ``p_i`` is the
+        center-of-mass position of link *i* and ``g`` is the gravity vector obtained from the solver. Its joint springs
+        contribute ``0.5 * sum_d(stiffness_d * (q_d - q0_d)^2)``, the elastic energy stored by holding each DOF away
+        from its neutral position.
 
         Parameters
         ----------
@@ -4433,89 +3341,118 @@ class RigidEntity(KinematicEntity):
     # --------------------------------- mass / inertia -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def set_mass_shift(self, mass_shift, links_idx_local=None, envs_idx=None):
-        """
-        Set the mass shift of specified links.
-
-        Parameters
-        ----------
-        mass : torch.Tensor, shape (n_envs, n_links)
-            The mass shift
-        links_idx_local : array_like
-            The indices of the links to set mass shift.
-        envs_idx : None | array_like, optional
-            The indices of the environments. If None, all environments will be considered. Defaults to None.
-        """
-        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        self._solver.set_links_mass_shift(mass_shift, links_idx, envs_idx)
-
-    def set_COM_shift(self, com_shift, links_idx_local=None, envs_idx=None):
-        """
-        Set the center of mass (COM) shift of specified links.
-
-        Parameters
-        ----------
-        com : torch.Tensor, shape (n_envs, n_links, 3)
-            The COM shift
-        links_idx_local : array_like
-            The indices of the links to set COM shift.
-        envs_idx : None | array_like, optional
-            The indices of the environments. If None, all environments will be considered. Defaults to None.
-        """
-        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        self._solver.set_links_COM_shift(com_shift, links_idx, envs_idx)
-
     @gs.assert_built
-    def set_links_inertial_mass(self, inertial_mass, links_idx_local=None, envs_idx=None):
+    def set_links_mass(self, mass, links_idx_local=None, envs_idx=None):
+        """
+        Set the mass of the given links, in kg.
+
+        The inertia of a link is left unchanged. Use `set_links_inertia` to change it too, or `set_mass` to set the
+        total mass of the entity, which keeps the ratios between the masses of its links and scales their inertia along
+        with them.
+
+        Parameters
+        ----------
+        mass : array_like, shape (n_links,) or (n_envs, n_links)
+            The mass of each link, in kg. Per-environment values require `RigidOptions.batch_links_info=True`.
+        links_idx_local : None | array_like, optional
+            The indices of the links. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
-        self._solver.set_links_inertial_mass(inertial_mass, links_idx, envs_idx)
+        self._solver.set_links_mass(mass, links_idx, envs_idx)
 
     @gs.assert_built
     def set_links_invweight(self, invweight, links_idx_local=None, envs_idx=None):
-        raise DeprecationError(
-            "This method has been removed because links invweights are supposed to be a by-product of link properties "
-            "(mass, pose, and inertia matrix), joint placements, and dof armatures. Please consider using the "
-            "considering setters instead."
-        )
+        """
+        Removed: Genesis computes the inverse weights of a link from its mass, its center of mass, its inertia and
+        the armature of the degrees of freedom above it, so write one of those instead.
+        """
+        raise DeprecationError("This method has been removed because links invweights are supposed to be a by-product.")
 
     @gs.assert_built
-    def set_mass(self, mass):
+    def set_links_COM(self, com, links_idx_local=None, envs_idx=None):
         """
-        Set the mass of the entity.
+        Set the center of mass (COM) of the given links, as an offset in their local frame.
 
         Parameters
         ----------
-        mass : float
-            The mass to set.
+        com : array_like, shape (n_links, 3) or (n_envs, n_links, 3)
+            The center of mass of each link. Per-environment values require `RigidOptions.batch_links_info=True`.
+        links_idx_local : None | array_like, optional
+            The indices of the links. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        ratio = float(mass) / self.get_mass()
-        for link in self.links:
-            link.set_mass(link.get_mass() * ratio)
+        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
+        self._solver.set_links_COM(com, links_idx, envs_idx)
 
     @gs.assert_built
-    def get_mass(self):
+    def set_links_inertia(self, inertia, links_idx_local=None, envs_idx=None):
         """
-        Get the total mass of the entity in kg.
+        Set the inertia matrix of the given links, expressed in their inertial frame.
 
-        For heterogeneous entities, returns an array of masses for each environment.
-        For non-heterogeneous entities, returns a scalar mass.
+        Parameters
+        ----------
+        inertia : array_like, shape (n_links, 3, 3) or (n_envs, n_links, 3, 3)
+            The inertia matrix of each link, which must be symmetric positive definite. Per-environment values require
+            `RigidOptions.batch_links_info=True`.
+        links_idx_local : None | array_like, optional
+            The indices of the links. If None, all links are considered. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
+        self._solver.set_links_inertia(inertia, links_idx, envs_idx)
+
+    @gs.assert_built
+    def set_mass(self, mass, envs_idx=None):
+        """
+        Set the total mass of the entity, in kg, keeping the ratios between the masses of its links.
+
+        The inertia of each link is scaled by the same factor as its mass, exactly how a body of the same shape made
+        heavier would behave. `RigidLink.set_mass` sets the mass of a single link and leaves its inertia unchanged.
+
+        An entity whose links are all fixed to the world moves no mass, so setting its total mass is ill-defined and
+        raises.
+
+        Parameters
+        ----------
+        mass : float | array_like, shape (n_envs,)
+            The mass to set. Per-environment values require `RigidOptions.batch_links_info=True`.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        # The mass of an entity is the mass it moves, so a link fixed to the world takes no part in the total nor in
+        # the fractions.
+        links_idx = [link.idx for link in self.links if not link.is_fixed]
+        links_mass = self._solver.get_links_mass(links_idx, envs_idx)
+        mass_entity = links_mass.sum(dim=-1, keepdim=True)
+        dim_names = ("envs_idx", "") if self._solver.is_links_info_batched else ("",)
+        mass_target = broadcast_tensor(mass, gs.tc_float, mass_entity.shape, dim_names)
+        # A body brought to a mass behaves as one built at it, so the inertia of every link grows with its share.
+        self._solver.set_links_mass(links_mass * mass_target / mass_entity, links_idx, envs_idx, scale_inertia=True)
+
+    @gs.assert_built
+    def get_mass(self, envs_idx=None):
+        """
+        Get the total mass of the entity, in kg.
+
+        Sums the links that are not fixed to the world, a fixed link never being accelerated, causing its mass to be
+        ill-defined as it is indistinguishable from the world itself.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
 
         Returns
         -------
-        mass : float | np.ndarray
-            The total mass of the entity in kg. For heterogeneous entities, returns
-            an array of shape (n_envs,) with per-environment masses.
+        mass : torch.Tensor, shape (n_envs,) or scalar
+            The total mass of the entity in kg.
         """
-        if self._enable_heterogeneous:
-            links_idx = slice(self.link_start, self.link_end)
-            links_mass = qd_to_numpy(self._solver.dyn_info.links.inertial_mass, None, links_idx, transpose=True)
-            return links_mass.sum(axis=1)
-
-        # Original behavior: sum link masses to scalar
-        mass = 0.0
-        for link in self.links:
-            mass += link.get_mass()
-        return mass
+        links_idx = [link.idx for link in self.links if not link.is_fixed]
+        return self._solver.get_links_mass(links_idx, envs_idx).sum(dim=-1)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

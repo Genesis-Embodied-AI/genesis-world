@@ -94,6 +94,23 @@ class PathPlanner(ABC):
 
         return qpos_cur, qpos_goal, qpos_start, envs_idx
 
+    def _get_dofs_limit(self, qpos_goal, envs_idx):
+        """Limits to sample within, one row per environment being planned for, and which goals they rule out.
+
+        Planning is refused for the joints whose coordinates are not their degrees of freedom, which are the free and
+        the ball joint, so the limits of the degrees of freedom are the limits of the coordinates sampled here.
+        """
+        is_batched = self._solver._options.batch_dofs_info
+        lower, upper = self._entity.get_dofs_limit(envs_idx=envs_idx if is_batched else None)
+        is_goal_out_of_limit = ((qpos_goal < lower) | (qpos_goal > upper)).any(dim=-1)
+        # One row per environment, laid out rather than broadcast: the limits come as a strided view of the pair they
+        # are stored in, and limits shared by every environment come without an environment dimension at all, while a
+        # kernel argument can be neither.
+        shape = (len(envs_idx), self._entity.n_dofs)
+        lower = torch.broadcast_to(lower, shape).contiguous()
+        upper = torch.broadcast_to(upper, shape).contiguous()
+        return lower, upper, is_goal_out_of_limit
+
     def get_exclude_geom_pairs(self, qposs, envs_idx):
         """
         Parameters
@@ -187,7 +204,7 @@ class PathPlanner(ABC):
                 obj_geom_end,
                 ignore_geom_pairs,
                 out,
-                self._solver.collider._collider_state,
+                self._solver.collider.collider_state,
                 is_plan_with_obj,
             )
         return out
@@ -291,7 +308,10 @@ class PathPlanner(ABC):
                 _pos=_pos,
                 _quat=_quat,
             )  # B
-            path[:, ~collision_mask] = result_path[:, ~collision_mask]
+            # Compared against zero rather than negated: the mask is integer-typed on the backends without a boolean
+            # one, where a bitwise negation would turn it into an index instead of the selection it reads as.
+            is_shortcut_free = collision_mask == 0
+            path[:, is_shortcut_free] = result_path[:, is_shortcut_free]
         return path
 
 
@@ -330,19 +350,29 @@ class RRT(PathPlanner):
 
     @qd.kernel
     def _kernel_rrt_init(
-        self, qpos_start: qd.types.ndarray(), envs_idx: qd.types.ndarray(), qpos_goal: qd.types.ndarray()
+        self,
+        qpos_start: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+        qpos_goal: qd.types.ndarray(),
+        q_limit_lower: qd.types.ndarray(),
+        q_limit_upper: qd.types.ndarray(),
     ):
         qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
+            # Every sample lies within the limits, so a goal outside them cannot be reached. Such an environment
+            # is left out of the search, and the plan reports it through the valid mask it returns.
+            is_goal_within_limit = True
             for i_q in range(self._entity.n_qs):
                 # save original qpos
                 self._rrt_start_configuration[i_q, i_b] = qpos_start[i_b_, i_q]
                 self._rrt_goal_configuration[i_q, i_b] = qpos_goal[i_b_, i_q]
                 self._rrt_node_info[0, i_b].configuration[i_q] = qpos_start[i_b_, i_q]
+                if qpos_goal[i_b_, i_q] < q_limit_lower[i_b_, i_q] or qpos_goal[i_b_, i_q] > q_limit_upper[i_b_, i_q]:
+                    is_goal_within_limit = False
             self._rrt_node_info[0, i_b].parent_idx = 0
             self._rrt_tree_size[i_b] = 1
-            self._rrt_is_active[i_b] = True
+            self._rrt_is_active[i_b] = is_goal_within_limit
 
     @qd.kernel
     def _kernel_rrt_step1(
@@ -368,7 +398,8 @@ class RRT(PathPlanner):
             if self._rrt_is_active[i_b]:
                 random_sample = qd.Vector(
                     [
-                        q_limit_lower[i_q] + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_q] - q_limit_lower[i_q])
+                        q_limit_lower[i_b_, i_q]
+                        + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_b_, i_q] - q_limit_lower[i_b_, i_q])
                         for i_q in range(self._entity.n_qs)
                     ]
                 )
@@ -408,6 +439,7 @@ class RRT(PathPlanner):
                     gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_entity(
                         self._entity._idx_in_solver,
                         i_b,
+                        rigid_info.qpos,
                         dyn_state,
                         dyn_info,
                         rigid_info,
@@ -489,6 +521,14 @@ class RRT(PathPlanner):
 
         qpos_cur, qpos_goal, qpos_start, envs_idx = self._sanitize_qposs(qpos_goal, qpos_start, envs_idx)
         ignore_geom_pairs = self.get_exclude_geom_pairs((qpos_goal, qpos_start), envs_idx)
+        q_limit_lower, q_limit_upper, is_goal_out_of_limit = self._get_dofs_limit(qpos_goal, envs_idx)
+        if is_goal_out_of_limit.all():
+            # No sample leaves the limits, so no tree would reach any of these goals. Growing one, and retrying
+            # afterwards, would give the same answer at the price of the whole search.
+            gs.logger.debug("Every goal lies outside the joint limits, so there is nothing to plan.")
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
+            sol = torch.zeros((num_waypoints, len(envs_idx), self._entity.n_qs), dtype=gs.tc_float, device=gs.device)
+            return sol, is_goal_out_of_limit
 
         is_plan_with_obj = False
         _pos, _quat = None, None
@@ -502,7 +542,7 @@ class RRT(PathPlanner):
 
         self._init_rrt_fields(max_nodes=max_nodes, max_step_size=resolution)
         self._reset_rrt_fields()
-        self._kernel_rrt_init(qpos_start, envs_idx, qpos_goal)
+        self._kernel_rrt_init(qpos_start, envs_idx, qpos_goal, q_limit_lower, q_limit_upper)
 
         gs.logger.debug("Start RRT planning...")
         time_start = time.time()
@@ -510,8 +550,8 @@ class RRT(PathPlanner):
             if self._rrt_is_active.to_torch().any():
                 self._kernel_rrt_step1(
                     envs_idx,
-                    self._entity.q_limit[0],
-                    self._entity.q_limit[1],
+                    q_limit_lower,
+                    q_limit_upper,
                     self._solver.dyn_state,
                     self._solver.dyn_info,
                     self._solver.rigid_info,
@@ -524,7 +564,7 @@ class RRT(PathPlanner):
                     obj_geom_start,
                     obj_geom_end,
                     ignore_geom_pairs,
-                    self._solver.collider._collider_state,
+                    self._solver.collider.collider_state,
                     ignore_collision,
                     is_plan_with_obj,
                 )
@@ -537,7 +577,7 @@ class RRT(PathPlanner):
 
         gs.logger.debug(f"RRT planning time: {time.time() - time_start}")
 
-        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx]
+        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx] | is_goal_out_of_limit
         ts = self._rrt_tree_size.to_torch(device=gs.device)
         g_n = self._rrt_goal_reached_node_idx.to_torch(device=gs.device)[envs_idx]  # B
 
@@ -555,10 +595,7 @@ class RRT(PathPlanner):
         sol = configurations[res_idx, envs_idx]  # N, B, DoF
 
         if is_invalid.all():
-            if self._solver.n_envs > 0:
-                self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-            else:
-                self._entity.set_qpos(qpos_cur, zero_velocity=False)
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
             sol = torch.zeros((num_waypoints, len(envs_idx), sol.shape[-1]), dtype=gs.tc_float, device=gs.device)
             return sol, is_invalid
 
@@ -608,10 +645,7 @@ class RRT(PathPlanner):
             else:
                 is_invalid |= self.check_collision(sol, ignore_geom_pairs, envs_idx).bool()
 
-        if self._solver.n_envs > 0:
-            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-        else:
-            self._entity.set_qpos(qpos_cur, zero_velocity=False)
+        self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
 
         if is_plan_with_obj:
             self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
@@ -656,22 +690,31 @@ class RRTConnect(PathPlanner):
 
     @qd.kernel
     def _kernel_rrt_connect_init(
-        self, qpos_start: qd.types.ndarray(), envs_idx: qd.types.ndarray(), qpos_goal: qd.types.ndarray()
+        self,
+        qpos_start: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+        qpos_goal: qd.types.ndarray(),
+        q_limit_lower: qd.types.ndarray(),
+        q_limit_upper: qd.types.ndarray(),
     ):
         # NOTE: run IK before this
         qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
+            # See the note in RRT: a goal outside the limits cannot be reached, which the valid mask reports.
+            is_goal_within_limit = True
             for i_q in range(self._entity.n_qs):
                 # save original qpos
                 self._rrt_start_configuration[i_q, i_b] = qpos_start[i_b_, i_q]
                 self._rrt_goal_configuration[i_q, i_b] = qpos_goal[i_b_, i_q]
                 self._rrt_node_info[0, i_b].configuration[i_q] = qpos_start[i_b_, i_q]
                 self._rrt_node_info[1, i_b].configuration[i_q] = qpos_goal[i_b_, i_q]
+                if qpos_goal[i_b_, i_q] < q_limit_lower[i_b_, i_q] or qpos_goal[i_b_, i_q] > q_limit_upper[i_b_, i_q]:
+                    is_goal_within_limit = False
             self._rrt_node_info[0, i_b].parent_idx = 0
             self._rrt_node_info[1, i_b].child_idx = 1
             self._rrt_tree_size[i_b] = 2
-            self._rrt_is_active[i_b] = True
+            self._rrt_is_active[i_b] = is_goal_within_limit
 
     @qd.kernel
     def _kernel_rrt_connect_step1(
@@ -699,7 +742,8 @@ class RRTConnect(PathPlanner):
             if self._rrt_is_active[i_b]:
                 random_sample = qd.Vector(
                     [
-                        q_limit_lower[i_q] + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_q] - q_limit_lower[i_q])
+                        q_limit_lower[i_b_, i_q]
+                        + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_b_, i_q] - q_limit_lower[i_b_, i_q])
                         for i_q in range(self._entity.n_qs)
                     ]
                 )
@@ -755,6 +799,7 @@ class RRTConnect(PathPlanner):
                     gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_entity(
                         self._entity._idx_in_solver,
                         i_b,
+                        rigid_info.qpos,
                         dyn_state,
                         dyn_info,
                         rigid_info,
@@ -853,6 +898,14 @@ class RRTConnect(PathPlanner):
 
         qpos_cur, qpos_goal, qpos_start, envs_idx = self._sanitize_qposs(qpos_goal, qpos_start, envs_idx)
         ignore_geom_pairs = self.get_exclude_geom_pairs([qpos_goal, qpos_start], envs_idx)
+        q_limit_lower, q_limit_upper, is_goal_out_of_limit = self._get_dofs_limit(qpos_goal, envs_idx)
+        if is_goal_out_of_limit.all():
+            # No sample leaves the limits, so no tree would reach any of these goals. Growing one, and retrying
+            # afterwards, would give the same answer at the price of the whole search.
+            gs.logger.debug("Every goal lies outside the joint limits, so there is nothing to plan.")
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
+            sol = torch.zeros((num_waypoints, len(envs_idx), self._entity.n_qs), dtype=gs.tc_float, device=gs.device)
+            return sol, is_goal_out_of_limit
 
         is_plan_with_obj = False
         _pos, _quat = None, None
@@ -866,7 +919,7 @@ class RRTConnect(PathPlanner):
 
         self._init_rrt_connect_fields(max_nodes=max_nodes, max_step_size=resolution)
         self._reset_rrt_connect_fields()
-        self._kernel_rrt_connect_init(qpos_start, envs_idx, qpos_goal)
+        self._kernel_rrt_connect_init(qpos_start, envs_idx, qpos_goal, q_limit_lower, q_limit_upper)
 
         gs.logger.debug("Start RRTConnect planning...")
         time_start = time.time()
@@ -875,8 +928,8 @@ class RRTConnect(PathPlanner):
             self._kernel_rrt_connect_step1(
                 envs_idx,
                 self._solver.qpos,
-                self._entity.q_limit[0],
-                self._entity.q_limit[1],
+                q_limit_lower,
+                q_limit_upper,
                 self._solver.dyn_state,
                 self._solver.dyn_info,
                 self._solver.rigid_info,
@@ -890,7 +943,7 @@ class RRTConnect(PathPlanner):
                 obj_geom_start,
                 obj_geom_end,
                 ignore_geom_pairs,
-                self._solver.collider._collider_state,
+                self._solver.collider.collider_state,
                 self._solver.rigid_info,
                 forward_pass,
                 ignore_collision,
@@ -908,7 +961,7 @@ class RRTConnect(PathPlanner):
             gs.logger.info(f"RRTConnect planning exceeded maximum number of nodes ({self._rrt_max_nodes}).")
 
         gs.logger.debug(f"RRTConnect planning time: {time.time() - time_start}")
-        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx]
+        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx] | is_goal_out_of_limit
         ts = self._rrt_tree_size.to_torch(device=gs.device)
         g_n = self._rrt_goal_reached_node_idx.to_torch(device=gs.device)[envs_idx]  # B
 
@@ -936,10 +989,7 @@ class RRTConnect(PathPlanner):
         sol = configurations[res_idx, envs_idx]  # N, B, DoF
 
         if is_invalid.all():
-            if self._solver.n_envs > 0:
-                self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-            else:
-                self._entity.set_qpos(qpos_cur, zero_velocity=False)
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
             return torch.zeros(num_waypoints, len(envs_idx), sol.shape[-1], device=gs.device), is_invalid
 
         mask = rrt_connect_valid_mask(res_idx)
@@ -988,10 +1038,7 @@ class RRTConnect(PathPlanner):
             else:
                 is_invalid |= self.check_collision(sol, ignore_geom_pairs, envs_idx).bool()
 
-        if self._solver.n_envs > 0:
-            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-        else:
-            self._entity.set_qpos(qpos_cur, zero_velocity=False)
+        self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
 
         if is_plan_with_obj:
             self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)

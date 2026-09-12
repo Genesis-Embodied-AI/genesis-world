@@ -13,76 +13,9 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
-from genesis.utils.misc import sanitize_index, tensor_to_array
+from genesis.utils.misc import indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
-
-
-@pytest.mark.required
-def test_repr_does_not_crash():
-    inline_mjcf = '<mujoco model="probe"><worldbody><body><geom type="box" size="1 1 1"/></body></worldbody></mujoco>'
-
-    scene = gs.Scene(show_viewer=False)
-    scene.add_entity(
-        morph=gs.morphs.Plane(),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        )
-    )
-    panda = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        )
-    )
-    inline = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=inline_mjcf,
-        )
-    )
-    het = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Cylinder(radius=0.05, height=0.2),
-        ),
-    )
-    scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Sphere(radius=0.1),
-        ),
-        material=gs.materials.Kinematic(),
-    )
-    cam = scene.add_camera(
-        res=(64, 64),
-        pos=(1.0, 1.0, 1.0),
-        lookat=(0.0, 0.0, 0.0),
-    )
-    scene.build(n_envs=2)
-
-    # Every printable object renders without raising, across both the brief and the full colorized form.
-    for obj in (scene, scene.entities, cam, scene.sim.rigid_solver):
-        assert repr(obj)
-    for entity in scene.entities:
-        assert entity._repr_brief()
-        assert repr(entity)
-        for morph in entity.morphs:
-            assert repr(morph)
-        sub_objects = [*entity.links, *entity.joints, *entity.vgeoms]
-        if isinstance(entity, gs.engine.entities.RigidEntity):
-            sub_objects += list(entity.geoms)
-        for sub in sub_objects:
-            assert sub._repr_brief()
-            assert repr(sub)
-
-    # Sanity on the parts worth enforcing.
-    # A file-based morph shows its path; an in-memory description is identified by its model name, not dumped.
-    assert "panda.xml" in repr(panda.main_morph)
-    assert "<inline probe>" in inline.main_morph.__repr_name__()
-    assert inline_mjcf not in repr(inline.main_morph)
-    # A heterogeneous entity reports its variants instead of collapsing to a single ambiguous morph.
-    assert "morph variants" in het._repr_brief()
 
 
 @pytest.mark.required
@@ -392,6 +325,23 @@ def test_sanitize_index_rejects_invalid_collections(index):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("as_boolean", (False, True))
+def test_indices_to_mask_selects_the_cross_product(as_boolean):
+    buf = torch.arange(20, dtype=torch.int32).reshape((4, 5))
+    if as_boolean:
+        envs_idx = torch.tensor((False, True, False, True))
+        dofs_idx = torch.tensor((True, False, True, False, False))
+    else:
+        envs_idx = torch.tensor((1, 3), dtype=torch.int32)
+        dofs_idx = torch.tensor((0, 2), dtype=torch.int32)
+
+    # Selecting on two axes takes every combination, rather than pairing the two selections elementwise, which for
+    # these inputs would give the two values on the diagonal.
+    assert_equal(buf[indices_to_mask(envs_idx, dofs_idx)], torch.tensor(((5, 7), (15, 17)), dtype=torch.int32))
+    assert_equal(buf[indices_to_mask(envs_idx)], buf[torch.tensor((1, 3))])
+
+
+@pytest.mark.required
 def test_fps_algorithm_core():
     # Shape, dtype, determinism, anchor-on-no-seed, and invalid n_samples all in one test.
     points = np.random.default_rng(1).random((50, 3))
@@ -607,9 +557,9 @@ def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
 
 
 @pytest.mark.parametrize("backend", [None])
-def test_set_gravity_accepts_field_and_tensor():
-    # The 'gravity: qd.Tensor' annotation must accept both a raw qd.field() (subclass solvers like MPM) and
-    # a qd.Tensor wrapper (base_solver / rigid solver).
+def test_per_solver_gravity():
+    # Field-backed storage is what a solver whose kernels reach gravity through the solver itself holds, and the array
+    # mode is forced to fields here so both kinds of solver are on that storage at once.
     os.environ["GS_ENABLE_NDARRAY"] = "0"
     try:
         gs.init(backend=gs.cpu, seed=0)
@@ -634,25 +584,251 @@ def test_set_gravity_accepts_field_and_tensor():
             ),
             material=gs.materials.MPM.Liquid(),
         )
-        scene.build()
+        scene.build(n_envs=2)
 
         new_gravity = [0.0, 0.0, -5.0]
 
-        # Rigid solver: _gravity is a qd.Tensor (from base_solver.build via V())
         rigid = scene.sim.rigid_solver
-        assert isinstance(rigid._gravity, qd.Tensor), f"Expected qd.Tensor, got {type(rigid._gravity)}"
         rigid.set_gravity(new_gravity)
-        np.testing.assert_allclose(rigid.get_gravity(), new_gravity, atol=1e-6)
+        assert_allclose(rigid.get_gravity(), new_gravity, atol=1e-6)
 
-        # MPM solver: _gravity is a raw qd.field() (subclass override)
         mpm = scene.sim.mpm_solver
-        assert isinstance(mpm._gravity, qd.Field), f"Expected qd.Field, got {type(mpm._gravity)}"
         mpm.set_gravity(new_gravity)
-        np.testing.assert_allclose(mpm._gravity.to_numpy().flatten(), new_gravity, atol=1e-6)
+        assert_allclose(mpm.get_gravity(), new_gravity, atol=1e-6)
+
+        # Gravity is per solver, so setting one leaves the other where it was.
+        rigid.set_gravity(0.0)
+        assert_allclose(rigid.get_gravity(), 0.0, atol=1e-6)
+        assert_allclose(mpm.get_gravity(), new_gravity, atol=1e-6)
+
+        # It is per environment too, so naming one leaves the others where they were.
+        rigid.set_gravity([0.0, 0.0, -1.0], envs_idx=1)
+        assert_allclose(rigid.get_gravity(envs_idx=0), 0.0, atol=1e-6)
+        assert_allclose(rigid.get_gravity(envs_idx=1), [0.0, 0.0, -1.0], atol=1e-6)
 
     finally:
         gs.destroy()
         os.environ.pop("GS_ENABLE_NDARRAY", None)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 3])
+def test_per_env_time(show_viewer, n_envs, tol):
+    DT = 0.01
+    N_STEPS = 10
+    N_MORE_STEPS = 5
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, 0.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 1.0),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    for _ in range(N_STEPS):
+        scene.step()
+
+    # A scene of no parallel environments has one clock, reported as the scalar the whole scene runs on.
+    if n_envs == 0:
+        assert_equal(scene.get_time().ndim, 0)
+        assert_allclose(scene.get_time(), N_STEPS * DT, tol=tol)
+        scene.reset()
+        assert_allclose(scene.get_time(), 0.0, tol=tol)
+        return
+
+    # Environments reset independently, so resetting one rewinds its clock alone while the others keep theirs, whether
+    # it is named by an index counted from either end, by a selection of several, or by a mask.
+    scene.reset(envs_idx=-2)
+    assert_allclose(scene.get_time(), [N_STEPS * DT, 0.0, N_STEPS * DT], tol=tol)
+
+    for _ in range(N_MORE_STEPS):
+        scene.step()
+    times_expected = [(N_STEPS + N_MORE_STEPS) * DT, N_MORE_STEPS * DT, (N_STEPS + N_MORE_STEPS) * DT]
+    assert_allclose(scene.get_time(), times_expected, tol=tol)
+    assert_allclose(scene.get_time(envs_idx=1), N_MORE_STEPS * DT, tol=tol)
+
+    scene.reset(envs_idx=(0, 2))
+    assert_allclose(scene.get_time(), [0.0, N_MORE_STEPS * DT, 0.0], tol=tol)
+
+    for _ in range(N_MORE_STEPS):
+        scene.step()
+    scene.reset(envs_idx=torch.tensor((False, True, False)))
+    assert_allclose(scene.get_time(), [N_MORE_STEPS * DT, 0.0, N_MORE_STEPS * DT], tol=tol)
+
+
+@pytest.mark.required
+def test_derived_substeps(show_viewer, tol):
+    GRAVITY = -9.81
+    N_STEPS = 10
+    SUBSTEPS = 5
+
+    @qd.data_oriented
+    class NullJet:
+        @qd.func
+        def get_tan_dir(self, t: float):
+            return qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+
+        @qd.func
+        def get_factor(self, i, j, k, dx: float, t: float):
+            return 0.0
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, GRAVITY),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            dt=0.01 / SUBSTEPS,
+        ),
+        sf_options=gs.options.SFOptions(
+            dt=0.01 / SUBSTEPS,
+            res=16,
+            solver_iters=2,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, 0.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    ball = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 1.0),
+        ),
+    )
+    sf_solver = scene.sim.sf_solver
+    sf_solver.set_jets([NullJet()])
+    scene.build()
+
+    # A solver integrates at the interval it was given, as many times per scene step as that interval divides the
+    # step dt, and the bodies and the grid read the same resolution.
+    solver = scene.rigid_solver
+    assert_equal(solver.substeps, SUBSTEPS)
+    assert_allclose(solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
+
+    # A step advances the step dt whatever the rate: the fall accumulates once per substep, at the solver dt, for as
+    # many substeps as the ratio gives.
+    t_built = sf_solver.t
+    for _ in range(N_STEPS):
+        scene.step()
+    n_substeps = N_STEPS * solver.substeps
+    expected_z = 1.0 + GRAVITY * solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
+    assert_allclose(ball.get_pos()[2], expected_z, tol=tol)
+
+    # Solvers integrating on a grid rather than on bodies read the interval off the same resolution, so their own
+    # clock advances one step dt per scene step however many substeps the ratio gives them.
+    assert_equal(sf_solver.substeps, SUBSTEPS)
+    assert_allclose(sf_solver.t - t_built, N_STEPS * 0.01, tol=gs.EPS)
+
+    # The substeps shorthand decides the rate when no solver asks for one of its own, which is settled as a solver is
+    # made rather than as a scene is built.
+    scene_from_substeps = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=4,
+        ),
+        show_viewer=False,
+    )
+    assert_equal(scene_from_substeps.rigid_solver.substeps, 4)
+    assert_allclose(scene_from_substeps.rigid_solver.substep_dt, 0.0025, tol=gs.EPS)
+
+    # The substep loop advances every active solver once per iteration, so the interval one of them asks for is the
+    # rate they all take, whether they asked for one or not.
+    scene_from_solver_dt = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        sf_options=gs.options.SFOptions(
+            dt=0.01 / SUBSTEPS,
+            res=16,
+            solver_iters=2,
+        ),
+        show_viewer=False,
+    )
+    ball_at_derived_rate = scene_from_solver_dt.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 1.0),
+        ),
+    )
+    scene_from_solver_dt.sim.sf_solver.set_jets([NullJet()])
+    scene_from_solver_dt.build()
+    assert_equal(scene_from_solver_dt.rigid_solver.substeps, SUBSTEPS)
+    assert_allclose(scene_from_solver_dt.rigid_solver.substep_dt, 0.01 / SUBSTEPS, tol=gs.EPS)
+
+    # The interval reaches what integrates, not only what reports it: a solver settles its buffers as it builds, so a
+    # rate inherited afterwards would leave it stepping the scene interval as many times as the shorter one.
+    for _ in range(N_STEPS):
+        scene_from_solver_dt.step()
+    n_substeps = N_STEPS * SUBSTEPS
+    expected_z = 1.0 + GRAVITY * scene_from_solver_dt.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
+    assert_allclose(ball_at_derived_rate.get_pos()[2], expected_z, tol=tol)
+
+    # Two solvers asking for intervals that imply different counts have no one rate to advance at, and are rejected.
+    with pytest.raises(gs.GenesisException, match="Solvers integrating at different rates"):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(dt=0.01),
+            rigid_options=gs.options.RigidOptions(dt=0.005),
+            sf_options=gs.options.SFOptions(dt=0.0025, res=16, solver_iters=2),
+            show_viewer=False,
+        )
+        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
+        scene.sim.sf_solver.set_jets([NullJet()])
+        scene.build()
+
+    # A rate is settled for the solvers the entities made active, and only for those: what an interval would imply for
+    # a solver nothing is simulated with is no reason to refuse the scene it sits in.
+    scene_inactive = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            dt=0.003,
+        ),
+        show_viewer=False,
+    )
+    scene_inactive.build()
+    assert_equal(scene_inactive.sim.substeps, 1)
+    assert_allclose(scene_inactive.sim.substep_dt, 0.01, tol=gs.EPS)
+
+    for interval in (0.003, 0.02):
+        with pytest.raises(gs.GenesisException, match="does not divide the step dt"):
+            scene = gs.Scene(
+                sim_options=gs.options.SimOptions(dt=0.01),
+                rigid_options=gs.options.RigidOptions(dt=interval),
+                show_viewer=False,
+            )
+            scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
+            scene.build()
+
+    with pytest.raises(gs.GenesisException, match="conflicting with the requested substeps"):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
+            rigid_options=gs.options.RigidOptions(dt=0.002),
+            show_viewer=False,
+        )
+        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
+        scene.build()
+
+    # The differentiable window is sized before the solvers allocate against it, so a rate derived from a solver dt
+    # cannot be honoured there and is rejected rather than left describing a step of a different length.
+    with pytest.raises(gs.GenesisException, match="not supported in differentiable mode"):
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(dt=0.01, requires_grad=True),
+            rigid_options=gs.options.RigidOptions(dt=0.002),
+            show_viewer=False,
+        )
+        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
+        scene.build()
 
 
 @pytest.mark.required

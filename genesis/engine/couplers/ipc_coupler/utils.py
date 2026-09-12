@@ -89,13 +89,13 @@ def compute_link_to_link_transform(from_link, to_link):
     while link is not to_link:
         if link.parent_idx < 0:
             gs.raise_exception(f"Cannot compute transform from link {from_link} to {to_link}")
-        pos, quat = gu.transform_pos_quat_by_trans_quat(pos, quat, link.pos, link.quat)
+        pos, quat = gu.transform_pos_quat_by_trans_quat(pos, quat, link.desc.pos, link.desc.quat)
         link = entity.links[link.parent_idx - entity.link_start]
 
     return pos, quat
 
 
-def build_ipc_scene_config(options, sim_options):
+def build_ipc_scene_config(options, sim_options, dt):
     """
     Build IPC Scene config dict from IPCCouplerOptions and SimOptions.
 
@@ -104,7 +104,9 @@ def build_ipc_scene_config(options, sim_options):
     options : IPCCouplerOptions
         The coupler options
     sim_options : SimOptions
-        The simulation options (provides dt, gravity, requires_grad)
+        The simulation options (provides gravity, requires_grad)
+    dt : float
+        The interval a single advance of the IPC world covers, which is the substep the coupler is called at.
 
     Returns
     -------
@@ -113,8 +115,7 @@ def build_ipc_scene_config(options, sim_options):
     """
     config = Scene.default_config()
 
-    # Basic simulation parameters (derived from SimOptions)
-    config["dt"] = sim_options.dt
+    config["dt"] = dt
     gravity = sim_options.gravity
     config["gravity"] = [[float(e)] for e in gravity]
 

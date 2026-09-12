@@ -445,7 +445,7 @@ def kernel_manual_compute_qacc_bw(
     mass_mat_L / mass_mat_D_inv already, so only mass_mat.grad is touched here; this kernel is the single place the
     backward path populates it, and kernel_forward_dynamics_without_qacc.grad then reverses it into link poses.
 
-    Like func_solve_mass_entity, the triangular solves and the IFT outer product are restricted to the mass blocks
+    Like func_solve_mass_block, the triangular solves and the IFT outer product are restricted to the mass blocks
     rooted in each entity (see entities_mass_block_dof_start in array_class.py): elimination never crosses a block,
     and cross-block mass entries are structural zeros whose grads must stay zero.
     """

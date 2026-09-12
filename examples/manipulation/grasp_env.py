@@ -50,16 +50,15 @@ class GraspEnv:
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=self.ctrl_dt,
-                substeps=2,
             ),
             rigid_options=gs.options.RigidOptions(
-                dt=self.ctrl_dt,
+                dt=self.ctrl_dt / 2,
                 enable_collision=True,
                 enable_joint_limit=True,
                 constraint_solver=gs.constraint_solver.Newton,
             ),
             vis_options=gs.options.VisOptions(
-                env_separate_rigid=True,
+                split_envs=True,
                 rendered_envs_idx=list(range(min(10, self.num_envs))),
             ),
             viewer_options=gs.options.ViewerOptions(
@@ -147,11 +146,11 @@ class GraspEnv:
 
         # Debug live preview of sensor cameras
         if self.env_cfg.get("visualize_camera", False):
-            self.scene.start_recording(
+            self.scene.add_recorder(
                 data_func=partial(_read_sensor_cam, self.left_cam),
                 rec_options=gs.recorders.MPLImagePlot(title="Left Camera"),
             )
-            self.scene.start_recording(
+            self.scene.add_recorder(
                 data_func=partial(_read_sensor_cam, self.right_cam),
                 rec_options=gs.recorders.MPLImagePlot(title="Right Camera"),
             )
@@ -161,7 +160,7 @@ class GraspEnv:
         for cam_name, filename in record_video.items():
             cam = getattr(self, cam_name)
             reader = _read_scene_cam if isinstance(cam, Camera) else _read_sensor_cam
-            self.scene.start_recording(
+            self.scene.add_recorder(
                 data_func=partial(reader, cam),
                 rec_options=gs.recorders.VideoFile(filename=filename),
             )

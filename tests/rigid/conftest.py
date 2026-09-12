@@ -4,21 +4,56 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 import trimesh
+from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
 
 
 @pytest.fixture
 def xml_path(request, tmp_path, model_name):
+    """The model Mujoco is built from, which holds every subtree, however Genesis groups them into entities."""
     # An asset-relative path passes through to the asset resolver; a bare name is the fixture generating the model.
     if "/" in model_name:
         return model_name
     mjcf = request.getfixturevalue(model_name)
-    xml_tree = ET.ElementTree(mjcf)
     file_name = f"{model_name}.urdf" if mjcf.tag == "robot" else f"{model_name}.xml"
     file_path = str(tmp_path / file_name)
-    xml_tree.write(file_path, encoding="utf-8", xml_declaration=True)
+    ET.ElementTree(mjcf).write(file_path, encoding="utf-8", xml_declaration=True)
     return file_path
+
+
+@pytest.fixture
+def xml_paths(request, tmp_path, xml_path):
+    """The models the Genesis scene is assembled from, one entity per model, which is the Mujoco model by default.
+
+    A test marked 'split_entities' gets the model of 'model_name' split into one model per independent subtree, so that
+    the Genesis scene holds one entity per subtree while Mujoco holds them all in one model. Every top-level body of
+    the worldbody roots a subtree of its own, and the geoms of the worldbody itself root nothing, so they make a model
+    of their own. Each part keeps the headers of the source model, its defaults and assets included.
+
+    Splitting changes which entity a body belongs to, and with it how Genesis pairs contacts, so it is asked for by the
+    tests that compare what must not depend on the grouping, rather than applied to every model.
+    """
+    if next(request.node.iter_markers("split_entities"), None) is None:
+        return (xml_path,)
+
+    model_name = request.getfixturevalue("model_name")
+    mjcf = request.getfixturevalue(model_name)
+    parts = []
+    worldbody = mjcf.find("worldbody")
+    geoms = worldbody.findall("geom")
+    for children in [[body] for body in worldbody.findall("body")] + ([geoms] if geoms else []):
+        part = ET.Element(mjcf.tag, mjcf.attrib)
+        part.extend(header for header in mjcf if header.tag != "worldbody")
+        ET.SubElement(part, "worldbody").extend(children)
+        parts.append(part)
+
+    paths = []
+    for i_part, part in enumerate(parts):
+        file_path = str(tmp_path / f"{model_name}_{i_part}.xml")
+        ET.ElementTree(part).write(file_path, encoding="utf-8", xml_declaration=True)
+        paths.append(file_path)
+    return tuple(paths)
 
 
 def _build_plane_contact_model(model_name, condim, friction, plane_size):
@@ -42,10 +77,63 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
 
 
 @pytest.fixture(scope="session")
+def fixed_base_dual_arm():
+    # A torso the world carries and two one-link arms hanging from it, mounted close enough that the arms overlap
+    # once they hang at rest, so that the arms touch when they fall under gravity
+    robot = ET.Element("robot", name="dual_arm")
+    torso = ET.SubElement(robot, "link", name="torso")
+    inertial = ET.SubElement(torso, "inertial")
+    ET.SubElement(inertial, "mass", value="5.0")
+    ET.SubElement(inertial, "inertia", ixx="0.1", iyy="0.1", izz="0.1", ixy="0", ixz="0", iyz="0")
+    ET.SubElement(ET.SubElement(ET.SubElement(torso, "collision"), "geometry"), "box", size="0.1 0.3 0.1")
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        link = ET.SubElement(robot, "link", name=f"{side}_arm")
+        inertial = ET.SubElement(link, "inertial")
+        ET.SubElement(inertial, "origin", xyz=f"{sign * 0.15} 0 0")
+        ET.SubElement(inertial, "mass", value="1.0")
+        ET.SubElement(inertial, "inertia", ixx="0.001", iyy="0.01", izz="0.01", ixy="0", ixz="0", iyz="0")
+        collision = ET.SubElement(link, "collision")
+        ET.SubElement(collision, "origin", xyz=f"{sign * 0.15} 0 0")
+        ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.3 0.12 0.12")
+        joint = ET.SubElement(robot, "joint", name=f"{side}_shoulder", type="revolute")
+        ET.SubElement(joint, "parent", link="torso")
+        ET.SubElement(joint, "child", link=f"{side}_arm")
+        ET.SubElement(joint, "origin", xyz=f"{sign * 0.05} 0 0")
+        ET.SubElement(joint, "axis", xyz="0 1 0")
+        ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
+        ET.SubElement(joint, "dynamics", damping="0.5")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def box_plan():
     """Generate an MJCF model for a box on a plane."""
     mjcf = _build_plane_contact_model("box_plan", condim="3", friction="1. 0.5 0.5", plane_size="40. 40. 40.")
     _add_free_body(mjcf, name="box", geom_type="box", geom_size="0.2 0.2 0.2", pos="0. 0. 0.3")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
+def free_boxes_and_slider():
+    """Generate an MJCF model for two free boxes a thousandfold apart in mass resting on a plane, each with an off-
+    center inertial frame, and a box sliding on the world along one axis with a rotor armature.
+    """
+    mjcf = _build_plane_contact_model(
+        "free_boxes_and_slider", condim="3", friction="1. 0.5 0.5", plane_size="40. 40. 40."
+    )
+    worldbody = mjcf.find("worldbody")
+    # A yaw of its own per box spreads the corner contacts along x, which is what pairs them with MuJoCo's
+    for name, pos, euler, mass, inertia in (
+        ("box_left", "-0.5 0. 0.1999", "0. 0. 20.", "64.", "1.7 1.7 1.7"),
+        ("box_right", "0.5 0. 0.1999", "0. 0. -35.", "0.064", "0.0017 0.0017 0.0017"),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos, euler=euler)
+        ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+        ET.SubElement(body, "inertial", pos="0.01 -0.02 0.03", mass=mass, diaginertia=inertia)
+        ET.SubElement(body, "joint", name=f"{name}_root", type="free")
+    body = ET.SubElement(worldbody, "body", name="box_slider", pos="0. 1. 1.")
+    ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+    ET.SubElement(body, "joint", name="box_slider_root", type="slide", axis="1 0 0", armature="0.1")
     return mjcf
 
 
@@ -100,11 +188,64 @@ def tet_meshball():
     ET.SubElement(worldbody, "geom", name="tet", type="mesh", mesh="tet")
     # The first ball lands off the tetrahedron's symmetry plane: a centered drop leaves the deepest face an exact
     # tie between two mirror faces, whose resolution is platform rounding in both engines.
-    for i, pos in enumerate(("0.02 0 1.2", "0.3 0 1.2", "0.3 0.29 1.2")):
+    for i, pos in enumerate(("0.03 0 1.2", "0.3 0 1.2", "0.3 0.29 1.2")):
         body = ET.SubElement(worldbody, "body", name=f"ball{i + 1}", pos=pos)
         ET.SubElement(body, "joint", name=f"root{i + 1}", type="free")
         ET.SubElement(body, "geom", name=f"ball{i + 1}_geom", type="mesh", mesh="icosphere")
     return mjcf
+
+
+@pytest.fixture(scope="session")
+def urdf_with_external_assets(asset_tmp_path):
+    """Generate a URDF naming a mesh and a texture by absolute paths outside the directory the model itself sits in.
+
+    Its material carries both a color and an image texture, shared by a sphere visual without texture coordinates and
+    a quad visual with them.
+    """
+    assets = asset_tmp_path / "external_assets"
+    assets.mkdir(exist_ok=True)
+    sphere_path = assets / "sphere.obj"
+    if not sphere_path.exists():
+        sphere_path.symlink_to(os.path.join(get_assets_dir(), "meshes", "sphere.obj"))
+    quad_path = assets / "textured_quad.obj"
+    quad_lines = (
+        "v 0 0 0",
+        "v 1 0 0",
+        "v 1 1 0",
+        "v 0 1 0",
+        "vt 0 0",
+        "vt 1 0",
+        "vt 1 1",
+        "vt 0 1",
+        "f 1/1 2/2 3/3",
+        "f 1/1 3/3 4/4",
+    )
+    quad_path.write_text("\n".join(quad_lines))
+    texture_path = assets / "texture.png"
+    texture = np.array(
+        [
+            [[100, 0, 255], [100, 0, 255]],
+            [[200, 0, 255], [200, 0, 255]],
+        ],
+        dtype=np.uint8,
+    )
+    Image.fromarray(texture).convert("P", palette=Image.Palette.ADAPTIVE).save(texture_path)
+    robot = ET.Element("robot", name="external_mesh_and_texture")
+    material = ET.SubElement(robot, "material", name="textured")
+    ET.SubElement(material, "color", rgba="0 1 0 1")
+    ET.SubElement(material, "texture", filename=str(texture_path))
+    link = ET.SubElement(robot, "link", name="base_link")
+    inertial = ET.SubElement(link, "inertial")
+    ET.SubElement(inertial, "mass", value="1.0")
+    ET.SubElement(inertial, "inertia", ixx="0.01", ixy="0", ixz="0", iyy="0.01", iyz="0", izz="0.01")
+    for tag in ("visual", "collision"):
+        geometry = ET.SubElement(ET.SubElement(link, tag), "geometry")
+        ET.SubElement(geometry, "mesh", filename=str(sphere_path), scale="0.05 0.05 0.05")
+    ET.SubElement(link.find("visual"), "material", name="textured")
+    quad_visual = ET.SubElement(link, "visual")
+    ET.SubElement(ET.SubElement(quad_visual, "geometry"), "mesh", filename=str(quad_path))
+    ET.SubElement(quad_visual, "material", name="textured")
+    return ET.tostring(robot, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
@@ -123,6 +264,73 @@ def mimic_hinges():
     equality = ET.SubElement(mjcf, "equality")
     ET.SubElement(equality, "joint", name="joint_equality", joint1="joint1", joint2="joint2")
     return mjcf
+
+
+@pytest.fixture(scope="session")
+def scaled_mjcf_joint_equalities():
+    mjcf = ET.Element("mujoco", model="scaled_mjcf_joint_equalities")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    equality = ET.SubElement(mjcf, "equality")
+    for driver_type, follower_type, position_y in (
+        ("hinge", "hinge", -0.25),
+        ("slide", "slide", -0.5),
+        ("slide", "hinge", -0.75),
+        ("hinge", "slide", -1.0),
+    ):
+        pair_name = f"{driver_type}_{follower_type}"
+        driver_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_driver_body", pos=f"0 {position_y} 0")
+        ET.SubElement(driver_body, "joint", name=f"{pair_name}_driver", type=driver_type, axis="1 0 0")
+        ET.SubElement(driver_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+        follower_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_follower_body", pos=f"0.15 {position_y} 0")
+        ET.SubElement(follower_body, "joint", name=f"{pair_name}_follower", type=follower_type, axis="1 0 0")
+        ET.SubElement(follower_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+        ET.SubElement(
+            equality,
+            "joint",
+            name=f"{pair_name}_coupling",
+            joint1=f"{pair_name}_follower",
+            joint2=f"{pair_name}_driver",
+            polycoef="0.2 0.4 -0.3 0.2 -0.1",
+        )
+    for name, position_y in (("target", 0.0), ("unrelated", 0.25)):
+        body = ET.SubElement(worldbody, "body", name=f"{name}_body", pos=f"0 {position_y} 0")
+        ET.SubElement(body, "joint", name=name, type="slide", axis="1 0 0")
+        ET.SubElement(body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+    ET.SubElement(equality, "joint", name="fixed_target", joint1="target", polycoef="0.25 1 0 0 0")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
+def scaled_urdf_mimic():
+    robot = ET.Element("robot", name="scaled_urdf_mimic")
+    ET.SubElement(robot, "link", name="base")
+    joint_type_pairs = (
+        ("revolute", "revolute"),
+        ("prismatic", "prismatic"),
+        ("prismatic", "revolute"),
+        ("revolute", "prismatic"),
+    )
+    for driver_type, follower_type in joint_type_pairs:
+        pair_name = f"{driver_type}_{follower_type}"
+        for role in ("driver", "follower"):
+            link = ET.SubElement(robot, "link", name=f"{pair_name}_{role}_link")
+            inertial = ET.SubElement(link, "inertial")
+            ET.SubElement(inertial, "mass", value="1.0")
+            ET.SubElement(inertial, "inertia", ixx="0.01", ixy="0.0", ixz="0.0", iyy="0.01", iyz="0.0", izz="0.01")
+
+        driver = ET.SubElement(robot, "joint", name=f"{pair_name}_driver_joint", type=driver_type)
+        ET.SubElement(driver, "parent", link="base")
+        ET.SubElement(driver, "child", link=f"{pair_name}_driver_link")
+        ET.SubElement(driver, "axis", xyz="0 0 1")
+        ET.SubElement(driver, "limit", lower="-10", upper="10", effort="100", velocity="100")
+
+        follower = ET.SubElement(robot, "joint", name=f"{pair_name}_follower_joint", type=follower_type)
+        ET.SubElement(follower, "parent", link=f"{pair_name}_driver_link")
+        ET.SubElement(follower, "child", link=f"{pair_name}_follower_link")
+        ET.SubElement(follower, "axis", xyz="0 0 1")
+        ET.SubElement(follower, "limit", lower="-10", upper="10", effort="100", velocity="100")
+        ET.SubElement(follower, "mimic", joint=f"{pair_name}_driver_joint", multiplier="2.0", offset="0.25")
+    return ET.tostring(robot, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
@@ -400,12 +608,14 @@ def double_pendulum():
     return _build_multi_pendulum(n=2, joint_damping=0.0, joint_friction=0.0)
 
 
-def _add_sphere_link(urdf, link_name, geom_pos, mass=None, inertia=None):
+def _add_sphere_link(urdf, link_name, geom_pos, mass=None, inertia=None, inertial_pos=None):
     """Append a link carrying a single sphere geometry offset by 'geom_pos' from the link frame, optionally authoring
-    an inertial element whose origin is left omitted."""
+    an inertial element, whose origin is left omitted unless 'inertial_pos' is given."""
     link = ET.SubElement(urdf, "link", name=link_name)
     if mass is not None:
         inertial = ET.SubElement(link, "inertial")
+        if inertial_pos is not None:
+            ET.SubElement(inertial, "origin", xyz=inertial_pos, rpy="0.0 0.0 0.0")
         ET.SubElement(inertial, "mass", value=str(mass))
         ixx, ixy, ixz, iyy, iyz, izz = (str(value) for value in inertia)
         ET.SubElement(inertial, "inertia", ixx=ixx, ixy=ixy, ixz=ixz, iyy=iyy, iyz=iyz, izz=izz)
@@ -445,12 +655,116 @@ def undefined_inertia():
 
 
 @pytest.fixture(scope="session")
+def undefined_inertia_arm():
+    """Generate a URDF of two links joined by a revolute joint, neither authoring an inertial element."""
+    urdf = ET.Element("robot", name="undefined_inertia_arm")
+    _add_sphere_link(urdf, "base_link", "0.0 0.0 0.0")
+    _add_sphere_link(urdf, "tip_link", "0.0 0.0 0.09")
+    joint = ET.SubElement(urdf, "joint", name="elbow", type="continuous")
+    ET.SubElement(joint, "origin", xyz="0.0 0.0 0.2", rpy="0.0 0.0 0.0")
+    ET.SubElement(joint, "axis", xyz="1 0 0")
+    ET.SubElement(joint, "parent", link="base_link")
+    ET.SubElement(joint, "child", link="tip_link")
+    ET.SubElement(joint, "limit", effort="100.0", velocity="30.0")
+    return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def implicit_inertial_origin():
     """Generate a URDF with an authored inertia whose origin is omitted. Its geometry is offset far enough from the
     link frame that the resolved center of mass falls outside the geometry bounding box."""
     urdf = ET.Element("robot", name="implicit_inertial_origin")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.09", mass=2.5, inertia=(0.11, 0.01, 0.02, 0.22, 0.03, 0.30))
     return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def sliding_ball_pair():
+    """Build a URDF of two spheres joined by a prismatic joint, each carrying the requested mass and the inertia of a
+    sphere of that mass, so a pair authored at one set of masses can be compared against a pair brought to it."""
+
+    def build(base_mass, tip_mass):
+        radius = 0.06
+        urdf = ET.Element("robot", name="sliding_ball_pair")
+        for name, mass in (("base_link", base_mass), ("tip_link", tip_mass)):
+            inertia = 0.4 * mass * radius**2
+            _add_sphere_link(urdf, name, "0.0 0.0 0.0", mass=mass, inertia=(inertia, 0.0, 0.0, inertia, 0.0, inertia))
+        joint = ET.SubElement(urdf, "joint", name="slide", type="prismatic")
+        ET.SubElement(joint, "parent", link="base_link")
+        ET.SubElement(joint, "child", link="tip_link")
+        ET.SubElement(joint, "origin", xyz="0.0 0.0 0.2", rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "axis", xyz="0.0 0.0 1.0")
+        ET.SubElement(joint, "limit", lower="-0.1", upper="0.1", effort="100.0", velocity="10.0")
+        return ET.tostring(urdf, encoding="unicode")
+
+    return build
+
+
+@pytest.fixture(scope="session")
+def free_bodies_in_one_model():
+    """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks."""
+    mjcf = ET.Element("mujoco")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for i_body, mass in enumerate((1.0, 3.0)):
+        body = ET.SubElement(worldbody, "body", name=f"free_{i_body}", pos=f"{i_body} 4.0 0.4")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", mass=str(mass))
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def degenerate_inertials():
+    """Generate a URDF stating a degenerate inertial on several of its links: a zero mass on the root, a zero
+    mass beside geometry and an authored center of mass on a fixed child, a zero mass above a fixed child that carries
+    all of it, a zero inertia beside an authored center of mass, and a zero inertia on a fixed child. MuJoCo rejects a
+    moving body whose rigid subtree carries no inertia, so each degenerate branch either roots the robot or holds a
+    fixed child that authors one."""
+    urdf = ET.Element("robot", name="degenerate_inertials")
+    _add_sphere_link(urdf, "base_link", "0.0 0.0 0.09", mass=0.0, inertia=(0.11, 0.01, 0.02, 0.22, 0.03, 0.30))
+    _add_sphere_link(urdf, "massless_marker", "0.0 0.0 0.09", mass=0.0, inertia=(0.0,) * 6, inertial_pos="0.0 0.0 0.11")
+    _add_sphere_link(urdf, "implicit_origin", "0.0 0.0 0.09", mass=2.5, inertia=(0.11, 0.01, 0.02, 0.22, 0.03, 0.30))
+    _add_sphere_link(urdf, "no_inertial", "0.0 0.0 0.09")
+    _add_sphere_link(urdf, "connector", "0.0 0.0 0.09", mass=0.0, inertia=(0.0,) * 6)
+    _add_sphere_link(
+        urdf, "bob", "0.0 0.0 0.09", mass=1.0, inertia=(1e-3, 0.0, 0.0, 1e-3, 0.0, 1e-3), inertial_pos="0.0 0.0 0.09"
+    )
+    _add_sphere_link(urdf, "zero_inertia", "0.0 0.0 0.09", mass=2.5, inertia=(0.0,) * 6, inertial_pos="0.0 0.0 0.11")
+    _add_sphere_link(urdf, "tip", "0.0 0.0 0.09", mass=1e-5, inertia=(0.0,) * 6)
+    # Every sphere sits at the same offset from its own link frame, so that the whole robot rests flat.
+    # The revolute axis is aligned with gravity so that neither branch swings on the way down.
+    for name, origin in (("implicit_origin", "0.4 0.0 0.0"), ("connector", "-0.4 0.0 0.0")):
+        joint = ET.SubElement(urdf, "joint", name=f"{name}_joint", type="continuous")
+        ET.SubElement(joint, "origin", xyz=origin, rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "axis", xyz="0.0 0.0 1.0")
+        ET.SubElement(joint, "parent", link="base_link")
+        ET.SubElement(joint, "child", link=name)
+    # Only the four links whose sphere is left at ground level touch it, as a triangle wide enough to stand on.
+    for name, parent, origin in (
+        ("massless_marker", "base_link", "0.0 0.0 0.3"),
+        ("no_inertial", "implicit_origin", "0.0 0.0 0.3"),
+        ("bob", "connector", "0.0 0.0 0.3"),
+        ("zero_inertia", "connector", "0.0 0.4 0.0"),
+        ("tip", "zero_inertia", "0.0 0.0 0.3"),
+    ):
+        joint = ET.SubElement(urdf, "joint", name=f"{name}_joint", type="fixed")
+        ET.SubElement(joint, "origin", xyz=origin, rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "parent", link=parent)
+        ET.SubElement(joint, "child", link=name)
+    return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def zero_density_marker_mjcf():
+    """Generate an MJCF with a free body holding a jointless child body whose geom has a zero density. The two bodies
+    share one frame, so the center of mass of the child lies inside its own geometry."""
+    mjcf = ET.Element("mujoco", model="zero_density_marker")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    hull = ET.SubElement(worldbody, "body", name="hull", pos="0.0 -2.0 0.5")
+    ET.SubElement(hull, "freejoint")
+    ET.SubElement(hull, "geom", type="box", size="0.1 0.1 0.1")
+    marker = ET.SubElement(hull, "body", name="marker")
+    ET.SubElement(marker, "geom", type="sphere", size="0.05", density="0")
+    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
@@ -464,6 +778,52 @@ def implicit_inertial_origin_chain():
     ET.SubElement(joint, "child", link="tip_link")
     ET.SubElement(joint, "origin", xyz="0.0 0.0 0.3", rpy="0.0 0.0 0.0")
     return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def aligned_link_frame_urdfs():
+    """Generate two fixed-child URDF variants with nontrivial link-local frames."""
+    joint_pos = (0.31, -0.09, 0.11)
+    joint_rpy = (-0.2, 0.15, 0.35)
+    variants_inertial = (
+        (
+            (1.0, (0.1, -0.05, 0.02), (0.0, 0.0, 0.0), (0.04, 0.05, 0.06)),
+            (0.5, (0.04, 0.02, -0.03), (0.2, -0.1, 0.3), (0.01, 0.015, 0.02)),
+        ),
+        (
+            (0.8, (-0.06, 0.04, 0.03), (0.0, 0.0, 0.0), (0.03, 0.04, 0.05)),
+            (0.4, (-0.03, 0.05, 0.02), (-0.1, 0.25, -0.2), (0.012, 0.016, 0.021)),
+        ),
+    )
+    links_geoms = (
+        ("base", ("0.04 -0.02 0.03", "0.2 -0.1 0.3"), ("-0.05 0.03 0.06", "0.4 0.1 -0.2")),
+        ("child", ("0.08 0.01 -0.02", "-0.3 0.2 0.1"), ("0.02 -0.06 0.05", "0.1 -0.4 0.3")),
+    )
+    urdfs = []
+    for i_variant, links_inertial in enumerate(variants_inertial):
+        urdf = ET.Element("robot", name=f"fixed_child_inertial_frame_{i_variant}")
+        for i_link, (link_name, geom_origin, vgeom_origin) in enumerate(links_geoms):
+            link = ET.SubElement(urdf, "link", name=link_name)
+            for group_tag, (origin_xyz, origin_rpy) in (("collision", geom_origin), ("visual", vgeom_origin)):
+                group = ET.SubElement(link, group_tag)
+                geometry = ET.SubElement(group, "geometry")
+                ET.SubElement(geometry, "box", size="0.3 0.2 0.15")
+                ET.SubElement(group, "origin", xyz=origin_xyz, rpy=origin_rpy)
+
+            mass, com, inertial_rpy, inertia = links_inertial[i_link]
+            inertial = ET.SubElement(link, "inertial")
+            ET.SubElement(inertial, "mass", value=str(mass))
+            ET.SubElement(inertial, "origin", xyz=" ".join(map(str, com)), rpy=" ".join(map(str, inertial_rpy)))
+            ixx, iyy, izz = inertia
+            ET.SubElement(inertial, "inertia", ixx=str(ixx), ixy="0", ixz="0", iyy=str(iyy), iyz="0", izz=str(izz))
+
+        joint = ET.SubElement(urdf, "joint", name="fixed_joint", type="fixed")
+        ET.SubElement(joint, "parent", link="base")
+        ET.SubElement(joint, "child", link="child")
+        ET.SubElement(joint, "origin", xyz=" ".join(map(str, joint_pos)), rpy=" ".join(map(str, joint_rpy)))
+        urdfs.append(ET.tostring(urdf, encoding="unicode"))
+
+    return tuple(urdfs)
 
 
 @pytest.fixture(scope="session")
@@ -576,16 +936,18 @@ def general_actuator():
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
     body1 = ET.SubElement(worldbody, "body", name="link1", pos="0 0 1")
-    ET.SubElement(body1, "joint", name="hinge_pd", type="hinge", axis="0 1 0", damping="0.5")
+    ET.SubElement(body1, "joint", name="hinge_pd", type="hinge", axis="0 1 0", damping="0.5", actuatorfrcrange="-20 20")
     ET.SubElement(body1, "geom", type="capsule", size="0.05 0.3", mass="1.0")
     body2 = ET.SubElement(body1, "body", name="link2", pos="0 0 -0.6")
     ET.SubElement(body2, "joint", name="hinge_general", type="hinge", axis="0 1 0", damping="0.3")
     ET.SubElement(body2, "geom", type="capsule", size="0.04 0.2", mass="0.5")
     body3 = ET.SubElement(body2, "body", name="link3", pos="0 0 -0.4")
-    ET.SubElement(body3, "joint", name="hinge_motor", type="hinge", axis="0 1 0", damping="0.2")
+    ET.SubElement(
+        body3, "joint", name="hinge_motor", type="hinge", axis="0 1 0", damping="0.2", actuatorfrcrange="-4 4"
+    )
     ET.SubElement(body3, "geom", type="capsule", size="0.03 0.15", mass="0.3")
     actuator = ET.SubElement(mjcf, "actuator")
-    ET.SubElement(actuator, "position", name="act_pd", joint="hinge_pd", kp="100")
+    ET.SubElement(actuator, "position", name="act_pd", joint="hinge_pd", kp="100", kv="2")
     ET.SubElement(
         actuator,
         "general",
@@ -595,7 +957,9 @@ def general_actuator():
         biastype="affine",
         biasprm="0.5 -10 -1",
     )
-    ET.SubElement(actuator, "motor", name="act_motor", joint="hinge_motor", gear="5")
+    ET.SubElement(
+        actuator, "motor", name="act_motor", joint="hinge_motor", gear="5", ctrlrange="-1 1", forcerange="6 8"
+    )
     return mjcf
 
 
@@ -747,6 +1111,28 @@ def freeflyer_mjcf():
     ET.SubElement(greatgrandchild, "inertial", pos="0 0 0", mass="0.1", diaginertia="0.0001 0.0001 0.0001")
     ET.SubElement(greatgrandchild, "geom", type="sphere", size="0.01")
     return mjcf
+
+
+@pytest.fixture(scope="session")
+def trees_and_slider_mjcf():
+    """Generate an MJCF model holding three kinematic trees: a free body with a hinged child twice, the second hinge
+    with an authored armature, and a body sliding on the world along one axis with an authored armature."""
+    mjcf = ET.Element("mujoco", model="trees_and_slider")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+        ET.SubElement(body, "joint", type="free")
+        ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+        ET.SubElement(body, "geom", type="sphere", size="0.05")
+        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0 0 0.1")
+        ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
+        ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
+        ET.SubElement(child, "geom", type="sphere", size="0.02")
+    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0 1")
+    ET.SubElement(slider, "joint", type="slide", axis="1 0 0", armature="0.3")
+    ET.SubElement(slider, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+    ET.SubElement(slider, "geom", type="sphere", size="0.05")
+    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")

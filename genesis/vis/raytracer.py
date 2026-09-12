@@ -88,7 +88,7 @@ class SphereLight(ShapeLight):
             )
             renderer.update_rigid(self.name, gs.trans_to_T(self.pos))
         else:
-            renderer.add_particles(self.name)
+            renderer.add_particles(self.name, None)
             renderer.update_particles(self.name, self.pos, self.radius)
 
 
@@ -312,13 +312,21 @@ class Raytracer:
                     self.add_deformable(str(mpm_entity.uid))
                 else:
                     self.add_particles(
-                        str(mpm_entity.uid), self.sim.mpm_solver.particle_radius, mpm_entity.material.rho
+                        str(mpm_entity.uid),
+                        self.sim.mpm_solver,
+                        self.sim.mpm_solver.particle_radius,
+                        mpm_entity.material.rho,
                     )
 
         # SPH particles
         if self.sim.sph_solver.is_active:
             for sph_entity in self.sim.sph_solver.entities:
-                self.add_particles(str(sph_entity.uid), self.sim.sph_solver.particle_radius, sph_entity.material.rho)
+                self.add_particles(
+                    str(sph_entity.uid),
+                    self.sim.sph_solver,
+                    self.sim.sph_solver.particle_radius,
+                    sph_entity.material.rho,
+                )
 
         # PBD entities
         if self.sim.pbd_solver.is_active:
@@ -327,7 +335,7 @@ class Raytracer:
                     self.add_deformable(str(pbd_entity.uid))
                 else:
                     if self.render_particle_as == "sphere":
-                        self.add_particles(str(pbd_entity.uid))
+                        self.add_particles(str(pbd_entity.uid), self.sim.pbd_solver)
                     elif self.render_particle_as == "tet":
                         mesh = mu.create_tets_mesh(pbd_entity.n_particles, self.sim.pbd_solver.particle_radius)
                         pbd_entity._tets_mesh = mesh
@@ -525,8 +533,12 @@ class Raytracer:
             self._scene.update_shape(self._shapes[shape_name])
 
     def update_rigid_batch(self, name, matrices):
-        for batch_index in self.rendered_envs_idx:
-            self.update_rigid(name, matrices[batch_index], batch_index)
+        """Place a rigid shape in every rendered environment from its transforms in each of them, laid out on the
+        environment grid as the raytracer draws the environments side by side."""
+        for env_i, batch_index in enumerate(self.rendered_envs_idx):
+            matrix = matrices[env_i].copy()
+            matrix[:3, 3] += self.visualizer.scene.envs_offset[batch_index]
+            self.update_rigid(name, matrix, batch_index)
 
     def add_deformable(self, name, batch_index=None):
         shape_name = name if batch_index is None else f"{name}_{batch_index}"
@@ -548,7 +560,7 @@ class Raytracer:
         )
         self._scene.update_shape(self._shapes[shape_name])
 
-    def add_particles(self, name, radius=None, density=None):
+    def add_particles(self, name, solver, radius=None, density=None):
         if self.shape_reconstructs[name] is not None:
             self.add_deformable(name)
         else:
@@ -561,11 +573,17 @@ class Raytracer:
             )
 
         if self.shape_foamgens[name] is not None:
+            # The gravity of the environment being rendered, taken from the solver these particles belong to, since
+            # each holds its own and a solver no entity was given never built one.
+            envs_idx = self.rendered_envs_idx[:1] if self.sim.n_envs > 0 else None
+            gravity = solver.get_gravity(envs_idx)
+            if envs_idx is not None:
+                gravity = gravity[0]
             self.shape_foamgens[name]["generator"] = pu.init_foam_generator(
                 object_id=name,
                 particle_radius=radius,
                 time_step=self.scene.dt,
-                gravity=self.scene.gravity,
+                gravity=miscu.tensor_to_array(gravity),
                 lower_bound=self.sim.sph_solver.lower_bound,
                 upper_bound=self.sim.sph_solver.upper_bound,
                 spray_decay=self.shape_foamgens[name]["spray_decay"],
@@ -575,7 +593,7 @@ class Raytracer:
                 foam_density=density,  # use fluid density for foam
             )
             self.shape_foamgens[name]["radius"] = radius * self.shape_foamgens[name]["radius_scale"]
-            self.add_particles(f"{name}_foams")
+            self.add_particles(f"{name}_foams", solver)
 
     def update_particles(self, name, particles, radius=None, particles_vel=None, particles_radii=None):
         if self.shape_reconstructs[name] is not None:
@@ -655,14 +673,14 @@ class Raytracer:
         self._t = -1
 
     def update_scene(self, force_render: bool = False):
-        if not force_render and self._t >= self.scene.t:
+        if not force_render and self._t >= self.scene.sim.cur_step_global:
             if self.camera_updated:
                 self._scene.update_scene(time=self._t)
                 self.camera_updated = False
             return
 
         # update t
-        self._t = self.scene.t
+        self._t = self.scene.sim.cur_step_global
 
         # update variables not used in simulation
         self.visualizer.update_visual_states(force_render)
@@ -680,17 +698,17 @@ class Raytracer:
             if not solver.is_active:
                 continue
 
+            # One conversion of the geom poses per visual mode in use
+            geoms_T_by_mode = {}
             for entity in solver.entities:
-                if entity.surface.vis_mode == "visual":
-                    geoms = entity.vgeoms
-                    geoms_T = solver._vgeoms_render_T
-                else:
-                    geoms = entity.geoms
-                    geoms_T = solver._geoms_render_T
+                is_visual = entity.surface.vis_mode == "visual"
+                geoms = entity.vgeoms if is_visual else entity.geoms
+                if is_visual not in geoms_T_by_mode:
+                    geoms_T_by_mode[is_visual] = self.visualizer.context.rigid_geoms_T(solver, is_visual)
+                geoms_T = geoms_T_by_mode[is_visual]
 
                 for geom in geoms:
-                    geom_T = geoms_T[geom.idx]  # TODO: support batching
-                    self.update_rigid_batch(str(geom.uid), geom_T)
+                    self.update_rigid_batch(str(geom.uid), geoms_T[:, geom.idx])
 
         # MPM particles
         if self.sim.mpm_solver.is_active:

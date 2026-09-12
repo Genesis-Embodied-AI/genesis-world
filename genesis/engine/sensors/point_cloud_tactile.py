@@ -2253,7 +2253,7 @@ class ElastomerTaxelSensor(
                 shared_metadata.probe_depth_buf,
                 solver.dyn_state,
                 solver.dyn_info,
-                solver.collider._collider_info,
+                solver.collider.collider_info,
             )
         else:
             collision_bvh_contexts = shared_context.collision_bvh_contexts
@@ -2332,7 +2332,7 @@ class ElastomerTaxelSensor(
                     shared_metadata.surface_candidate_buf,
                     solver.dyn_state,
                     solver.dyn_info,
-                    solver.collider._collider_info,
+                    solver.collider.collider_info,
                     _ELASTOMER_QUERY_AABB_MARGIN,
                     BVH_STACK_SIZE,
                 )

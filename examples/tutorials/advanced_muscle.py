@@ -6,18 +6,22 @@ import genesis as gs
 gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
 dt = 5e-4
+substep_dt = 5e-5
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
-        substeps=10,
+        dt=dt,
         gravity=(0, 0, 0),
     ),
+    rigid_options=gs.options.RigidOptions(
+        dt=substep_dt,
+    ),
     mpm_options=gs.options.MPMOptions(
-        dt=dt,
+        dt=substep_dt,
         lower_bound=(-1.0, -1.0, -0.2),
         upper_bound=(1.0, 1.0, 1.0),
     ),
     fem_options=gs.options.FEMOptions(
-        dt=dt,
+        dt=substep_dt,
         damping=45.0,
     ),
     vis_options=gs.options.VisOptions(

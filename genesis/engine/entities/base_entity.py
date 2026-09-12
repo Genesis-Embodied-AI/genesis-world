@@ -1,13 +1,27 @@
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 
 import genesis as gs
+from genesis.engine.materials.base import Material
+from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.sensors.base_sensor import Sensor
+
+
+@dataclass
+class EntityDescription:
+    """Base class of what one entity of a scene is created from, whatever the solver simulating it.
+
+    A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
+    material is what every description holds, since the simulator picks the solver from it.
+    """
+
+    material: Material
 
 
 class Entity(RBC):
@@ -25,6 +39,9 @@ class Entity(RBC):
         surface,
         name: str | None = None,
     ):
+        # An entity is created from one morph. A kind of entity built from several passes the primary one here.
+        if not isinstance(morph, Morph):
+            gs.raise_exception(f"An entity is created from one morph, got {type(morph).__name__}.")
         uid = gs.UID()
         while any(entity.uid.match(uid, short_only=True) for entity in scene.entities):
             uid = gs.UID()
@@ -82,6 +99,15 @@ class Entity(RBC):
     @property
     def morph(self):
         return self._morph
+
+    @property
+    def desc(self) -> EntityDescription | None:
+        """The description this entity was created from, or None for a kind of entity no description carries.
+
+        'Scene.export' writes every entity as its description and rejects a scene holding an entity without one. A
+        kind of entity gains export support by returning its description here.
+        """
+        return None
 
     @property
     def material(self):

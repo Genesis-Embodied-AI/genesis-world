@@ -48,23 +48,10 @@ class InteractiveScene:
         self._entities_kwargs: dict[str, dict[str, Any]] = {}
         self._sensors_kwargs: list["SensorOptions"] = []
         scene.register_pre_step_callback(self._pre_step)
-        # Capture the wrapped scene's construction so rebuild() can reconstruct it identically. The stored option
-        # objects are already merged with sim_options; re-passing them is idempotent.
+        # Capture the wrapped scene's construction so rebuild() can reconstruct it identically. The stored options
+        # are already merged with the simulation options, so passing them again changes nothing.
         self._scene_kwargs: dict[str, Any] = dict(
-            sim_options=scene.sim_options,
-            coupler_options=scene.coupler_options,
-            tool_options=scene.tool_options,
-            rigid_options=scene.rigid_options,
-            kinematic_options=scene.kinematic_options,
-            mpm_options=scene.mpm_options,
-            sph_options=scene.sph_options,
-            fem_options=scene.fem_options,
-            sf_options=scene.sf_options,
-            pbd_options=scene.pbd_options,
-            vis_options=scene.vis_options,
-            viewer_options=scene.viewer_options,
-            profiling_options=scene.profiling_options,
-            renderer=scene.renderer_options,
+            options=scene.options,
             show_viewer=scene.viewer is not None,
         )
         self._build_kwargs: dict[str, Any] = dict(
@@ -151,7 +138,7 @@ class InteractiveScene:
 
     @property
     def t(self) -> int:
-        return self.scene.t
+        return self.scene.sim.cur_step_global
 
     @property
     def dt(self) -> float:
@@ -171,16 +158,14 @@ class InteractiveScene:
 
     @with_lock
     def refresh_visual_transforms(self):
-        """Refresh render transforms so visuals reflect the latest qpos. Idempotent."""
+        """Refresh the visual geom poses and the drawn nodes so visuals reflect the latest qpos. Idempotent."""
         self._refresh_visual_transforms_unlocked()
 
     def _refresh_visual_transforms_unlocked(self):
         rigid_solver = self.scene.rigid_solver
         if not rigid_solver.is_active:
             return
-        rigid_solver.update_geoms_render_T()
         rigid_solver.update_vgeoms()
-        rigid_solver.update_vgeoms_render_T()
         ctx = self._ctx
         ctx.update_link_frame()
         ctx.update_rigid()
@@ -217,8 +202,6 @@ class InteractiveScene:
     @with_lock
     def set_entity_vis_mode(self, entity: "RigidEntity", mode: str):
         """Switch entity rendering between ``"visual"`` and ``"collision"``."""
-        from genesis.ext import pyrender
-
         if not isinstance(entity.surface, gs.surfaces.Surface):
             return
         old_mode = entity.surface.vis_mode
@@ -230,40 +213,16 @@ class InteractiveScene:
 
         old_geoms = entity.vgeoms if old_mode == "visual" else entity.geoms
         for geom in old_geoms:
-            if geom.uid in ctx.rigid_nodes:
-                ctx.remove_node(ctx.rigid_nodes[geom.uid])
-                del ctx.rigid_nodes[geom.uid]
+            ctx.remove_rigid_node(geom)
 
         entity.surface.vis_mode = mode
-        rigid_solver.update_geoms_render_T()
         rigid_solver.update_vgeoms()
-        rigid_solver.update_vgeoms_render_T()
 
-        if mode == "visual":
-            geoms = entity.vgeoms
-            geoms_T = rigid_solver._vgeoms_render_T
-        else:
-            geoms = entity.geoms
-            geoms_T = rigid_solver._geoms_render_T
-
-        is_collision = mode == "collision"
+        is_visual = mode == "visual"
+        geoms = entity.vgeoms if is_visual else entity.geoms
+        geoms_T = ctx.rigid_geoms_T(rigid_solver, is_visual)
         for geom in geoms:
-            geom_envs_idx = ctx._get_geom_active_envs_idx(geom, ctx.rendered_envs_idx)
-            if len(geom_envs_idx) == 0:
-                continue
-            mesh = geom.get_trimesh()
-            geom_T = geoms_T[geom.idx][geom_envs_idx]
-            ctx.add_rigid_node(
-                geom,
-                pyrender.Mesh.from_trimesh(
-                    mesh=mesh,
-                    poses=geom_T,
-                    smooth=geom.surface.smooth if not is_collision else False,
-                    double_sided=geom.surface.double_sided if not is_collision else False,
-                    is_floor=isinstance(entity._morph, gs.morphs.Plane),
-                    env_shared=not ctx.env_separate_rigid,
-                ),
-            )
+            ctx.add_geom_node(geom, geoms_T)
 
     def rebuild(
         self,

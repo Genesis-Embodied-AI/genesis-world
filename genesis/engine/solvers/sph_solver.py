@@ -7,16 +7,18 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import SPHEntity
+from genesis.engine.materials import SPH
 from genesis.engine.states.solvers import SPHSolverState
 
-from .base_solver import Solver
+from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 if TYPE_CHECKING:
     from genesis.engine.entities import SPHEntity
 
 
 @qd.data_oriented
-class SPHSolver(Solver):
+class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
+    material_cls = SPH.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -158,12 +160,8 @@ class SPHSolver(Solver):
             # TODO: Support per-particle density
             self._density0 = self.particles_info[0].rho
 
-        # FIXME: _gravity must be a raw qd.field() — see comment in mpm_solver.py
-        # Only when active — see the SNode-tree note in mpm_solver.py.
-        if self.is_active and self._gravity is not None:
-            gravity = self._gravity.to_numpy()
-            self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
-            self._gravity.from_numpy(gravity)
+        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
+        self._build_gravity(as_field=True)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -173,7 +171,9 @@ class SPHSolver(Solver):
     def is_active(self):
         return self.n_particles > 0
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "SPHEntity":
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+    ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,
             solver=self,

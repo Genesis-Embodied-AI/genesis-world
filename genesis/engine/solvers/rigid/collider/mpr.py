@@ -24,7 +24,7 @@ class MPR:
             # Bounds that refinement, which is not otherwise guaranteed to terminate.
             CCD_ITERATIONS=50,
         )
-        self._mpr_state = array_class.get_mpr_state(self._solver._B)
+        self.mpr_state = array_class.get_mpr_state(self._solver._B)
 
 
 @qd.kernel
@@ -140,12 +140,16 @@ def mpr_portal_can_encapsule_origin(v, direction, collider_info: array_class.Col
 def mpr_portal_reach_tolerance(
     i_ga, i_gb, i_b, ccd_tol, v, direction, mpr_state: array_class.MPRState, collider_info: array_class.ColliderInfo
 ):
-    dv1 = mpr_state.simplex_support.v[1, i_b].dot(direction)
-    dv2 = mpr_state.simplex_support.v[2, i_b].dot(direction)
-    dv3 = mpr_state.simplex_support.v[3, i_b].dot(direction)
-    dv4 = v.dot(direction)
-    dot1 = qd.min(dv4 - dv1, dv4 - dv2, dv4 - dv3)
-    return dot1 < ccd_tol + collider_info.mpr.CCD_EPS[None] * qd.abs(dv4)
+    pv1 = mpr_state.simplex_support.v[1, i_b]
+    pv2 = mpr_state.simplex_support.v[2, i_b]
+    pv3 = mpr_state.simplex_support.v[3, i_b]
+    dv = v.dot(direction)
+    dot1 = qd.min(dv - pv1.dot(direction), dv - pv2.dot(direction), dv - pv3.dot(direction))
+    # A portal plane through the origin makes dv and the three pv projections pure rounding noise.
+    # The rounding error of a dot product scales with its operands, so the tolerance floor scales with the vertices.
+    # Without the floor a noise gap counts as progress, the portal re-adds a held vertex, and refinement never ends.
+    scale = qd.max(qd.abs(v).sum(), qd.abs(pv1).sum(), qd.abs(pv2).sum(), qd.abs(pv3).sum())
+    return dot1 < ccd_tol + collider_info.mpr.CCD_EPS[None] * scale
 
 
 @qd.func

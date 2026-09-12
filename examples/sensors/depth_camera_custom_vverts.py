@@ -32,6 +32,8 @@ def main():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
+        ),
+        rigid_options=gs.options.RigidOptions(
             gravity=(0, 0, -9.81),
         ),
         viewer_options=gs.options.ViewerOptions(

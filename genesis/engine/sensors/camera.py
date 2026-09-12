@@ -326,11 +326,11 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         scene = self._manager._sim.scene
 
         # If the scene time advanced, mark all cameras as stale
-        if self._shared_metadata.last_render_timestep != scene.t:
+        if self._shared_metadata.last_render_timestep != scene.sim.cur_step_global:
             if self._shared_metadata.sensors is not None:
                 for sensor in self._shared_metadata.sensors:
                     sensor._stale = True
-            self._shared_metadata.last_render_timestep = scene.t
+            self._shared_metadata.last_render_timestep = scene.sim.cur_step_global
 
         # If this camera is not stale, cache is considered fresh
         if not self._stale:
@@ -369,7 +369,7 @@ def _camera_read_from_image_cache(sensor, cached_image, envs_idx, *, to_numpy: b
 
     Parameters
     ----------
-    sensor : any camera sensor with _manager and _return_data_class
+    sensor : any camera sensor with _manager and _return_data_cls
     cached_image : np.ndarray | torch.Tensor
         Image cache for this camera, shaped (B, H, W, 3) or (H, W, 3) depending on n_envs.
     envs_idx : None | int | sequence
@@ -382,11 +382,11 @@ def _camera_read_from_image_cache(sensor, cached_image, envs_idx, *, to_numpy: b
 
     if envs_idx is None:
         if sensor._manager._sim.n_envs == 0:
-            return sensor._return_data_class(rgb=cached_image[0])
-        return sensor._return_data_class(rgb=cached_image)
+            return sensor._return_data_cls(rgb=cached_image[0])
+        return sensor._return_data_cls(rgb=cached_image)
     if isinstance(envs_idx, (int, np.integer)):
-        return sensor._return_data_class(rgb=cached_image[envs_idx])
-    return sensor._return_data_class(rgb=cached_image[envs_idx])
+        return sensor._return_data_cls(rgb=cached_image[envs_idx])
+    return sensor._return_data_cls(rgb=cached_image[envs_idx])
 
 
 # ========================== Rasterizer Camera Sensor ==========================
@@ -443,12 +443,6 @@ class RasterizerCameraSensor(
 
         self._shared_metadata.sensors.append(self)
 
-        if self._manager._sim.n_envs > 1 and not self._shared_metadata.context.env_separate_rigid:
-            gs.raise_exception(
-                "RasterizerCameraSensor with n_envs > 1 requires 'env_separate_rigid=True' in VisOptions "
-                "for correct per-environment rendering."
-            )
-
         # Register camera now if standalone (offscreen), or defer to first render if using visualizer's rasterizer
         # (visualizer isn't built yet at sensor.build() time)
         if self._shared_metadata.renderer.offscreen:
@@ -457,6 +451,12 @@ class RasterizerCameraSensor(
         _B = max(self._manager._sim.n_envs, 1)
         w, h = self._options.res
         self._shared_metadata.image_cache[self._idx] = torch.zeros((_B, h, w, 3), dtype=torch.uint8, device=gs.device)
+
+    @classmethod
+    def reset(cls, shared_metadata: SharedSensorMetadata, shared_ground_truth_cache: torch.Tensor, envs_idx):
+        super().reset(shared_metadata, shared_ground_truth_cache, envs_idx)
+        # The context syncs with the simulation once per step, so a reset at the last synced step must clear that
+        shared_metadata.context.reset()
 
     def _ensure_camera_registered(self):
         """Register this camera with the renderer (no-op if already registered)."""
@@ -483,13 +483,11 @@ class RasterizerCameraSensor(
             gs.logger.warning(
                 "Rasterizer with n_envs > 1 is slow as it doesn't do batched rendering consider using BatchRenderer instead."
             )
-        env_separate_rigid = True
         vis_options = VisOptions(
             show_world_frame=False,
             show_link_frame=False,
             show_cameras=False,
             rendered_envs_idx=range(max(self._manager._sim._B, 1)),
-            env_separate_rigid=env_separate_rigid,
         )
 
         context = RasterizerContext(vis_options)
@@ -547,37 +545,10 @@ class RasterizerCameraSensor(
         """Perform the actual render for the current state."""
         self._ensure_camera_registered()
 
-        context = self._shared_metadata.context
-
-        # When env_separate_rigid is enabled, geometry render transforms include env_spacing offsets (baked in by
-        # kernel_update_geoms_render_T). For per-env sensor rendering, these offsets must be temporarily removed so each
-        # env's geometry renders at local origin relative to the camera. The offsets are restored after rendering to
-        # preserve the correct layout for the interactive viewer which shares the same context.
-        context.update(force_render=True)
-
-        # When env_separate_rigid is enabled, geometry render transforms include env_spacing offsets (baked in by
-        # kernel_update_geoms_render_T). For per-env sensor rendering, these offsets must be temporarily removed so each
-        # env's geometry renders at local origin relative to the camera. The offsets are restored after rendering to
-        # preserve the correct layout for the interactive viewer which shares the same context.
-        envs_offset = context.scene.envs_offset
-        saved_poses = {}
-        if context.env_separate_rigid and (envs_offset != 0).any():
-            for node_uid, node in context.rigid_nodes.items():
-                poses = node.mesh.primitives[0].poses
-                if poses is not None and len(poses) > 1:
-                    saved_poses[node_uid] = poses.copy()
-                    poses[:, :3, 3] -= envs_offset[context.rendered_envs_idx]
-                    context.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
-
+        self._shared_metadata.renderer.update_scene()
         rgb_arr, _, _, _ = self._shared_metadata.renderer.render_camera(
-            self._camera_wrapper, rgb=True, depth=False, segmentation=False, normal=False
+            self._camera_wrapper, rgb=True, depth=False, segmentation=False, normal=False, split_envs=True
         )
-
-        # Restore original geometry transforms with offsets for the interactive viewer
-        for node_uid, poses in saved_poses.items():
-            node = context.rigid_nodes[node_uid]
-            node.mesh.primitives[0].poses = poses
-            context.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
 
         # Ensure contiguous layout because the rendered array may have negative strides.
         rgb_tensor = torch.from_numpy(np.ascontiguousarray(rgb_arr)).to(dtype=torch.uint8, device=gs.device)
@@ -844,7 +815,7 @@ class BatchRendererCameraSensor(
             sensor._shared_metadata.image_cache[sensor._idx][:] = rgb_arr
             sensor._stale = False
 
-        self._shared_metadata.last_render_timestep = self._manager._sim.scene.t
+        self._shared_metadata.last_render_timestep = self._manager._sim.cur_step_global
 
     def _apply_camera_transform(self, camera_T: torch.Tensor):
         """Update batch renderer camera from a world transform."""

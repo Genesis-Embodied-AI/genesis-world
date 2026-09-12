@@ -10,6 +10,8 @@ import genesis as gs
 import genesis.utils.mesh as mu
 from genesis.typing import LaxUnitIntervalArrayType, LaxFArrayType, UnitIntervalArrayType, NDArrayType
 
+from genesis.utils.serialization import Exporting, Loading, SerializationMixin
+
 from .options import Options
 
 
@@ -92,7 +94,7 @@ class ColorTexture(Texture):
         return False
 
 
-class ImageTexture(Texture):
+class ImageTexture(Texture, SerializationMixin):
     """
     A texture with a texture map (image).
 
@@ -160,7 +162,7 @@ class ImageTexture(Texture):
                 if image_path.endswith((".exr")):
                     image_path = mu.check_exr_compression(image_path)
             else:
-                image_array = np.array(Image.open(image_path))
+                image_array = mu.PIL_to_array(Image.open(image_path))
         else:
             # Normalize image array
             if not isinstance(image_array, np.ndarray):
@@ -252,6 +254,30 @@ class ImageTexture(Texture):
         if cutoff is None or self.image_array is None:  # Cutoff does not apply on image file.
             return
         self.image_array = np.where(self.image_array >= 255.0 * cutoff, 255, 0).astype(np.uint8)
+
+    def export(self, exporting: Exporting) -> dict | None:
+        """Return the pixels of the image and how they are read, or None where a file can hold none of it.
+
+        A texture read from an HDR or EXR file keeps its path rather than its pixels, so nothing of it travels.
+        """
+        if self.image_array is None:
+            return None
+        return {
+            "image_path": self.image_path,
+            "image_array": exporting.array(self.image_array),
+            "image_color": exporting.value(self.image_color, UnitIntervalArrayType),
+            "encoding": self.encoding,
+        }
+
+    @classmethod
+    def load(cls, raw: dict, loading: Loading) -> "ImageTexture":
+        """Recreate the texture from the pixels a file holds, which the constructor would read from a file instead."""
+        return cls.model_construct(
+            image_path=raw["image_path"],
+            image_array=loading.array(raw["image_array"]),
+            image_color=loading.value(raw["image_color"], UnitIntervalArrayType),
+            encoding=raw["encoding"],
+        )
 
 
 class BatchTexture(Texture):

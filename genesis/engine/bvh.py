@@ -8,6 +8,12 @@ from genesis.repr_base import RBC
 # https://forums.developer.nvidia.com/t/thinking-parallel-part-ii-tree-traversal-on-the-gpu/148342
 STACK_SIZE = 64
 
+# Launch geometry of the scene-extent reduction in `LBVH.compute_aabb_centers_and_scales`, widest first. Every width
+# is a multiple of 64, hence of any subgroup size `block.reduce_*` can be given (see `qd.simt.subgroup.group_size`).
+# A block reduction costs the same whatever its slice is worth, hence the floor on the workload of a single lane.
+EXTENT_REDUCE_BLOCK_DIMS = (256, 128, 64)
+EXTENT_REDUCE_MIN_AABBS_PER_LANE = 32
+
 
 @qd.data_oriented
 class AABB(RBC):
@@ -82,47 +88,6 @@ class LBVH(RBC):
     max_stack_depth : int
         Maximum stack depth for BVH traversal. Defaults to STACK_SIZE.
 
-    Attributes
-    -----
-    aabbs : qd.field
-        The input AABBs to be organized in the BVH, shape (n_batches, n_aabbs).
-    n_aabbs : int
-        Number of AABBs per batch.
-    n_batches : int
-        Number of batches.
-    max_query_results : int
-        Maximum number of query results allowed.
-    max_stack_depth : int
-        Maximum stack depth for BVH traversal.
-    aabb_centers : qd.field
-        Centers of the AABBs, shape (n_batches, n_aabbs).
-    aabb_min : qd.field
-        Minimum coordinates of AABB centers per batch, shape (n_batches).
-    aabb_max : qd.field
-        Maximum coordinates of AABB centers per batch, shape (n_batches).
-    scale : qd.field
-        Scaling factors for normalizing AABB centers, shape (n_batches).
-    morton_codes : qd.field
-        Morton codes for each AABB, shape (n_batches, n_aabbs).
-    hist : qd.field
-        Histogram for radix sort, shape (n_batches, 256).
-    prefix_sum : qd.field
-        Prefix sum for histogram, shape (n_batches, 256).
-    offset : qd.field
-        Offset for radix sort, shape (n_batches, n_aabbs).
-    tmp_morton_codes : qd.field
-        Temporary storage for radix sort, shape (n_batches, n_aabbs).
-    Node : qd.dataclass
-        Node structure for the BVH tree, containing left, right, parent indices and bounding box.
-    nodes : qd.field
-        BVH nodes, shape (n_batches, n_aabbs * 2 - 1).
-    internal_node_visited : qd.field
-        Flags indicating if an internal node has been visited during traversal, shape (n_batches, n_aabbs - 1).
-    query_result : qd.field
-        Query results as a vector of (batch id, self id, query id), shape (max_query_results).
-    query_result_count : qd.field
-        Counter for the number of query results.
-
     Notes
     ------
         For algorithmic details, see:
@@ -151,6 +116,15 @@ class LBVH(RBC):
         self.aabb_min = qd.field(gs.qd_vec3, shape=(self.n_batches,))
         self.aabb_max = qd.field(gs.qd_vec3, shape=(self.n_batches,))
         self.scale = qd.field(gs.qd_vec3, shape=(self.n_batches,))
+        # Block-cooperative scene-extent reduction: it goes through subgroup shuffles, so it is GPU-only, and it
+        # only pays off for a tree wide enough to fill the narrowest block. Anything smaller keeps the flat atomic
+        # reduction below, whose contention is bounded by the AABB count at that size anyway.
+        narrowest_block_dim = EXTENT_REDUCE_BLOCK_DIMS[-1]
+        self._use_cooperative_extent_reduce = gs.backend != gs.cpu and self.n_aabbs >= narrowest_block_dim
+        block_dim = next((width for width in EXTENT_REDUCE_BLOCK_DIMS if width <= self.n_aabbs), narrowest_block_dim)
+        n_blocks = max(1, self.n_aabbs // (block_dim * EXTENT_REDUCE_MIN_AABBS_PER_LANE))
+        self._extent_reduce_block_dim = block_dim
+        self._n_extent_reduce_threads = n_blocks * block_dim
         self.morton_codes = qd.field(qd.types.vector(2, qd.u32), shape=(self.n_batches, self.n_aabbs))
 
         # Histogram for radix sort
@@ -233,9 +207,40 @@ class LBVH(RBC):
             self.aabb_min[i_b] = self.aabb_centers[i_b, 0]
             self.aabb_max[i_b] = self.aabb_centers[i_b, 0]
 
-        for i_b, i_a in qd.ndrange(self.n_batches, self.n_aabbs):
-            qd.atomic_min(self.aabb_min[i_b], self.aabbs[i_b, i_a].min)
-            qd.atomic_max(self.aabb_max[i_b], self.aabbs[i_b, i_a].max)
+        if qd.static(self._use_cooperative_extent_reduce):
+            # One atomic per block instead of one per AABB: each lane folds a strided (hence coalesced) slice in
+            # registers and `block.reduce_*` collapses the block. Bit-identical to the flat reduction below, min /
+            # max being exact, associative and commutative.
+            _BLOCK_DIM = qd.static(self._extent_reduce_block_dim)
+            _N_THREADS_PER_BATCH = qd.static(self._n_extent_reduce_threads)
+            qd.loop_config(name="reduce_aabb_extent", block_dim=_BLOCK_DIM)
+            for i_flat in range(self.n_batches * _N_THREADS_PER_BATCH):
+                i_b = i_flat // _N_THREADS_PER_BATCH
+                i_lane = i_flat % _N_THREADS_PER_BATCH
+                # A real AABB of the batch as seed keeps lanes that run out of work neutral, so no identity value
+                # is needed and no lane is left uninitialized.
+                lane_min = self.aabbs[i_b, 0].min
+                lane_max = self.aabbs[i_b, 0].max
+                i_a = i_lane
+                while i_a < self.n_aabbs:
+                    lane_min = qd.min(lane_min, self.aabbs[i_b, i_a].min)
+                    lane_max = qd.max(lane_max, self.aabbs[i_b, i_a].max)
+                    i_a += _N_THREADS_PER_BATCH
+
+                # `block.reduce_*` is scalar, so fold the vec3 component-wise. Result is valid on thread 0 only.
+                block_min = lane_min
+                block_max = lane_max
+                for i in qd.static(range(3)):
+                    block_min[i] = qd.simt.block.reduce_min(lane_min[i], _BLOCK_DIM, gs.qd_float)
+                    block_max[i] = qd.simt.block.reduce_max(lane_max[i], _BLOCK_DIM, gs.qd_float)
+
+                if qd.simt.block.thread_idx() == 0:
+                    qd.atomic_min(self.aabb_min[i_b], block_min)
+                    qd.atomic_max(self.aabb_max[i_b], block_max)
+        else:
+            for i_b, i_a in qd.ndrange(self.n_batches, self.n_aabbs):
+                qd.atomic_min(self.aabb_min[i_b], self.aabbs[i_b, i_a].min)
+                qd.atomic_max(self.aabb_max[i_b], self.aabbs[i_b, i_a].max)
 
         for i_b in qd.ndrange(self.n_batches):
             scale = self.aabb_max[i_b] - self.aabb_min[i_b]

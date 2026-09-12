@@ -37,7 +37,7 @@ Rules:
 4. Booleans are `store_true` and default off, which makes `default=False` redundant. Where the negative form
    reads better, a single `store_true` negative flag covers it (`--no-ipc`, `--no-force`).
 5. Use `--steps` when the script's natural unit is iterations, `-t/--seconds` when it reasons in simulated
-   time (that is, it also exposes `--dt` or compares against `scene.t`).
+   time (that is, it also exposes `--dt` or compares against `scene.get_time()`).
 6. `--dt` is the only spelling for the timestep; it matches `SimOptions(dt=...)`.
 7. Every flag carries a `help=`. Keyword order is `action=` / `type=`, then `default=`, then `help=`.
 8. The parser is named `parser`, built as the first statements of `main()`, with

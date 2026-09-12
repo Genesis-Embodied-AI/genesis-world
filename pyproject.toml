@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-world"
-version = "1.3.3"
+version = "1.4.0"
 description = "A universal and generative physics engine"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "psutil",
     "quadrants==1.3.0",
-    "pydantic>=2.11.0",
+    # * 2.13.0 sets the private state of a model built by 'model_construct', which pickling reads.
+    "pydantic>=2.13.0",
     "numpy>=1.26.4",
     "frozendict",
     # * 4.8.2 fixed linear/sRGB color conversion in `to_color()`.

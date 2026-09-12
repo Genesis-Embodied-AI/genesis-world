@@ -236,13 +236,13 @@ def main():
 
             data = temperature_sensor.read()
             t_min, t_max = float(data.min()), float(data.max())
-            print(f"time={scene.t:.2f}s: Temperature range [{t_min:.1f}, {t_max:.1f}] degC")
+            print(f"time={scene.get_time():.2f}s: Temperature range [{t_min:.1f}, {t_max:.1f}] degC")
             if args.simulate_all_links:
                 print(f"Link temperatures: {temperature_sensor.link_temperatures}")
 
             if "PYTEST_VERSION" in os.environ:
                 break
-            if not args.vis and scene.t > args.seconds:
+            if not args.vis and scene.get_time() > args.seconds:
                 break
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted.")

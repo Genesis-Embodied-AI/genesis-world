@@ -8,7 +8,7 @@ def main():
     parser.add_argument(
         "--pile-type",
         type=str,
-        default="falling",
+        default="static",
         choices=("static", "falling"),
         help="Whether the pile starts settled or falls into place",
     )
@@ -41,7 +41,7 @@ def main():
 
     # create pyramid of boxes
     box_size = 0.25
-    box_spacing = (1.0 - 1e-3 + 0.1 * (args.pile_type == "static")) * box_size
+    box_spacing = (1.0 - 1e-3 + 0.1 * (args.pile_type == "falling")) * box_size
     box_pos_offset = (-0.5, 1, 0.0) + 0.5 * np.array([box_size, box_size, box_size])
     boxes = {}
     for i in range(args.num_cubes):

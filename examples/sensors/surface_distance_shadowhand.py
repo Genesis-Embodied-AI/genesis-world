@@ -169,7 +169,7 @@ def main():
 
             if "PYTEST_VERSION" in os.environ:
                 break
-            if not args.vis and scene.t > args.seconds:
+            if not args.vis and scene.get_time() > args.seconds:
                 break
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted.")

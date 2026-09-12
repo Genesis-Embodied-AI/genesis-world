@@ -46,7 +46,6 @@ def main():
         ),
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=3000,
-            use_contact_island=True,
             use_hibernation=True,
         ),
         profiling_options=gs.options.ProfilingOptions(
@@ -111,7 +110,7 @@ def main():
     def plot_data():
         return {"step_rate": [step_rate[0]], "awake_bodies": [n_awake[0]]}
 
-    scene.start_recording(
+    scene.add_recorder(
         plot_data,
         gs.recorders.MPLLinePlot(
             labels={"step_rate": ["steps/s"], "awake_bodies": ["awake bodies"]},

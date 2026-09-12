@@ -79,7 +79,11 @@ def get_glb_data_from_accessor(glb, accessor_index):
             data_slice = buffer_data[start:end]
             array[i] = np.frombuffer(data_slice, dtype=dtype, count=num_components)
 
-    return array.reshape((count, *type_to_count[data_type][1]))
+    array = array.reshape((count, *type_to_count[data_type][1]))
+    if accessor.normalized:
+        # glTF stores normalized integer components as [0, 1] (unsigned) or [-1, 1] (signed) fixed point
+        array = np.maximum(array / np.iinfo(dtype).max, -1.0, dtype=np.float32)
+    return array
 
 
 def get_glb_image(glb, image_index, image_type=None):
@@ -87,7 +91,7 @@ def get_glb_image(glb, image_index, image_type=None):
         image = Image.open(uri_to_PIL(glb.images[image_index].uri))
         if image_type is not None:
             image = image.convert(image_type)
-        return np.array(image)
+        return mu.PIL_to_array(image)
     return None
 
 
@@ -378,17 +382,17 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
                     continue  # Skip unsupported modes
 
                 # parse normals
-                if primitive.attributes.NORMAL:
+                if primitive.attributes.NORMAL is not None:
                     normals = get_glb_data_from_accessor(glb, primitive.attributes.NORMAL).astype(np.float32)
                 else:
                     normals = None
 
                 # parse uvs
                 if uv_used == 0:
-                    if primitive.attributes.TEXCOORD_0:
+                    if primitive.attributes.TEXCOORD_0 is not None:
                         uvs = get_glb_data_from_accessor(glb, primitive.attributes.TEXCOORD_0).astype(np.float32)
                 elif uv_used == 1:
-                    if primitive.attributes.TEXCOORD_1:
+                    if primitive.attributes.TEXCOORD_1 is not None:
                         uvs = get_glb_data_from_accessor(glb, primitive.attributes.TEXCOORD_1).astype(np.float32)
 
             points, normals = mu.apply_transform(mesh_transform, points, normals)

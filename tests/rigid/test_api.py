@@ -20,7 +20,7 @@ from ..utils.assertions import assert_allclose, assert_equal
         (0, False, gs.cpu),
         (0, False, gs.gpu),
         (3, False, gs.cpu),
-        # (3, True, gs.cpu),  # FIXME: Must refactor the unit test to support batching
+        (3, True, gs.cpu),
     ],
 )
 def test_data_accessor(n_envs, batched, tol):
@@ -48,19 +48,21 @@ def test_data_accessor(n_envs, batched, tol):
 
     # Initialize the simulation
     np.random.seed(0)
-    dof_bounds = gs_s.dyn_info.dofs.limit.to_numpy()
-    dof_bounds[..., :2, :] = np.array((-1.0, 1.0))
-    dof_bounds[..., 2, :] = np.array((0.7, 1.0))
-    dof_bounds[..., 3:6, :] = np.array((-np.pi / 2, np.pi / 2))
+    dofs_limit = qd_to_numpy(gs_s.dyn_info.dofs.limit, transpose=True)
+    dof_bounds = np.broadcast_to(dofs_limit, (max(n_envs, 1), gs_s.n_dofs, 2)).copy()
+    dof_bounds[..., :2, :] = (-1.0, 1.0)
+    dof_bounds[..., 2, :] = (0.7, 1.0)
+    dof_bounds[..., 3:6, :] = (-np.pi / 2, np.pi / 2)
     for i in range(max(n_envs, 1)):
-        qpos = dof_bounds[:, 0] + (dof_bounds[:, 1] - dof_bounds[:, 0]) * np.random.rand(gs_robot.n_dofs)
+        lower, upper = dof_bounds[i, :, 0], dof_bounds[i, :, 1]
+        qpos = lower + (upper - lower) * np.random.rand(gs_robot.n_dofs)
         gs_robot.set_dofs_position(qpos, envs_idx=([i] if n_envs else None))
 
     # Simulate for a while, until they collide with something
     for _ in range(400):
         scene.step()
 
-        gs_n_contacts = gs_s.collider._collider_state.n_contacts.to_numpy()
+        gs_n_contacts = gs_s.collider.collider_state.n_contacts.to_numpy()
         assert len(gs_n_contacts) == max(n_envs, 1)
         for as_tensor in (False, True):
             for to_torch in (False, True):
@@ -94,7 +96,7 @@ def test_data_accessor(n_envs, batched, tol):
 
     # 'is_padded' returns a fixed capacity (independent of the live contact count) plus per-env 'n_contacts',
     # with the live prefix identical to the trimmed result, for every (as_tensor, to_torch) and batching.
-    capacity = max(gs_s.collider._collider_info.max_candidate_contacts[None], 1)
+    capacity = max(gs_s.collider.collider_info.max_candidate_contacts[None], 1)
     for as_tensor in (False, True):
         for to_torch in (False, True):
             trimmed = gs_s.collider.get_contacts(as_tensor, to_torch, is_padded=False)
@@ -150,13 +152,9 @@ def test_data_accessor(n_envs, batched, tol):
             torch.tensor([i, i + 1], dtype=gs.tc_int, device=gs.device),
         )
 
-    def must_cast(value, dtype):
-        return not (
-            isinstance(value, torch.Tensor)
-            and value.is_contiguous()
-            and value.dtype == dtype
-            and value.device == gs.device
-        )
+    # Link, joint and DOF info only carries an environment dimension when batched, which decides whether their
+    # accessors take an environment selection at all.
+    n_envs_info = n_envs if batched else -1
 
     for arg1_max, arg2_max, getter_or_spec, setter, qd_data in (
         # SOLVER
@@ -166,31 +164,43 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_s.n_links, n_envs, gs_s.get_links_ang, None, gs_s.dyn_state.links.cd_ang),
         (gs_s.n_links, n_envs, gs_s.get_links_acc, None, None),
         (gs_s.n_links, n_envs, gs_s.get_links_root_COM, None, gs_s.dyn_state.links.root_COM),
-        (gs_s.n_links, n_envs, gs_s.get_links_mass_shift, gs_s.set_links_mass_shift, gs_s.dyn_state.links.mass_shift),
-        (gs_s.n_links, n_envs, gs_s.get_links_COM_shift, gs_s.set_links_COM_shift, gs_s.dyn_state.links.i_pos_shift),
         (
             gs_s.n_links,
-            -1,
-            gs_s.get_links_inertial_mass,
-            gs_s.set_links_inertial_mass,
+            n_envs_info,
+            gs_s.get_links_mass,
+            gs_s.set_links_mass,
             gs_s.dyn_info.links.inertial_mass,
         ),
-        (gs_s.n_links, -1, gs_s.get_links_invweight, None, gs_s.dyn_info.links.invweight),
+        (gs_s.n_links, n_envs_info, gs_s.get_links_COM, gs_s.set_links_COM, gs_s.dyn_info.links.inertial_pos),
+        (gs_s.n_links, n_envs_info, gs_s.get_links_inertia, gs_s.set_links_inertia, gs_s.dyn_info.links.inertial_i),
+        (gs_s.n_links, n_envs_info, gs_s.get_links_invweight, None, gs_s.dyn_info.links.invweight),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_control_force, gs_s.control_dofs_force, None),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_force, None, gs_s.dyn_state.dofs.force),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_velocity, gs_s.set_dofs_velocity, gs_s.dyn_state.dofs.vel),
         (gs_s.n_dofs, n_envs, gs_s.get_dofs_position, gs_s.set_dofs_position, gs_s.dyn_state.dofs.pos),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_force_range, gs_s.set_dofs_force_range, gs_s.dyn_info.dofs.force_range),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_limit, gs_s.set_dofs_limit, gs_s.dyn_info.dofs.limit),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_stiffness, gs_s.set_dofs_stiffness, gs_s.dyn_info.dofs.stiffness),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_invweight, None, gs_s.dyn_info.dofs.invweight),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_armature, gs_s.set_dofs_armature, gs_s.dyn_info.dofs.armature),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_damping, gs_s.set_dofs_damping, gs_s.dyn_info.dofs.damping),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_frictionloss, gs_s.set_dofs_frictionloss, gs_s.dyn_info.dofs.frictionloss),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_kp, gs_s.set_dofs_kp, gs_s.dyn_info.dofs.act_gain),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_kv, gs_s.set_dofs_kv, None),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_act_bias, gs_s.set_dofs_act_bias, gs_s.dyn_info.dofs.act_bias),
-        (gs_s.n_dofs, -1, gs_s.get_dofs_act_gain, gs_s.set_dofs_act_gain, gs_s.dyn_info.dofs.act_gain),
+        (
+            gs_s.n_dofs,
+            n_envs_info,
+            gs_s.get_dofs_force_range,
+            gs_s.set_dofs_force_range,
+            gs_s.dyn_info.dofs.force_range,
+        ),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_limit, gs_s.set_dofs_limit, gs_s.dyn_info.dofs.limit),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_stiffness, gs_s.set_dofs_stiffness, gs_s.dyn_info.dofs.stiffness),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_invweight, None, gs_s.dyn_info.dofs.invweight),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_armature, gs_s.set_dofs_armature, gs_s.dyn_info.dofs.armature),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_damping, gs_s.set_dofs_damping, gs_s.dyn_info.dofs.damping),
+        (
+            gs_s.n_dofs,
+            n_envs_info,
+            gs_s.get_dofs_frictionloss,
+            gs_s.set_dofs_frictionloss,
+            gs_s.dyn_info.dofs.frictionloss,
+        ),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_kp, gs_s.set_dofs_kp, gs_s.dyn_info.dofs.act_gain),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_kv, gs_s.set_dofs_kv, None),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_act_bias, gs_s.set_dofs_act_bias, gs_s.dyn_info.dofs.act_bias),
+        (gs_s.n_dofs, n_envs_info, gs_s.get_dofs_act_gain, gs_s.set_dofs_act_gain, gs_s.dyn_info.dofs.act_gain),
         (gs_s.n_geoms, n_envs, gs_s.get_geoms_pos, None, gs_s.dyn_state.geoms.pos),
         (gs_s.n_geoms, n_envs, gs_s.get_geoms_quat, None, gs_s.dyn_state.geoms.quat),
         (
@@ -208,26 +218,26 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_links, n_envs, gs_robot.get_links_vel, None, None),
         (gs_robot.n_links, n_envs, gs_robot.get_links_ang, None, None),
         (gs_robot.n_links, n_envs, gs_robot.get_links_acc, None, None),
-        (gs_robot.n_links, n_envs, (), gs_robot.set_mass_shift, None),
-        (gs_robot.n_links, n_envs, (3,), gs_robot.set_COM_shift, None),
         (gs_robot.n_links, n_envs, (), gs_robot.set_friction_ratio, None),
-        (gs_robot.n_links, -1, gs_robot.get_links_inertial_mass, gs_robot.set_links_inertial_mass, None),
-        (gs_robot.n_links, -1, gs_robot.get_links_invweight, None, None),
+        (gs_robot.n_links, n_envs_info, gs_robot.get_links_mass, gs_robot.set_links_mass, None),
+        (gs_robot.n_links, n_envs_info, (3,), gs_robot.set_links_COM, None),
+        (gs_robot.n_links, n_envs_info, gs_robot.get_links_inertia, gs_robot.set_links_inertia, None),
+        (gs_robot.n_links, n_envs_info, gs_robot.get_links_invweight, None, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_control_force, None, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_force, None, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_velocity, gs_robot.set_dofs_velocity, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_position, gs_robot.set_dofs_position, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_force_range, gs_robot.set_dofs_force_range, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_limit, None, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_stiffness, None, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_invweight, None, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_armature, None, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_damping, None, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_frictionloss, gs_robot.set_dofs_frictionloss, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_kp, gs_robot.set_dofs_kp, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_kv, gs_robot.set_dofs_kv, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_act_bias, gs_robot.set_dofs_act_bias, None),
-        (gs_robot.n_dofs, -1, gs_robot.get_dofs_act_gain, gs_robot.set_dofs_act_gain, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_force_range, gs_robot.set_dofs_force_range, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_limit, gs_robot.set_dofs_limit, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_stiffness, None, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_invweight, None, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_armature, None, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_damping, None, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_frictionloss, gs_robot.set_dofs_frictionloss, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_kp, gs_robot.set_dofs_kp, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_kv, gs_robot.set_dofs_kv, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_act_bias, gs_robot.set_dofs_act_bias, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_act_gain, gs_robot.set_dofs_act_gain, None),
         (gs_robot.n_qs, n_envs, gs_robot.get_qpos, gs_robot.set_qpos, None),
         (-1, n_envs, gs_robot.get_mass_mat, None, None),
         (-1, n_envs, gs_robot.get_links_net_contact_force, None, None),
@@ -294,11 +304,15 @@ def test_data_accessor(n_envs, batched, tol):
                 datas = torch.as_tensor(datas, dtype=gs.tc_float)
             datas_tp = datas if is_tuple else (datas,)
             if getter is not None:
-                # Randomly sample new data that are strictly positive and normalized,
-                # as this may be required for some setters (mass, quaternion, ...).
+                # Sampled valid for what they set: positive for masses, normalized for quaternions, and symmetric
+                # positive definite for an inertia matrix, which a merely positive matrix is not.
                 for val in datas_tp:
-                    val[()] = torch.abs(torch.randn(val.shape, dtype=gs.tc_float, device=gs.device)) + gs.EPS
-                    val /= torch.linalg.norm(val, dim=-1, keepdims=True)
+                    if val.ndim > 1 and val.shape[-2] == 3 and val.shape[-1] == 3:
+                        factor = torch.randn(val.shape, dtype=gs.tc_float, device=gs.device)
+                        val[()] = factor @ factor.transpose(-1, -2) + torch.eye(3, dtype=gs.tc_float, device=gs.device)
+                    else:
+                        val[()] = torch.abs(torch.randn(val.shape, dtype=gs.tc_float, device=gs.device)) + gs.EPS
+                        val /= torch.linalg.norm(val, dim=-1, keepdims=True)
             setter(*datas_tp)
             if getter is not None:
                 assert_allclose(getter(), datas, tol=tol)
@@ -359,7 +373,10 @@ def test_data_accessor(n_envs, batched, tol):
                                 else:
                                     data = torch.ones((len(mask_j), len(mask_i), *spec))
                             if setter is not None:
-                                setter(data, arg1, arg2)
+                                if is_tuple:
+                                    setter(*data, arg1, arg2)
+                                else:
+                                    setter(data, arg1, arg2)
                             if is_tuple:
                                 data_ = [val[mask_j, :][:, mask_i] for val in datas]
                             else:
@@ -483,34 +500,63 @@ def test_batched_info(batch_links_info, batch_joints_info, batch_dofs_info, tol)
 
     # Links info only has an environment dimension when batched, so `envs_idx` must be rejected otherwise.
     if batch_links_info:
-        # Potential energy is linear in the link masses, so scaling the inertia of every link of a single environment
-        # scales the potential energy of that environment by the very same ratio, leaving the other one untouched.
+        # Potential energy is linear in the link masses, so scaling one environment scales its energy by that ratio
+        # alone. Armature is cleared first: it adds to the mass matrix without belonging to any link, so invweight
+        # only scales with the mass once the mass matrix is the links' alone.
+        franka.set_dofs_armature(0.0)
         potential_energy = franka.get_potential_energy()
-        gs_s.set_links_inertia(INERTIA_RATIO, envs_idx=[1])
+        gs_s.set_links_mass(INERTIA_RATIO * gs_s.get_links_mass(envs_idx=1), envs_idx=1)
+        gs_s.set_links_inertia(INERTIA_RATIO * gs_s.get_links_inertia(envs_idx=1), envs_idx=1)
         assert_allclose(franka.get_potential_energy() / potential_energy, (1.0, INERTIA_RATIO), tol=tol)
 
-        links_mass = gs_s.get_links_inertial_mass()
+        links_mass = gs_s.get_links_mass()
         links_invweight = gs_s.get_links_invweight()
         assert links_mass.shape == (2, 12)
         assert links_invweight.shape == (2, 12, 2)
         assert_allclose(links_mass[1], INERTIA_RATIO * links_mass[0], tol=tol)
         assert_allclose(INERTIA_RATIO * links_invweight[1], links_invweight[0], tol=tol)
-        assert_allclose(gs_s.get_links_inertial_mass(envs_idx=[1]), links_mass[1], tol=gs.EPS)
-        assert_allclose(gs_s.get_links_invweight(envs_idx=[1]), links_invweight[1], tol=gs.EPS)
+        assert_allclose(gs_s.get_links_mass(envs_idx=1), links_mass[1], tol=gs.EPS)
+        assert_allclose(gs_s.get_links_invweight(envs_idx=1), links_invweight[1], tol=gs.EPS)
     else:
-        assert gs_s.get_links_inertial_mass().shape == (12,)
+        assert gs_s.get_links_mass().shape == (12,)
         assert gs_s.get_links_invweight().shape == (12, 2)
-        with pytest.raises(gs.GenesisException):
-            gs_s.get_links_inertial_mass(envs_idx=[1])
-        with pytest.raises(gs.GenesisException):
-            gs_s.get_links_invweight(envs_idx=[1])
+        # Nothing is held per environment, so naming one is rejected rather than answered with the shared value, by
+        # every accessor of link info alike.
+        for accessor in (gs_s.get_links_mass, gs_s.get_links_COM, gs_s.get_links_inertia, gs_s.get_links_invweight):
+            with pytest.raises(gs.GenesisException, match="cannot be specified for non-batched links info"):
+                accessor(envs_idx=1)
+        for setter in (gs_s.set_links_mass, gs_s.set_links_COM, gs_s.set_links_inertia):
+            with pytest.raises(gs.GenesisException, match="cannot be specified for non-batched links info"):
+                setter(gs_s.get_links_mass()[1] if setter is gs_s.set_links_mass else 0.0, envs_idx=1)
+        # A shared mass has nowhere to put a value of its own per environment.
+        with pytest.raises(gs.GenesisException, match="batch_links_info"):
+            franka.links[1].set_mass((1.0, 2.0))
+        # One value stands for the whole batch, and the weights it settles are recomputed from it.
+        link = franka.links[1]
+        links_invweight = gs_s.get_links_invweight()
+        link.set_mass(2.0 * link.get_mass())
+        assert_allclose(link.get_mass(), gs_s.get_links_mass()[link.idx], tol=gs.EPS)
+        with np.testing.assert_raises(AssertionError):
+            assert_allclose(gs_s.get_links_invweight(), links_invweight, tol=tol)
+
+        # A body brought to a mass is brought to it by the links the dynamics moves: the base of this robot is fixed
+        # to the world and carries mass of its own, which counted in the shares would leave the body short of what was
+        # asked for, and counted in the total would hide that it was.
+        base = franka.base_link
+        assert base.is_fixed and base.get_mass() > gs.EPS
+        base_mass = base.get_mass()
+        franka.set_mass(10.0)
+        assert_allclose(franka.get_mass(), 10.0, tol=tol)
+        moved = sum(gs_s.get_links_mass(link.idx) for link in franka.links if not link.is_fixed)
+        assert_allclose(moved, 10.0, tol=tol)
+        assert_allclose(base.get_mass(), base_mass, tol=gs.EPS)
 
     # Energy getters select environments through the dynamic state, so they accept `envs_idx` in both batching modes.
     for get_energy in (gs_s.get_total_energy, franka.get_potential_energy, franka.get_total_energy):
         energy = get_energy()
         with np.testing.assert_raises(AssertionError):
             assert_allclose(energy[0], energy[1], tol=gs.EPS)
-        assert_allclose(get_energy(envs_idx=[1]), energy[1], tol=gs.EPS)
+        assert_allclose(get_energy(envs_idx=1), energy[1], tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s
@@ -529,7 +575,9 @@ def test_info_batching(tol):
         gs.morphs.Plane(),
     )
     robot = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
     )
     scene.build(n_envs=2)
 
@@ -634,7 +682,7 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
     assert_allclose(plain_box.get_pos(), (2.0, 0.0, 0.2), tol=tol)
 
     # With both a morph pose and an offset, the relative getter returns the morph pose while the world getter carries
-    # the offset composed onto it (the offset position adds in z since the user orientation is identity).
+    # the offset composed onto it (the offset position adds in z since the authored orientation is identity).
     assert_allclose(posed_box.get_pos(relative=True), POSED_BOX_POS, tol=tol)
     assert_allclose(posed_box.get_quat(relative=True), gu.identity_quat(), tol=tol)
     assert_allclose(posed_box.get_pos(relative=False), (2.0, 0.5, 0.8), tol=tol)
@@ -644,9 +692,9 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
         tol=tol,
     )
 
-    # Setting the orientation in the user frame keeps the user-frame position fixed: the offset position rotates with
-    # the orientation, so the world position is rewritten to preserve the reported relative position. Rotating about x
-    # while the offset position is along z makes that offset contribution change, exercising the rewrite.
+    # Setting the orientation in the authored frame keeps the authored-frame position fixed: the offset position rotates
+    # with the orientation, so the world position is rewritten to preserve the reported relative position. Rotating
+    # about x while the offset position is along z makes that offset contribution change, exercising the rewrite.
     new_quat = gu.xyz_to_quat(np.array((90.0, 0.0, 0.0)), rpy=True, degrees=True)
     posed_box.set_quat(new_quat, relative=True)
     assert_allclose(posed_box.get_pos(relative=True), POSED_BOX_POS, tol=tol)
@@ -654,6 +702,34 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
 
     robot_aabb_init, robot_base_aabb_init = robot.get_AABB(), robot.geoms[0].get_AABB()
     cube_aabb_init, cube_base_aabb_init = cube.get_AABB(), cube.geoms[0].get_AABB()
+
+    # A non-rotating link origin only translates, so both frames report the same free fall.
+    scene.step()
+    assert_allclose(posed_box.get_vel(relative=True), posed_box.get_vel(relative=False), tol=tol)
+    assert_allclose(posed_box.get_links_acc(relative=True), posed_box.get_links_acc(relative=False), tol=tol)
+
+    # Spinning the box makes the authored origin orbit the internal one, so both are reported at the displacement 'd'
+    # the position getters strip. The spin is about a principal body axis orthogonal to the offset position, so it is
+    # torque-free and stays orthogonal to 'd', which collapses the acceleration transport to the centripetal term
+    # 'SPIN**2 * d' toward the internal origin.
+    SPIN = 5.0
+    posed_box.set_dofs_velocity((0.0, 0.0, 0.0, SPIN, 0.0, 0.0))
+    scene.step()
+    omega = posed_box.get_ang()
+    offset_shift = posed_box.get_pos(relative=False) - posed_box.get_pos(relative=True)
+    assert_allclose(
+        posed_box.get_vel(relative=True),
+        posed_box.get_vel(relative=False) - torch.cross(omega, offset_shift, dim=-1),
+        tol=tol,
+    )
+    assert_allclose(
+        posed_box.get_links_acc(relative=True)[..., 0, :],
+        posed_box.get_links_acc(relative=False)[..., 0, :] + SPIN**2 * offset_shift,
+        tol=tol,
+    )
+
+    # Masking rows and columns must strip the same offset as the unmasked query.
+    assert_allclose(posed_box.get_links_vel(links_idx_local=0, envs_idx=1)[..., 0, :], posed_box.get_vel()[1], tol=tol)
 
     # Make sure that it is not possible to end up in an inconsistent state for fixed geometries. These place entities
     # at absolute world positions, so they bypass the pose offset (relative=False).
@@ -667,7 +743,7 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
         if show_viewer:
             scene.visualizer.update()
     cube.set_pos(pos_delta[[0]] + (0.0, 0.0, 0.16), envs_idx=[0], relative=False)
-    cube.set_pos(pos_delta[[1]] + (0.0, 0.0, 0.11), envs_idx=[1], relative=False)
+    cube.set_pos(pos_delta[[1]] + (0.0, 0.0, 0.11), envs_idx=1, relative=False)
     sphere.set_pos(np.tile(pos_delta[[0]], (2, 1)) + 1.0, relative=False)
     quat_delta = np.random.rand(2, 4)
     with nullcontext() if batch_fixed_verts else pytest.raises(gs.GenesisException):
@@ -708,7 +784,7 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
             pos_zero = torch.tensor(pos_zero, device=gs.device, dtype=gs.tc_float)
             euler_zero = torch.deg2rad(torch.tensor(euler_zero, dtype=gs.tc_float))
             quat_zero = gu.xyz_to_quat(euler_zero, rpy=True)
-            # The pose lives in the offset, so the world frame (relative=False) carries it; the user frame is identity.
+            # The pose lives in the offset, so relative=False reports it and the authored frame is identity.
             assert_allclose(entity.get_pos(relative=False), pos_zero, tol=tol)
             assert_allclose(entity.get_pos(relative=True), 0.0, tol=tol)
             # Use quaternion for comparison to avoid gymbal lock issue in euler angles
@@ -789,46 +865,201 @@ def test_normalized_quat(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_mass_setters(tol):
-    # Batched links info (default): entity- and link-level set_mass apply, link masses may differ per env, and a
-    # wrong-length array is rejected. The heterogeneous entity gives each env a distinct starting mass.
-    scene = gs.Scene(show_viewer=False)
+def test_inertial_property_setters(
+    sliding_ball_pair, free_bodies_in_one_model, implicit_inertial_origin_chain, show_viewer, tol
+):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            batch_links_info=True,
+            integrator=gs.integrator.Euler,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.5, -3.0, 1.5),
+            camera_lookat=(2.5, 0.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
     het_obj = scene.add_entity(
         morph=[
-            gs.morphs.Box(size=(0.01, 0.01, 0.01)),
-            gs.morphs.Box(size=(0.02, 0.02, 0.02)),
-            gs.morphs.Sphere(radius=0.01),
-            gs.morphs.Sphere(radius=0.02),
+            gs.morphs.Box(size=(0.01, 0.01, 0.01), pos=(0.0, 3.0, 0.3)),
+            gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=(0.0, 3.0, 0.3)),
+            gs.morphs.Sphere(radius=0.01, pos=(0.0, 3.0, 0.3)),
+            gs.morphs.Sphere(radius=0.02, pos=(0.0, 3.0, 0.3)),
         ],
     )
+    authored, per_link, whole_entity = (
+        scene.add_entity(
+            morph=gs.morphs.URDF(file=sliding_ball_pair(*masses), pos=(x, 0.0, 0.3)),
+        )
+        for x, masses in ((1.0, (1.0, 2.0)), (2.0, (1.0, 1.5)), (3.0, (0.5, 1.0)))
+    )
+    free_bodies = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=free_bodies_in_one_model,
+        ),
+    )
+    unaligned = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=free_bodies_in_one_model,
+            pos=(0.0, 10.0, 8.0),
+            align=False,
+        ),
+    )
+    chain = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=implicit_inertial_origin_chain,
+            pos=(0.0, -3.0, 0.5),
+            merge_fixed_links=False,
+        ),
+    )
     scene.build(n_envs=4)
-    link = next(link for link in het_obj.links if not link.is_fixed)
+
+    # Bringing a whole entity to a mass holds however far apart its environments start, and a per-link set takes one
+    # value per environment and nothing else.
+    het_link = next(link for link in het_obj.links if not link.is_fixed)
     with pytest.raises(gs.GenesisException):
-        link.set_mass((1.0, 2.0))
+        het_link.set_mass((1.0, 2.0))
     het_obj.set_mass(1.0)
     assert_allclose(het_obj.get_mass(), 1.0, tol=tol)
-    target_mass = (0.2, 0.4, 0.6, 0.8)
-    link.set_mass(target_mass)
-    assert_allclose(link.get_mass(), target_mass, tol=tol)
 
-    # Non-batched links info: link mass is shared across envs, so a scalar applies uniformly and a per-env array raises.
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            batch_links_info=False,
-        ),
-        show_viewer=False,
-    )
-    obj = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
-        )
-    )
-    scene.build(n_envs=4)
-    link = next(link for link in obj.links if not link.is_fixed)
-    link.set_mass(2.0)
-    assert_allclose(link.get_mass(), 2.0, tol=tol)
-    with pytest.raises(gs.GenesisException):
-        link.set_mass((1.0, 2.0, 3.0, 4.0))
+    # One route brings a single link to the mass, keeping the inertia it was given, and the other the whole body by a
+    # ratio, which scales the inertia with it - so the link route writes the heavier inertia itself to match.
+    mass_ratio = 2.0 / scene.rigid_solver.get_links_mass(per_link.links[1].idx)
+    links_inertia = scene.rigid_solver.get_links_inertia(per_link.links[1].idx)
+    per_link.links[1].set_mass(2.0)
+    per_link.set_links_inertia(links_inertia * mass_ratio[..., None, None], links_idx_local=1)
+    whole_entity.set_mass(3.0)
+
+    pairs = (authored, per_link, whole_entity)
+    for pair in pairs[1:]:
+        assert_allclose(pair.get_mass(), authored.get_mass(), tol=gs.EPS)
+
+    # The inertia grows with the mass, as it does for a body of the same shape built heavier.
+    authored_inertia = scene.rigid_solver.get_links_inertia(authored.links[1].idx)
+    assert_allclose(authored_inertia, scene.rigid_solver.get_links_inertia(per_link.links[1].idx), tol=gs.EPS)
+
+    links_idx = [pair.base_link.idx for pair in pairs]
+    for pair in pairs:
+        pair.set_dofs_velocity([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    # Long enough to fall onto the plane and keep sliding, so the contact rows take part.
+    for _ in range(60):
+        scene.rigid_solver.apply_links_external_wrench([[[2.0, 0.0, 0.0]] * len(links_idx)] * 4, links_idx=links_idx)
+        scene.step()
+    assert (authored.get_pos()[:, 2] < 0.2).all(), "the pairs must have landed for the contact solve to be exercised"
+
+    # The slide between the two spheres is where the mass of the second one shows up in the articulated solve.
+    slide_dof = [authored.n_dofs - 1]
+    for i_pair, pair in enumerate(pairs[1:], start=1):
+        offset = torch.tensor([i_pair, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
+        assert_allclose(pair.get_pos() - offset, authored.get_pos(), tol=tol)
+        assert_allclose(pair.get_vel(), authored.get_vel(), tol=tol)
+        assert_allclose(pair.get_ang(), authored.get_ang(), tol=tol)
+        assert_allclose(pair.get_dofs_position(slide_dof), authored.get_dofs_position(slide_dof), tol=tol)
+        assert_allclose(pair.get_dofs_velocity(slide_dof), authored.get_dofs_velocity(slide_dof), tol=tol)
+
+    # Refreshing the weights, defined only at the neutral configuration, must leave the live one untouched.
+    qpos_live = authored.get_qpos()
+    vel_live = authored.get_dofs_velocity()
+    authored.links[1].set_mass(2.25)
+    assert_allclose(authored.get_qpos(), qpos_live, tol=gs.EPS)
+    assert_allclose(authored.get_dofs_velocity(), vel_live, tol=gs.EPS)
+
+    # Where the mass of a link sits is what the dynamics turns it about, so both the place a link carries its own mass
+    # and the composite place its tree turns about have to follow a mass or a center of mass being written. Asserted on
+    # those two places directly: the one the solver holds against the offset it was given, and the composite one
+    # against the mass-weighted mean it is by definition.
+    solver = scene.rigid_solver
+    pair_idx = [link.idx for link in per_link.links]
+    het_obj.set_dofs_velocity([0.4, -0.3, 0.5], dofs_idx_local=[3, 4, 5])
+    for change in (None, "COM", "mass", "inertia"):
+        if change == "inertia":
+            # An inertia is not a place, so writing one leaves both of them where the motion alone puts them.
+            solver.set_links_inertia(solver.get_links_inertia(pair_idx) * 2.0, links_idx=pair_idx)
+        elif change == "COM":
+            solver.set_links_COM(solver.get_links_COM(pair_idx) + 0.03, links_idx=pair_idx)
+        elif change == "mass":
+            solver.set_links_mass(solver.get_links_mass(pair_idx) * 1.5, links_idx=pair_idx)
+        held_idx = pair_idx[-1]
+        offset = gu.transform_by_quat(solver.get_links_COM(held_idx), solver.get_links_quat(held_idx))
+        held = solver.get_links_pos(held_idx, ref=gs.link_ref_frame.link_COM)
+        assert_allclose(held, solver.get_links_pos(held_idx) + offset, tol=tol)
+
+        masses = solver.get_links_mass(pair_idx)
+        centers = solver.get_links_pos(pair_idx, ref=gs.link_ref_frame.link_COM)
+        weighed = (masses[..., None] * centers).sum(dim=-2) / masses.sum(dim=-1)[..., None]
+        assert_allclose(solver.get_links_pos(pair_idx, ref=gs.link_ref_frame.root_COM), weighed[..., None, :], tol=tol)
+        # Stepped last, so the next write lands on a configuration the motion has moved on.
+        scene.step()
+
+    # An inertial property is written in the frame the degrees of freedom are taken at, so a center of mass away from
+    # its origin couples translation to rotation and an inertia holding a product of inertia couples the rotations to
+    # each other. A force with no moment about that origin then turns the body, by the moment the offset gives it and
+    # by what the inertia carries. Gravity exerts no moment about a body's own center of mass, so the turn is the
+    # applied force's alone.
+    OFFSET, FORCE, TORQUE = 0.05, 2.0, 2.0
+    SKEWED_INERTIA = np.array([[0.02, 0.0, 0.0], [0.0, 0.065, 0.03], [0.0, 0.03, 0.08]])
+    offset_link, skewed_link = unaligned.links
+    solver.set_links_COM([OFFSET, 0.0, 0.0], links_idx=offset_link.idx)
+    solver.set_links_inertia(SKEWED_INERTIA, links_idx=skewed_link.idx)
+    inertia_zz = solver.get_links_inertia(offset_link.idx)[..., 0, 2, 2]
+    unaligned.control_dofs_force([0.0, FORCE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, TORQUE])
+    scene.step()
+    turn = unaligned.get_links_ang()[..., 0, :]
+    assert_allclose(turn[..., 2], -OFFSET * FORCE / inertia_zz * scene.dt, tol=tol)
+    assert_allclose(turn[..., :2], 0.0, tol=tol)
+    spin = np.linalg.solve(SKEWED_INERTIA, [0.0, 0.0, TORQUE]) * scene.dt
+    assert_allclose(unaligned.get_links_ang()[..., 1, :], spin, tol=tol)
+
+    # A body the build anchored on its own center of mass and principal axes has no room for either write, since the
+    # frame that anchoring gave it is what the solver goes on to rely on. A model file can decline the anchoring,
+    # which is what the body above does; a primitive shape cannot.
+    with pytest.raises(gs.GenesisException, match="align=False"):
+        solver.set_links_COM([OFFSET, 0.0, 0.0], links_idx=free_bodies.links[0].idx)
+    with pytest.raises(gs.GenesisException, match="not supported yet"):
+        solver.set_links_inertia(SKEWED_INERTIA, links_idx=het_link.idx)
+    # The anchor covers fixed children too, so the setters hold their center of mass and inertia like the root's. A mass
+    # written on one link alone moves the anchor, so the setter rejects it. A mass set on the whole entity keeps the
+    # anchor and the mass ratios.
+    root, child = chain.links
+    with pytest.raises(gs.GenesisException, match="align=False"):
+        child.set_COM([OFFSET, 0.0, 0.0])
+    with pytest.raises(gs.GenesisException, match="align=False"):
+        child.set_inertia(SKEWED_INERTIA)
+    with pytest.raises(gs.GenesisException, match="align=False"):
+        child.set_mass(1.0)
+    with pytest.raises(gs.GenesisException, match="align=False"):
+        root.set_mass(1.0)
+    with pytest.raises(gs.GenesisException, match="align=False"):
+        chain.set_links_mass([1.0, 1.0])
+    chain.set_mass(2.0)
+    assert_allclose(chain.get_links_mass(), [[1.25, 0.75]] * 4, tol=tol)
+
+    # An inertial property belongs to the model, so a reset restores the configuration the scene was built at and
+    # leaves the mass it now runs with alone.
+    mass_written = solver.get_links_mass(pair_idx)
+    scene.reset()
+    assert_allclose(solver.get_links_mass(pair_idx), mass_written, tol=gs.EPS)
+
+    # A weight is solved over the mass blocks of the chain being weighed alone, which is what lets the trees of one
+    # entity be weighed side by side through one pair of buffers. Sentinels are written over every row first: those of
+    # the tree that is not weighed must come back untouched.
+    SENTINEL = -7.0
+    scratch = solver.data_manager.weight_scratch
+    dofs_idx = slice(free_bodies.dof_start, free_bodies.dof_start + free_bodies.n_dofs)
+    untouched = slice(free_bodies.dof_start + 6, free_bodies.dof_start + free_bodies.n_dofs)
+    for buffer in (scratch.jac_row, scratch.solve_out):
+        sentinels = qd_to_numpy(buffer)
+        sentinels[dofs_idx] = SENTINEL
+        buffer.from_numpy(sentinels)
+    free_bodies.links[0].set_mass(2.0)
+    for buffer in (scratch.jac_row, scratch.solve_out):
+        assert_allclose(qd_to_numpy(buffer)[untouched], SENTINEL, tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~250s
@@ -1038,50 +1269,6 @@ def test_reset(show_viewer, friction_cone, sparse_solve, use_hibernation, enable
         assert_equal(actual[BOOL_MASK], fallen_ref[BOOL_MASK])
 
 
-@pytest.mark.slow  # ~350s
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_scene_saver_franka(tmp_path, show_viewer, tol):
-    scene1 = gs.Scene(
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
-        ),
-        show_viewer=show_viewer,
-    )
-    franka1 = scene1.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-    )
-    scene1.build()
-
-    dof_idx = [j.dofs_idx_local[0] for j in franka1.joints]
-
-    franka1.set_dofs_kp(np.full(len(dof_idx), 3000), dof_idx)
-    franka1.set_dofs_kv(np.full(len(dof_idx), 300), dof_idx)
-
-    target_pose = np.array([0.3, -0.8, 0.4, -1.6, 0.5, 1.0, -0.6, 0.03, 0.03], dtype=float)
-    franka1.control_dofs_position(target_pose, dof_idx)
-
-    for _ in range(100):
-        scene1.step()
-
-    pose_ref = franka1.get_dofs_position(dof_idx)
-
-    ckpt_path = tmp_path / "franka_unit.pkl"
-    scene1.save_checkpoint(ckpt_path)
-
-    scene2 = gs.Scene(show_viewer=show_viewer)
-    franka2 = scene2.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-    )
-    scene2.build()
-    scene2.load_checkpoint(ckpt_path)
-
-    pose_loaded = franka2.get_dofs_position(dof_idx)
-
-    # FIXME: It should be possible to achieve better accuracy with 64bits precision
-    assert_allclose(pose_ref, pose_loaded, tol=2e-6)
-
-
 @pytest.mark.required
 def test_deprecated_properties(caplog):
     scene = gs.Scene(
@@ -1120,3 +1307,70 @@ def test_deprecated_properties(caplog):
             deprecated_value = getattr(joint, name_old)
         assert len(caplog.records) > 0
         assert_allclose(deprecated_value, getattr(joint, name_new), tol=gs.EPS)
+
+
+@pytest.mark.required
+def test_object_repr():
+    inline_mjcf = '<mujoco model="probe"><worldbody><body><geom type="box" size="1 1 1"/></body></worldbody></mujoco>'
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+        )
+    )
+    panda = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        )
+    )
+    inline = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=inline_mjcf,
+        )
+    )
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+            gs.morphs.Cylinder(radius=0.05, height=0.2),
+        ),
+    )
+    scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+            gs.morphs.Sphere(radius=0.1),
+        ),
+        material=gs.materials.Kinematic(),
+    )
+    cam = scene.add_camera(
+        res=(64, 64),
+        pos=(1.0, 1.0, 1.0),
+        lookat=(0.0, 0.0, 0.0),
+    )
+    scene.build(n_envs=2)
+
+    # Every printable object renders without raising, across both the brief and the full colorized form
+    for obj in (scene, scene.entities, cam, scene.sim.rigid_solver):
+        assert repr(obj)
+    for entity in scene.entities:
+        assert entity._repr_brief()
+        assert repr(entity)
+        for morph in entity.morphs:
+            assert repr(morph)
+        sub_objects = [*entity.links, *entity.joints, *entity.vgeoms]
+        if isinstance(entity, gs.engine.entities.RigidEntity):
+            sub_objects += list(entity.geoms)
+        for sub in sub_objects:
+            assert sub._repr_brief()
+            assert repr(sub)
+
+    # A morph created from a file prints its path. A morph created from inline XML prints the model name its
+    # document declares, and never the document itself.
+    assert "panda.xml" in repr(panda.main_morph)
+    assert "<inline probe>" in inline.main_morph.__repr_name__()
+    assert inline_mjcf not in repr(inline.main_morph)
+    # A heterogeneous entity reports its variants instead of collapsing to a single ambiguous morph
+    assert "morph variants" in het._repr_brief()

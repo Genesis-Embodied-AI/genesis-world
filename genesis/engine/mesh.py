@@ -11,10 +11,12 @@ import genesis as gs
 import genesis.utils.gltf as gltf_utils
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.constants import GLTF_FORMATS, MESH_FORMATS
 import genesis.utils.point_cloud as pc
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
+from genesis.utils import serialization
 from genesis.utils.misc import redirect_libc_stderr
 
 
@@ -26,15 +28,7 @@ class InertialProperties(NamedTuple):
     i: Matrix3x3Type
 
 
-class MeshInertialInfo(NamedTuple):
-    """A mesh's mass properties in its own frame at unit density: the volume and the corresponding intrinsic
-    'inertial', which is None for degenerate geometry that carries no well-defined mass distribution."""
-
-    volume: float
-    inertial: "InertialProperties | None"
-
-
-class Mesh(RBC):
+class Mesh(RBC, serialization.SerializationMixin):
     """
     Genesis's own triangle mesh object.
 
@@ -89,11 +83,11 @@ class Mesh(RBC):
         self._unique_edges: "np.ndarray | None" = None
         self._vert_adjacency: "tuple[np.ndarray, np.ndarray, np.ndarray] | None" = None
         self._is_convex: "bool | None" = None
-        self._inertial_info: "MeshInertialInfo | None" = None
+        self._inertial: "InertialProperties | None" = None
         # A mesh sharing another's processed geometry (a cached collision template) delegates its inertia query to that
         # source, so the (convex-hull) mass-property computation runs at most once per geometry and only when an entity
         # actually needs it - never eagerly for e.g. fixed or articulated assets whose link frames are not aligned.
-        self._inertial_info_source: "Mesh | None" = None
+        self._inertial_source: "Mesh | None" = None
 
         # By default, all meshes are considered zup, unless the "FileMorph.file_meshes_are_zup" option was set to False
         self._metadata.setdefault("imported_as_zup", True)
@@ -267,8 +261,8 @@ class Mesh(RBC):
         self._unique_edges = None
         self._vert_adjacency = None
         self._is_convex = None
-        self._inertial_info = None
-        self._inertial_info_source = None
+        self._inertial = None
+        self._inertial_source = None
 
     def get_unique_edges(self):
         """
@@ -285,22 +279,22 @@ class Mesh(RBC):
 
         return self._unique_edges
 
-    def get_inertial_info(self):
+    @property
+    def inertial(self):
         """
-        Get the mass properties of the geometry in its own frame as a MeshInertialInfo.
+        Mass, center of mass and inertia tensor of the geometry in its own frame, at unit density.
 
         Non-watertight geometry is closed by its convex hull first so the volume integral is well-defined; a degenerate
-        geometry reports a zero volume and no mass distribution. The result is memoized and shared by reference across
-        entities backed by the same geometry.
+        geometry has no mass, and composes as a geom of no mass at the origin. The result is memoized and shared by
+        reference across entities backed by the same geometry.
         """
-        if self._inertial_info_source is not None:
-            return self._inertial_info_source.get_inertial_info()
-        if self._inertial_info is None:
+        if self._inertial_source is not None:
+            return self._inertial_source.inertial
+        if self._inertial is None:
             # A degenerate geometry (zero / ill-defined volume) makes trimesh's mass-property integral divide by zero,
             # yielding a non-finite center of mass; a more degenerate one (fewer than 4 non-coplanar vertices) makes the
-            # convex-hull closure of a non-watertight mesh raise instead. Either way the geom carries no inertia: report
-            # a zero volume so the caller skips it, rather than crashing or letting NaNs propagate into the composed
-            # inertia (and emitting a warning).
+            # convex-hull closure of a non-watertight mesh raise instead. Either way the geom carries no inertia:
+            # report no mass, rather than crashing or letting NaNs propagate into the composed inertia.
             with np.errstate(invalid="ignore", divide="ignore"):
                 try:
                     tmesh = self._mesh
@@ -321,12 +315,10 @@ class Mesh(RBC):
                 except QhullError:
                     volume, center_mass = 0.0, None
                 if volume > 0.0 and np.all(np.isfinite(center_mass)):
-                    self._inertial_info = MeshInertialInfo(
-                        volume, InertialProperties(tmesh.mass, center_mass, tmesh.moment_inertia)
-                    )
+                    self._inertial = InertialProperties(tmesh.mass, center_mass, tmesh.moment_inertia)
                 else:
-                    self._inertial_info = MeshInertialInfo(0.0, None)
-        return self._inertial_info
+                    self._inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+        return self._inertial
 
     def get_vert_adjacency(self):
         """
@@ -511,8 +503,8 @@ class Mesh(RBC):
         morphs yield a single mesh.
         """
         if isinstance(morph, gs.options.morphs.Mesh):
-            if morph.is_format(gs.options.morphs.MESH_FORMATS):
-                if morph.is_format(gs.options.morphs.GLTF_FORMATS):
+            if morph.is_format(MESH_FORMATS):
+                if morph.is_format(GLTF_FORMATS):
                     meshes = gltf_utils.parse_mesh_glb(
                         morph.file, morph.group_by_material, morph.scale, morph.file_meshes_are_zup, surface
                     )
@@ -635,6 +627,13 @@ class Mesh(RBC):
         return self._mesh.vertex_normals
 
     @property
+    def color(self):
+        """
+        Color of the mesh, as red, green, blue and alpha.
+        """
+        return self._color
+
+    @property
     def surface(self):
         """
         Surface of the mesh.
@@ -661,3 +660,69 @@ class Mesh(RBC):
         Volume of the mesh.
         """
         return self._mesh.volume
+
+    def export(self, exporting: serialization.Exporting) -> dict:
+        """Export the geometry, uvs, surface and metadata a mesh holds.
+
+        A mesh is written this way rather than through its fields because construction convexifies, decimates and
+        rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
+        """
+        return {
+            "geometry": _exported_geometry(self.trimesh, exporting),
+            "uvs": None if self.uvs is None else exporting.array(self.uvs),
+            "surface": exporting.value(self.surface, Surface),
+            "metadata": exporting.value(self.metadata, Any),
+        }
+
+    @classmethod
+    def load(cls, raw: dict, loading: serialization.Loading) -> "Mesh":
+        """Recreate the mesh exactly as exported, processing none of its geometry again.
+
+        Meshes written from one geometry are handed the edges, the vertex adjacency and the inertia of the first of
+        them, exactly as 'postprocess_collision_geoms' hands them to the entities it builds from one asset. Each
+        keeps its own trimesh and surface, so a mesh drawn in its own colour still costs one copy of the geometry.
+        """
+        mesh = cls(
+            mesh=_loaded_geometry(raw["geometry"], loading),
+            surface=loading.value(raw["surface"], Surface),
+            uvs=None if raw["uvs"] is None else loading.array(raw["uvs"]),
+            # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
+            metadata=loading.value(raw["metadata"], Any),
+        )
+        source = loading.shared.setdefault((raw["geometry"]["verts"], raw["geometry"]["faces"]), mesh)
+        if source is not mesh:
+            mesh._unique_edges = source.get_unique_edges()
+            mesh._vert_adjacency = source.get_vert_adjacency()
+            mesh._inertial_source = source
+        return mesh
+
+
+def _exported_geometry(mesh: trimesh.Trimesh, exporting: serialization.Exporting) -> dict:
+    """Export the geometry of a trimesh: its vertices, the faces joining them, their normals and their colours.
+
+    Only colours the mesh states are exported. Asking a mesh coloured by anything else for its vertex colours makes
+    trimesh invent a default one per vertex, which a file would then carry as if the author had chosen it.
+    """
+    colours = mesh.visual.vertex_colors if mesh.visual.kind == "vertex" else None
+    return {
+        "verts": exporting.array(mesh.vertices),
+        "faces": exporting.array(mesh.faces),
+        "normals": exporting.array(mesh.vertex_normals),
+        "colours": None if colours is None else exporting.array(colours),
+    }
+
+
+def _loaded_geometry(raw: dict, loading: serialization.Loading) -> trimesh.Trimesh:
+    """Recreate the trimesh as it was exported, with the vertices, faces and normals the file holds."""
+    mesh = trimesh.Trimesh(
+        vertices=loading.array(raw["verts"]),
+        faces=loading.array(raw["faces"]),
+        vertex_normals=loading.array(raw["normals"]),
+        process=False,
+    )
+    if raw["colours"] is not None:
+        mesh.visual.vertex_colors = loading.array(raw["colours"])
+    return mesh
+
+
+serialization.register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)

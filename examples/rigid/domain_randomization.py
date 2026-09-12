@@ -14,8 +14,13 @@ def main():
     gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
+        sim_options=gs.options.SimOptions(
             dt=0.01,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            # Giving each environment its own masses and centers of mass is what this exists for: without it the
+            # link info is shared, and a per-environment value has nowhere to live.
+            batch_links_info=True,
             constraint_solver=gs.constraint_solver.Newton,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -45,18 +50,21 @@ def main():
 
     # set mass of a single link
     link = robot.get_link("RR_thigh")
-    ori_mass = robot.get_links_inertial_mass()
+    ori_mass = robot.get_links_mass()
     print("original mass", link.get_mass(), ori_mass)
     link.set_mass(1)
-    print("diff mass", robot.get_links_inertial_mass() - ori_mass)
+    print("diff mass", robot.get_links_mass() - ori_mass)
 
-    robot.set_mass_shift(
-        mass_shift=-0.5 + torch.rand(scene.n_envs, robot.n_links),
-        links_idx_local=np.arange(0, robot.n_links),
+    robot.set_links_mass(
+        robot.get_links_mass() * (0.75 + 0.5 * torch.rand(scene.n_envs, robot.n_links, device=gs.device))
     )
-    robot.set_COM_shift(
-        com_shift=-0.05 + 0.1 * torch.rand(scene.n_envs, robot.n_links, 3),
-        links_idx_local=np.arange(0, robot.n_links),
+    # The center of mass is where it is, so a randomized model is the authored one shifted rather than one whose every
+    # link carries its mass at its own origin.
+    robot.set_links_COM(
+        com=robot.get_links_COM() + (-0.05 + 0.1 * torch.rand(scene.n_envs, robot.n_links, 3, device=gs.device))
+    )
+    robot.set_links_inertia(
+        robot.get_links_inertia() * (0.75 + 0.5 * torch.rand(scene.n_envs, robot.n_links, 1, 1, device=gs.device))
     )
     aabb = robot.get_AABB()
 

@@ -6,7 +6,7 @@ import genesis as gs
 gs.init(backend=gs.gpu, performance_mode=True)
 
 scene = gs.Scene(
-    rigid_options=gs.options.RigidOptions(
+    sim_options=gs.options.SimOptions(
         dt=0.01,
     ),
     viewer_options=gs.options.ViewerOptions(

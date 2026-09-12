@@ -76,7 +76,7 @@ def main():
     ghost.set_dofs_position(joint_angles, dofs_idx)
 
     for step in range(500 if "PYTEST_VERSION" not in os.environ else 5):
-        t = step * scene.sim_options.dt
+        t = step * scene.options.sim.dt
 
         # Sinusoidal reference trajectory for the ghost
         offset = AMPLITUDE * math.sin(2.0 * math.pi * FREQ * t)

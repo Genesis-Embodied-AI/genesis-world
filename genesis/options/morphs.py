@@ -15,36 +15,36 @@ import numpy as np
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
+import genesis.ext.urdfpy as urdfpy
 import genesis.utils.geom as gu
 import genesis.utils.mjcf as mju
 import genesis.utils.misc as mu
 import genesis.utils.urdf as uu
-import genesis.ext.urdfpy as urdfpy
+from genesis.constants import (
+    GLTF_FORMATS,
+    MJCF_FORMAT,
+    URDF_FORMAT,
+    USD_FORMATS,
+    XACRO_FORMAT,
+    XML_ROOT_TAG_TO_FORMAT,
+)
 from genesis.typing import (
+    FGridArrayType,
     FrozenDictType,
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
+    PositiveVec2FType,
     StrArrayType,
     UnitVec3FType,
     UnitVec4FType,
     Vec2IType,
-    PositiveVec2FType,
     Vec3FType,
 )
+from genesis.utils import serialization
 
 from .misc import CoacdOptions
 from .options import Options
-
-URDF_FORMAT = ".urdf"
-XACRO_FORMAT = ".xacro"
-MJCF_FORMAT = ".xml"
-
-# Root tags identifying the format of inline XML content passed as 'FileMorph.file'.
-XML_ROOT_TAG_TO_FORMAT = {"mujoco": MJCF_FORMAT, "robot": URDF_FORMAT}
-GLTF_FORMATS = (".glb", ".gltf")
-MESH_FORMATS = (".obj", ".stl", ".dae", *GLTF_FORMATS)
-USD_FORMATS = (".usd", ".usda", ".usdc", ".usdz")
 
 
 class TetGenMixin(Options):
@@ -509,8 +509,9 @@ class FileMorph(Morph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the file. An MJCF or URDF description built in memory is accepted as XML content in place of
+        the path, either as a string or as an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -565,9 +566,11 @@ class FileMorph(Morph):
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
-        stability. Only applies to root (floating-base) links. Uses file-specified inertia if valid (and
-        ``recompute_inertia=False``), otherwise computes from geometry. Defaults to None, which resolves to True
-        for basic rigid objects (entities with only a root free joint and no articulated descendants), False otherwise.
+        stability. The frame is then the solver's to keep, so the center of mass and the inertia of such a link cannot
+        be written once the scene is built; set it to False to keep the authored frame and write them at runtime. Only
+        applies to root (floating-base) links. Uses file-specified inertia if valid (and ``recompute_inertia=False``),
+        otherwise computes from geometry. Defaults to None, which resolves to True for basic rigid objects (entities
+        with only a root free joint and no articulated descendants), False otherwise.
         **This is only used for RigidEntity.**
     file_meshes_are_zup : bool, optional
         Defines if the mesh files are expressed in a Z-up or Y-up coordinate system. If set to true, meshes are loaded
@@ -615,6 +618,8 @@ class FileMorph(Morph):
             data["coacd_options"] = CoacdOptions()
 
         file = data.get("file", "")
+        if isinstance(file, os.PathLike):
+            file = data["file"] = str(file)
         if isinstance(file, str) and file:
             # Inline XML content (a description built in-memory) parses directly and is passed through untouched to the
             # loader. A path string does not parse as XML and is resolved against the working and assets directories.
@@ -627,6 +632,12 @@ class FileMorph(Morph):
                 if not os.path.exists(abs_file):
                     gs.raise_exception(f"File not found in either current directory or assets directory: '{file}'.")
                 data["file"] = abs_file
+        elif isinstance(file, (ET.Element, ET.ElementTree)):
+            # An element tree is XML content by construction, so it is serialized to the inline string form the loaders
+            # read without the parse round-trip above.
+            if isinstance(file, ET.ElementTree):
+                file = file.getroot()
+            data["file"] = ET.tostring(file, encoding="unicode")
 
         return data
 
@@ -891,8 +902,8 @@ class MJCF(FileMorph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the MJCF file, or the MJCF content itself as a string or an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -967,9 +978,11 @@ class MJCF(FileMorph):
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
         **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Defaults to 0.1 if MuJoCo compatibility is
-        disabled on the rigid solver, None otherwise.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     exclude_ground_plane : bool, optional
         Whether to exclude plane geometries authored directly under the MJCF worldbody if any. Defaults to False.
     """
@@ -995,8 +1008,14 @@ class MJCF(FileMorph):
             gs.raise_exception(f"Expected `{MJCF_FORMAT}` extension for MJCF file: {self.file}")
 
     def _identifier(self) -> str:
-        if isinstance(self.file, str) and (name := mju.get_model_name(self.file)):
-            return name
+        # A morph outlives the file it came from, because the entity builds only once. An unreadable file falls back
+        # to the identifier of the morph type.
+        if isinstance(self.file, str):
+            try:
+                if name := mju.get_model_name(self.file):
+                    return name
+            except (ET.ParseError, OSError):
+                pass
         return super()._identifier()
 
 
@@ -1021,8 +1040,8 @@ class URDF(FileMorph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the URDF file, or the URDF content itself as a string or an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -1094,9 +1113,9 @@ class URDF(FileMorph):
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
     prioritize_urdf_material : bool, optional
-        Sometimes a geom in a urdf file will be assigned a color, and the geom asset file also contains its own visual
-        material. This parameter controls whether to prioritize the URDF-defined material over the asset's own material.
-        Defaults to False.
+        Sometimes a geom in a urdf file will be assigned a color or a texture, and the geom asset file also contains its
+        own visual material. This parameter controls whether to prioritize the URDF-defined material over the asset's
+        own material. Defaults to False.
     merge_fixed_links : bool, optional
         Whether to merge links connected via a fixed joint. Defaults to True.
     links_to_keep : list of str, optional
@@ -1106,9 +1125,11 @@ class URDF(FileMorph):
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
         **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Defaults to 0.1 if MuJoCo compatibility is
-        disabled on the rigid solver, None otherwise.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     xacro_args : dict, optional
         Key-value pairs to override ``xacro:arg`` declarations in the xacro file
         (e.g. ``{"use_sim": "true", "arm_length": "0.5"}``). Only used for ``.xacro`` files. Defaults to ``{}``.
@@ -1132,9 +1153,7 @@ class URDF(FileMorph):
         return data
 
     def model_post_init(self, context: Any) -> None:
-        if self.is_format(XACRO_FORMAT):
-            self.file = uu.load_xacro(self.file, self.xacro_args)
-        elif not self.is_format(URDF_FORMAT):
+        if not (self.is_format(URDF_FORMAT) or self.is_format(XACRO_FORMAT)):
             gs.raise_exception(f"Expected `{URDF_FORMAT}` or `{XACRO_FORMAT}` extension for URDF file: {self.file}")
 
     def is_format(self, format):
@@ -1227,9 +1246,9 @@ class Drone(FileMorph):
     collision : bool, optional
         **NB**: Drone doesn't support collision checking for now.
     prioritize_urdf_material : bool, optional
-        Sometimes a geom in a urdf file will be assigned a color, and the geom asset file also contains its own visual
-        material. This parameter controls whether to prioritize the URDF-defined material over the asset's own material.
-        Defaults to False.
+        Sometimes a geom in a urdf file will be assigned a color or a texture, and the geom asset file also contains its
+        own visual material. This parameter controls whether to prioritize the URDF-defined material over the asset's
+        own material. Defaults to False.
     model : str, optional
         The model of the drone. Defaults to 'CF2X'. Supported models are 'CF2X', 'CF2P', and 'RACE'.
     COM_link_name : str, optional
@@ -1247,9 +1266,11 @@ class Drone(FileMorph):
     links_to_keep : list of str, optional
         A list of link names that should not be skipped during link merging. Defaults to ().
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Defaults to 0.1 if MuJoCo compatibility is
-        disabled on the rigid solver, None otherwise.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     default_base_ang_damping_scale : float, optional
         Default angular damping applied on the floating base that will be rescaled by the total mass.
         None to disable. Default to 1e-5.
@@ -1351,7 +1372,7 @@ class Terrain(Morph):
     subterrain_types : str or 2D list of str, optional
         The types of subterrains to generate. If a string, it will be repeated for all subterrains.
         If a 2D list, it should have the same shape as `n_subterrains`.
-    height_field : array-like, optional
+    height_field : array-like or torch.Tensor, optional
         The height field to generate the terrain. If specified, all other configurations will be ignored.
         Defaults to None.
     name : str, optional
@@ -1379,7 +1400,7 @@ class Terrain(Morph):
         ["pyramid_sloped_terrain", "discrete_obstacles_terrain", "wave_terrain"],
         ["random_uniform_terrain", "pyramid_stairs_terrain", "sloped_terrain"],
     ]
-    height_field: Any = None
+    height_field: FGridArrayType | None = None
     name: str | None = None
     subterrain_parameters: dict[str, dict] | None = None
 
@@ -1424,11 +1445,6 @@ class Terrain(Morph):
 
     def model_post_init(self, context: Any) -> None:
         if self.height_field is not None:
-            try:
-                if np.array(self.height_field).ndim != 2:
-                    gs.raise_exception("`height_field` should be a 2D array.")
-            except Exception:
-                gs.raise_exception("`height_field` should be array-like to be converted to np.ndarray.")
             return
 
         if not isinstance(self.subterrain_types, str):
@@ -1585,8 +1601,10 @@ class USD(FileMorph):
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators, applied to every joint whose armature is not specified in the model
-        file, regardless of whether it is actuated. None to disable. Default to 0.1.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1.
 
     Joint Dynamics Options
     ----------------------
@@ -1644,8 +1662,6 @@ class USD(FileMorph):
     ----------------
     prim_path : str, optional
         The parsing target prim path. Defaults to None.
-    usd_ctx : Any, optional
-        The parser context. Defaults to None.
     """
 
     # Mesh Options
@@ -1697,7 +1713,6 @@ class USD(FileMorph):
     visual_mesh_prim_patterns: StrArrayType = (r"^([vV]isual).*",)
 
     # USD specific Options
-    usd_ctx: Any = None
     prim_path: str | None = None
 
     def __init__(self, **data):
@@ -1709,13 +1724,8 @@ class USD(FileMorph):
                 "USD file has independent metadata `up_axis` for up axis specification."
             )
 
-        if self.usd_ctx is None:
-            from genesis.utils.usd import UsdContext
-
-            if not self.is_format(USD_FORMATS):
-                gs.raise_exception(f"Expected `{USD_FORMATS}` extension for USD file: {self.file}")
-
-            self.usd_ctx = UsdContext(self.file)
+        if not self.is_format(USD_FORMATS):
+            gs.raise_exception(f"Expected `{USD_FORMATS}` extension for USD file: {self.file}")
 
     def _identifier(self) -> str:
         if self.prim_path:
@@ -1724,3 +1734,21 @@ class USD(FileMorph):
 
     def __repr_name__(self):
         return f"{super().__repr_name__()[:-1]}, prim_path='{self.prim_path}')>"
+
+
+def _exported_urdf(robot: urdfpy.URDF, exporting: serialization.Exporting) -> str:
+    """Export a URDF model built in memory as the document it stands for.
+
+    Relative asset paths stay as written: an in-memory model resolves them against the working directory when it is
+    read (see '_loaded_urdf').
+    """
+    return ET.tostring(robot.to_xml(), encoding="unicode")
+
+
+def _loaded_urdf(raw: str, loading: serialization.Loading) -> urdfpy.URDF:
+    """Recreate the URDF model from its document, as an inline document is read."""
+    node = ET.fromstring(raw)
+    return urdfpy.URDF._from_xml(node, node, os.getcwd())
+
+
+serialization.register(urdfpy.URDF, _exported_urdf, _loaded_urdf)

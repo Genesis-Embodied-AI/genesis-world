@@ -276,7 +276,7 @@ def kernel_get_jacobian(
         func_get_jacobian(i_b, tgt_link_idx, dof_start, p_vec, jacobian, dyn_state, dyn_info, rigid_config)
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_get_jacobian_zero(
     tgt_link_idx: int,
     dof_start: int,
@@ -775,7 +775,14 @@ def kernel_forward_kinematics_query(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         func_forward_kinematics_entity(
-            entity_idx, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+            entity_idx,
+            envs_idx[i_b_],
+            rigid_info.qpos,
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            is_backward=False,
         )
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
@@ -792,5 +799,12 @@ def kernel_forward_kinematics_query(
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         func_forward_kinematics_entity(
-            entity_idx, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+            entity_idx,
+            envs_idx[i_b_],
+            rigid_info.qpos,
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            is_backward=False,
         )

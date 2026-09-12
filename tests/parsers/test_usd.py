@@ -7,6 +7,7 @@ loaded from USD files match equivalent scenes loaded from compared files.
 
 import os
 import xml.etree.ElementTree as ET
+import zipfile
 
 import numpy as np
 import pytest
@@ -21,7 +22,9 @@ from genesis.utils.usd import UsdContext, HAS_OMNIVERSE_KIT_SUPPORT
 from ..conftest import SKIP_NO_OMNIVERSE_KIT
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 from genesis.utils.misc import tensor_to_array
+from genesis.utils.serialization import MANIFEST_NAME
 
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
@@ -140,7 +143,12 @@ def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     # principalAxes (0, 0, 0, 0), diagonalInertia (0, 0, 0), mass (0) - that must be treated as unset and
     # recomputed from geometry, matching an MJCF scene without inertial element. Leaving only 'centerOfMass' at
     # its sentinel keeps the authored mass and inertia and places the center of mass at the link frame, matching an
-    # MJCF body whose inertial frame is the body origin.
+    # MJCF body whose inertial frame is the body origin. Leaving only 'diagonalInertia' at its sentinel keeps the
+    # authored mass and center of mass and takes the inertia from geometry.
+    MASS = 64.0
+    HALF_EXTENT = 0.2
+    COM = (0.1, 0.0, 0.0)
+    BOX_INERTIA = MASS * 2.0 * (2.0 * HALF_EXTENT) ** 2 / 12.0
     mjcf = ET.Element("mujoco", model="massapi_test")
 
     worldbody = ET.SubElement(mjcf, "worldbody")
@@ -156,6 +164,17 @@ def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     ET.SubElement(inertia_box, "inertial", pos="0. 0. 0.", mass="64.", diaginertia="1.5 1.7 2.0")
     ET.SubElement(inertia_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
     ET.SubElement(inertia_box, "joint", name="/worldbody/inertia_box_joint", type="free")
+
+    com_box = ET.SubElement(worldbody, "body", name="/worldbody/com_box", pos="1.2 0. 0.3")
+    ET.SubElement(
+        com_box,
+        "inertial",
+        pos=f"{COM[0]} {COM[1]} {COM[2]}",
+        mass=str(MASS),
+        diaginertia=f"{BOX_INERTIA} {BOX_INERTIA} {BOX_INERTIA}",
+    )
+    ET.SubElement(com_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+    ET.SubElement(com_box, "joint", name="/worldbody/com_box_joint", type="free")
 
     xml_tree = ET.ElementTree(mjcf)
     xml_file = str(asset_tmp_path / "massapi_test.xml")
@@ -207,6 +226,22 @@ def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     inertia_mass_api = UsdPhysics.MassAPI.Apply(inertia_box.GetPrim())
     inertia_mass_api.CreateMassAttr(64.0)
     inertia_mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(1.5, 1.7, 2.0))
+
+    com_box = UsdGeom.Cube.Define(stage, "/worldbody/com_box")
+    com_box.AddTranslateOp().Set(Gf.Vec3d(1.2, 0.0, 0.3))
+    com_box.GetSizeAttr().Set(2.0 * HALF_EXTENT)
+
+    com_box_joint = UsdPhysics.Joint.Define(stage, "/worldbody/com_box_joint")
+    com_box_joint.CreateBody0Rel().SetTargets([root_prim.GetPath()])
+    com_box_joint.CreateBody1Rel().SetTargets([com_box.GetPrim().GetPath()])
+    com_box_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    com_box_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+
+    UsdPhysics.RigidBodyAPI.Apply(com_box.GetPrim()).GetKinematicEnabledAttr().Set(False)
+
+    com_mass_api = UsdPhysics.MassAPI.Apply(com_box.GetPrim())
+    com_mass_api.CreateMassAttr(MASS)
+    com_mass_api.CreateCenterOfMassAttr(Gf.Vec3f(*COM))
 
     stage.Save()
 
@@ -271,7 +306,7 @@ def test_collision_only_fixed_override(usd_scene, expected_dofs):
 
 
 @pytest.mark.required
-def test_visual_collision_parsing(visual_collision_usd):
+def test_visual_collision_parsing(visual_collision_usd, tmp_path):
     usd_scene = build_usd_scene(visual_collision_usd, scale=1.0, fixed=True)
     assert len(usd_scene.entities) == 1
     entity = usd_scene.entities[0]
@@ -280,6 +315,18 @@ def test_visual_collision_parsing(visual_collision_usd):
     assert link.n_geoms == 2
     # 1 visual geom (Visual1), invisible site_marker excluded
     assert link.n_vgeoms == 1
+
+    # The export carries the descriptions the parse resolved, collision and visual geometry included. The USD
+    # context and its directory stay behind.
+    exported = tmp_path / f"stage{SCENE_FORMAT}"
+    usd_scene.export(exported)
+    with zipfile.ZipFile(exported) as archive:
+        assert os.path.dirname(visual_collision_usd) not in archive.read(MANIFEST_NAME).decode()
+    restored = gs.Scene.load(exported)
+    restored.build()
+    restored_link = restored.entities[0].base_link
+    assert (restored_link.n_geoms, restored_link.n_vgeoms) == (link.n_geoms, link.n_vgeoms)
+    assert_equal(restored.entities[0].get_mass(), entity.get_mass())
 
 
 @pytest.mark.required
@@ -341,9 +388,13 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
     entities = {entity.links[0].name: entity for entity in usd_scene.entities}
 
     # Dynamic friction (0.6) is preferred over static (0.8); restitution (0.4) is dropped.
-    assert_allclose(entities["/root/material_body"].geoms[0].friction, 0.6, tol=5e-8)
+    assert_allclose(entities["/root/material_body"].geoms[0].desc.friction, 0.6, tol=5e-8)
+    # An authored density belongs to its geom and feeds the link inertial. The entity material here states a
+    # density, so the resolution drops every authored one.
+    assert entities["/root/material_body"].geoms[0].desc.density is None
+    assert entities["/root/frictionless_body"].geoms[0].desc.density is None
     # An explicitly authored dynamic_friction = 0 is honored (frictionless collider).
-    assert_allclose(entities["/root/frictionless_body"].geoms[0].friction, 0.0, tol=gs.EPS)
+    assert_allclose(entities["/root/frictionless_body"].geoms[0].desc.friction, 0.0, tol=gs.EPS)
 
     # The explicitly set entity material density (rho=1000 in build_usd_scene) overrides the authored
     # per-geom densities, as material friction does for authored frictions: unit cubes weigh 1000 kg.
@@ -364,6 +415,11 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
     entities = {entity.links[0].name: entity for entity in entities}
     assert_allclose(entities["/root/material_body"].get_mass(), 300.0, tol=gs.EPS)
     assert_allclose(entities["/root/density_body"].get_mass(), 500.0, tol=gs.EPS)
+    # This entity material leaves density unset, so each geom keeps its authored value. A link freed from the
+    # world then recomputes its inertial at that value rather than at the entity default.
+    assert_allclose(entities["/root/material_body"].geoms[0].desc.density, 300.0, tol=gs.EPS)
+    assert_allclose(entities["/root/density_body"].geoms[0].desc.density, 500.0, tol=gs.EPS)
+    assert entities["/root/frictionless_body"].geoms[0].desc.density is None
 
 
 @pytest.mark.required
@@ -390,7 +446,7 @@ def test_align_anchor_with_geom_densities(density_align_usd):
     # for the rigid body and its kinematic ghost.
     assert_allclose(body.get_mass(), 400.0, tol=gs.EPS)
     assert_allclose(body.base_link.get_pos(relative=False), (0.25, 0.0, 0.0), tol=gs.EPS)
-    assert_allclose(body.base_link.inertial_pos, 0.0, tol=gs.EPS)
+    assert_allclose(body.base_link.desc.inertial_pos, 0.0, tol=gs.EPS)
     assert_allclose(ghost.base_link.get_pos(relative=False), (0.25, 0.0, 0.0), tol=gs.EPS)
 
 
@@ -398,6 +454,18 @@ def test_align_anchor_with_geom_densities(density_align_usd):
 @pytest.mark.parametrize("align, rho", [(True, None), (None, 1000.0), (None, None)])
 def test_align_requires_all_or_none_geom_densities(density_align_usd, align, rho):
     scene = gs.Scene()
+
+    # A density authored on only part of a link's geoms leaves the anchor sensitive to the density the others take.
+    # No kinematic entity holds such a density (see '_align_free_roots'), so an explicit align=True raises. The
+    # estimate is resolved as the entity is added, and it raises from there.
+    if align:
+        with pytest.raises(gs.GenesisException, match="with and without an authored density"):
+            scene.add_entity(
+                gs.morphs.USD(file=density_align_usd, prim_path="/root/mixed_body", align=align),
+                material=gs.materials.Rigid(rho=rho),
+            )
+        return
+
     body = scene.add_entity(
         gs.morphs.USD(
             file=density_align_usd,
@@ -408,13 +476,6 @@ def test_align_requires_all_or_none_geom_densities(density_align_usd, align, rho
             rho=rho,
         ),
     )
-
-    # A density authored on only part of a link's geoms leaves an inertial estimate that is neither explicit
-    # nor a uniform material-density rescale, so an explicit align=True raises.
-    if align:
-        with pytest.raises(gs.GenesisException, match="with and without an authored density"):
-            scene.build()
-        return
 
     # An explicitly set material density overrides the authored per-geom density, leaving a plain
     # uniform-density body for which auto-alignment proceeds; otherwise auto-alignment quietly declines
@@ -544,7 +605,7 @@ def test_oriented_capsule(oriented_capsule_usd, show_viewer, tol):
     assert capsule.n_geoms >= 1
     assert capsule.n_vgeoms >= 1
     for vgeom, geom in zip(capsule.vgeoms, capsule.geoms):
-        assert_allclose(vgeom._init_quat, geom._init_quat, tol=gs.EPS)
+        assert_allclose(vgeom.init_quat, geom.init_quat, tol=gs.EPS)
         # Capsule with axis=X has identity quat — axis rotation not composed into geom_Q.
         with pytest.raises(AssertionError):
             assert_allclose(geom.get_quat(), (1.0, 0.0, 0.0, 0.0), atol=tol)

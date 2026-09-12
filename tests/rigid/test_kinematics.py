@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("model_name", ["two_aligned_hinges"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+# Swept over compatibility, which decides whether every step recomputes the whole derived state or only what is owed.
+@pytest.mark.parametrize("mujoco_compatibility", [True, False])
 def test_link_velocity(gs_sim, tol):
     # Check the velocity for a few "easy" special cases
     (gs_robot,) = gs_sim.entities
@@ -86,6 +88,30 @@ def test_link_velocity(gs_sim, tol):
         [xanchor[1] - COM_1[1], COM_1[0] - xanchor[0], 0.0]
     )
     assert_allclose(civel_1, civel_1_, tol=tol)
+
+    # A mass or a center of mass written moves the center the velocities are quoted about, and the write alone has to
+    # leave them right: the same identity, against the masses and the placements the solver now carries.
+    solver = gs_sim.rigid_solver
+    for writing in ("mass", "COM"):
+        if writing == "mass":
+            solver.set_links_mass([1.0, 3.0])
+        else:
+            solver.set_links_COM(solver.get_links_COM() + torch.tensor([0.05, -0.02, 0.0]))
+
+        masses = tensor_to_array(solver.get_links_mass())
+        centers = tensor_to_array(solver.get_links_pos(ref=gs.link_ref_frame.link_COM))
+        anchor = tensor_to_array(gs_robot.joints[1].get_anchor_pos())
+        turn = tensor_to_array(solver.get_links_ang())[:, 2]
+        weighed = (masses[:, None] * centers).sum(axis=0) / masses.sum()
+        assert_allclose(tensor_to_array(solver.get_links_pos(ref=gs.link_ref_frame.root_COM)), weighed, tol=tol)
+
+        # The velocity of a point of a turning link, taken at each link's own center of mass.
+        for i_l, (center, spin) in enumerate(zip(centers, turn)):
+            expected = turn[0] * np.array([-center[1], center[0], 0.0])
+            if i_l:
+                expected += (spin - turn[0]) * np.array([anchor[1] - center[1], center[0] - anchor[0], 0.0])
+            reported = tensor_to_array(solver.get_links_vel(i_l, ref=gs.link_ref_frame.link_COM))
+            assert_allclose(reported, expected, tol=tol)
 
 
 @pytest.mark.required
@@ -597,10 +623,11 @@ def test_multi_robot_inverse_kinematics(show_viewer, tol):
 
 @pytest.mark.slow("gpu")  # gpu ~300s
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs, batch_dofs_info", [(0, True), (2, False), (2, True)])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_path_planning_avoidance(backend, n_envs, show_viewer, tol):
+def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, tol):
     CUBE_SIZE = 0.07
+    DOF_LIMIT = 0.5
 
     # FIXME: Implement a more robust plan planning algorithm
     if sys.platform == "darwin" and backend == gs.gpu:
@@ -609,6 +636,9 @@ def test_path_planning_avoidance(backend, n_envs, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            batch_dofs_info=batch_dofs_info,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3, 1, 1.5),
@@ -638,7 +668,7 @@ def test_path_planning_avoidance(backend, n_envs, show_viewer, tol):
         vis_mode="collision",
     )
     scene.build(n_envs=n_envs)
-    collider_state = scene.rigid_solver.collider._collider_state
+    collider_state = scene.rigid_solver.collider.collider_state
 
     hand = franka.get_link("hand")
     hand_pos_ref = torch.tensor([0.3, 0.1, 0.1], dtype=gs.tc_float, device=gs.device)
@@ -716,6 +746,36 @@ def test_path_planning_avoidance(backend, n_envs, show_viewer, tol):
         hand_quat_diff = gu.transform_quat_by_quat(gu.inv_quat(hand_quat_ref), hand.get_quat())
         theta = 2 * torch.arctan2(torch.linalg.norm(hand_quat_diff[..., 1:]), torch.abs(hand_quat_diff[..., 0]))
         assert_allclose(theta, 0.0, tol=5e-3)
+
+    # A limit tightened once the scene is built is the one the planner samples within: a goal it excludes cannot be
+    # reached, while one it allows still can, and no waypoint leaves what the solver would let the robot hold.
+    franka.set_dofs_limit(-DOF_LIMIT, DOF_LIMIT, dofs_idx_local=slice(0, 7))
+    assert_allclose(franka.get_dofs_limit()[1][..., :7], DOF_LIMIT, tol=gs.EPS)
+    franka.set_qpos(torch.zeros_like(qpos_goal))
+
+    qpos_goal_within = torch.zeros_like(qpos_goal)
+    qpos_goal_within[..., :7] = 0.5 * DOF_LIMIT
+    within_path, within_valid_mask = franka.plan_path(
+        qpos_goal=qpos_goal_within,
+        num_waypoints=300,
+        ignore_collision=True,
+        resolution=0.05,
+        return_valid_mask=True,
+    )
+    assert within_valid_mask.all()
+    np.testing.assert_array_less(tensor_to_array(within_path[..., :7].abs()), DOF_LIMIT + tol)
+
+    # Reachable for the limits the model was parsed with, which is what a snapshot taken at build would hold.
+    qpos_goal_beyond = torch.zeros_like(qpos_goal)
+    qpos_goal_beyond[..., 0] = 2.0 * DOF_LIMIT
+    _, beyond_valid_mask = franka.plan_path(
+        qpos_goal=qpos_goal_beyond,
+        num_waypoints=300,
+        ignore_collision=True,
+        resolution=0.05,
+        return_valid_mask=True,
+    )
+    assert not beyond_valid_mask.any()
 
 
 @pytest.mark.required
@@ -958,7 +1018,7 @@ def test_kinematics_queries_span_entities_and_solvers(n_envs, show_viewer, tol):
         entity.set_qpos(qpos)
         assert_allclose(end_effector.get_pos(), target_pos, tol=tol)
 
-    # Carrying more targets than the error buffer is sized for is refused, rather than written past.
+    # Carrying more targets than the error buffer is sized for is rejected, rather than written past.
     n_tgts = franka.solver._options.IK_max_targets
     with pytest.raises(gs.GenesisException):
         franka.inverse_kinematics_multilink(

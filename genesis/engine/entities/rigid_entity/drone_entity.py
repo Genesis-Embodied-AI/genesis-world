@@ -1,23 +1,18 @@
-import os
-import xml.etree.ElementTree as ET
-
 import torch
 
 import genesis as gs
-from genesis.utils.misc import get_assets_dir
 
+from .description import DroneEntityDescription
 from .rigid_entity import RigidEntity
 
 
 class DroneEntity(RigidEntity):
-    def _load_scene(self, morph, surface):
-        super()._load_scene(morph, surface)
+    _description_cls = DroneEntityDescription
 
-        # additional drone specific attributes
-        properties = ET.parse(os.path.join(get_assets_dir(), morph.file)).getroot()[0].attrib
-        self._KF = float(properties["kf"])
-        self._KM = float(properties["km"])
+    def _load_model(self):
+        super()._load_model()
 
+        morph = self._morph
         self._n_propellers = len(morph.propellers_link_name)
 
         propellers_link = gs.List([self.get_link(name) for name in morph.propellers_link_name])
@@ -76,12 +71,7 @@ class DroneEntity(RigidEntity):
         self._propellers_revs = (self._propellers_revs + propellers_rpm.T) % (60 / self.solver.dt)
 
         self.solver.set_drone_rpm(
-            self._propellers_link_idx,
-            propellers_rpm,
-            self._propellers_spin,
-            self.KF,
-            self.KM,
-            self._model == "RACE",
+            self._propellers_link_idx, self.KF, self.KM, propellers_rpm, self._propellers_spin, self._model == "RACE"
         )
 
     def update_propeller_vgeoms(self):
@@ -103,12 +93,12 @@ class DroneEntity(RigidEntity):
     @property
     def KF(self):
         """The drone's thrust coefficient."""
-        return self._KF
+        return self._desc.kf
 
     @property
     def KM(self):
         """The drone's moment coefficient."""
-        return self._KM
+        return self._desc.km
 
     @property
     def n_propellers(self):

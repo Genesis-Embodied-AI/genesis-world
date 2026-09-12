@@ -168,9 +168,8 @@ def test_get_terrain_height(n_envs, tol):
             vertical_scale=0.01,
             height_field=np.add.outer(np.arange(3), 2 * np.arange(3)),
         ),
-        material=gs.materials.Kinematic(),
     )
-    box = scene.add_entity(
+    scene.add_entity(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
         ),
@@ -235,8 +234,6 @@ def test_get_terrain_height(n_envs, tol):
 
     with pytest.raises(gs.GenesisException):
         terrain.get_terrain_height((10.0, 20.0, 1.0), envs_idx=envs_idx)
-    with pytest.raises(gs.GenesisException):
-        box.get_terrain_height((0.0, 0.0), envs_idx=envs_idx)
 
     terrain.set_quat(gu.xyz_to_quat(np.array((5e-4, 0.0, 0.0))), envs_idx=envs_idx, relative=False)
     height = terrain.get_terrain_height((10.0, 20.0), envs_idx=envs_idx)

@@ -7,6 +7,7 @@ import pytest
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from .assertions import assert_allclose
 
@@ -21,43 +22,39 @@ def _gs_search_by_joints_name(
     if isinstance(joints_name, str):
         joints_name = [joints_name]
 
+    gs_joints_idx = dict()
+    gs_joints_qs_idx = dict()
+    gs_joints_dofs_idx = dict()
+    valid_joints_name = []
     for entity in scene.entities:
-        try:
-            gs_joints_idx = dict()
-            gs_joints_qs_idx = dict()
-            gs_joints_dofs_idx = dict()
-            valid_joints_name = []
-            for joint in entity.joints:
-                valid_joints_name.append(joint.name)
-                if joint.name in joints_name:
-                    if to == "entity":
-                        gs_joints_idx[joint.name] = joint
-                        gs_joints_qs_idx[joint.name] = joint
-                        gs_joints_dofs_idx[joint.name] = joint
-                    elif to == "index":
-                        gs_joints_idx[joint.name] = joint.idx_local if is_local else joint.idx
-                        gs_joints_qs_idx[joint.name] = joint.qs_idx_local if is_local else joint.qs_idx
-                        gs_joints_dofs_idx[joint.name] = joint.dofs_idx_local if is_local else joint.dofs_idx
-                    else:
-                        raise ValueError(f"Cannot recognize what ({to}) to extract for the search")
+        for joint in entity.joints:
+            valid_joints_name.append(joint.name)
+            if joint.name in joints_name:
+                if to == "entity":
+                    gs_joints_idx[joint.name] = joint
+                    gs_joints_qs_idx[joint.name] = joint
+                    gs_joints_dofs_idx[joint.name] = joint
+                elif to == "index":
+                    gs_joints_idx[joint.name] = joint.idx_local if is_local else joint.idx
+                    gs_joints_qs_idx[joint.name] = joint.qs_idx_local if is_local else joint.qs_idx
+                    gs_joints_dofs_idx[joint.name] = joint.dofs_idx_local if is_local else joint.dofs_idx
+                else:
+                    raise ValueError(f"Cannot recognize what ({to}) to extract for the search")
 
-            missing_joints_name = set(joints_name) - gs_joints_idx.keys()
-            if len(missing_joints_name) > 0:
-                raise ValueError(
-                    f"Cannot find joints `{missing_joints_name}`. Valid joints names are {valid_joints_name}"
-                )
+    missing_joints_name = set(joints_name) - gs_joints_idx.keys()
+    if missing_joints_name:
+        raise ValueError(f"Cannot find joints `{missing_joints_name}`. Valid joints names are {valid_joints_name}")
 
-            if flatten:
-                return (
-                    list(gs_joints_idx.values()),
-                    list(chain.from_iterable(gs_joints_qs_idx.values())),
-                    list(chain.from_iterable(gs_joints_dofs_idx.values())),
-                )
-            return (gs_joints_idx, gs_joints_qs_idx, gs_joints_dofs_idx)
-        except ValueError:
-            pass
-    else:
-        raise ValueError(f"Fail to find joint indices for {joints_name}")
+    gs_joints_idx = {name: gs_joints_idx[name] for name in joints_name}
+    gs_joints_qs_idx = {name: gs_joints_qs_idx[name] for name in joints_name}
+    gs_joints_dofs_idx = {name: gs_joints_dofs_idx[name] for name in joints_name}
+    if flatten:
+        return (
+            list(gs_joints_idx.values()),
+            list(chain.from_iterable(gs_joints_qs_idx.values())),
+            list(chain.from_iterable(gs_joints_dofs_idx.values())),
+        )
+    return (gs_joints_idx, gs_joints_qs_idx, gs_joints_dofs_idx)
 
 
 def _gs_search_by_links_name(
@@ -70,31 +67,27 @@ def _gs_search_by_links_name(
     if isinstance(links_name, str):
         links_name = (links_name,)
 
+    gs_links_idx = dict()
+    valid_links_name = []
     for entity in scene.entities:
-        try:
-            gs_links_idx = dict()
-            valid_links_name = []
-            for link in entity.links:
-                valid_links_name.append(link.name)
-                if link.name in links_name:
-                    if to == "entity":
-                        gs_links_idx[link.name] = link
-                    elif to == "index":
-                        gs_links_idx[link.name] = link.idx_local if is_local else link.idx
-                    else:
-                        raise ValueError(f"Cannot recognize what ({to}) to extract for the search")
+        for link in entity.links:
+            valid_links_name.append(link.name)
+            if link.name in links_name:
+                if to == "entity":
+                    gs_links_idx[link.name] = link
+                elif to == "index":
+                    gs_links_idx[link.name] = link.idx_local if is_local else link.idx
+                else:
+                    raise ValueError(f"Cannot recognize what ({to}) to extract for the search")
 
-            missing_links_name = set(links_name) - gs_links_idx.keys()
-            if missing_links_name:
-                raise ValueError(f"Cannot find links `{missing_links_name}`. Valid link names are {valid_links_name}")
+    missing_links_name = set(links_name) - gs_links_idx.keys()
+    if missing_links_name:
+        raise ValueError(f"Cannot find links `{missing_links_name}`. Valid link names are {valid_links_name}")
 
-            if flatten:
-                return list(gs_links_idx.values())
-            return gs_links_idx
-        except ValueError:
-            pass
-    else:
-        raise ValueError(f"Fail to find link indices for {links_name}")
+    gs_links_idx = {name: gs_links_idx[name] for name in links_name}
+    if flatten:
+        return list(gs_links_idx.values())
+    return gs_links_idx
 
 
 def _get_model_mappings(
@@ -187,13 +180,11 @@ def _get_model_mappings(
 
 def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     """Initialize the Genesis simulator and reset MuJoCo onto its exact state, ready for a step-by-step comparison."""
-    (gs_robot,) = gs_sim.entities
-
     gs_sim.scene.reset()
     if qpos is not None:
-        gs_robot.set_qpos(qpos)
+        gs_sim.rigid_solver.set_qpos(qpos)
     if qvel is not None:
-        gs_robot.set_dofs_velocity(qvel)
+        gs_sim.rigid_solver.set_dofs_velocity(qvel)
 
     # The consistency checks compare pre-step derived quantities (bias forces, smooth accelerations), which only a
     # dynamics pass populates on the Genesis side, mirroring the mj_forward call below.
@@ -210,6 +201,43 @@ def init_paired_simulators(gs_sim, mj_sim, qpos=None, qvel=None):
     mj_sim.data.qpos[mj_qs_idx] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
     mj_sim.data.qvel[mj_dofs_idx] = gs_sim.rigid_solver.dyn_state.dofs.vel.to_numpy()[:, 0]
     mujoco.mj_forward(mj_sim.model, mj_sim.data)
+
+
+def set_paired_inertial_properties(gs_sim, mj_sim, *, armature_ratio, mass_ratio, inertia_ratio, com_offset):
+    """Apply the same inertial change to both simulators, through the runtime setters on the Genesis side and through
+    the model fields and 'mj_setConst' on the MuJoCo side.
+
+    Every DOF armature and every body mass and inertia are scaled by the given ratios, and the center of mass of every
+    body MuJoCo compiled with a full mass matrix structure is shifted by 'com_offset' in its body frame. What the setters
+    derive from the change (inverse weights, mean inertia) can then be held against the constants MuJoCo recomputes.
+    """
+    gs_maps, mj_maps = _get_model_mappings(gs_sim, mj_sim)
+    gs_bodies_idx, _, _, gs_dofs_idx, _, _ = gs_maps
+    mj_bodies_idx, _, _, mj_dofs_idx, _, _ = mj_maps
+    model = mj_sim.model
+    # MuJoCo bakes a diagonal mass matrix structure for a body compiled with its inertial frame on the body frame, so a
+    # center of mass shifted at runtime has nowhere to couple: only the bodies compiled with the full structure take one.
+    gs_com_idx, mj_com_idx = [], []
+    for gs_i, mj_i in zip(gs_bodies_idx, mj_bodies_idx):
+        if not model.body_simple[mj_i]:
+            gs_com_idx.append(gs_i)
+            mj_com_idx.append(mj_i)
+
+    model.dof_armature[mj_dofs_idx] *= armature_ratio
+    model.body_mass[mj_bodies_idx] *= mass_ratio
+    model.body_inertia[mj_bodies_idx] *= inertia_ratio
+    model.body_ipos[mj_com_idx] += com_offset
+    # A body compiled with its inertial frame on the body frame keeps the flag that lets MuJoCo skip the offset.
+    model.body_sameframe[mj_com_idx] = mujoco.mjtSameFrame.mjSAMEFRAME_NONE
+    mujoco.mj_setConst(model, mj_sim.data)
+    align_mujoco_invweight0(model)
+
+    solver = gs_sim.rigid_solver
+    solver.set_dofs_armature(armature_ratio * solver.get_dofs_armature(dofs_idx=gs_dofs_idx), dofs_idx=gs_dofs_idx)
+    solver.set_links_mass(mass_ratio * solver.get_links_mass(links_idx=gs_bodies_idx), links_idx=gs_bodies_idx)
+    solver.set_links_inertia(inertia_ratio * solver.get_links_inertia(links_idx=gs_bodies_idx), links_idx=gs_bodies_idx)
+    links_com = tensor_to_array(solver.get_links_COM(links_idx=gs_com_idx)) + com_offset
+    solver.set_links_COM(links_com, links_idx=gs_com_idx)
 
 
 def get_mujoco_midpoint_dofs_mask(mj_sim):
@@ -258,6 +286,34 @@ def get_mujoco_midpoint_dofs_mask(mj_sim):
     return mask
 
 
+def align_mujoco_invweight0(model):
+    """Write into the model the constraint inverse weights of every body and DOF that MuJoCo's general rule gives.
+
+    That rule of 'mj_setConst' is the mean diagonal of J M^-1 J^T at the neutral configuration, over the translational
+    and the rotational rows of a body, and over the DOFs a joint moves together. MuJoCo leaves it aside for a body it
+    flags as simple (see the FIXME in genesis.utils.mjcf), so aligning the model on it has both engines simulate the
+    weights Genesis derives.
+    """
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    mass_mat_inv = np.zeros((model.nv, model.nv))
+    mujoco.mj_solveM(model, data, mass_mat_inv, np.eye(model.nv))
+    jac = np.zeros((6, model.nv))
+    for i_b in range(1, model.nbody):
+        mujoco.mj_jacBodyCom(model, data, jac[:3], jac[3:], i_b)
+        inv_inertia = jac @ mass_mat_inv @ jac.T
+        model.body_invweight0[i_b] = (np.trace(inv_inertia[:3, :3]) / 3.0, np.trace(inv_inertia[3:, 3:]) / 3.0)
+    dofs_invweight = np.diag(mass_mat_inv).copy()
+    for i_j in range(model.njnt):
+        i_d = model.jnt_dofadr[i_j]
+        if model.jnt_type[i_j] == mujoco.mjtJoint.mjJNT_FREE:
+            dofs_invweight[i_d : i_d + 3] = dofs_invweight[i_d : i_d + 3].mean()
+            dofs_invweight[i_d + 3 : i_d + 6] = dofs_invweight[i_d + 3 : i_d + 6].mean()
+        elif model.jnt_type[i_j] == mujoco.mjtJoint.mjJNT_BALL:
+            dofs_invweight[i_d : i_d + 3] = dofs_invweight[i_d : i_d + 3].mean()
+    model.dof_invweight0[:] = dofs_invweight
+
+
 def check_mujoco_model_consistency(
     gs_sim,
     mj_sim,
@@ -275,7 +331,7 @@ def check_mujoco_model_consistency(
     mj_bodies_idx, mj_joints_idx, mj_qs_idx, mj_dofs_idx, mj_geoms_idx, mj_motors_idx = mj_maps
 
     # solver
-    gs_gravity = gs_sim.rigid_solver.scene.gravity
+    gs_gravity = gs_sim.rigid_solver.get_gravity()
     mj_gravity = mj_sim.model.opt.gravity
     assert_allclose(gs_gravity, mj_gravity, tol=tol)
     assert mj_sim.model.opt.timestep == gs_sim.rigid_solver.substep_dt
@@ -385,13 +441,17 @@ def check_mujoco_model_consistency(
     mj_dof_dof_frictionloss = mj_sim.model.dof_frictionloss
     assert_allclose(gs_dof_dof_frictionloss[gs_dofs_idx], mj_dof_dof_frictionloss[mj_dofs_idx], tol=tol)
 
-    gs_joint_solparams = np.array([joint.sol_params.cpu() for entity in gs_sim.entities for joint in entity.joints])
+    # Batched joint info carries a leading environment axis, and the MuJoCo model states one value per joint, so
+    # compare the first environment against it.
+    gs_joints_solparams = tensor_to_array(gs_sim.rigid_solver.get_sol_params(joints_idx=slice(None)))
+    gs_joint_solparams = gs_joints_solparams[0] if gs_joints_solparams.ndim == 3 else gs_joints_solparams
     mj_joint_solparams = np.concatenate((mj_sim.model.jnt_solref, mj_sim.model.jnt_solimp), axis=-1)
     _sanitize_sol_params(
         mj_joint_solparams, gs_sim.rigid_solver._sol_min_timeconst, gs_sim.rigid_solver._sol_default_timeconst
     )
     assert_allclose(gs_joint_solparams[gs_joints_idx], mj_joint_solparams[mj_joints_idx], tol=tol)
-    gs_geom_solparams = np.array([geom.sol_params.cpu() for entity in gs_sim.entities for geom in entity.geoms])
+    gs_geoms_solparams = tensor_to_array(gs_sim.rigid_solver.get_sol_params())
+    gs_geom_solparams = gs_geoms_solparams[0] if gs_geoms_solparams.ndim == 3 else gs_geoms_solparams
     mj_geom_solparams = np.concatenate((mj_sim.model.geom_solref, mj_sim.model.geom_solimp), axis=-1)
     # Geom time constants are compared as the model states them: a contact mixes the two geoms' values and the floor is
     # applied to that mix, so flooring per geom here would expect a value neither engine stores.
@@ -404,7 +464,7 @@ def check_mujoco_model_consistency(
     assert_allclose(gs_geom_solparams[gs_geoms_idx], mj_geom_solparams[mj_geoms_idx], tol=tol)
     # FIXME: Masking geometries and equality constraints is not supported for now
     gs_eq_solparams = np.array(
-        [equality.sol_params.cpu() for entity in gs_sim.entities for equality in entity.equalities]
+        [tensor_to_array(equality.get_sol_params()) for entity in gs_sim.entities for equality in entity.equalities]
     ).reshape((-1, 7))
     mj_eq_solparams = np.concatenate((mj_sim.model.eq_solref, mj_sim.model.eq_solimp), axis=-1)
     _sanitize_sol_params(
@@ -468,14 +528,14 @@ def _pair_constraint_rows(gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, *, qvel_prev
     gs_n_constraints = gs_sim.rigid_solver.constraint_solver.n_constraints.to_numpy()[0]
     mj_n_constraints = mj_sim.data.nefc
     assert gs_n_constraints == mj_n_constraints
-    gs_n_contacts = gs_sim.rigid_solver.collider._collider_state.n_contacts.to_numpy()[0]
+    gs_n_contacts = gs_sim.rigid_solver.collider.collider_state.n_contacts.to_numpy()[0]
     mj_n_contacts = mj_sim.data.ncon
-    gs_contact_pos = gs_sim.rigid_solver.collider._collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
+    gs_contact_pos = gs_sim.rigid_solver.collider.collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
     mj_contact_pos = mj_sim.data.contact.pos
     gs_contact_geoms = np.stack(
         (
-            gs_sim.rigid_solver.collider._collider_state.contact_data.geom_a.to_numpy()[:gs_n_contacts, 0],
-            gs_sim.rigid_solver.collider._collider_state.contact_data.geom_b.to_numpy()[:gs_n_contacts, 0],
+            gs_sim.rigid_solver.collider.collider_state.contact_data.geom_a.to_numpy()[:gs_n_contacts, 0],
+            gs_sim.rigid_solver.collider.collider_state.contact_data.geom_b.to_numpy()[:gs_n_contacts, 0],
         ),
         axis=-1,
     )
@@ -517,7 +577,7 @@ def _pair_constraint_rows(gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, *, qvel_prev
     n_head = mj_n_constraints - n_mj_contact_rows - int(is_mj_limit.sum())
     rows_per_contact = n_mj_contact_rows // mj_n_contacts if mj_n_contacts else 0
 
-    gs_contact_sort_idx = gs_sim.rigid_solver.collider._collider_state.contact_sort_idx.to_numpy()[:gs_n_contacts, 0]
+    gs_contact_sort_idx = gs_sim.rigid_solver.collider.collider_state.contact_sort_idx.to_numpy()[:gs_n_contacts, 0]
     gs_block_of_contact = np.empty(gs_n_contacts, dtype=int)
     gs_block_of_contact[gs_contact_sort_idx] = np.arange(gs_n_contacts)
 
@@ -628,7 +688,7 @@ def check_mujoco_data_consistency(
     mj_qfrc_actuator = mj_sim.data.qfrc_actuator
     assert_allclose(gs_qfrc_actuator, mj_qfrc_actuator[mj_dofs_idx], tol=tol)
 
-    gs_n_contacts = gs_sim.rigid_solver.collider._collider_state.n_contacts.to_numpy()[0]
+    gs_n_contacts = gs_sim.rigid_solver.collider.collider_state.n_contacts.to_numpy()[0]
     mj_n_contacts = mj_sim.data.ncon
     assert gs_n_contacts == mj_n_contacts, f"contact count differs: gs={gs_n_contacts} mj={mj_n_contacts}"
     gs_n_constraints = gs_sim.rigid_solver.constraint_solver.n_constraints.to_numpy()[0]
@@ -638,7 +698,7 @@ def check_mujoco_data_consistency(
     efc_atol, qvel_atol = _compute_efc_tolerances(mj_sim, tol)
 
     if gs_n_constraints and not ignore_constraints:
-        gs_contact_pos = gs_sim.rigid_solver.collider._collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
+        gs_contact_pos = gs_sim.rigid_solver.collider.collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
         mj_contact_pos = mj_sim.data.contact.pos
         # Sort based on the axis with the largest variation
         max_var_axis = 0
@@ -653,12 +713,12 @@ def check_mujoco_data_consistency(
         gs_sidx = np.argsort(gs_contact_pos[:, max_var_axis])
         mj_sidx = np.argsort(mj_contact_pos[:, max_var_axis])
         assert_allclose(gs_contact_pos[gs_sidx], mj_contact_pos[mj_sidx], tol=tol)
-        gs_contact_normal = gs_sim.rigid_solver.collider._collider_state.contact_data.normal.to_numpy()[
+        gs_contact_normal = gs_sim.rigid_solver.collider.collider_state.contact_data.normal.to_numpy()[
             :gs_n_contacts, 0
         ]
         mj_contact_normal = -mj_sim.data.contact.frame[:, :3]
         assert_allclose(gs_contact_normal[gs_sidx], mj_contact_normal[mj_sidx], tol=tol)
-        gs_penetration = gs_sim.rigid_solver.collider._collider_state.contact_data.penetration.to_numpy()[
+        gs_penetration = gs_sim.rigid_solver.collider.collider_state.contact_data.penetration.to_numpy()[
             :gs_n_contacts, 0
         ]
         mj_penetration = -mj_sim.data.contact.dist
@@ -672,16 +732,33 @@ def check_mujoco_data_consistency(
         mj_efc_force = mj_sim.data.efc_force
         assert_allclose(gs_efc_force[gs_sidx], mj_efc_force[mj_sidx], atol=efc_atol, rtol=tol)
 
-        mj_iter = mj_sim.data.solver_niter[0] - 1
-        if gs_n_constraints and mj_iter >= 0:
-            gs_scale = 1.0 / (gs_meaninertia * max(1, gs_sim.rigid_solver.n_dofs))
-            gs_gradient = gs_scale * np.linalg.norm(
-                gs_sim.rigid_solver.constraint_solver.grad.to_numpy()[: gs_sim.rigid_solver.n_dofs, 0]
-            )
-            mj_gradient = mj_sim.data.solver.gradient[mj_iter]
+        # Solver statistics of the last iteration, per island (both engines solve per island, see build_genesis_sim),
+        # matched through the MuJoCo island of the island's first dof. A Genesis island without any constraint has no
+        # MuJoCo counterpart (its dofs sit outside every MuJoCo island) and is skipped.
+        gs_constraint_solver = gs_sim.rigid_solver.constraint_solver
+        gs_island_state = gs_constraint_solver.constraint_state.island
+        gs_grad = qd_to_numpy(gs_constraint_solver.grad, transpose=True)[0, : gs_sim.rigid_solver.n_dofs]
+        gs_islands_inertia = qd_to_numpy(gs_island_state.inertia, transpose=True)[0]
+        gs_islands_ls_improvement = qd_to_numpy(gs_island_state.ls_improvement, transpose=True)[0]
+        gs_n_islands = qd_to_numpy(gs_island_state.n_islands)[0]
+        gs_dofs_island = qd_to_numpy(gs_island_state.dofs_island_idx, transpose=True)[0]
+        gs_constraints_island = qd_to_numpy(gs_island_state.constraint_island_idx, transpose=True)[0, :gs_n_constraints]
+        gs_to_mj_dof = dict(zip(gs_dofs_idx, mj_dofs_idx))
+        for gs_island in range(gs_n_islands):
+            gs_island_dofs = np.flatnonzero(gs_dofs_island == gs_island)
+            mj_island = mj_sim.data.dof_island[gs_to_mj_dof[gs_island_dofs[0]]]
+            if mj_island < 0 or not gs_n_constraints:
+                continue
+            mj_iter = mj_sim.data.solver_niter[mj_island] - 1
+            if mj_iter < 0:
+                continue
+            mj_stat = mj_island * mujoco.mjNSOLVER + mj_iter
+            gs_scale = 1.0 / gs_islands_inertia[gs_island]
+            gs_gradient = gs_scale * np.linalg.norm(gs_grad[gs_island_dofs])
+            mj_gradient = mj_sim.data.solver.gradient[mj_stat]
             assert_allclose(gs_gradient, mj_gradient, tol=tol)
-            gs_improvement = gs_scale * gs_sim.rigid_solver.constraint_solver.ls_improvement[0]
-            mj_improvement = mj_sim.data.solver.improvement[mj_iter]
+            gs_improvement = gs_scale * gs_islands_ls_improvement[gs_island]
+            mj_improvement = mj_sim.data.solver.improvement[mj_stat]
 
             # Note that 'constraint_solver.active' refers to whether the quadratic part of a constraint is active,
             # unlike Mujoco that defines 'nactive' as the number of active constraints regardless of its type.
@@ -689,20 +766,20 @@ def check_mujoco_data_consistency(
             # cone rows are excluded from the per-row quadratic (handled as a coupled block) yet count as active in
             # Mujoco's stat, which engages a cone as a whole; counting every row of a cone that carries any force
             # translates Genesis's convention into Mujoco's.
-            gs_counted = gs_sim.rigid_solver.constraint_solver.active.to_numpy()[:gs_n_constraints, 0].copy()
-            gs_n_cone = gs_sim.rigid_solver.constraint_solver.n_constraints_cone.to_numpy()[0]
+            gs_counted = gs_constraint_solver.active.to_numpy()[:gs_n_constraints, 0].copy()
+            gs_n_cone = gs_constraint_solver.n_constraints_cone.to_numpy()[0]
             if gs_n_cone:
                 gs_nef = (
-                    gs_sim.rigid_solver.constraint_solver.n_constraints_equality.to_numpy()[0]
-                    + gs_sim.rigid_solver.constraint_solver.n_constraints_frictionloss.to_numpy()[0]
+                    gs_constraint_solver.n_constraints_equality.to_numpy()[0]
+                    + gs_constraint_solver.n_constraints_frictionloss.to_numpy()[0]
                 )
                 rows_per_contact = gs_sim.rigid_solver.rigid_config.rows_per_contact
                 gs_cone_rows = slice(gs_nef, gs_nef + gs_n_cone)
                 gs_cone_rows_counted = gs_counted[gs_cone_rows] | (np.abs(gs_efc_force[gs_cone_rows]) > 0.0)
                 gs_cones_counted = gs_cone_rows_counted.reshape(-1, rows_per_contact).any(axis=1)
                 gs_counted[gs_cone_rows] = np.repeat(gs_cones_counted, rows_per_contact)
-            gs_nactive = gs_counted.sum()
-            mj_native = mj_sim.data.solver.nactive[mj_iter]
+            gs_nactive = gs_counted[gs_constraints_island == gs_island].sum()
+            mj_native = mj_sim.data.solver.nactive[mj_stat]
             if not (gs_sim.rigid_solver.dyn_info.dofs.frictionloss.to_numpy() > gs.EPS).any():
                 assert mj_native == gs_nactive
 
@@ -827,10 +904,22 @@ def simulate_and_check_mujoco_consistency(
     gs_sim, mj_sim, qpos=None, qvel=None, *, tol, num_steps, ignore_constraints=False
 ):
     # Get mapping between Mujoco and Genesis
-    (_, _, _, gs_dofs_idx, _, _), (_, _, mj_qs_idx, mj_dofs_idx, _, _) = _get_model_mappings(gs_sim, mj_sim)
+    gs_maps, mj_maps = _get_model_mappings(gs_sim, mj_sim)
+    gs_bodies_idx, _, _, gs_dofs_idx, _, _ = gs_maps
+    mj_bodies_idx, _, mj_qs_idx, mj_dofs_idx, _, _ = mj_maps
 
     # Make sure that "static" model information are matching
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
+
+    # Weights computed in single precision land a unit or two of the last place from MuJoCo's double ones, which a
+    # contact system holding near-equal rows carries through to forces differing by percents, so MuJoCo's are imposed.
+    if gs.np_float == np.float32:
+        links_invweight = qd_to_numpy(gs_sim.rigid_solver.dyn_info.links.invweight)
+        links_invweight[gs_bodies_idx] = mj_sim.model.body_invweight0[mj_bodies_idx]
+        gs_sim.rigid_solver.dyn_info.links.invweight.from_numpy(links_invweight)
+        dofs_invweight = qd_to_numpy(gs_sim.rigid_solver.dyn_info.dofs.invweight)
+        dofs_invweight[gs_dofs_idx] = mj_sim.model.dof_invweight0[mj_dofs_idx]
+        gs_sim.rigid_solver.dyn_info.dofs.invweight.from_numpy(dofs_invweight)
 
     # Initialize the simulation
     init_paired_simulators(gs_sim, mj_sim, qpos, qvel)

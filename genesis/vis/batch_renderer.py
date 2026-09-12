@@ -375,7 +375,7 @@ class BatchRenderer(RBC):
         """
 
         # Clear cache if requested or necessary
-        if force_render or self._t < self._visualizer.scene.t:
+        if force_render or self._t < self._visualizer.scene.sim.cur_step_global:
             self._data_cache.clear()
 
         # Fetch available cached data
@@ -435,7 +435,7 @@ class BatchRenderer(RBC):
             )
 
         # Update cache
-        self._t = self._visualizer.scene.t
+        self._t = self._visualizer.scene.sim.cur_step_global
         for img_type, data in enumerate(rendered):
             if needed[img_type]:
                 self._data_cache[(img_type, cache_key)] = rendered[img_type]

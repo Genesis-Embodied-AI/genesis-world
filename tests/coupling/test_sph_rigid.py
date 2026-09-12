@@ -1,6 +1,8 @@
 import pytest
+import torch
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy
 
 
@@ -64,10 +66,23 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
             rho=1500.0,
         ),
     )
+    raft = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.12, 0.25),
+            size=(0.1, 0.1, 0.04),
+            euler=(30.0, 0.0, 0.0),
+        ),
+        material=gs.materials.Rigid(
+            rho=200.0,
+        ),
+    )
     scene.build(n_envs=n_envs)
 
+    raft_rolls = []
     for _ in range(50):
         scene.step()
+        raft_rolls.append(gu.quat_to_xyz(raft.get_quat(), rpy=True, degrees=True)[..., 0])
+    raft_rolls = torch.stack(raft_rolls)
 
     # The static fluid pressure must push the light ball (rho well below the fluid rest density) up toward the
     # surface, while the heavy ball (rho well above) must keep sinking: flotation discriminates on the density
@@ -76,6 +91,9 @@ def test_rigid_flotation_follows_density_ratio(n_envs, pressure_solver, show_vie
     heavy_z = heavy_ball.get_pos()[..., 2]
     assert (light_z > 0.28).all(), f"Light ball must rise under buoyancy, got z={light_z}"
     assert (heavy_z < 0.22).all(), f"Heavy ball must sink, got z={heavy_z}"
+    # The pressure on the tilted raft acts off its center of mass, so the buoyancy torque rocks it about its roll
+    # axis. That torque reaches the rigid body through the coupling wrench alone.
+    assert (raft_rolls.amax(dim=0) - raft_rolls.amin(dim=0) > 2.0).all(), f"Raft must rock, got rolls={raft_rolls}"
 
 
 @pytest.mark.required

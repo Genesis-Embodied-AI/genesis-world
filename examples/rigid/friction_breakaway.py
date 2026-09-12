@@ -100,9 +100,9 @@ def measure_stiction(friction_cone, show_viewer):
     )
     scene.build()
 
-    box_load_coulomb = box.geoms[0].friction * float(box.get_mass()) * GRAVITY
-    spinner_load_coulomb = spinner.geoms[0].friction_torsional * float(spinner.get_mass()) * GRAVITY
-    roller_load_coulomb = roller.geoms[0].friction_rolling * float(roller.get_mass()) * GRAVITY
+    box_load_coulomb = box.geoms[0].get_friction() * box.get_mass() * GRAVITY
+    spinner_load_coulomb = spinner.geoms[0].get_friction_torsional() * spinner.get_mass() * GRAVITY
+    roller_load_coulomb = roller.geoms[0].get_friction_rolling() * roller.get_mass() * GRAVITY
 
     is_load_held = []
     for load_ratio in LOAD_RATIOS:

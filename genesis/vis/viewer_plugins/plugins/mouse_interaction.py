@@ -62,9 +62,9 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
 
         self._lock: Lock = Lock()
         self._held_link: RigidLink | None = None
-        # The plugin is active only while the simulation advances (scene.t increases). _last_step_t is the step
-        # counter seen at the previous sim-step callback; _sim_running caches whether it advanced so on_draw and the
-        # mouse handlers, which run off the step loop, share the same paused/running verdict.
+        # The plugin is active only while the simulation advances. _last_step_t is the step counter seen at the
+        # previous sim-step callback, and _sim_running caches whether it advanced, so that on_draw and the mouse
+        # handlers, which run off the step loop, share the same paused or running verdict.
         self._last_step_t: int = 0
         self._sim_running: bool = False
         self._interact_env_idx: int | None = None
@@ -84,7 +84,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
 
     def build(self, viewer, camera: "Node", scene: "Scene"):
         super().build(viewer, camera, scene)
-        self._last_step_t = self.scene.t
+        self._last_step_t = self.scene.sim.cur_step_global
         self._prev_mouse_screen_pos = (self.viewer._viewport_size[0] // 2, self.viewer._viewport_size[1] // 2)
 
         self._unit_cylinder_mesh = create_cylinder(radius=0.005, height=1.0, color=self.color)
@@ -128,7 +128,9 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
             if ray_hit.geom is not None and isinstance(ray_hit.geom.link, RigidLink) and not ray_hit.geom.link.is_fixed:
                 link = ray_hit.geom.link
                 hit_env_idx = ray_hit.env_idx
-                mass = float(link.get_mass())
+                # The mass a link was built with, which a setter may only ever bring to another valid mass, so the
+                # affordance costs no reading of the solver from the thread that draws it.
+                mass = link.desc.mass
 
                 # Validate mass is not too small to prevent numerical instability
                 if mass < MIN_PICKABLE_MASS:
@@ -177,11 +179,11 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
     @with_lock
     @override
     def update_on_sim_step(self) -> None:
-        # Active only while the simulation advances: a grabbed body is dragged through physics, so when the step did
-        # not advance scene.t (paused) the plugin releases its grip and applies no force or motion. on_draw reads
-        # _sim_running to drop its hover/drag visuals too.
-        self._sim_running = self.scene.t > self._last_step_t
-        self._last_step_t = self.scene.t
+        # Active only while the simulation advances: a grabbed body is dragged through physics, so a step that did not
+        # advance the counter (paused) releases the grip and applies no force or motion. on_draw reads _sim_running to
+        # drop its hover/drag visuals too.
+        self._sim_running = self.scene.sim.cur_step_global > self._last_step_t
+        self._last_step_t = self.scene.sim.cur_step_global
         if not self._sim_running:
             self._held_link = None
             return
@@ -276,7 +278,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
                 self._sim_running
                 and isinstance(link, RigidLink)
                 and not link.is_fixed
-                and float(link.get_mass()) >= MIN_PICKABLE_MASS
+                and link.desc.mass >= MIN_PICKABLE_MASS
             )
             if is_pickable:
                 arrow_T = gu.trans_R_to_T(closest_hit.position, gu.z_up_to_R(closest_hit.normal))
@@ -348,29 +350,37 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         # Current link state in env-local frame
         link_pos = tensor_to_array(self._held_link.get_pos(envs_idx=envs_idx, relative=False).squeeze(0))
         link_quat = tensor_to_array(self._held_link.get_quat(envs_idx=envs_idx, relative=False).squeeze(0))
-        lin_vel = tensor_to_array(self._held_link.get_vel(envs_idx=envs_idx).squeeze(0))
+        lin_vel = tensor_to_array(self._held_link.get_vel(envs_idx=envs_idx, relative=False).squeeze(0))
         ang_vel = tensor_to_array(self._held_link.get_ang(envs_idx=envs_idx).squeeze(0))
 
         # Held point in env-local frame; control point comes from a world-space plane raycast, so strip the offset.
         held_point_env_local = gu.transform_by_trans_quat(self._held_point_local, link_pos, link_quat)
         control_point_env_local = control_point - self._env_offset
 
-        # Compute inertial frame properties
-        inertial_pos = tensor_to_array(self._held_link.inertial_pos)
-        inertial_quat = tensor_to_array(self._held_link.inertial_quat)
+        # What the dynamics spins this link about, read live: a center of mass or an inertia set at runtime moves it,
+        # and a drag worked out around the authored one pulls about a point the solver does not turn on. Per
+        # environment only where link info is batched, which is the only case where the grabbed one has its own.
+        solver = self._held_link.solver
+        envs_idx_info = self._interact_env_idx if solver.is_links_info_batched else None
+        com_local = tensor_to_array(solver.get_links_COM(self._held_link.idx, envs_idx_info))[..., 0, :]
+        inertia_local = tensor_to_array(solver.get_links_inertia(self._held_link.idx, envs_idx_info))[..., 0, :, :]
+        if envs_idx_info is not None:
+            com_local, inertia_local = com_local[0], inertia_local[0]
+        inertial_quat = tensor_to_array(self._held_link.desc.inertial_quat)
         world_principal_quat = gu.transform_quat_by_quat(inertial_quat, link_quat)
 
         # Compute arm from COM to held point in world frame
-        arm_in_principal = gu.inv_transform_by_trans_quat(self._held_point_local, inertial_pos, inertial_quat)
+        arm_in_principal = gu.inv_transform_by_trans_quat(self._held_point_local, com_local, inertial_quat)
         arm_in_world = gu.transform_by_quat(arm_in_principal, world_principal_quat)
 
         # Compute inverse inertia in world frame
         R_world = gu.quat_to_R(world_principal_quat)
-        inertia_world = R_world @ self._held_link.inertial_i @ R_world.T
+        inertia_world = R_world @ inertia_local @ R_world.T
         inv_inertia_world = np.linalg.inv(inertia_world)
 
         pos_err_v = control_point_env_local - held_point_env_local
-        mass = float(self._held_link.get_mass())
+        # The mass of the environment being grabbed in, where a batched scene gives each one its own.
+        mass = float(self._held_link.get_mass(envs_idx=envs_idx_info))
         inv_mass = 1.0 / mass
 
         # A link at rest hangs below its center of mass with the spring carrying its whole weight, so the slack alone

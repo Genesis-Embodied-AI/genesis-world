@@ -31,18 +31,26 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_objects_freefall(n_envs, show_viewer):
+@pytest.mark.parametrize("n_envs, n_substeps", [(0, 1), (2, 1), (0, 2), (2, 2)])
+def test_objects_freefall(n_envs, n_substeps, show_viewer):
     from genesis.engine.entities import FEMEntity
 
+    # The interval one advance of the IPC world covers, asked for as the dt the solvers integrate at, so that a step
+    # holding several substeps must reach the coupler as the substep rate to integrate the same free fall.
     DT = 0.002
     GRAVITY = np.array([0.0, 0.0, -9.8], dtype=gs.np_float)
-    NUM_STEPS = 30
+    NUM_SUBSTEPS = 30
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=DT,
+            dt=DT * n_substeps,
             gravity=GRAVITY,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            dt=DT,
+        ),
+        fem_options=gs.options.FEMOptions(
+            dt=DT,
         ),
         coupler_options=gs.options.IPCCouplerOptions(
             contact_d_hat=0.01,
@@ -108,6 +116,7 @@ def test_objects_freefall(n_envs, show_viewer):
 
     scene.build(n_envs=n_envs)
     assert scene.sim is not None
+    assert scene.sim.substeps == n_substeps
     coupler = cast("IPCCoupler", scene.sim.coupler)
 
     envs_idx = range(max(scene.n_envs, 1))
@@ -138,7 +147,7 @@ def test_objects_freefall(n_envs, show_viewer):
 
     # Run simulation and validate dynamics equations at each step
     p_prev, v_prev = p_0.copy(), v_0.copy()
-    for _i in range(NUM_STEPS):
+    for _i in range(NUM_SUBSTEPS // n_substeps):
         # Move forward in time
         scene.step()
 
@@ -146,15 +155,16 @@ def test_objects_freefall(n_envs, show_viewer):
             # Get new position
             p_i = get_ipc_positions(scene, **obj_kwargs, envs_idx=envs_idx)
 
-            # Estimate velocity by finite difference: v_{n+1} = (x_{n+1} - x_n) / DT
-            v_i = (p_i - p_prev[obj]) / DT
+            # Estimate velocity by finite difference over the step, which the Euler scheme makes the mean over its
+            # substeps: (x_{n+m} - x_n) / (m * DT)
+            v_i = (p_i - p_prev[obj]) / (n_substeps * DT)
 
-            # Compute estimated position and velocity
-            expected_v = v_prev[obj] + GRAVITY * DT
-            expected_p = p_prev[obj] + expected_v * DT
+            # Compute estimated position and velocity, accumulating one Euler substep at a time
+            expected_v = v_prev[obj] + GRAVITY * DT * (n_substeps + 1) / 2
+            expected_p = p_prev[obj] + expected_v * (n_substeps * DT)
 
             # Update for next iteration
-            p_prev[obj], v_prev[obj] = p_i, v_i
+            p_prev[obj], v_prev[obj] = p_i, v_prev[obj] + GRAVITY * DT * n_substeps
 
             # FIXME: This test does not pass for sphere entity...
             if obj is sphere:
@@ -173,7 +183,7 @@ def test_objects_freefall(n_envs, show_viewer):
         # Validate centroidal total displacement: 0.5 * GRAVITY * t * (t + DT)
         # FEM entities (cloth) deform during freefall, causing small centroid drift — use looser tolerance.
         p_delta = p_prev[obj] - p_0[obj]
-        expected_displacement = 0.5 * GRAVITY * NUM_STEPS * (NUM_STEPS + 1) * DT**2
+        expected_displacement = 0.5 * GRAVITY * NUM_SUBSTEPS * (NUM_SUBSTEPS + 1) * DT**2
         assert_allclose(p_delta.mean(axis=-2), expected_displacement, tol=2e-3 if isinstance(obj, FEMEntity) else 1e-3)
 
         # FIXME: This test does not pass for sphere entity...
@@ -614,7 +624,7 @@ def test_momentum_conservation(n_envs, show_viewer):
     assert rigid_link.idx in ipc_links_idx
     assert rigid_link in coupler._abd_slots_by_link
 
-    cube_mass = rigid_cube.get_mass()
+    cube_mass = tensor_to_array(rigid_cube.get_mass())
 
     # Read actual FEM mass from IPC geometry (mesh mass != analytical sphere mass due to tet discretization).
     blob_radius = blob.morph.radius
@@ -628,7 +638,7 @@ def test_momentum_conservation(n_envs, show_viewer):
     assert_allclose(blob_mass, blob_analytical_mass, rtol=0.01)
 
     total_p_history = []
-    momentum_0 = VELOCITY * cube_mass
+    momentum_0 = VELOCITY * cube_mass[..., None]
 
     dist_min = np.array(float("inf"))
     fem_positions_prev = None  # FEM initial velocity is zero
@@ -636,7 +646,7 @@ def test_momentum_conservation(n_envs, show_viewer):
         cube_vel = tensor_to_array(
             rigid_cube.get_links_vel(links_idx_local=0, ref=gs.link_ref_frame.link_COM)[..., 0, :]
         )
-        rigid_linear_momentum = cube_mass * cube_vel
+        rigid_linear_momentum = cube_mass[..., None] * cube_vel
 
         fem_proc_geo = get_ipc_merged_geometry(scene, solver_type="fem", idx=fem_entity_idx, env_idx=0)
         fem_positions = fem_proc_geo.positions().view().squeeze(axis=-1)

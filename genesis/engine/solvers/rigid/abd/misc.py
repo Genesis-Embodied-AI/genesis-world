@@ -90,67 +90,6 @@ def func_wakeup_island(
 
 
 @qd.kernel(fastcache=True)
-def kernel_init_invweight(
-    envs_idx: qd.types.ndarray(),
-    links_invweight: qd.types.ndarray(),
-    dofs_invweight: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    force_update: qd.template(),
-):
-    EPS = rigid_info.EPS[None]
-
-    if qd.static(rigid_config.batch_links_info):
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_l, i_b_ in qd.ndrange(dyn_info.links.parent_idx.shape[0], envs_idx.shape[0]):
-            i_b = envs_idx[i_b_]
-            for j in qd.static(range(2)):
-                if force_update or dyn_info.links.invweight[i_l, i_b][j] < EPS:
-                    dyn_info.links.invweight[i_l, i_b][j] = links_invweight[i_b_, i_l, j]
-    else:
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_l in range(dyn_info.links.parent_idx.shape[0]):
-            for j in qd.static(range(2)):
-                if force_update or dyn_info.links.invweight[i_l][j] < EPS:
-                    dyn_info.links.invweight[i_l][j] = links_invweight[i_l, j]
-
-    if qd.static(rigid_config.batch_dofs_info):
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_d, i_b_ in qd.ndrange(dyn_info.dofs.invweight.shape[0], envs_idx.shape[0]):
-            i_b = envs_idx[i_b_]
-            if force_update or dyn_info.dofs.invweight[i_d, i_b] < EPS:
-                dyn_info.dofs.invweight[i_d, i_b] = dofs_invweight[i_b_, i_d]
-    else:
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_d in range(dyn_info.dofs.invweight.shape[0]):
-            if force_update or dyn_info.dofs.invweight[i_d] < EPS:
-                dyn_info.dofs.invweight[i_d] = dofs_invweight[i_d]
-
-
-@qd.kernel(fastcache=True)
-def kernel_init_meaninertia(
-    envs_idx: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_dofs = rigid_info.mass_mat.shape[0]
-    n_entities = dyn_info.entities.n_links.shape[0]
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        if n_dofs > 0:
-            rigid_info.meaninertia[i_b] = 0.0
-            for i_e in range(n_entities):
-                for i_d in range(dyn_info.entities.dof_start[i_e], dyn_info.entities.dof_end[i_e]):
-                    rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] + rigid_info.mass_mat[i_d, i_d, i_b]
-                rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] / n_dofs
-        else:
-            rigid_info.meaninertia[i_b] = 1.0
-
-
-@qd.kernel(fastcache=True)
 def kernel_init_dof_fields(
     entity_idx: qd.types.ndarray(),
     dofs_motion_ang: qd.types.ndarray(),
@@ -268,14 +207,9 @@ def kernel_init_link_fields(
     links_geom_end: qd.types.ndarray(),
     links_vgeom_start: qd.types.ndarray(),
     links_vgeom_end: qd.types.ndarray(),
-    links_invweight: qd.types.ndarray(),
     links_is_fixed: qd.types.ndarray(),
     links_pos: qd.types.ndarray(),
     links_quat: qd.types.ndarray(),
-    links_inertial_pos: qd.types.ndarray(),
-    links_inertial_quat: qd.types.ndarray(),
-    links_inertial_i: qd.types.ndarray(),
-    links_inertial_mass: qd.types.ndarray(),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -284,7 +218,7 @@ def kernel_init_link_fields(
     n_links = links_parent_idx.shape[0]
     _B = dyn_state.links.pos.shape[1]
 
-    for I_l in qd.grouped(dyn_info.links.invweight):
+    for I_l in qd.grouped(dyn_info.links.parent_idx):
         i_l = I_l[0]
 
         dyn_info.links.parent_idx[I_l] = links_parent_idx[i_l]
@@ -303,20 +237,11 @@ def kernel_init_link_fields(
         dyn_info.links.vgeom_start[I_l] = links_vgeom_start[i_l]
         dyn_info.links.vgeom_end[I_l] = links_vgeom_end[i_l]
 
-        for j in qd.static(range(2)):
-            dyn_info.links.invweight[I_l][j] = links_invweight[i_l, j]
-
         for j in qd.static(range(4)):
             dyn_info.links.quat[I_l][j] = links_quat[i_l, j]
-            dyn_info.links.inertial_quat[I_l][j] = links_inertial_quat[i_l, j]
 
         for j in qd.static(range(3)):
             dyn_info.links.pos[I_l][j] = links_pos[i_l, j]
-            dyn_info.links.inertial_pos[I_l][j] = links_inertial_pos[i_l, j]
-
-        dyn_info.links.inertial_mass[I_l] = links_inertial_mass[i_l]
-        for j1, j2 in qd.static(qd.ndrange(3, 3)):
-            dyn_info.links.inertial_i[I_l][j1, j2] = links_inertial_i[i_l, j1, j2]
 
     for i_l, i_b in qd.ndrange(n_links, _B):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -329,10 +254,6 @@ def kernel_init_link_fields(
             for j in qd.static(range(3)):
                 dyn_state.links.pos[i_l, i_b][j] = links_pos[i_l, j]
 
-        for j in qd.static(range(3)):
-            dyn_state.links.i_pos_shift[i_l, i_b][j] = 0.0
-        dyn_state.links.mass_shift[i_l, i_b] = 0.0
-
     if qd.static(rigid_config.use_hibernation):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_l, i_b in qd.ndrange(n_links, _B):
@@ -342,6 +263,34 @@ def kernel_init_link_fields(
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
             rigid_info.n_awake_links[i_b] = n_links
+
+
+@qd.kernel(fastcache=True)
+def kernel_init_link_dynamics(
+    links_invweight: qd.types.ndarray(),
+    links_inertial_pos: qd.types.ndarray(),
+    links_inertial_quat: qd.types.ndarray(),
+    links_inertial_i: qd.types.ndarray(),
+    links_inertial_mass: qd.types.ndarray(),
+    # Quadrants variables
+    dyn_info: array_class.DynInfo,
+):
+    """Write each simulated link's inertial frame, inertia, mass and inverse weight."""
+    for I_l in qd.grouped(dyn_info.links.invweight):
+        i_l = I_l[0]
+
+        for j in qd.static(range(2)):
+            dyn_info.links.invweight[I_l][j] = links_invweight[i_l, j]
+
+        for j in qd.static(range(4)):
+            dyn_info.links.inertial_quat[I_l][j] = links_inertial_quat[i_l, j]
+
+        for j in qd.static(range(3)):
+            dyn_info.links.inertial_pos[I_l][j] = links_inertial_pos[i_l, j]
+
+        dyn_info.links.inertial_mass[I_l] = links_inertial_mass[i_l]
+        for j1, j2 in qd.static(qd.ndrange(3, 3)):
+            dyn_info.links.inertial_i[I_l][j1, j2] = links_inertial_i[i_l, j1, j2]
 
 
 @qd.kernel(fastcache=True)
@@ -800,7 +749,7 @@ def func_apply_coupling_force(link_idx, env_idx, pos, force, links_state: array_
     links_state.cfrc_coupling_vel[link_idx, env_idx] -= force
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def kernel_wakeup_coupled_links(
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
@@ -895,54 +844,6 @@ def func_clear_external_force(
 
 # --------------------------------------------------------------------------------------
 # Render transform kernels
-# --------------------------------------------------------------------------------------
-
-
-@qd.kernel(fastcache=True)
-def kernel_update_geoms_render_T(
-    geoms_render_T: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    EPS = rigid_info.EPS[None]
-
-    n_geoms = dyn_state.geoms.pos.shape[0]
-    _B = dyn_state.geoms.pos.shape[1]
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_g, i_b in qd.ndrange(n_geoms, _B):
-        geom_T = gu.qd_trans_quat_to_T(
-            dyn_state.geoms.pos[i_g, i_b] + rigid_info.envs_offset[i_b], dyn_state.geoms.quat[i_g, i_b], EPS
-        )
-        if (qd.abs(geom_T) < 1e20).all():
-            for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
-                geoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)
-
-
-@qd.kernel(fastcache=True)
-def kernel_update_vgeoms_render_T(
-    vgeoms_render_T: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    EPS = rigid_info.EPS[None]
-
-    n_vgeoms = dyn_info.vgeoms.link_idx.shape[0]
-    _B = dyn_state.links.pos.shape[1]
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_g, i_b in qd.ndrange(n_vgeoms, _B):
-        geom_T = gu.qd_trans_quat_to_T(
-            dyn_state.vgeoms.pos[i_g, i_b] + rigid_info.envs_offset[i_b], dyn_state.vgeoms.quat[i_g, i_b], EPS
-        )
-        if (qd.abs(geom_T) < 1e20).all():
-            for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
-                vgeoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)
-
-
-# --------------------------------------------------------------------------------------
-# Utility kernels and functions
 # --------------------------------------------------------------------------------------
 
 

@@ -10,11 +10,12 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
 from genesis.utils.misc import DeprecationError, qd_to_torch
 
-from .base_solver import Solver
+from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 if TYPE_CHECKING:
     from genesis.engine.entities import MPMEntity
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
 
 
 @qd.data_oriented
-class MPMSolver(Solver):
+class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
+    material_cls = MPM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -40,7 +42,7 @@ class MPMSolver(Solver):
         self._enable_CPIC = options.enable_CPIC
         self._constraints_initialized = False
 
-        self._n_vvert_supports = self.scene.vis_options.n_support_neighbors
+        self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
         # `_particle_volume_scale` is used to avoid potential numerical instability, as the actual `_particle_volume` may be very small.
         # Note that the magnitude of `_particle_volume` doesn't affect MPM simulation itself, but it is used to compute particle
@@ -242,17 +244,8 @@ class MPMSolver(Solver):
                     "calculated based on `grid_density`). Simulation might be unstable."
                 )
 
-        # FIXME: _gravity must be a raw qd.field() because LegacyCoupler.mpm_grid_op accesses it via template attribute on a
-        # @qd.data_oriented class, and Quadrants doesn't support Ndarray attrs on data_oriented in kernel scope. Fix by either:
-        # (1) adding Ndarray support to data_oriented template resolution, or (2) migrating the solver to a frozen dataclass
-        # so _predeclare_struct_ndarrays can register the Ndarray.
-        # Only when active: the field costs an SNode tree that Quadrants never gives back short of
-        # qd.reset(), and nothing reads an inactive solver's gravity from kernel scope (`set_gravity`
-        # skips inactive solvers, and `SolverBase.set_gravity` / `get_gravity` accept the Ndarray).
-        if self.is_active and self._gravity is not None:
-            gravity = self._gravity.to_numpy()
-            self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
-            self._gravity.from_numpy(gravity)
+        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
+        self._build_gravity(as_field=True)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -262,7 +255,9 @@ class MPMSolver(Solver):
     def is_active(self):
         return self.n_particles > 0
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "MPMEntity":
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+    ) -> "MPMEntity":
         self.add_material(material)
 
         # create entity
@@ -583,7 +578,7 @@ class MPMSolver(Solver):
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
-            self.sim.coupler.rigid_solver.collider._collider_static_config,
+            self.sim.coupler.rigid_solver.collider.collider_config,
         )
 
     def substep_pre_coupling_grad(self, f):
@@ -594,7 +589,7 @@ class MPMSolver(Solver):
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
-            self.sim.coupler.rigid_solver.collider._collider_static_config,
+            self.sim.coupler.rigid_solver.collider.collider_config,
         )
         self.svd_grad(f)
         self.compute_F_tmp.grad(f)

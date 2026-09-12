@@ -4,6 +4,7 @@ Author: Matthew Matl
 """
 
 import os
+import sys
 
 from OpenGL.GL import *
 
@@ -17,41 +18,17 @@ class OffscreenRenderer(object):
 
     Parameters
     ----------
-    viewport_width : int
-        The width of the main viewport, in pixels.
-    viewport_height : int
-        The height of the main viewport, in pixels.
     point_size : float
         The size of screen-space points in pixels.
     """
 
-    def __init__(self, point_size=1.0, pyopengl_platform="pyglet", seg_node_map=None):
+    def __init__(self, point_size=1.0, seg_node_map=None):
         self.point_size = point_size
         self._platform = None
         self._is_software = False
         self._has_valid_context = False
-        self._create(pyopengl_platform)
+        self._create()
         self._seg_node_map = seg_node_map
-
-    @property
-    def viewport_width(self):
-        """int : The width of the main viewport, in pixels."""
-        return 32
-        # return self._viewport_width
-
-    @viewport_width.setter
-    def viewport_width(self, value):
-        self._viewport_width = int(value)
-
-    @property
-    def viewport_height(self):
-        """int : The height of the main viewport, in pixels."""
-        return 32
-        # return self._viewport_height
-
-    @viewport_height.setter
-    def viewport_height(self, value):
-        self._viewport_height = int(value)
 
     @property
     def point_size(self):
@@ -70,19 +47,6 @@ class OffscreenRenderer(object):
             )
 
         self._platform.make_current()
-
-        # If platform does not support dynamically-resizing framebuffers, destroy it and restart it
-        if (
-            self._platform.viewport_height != self.viewport_height
-            or self._platform.viewport_width != self.viewport_width
-        ):
-            if not self._platform.supports_framebuffers():
-                self.delete()
-                self._create()
-
-                # Only needs to happen if the context was deleted and created
-                self._platform.make_current()
-
         self._has_valid_context = True
 
     def make_uncurrent(self):
@@ -110,7 +74,7 @@ class OffscreenRenderer(object):
         camera_node=None,
         shadow=False,
         plane_reflection=False,
-        env_separate_rigid=False,
+        split_envs=False,
         skip_markers=False,
     ):
         """Render a scene with the given set of flags.
@@ -153,7 +117,7 @@ class OffscreenRenderer(object):
         if plane_reflection and not self._is_software:
             flags |= RenderFlags.REFLECTIVE_FLOOR
 
-        if env_separate_rigid:
+        if split_envs:
             flags |= RenderFlags.ENV_SEPARATE
 
         if skip_markers:
@@ -172,30 +136,9 @@ class OffscreenRenderer(object):
 
         first_pass_done = False
         if rgb or depth or seg:
-            if self._platform.supports_framebuffers():
-                flags |= RenderFlags.OFFSCREEN
-                retval = renderer.render(scene, flags, seg_node_map)
-                assert retval is not None
-            else:
-                if flags & RenderFlags.ENV_SEPARATE:
-                    gs.raise_exception("'env_separate_rigid=True' not supported on this platform.")
-                result = renderer.render(scene, flags, seg_node_map)
-                assert result is not None
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0)
-                glReadBuffer(GL_FRONT)
-                if depth:
-                    z_near = scene.main_camera_node.camera.znear
-                    z_far = scene.main_camera_node.camera.zfar
-                    if z_far is None:
-                        z_far = -1.0
-                    depth_arr = renderer.jit.read_depth_buf(self.viewport_height, self.viewport_width, z_near, z_far)
-                    depth_arr = renderer._resize_image(depth_arr, antialias=not seg)
-                if flags & RenderFlags.DEPTH_ONLY:
-                    retval = (depth_arr,)
-                else:
-                    color_arr = renderer.jit.read_color_buf(self.viewport_height, self.viewport_width, rgba=False)
-                    color_arr = renderer._resize_image(color_arr, antialias=not seg)
-                    retval = (color_arr, depth_arr) if depth else (color_arr,)
+            flags |= RenderFlags.OFFSCREEN
+            retval = renderer.render(scene, flags, seg_node_map)
+            assert retval is not None
             first_pass_done = True
         else:
             retval = ()
@@ -205,23 +148,13 @@ class OffscreenRenderer(object):
             renderer._program_cache = renderer._normal_program_cache
 
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
-            if env_separate_rigid:
+            if split_envs:
                 flags |= RenderFlags.ENV_SEPARATE
             if skip_markers:
                 flags |= RenderFlags.SKIP_MARKERS
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-            if self._platform.supports_framebuffers():
-                normal_arr, *_ = renderer.render(
-                    scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True
-                )
-            else:
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0)
-                glReadBuffer(GL_FRONT)
-                renderer.render(scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True)
-                normal_arr = renderer.jit.read_color_buf(self.viewport_height, self.viewport_width, rgba=False)
-                normal_arr = renderer._resize_image(normal_arr, antialias=not seg)
-
+            normal_arr, *_ = renderer.render(scene, flags, is_first_pass=not first_pass_done, force_skip_shadows=True)
             retval = (*retval, normal_arr)
 
             renderer._program_cache = old_cache
@@ -241,11 +174,20 @@ class OffscreenRenderer(object):
         del self._platform
         self._platform = None
 
-    def _create(self, platform):
+    def _create(self):
+        # The PyOpenGL platform requested through PYOPENGL_PLATFORM, defaulting to the window-less one of the operating
+        # system.
+        platform = os.environ.get("PYOPENGL_PLATFORM", {"linux": "egl", "darwin": "cgl"}.get(sys.platform, "pyglet"))
+        if platform not in ("osmesa", "pyglet", "egl", "cgl"):
+            gs.logger.warning(f"PYOPENGL_PLATFORM='{platform}' not supported. Falling back to 'pyglet'.")
+            platform = "pyglet"
+        if sys.platform != "darwin" and platform == "cgl":
+            gs.raise_exception("PYOPENGL_PLATFORM='cgl' is only supported on MacOS.")
+
         if platform == "pyglet":
             from .platforms.pyglet_platform import PygletPlatform
 
-            self._platform = PygletPlatform(self.viewport_width, self.viewport_height)
+            self._platform = PygletPlatform()
         elif platform == "egl":
             from .platforms import egl
 
@@ -253,17 +195,15 @@ class OffscreenRenderer(object):
                 device_id = int(os.environ["EGL_DEVICE_ID"])
             else:
                 device_id = None
-            self._platform = egl.EGLPlatform(self.viewport_width, self.viewport_height, device_id)
+            self._platform = egl.EGLPlatform(device_id)
         elif platform == "osmesa":
             from .platforms.osmesa import OSMesaPlatform
 
-            self._platform = OSMesaPlatform(self.viewport_width, self.viewport_height)
-        elif platform == "cgl":
+            self._platform = OSMesaPlatform()
+        else:
             from .platforms.cgl import CGLPlatform
 
-            self._platform = CGLPlatform(self.viewport_width, self.viewport_height)
-        else:
-            raise ValueError("Unsupported PyOpenGL platform: {}".format(platform))
+            self._platform = CGLPlatform()
         self._platform.init_context()
 
         self._platform.make_current()

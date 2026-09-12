@@ -75,20 +75,20 @@ def main():
             }
 
         if IS_PYQTGRAPH_AVAILABLE:
-            scene.start_recording(
+            scene.add_recorder(
                 data_func,
                 gs.recorders.PyQtLinePlot(labels=labels, title="IMU Ground Truth Data"),
             )
         elif IS_MATPLOTLIB_AVAILABLE:
             gs.logger.info("pyqtgraph not found, falling back to matplotlib.")
-            scene.start_recording(
+            scene.add_recorder(
                 data_func,
                 gs.recorders.MPLLinePlot(labels=labels, title="IMU Ground Truth Data"),
             )
         else:
             print("matplotlib or pyqtgraph not found, skipping real-time plotting.")
 
-    scene.start_recording(
+    scene.add_recorder(
         data_func=lambda: imu.read()._asdict(),
         rec_options=gs.recorders.NPZFile(filename="out/imu_data.npz"),
     )

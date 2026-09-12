@@ -8,11 +8,14 @@ gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
-        substeps=10,
+        dt=5e-4,
         gravity=(0, 0, -9.8),
     ),
+    rigid_options=gs.options.RigidOptions(
+        dt=5e-5,
+    ),
     mpm_options=gs.options.MPMOptions(
-        dt=5e-4,
+        dt=5e-5,
         lower_bound=(-1.0, -1.0, -0.2),
         upper_bound=(1.0, 1.0, 1.0),
     ),

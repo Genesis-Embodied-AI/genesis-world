@@ -6,7 +6,7 @@ import numpy as np
 from genesis.utils.geom import quat_to_xyz
 
 if TYPE_CHECKING:
-    from genesis.engine.entities.drone_entity import DroneEntity
+    from genesis.engine.entities import DroneEntity
 
 
 class PIDController:

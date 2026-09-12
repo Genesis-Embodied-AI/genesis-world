@@ -21,7 +21,6 @@ env:
   HF_HUB_DOWNLOAD_TIMEOUT: 60
   # Increment to switch new jobs to fresh caches before deleting the previous version.
   CACHE_VERSION: "1"
-  GENESIS_IMAGE_VER: "1_25"
   TIMEOUT_MINUTES: 60
   FORCE_COLOR: 1
   PY_COLORS: 1
@@ -32,9 +31,38 @@ defaults:
     shell: bash --noprofile --norc -exo pipefail {0}
 
 jobs:
+  image-version:
+    name: production-image_version
+
+    runs-on: ubuntu-24.04
+
+    outputs:
+      GENESIS_IMAGE_VER: ${{ steps.resolve.outputs.ver }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The pin lives in the tree rather than in this file so that a pull request bumping it is validated by its own
+      # run instead of only taking effect once merged.
+      - name: Resolve the pinned container image version
+        id: resolve
+        run: |
+          if [[ ! -f .github/genesis_image_ver ]] ; then
+            echo "::error::'.github/genesis_image_ver' is missing. Rebase onto the default branch."
+            exit 1
+          fi
+          VER=$(tr -d '[:space:]' < .github/genesis_image_ver)
+          if [[ ! "${VER}" =~ ^[0-9]+_[0-9]+[a-z0-9]*$ ]] ; then
+            echo "::error::'.github/genesis_image_ver' must hold a version of the form '<major>_<minor>[<suffix>]'."
+            exit 1
+          fi
+          echo "ver=${VER}" >> $GITHUB_OUTPUT
+
   unit-tests:
     name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
+    needs: image-version
     runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
@@ -45,6 +73,7 @@ jobs:
         GS_ENABLE_NDARRAY: ["1", "0"]
 
     env:
+      GENESIS_IMAGE_VER: ${{ needs.image-version.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:
@@ -122,7 +151,7 @@ jobs:
   benchmarks:
     name: production-benchmarks-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
-    needs: unit-tests
+    needs: [image-version, unit-tests]
     runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
@@ -132,6 +161,7 @@ jobs:
     env:
       # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      GENESIS_IMAGE_VER: ${{ needs.image-version.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:

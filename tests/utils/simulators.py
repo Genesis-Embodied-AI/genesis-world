@@ -9,6 +9,7 @@ from genesis.utils import mjcf as mju
 from genesis.utils.mesh import get_assets_dir
 
 from .assets import get_hf_dataset
+from .mujoco_parity import align_mujoco_invweight0
 
 
 @dataclass
@@ -46,9 +47,7 @@ def build_mujoco_sim(
         asset_path = get_hf_dataset(pattern=xml_path)
         file = os.path.join(asset_path, xml_path)
 
-    model = mju.build_model(
-        file, discard_visual=True, default_armature=None, merge_fixed_links=merge_fixed_links, links_to_keep=()
-    )
+    model = mju.build_model(file, discard_visual=True, merge_fixed_links=merge_fixed_links, links_to_keep=())
 
     model.opt.solver = mj_solver
     model.opt.integrator = mj_integrator
@@ -76,6 +75,7 @@ def build_mujoco_sim(
     # meshes exactly. Midpoint integration branches on an exact ipos == 0 test, so the residuals would silently
     # route the two engines through different update rules; canonicalize the dust to zero.
     model.body_ipos[np.abs(model.body_ipos) < 1e-12] = 0.0
+    align_mujoco_invweight0(model)
     if native_ccd:
         model.opt.disableflags &= ~np.uint32(mujoco.mjtDisableBit.mjDSBL_NATIVECCD)
     else:
@@ -94,7 +94,7 @@ def build_mujoco_sim(
 
 
 def build_genesis_sim(
-    xml_path,
+    xml_paths,
     gs_solver,
     gs_integrator,
     merge_fixed_links,
@@ -131,6 +131,8 @@ def build_genesis_sim(
             enable_multi_contact=multi_contact,
             enable_mujoco_compatibility=mujoco_compatibility,
             use_gjk_collision=gjk_collision,
+            # None gives a geom carrying no time constant of its own the floor, twice the timestep, as Mujoco does.
+            constraint_timeconst=None,
         ),
         viewer_options=gs.options.ViewerOptions(
             res=(960, 640),
@@ -142,47 +144,45 @@ def build_genesis_sim(
         show_FPS=False,
     )
 
-    file = os.path.join(get_assets_dir(), xml_path)
-    if not os.path.exists(file):
-        asset_path = get_hf_dataset(pattern=xml_path)
-        file = os.path.join(asset_path, xml_path)
+    for path in xml_paths:
+        file = os.path.join(get_assets_dir(), path)
+        if not os.path.exists(file):
+            asset_path = get_hf_dataset(pattern=path)
+            file = os.path.join(asset_path, path)
 
-    morph_kwargs = dict(
-        file=file,
-        convexify=True,
-        decompose_robot_error_threshold=float("inf"),
-        align=False,
-    )
-    if xml_path.endswith(".xml"):
-        morph = gs.morphs.MJCF(**morph_kwargs)
-    else:
-        morph = gs.morphs.URDF(
-            fixed=True,
-            merge_fixed_links=merge_fixed_links,
-            links_to_keep=(),
-            **morph_kwargs,
+        morph_kwargs = dict(
+            file=file,
+            convexify=True,
+            decompose_robot_error_threshold=float("inf"),
+            align=False,
         )
-    scene.add_entity(
-        morph,
-        visualize_contact=True,
-    )
-
-    # Force matching Mujoco safety factor for constraint time constant.
-    # Note that this time constant affects the penetration depth at rest.
-    gs_sim = scene.sim
-    gs_sim.rigid_solver._sol_default_timeconst = None
-    gs_sim.rigid_solver._sol_min_timeconst = 2.0 * gs_sim._substep_dt
+        if path.endswith(".xml"):
+            morph = gs.morphs.MJCF(**morph_kwargs)
+        else:
+            morph = gs.morphs.URDF(
+                fixed=True,
+                merge_fixed_links=merge_fixed_links,
+                links_to_keep=(),
+                **morph_kwargs,
+            )
+        scene.add_entity(
+            morph,
+            visualize_contact=True,
+        )
 
     # Force recomputation of invweights to make sure it works fine
     for link in scene.rigid_solver.links:
-        link.invweight[:] = -1
+        link.desc.invweight[:] = -1
     for joint in scene.rigid_solver.joints:
-        joint.dofs_invweight[:] = -1
+        joint.desc.dofs_invweight[:] = -1
 
     # Canonicalize mesh center-of-mass dust to zero: see the matching body_ipos normalization in build_mujoco_sim.
     for link in scene.rigid_solver.links:
-        link.inertial_pos[np.abs(link.inertial_pos) < 1e-12] = 0.0
+        link.desc.inertial_pos[np.abs(link.desc.inertial_pos) < 1e-12] = 0.0
 
     scene.build()
 
-    return gs_sim
+    # Genesis solves per island (see linesearch.py) and MuJoCo does when its islands are enabled
+    mj_sim.model.opt.disableflags &= ~np.uint32(mujoco.mjtDisableBit.mjDSBL_ISLAND)
+
+    return scene.sim

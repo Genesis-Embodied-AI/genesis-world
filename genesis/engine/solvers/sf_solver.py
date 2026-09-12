@@ -2,11 +2,11 @@ import quadrants as qd
 
 import genesis as gs
 
-from .base_solver import Solver
+from .base_solver import Solver, TimeBasedMixin
 
 
 @qd.data_oriented
-class SFSolver(Solver):
+class SFSolver(TimeBasedMixin, Solver):
     """
     Stable Fluid solver for eulerian-based gaseous simulation.
     """
@@ -68,12 +68,6 @@ class SFSolver(Solver):
             self.setup_fields()
             self.init_fields()
 
-        # FIXME: _gravity must be a raw qd.field() — see comment in mpm_solver.py
-        if self._gravity is not None:
-            gravity = self._gravity.to_numpy()
-            self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
-            self._gravity.from_numpy(gravity)
-
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
     # ------------------------------------------------------------------------------------
@@ -110,7 +104,7 @@ class SFSolver(Solver):
     def advect_and_impulse(self, f: qd.i32, t: qd.f32):
         for i, j, k in qd.ndrange(*self.res):
             p = qd.Vector([i, j, k], dt=gs.qd_float) + 0.5
-            p = self.backtrace(self.grid.v, p, self.dt)
+            p = self.backtrace(self.grid.v, p, self.substep_dt)
             v_tmp = self.trilerp(self.grid.v, p)
 
             for q in qd.static(range(self.grid.q.n)):
@@ -118,13 +112,13 @@ class SFSolver(Solver):
 
                 imp_dir = self.jets[q].get_tan_dir(t)
                 factor = self.jets[q].get_factor(i, j, k, self.dx, t)
-                momentum = (imp_dir * self.inlet_s * factor) * self.dt
+                momentum = (imp_dir * self.inlet_s * factor) * self.substep_dt
 
                 v_tmp += momentum
 
                 self.grid.q[i, j, k][q] = (1 - factor) * q_f + factor
                 # self.grid.q[i, j, k][q] *= self.decay
-                self.grid.q[i, j, k][q] -= self.decay * self.dt
+                self.grid.q[i, j, k][q] -= self.decay * self.substep_dt
                 self.grid.q[i, j, k][q] = max(0.0, self.grid.q[i, j, k][q])
 
             self.grid.v_tmp[i, j, k] = v_tmp
@@ -269,7 +263,7 @@ class SFSolver(Solver):
         self.reset_swap()
 
         self.subtract_gradient()
-        self.t += self.dt
+        self.t += self.substep_dt
 
     def substep_post_coupling(self, f):
         return

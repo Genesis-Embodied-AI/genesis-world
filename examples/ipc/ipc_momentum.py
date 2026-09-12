@@ -78,7 +78,7 @@ def main():
     blob_radius = blob.morph.radius
     blob_rho = blob.material.rho
     blob_mass = (4.0 / 3.0) * np.pi * (blob_radius**3) * blob_rho
-    cube_mass = rigid_cube.get_mass()
+    cube_mass = tensor_to_array(rigid_cube.get_mass())
 
     initial_momentum = 4.0 * cube_mass
 
@@ -137,7 +137,7 @@ def main():
 
         # Compute vertex velocities using finite difference
         if fem_prev_pos is not None:
-            fem_vertex_velocities = (fem_vertex_positions - fem_prev_pos) / scene.sim_options.dt
+            fem_vertex_velocities = (fem_vertex_positions - fem_prev_pos) / scene.options.sim.dt
         else:
             # First step: zero velocity
             fem_vertex_velocities = np.zeros_like(fem_vertex_positions)
@@ -170,14 +170,14 @@ def main():
     fem_v_history = []
 
     test_time = 0.30  # seconds
-    n_steps = int(test_time / scene.sim_options.dt) if "PYTEST_VERSION" not in os.environ else 10
+    n_steps = int(test_time / scene.options.sim.dt) if "PYTEST_VERSION" not in os.environ else 10
     for i_step in range(n_steps):
         # Compute momentum at every step
         (rigid_p, fem_p, rigid_v, fem_v, rigid_m, fem_m) = compute_rigid_fem_linear_momentum()
         total_p = rigid_p + fem_p
 
         # Save data for plotting
-        time_history.append(i_step * scene.sim_options.dt)
+        time_history.append(i_step * scene.options.sim.dt)
         rigid_p_history.append(rigid_p)
         fem_p_history.append(fem_p)
         total_p_history.append(total_p)
@@ -187,7 +187,7 @@ def main():
         # Print every 100 steps
         if i_step % (n_steps // 10) == 0:
             print(f"\n{'=' * 70}")
-            print(f"Step {i_step:4d}: t = {i_step * scene.sim_options.dt:.3f}s")
+            print(f"Step {i_step:4d}: t = {i_step * scene.options.sim.dt:.3f}s")
             print(f"{'-' * 70}")
             print(f"Rigid mass:   {rigid_m:8.4f} kg")
             print(f"Rigid velocity: [{rigid_v[0]:9.5f}, {rigid_v[1]:9.5f}, {rigid_v[2]:9.5f}] m/s")

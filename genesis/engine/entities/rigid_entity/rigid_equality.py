@@ -1,5 +1,6 @@
 import genesis as gs
 from genesis.repr_base import RBC
+from .description import RigidEqualityDescription
 
 
 class RigidEquality(RBC):
@@ -7,29 +8,16 @@ class RigidEquality(RBC):
     Equality class for rigid body entities.
     """
 
-    def __init__(
-        self,
-        entity,
-        name,
-        idx,
-        type,
-        eq_obj1id,
-        eq_obj2id,
-        eq_data,
-        sol_params,
-    ):
-        self._name = name
+    def __init__(self, entity, idx, eq_obj1id, eq_obj2id, desc: RigidEqualityDescription):
+        self.desc: RigidEqualityDescription = desc
         self._entity = entity
         self._solver = entity.solver
 
         self._uid = gs.UID()
         self._idx = idx
-        self._type = type
 
         self._eq_obj1id = eq_obj1id
         self._eq_obj2id = eq_obj2id
-        self._eq_data = eq_data
-        self._sol_params = sol_params
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------
@@ -42,16 +30,14 @@ class RigidEquality(RBC):
         if self._solver.is_built:
             self._solver.set_sol_params(sol_params, eqs_idx=self._idx, envs_idx=None)
         else:
-            self._sol_params = sol_params
+            self.desc.sol_params = sol_params
 
-    @property
-    def sol_params(self):
+    @gs.assert_built
+    def get_sol_params(self):
         """
-        Returns the solver parameters of this equality constraint.
+        Get the solver parameters the simulation is currently using for this equality constraint.
         """
-        if self._solver.is_built:
-            return self._solver.get_sol_params(eqs_idx=self._idx, envs_idx=None)[..., 0, :]
-        return self._sol_params
+        return self._solver.get_sol_params(eqs_idx=self._idx, envs_idx=None)[..., 0, :]
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -69,7 +55,7 @@ class RigidEquality(RBC):
         """
         Returns the name of the equality.
         """
-        return self._name
+        return self.desc.name
 
     @property
     def entity(self):
@@ -107,7 +93,7 @@ class RigidEquality(RBC):
         """
         Returns the type of the equality.
         """
-        return self._type
+        return self.desc.type
 
     @property
     def eq_obj1id(self):
@@ -119,7 +105,7 @@ class RigidEquality(RBC):
     @property
     def eq_obj2id(self):
         """
-        Returns the index of the second object (joint for EQUALITY_TYPE.JOINT, link otherwise)
+        Returns the index of the second object, or -1 for a JOINT equality that fixes one joint to a constant.
         """
         return self._eq_obj2id
 
@@ -128,7 +114,7 @@ class RigidEquality(RBC):
         """
         Returns the eq_data of this equality constraint.
         """
-        return self._eq_data
+        return self.desc.data
 
     @property
     def is_built(self):

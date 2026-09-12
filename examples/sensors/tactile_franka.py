@@ -122,7 +122,7 @@ def _plot_tactile_sensor(
     positions = sensors[0].probe_local_pos.reshape(-1, 3)
     if sensor_type == "elastomer":
         # ElastomerTaxel read() is grid-shaped (ny, nx, 3); flatten each finger to (N, 3) before stacking.
-        scene.start_recording(
+        scene.add_recorder(
             lambda: torch.stack([sensor.read().reshape(-1, 3) for sensor in sensors]),
             gs.recorders.MPLVectorFieldPlot(
                 title="ElastomerTaxel marker displacements",
@@ -134,7 +134,7 @@ def _plot_tactile_sensor(
             ),
         )
     elif sensor_type == "kinematic":
-        scene.start_recording(
+        scene.add_recorder(
             lambda: _force_torque_field(sensors),
             gs.recorders.MPLVectorFieldPlot(
                 title="KinematicTaxel force + twist",
@@ -148,7 +148,7 @@ def _plot_tactile_sensor(
             ),
         )
     elif sensor_type == "proximity":
-        scene.start_recording(
+        scene.add_recorder(
             lambda: _force_torque_field(sensors),
             gs.recorders.MPLVectorFieldPlot(
                 title="ProximityTaxel force + twist",
@@ -162,7 +162,7 @@ def _plot_tactile_sensor(
             ),
         )
     elif sensor_type == "depth":
-        scene.start_recording(
+        scene.add_recorder(
             lambda: tuple(sensor.read().max() for sensor in sensors),
             gs.recorders.MPLLinePlot(
                 labels=labels,
@@ -172,31 +172,6 @@ def _plot_tactile_sensor(
                 title="ContactDepthProbe max depth",
             ),
         )
-
-
-def _print_sensor_reading(
-    sensor_type: str,
-    labels: tuple[str, ...],
-    sensors: "tuple[Sensor, ...]",
-    t: float,
-    plot_normal: tuple[float, float, float],
-) -> None:
-    for label, sensor in zip(labels, sensors):
-        data = sensor.read()
-        if sensor_type == "elastomer":
-            magnitude = data.norm(dim=-1)
-            if magnitude.max() > gs.EPS:
-                print(f"({label}) t={t:.2f}s  max|displacement|={magnitude.max():.5f}")
-        elif sensor_type == "depth":
-            max_depth = data.max()
-            if max_depth > gs.EPS:
-                print(f"({label}) t={t:.2f}s  max depth={max_depth:.4f}")
-        elif sensor_type in ("kinematic", "proximity"):
-            force_mag = data.force.norm(dim=-1).max()
-            # |twist| is the plotted torque about the view normal; print it to calibrate twist_scale_factor.
-            twist_mag = (data.torque @ data.torque.new_tensor(plot_normal)).abs().max()
-            if force_mag > gs.EPS:
-                print(f"({label}) t={t:.2f}s  max|F|={force_mag:.4f}  max|twist|={twist_mag:.5f}")
 
 
 def main() -> None:
@@ -328,8 +303,8 @@ def main() -> None:
         franka.set_qpos(qpos[motor_dofs_idx], motor_dofs_idx)
         toggle_gripper(False)
 
-        cube.set_pos(cube.base_link.pos)
-        sphere.set_pos(sphere.base_link.pos)
+        cube.set_pos(cube.base_link.desc.pos)
+        sphere.set_pos(sphere.base_link.desc.pos)
 
     reset_robot()
 
@@ -366,17 +341,18 @@ def main() -> None:
     grasp_pos = np.array((*CUBE_INIT_XY, 0.125), dtype=gs.np_float)
     lift_pos = np.array((*CUBE_INIT_XY, 0.30), dtype=gs.np_float)
 
+    i_step = 0
     try:
         while is_running:
             if not args.vis:
                 # Automatic pickup: hover over the cube, descend around it, squeeze, then lift.
-                if scene.t < 40:
+                if i_step < 40:
                     target_pos[:] = target_init_pos
                     toggle_gripper(close=False)
-                elif scene.t < 100:
+                elif i_step < 100:
                     target_pos[:] = grasp_pos
                     toggle_gripper(close=False)
-                elif scene.t < 150:
+                elif i_step < 150:
                     target_pos[:] = grasp_pos
                     toggle_gripper(close=True)
                 else:
@@ -392,12 +368,29 @@ def main() -> None:
             franka.control_dofs_position(qpos[motor_dofs_idx], motor_dofs_idx)
 
             scene.step()
+            i_step += 1
 
-            _print_sensor_reading(args.sensor, ("left", "right"), (left, right), scene.t * scene.dt, probe_normal)
+            t = scene.get_time()
+            for label, sensor in zip(("left", "right"), (left, right)):
+                data = sensor.read()
+                if args.sensor == "elastomer":
+                    magnitude = data.norm(dim=-1)
+                    if magnitude.max() > gs.EPS:
+                        print(f"({label}) t={t:.2f}s  max|displacement|={magnitude.max():.5f}")
+                elif args.sensor == "depth":
+                    max_depth = data.max()
+                    if max_depth > gs.EPS:
+                        print(f"({label}) t={t:.2f}s  max depth={max_depth:.4f}")
+                elif args.sensor in ("kinematic", "proximity"):
+                    force_mag = data.force.norm(dim=-1).max()
+                    # |twist| is the plotted torque about the view normal; print it to calibrate twist_scale_factor.
+                    twist_mag = (data.torque @ data.torque.new_tensor(probe_normal)).abs().max()
+                    if force_mag > gs.EPS:
+                        print(f"({label}) t={t:.2f}s  max|F|={force_mag:.4f}  max|twist|={twist_mag:.5f}")
 
             if "PYTEST_VERSION" in os.environ:
                 break
-            if not args.vis and scene.t * scene.dt >= args.seconds:
+            if not args.vis and t >= args.seconds:
                 break
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted, exiting.")

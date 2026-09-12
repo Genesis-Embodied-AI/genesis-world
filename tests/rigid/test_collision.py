@@ -420,6 +420,77 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
     assert_allclose(pos[..., 2], 0.015, atol=1e1 * tol)
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+@pytest.mark.parametrize("gjk_collision", [True, False])
+def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
+    YAW = 1.1
+    BOX_SIZE = 16.0
+    GEOM_SIZE = 0.016
+    # Collision tolerances scale with the smaller geom of a pair, rounding errors with its coordinates. A large size
+    # ratio thus drives the tolerance below the rounding error. The grazing box sits where its separation from the face
+    # is rounding noise, so contact detection must resolve the pair without any measurable depth to converge on. The
+    # pressed box checks that such a pair still yields a contact.
+    GRAZING_SPOT = (-3.36, 0.8)
+    PRESSED_SPOT = (-3.3, 0.8)
+    PRESSED_DEPTH = 0.25 * GEOM_SIZE
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=gjk_collision,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(6.6, 5.74, 8.85),
+            camera_lookat=(6.6, 5.63, 8.8),
+            camera_fov=30,
+        ),
+        show_viewer=show_viewer,
+    )
+    box = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5 * BOX_SIZE),
+            euler=(0.0, 0.0, math.degrees(YAW)),
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            fixed=True,
+        ),
+    )
+    geom_grazing = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 2.0 * BOX_SIZE),
+            size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    geom_pressed = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 3.0 * BOX_SIZE),
+            size=(GEOM_SIZE, GEOM_SIZE, GEOM_SIZE),
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    scene.build()
+
+    face_offset = 0.5 * (BOX_SIZE + GEOM_SIZE)
+    face_normal = torch.tensor([math.cos(YAW), math.sin(YAW), 0.0], dtype=gs.tc_float, device=gs.device)
+    for geom, spot, depth in ((geom_grazing, GRAZING_SPOT, 0.0), (geom_pressed, PRESSED_SPOT, PRESSED_DEPTH)):
+        pos_local = torch.tensor([face_offset - depth, *spot], dtype=gs.tc_float, device=gs.device)
+        geom.set_pos(gu.transform_by_quat(pos_local, box.get_quat()) + box.get_pos())
+        geom.set_quat(box.get_quat())
+
+    scene.step()
+    contacts = scene.rigid_solver.collider.get_contacts()
+    assert_allclose((contacts["normal"] @ face_normal).abs(), 1.0, tol=tol)
+    is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
+    assert is_pressed.any()
+    assert_allclose(contacts["penetration"][is_pressed], PRESSED_DEPTH, tol=tol)
+    assert (contacts["penetration"][~is_pressed] >= 0.0).all()
+    assert (contacts["penetration"][~is_pressed] <= GEOM_SIZE).all()
+    offset = (geom_grazing.get_pos() - box.get_pos()) @ face_normal
+    assert face_offset - tol <= offset <= face_offset + GEOM_SIZE
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_robot_scaling_primitive_collision(show_viewer):
@@ -488,7 +559,7 @@ def test_contact_forces(show_viewer):
     )
     scene.build(n_envs=5)
 
-    cube_weight = scene.rigid_solver._gravity[0] * cube.get_mass()
+    cube_weight = scene.rigid_solver.get_gravity(envs_idx=0) * cube.get_mass()
     motors_dof = np.arange(7)
     fingers_dof = np.arange(7, 9)
     qpos = np.array([-1.0124, 1.5559, 1.3662, -1.6878, -1.5799, 1.7757, 1.4602, 0.04, 0.04])
@@ -547,10 +618,10 @@ def test_contact_forces(show_viewer):
         for _ in range(160):
             scene.step()
 
-        contact_forces = tensor_to_array(cube.get_links_net_contact_force())
-        errors = np.linalg.norm(contact_forces[:, 0, :] + cube_weight, ord=np.inf, axis=-1)
+        contact_forces = cube.get_links_net_contact_force()
+        errors = torch.linalg.norm(contact_forces[:, 0, :] + cube_weight, ord=float("inf"), dim=-1)
         all_errors.append(errors)
-    assert np.percentile(all_errors, 95) < 2e-4
+    assert torch.quantile(torch.cat(all_errors), 0.95) < 2e-4
 
 
 @pytest.mark.slow  # ~200s
@@ -615,7 +686,7 @@ def test_contact_dedup(surface_kind, show_viewer):
         scene.step()
         if i == 20:
             sphere.set_dofs_velocity(0.2, dofs_idx_local=sphere.dof_start)
-        n_contacts = scene.rigid_solver.collider._collider_state.n_contacts.to_numpy()
+        n_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
         assert np.all(n_contacts == 1), f"Expected 1 contact after dedup, got {n_contacts}"
 
 
@@ -948,7 +1019,7 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
         scene.step()
     for _ in range(300):
         scene.step()
-        n_contacts = scene.rigid_solver.collider._collider_state.n_contacts.to_numpy()
+        n_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
         assert n_contacts.all()
         if model_name.startswith("side_by_side"):
             assert (n_contacts == 4).all()
@@ -1023,14 +1094,14 @@ def test_num_contact_overflow(scene_kind, max_collision_pairs, max_contacts, err
                 ),
             )
     scene.build()
-    assert scene.rigid_solver.collider._collider_static_config.has_prunable_contacts
+    assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
 
     # The resolved contact budget must match the documented resolution: 32 contact points per link pair floored at
     # 512 when automatic (every link pair here has more than 32 candidate contact points), the explicit value clamped
     # to the candidate buffer size otherwise. The constraint buffers are sized accordingly, with 4 constraint rows
     # per contact point (all joints are free so there is no joint-limit term).
     solver = scene.rigid_solver
-    collider_info = solver.collider._collider_info
+    collider_info = solver.collider.collider_info
     if max_contacts is None:
         n_link_pairs = (N_BOWLS + 1) * N_BOWLS // 2
         expected_max_contacts = max(32 * n_link_pairs, 512)
@@ -1402,7 +1473,7 @@ def test_neutral_self_collision_masks_across_merged_entities(merged_overlapping_
     assert set(geoms_root_idx[arm_geoms].tolist()) == set(geoms_root_idx[hand_geoms].tolist())
 
     # The palm overlaps the non-adjacent a2 link at qpos0, so the neutral-overlap check masks this cross-entity pair.
-    collision_pair_idx = scene.rigid_solver.collider._collider_info.collision_pair_idx.to_numpy()
+    collision_pair_idx = scene.rigid_solver.collider.collider_info.collision_pair_idx.to_numpy()
     a2_geom = arm.get_link("a2").geoms[0].idx
     palm_geom = hand.get_link("palm").geoms[0].idx
     assert_equal(collision_pair_idx[a2_geom, palm_geom], -1)

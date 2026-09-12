@@ -185,36 +185,46 @@ def func_collider_clear_env(
     rigid_config: qd.template(),
 ):
     if qd.static(rigid_config.use_hibernation):
-        collider_state.n_contacts_hibernated[i_b] = 0
-
-        for i_c in range(collider_state.n_contacts[i_b]):
+        # Advect the contacts of the sleepers: a hibernated-fixed pair stays where it is, so its contact is kept at the
+        # front of the buffer with the force of the last solve it took part in. The kept contacts are read through the
+        # permutation (see has_prunable_contacts in array_class.py), so they are first flagged on their raw slot, in
+        # the sort key the narrowphase rewrites before reading it, then compacted in raw order: every slot written to
+        # was already read, so no kept contact is overwritten.
+        n_raw = 0
+        for i_c_ in range(collider_state.n_contacts[i_b]):
+            n_raw = qd.max(n_raw, collider_state.contact_sort_idx[i_c_, i_b] + 1)
+        for i_c in range(n_raw):
+            collider_state.contact_sort_key[i_c, i_b] = 0.0
+        for i_c_ in range(collider_state.n_contacts[i_b]):
+            i_c = collider_state.contact_sort_idx[i_c_, i_b]
             i_la = collider_state.contact_data.link_a[i_c, i_b]
             i_lb = collider_state.contact_data.link_b[i_c, i_b]
-
             I_la = [i_la, i_b] if qd.static(rigid_config.batch_links_info) else i_la
             I_lb = [i_lb, i_b] if qd.static(rigid_config.batch_links_info) else i_lb
-
             if (dyn_state.links.is_hibernated[i_la, i_b] and dyn_info.links.is_fixed[I_lb]) or (
                 dyn_state.links.is_hibernated[i_lb, i_b] and dyn_info.links.is_fixed[I_la]
             ):
-                i_c_hibernated = collider_state.n_contacts_hibernated[i_b]
-                if i_c != i_c_hibernated:
+                collider_state.contact_sort_key[i_c, i_b] = 1.0
+        n_hib = 0
+        for i_c in range(n_raw):
+            if collider_state.contact_sort_key[i_c, i_b] > 0.0:
+                if i_c != n_hib:
                     # fmt: off
-                    collider_state.contact_data.geom_a[i_c_hibernated, i_b] = collider_state.contact_data.geom_a[i_c, i_b]
-                    collider_state.contact_data.geom_b[i_c_hibernated, i_b] = collider_state.contact_data.geom_b[i_c, i_b]
-                    collider_state.contact_data.penetration[i_c_hibernated, i_b] = collider_state.contact_data.penetration[i_c, i_b]
-                    collider_state.contact_data.normal[i_c_hibernated, i_b] = collider_state.contact_data.normal[i_c, i_b]
-                    collider_state.contact_data.pos[i_c_hibernated, i_b] = collider_state.contact_data.pos[i_c, i_b]
-                    collider_state.contact_data.friction[i_c_hibernated, i_b] = collider_state.contact_data.friction[i_c, i_b]
-                    collider_state.contact_data.friction_torsional[i_c_hibernated, i_b] = collider_state.contact_data.friction_torsional[i_c, i_b]
-                    collider_state.contact_data.friction_rolling[i_c_hibernated, i_b] = collider_state.contact_data.friction_rolling[i_c, i_b]
-                    collider_state.contact_data.sol_params[i_c_hibernated, i_b] = collider_state.contact_data.sol_params[i_c, i_b]
-                    collider_state.contact_data.force[i_c_hibernated, i_b] = collider_state.contact_data.force[i_c, i_b]
-                    collider_state.contact_data.link_a[i_c_hibernated, i_b] = collider_state.contact_data.link_a[i_c, i_b]
-                    collider_state.contact_data.link_b[i_c_hibernated, i_b] = collider_state.contact_data.link_b[i_c, i_b]
+                    collider_state.contact_data.geom_a[n_hib, i_b] = collider_state.contact_data.geom_a[i_c, i_b]
+                    collider_state.contact_data.geom_b[n_hib, i_b] = collider_state.contact_data.geom_b[i_c, i_b]
+                    collider_state.contact_data.penetration[n_hib, i_b] = collider_state.contact_data.penetration[i_c, i_b]
+                    collider_state.contact_data.normal[n_hib, i_b] = collider_state.contact_data.normal[i_c, i_b]
+                    collider_state.contact_data.pos[n_hib, i_b] = collider_state.contact_data.pos[i_c, i_b]
+                    collider_state.contact_data.friction[n_hib, i_b] = collider_state.contact_data.friction[i_c, i_b]
+                    collider_state.contact_data.friction_torsional[n_hib, i_b] = collider_state.contact_data.friction_torsional[i_c, i_b]
+                    collider_state.contact_data.friction_rolling[n_hib, i_b] = collider_state.contact_data.friction_rolling[i_c, i_b]
+                    collider_state.contact_data.sol_params[n_hib, i_b] = collider_state.contact_data.sol_params[i_c, i_b]
+                    collider_state.contact_data.force[n_hib, i_b] = collider_state.contact_data.force[i_c, i_b]
+                    collider_state.contact_data.link_a[n_hib, i_b] = collider_state.contact_data.link_a[i_c, i_b]
+                    collider_state.contact_data.link_b[n_hib, i_b] = collider_state.contact_data.link_b[i_c, i_b]
                     # fmt: on
-
-                collider_state.n_contacts_hibernated[i_b] = i_c_hibernated + 1
+                n_hib = n_hib + 1
+        collider_state.n_contacts_hibernated[i_b] = n_hib
 
     for i_c in range(collider_state.n_contacts[i_b]):
         should_clear = True

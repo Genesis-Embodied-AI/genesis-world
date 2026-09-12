@@ -100,8 +100,12 @@ class Raycaster:
 
         self.update()
 
-        # Pre-compile to avoid a race condition with Quadrants on the first interactive cast.
+        # FIXME: quadrants#887 - a host-side read is refused while another thread traces a kernel, so the first
+        # interactive cast races the compilation of any kernel. Every buffer it reads is therefore converted up front.
         self.cast(ray_origin=np.zeros(3, dtype=gs.np_float), ray_direction=np.zeros(3, dtype=gs.np_float))
+        for target in self.targets:
+            for buffer in (target.result.hit_point, target.result.normal):
+                qd_to_numpy(buffer, row_mask=0, keepdim=False, transpose=True, copy=True)
 
     @with_lock
     def update(self) -> None:

@@ -2,9 +2,10 @@ import numpy as np
 import pytest
 
 import genesis as gs
-from genesis.engine.bvh import LBVH, AABB
+from genesis.engine.bvh import AABB, LBVH
+from genesis.utils.misc import qd_to_numpy
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.fixture(scope="function")
@@ -24,16 +25,22 @@ def lbvh(n_aabbs, n_batches):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_aabbs, n_batches", [(500, 10), (5, 1), (1, 1), (1, 3)])
-def test_morton_code(lbvh):
-    morton_codes = lbvh.morton_codes.to_numpy()
+@pytest.mark.parametrize("n_aabbs, n_batches", [(1, 3), (5, 1), (64, 4), (255, 2), (16384, 2)])
+def test_morton_code_normalization(lbvh, tol):
+    aabbs_min = qd_to_numpy(lbvh.aabbs.min)
+    aabbs_max = qd_to_numpy(lbvh.aabbs.max)
+    scene_min = aabbs_min.min(axis=1)
+    scene_max = aabbs_max.max(axis=1)
+    extent = scene_max - scene_min
 
-    # Check that the morton codes are sorted
-    for i_b in range(morton_codes.shape[0]):
-        for i in range(1, morton_codes.shape[1]):
-            assert morton_codes[i_b, i, 0] > morton_codes[i_b, i - 1, 0], (
-                f"Morton codes are not sorted: {morton_codes[i_b, i]} < {morton_codes[i_b, i - 1]}"
-            )
+    # The reduction selects an input value, so it must land on it exactly whichever fold order the backend picks.
+    assert_equal(qd_to_numpy(lbvh.aabb_min), scene_min)
+    assert_equal(qd_to_numpy(lbvh.aabb_max), scene_max)
+    assert_allclose(qd_to_numpy(lbvh.scale), np.where(extent > gs.EPS, 1.0 / extent, 1.0), tol=tol)
+
+    # Two centers may share a cell of the 1024^3 grid the codes quantize to, so equal codes are legitimate.
+    morton_codes = qd_to_numpy(lbvh.morton_codes)[..., 0]
+    assert (morton_codes[:, 1:] >= morton_codes[:, :-1]).all(), "Morton codes are not sorted"
 
 
 @pytest.mark.required

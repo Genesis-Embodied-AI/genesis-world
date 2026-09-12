@@ -19,15 +19,36 @@ def test_gravity(show_viewer, tol):
     scene = gs.Scene(show_viewer=show_viewer)
 
     sphere = scene.add_entity(gs.morphs.Sphere())
+    ghost = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(1.0, 0.0, 0.0),
+        ),
+        material=gs.materials.Kinematic(),
+    )
     scene.build(n_envs=3)
+
+    # Gravity belongs to the solvers that fall under it, and a solver that does not carries no way of setting it at
+    # all; the scene-wide call reaches only those that do.
+    with pytest.raises(AttributeError):
+        ghost.solver.set_gravity((0.0, 0.0, -9.81))
 
     envs_idx_cases = (
         ([-3, -1], (0, 2)),
-        (range(-3, 0), (0, 1, 2)),
-        (range(-1, 1), (2, 0)),
         (slice(-2, None), (1, 2)),
-        (slice(-1, None, -1), (2, 1, 0)),
+        (range(-3, -1), (0, 1)),
+        (torch.tensor((True, False, True)), (0, 2)),
+        # The last environment, named in each of the forms it can be named in: one index becomes a slice of itself, and
+        # the last one is where that has to be said with no stop at all.
+        (-1, (2,)),
+        ([-1], (2,)),
+        ((-1,), (2,)),
+        (np.int64(-1), (2,)),
+        (np.array((-1,)), (2,)),
+        (torch.tensor((-1,)), (2,)),
     )
+    # A slice stepping backwards names its environments in reverse, which the kernel resolves and a view cannot.
+    if not gs.use_zerocopy:
+        envs_idx_cases += ((slice(-1, 0, -1), (2, 1)),)
     gravity_values = torch.tensor(((1.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 3.0)))
     for envs_idx, expected_envs_idx in envs_idx_cases:
         values = gravity_values[: len(expected_envs_idx)]
@@ -44,12 +65,11 @@ def test_gravity(show_viewer, tol):
     scene.sim.set_gravity(torch.tensor([[9.0, 0.0, 0.0], [0.0, 2.0, 0.0]]), envs_idx=[0, 1])
     scene.sim.set_gravity(torch.tensor([1.0, 0.0, 0.0]), envs_idx=np.int64(-3))
     scene.sim.set_gravity(torch.tensor([0.0, 0.0, 3.0]), envs_idx=-1)
-    for envs_idx in (-4, 3, np.int64(-4), np.int64(3)):
-        with pytest.raises(gs.GenesisException, match="`envs_idx` out of range"):
-            scene.sim.set_gravity(torch.tensor([0.0, 0.0, 0.0]), envs_idx=envs_idx)
-    with np.testing.assert_raises(RuntimeError):
+    # A vector that is not one, and one vector per environment where a single environment was named: rejected by
+    # shape, with the shape said, rather than by whatever the write would have made of it.
+    with pytest.raises(gs.GenesisException, match="Invalid input shape"):
         scene.sim.set_gravity(torch.tensor([0.0, -10.0]))
-    with np.testing.assert_raises(RuntimeError):
+    with pytest.raises(gs.GenesisException, match="Invalid input shape"):
         scene.sim.set_gravity(torch.tensor([[0.0, 0.0, -10.0], [0.0, 0.0, -10.0]]), envs_idx=1)
 
     scene.step()
@@ -166,7 +186,7 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
     if dynamics:
         for entity in scene.entities[1:]:
             entity.set_dofs_velocity(4.0 * np.random.rand(6))
-    num_steps = 850 if dynamics else 150
+    num_steps = 900 if dynamics else 150
     for i in range(num_steps):
         scene.step()
         if i > num_steps - 50:
@@ -189,7 +209,7 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["double_ball_pendulum"])
-def test_apply_external_wrench(xml_path, show_viewer):
+def test_apply_external_wrench(xml_path, show_viewer, tol):
     GRAVITY = 2.0
 
     scene = gs.Scene(
@@ -230,12 +250,13 @@ def test_apply_external_wrench(xml_path, show_viewer):
     end_effector_link_idx_local = robot.links[-1].idx_local
     duck_link_idx = duck.links[0].idx
     duck_mass = duck.get_mass()
-    duck_init_link_pos, duck_init_link_R = duck.base_link.pos, gu.quat_to_R(duck.base_link.quat)
+    duck_init_link_pos = duck.base_link.get_pos()
+    duck_init_link_R = gu.quat_to_R(duck.base_link.get_quat())
     # The duck is held at rest by cancelling gravity, but the cancelling force is applied away from its center of mass
     # so that the moment arm of 'pos' is exercised: the spurious torque it generates is undone by an opposite torque
     # about the very same frame, hence any error in the arm leaves the duck accelerating.
     duck_lever_arm = (0.2, -0.15, 0.1)
-    duck_force_local = duck_mass * GRAVITY * duck_init_link_R[2]
+    duck_force_local = tensor_to_array(duck_mass * GRAVITY * duck_init_link_R[2])
     for step in range(801):
         ee_pos = rigid_solver.get_links_pos(end_effector_link_idx)[0]
         duck_pos = rigid_solver.get_links_pos(duck_link_idx)[0]
@@ -247,7 +268,7 @@ def test_apply_external_wrench(xml_path, show_viewer):
         elif step == 800:
             assert_allclose(ee_pos, (-0.8 / math.sqrt(2), 0.8 / math.sqrt(2), 0.02), tol=0.02)
         assert_allclose(duck_pos, duck_init_link_pos, tol=1e-3)
-        assert_allclose(duck_quat, duck.base_link.quat, tol=1e-3)
+        assert_allclose(duck_quat, duck.base_link.desc.quat, tol=1e-3)
 
         if step >= 600:
             force = [-4.0, 4.0, 0.0]
@@ -281,8 +302,9 @@ def test_apply_external_wrench(xml_path, show_viewer):
     # A local force and a local application point are both expressed in the frame that 'ref' designates, which only
     # shows on a link whose inertial frame is rotated with respect to its own frame.
     base_link = robot.get_link("base")
-    assert not np.allclose(base_link.inertial_quat, gu.identity_quat())
-    base_inertial_quat = torch.as_tensor(base_link.inertial_quat, device=gs.device)
+    with pytest.raises(AssertionError):
+        assert_allclose(base_link.desc.inertial_quat, gu.identity_quat(), tol=gs.EPS)
+    base_inertial_quat = torch.as_tensor(base_link.desc.inertial_quat, device=gs.device)
     base_link_pos = rigid_solver.get_links_pos(base_link.idx)
     base_link_quat = rigid_solver.get_links_quat(base_link.idx)
     base_link_COM = rigid_solver.get_links_pos(base_link.idx, ref=gs.link_ref_frame.link_COM)
@@ -337,10 +359,25 @@ def test_apply_external_wrench(xml_path, show_viewer):
     with pytest.raises(gs.GenesisException, match="'pos' requires 'force'"):
         rigid_solver.apply_links_external_wrench(torque=(0, 0, 0), links_idx=duck_link_idx, pos=lever_arm)
 
+    # Armature on a free joint adds to the inertia the solver turns the body with. A torque from rest spins the body up
+    # by that augmented inertia under the implicit integrators too. The torque is given in the inertial frame, which
+    # holds the inertia tensor, and the angular velocity is read in the link frame.
+    ARMATURE, TORQUE = 0.002, (0.02, -0.01, 0.015)
+    duck_inertia = duck.base_link.desc.inertia + ARMATURE * np.eye(3)
+    duck_inertial_R = gu.quat_to_R(duck.base_link.desc.inertial_quat)
+    duck_ang = duck.get_dofs_velocity()[3:]
+    duck.set_dofs_armature(ARMATURE, dofs_idx_local=[3, 4, 5])
+    duck.base_link.apply_external_torque(TORQUE, ref=gs.link_ref_frame.link_COM, local=True)
+    scene.step()
+    duck_spin = duck_inertial_R @ np.linalg.solve(duck_inertia, np.array(TORQUE) * scene.dt)
+    assert_allclose(duck.get_dofs_velocity()[3:] - duck_ang, duck_spin, tol=1e-4)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.approximate_implicitfast])
-def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer, tol, integrator):
+def test_energy_analytical_and_conservation(
+    spring_double_pendulum, implicit_inertial_origin_chain, show_viewer, tol, integrator
+):
     g = 9.81
     dt = 0.001
     h0 = 0.5
@@ -380,28 +417,108 @@ def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer,
             file=spring_double_pendulum,
         ),
     )
+    # A load hung on the elbow link weighs on both joints of the arm and swings with it.
+    arm_load = scene.add_entity(
+        gs.morphs.URDF(
+            file=implicit_inertial_origin_chain,
+            pos=(0.45, 0.5, 0.8),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
+    arm_load.attach(arm, parent_link_name="arm_lower", pos=(0.2, 0.0, 0.0))
+    # Three copies of a tumbling free body, high enough to fall for the whole horizon: one link, a root with a fixed
+    # child, and one link with armature on its angular DOFs.
+    tumblers = [
+        scene.add_entity(
+            gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(x, 1.0, 2.0),
+                merge_fixed_links=merge_fixed_links,
+            ),
+        )
+        for x, merge_fixed_links in ((1.0, True), (1.6, False), (2.2, True))
+    ]
+    # A fourth copy receives a fixed entity off its center of mass, so the body it tumbles as is the pair.
+    tumblers.append(
+        scene.add_entity(
+            gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(2.8, 1.0, 2.0),
+            ),
+        )
+    )
+    load = scene.add_entity(
+        gs.morphs.URDF(
+            file=implicit_inertial_origin_chain,
+            pos=(2.8, 1.0, 2.0),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
+    load.attach(tumblers[-1], parent_link_name=tumblers[-1].base_link.name, pos=(0.3, 0.0, 0.0))
     scene.build()
+    rigid_solver = scene.rigid_solver
+    # The attachment leaves the anchor of the receiving body where the build put it, so its configuration reads exactly
+    # as the lone copy's, offset by the morph pose.
+    assert_allclose(tumblers[-1].get_qpos() - tumblers[0].get_qpos(), (1.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), tol=gs.EPS)
+    arm_links_idx = [link.idx for link in (*arm.links, *arm_load.links)]
+    arm_dofs_idx = slice(arm.dof_start, arm.dof_end)
+    tumblers_links_idx = [[link.idx for link in tumbler.links] for tumbler in tumblers]
+    tumblers_links_idx[-1] += [link.idx for link in load.links]
+    tumblers_dofs_idx = [slice(tumbler.dof_start, tumbler.dof_end) for tumbler in tumblers]
+    tumblers_links_mass = [rigid_solver.get_links_mass(links_idx) for links_idx in tumblers_links_idx]
+    # One row of mass fractions per tumbler turns the links' centers of mass into the tumblers' own.
+    tumblers_all_links_idx = [idx for links_idx in tumblers_links_idx for idx in links_idx]
+    tumblers_weights = torch.block_diag(*[(links_mass / links_mass.sum())[None] for links_mass in tumblers_links_mass])
 
     arm.set_dofs_position([0.5, -0.8])
+    ARMATURE = 0.05
+    for tumbler in tumblers:
+        tumbler.set_dofs_velocity([0.0, 0.0, 0.0, 3.0, 1.0, 2.0])
+    tumblers[2].set_dofs_armature(ARMATURE, dofs_idx_local=[3, 4, 5])
 
     # Nearly undamped contact for sphere_a: small dampratio gives very stiff elastic spring with minimal damping.
     # Contact sol_params are averaged: 0.5*(geom_a + geom_b), so both geoms must share the same params.
     plane.geoms[0].set_sol_params(undamped_sol_params)
     sphere_a.geoms[0].set_sol_params(undamped_sol_params)
 
-    mass = sphere_a.get_links_inertial_mass()
+    mass = sphere_a.get_links_mass()
     te_initial = sphere_a.get_total_energy()
 
-    ke_a, pe_a, ke_b, pe_b, te_arm = [], [], [], [], []
+    ke_a, pe_a, ke_b, pe_b, te_arm, ke_tumblers, vel_tumblers, pos_tumblers = [], [], [], [], [], [], [], []
+    pos_tumblers.append(
+        tumblers_weights @ rigid_solver.get_links_pos(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+    )
+    vel_tumblers.append(
+        tumblers_weights @ rigid_solver.get_links_vel(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+    )
     impact_step = -1
     for i in range(n_steps):
         scene.step()
-        te_arm.append(arm.get_total_energy())
+        pos_tumblers.append(
+            tumblers_weights @ rigid_solver.get_links_pos(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+        )
+        vel_tumblers.append(
+            tumblers_weights @ rigid_solver.get_links_vel(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+        )
+        te_arm.append(
+            rigid_solver.get_kinetic_energy(arm_links_idx, arm_dofs_idx)
+            + rigid_solver.get_potential_energy(arm_links_idx, arm_dofs_idx)
+        )
+        ke_tumblers.append(
+            torch.stack(
+                [
+                    rigid_solver.get_kinetic_energy(links_idx, dofs_idx)
+                    for links_idx, dofs_idx in zip(tumblers_links_idx, tumblers_dofs_idx)
+                ]
+            )
+        )
         ke_a.append(sphere_a.get_kinetic_energy())
         pe_a.append(sphere_a.get_potential_energy())
         ke_b.append(sphere_b.get_kinetic_energy())
         pe_b.append(sphere_b.get_potential_energy())
-        if impact_step < 0 and scene.rigid_solver.collider._collider_state.n_contacts.to_numpy().any():
+        if impact_step < 0 and scene.rigid_solver.collider.collider_state.n_contacts.to_numpy().any():
             impact_step = i
     assert impact_step > 0
 
@@ -424,12 +541,33 @@ def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer,
     te_b_final = ke_b[-1] + pe_b[-1]
     assert te_b_final < te_initial
 
-    # Spring-driven arm: nothing dissipates, so its energy holds throughout the swing to integration error
+    # Spring-driven arm with its load: nothing dissipates, so its energy holds through the swing to integration error
     te_arm = torch.stack(te_arm)
     assert_allclose(te_arm, te_arm[0], tol=0.01)
-    # The springs must carry a real share of that energy, otherwise the check above would hold with no spring term
+    # The springs must carry a real share of the arm's own energy, or the check above would hold with no spring term
     spring_energy = 0.5 * torch.sum(arm.get_dofs_stiffness() * arm.get_dofs_position() ** 2)
-    assert spring_energy > 0.1 * te_arm[-1]
+    assert spring_energy > 0.1 * arm.get_total_energy()
+
+    # Gravity is the only force on a tumbling body, so its center of mass falls along the parabola the velocity-implicit
+    # update traces, whatever the body turns about it. A body anchored on its center of mass integrates that point
+    # itself and follows the parabola exactly. The pair is anchored on its first link alone: its center of mass starts
+    # moving with the spin, which the parabola carries through the initial velocity, and turns about the integrated
+    # origin, which leaves the parabola by the rotation of the offset over one step, a second-order term per step.
+    tumblers_mass = torch.stack([links_mass.sum() for links_mass in tumblers_links_mass])
+    steps = torch.arange(n_steps + 1, dtype=gs.tc_float, device=gs.device)[:, None, None]
+    pos_tumblers, vel_tumblers = torch.stack(pos_tumblers), torch.stack(vel_tumblers)
+    gravity = torch.tensor((0.0, 0.0, -g), dtype=gs.tc_float, device=gs.device)
+    pos_expected = pos_tumblers[0] + vel_tumblers[0] * steps * dt + gravity * dt**2 * steps * (steps + 1) / 2
+    assert_allclose(pos_tumblers[:, :-1], pos_expected[:, :-1], tol=tol)
+    pair_offset = np.linalg.norm(tensor_to_array(pos_tumblers[0, -1] - tumblers[-1].get_pos()))
+    pair_spin = np.linalg.norm(tensor_to_array(tumblers[-1].get_dofs_velocity()[3:]))
+    assert_allclose(pos_tumblers[:, -1], pos_expected[:, -1], atol=n_steps * (dt * pair_spin) ** 2 * pair_offset)
+    # Gravity exerts no torque about the center of mass, so the rotational energy of a tumbling body is a constant of
+    # its motion. The midpoint rule keeps it, with armature the augmented energy w^T (I + A) w / 2. Each Newton solve
+    # leaves a residual at the working precision, and the horizon accumulates them.
+    ke_rot = torch.stack(ke_tumblers) - 0.5 * tumblers_mass * vel_tumblers[1:].square().sum(dim=-1)
+    if integrator != gs.integrator.Euler:
+        assert_allclose(ke_rot, ke_rot[0], tol=10.0 * tol)
 
 
 @pytest.mark.slow  # ~250s
@@ -606,6 +744,21 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
         return
     hand.attach(arm, "tip")
     hand_branch.attach(arm, "a2")
+    # A free body attached onto a link the world carries is carried by it too
+    pedestal = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, -2.0, 0.1),
+            fixed=True,
+        )
+    )
+    mounted = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, -2.0, 0.5),
+        )
+    )
+    mounted.attach(pedestal, pedestal.base_link.name, pos=(0.0, 0.0, 0.15))
     if box_position == "inside_target":
         hand_box = scene.add_entity(
             gs.morphs.MJCF(
@@ -624,6 +777,11 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     assert hand_branch.base_link.parent_idx == arm.get_link("a2").idx
     for child in (hand, hand_chained, hand_branch):
         assert_equal([link.root_idx for link in child.links], tip_link.root_idx)
+    assert all(link.is_fixed for link in mounted.links)
+    assert mounted.n_dofs == 0
+    mounted_verts = mounted.get_verts()
+    assert_allclose(mounted_verts.min(dim=-2).values, (-0.05, -2.05, 0.2), tol=tol)
+    assert_allclose(mounted_verts.max(dim=-2).values, (0.05, -1.95, 0.3), tol=tol)
 
     mono_dofs = torch.arange(mono.dof_start, mono.dof_start + mono.n_dofs)
     hands = (hand, hand_chained, hand_branch)
@@ -683,10 +841,8 @@ def test_cholesky_tiling(monkeypatch, tol):
 
             rigid_solver_build_orig(self)
             self.rigid_config.enable_tiled_cholesky_mass_matrix = enable_tiled_cholesky
-            self.rigid_config.enable_tiled_cholesky_hessian = enable_tiled_cholesky
             if enable_tiled_cholesky:
                 self.rigid_config.tiled_n_dofs_per_entity = 32
-                self.rigid_config.tiled_n_dofs = 32
 
         monkeypatch.setattr("genesis.engine.solvers.RigidSolver.build", rigid_solver_build)
 
@@ -707,7 +863,6 @@ def test_cholesky_tiling(monkeypatch, tol):
         )
         scene.build(n_envs=2)
         assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_mass_matrix == enable_tiled_cholesky
-        assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_hessian == enable_tiled_cholesky
 
         scene.step()
         assert not scene.rigid_solver.get_error_envs_mask().any()
@@ -783,7 +938,6 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
         constraint_state.incr_n_changed,
         constraint_state.nt_H,
         constraint_state.nt_jacobi,
-        constraint_state.use_full_hessian,
         constraint_state.solver_iter_counter,
         constraint_state.improved,
         dofs.force,
@@ -857,7 +1011,7 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
     scene.build(n_envs=2)
 
     assert scene.rigid_solver.n_dofs == 102
-    assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_hessian
+    assert scene.rigid_solver.rigid_config.island_tile_cap_last == 128
 
     scene.step()
     assert not scene.rigid_solver.get_error_envs_mask().any()

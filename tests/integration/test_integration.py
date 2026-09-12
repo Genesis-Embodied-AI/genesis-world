@@ -264,8 +264,8 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
     # Only allow finger contact to accelerate
     for geom in franka.geoms:
         if "finger" not in geom.link.name:
-            geom._contype = 0
-            geom._conaffinity = 0
+            geom.desc.contype = 0
+            geom.desc.conaffinity = 0
     if primitive_type == "sphere":
         obj = scene.add_entity(
             morph=gs.morphs.Sphere(

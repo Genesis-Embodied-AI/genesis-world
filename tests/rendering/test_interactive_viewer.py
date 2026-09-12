@@ -620,7 +620,7 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 @pytest.mark.parametrize("add_box", [False, True])
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
-def test_add_camera_consistency(add_box, renderer_type, show_viewer):
+def test_add_camera_consistency(add_box, renderer, show_viewer):
     CAM_RES = (128, 128)
     CAM_POS = (0.0, -2.0, 1.5)
     CAM_LOOKAT = (0.0, 0.0, 0.0)
@@ -644,7 +644,7 @@ def test_add_camera_consistency(add_box, renderer_type, show_viewer):
             camera_lookat=CAM_LOOKAT,
             camera_fov=CAM_FOV,
         ),
-        renderer=renderer_type,
+        renderer=renderer,
         show_viewer=True,
     )
     scene.add_entity(

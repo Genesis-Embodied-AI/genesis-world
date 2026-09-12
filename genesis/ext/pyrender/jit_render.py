@@ -1,5 +1,6 @@
 import contextlib
 import os
+from typing import NamedTuple
 
 import numpy as np
 import numba as nb
@@ -7,13 +8,21 @@ import numba as nb
 import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
 
-from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
-from .light import DirectionalLight, PointLight
 from .constants import RenderFlags, MAX_N_LIGHTS
+from .light import DirectionalLight, PointLight, SpotLight
+from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
+from .scene import CORNER_INDICES
 
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
+
+
+class PlacedGroup(NamedTuple):
+    """Primitives placed through instance transforms that share an instance count, so that their poses stack."""
+
+    idx: np.ndarray
+    n_instances: int
 
 
 def load_const(const_name):
@@ -135,6 +144,7 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, gl
     set_uniform_3fv(pid, "ambient_light", ambient_light, gl)
     n_dir, n_pt, n_spot = 0, 0, 0
     active_texture = 0
+    depth_tex = -1
     cube_tex = -1
 
     for i in range(n):
@@ -144,10 +154,13 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, gl
             set_uniform_3fv(pid, b + "direction", light[i, 3:6], gl)
             set_uniform_1f(pid, b + "intensity", light[i, 6], gl)
             if flags & RenderFlags_SHADOWS_DIRECTIONAL:
+                if active_texture == 0:
+                    active_texture += 1
                 gl.glActiveTexture(GL_TEXTURE0 + active_texture)
                 gl.glBindTexture(GL_TEXTURE_2D, shadow_map[i])
                 set_uniform_1i(pid, b + "shadow_map", active_texture, gl)
                 set_uniform_matrix_4fv(pid, b + "light_matrix", light_matrix[i, 0], gl)
+                depth_tex = active_texture
                 active_texture += 1
             n_dir += 1
         elif abs(light[i, 7] - 1.0) < 0.1:
@@ -168,6 +181,20 @@ def bind_lighting(pid, flags, light, shadow_map, light_matrix, ambient_light, gl
     set_uniform_1i(pid, "n_directional_lights", n_dir, gl)
     set_uniform_1i(pid, "n_spot_lights", n_spot, gl)
     set_uniform_1i(pid, "n_point_lights", n_pt, gl)
+
+    # A draw fails when sampler uniforms of two types point at the same texture unit, and every sampler left unset
+    # points at unit 0 along with the material textures (sampler2D). So the shadow samplers (sampler2DShadow,
+    # samplerCube) take units of their own, and the light slots beyond the lights present point at one of those.
+    if flags & RenderFlags_SHADOWS_DIRECTIONAL:
+        if depth_tex < 0:
+            if active_texture == 0:
+                active_texture += 1
+            depth_tex = active_texture
+            active_texture += 1
+
+        for i in range(n_dir, MAX_N_LIGHTS):
+            b = "directional_lights[" + str(i) + "]."
+            set_uniform_1i(pid, b + "shadow_map", depth_tex, gl)
 
     if flags & RenderFlags_SHADOWS_POINT:
         if cube_tex < 0:
@@ -194,8 +221,15 @@ def address_to_ptr(typingctx, src):
     return sig, codegen
 
 
+def is_env_pass(flags):
+    """Whether a pass draws one environment where it is, for a camera bound to it, rather than every environment side
+    by side on the grid as the viewer window does. The window draws the grid whatever the separation setting: the
+    setting picks how its cameras render (see 'JITRenderer.env_offset_buffer')."""
+    return bool(flags & RenderFlags.ENV_SEPARATE and flags & RenderFlags.OFFSCREEN)
+
+
 class JITRenderer:
-    def __init__(self, scene, node_list, primitive_list):
+    def __init__(self, scene, node_list, primitive_list, envs_offset):
         self._forward_pass = None
         self._shadow_mapping_pass = None
         self._point_shadow_mapping_pass = None
@@ -205,18 +239,56 @@ class JITRenderer:
         self._update_normal_smooth = None
         self._update_buffer_fn = None
         self._buffer = dict()
+        self._scene = scene
+        # Offset of each rendered environment in the pass drawing them side by side. Instance k of an
+        # environment-instanced primitive (see Primitive.is_env_instanced) reads row k through an instance attribute
+        # fed by 'env_offset_buffer', so the poses stay the true ones and a pass rendering one environment at a time
+        # leaves the offsets out by scaling the attribute to zero.
+        self.envs_offset = np.ascontiguousarray(envs_offset, dtype=np.float32)
+        self.env_offset_buffer = None
+        # Scene revision the node poses were last gathered at (see Scene.revision)
+        self._scene_revision = None
+        # (scene revision, grid pass) the light setup was last done for, and whether it found every shadow texture in
+        # the context. See 'set_lighting'.
+        self._lights_revision = None
+        self._is_lighting_ready = False
+        # Meshes and textures held in the GL context, and the (scene revision, shadow flags) they were last synced for.
+        # The context is shared by every renderer of the scene, so the bookkeeping lives here rather than per renderer.
+        self._meshes = set()
+        self._mesh_textures = set()
+        self._shadow_textures = set()
+        self._context_revision = None
         self.set_primitive(scene, node_list, primitive_list)
         self.set_light(scene, scene.light_nodes, scene.ambient_light)
         self.reflection_mat = np.identity(4, np.float32)
 
-    def _update_centroid_local(self, i):
-        poses = self.primitive_list[i].poses
-        centres = np.einsum("eij,j->ei", poses[:, :3, :3], self.centroid_geom[i]) + poses[:, :3, 3]
-        if len(centres) == 1:
-            # A lone instance places the primitive in every environment, so its centre is the centre for all of them
-            self.centroid_local[i] = centres[0]
-        else:
-            self.centroid_local[i, : len(centres)] = centres
+    def _update_instances(self):
+        """Refresh what follows the instance transforms: the centre of each placed primitive per environment (see
+        'set_primitive') and the range its instances span, which the scene bounds widen the local bounds by."""
+        for idx, n_instances in self._placed_groups:
+            poses = np.stack([self.primitive_list[i].poses for i in idx])
+            centres = np.einsum("kenj,kj->ken", poses[:, :, :3, :3], self.centroid_geom[idx]) + poses[:, :, :3, 3]
+            if n_instances == 1:
+                # A lone instance places the primitive in every environment, so its centre is the centre for all of them
+                self.centroid_local[idx] = centres
+            else:
+                self.centroid_local[idx, :n_instances] = centres
+            self._set_translation_bounds(idx, poses[:, :, :3, 3])
+
+    def _set_translation_bounds(self, idx, translations):
+        """Record the range the instance translations of the primitives 'idx' span, given as (k, n_instances, 3), both
+        where the instances stand and on the environment grid, where the instances of one environment move by its
+        offset and instance k of an environment-instanced primitive by the offset of environment k."""
+        self.translation_bounds[idx, 0] = translations.min(axis=1)
+        self.translation_bounds[idx, 1] = translations.max(axis=1)
+        offsets = np.zeros_like(translations)
+        is_env_placed = self.env_row[idx] >= 0
+        offsets[is_env_placed] = self.envs_offset[self.env_row[idx][is_env_placed], np.newaxis]
+        if self.is_env_instanced[idx].any():
+            offsets[self.is_env_instanced[idx]] = self.envs_offset
+        translations = translations + offsets
+        self.translation_bounds_grid[idx, 0] = translations.min(axis=1)
+        self.translation_bounds_grid[idx, 1] = translations.max(axis=1)
 
     def update(self, scene):
         if scene.meshes_updated:
@@ -230,16 +302,153 @@ class JITRenderer:
                     primitive_list.append(primitive)
             self.set_primitive(scene, node_list, primitive_list)
             scene.reset_meshes_updated()
-        else:
-            # TODO: more efficient pose update
+        elif self._scene_revision != scene.revision:
+            # A node moves through Scene.set_pose, which advances the revision. Its own transform setters leave it alone.
             for i, node in enumerate(self.node_list):
                 self.pose[i] = scene.get_pose(node)
             # Instances move with the simulation, so where they place their primitive has to be refreshed as well
-            for i in np.flatnonzero(self.is_instance_placed):
-                self._update_centroid_local(i)
+            self._update_instances()
+        if self._scene_revision != scene.revision:
+            # The scene bounds as 'Scene.bounds' defines them, over every primitive at once: the local bounds widened
+            # by the range the instances span, whose corners go through the node pose. A floor counts by its centre
+            # alone and a marker counts for nothing, so a scene of markers keeps the bounds the scene computes itself.
+            # The grid pass spreads the environment-instanced primitives by their environment offsets, so it has bounds
+            # of its own.
+            is_bounded = self.render_flags[:, 6] == 0
+            if is_bounded.any():
+                for is_grid, translation_bounds in (
+                    (False, self.translation_bounds),
+                    (True, self.translation_bounds_grid),
+                ):
+                    bounds = self.bounds_geom + translation_bounds
+                    corners = bounds.reshape((-1, 6))[:, CORNER_INDICES]
+                    corners[self.is_floor] = bounds[self.is_floor].mean(axis=1)[:, np.newaxis]
+                    corners = np.einsum("nij,ncj->nci", self.pose[:, :3, :3], corners) + self.pose[:, np.newaxis, :3, 3]
+                    corners = corners[is_bounded].reshape((-1, 3))
+                    self.scene_bounds[is_grid] = np.stack((corners.min(axis=0), corners.max(axis=0)), axis=0)
+        self._scene_revision = scene.revision
 
-        # TODO: update lights
-        return self.set_light(scene, scene.light_nodes, scene.ambient_light)
+    def set_lighting(self, scene, is_grid):
+        """Set up the lights for a pass, and tell whether every shadow texture was found in the context.
+
+        The setup follows the scene: the light poses and the bounds the directional shadow frustum is fitted to, which
+        the grid pass has its own of. It stays unsettled while a shadow texture is missing from the context, so the next
+        render tries again.
+        """
+        if self.scene_bounds[is_grid] is not None:
+            scene.bounds = self.scene_bounds[is_grid]
+        lights_revision = (scene.revision, is_grid)
+        if self._lights_revision != lights_revision:
+            self._is_lighting_ready = self.set_light(scene, scene.light_nodes, scene.ambient_light)
+            self._lights_revision = lights_revision if self._is_lighting_ready else None
+        return self._is_lighting_ready
+
+    def _add_primitive_to_context(self, primitive):
+        """Upload a primitive to the GL context, one instanced per environment or placed in one reading the offsets."""
+        if not (primitive.is_env_instanced or primitive.env_idx is not None):
+            primitive._add_to_context()
+            return
+        if self.env_offset_buffer is None:
+            self.env_offset_buffer = GL.glGenBuffers(1)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.env_offset_buffer)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, self.envs_offset.nbytes, self.envs_offset, GL.GL_STATIC_DRAW)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        primitive._add_to_context(self.env_offset_buffer)
+
+    def update_context(self, scene, flags):
+        """Add to the GL context the meshes and textures the scene holds and free the ones it dropped.
+
+        Runs once per scene revision. The shadow flags decide which lights get a shadow texture, so they are part of
+        the key.
+        """
+        shadow_flags = flags & (RenderFlags.SHADOWS_DIRECTIONAL | RenderFlags.SHADOWS_POINT | RenderFlags.SHADOWS_SPOT)
+        if self._context_revision == (scene.revision, shadow_flags):
+            return
+        self._context_revision = (scene.revision, shadow_flags)
+
+        # Get existing and new meshes
+        scene_meshes_new = scene.meshes.copy()
+        scene_meshes_old = self._meshes
+
+        # Remove from context old meshes that are now irrelevant
+        for mesh in scene_meshes_old - scene_meshes_new:
+            for p in mesh.primitives:
+                p.delete()
+
+        # Update set of meshes right away, so that the context can be cleaned up correctly in case of failure
+        self._meshes = scene_meshes_new
+
+        # Add new meshes to context
+        for mesh in scene_meshes_new - scene_meshes_old:
+            for p in mesh.primitives:
+                self._add_primitive_to_context(p)
+
+        # Update mesh textures
+        mesh_textures = set()
+        for m in scene_meshes_new:
+            for p in m.primitives:
+                mesh_textures |= p.material.textures
+
+        # Add new textures to context
+        for texture in mesh_textures - self._mesh_textures:
+            texture._add_to_context()
+
+        # Remove old textures from context
+        for texture in self._mesh_textures - mesh_textures:
+            texture.delete()
+
+        self._mesh_textures = mesh_textures.copy()
+
+        shadow_textures = set()
+        for light in scene.lights:
+            # Create if needed
+            active = False
+            if isinstance(light, DirectionalLight) and flags & RenderFlags.SHADOWS_DIRECTIONAL:
+                active = True
+            elif isinstance(light, PointLight) and flags & RenderFlags.SHADOWS_POINT:
+                active = True
+            elif isinstance(light, SpotLight) and flags & RenderFlags.SHADOWS_SPOT:
+                active = True
+
+            if active and light.shadow_texture is None:
+                light._generate_shadow_texture()
+            if light.shadow_texture is not None:
+                shadow_textures.add(light.shadow_texture)
+
+        # Add new textures to context
+        for texture in shadow_textures - self._shadow_textures:
+            texture._add_to_context()
+
+        # Remove old textures from context
+        for texture in self._shadow_textures - shadow_textures:
+            texture.delete()
+
+        self._shadow_textures = shadow_textures.copy()
+
+    def delete(self):
+        """Free the GL resources of the meshes and textures held in the context."""
+        for mesh in self._meshes:
+            for p in mesh.primitives:
+                try:
+                    p.delete()
+                except (GL.error.GLError, GL.error.NullFunctionError):
+                    pass
+        self._meshes.clear()
+
+        for texture in (*self._mesh_textures, *self._shadow_textures):
+            try:
+                texture.delete()
+            except (GL.error.GLError, GL.error.NullFunctionError):
+                pass
+        self._mesh_textures.clear()
+        self._shadow_textures.clear()
+        self._context_revision = None
+        if self.env_offset_buffer is not None:
+            try:
+                GL.glDeleteBuffers(1, [self.env_offset_buffer])
+            except (GL.error.GLError, GL.error.NullFunctionError):
+                pass
+            self.env_offset_buffer = None
 
     def set_light(self, scene, light_nodes, ambient_light):
         self.light_list = light_nodes
@@ -335,19 +544,32 @@ class JITRenderer:
         # three coordinates apiece would be far more than what tracking a centre per environment needs.
         # An instance set may be empty, and such a primitive is still drawn, so it may not shrink the axis to nothing
         n_env_instanced = max(
-            (len(p.poses) for p in primitive_list if p.poses is not None and not p.env_shared and len(p.poses)),
+            (len(p.poses) for p in primitive_list if p.poses is not None and p.is_env_instanced and len(p.poses)),
             default=1,
         )
         self.centroid_local = np.zeros((n, n_env_instanced, 3), np.float32)
         # Centre of the bare geometry, which the instance transforms are applied to whenever they move
         self.centroid_geom = np.zeros((n, 3), np.float32)
         self.is_instance_placed = np.zeros(n, np.bool_)
+        # Per primitive: the bounds of the bare geometry, the range of the instance translations, and whether it is a
+        # floor, which the scene bounds count by its centre alone (see 'update')
+        self.bounds_geom = np.zeros((n, 2, 3), np.float32)
+        self.translation_bounds = np.zeros((n, 2, 3), np.float32)
+        self.translation_bounds_grid = np.zeros((n, 2, 3), np.float32)
+        self.is_floor = np.zeros(n, np.bool_)
+        self.is_env_instanced = np.zeros(n, np.bool_)
+        # Index among the rendered environments of the one a primitive is placed in, -1 for none (see Primitive.env_idx)
+        self.env_row = np.full(n, -1, np.int32)
+        # Axis-aligned bounds of what is drawn, for a pass rendering one environment at a time (False) and for the
+        # grid pass (True), None until a bounded primitive exists (see 'update')
+        self.scene_bounds = {False: None, True: None}
+        self._primitive_index = {primitive: i for i, primitive in enumerate(primitive_list)}
 
         floor_existed = False
 
         for i, primitive in enumerate(primitive_list):
             if primitive._vaid is None:
-                primitive._add_to_context()
+                self._add_primitive_to_context(primitive)
             self.vao_id[i] = primitive._vaid
             self.pose[i] = scene.get_pose(node_list[i])
             # An instance transform is what places a primitive, and it moves with the simulation, so the centre has to
@@ -355,17 +577,27 @@ class JITRenderer:
             # as for one instance per environment. A cloud of instances sharing a primitive - particles - has no single
             # centre to be sorted on, so it keeps the centre of the mesh itself.
             self.is_instance_placed[i] = primitive.poses is not None and (
-                len(primitive.poses) == 1 or not primitive.env_shared
+                len(primitive.poses) == 1 or primitive.is_env_instanced
             )
-            if self.is_instance_placed[i]:
-                # A primitive without a single vertex keeps the zero centre it was allocated with, as its bounds are
-                # zero too, rather than reducing over an empty axis
-                positions = primitive.positions
-                if len(positions):
-                    self.centroid_geom[i] = 0.5 * (positions.min(axis=0) + positions.max(axis=0))
-                self._update_centroid_local(i)
-            else:
+            # A primitive without a single vertex keeps the zero centre and bounds it was allocated with, rather than
+            # reducing over an empty axis
+            positions = primitive.positions
+            if len(positions):
+                self.bounds_geom[i, 0] = positions.min(axis=0)
+                self.bounds_geom[i, 1] = positions.max(axis=0)
+                self.centroid_geom[i] = 0.5 * (self.bounds_geom[i, 0] + self.bounds_geom[i, 1])
+            self.is_floor[i] = primitive.is_floor
+            self.is_env_instanced[i] = primitive.is_env_instanced
+            if primitive.env_idx is not None:
+                self.env_row[i] = primitive.env_idx
+            if not self.is_instance_placed[i]:
                 self.centroid_local[i] = primitive.centroid
+            # The range the instances span, refreshed with the instance transforms afterwards (see 'update_buffer')
+            if primitive.poses is not None and len(primitive.poses):
+                translations = primitive.poses[:, :3, 3]
+            else:
+                translations = np.zeros((1, 3), np.float32)
+            self._set_translation_bounds(np.array([i]), translations[np.newaxis])
 
             material = primitive.material
             tf = material.tex_flags
@@ -403,10 +635,12 @@ class JITRenderer:
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
-            self.render_flags[i, 7] = primitive.env_shared
-            if primitive.active_envs is not None:
+            # A pass drawing one environment draws the instance of that environment of a per-environment instanced
+            # primitive, and every instance of any other, which the culling below keeps to its environment
+            self.render_flags[i, 7] = not primitive.is_env_instanced
+            if primitive.is_env_instanced and not primitive.envs.all():
                 self.render_flags[i, 8] = 1
-                self.env_active[i, : len(primitive.active_envs)] = primitive.active_envs
+                self.env_active[i, : len(primitive.envs)] = primitive.envs
 
             if primitive.is_floor:
                 floor_existed = True
@@ -417,17 +651,32 @@ class JITRenderer:
             self.model_buffer_id[i] = primitive._buffers.get("model", 0)
             self.inst_attr_start[i] = getattr(primitive, "_inst_attr_start", 0)
 
-        # Gate the per-env visibility culling to scenes that actually have heterogeneous variants.
-        self._has_env_filtered = bool(self.render_flags[:, 8].any())
+        # Gate the per-env culling to scenes with heterogeneous variants or primitives standing in one environment
+        self._has_env_filtered = bool(self.render_flags[:, 8].any() or (self.env_row >= 0).any())
+
+        # The placed primitives are refreshed together, in groups of equal instance count so that their poses stack.
+        # Their instance count is fixed by the buffers sized on it. A group without an instance has nothing to reduce.
+        n_instances_placed = {}
+        for i in np.flatnonzero(self.is_instance_placed):
+            n_instances_placed.setdefault(len(primitive_list[i].poses), []).append(i)
+        self._placed_groups = [
+            PlacedGroup(np.array(idx), n_instances)
+            for n_instances, idx in n_instances_placed.items()
+            if n_instances > 0
+        ]
+        self._update_instances()
 
     @contextlib.contextmanager
     def _env_filtered_culling(self, env_idx):
-        # Temporarily zero the index count of env-filtered primitives (heterogeneous variants) absent from env_idx, so
-        # their per-env draw renders nothing. Mirrors the SKIP_MARKERS approach used in forward_pass.
+        # Temporarily zero the index count of the primitives absent from env_idx (heterogeneous variants, and those
+        # standing in another environment), so their per-env draw renders nothing. Mirrors the SKIP_MARKERS approach
+        # used in forward_pass.
         if env_idx < 0 or not self._has_env_filtered:
             yield
             return
-        inactive = self.render_flags[:, 8].astype(bool) & ~self.env_active[:, env_idx]
+        inactive = (self.render_flags[:, 8].astype(bool) & ~self.env_active[:, env_idx]) | (
+            (self.env_row >= 0) & (self.env_row != env_idx)
+        )
         saved = self.n_indices[inactive].copy()
         self.n_indices[inactive] = 0
         try:
@@ -484,6 +733,9 @@ class JITRenderer:
                 nb.int32[:],
                 nb.boolean[:, :],
                 nb.int32[:],
+                nb.float32,
+                nb.boolean[:],
+                nb.int32,
                 self.gl.wrapper_type,
             ),
             cache=True,
@@ -516,6 +768,9 @@ class JITRenderer:
             inst_attr_start,
             env_active,
             draw_order,
+            env_offset_scale,
+            is_env_instanced,
+            env_offset_buffer,
             gl,
         ):
             is_rgba = not (flags & RenderFlags_DEPTH_ONLY or flags & RenderFlags_SEG)
@@ -523,6 +778,7 @@ class JITRenderer:
             det_reflection = np.linalg.det(reflection_mat)
             last_pid = -1
             lighting_texture = 0
+
             for id in draw_order:
                 # Only render markers on the main graphical window, while skipping plane-reflection
                 if ((render_flags[id, 4] or render_flags[id, 6]) and flags & RenderFlags_SKIP_FLOOR) or (
@@ -549,6 +805,7 @@ class JITRenderer:
 
                     set_uniform_matrix_4fv(pid, "V", mat_V, gl)
                     set_uniform_matrix_4fv(pid, "P", mat_P, gl)
+                    set_uniform_1f(pid, "env_offset_scale", env_offset_scale, gl)
 
                     last_pid = pid
 
@@ -653,12 +910,22 @@ class JITRenderer:
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(k * 64 + j * 16)
                                     )
+                                if is_env_instanced[id]:
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
+                                    )
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstanced(
                                         mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
                                     )
                                 else:
                                     gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
+                                if is_env_instanced[id]:
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
+                                    )
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
                                 for j in range(4):
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
@@ -710,6 +977,9 @@ class JITRenderer:
                 nb.int32[:],
                 nb.int32[:],
                 nb.boolean[:, :],
+                nb.float32,
+                nb.boolean[:],
+                nb.int32,
                 self.gl.wrapper_type,
             ),
             cache=True,
@@ -728,6 +998,9 @@ class JITRenderer:
             model_buffer_id,
             inst_attr_start,
             env_active,
+            env_offset_scale,
+            is_env_instanced,
+            env_offset_buffer,
             gl,
         ):
             last_pid = -1
@@ -742,6 +1015,7 @@ class JITRenderer:
 
                     set_uniform_matrix_4fv(pid, "V", mat_V, gl)
                     set_uniform_matrix_4fv(pid, "P", mat_P, gl)
+                    set_uniform_1f(pid, "env_offset_scale", env_offset_scale, gl)
 
                     last_pid = pid
 
@@ -752,7 +1026,6 @@ class JITRenderer:
                 gl.glCullFace(GL_BACK)
                 gl.glDisable(GL_BLEND)
                 gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-
                 gl.glDisable(GL_PROGRAM_POINT_SIZE)
 
                 if render_flags[id, 7] or env_idx == -1:
@@ -775,12 +1048,22 @@ class JITRenderer:
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(k * 64 + j * 16)
                                     )
+                                if is_env_instanced[id]:
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
+                                    )
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstanced(
                                         mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
                                     )
                                 else:
                                     gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
+                                if is_env_instanced[id]:
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
+                                    )
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
                                 for j in range(4):
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
@@ -831,6 +1114,9 @@ class JITRenderer:
                 nb.int32[:],
                 nb.int32[:],
                 nb.boolean[:, :],
+                nb.float32,
+                nb.boolean[:],
+                nb.int32,
                 self.gl.wrapper_type,
             ),
             cache=True,
@@ -849,6 +1135,9 @@ class JITRenderer:
             model_buffer_id,
             inst_attr_start,
             env_active,
+            env_offset_scale,
+            is_env_instanced,
+            env_offset_buffer,
             gl,
         ):
             last_pid = -1
@@ -864,6 +1153,7 @@ class JITRenderer:
                     for i in range(6):
                         set_uniform_matrix_4fv(pid, "light_matrix[" + str(i) + "]", light_matrix[i], gl)
                     set_uniform_3fv(pid, "light_pos", light_pos, gl)
+                    set_uniform_1f(pid, "env_offset_scale", env_offset_scale, gl)
 
                     last_pid = pid
 
@@ -874,7 +1164,6 @@ class JITRenderer:
                 gl.glCullFace(GL_BACK)
                 gl.glDisable(GL_BLEND)
                 gl.glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-
                 gl.glDisable(GL_PROGRAM_POINT_SIZE)
 
                 if render_flags[id, 7] or env_idx == -1:
@@ -897,12 +1186,22 @@ class JITRenderer:
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(k * 64 + j * 16)
                                     )
+                                if is_env_instanced[id]:
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
+                                    )
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstanced(
                                         mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
                                     )
                                 else:
                                     gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
+                                if is_env_instanced[id]:
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
+                                    )
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
                                 for j in range(4):
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
@@ -1079,6 +1378,9 @@ class JITRenderer:
                 self.inst_attr_start,
                 self.env_active,
                 draw_order,
+                0.0 if is_env_pass(flags) else 1.0,
+                self.is_env_instanced,
+                self.env_offset_buffer if self.env_offset_buffer is not None else 0,
                 self.gl.wrapper_instance,
             )
         if flags & RenderFlags.SKIP_MARKERS:
@@ -1105,6 +1407,9 @@ class JITRenderer:
                 self.model_buffer_id,
                 self.inst_attr_start,
                 self.env_active,
+                0.0 if is_env_pass(flags) else 1.0,
+                self.is_env_instanced,
+                self.env_offset_buffer if self.env_offset_buffer is not None else 0,
                 self.gl.wrapper_instance,
             )
 
@@ -1127,6 +1432,9 @@ class JITRenderer:
                 self.model_buffer_id,
                 self.inst_attr_start,
                 self.env_active,
+                0.0 if is_env_pass(flags) else 1.0,
+                self.is_env_instanced,
+                self.env_offset_buffer if self.env_offset_buffer is not None else 0,
                 self.gl.wrapper_instance,
             )
 
@@ -1153,7 +1461,19 @@ class JITRenderer:
         """
         if node.mesh is None or len(node.mesh.primitives) != 1:
             raise ValueError("Node must have one primitive")
-        self._buffer[(node.mesh.primitives[0], buffer_name)] = data
+        primitive = node.mesh.primitives[0]
+        self._buffer[(primitive, buffer_name)] = data
+        # New vertex positions move the bounds of the bare geometry along, and new instance transforms (uploaded
+        # transposed, translation in the last row) the range the instances span. A placed primitive gets that from
+        # its poses in bulk instead (see '_update_instances').
+        i = self._primitive_index.get(primitive)
+        if i is not None and len(data):
+            if buffer_name == "pos":
+                self.bounds_geom[i, 0] = data.min(axis=0)
+                self.bounds_geom[i, 1] = data.max(axis=0)
+            elif buffer_name == "model" and not self.is_instance_placed[i]:
+                self._set_translation_bounds(np.array([i]), data[np.newaxis, :, 3, :3])
+        self._scene.bump_revision()
 
     def flush_buffer(self):
         """Upload all queued buffer updates to the GPU and clear the queue."""

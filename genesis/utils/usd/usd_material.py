@@ -124,7 +124,7 @@ def parse_preview_surface(prim: Usd.Prim, output_name):
             texture_asset = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(texture.resolvedPath))
             if texture_asset is None:
                 gs.raise_exception(f"Unable to open UsdUVTexture asset: {texture.resolvedPath}")
-            texture_image = np.asarray(Image.open(io.BytesIO(texture_asset.GetBuffer())))
+            texture_image = mu.PIL_to_array(Image.open(io.BytesIO(texture_asset.GetBuffer())))
             if texture_image.ndim == 3:
                 if output_name == "r":
                     texture_image = texture_image[:, :, 0]

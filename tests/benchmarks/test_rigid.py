@@ -222,7 +222,6 @@ def make_go2(n_envs, solver=None, gjk=None, **scene_kwargs):
         ),
         rigid_options=gs.options.RigidOptions(
             **get_rigid_solver_options(
-                dt=STEP_DT,
                 **(dict(constraint_solver=solver) if solver is not None else {}),
                 **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             ),
@@ -272,7 +271,6 @@ def make_anymal(n_envs, solver=None, gjk=None, control=None, with_kinematic=Fals
         ),
         rigid_options=gs.options.RigidOptions(
             **get_rigid_solver_options(
-                dt=STEP_DT,
                 **(dict(constraint_solver=solver) if solver is not None else {}),
                 **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
             ),
@@ -327,8 +325,10 @@ def make_g1_fall(n_envs, solver=None, gjk=None, accessors=False, **scene_kwargs)
     step_dt = 0.005
 
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
+        sim_options=gs.options.SimOptions(
             dt=step_dt,
+        ),
+        rigid_options=gs.options.RigidOptions(
             iterations=10,
             tolerance=1e-5,
             ls_iterations=20,
@@ -430,8 +430,10 @@ def make_double_smplx(n_envs, solver=None, gjk=None, **scene_kwargs):
     MAX_FORCE = 500.0
 
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
+        sim_options=gs.options.SimOptions(
             dt=STEP_DT,
+        ),
+        rigid_options=gs.options.RigidOptions(
             # Cap the reserved contacts so the self-colliding 318-DOF Jacobian (n_constraints * n_dofs * n_envs) stays
             # within int32 at n_envs=4096.
             max_collision_pairs=40,
@@ -491,7 +493,6 @@ def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=None, **s
             substeps=4,
         ),
         rigid_options=gs.options.RigidOptions(
-            dt=STEP_DT,
             noslip_iterations=2,
             max_collision_pairs=256,
             sparse_solve=sparse_solve,
@@ -616,7 +617,6 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
             substeps=25,
         ),
         rigid_options=gs.options.RigidOptions(
-            dt=STEP_DT,
             max_collision_pairs=200,
             **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
         ),

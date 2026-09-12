@@ -77,7 +77,7 @@ def test_physics_parity(show_viewer, tol):
     # heterogeneous entity through a different arithmetic than its own reference.
     assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
     assert_allclose(het_obj.get_vel(), ref_vel, tol=2e-4)
-    assert_allclose(het_obj.get_mass(), [ref_obj.get_mass() for ref_obj in ref_objs], tol=tol)
+    assert_allclose(het_obj.get_mass(), torch.cat([ref_obj.get_mass(envs_idx=0) for ref_obj in ref_objs]), tol=tol)
 
     # The variants are genuinely distinct: their masses are not all equal.
     with pytest.raises(AssertionError):
@@ -93,7 +93,7 @@ def test_variant_inertia_matches_standalone(undefined_inertia, implicit_inertial
     # no URDF variant can match.
     scene = gs.Scene(show_viewer=False)
     files = (undefined_inertia, implicit_inertial_origin)
-    references = [
+    ref_objs = [
         scene.add_entity(
             gs.morphs.URDF(
                 file=file,
@@ -113,7 +113,7 @@ def test_variant_inertia_matches_standalone(undefined_inertia, implicit_inertial
     )
     scene.build(n_envs=len(files))
 
-    assert_allclose(het_obj.get_mass(), [reference.get_mass() for reference in references], tol=tol)
+    assert_allclose(het_obj.get_mass(), torch.cat([ref_obj.get_mass(envs_idx=0) for ref_obj in ref_objs]), tol=tol)
 
 
 @pytest.mark.required
@@ -313,7 +313,7 @@ def test_invalid_variant_specification_raises():
     )
 
     # PBD material should raise an exception
-    with pytest.raises(gs.GenesisException, match="only supported for Rigid and Kinematic"):
+    with pytest.raises(gs.GenesisException, match="created from one morph"):
         scene.add_entity(
             morph=morphs_heterogeneous,
             material=gs.materials.PBD.Cloth(),

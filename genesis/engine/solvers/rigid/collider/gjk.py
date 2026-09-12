@@ -78,7 +78,7 @@ class GJK:
             max_contacts_per_pair = 1
             max_contact_polygon_verts = 1
 
-        self._gjk_static_config = array_class.GJKStaticConfig(enable_contact_patch=enable_contact_patch)
+        self.gjk_config = array_class.GJKStaticConfig(enable_contact_patch=enable_contact_patch)
 
         # Initialize GJK info
         self._gjk_info = array_class.get_gjk_info(
@@ -117,7 +117,7 @@ class GJK:
         )
 
         # Initialize GJK state
-        self._gjk_state = array_class.get_gjk_state(
+        self.gjk_state = array_class.get_gjk_state(
             rigid_solver._B, rigid_solver.rigid_config, self._gjk_info, False, rigid_solver.rigid_config.requires_grad
         )
 
@@ -127,7 +127,7 @@ class GJK:
         if self._is_active:
             return
 
-        self._gjk_state = array_class.get_gjk_state(
+        self.gjk_state = array_class.get_gjk_state(
             self._solver._B, self._solver.rigid_config, self._gjk_info, True, self._solver.rigid_config.requires_grad
         )
         self._is_active = True

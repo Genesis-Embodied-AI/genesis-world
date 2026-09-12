@@ -2758,7 +2758,7 @@ def _func_narrowphase_multicontact(
             )
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _func_reset_narrowphase_work_queues(collider_state: array_class.ColliderState):
     for _i in range(1):
         collider_state.narrowphase_work_queues.mpr_queue_size[0] = 0

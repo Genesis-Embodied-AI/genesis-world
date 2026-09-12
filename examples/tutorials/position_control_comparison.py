@@ -76,8 +76,8 @@ def main():
     # Use control_dofs_position
     pos_simulation_result = []
     franka.set_dofs_position([A, 0, 0, 0, 0, 0, 0, 0, 0], motors_dof_idx)
-    t0 = scene.t
-    while (t := (scene.t - t0) * scene.dt) < 2.0:
+    t0 = scene.get_time()
+    while (t := scene.get_time() - t0) < 2.0:
         target_position = A * (1 + math.sin(2 * math.pi * f * t))
 
         current_position = float(franka.get_qpos()[0])
@@ -88,8 +88,8 @@ def main():
     # Use control_dofs_position_velocity
     pos_vel_simulation_result = []
     franka.set_dofs_position([A, 0, 0, 0, 0, 0, 0, 0, 0], motors_dof_idx)
-    t0 = scene.t
-    while (t := (scene.t - t0) * scene.dt) < 2.0:
+    t0 = scene.get_time()
+    while (t := scene.get_time() - t0) < 2.0:
         target_position = A * (1 + math.sin(2 * math.pi * f * t))
         target_velocity = 2 * math.pi * f * A * math.cos(2 * math.pi * f * t)
 

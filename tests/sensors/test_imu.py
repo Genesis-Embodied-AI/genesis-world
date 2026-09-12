@@ -10,7 +10,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_sensor(show_viewer, tol, n_envs):
+def test_sensor(free_box, show_viewer, tol, n_envs):
     GRAVITY = -10.0
     DT = 1e-2
     BIAS = (0.1, 0.2, 0.3)
@@ -32,9 +32,11 @@ def test_sensor(show_viewer, tol, n_envs):
     scene.add_entity(gs.morphs.Plane())
 
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.1, 0.1, 0.1),
+        morph=gs.morphs.MJCF(
+            file=free_box((0.05, 0.05, 0.05), 600),
             pos=(0.0, 0.0, 0.2),
+            align=False,
+            default_armature=0.0,
         ),
     )
 
@@ -85,7 +87,7 @@ def test_sensor(show_viewer, tol, n_envs):
     assert_allclose(imu_noisy.read().mag, MAG_FIELD, tol=1e-1)
 
     # shift COM to induce angular velocity
-    box.set_COM_shift([0.05, 0.05, 0.05])
+    box.set_links_COM([0.05, 0.05, 0.05])
 
     # update noise and bias for accelerometer, gyroscope and magnetometer
     imu_noisy.set_noise((0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.05, 0.05, 0.05))
@@ -130,7 +132,7 @@ def test_sensor(show_viewer, tol, n_envs):
     with np.testing.assert_raises(AssertionError, msg="Delayed mag data should not be equal to the ground truth data"):
         assert_equal(imu_delayed.read().mag - imu_delayed.read_ground_truth().mag, 0.0)
 
-    box.set_COM_shift((0.0, 0.0, 0.0))
+    box.set_links_COM([0.0, 0.0, 0.0])
     box.set_quat((0.0, 0.0, 0.0, 1.0))  # pi rotation around z-axis
 
     # wait for the box to be stationary on ground
