@@ -571,6 +571,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             gs.backend != gs.cpu and not self.sim.options.requires_grad and not sparse_solve and self.n_dofs >= 16
         )
         enable_cooperative_constraint_kernels = enable_tiled_island_seed and self._sim._B <= get_gpu_core_count()
+        # The noslip sweep of an island is the last one-thread process of the cooperative regime, so its block-per-island
+        # variant takes the same bound (see kernel_noslip in noslip.py).
+        enable_cooperative_noslip = enable_cooperative_constraint_kernels and self._options.noslip_iterations > 0
         # Dofs per kinematic tree, counted from the links here since _init_tree_fields runs once the fields this config
         # sizes are allocated. A scene holding one tree forms at most one island per env, and the per-island passes
         # read the env's plain ranges.
@@ -616,6 +619,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             ),
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
+            enable_cooperative_noslip=enable_cooperative_noslip,
             is_single_island=is_single_island,
             has_scalar_seed_factor=has_scalar_seed_factor,
             constraint_layout_batch_first=constraint_layout_batch_first,
