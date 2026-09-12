@@ -407,8 +407,7 @@ class KinematicEntity(Entity):
         # attached into this one already share its root and must follow it (chained attaches may run in any order);
         # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight. A
         # link is fixed when its own joints and every joint above it are fixed, the base link's being gone, so the
-        # flag follows the parent link's down the tree, which the link order walks parents first. The vertex pools
-        # follow the flags at build (see RigidSolver.build).
+        # flag follows the parent link's down the tree, which the link order walks parents first.
         for link in self._solver.links:
             if link.root_idx == base_link.idx:
                 was_fixed = link.is_fixed
@@ -441,6 +440,24 @@ class KinematicEntity(Entity):
                     desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
                         desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *hint
                     )
+
+        # The slots of the free and fixed vertex pools follow the flags: this entity's links and geoms move between the
+        # pools, and the entities created after it shift behind them.
+        n_free_verts = self._free_verts_state_start
+        n_fixed_verts = self._fixed_verts_state_start
+        for entity in self._solver.entities[self._idx_in_solver :]:
+            entity._free_verts_state_start = n_free_verts
+            entity._fixed_verts_state_start = n_fixed_verts
+            for link in entity.links:
+                is_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
+                link._verts_state_start = n_fixed_verts if is_fixed_pool else n_free_verts
+                for geom in link.geoms:
+                    if is_fixed_pool:
+                        geom._verts_state_start = n_fixed_verts
+                        n_fixed_verts += geom.n_verts
+                    else:
+                        geom._verts_state_start = n_free_verts
+                        n_free_verts += geom.n_verts
 
         # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,
         # and the attached links now extend that body. Its frame and qpos stay where they are, so the anchor stops
