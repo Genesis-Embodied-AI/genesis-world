@@ -3352,7 +3352,9 @@ def func_factor_island_incremental_dense(
         con_base = linesearch.func_list_range_start(constraint_state.island.constraint_id, con_lo, con_hi, i_b)
     is_degenerated = False
     for i_pos in range(con_lo, con_hi):
-        i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, con_lo, con_base, i_b)
+        i_c = i_pos
+        if qd.static(not rigid_config.is_single_island):
+            i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, con_lo, con_base, i_b)
         if constraint_state.active[i_c, i_b] ^ constraint_state.prev_active[i_c, i_b]:
             if func_rank1_flip_dense_block(i_b, i_c, i_d_start, n, constraint_state, rigid_info, rigid_config):
                 is_degenerated = True
