@@ -442,10 +442,12 @@ class KinematicEntity(Entity):
                     )
 
         # The slots of the free and fixed vertex pools follow the flags: this entity's links and geoms move between the
-        # pools, and the entities created after it shift behind them.
+        # pools, and the entities created after it shift behind them. A kinematic entity holds no collision vertex.
         n_free_verts = self._free_verts_state_start
         n_fixed_verts = self._fixed_verts_state_start
         for entity in self._solver.entities[self._idx_in_solver :]:
+            if not isinstance(entity, RigidEntity):
+                continue
             entity._free_verts_state_start = n_free_verts
             entity._fixed_verts_state_start = n_fixed_verts
             for link in entity.links:
