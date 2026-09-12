@@ -327,6 +327,20 @@ def test_glb_parse_geometry(request, glb_file, tol):
 
 
 @pytest.mark.required
+def test_glb_strip_nodes_stay_separate(triangle_strip_nodes_glb):
+    # Two nodes are two meshes, and one collision geom each, whatever primitive mode they declare
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        triangle_strip_nodes_glb,
+        group_by_material=False,
+        scale=None,
+        is_mesh_zup=True,
+        surface=gs.surfaces.Default(),
+    )
+    assert {gs_mesh.metadata["name"] for gs_mesh in gs_meshes} == {"near_strip", "far_strip"}
+    assert {gs_mesh.metadata["node_index"] for gs_mesh in gs_meshes} == {0, 1}
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("glb_file", ["glb/tycoon_draco_no_normal.glb", "glb/tycoon_with_normal_draco.glb"])
 def test_glb_draco_missing_normals_texcoord(glb_file):
     # Normals and tex_coord are not always present in GLB files, typically for Draco-compressed ones.
