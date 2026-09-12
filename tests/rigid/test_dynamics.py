@@ -744,6 +744,21 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
         return
     hand.attach(arm, "tip")
     hand_branch.attach(arm, "a2")
+    # A free body attached onto a link the world carries is carried by it too
+    pedestal = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, -2.0, 0.1),
+            fixed=True,
+        )
+    )
+    mounted = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, -2.0, 0.5),
+        )
+    )
+    mounted.attach(pedestal, pedestal.base_link.name, pos=(0.0, 0.0, 0.15))
     if box_position == "inside_target":
         hand_box = scene.add_entity(
             gs.morphs.MJCF(
@@ -762,6 +777,11 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     assert hand_branch.base_link.parent_idx == arm.get_link("a2").idx
     for child in (hand, hand_chained, hand_branch):
         assert_equal([link.root_idx for link in child.links], tip_link.root_idx)
+    assert all(link.is_fixed for link in mounted.links)
+    assert mounted.n_dofs == 0
+    mounted_verts = mounted.get_verts()
+    assert_allclose(mounted_verts.min(dim=-2).values, (-0.05, -2.05, 0.2), tol=tol)
+    assert_allclose(mounted_verts.max(dim=-2).values, (0.05, -1.95, 0.3), tol=tol)
 
     mono_dofs = torch.arange(mono.dof_start, mono.dof_start + mono.n_dofs)
     hands = (hand, hand_chained, hand_branch)

@@ -194,7 +194,7 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
 
 
 @pytest.mark.required
-def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
+def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
     # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike. The
     # arms of the first env start lower, so its islands merge first.
@@ -275,17 +275,14 @@ def test_partition_track_changes(show_viewer, n_envs):
     # The step rebuilds the partition; read the island count the solver actually used this step.
     island_state = scene.rigid_solver.constraint_solver.constraint_state.island
 
-    def n_islands_now():
-        return qd_to_numpy(island_state.n_islands)
-
     scene.step()
-    assert_equal(n_islands_now(), 2)
+    assert_equal(qd_to_numpy(island_state.n_islands), 2)
     for _ in range(45):
         scene.step()
-    assert_equal(n_islands_now(), 1)
+    assert_equal(qd_to_numpy(island_state.n_islands), 1)
     box_upper.set_pos([0.0, 0.0, 0.40])
     scene.step()
-    assert_equal(n_islands_now(), 2)
+    assert_equal(qd_to_numpy(island_state.n_islands), 2)
 
 
 @pytest.mark.required

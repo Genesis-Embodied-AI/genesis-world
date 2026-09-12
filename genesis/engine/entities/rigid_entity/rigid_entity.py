@@ -405,12 +405,17 @@ class KinematicEntity(Entity):
 
         # Re-root the whole tree hanging from this entity's base link - scene-wide, because entities previously
         # attached into this one already share its root and must follow it (chained attaches may run in any order);
-        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight.
+        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight. A
+        # link is fixed when its own joints and every joint above it are fixed, the base link's being gone, so the
+        # flag follows the parent link's down the tree, which the link order walks parents first. The vertex pools
+        # follow the flags at build (see RigidSolver.build).
         for link in self._solver.links:
             if link.root_idx == base_link.idx:
                 was_fixed = link.is_fixed
                 link._root_idx = parent_link.root_idx
-                link._is_fixed &= parent_link.is_fixed
+                link._is_fixed = self._solver.links[link.parent_idx].is_fixed and all(
+                    joint.type is gs.JOINT_TYPE.FIXED for joint in link.joints
+                )
 
                 # The attach moves this link into another kinematic tree, so its old tree's inverse weight no longer
                 # applies. The sentinel makes the solver recompute it during its refresh.

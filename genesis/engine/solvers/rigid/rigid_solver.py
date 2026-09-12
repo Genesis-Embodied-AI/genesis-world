@@ -350,6 +350,24 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         pass
 
     def build(self):
+        # The vertex pools follow the fixed flags as they stand now: attach() moves links between them after their
+        # geoms recorded a slot (see RigidEntity.attach), so every slot is reassigned, the entities' down to the geoms'.
+        n_free_verts = 0
+        n_fixed_verts = 0
+        for entity in self._entities:
+            entity._free_verts_state_start = n_free_verts
+            entity._fixed_verts_state_start = n_fixed_verts
+            for link in entity.links:
+                is_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
+                link._verts_state_start = n_fixed_verts if is_fixed_pool else n_free_verts
+                for geom in link.geoms:
+                    if is_fixed_pool:
+                        geom._verts_state_start = n_fixed_verts
+                        n_fixed_verts += geom.n_verts
+                    else:
+                        geom._verts_state_start = n_free_verts
+                        n_free_verts += geom.n_verts
+
         self._n_geoms = self.n_geoms
         self._n_cells = self.n_cells
         self._n_verts = self.n_verts
