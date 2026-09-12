@@ -1319,45 +1319,90 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 )
 
     def get_error_envs_mask(self):
+        """Return a mask selecting environments with a rigid-solver error.
+
+        An environment is flagged after the solver encounters an error such as a non-finite constraint force or
+        acceleration. The flag remains set until the environment state is reset.
+
+        If a flag remains set, a later `Scene.step` raises. For non-finite force and acceleration errors, batched
+        workloads can read this mask after each step and reset the affected environments before stepping again.
+
+        Returns
+        -------
+        error_envs_mask : torch.Tensor
+            Boolean tensor with one value per built environment. A non-parallelized scene returns one value.
+        """
         return qd_to_torch(self._errno) > 0
 
     def check_errno(self):
-        # FIXME: qd.atomic_or return value is broken on Metal — always returns 0.
-        # See repro_metal_kernel_return.py. Falling back to numpy reduction.
+        """Raise for a solver error and list the affected environments in batched scenes."""
+        # FIXME: qd.atomic_or return value is broken on Metal - always returns 0. Falling back to numpy reduction.
+        errno_by_env = None
         if gs.use_zerocopy or sys.platform == "darwin":
-            errno = np.bitwise_or.reduce(qd_to_numpy(self._errno))
+            errno_by_env = qd_to_numpy(self._errno, transpose=True)
+            errno = np.bitwise_or.reduce(errno_by_env)
         else:
             errno = kernel_bit_reduction(self._errno)
+        if not errno:
+            return
 
         if errno & array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS:
+            code = array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS
             max_collision_pairs_broad = self.collider.collider_info.max_collision_pairs_broad[None]
-            gs.raise_exception(
+            message = (
                 f"Exceeding max number of broad phase candidate contact pairs ({max_collision_pairs_broad}). "
-                f"Please increase the value of RigidSolver's option 'multiplier_collision_broad_phase'."
+                "Please increase the value of RigidSolver's option 'multiplier_collision_broad_phase'."
             )
-        if errno & array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS:
+        elif errno & array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS:
+            code = array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS
             max_candidate_contacts = self.collider.collider_info.max_candidate_contacts[None]
-            gs.raise_exception(
+            message = (
                 f"Exceeding max number of candidate contact points ({max_candidate_contacts}). Please increase the "
                 "value of RigidSolver's option 'max_collision_pairs'."
             )
-        if errno & array_class.ErrorCode.OVERFLOW_CONTACTS:
+        elif errno & array_class.ErrorCode.OVERFLOW_CONTACTS:
+            code = array_class.ErrorCode.OVERFLOW_CONTACTS
             max_contacts = self.collider.collider_info.max_contacts[None]
-            gs.raise_exception(
+            message = (
                 f"Exceeding max number of post-pruning contact points ({max_contacts}) supported by the constraint "
                 "solver. Please increase the value of RigidSolver's option 'max_contacts'."
             )
-        if errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
-            gs.raise_exception(
+        elif errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
+            code = array_class.ErrorCode.INVALID_CONTACT_NAN
+            message = (
                 "Collision detection reported a contact whose position, normal or penetration is not finite. This is a "
                 "solver-internal error, please report it."
             )
-        if errno & array_class.ErrorCode.INVALID_FORCE_NAN:
-            gs.raise_exception("Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep.")
-        if errno & array_class.ErrorCode.INVALID_ACC_NAN:
-            gs.raise_exception("Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep.")
-        if errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
-            gs.raise_exception("Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'.")
+        elif errno & array_class.ErrorCode.INVALID_FORCE_NAN:
+            code = array_class.ErrorCode.INVALID_FORCE_NAN
+            message = "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
+        elif errno & array_class.ErrorCode.INVALID_ACC_NAN:
+            code = array_class.ErrorCode.INVALID_ACC_NAN
+            message = "Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep."
+        elif errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
+            code = array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS
+            message = "Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'."
+        else:
+            return
+
+        envs_info = ""
+        if self.n_envs > 0:
+            # One sweep can flag different errors, so associate each environment with the message that describes it
+            if errno_by_env is None:
+                errno_by_env = qd_to_numpy(self._errno, transpose=True)
+            envs_info = f" Environments reporting this error: {np.nonzero(errno_by_env & code)[0].tolist()}."
+            i_bs_other = np.nonzero((errno_by_env != 0) & ((errno_by_env & code) == 0))[0]
+            if i_bs_other.size:
+                envs_info += f" Environments reporting a different error: {i_bs_other.tolist()}."
+
+        recovery_info = (
+            " Read RigidSolver.get_error_envs_mask() after each step and reset the environments it reports so the "
+            "rest of the batch can continue."
+            if self.n_envs > 0
+            and code in (array_class.ErrorCode.INVALID_FORCE_NAN, array_class.ErrorCode.INVALID_ACC_NAN)
+            else ""
+        )
+        gs.raise_exception(f"{message}{envs_info}{recovery_info}")
 
     def _kernel_detect_collision(self):
         self.collider.clear()

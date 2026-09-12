@@ -858,7 +858,7 @@ def kernel_bit_reduction(tensor: qd.Tensor) -> qd.i32:
 @qd.kernel(fastcache=True)
 def kernel_set_zero(envs_idx: qd.types.ndarray(), tensor: qd.Tensor):
     for i_b_ in range(envs_idx.shape[0]):
-        tensor[i_b_] = 0
+        tensor[envs_idx[i_b_]] = 0
 
 
 @qd.func
