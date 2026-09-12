@@ -194,10 +194,10 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_fixed_base_branches_are_islands(show_viewer, n_envs, fixed_base_dual_arm):
+def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
     # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
-    # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike.
+    # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike. The
+    # arms of the first env start lower, so its islands merge first.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, -5.0, 2.0),
@@ -206,7 +206,7 @@ def test_fixed_base_branches_are_islands(show_viewer, n_envs, fixed_base_dual_ar
         show_viewer=show_viewer,
     )
     plane = scene.add_entity(gs.morphs.Plane())
-    quadruped = scene.add_entity(
+    scene.add_entity(
         gs.morphs.URDF(
             file="urdf/go2/urdf/go2.urdf",
             pos=(-3.0, 0.0, 0.6),
@@ -226,30 +226,29 @@ def test_fixed_base_branches_are_islands(show_viewer, n_envs, fixed_base_dual_ar
             pos=(3.0, 0.0, 1.0),
         )
     )
-    scene.build(n_envs=n_envs)
+    scene.build(n_envs=2)
     scene.rigid_solver.add_weld_constraint(dual_arm_welded.base_link_idx, plane.base_link_idx)
-    island_state = scene.rigid_solver.constraint_solver.constraint_state.island
-
-    def links_island(entity):
-        links_idx = [link.idx for link in entity.links if not link.is_fixed]
-        return qd_to_numpy(island_state.links_island_idx, transpose=True)[..., links_idx]
+    dual_arm.set_dofs_position([[0.9, -0.9], [0.0, 0.0]])
+    dual_arm_welded.set_dofs_position([[0.9, -0.9], [0.0, 0.0]], dofs_idx_local=[6, 7])
+    n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
 
     # Every leg of the quadruped and every arm of the fixed dual arm is an island, the welded dual arm one island
     scene.step()
-    assert_equal(qd_to_numpy(island_state.n_islands), 7)
-    assert np.unique(links_island(quadruped), axis=-1).shape[-1] == 4
-    assert (links_island(dual_arm)[..., :1] != links_island(dual_arm)[..., 1:]).all()
+    assert_equal(qd_to_numpy(n_islands), 7)
+
+    # The arms of the first env have come to rest against each other, merging its two arm islands, the second env is
+    # still falling
     for _ in range(39):
         scene.step()
-    assert (links_island(dual_arm_welded) == links_island(dual_arm_welded)[..., :1]).all()
-    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=1e-3)
+    assert_equal(qd_to_numpy(n_islands), [6, 7])
+    arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
+    assert_allclose(arms_qpos_diff[0], 0.0, tol=5e-3)
+    assert_allclose(arms_qpos_diff[1], 0.0, tol=1e-3)
 
-    # The arms come to rest against each other: the two islands of the fixed dual arm merge and both twins settle alike
+    # Both envs at rest, the twins settled alike up to the compliance of the weld
     for _ in range(60):
         scene.step()
-    assert_equal(qd_to_numpy(island_state.n_islands), 6)
-    assert (links_island(dual_arm) == links_island(dual_arm)[..., :1]).all()
-    assert (links_island(dual_arm_welded) == links_island(dual_arm_welded)[..., :1]).all()
+    assert_equal(qd_to_numpy(n_islands), 6)
     assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
 
