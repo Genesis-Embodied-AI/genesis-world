@@ -742,7 +742,12 @@ def check_mujoco_data_consistency(
         gs_islands_ls_improvement = qd_to_numpy(gs_island_state.ls_improvement, transpose=True)[0]
         gs_n_islands = qd_to_numpy(gs_island_state.n_islands)[0]
         gs_dofs_island = qd_to_numpy(gs_island_state.dofs_island_idx, transpose=True)[0]
-        gs_constraints_island = qd_to_numpy(gs_island_state.constraint_island_idx, transpose=True)[0, :gs_n_constraints]
+        # A single-island scene keeps no per-row island map, its one island holding every row (see func_island_rows)
+        gs_constraints_island = np.zeros(gs_n_constraints, dtype=gs.np_int)
+        if not gs_sim.rigid_solver.rigid_config.is_single_island:
+            gs_constraints_island = qd_to_numpy(gs_island_state.constraint_island_idx, transpose=True)[
+                0, :gs_n_constraints
+            ]
         gs_to_mj_dof = dict(zip(gs_dofs_idx, mj_dofs_idx))
         for gs_island in range(gs_n_islands):
             gs_island_dofs = np.flatnonzero(gs_dofs_island == gs_island)
