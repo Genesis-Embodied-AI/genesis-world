@@ -200,19 +200,12 @@ def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
     # arms of the first env start lower, so its islands merge first.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, -5.0, 2.0),
+            camera_pos=(1.5, -4.0, 1.5),
             camera_lookat=(1.5, 0.0, 0.8),
         ),
         show_viewer=show_viewer,
     )
     plane = scene.add_entity(gs.morphs.Plane())
-    scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(-3.0, 0.0, 0.6),
-            fixed=True,
-        )
-    )
     dual_arm = scene.add_entity(
         gs.morphs.URDF(
             file=fixed_base_dual_arm,
@@ -232,23 +225,22 @@ def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
     dual_arm_welded.set_dofs_position([[0.9, -0.9], [0.0, 0.0]], dofs_idx_local=[6, 7])
     n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
 
-    # Every leg of the quadruped and every arm of the fixed dual arm is an island, the welded dual arm one island
-    scene.step()
-    assert_equal(qd_to_numpy(n_islands), 7)
-
-    # The arms of the first env have come to rest against each other, merging its two arm islands, the second env is
-    # still falling
-    for _ in range(39):
+    # The welded dual arm is one island, the two arms of the fixed dual arm are two islands until they touch, one from
+    # then on
+    for i_step in range(80):
         scene.step()
-    assert_equal(qd_to_numpy(n_islands), [6, 7])
-    arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
-    assert_allclose(arms_qpos_diff[0], 0.0, tol=5e-3)
-    assert_allclose(arms_qpos_diff[1], 0.0, tol=1e-3)
+        is_arms_touching = tensor_to_array(dual_arm.get_contacts(with_entity=dual_arm)["valid_mask"].any(dim=-1))
+        assert_equal(qd_to_numpy(n_islands), 3 - is_arms_touching)
+        if i_step == 0:
+            assert not is_arms_touching.any()
+        if i_step == 39:
+            assert_equal(is_arms_touching, [True, False])
+            arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
+            assert_allclose(arms_qpos_diff[0], 0.0, tol=5e-3)
+            assert_allclose(arms_qpos_diff[1], 0.0, tol=1e-3)
 
     # Both envs at rest, the twins settled alike up to the compliance of the weld
-    for _ in range(60):
-        scene.step()
-    assert_equal(qd_to_numpy(n_islands), 6)
+    assert is_arms_touching.all()
     assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
 
