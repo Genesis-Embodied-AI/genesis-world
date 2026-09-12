@@ -12,6 +12,7 @@ import enum
 import io
 import json
 import logging
+import math
 import os
 import struct
 import threading
@@ -126,8 +127,14 @@ def _frame_fields(sim: "Simulator", kinds: frozenset[DataKind]) -> list[FrameFie
     for solver in sim.active_solvers:
         if isinstance(solver, KinematicSolver):
             name = f"{type(solver).__name__}{FLAGS_SUFFIX}"
-            fields.append(FrameField(name, DataKind.STATE, (2,), "|u1", offset, 2))
-            offset += 2
+            shape = (
+                (2, *solver.is_forward_pos_updated.shape)
+                if isinstance(solver.is_forward_pos_updated, torch.Tensor)
+                else (2,)
+            )
+            nbytes = math.prod(shape)
+            fields.append(FrameField(name, DataKind.STATE, shape, "|u1", offset, nbytes))
+            offset += nbytes
     return fields
 
 
@@ -146,11 +153,11 @@ def _read_frame(sim: "Simulator", kinds: frozenset[DataKind]) -> np.ndarray:
     if gs.use_zerocopy:
         parts = [qd_to_torch(value).contiguous().reshape(-1).view(torch.uint8) for _, value, _ in sim.data(kinds)]
         parts.append(sim.steps.reshape(-1).view(torch.uint8))
-        parts.append(torch.tensor(flags, dtype=torch.uint8, device=gs.device))
+        parts.extend(torch.as_tensor(flag, dtype=torch.uint8, device=gs.device).reshape(-1) for flag in flags)
         return tensor_to_array(torch.cat(parts))
     parts = [qd_to_numpy(value).reshape(-1).view(np.uint8) for _, value, _ in sim.data(kinds)]
     parts.append(tensor_to_array(sim.steps).reshape(-1).view(np.uint8))
-    parts.append(np.array(flags, dtype=np.uint8))
+    parts.extend(tensor_to_array(flag, dtype=np.uint8).reshape(-1) for flag in flags)
     return np.concatenate(parts)
 
 
@@ -516,14 +523,14 @@ class Trajectory:
         kinds = EXACT_KINDS if self.is_exact else COMPRESSED_KINDS
         values = self.frame(index, kinds)
         arrays: dict[str, dict[str, np.ndarray]] = {}
-        flags: dict[str, tuple[bool, bool]] = {}
+        flags: dict[str, tuple[bool | np.ndarray, ...]] = {}
         for name, value in values.items():
             if name == STEPS_FIELD:
                 continue
             solver_name, array_name = name.split(".", 1)
             if name.endswith(FLAGS_SUFFIX):
-                # Native booleans: the step hands these to kernels as template arguments.
-                flags[solver_name] = tuple(map(bool, value))
+                # Rigid flags are scalar kernel arguments, while kinematic masks retain their environment axis
+                flags[solver_name] = tuple(bool(flag) if flag.ndim == 0 else flag for flag in value)
             else:
                 arrays.setdefault(solver_name, {})[array_name] = value
         solvers = {}

@@ -1,5 +1,4 @@
 import math
-import os
 import sys
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -14,9 +13,8 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
-from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials import Rigid
-from genesis.engine.states import KinematicSolverCheckpoint, QueriedStates, RigidSolverState
+from genesis.engine.states import KinematicSolverCheckpoint, RigidSolverState
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.utils.misc import (
@@ -31,104 +29,14 @@ from genesis.utils.misc import (
     qd_zero_grad,
     tensor_to_array,
 )
-from genesis.utils.sdf import SDF
 
-from ..base_solver import GravityMixin, MutatedLinks, Solver, StateChange, TimeBasedMixin, mutates
+from ..base_solver import GravityMixin, MutatedLinks, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
     _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
-)
-from .collider import Collider
-from .constraint import ConstraintSolver
-from .constraint.backward import (
-    kernel_accumulate_constraint_solver_grads,
-    kernel_load_dL_dqacc_from_acc_grad,
-    kernel_manual_add_collision_constraints_bw,
-    kernel_manual_add_equality_constraints_bw,
-    kernel_manual_add_frictionloss_constraints_bw,
-    kernel_manual_add_joint_limit_constraints_bw,
-)
-from .abd.misc import (
-    kernel_init_link_dynamics,
-    func_add_safe_backward,
-    func_apply_coupling_force,
-    func_atomic_add_if,
-    func_check_index_range,
-    func_clear_external_force,
-    func_read_field_if,
-    func_write_and_read_field_if,
-    func_write_field_if,
-    kernel_apply_links_external_wrench,
-    kernel_apply_links_external_wrench_at_pos,
-    kernel_bit_reduction,
-    kernel_clear_external_force,
-    kernel_init_dof_fields,
-    kernel_init_entity_fields,
-    kernel_init_equality_fields,
-    kernel_init_geom_fields,
-    kernel_init_joint_fields,
-    kernel_init_vert_fields,
-    kernel_init_vgeom_fields,
-    kernel_init_vvert_fields,
-    kernel_reset_hibernation,
-    kernel_set_zero,
-    kernel_update_heterogeneous_link_info,
-    kernel_wakeup_coupled_links,
-)
-from .abd.forward_kinematics import (
-    func_aggregate_awake_entities,
-    func_COM_links,
-    func_forward_kinematics_batch,
-    func_forward_kinematics_entity,
-    func_forward_velocity,
-    func_forward_velocity_batch,
-    func_forward_velocity_entity,
-    func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer,
-    func_update_all_verts,
-    func_update_cartesian_space,
-    func_update_cartesian_space_batch,
-    func_update_geoms,
-    func_update_geoms_batch,
-    func_update_geoms_entity,
-    func_update_verts_for_geom,
-    kernel_COM_links_replay,
-    kernel_forward_kinematics_entity,
-    kernel_forward_kinematics_links_geoms,
-    kernel_forward_kinematics_replay,
-    kernel_forward_velocity,
-    kernel_masked_forward_kinematics_links_geoms,
-    kernel_masked_forward_velocity,
-    kernel_update_all_verts,
-    kernel_update_cartesian_space,
-    kernel_update_geom_aabbs,
-    kernel_update_geoms_replay,
-    kernel_update_verts_for_geoms,
-    kernel_update_vgeoms,
-)
-from .abd.forward_dynamics import (
-    func_actuation,
-    func_bias_force,
-    func_compute_mass_matrix,
-    func_compute_qacc,
-    func_factor_mass,
-    func_forward_dynamics,
-    func_implicit_damping,
-    func_integrate,
-    func_solve_mass,
-    func_solve_mass_batch,
-    func_torque_and_passive_force,
-    func_update_acc,
-    func_update_force,
-    func_vel_at_point,
-    kernel_forward_dynamics,
-    kernel_forward_dynamics_without_qacc,
-    kernel_refresh_invweight_and_meaninertia,
-    kernel_update_acc,
-    update_qacc_from_qvel_delta,
-    update_qvel,
 )
 from .abd.accessor import (
     ConstraintType,
@@ -151,9 +59,6 @@ from .abd.accessor import (
     kernel_set_dofs_limit,
     kernel_set_dofs_position,
     kernel_set_dofs_stiffness,
-    kernel_set_dofs_velocity,
-    kernel_set_dofs_velocity_grad,
-    kernel_set_dofs_zero_velocity,
     kernel_set_drone_rpm,
     kernel_set_geom_friction,
     kernel_set_geom_friction_rolling,
@@ -178,23 +83,79 @@ from .abd.accessor import (
     kernel_wake_up_entities_on_new_contact,
 )
 from .abd.diff import (
-    func_copy_cartesian_space,
     func_copy_next_to_curr,
-    func_copy_next_to_curr_grad,
     func_integrate_dq_entity,
-    func_is_grad_valid,
-    func_load_adjoint_cache,
-    func_save_adjoint_cache,
     kernel_begin_backward_substep,
     kernel_copy_acc,
     kernel_copy_next_to_curr_no_check,
     kernel_prepare_backward_substep,
     kernel_save_adjoint_cache,
 )
+from .abd.forward_dynamics import (
+    func_forward_dynamics,
+    func_implicit_damping,
+    func_integrate,
+    func_update_acc,
+    func_vel_at_point,
+    kernel_forward_dynamics,
+    kernel_forward_dynamics_without_qacc,
+    kernel_refresh_invweight_and_meaninertia,
+    kernel_update_acc,
+    update_qacc_from_qvel_delta,
+    update_qvel,
+)
+from .abd.forward_kinematics import (
+    func_aggregate_awake_entities,
+    func_forward_kinematics_entity,
+    func_forward_velocity,
+    func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer,
+    func_update_all_verts,
+    func_update_cartesian_space,
+    func_update_geoms_batch,
+    kernel_COM_links_replay,
+    kernel_forward_kinematics_entity,
+    kernel_forward_kinematics_links_geoms,
+    kernel_forward_kinematics_replay,
+    kernel_forward_velocity,
+    kernel_masked_forward_kinematics_links_geoms,
+    kernel_masked_forward_velocity,
+    kernel_update_all_verts,
+    kernel_update_cartesian_space,
+    kernel_update_geom_aabbs,
+    kernel_update_geoms_replay,
+    kernel_update_verts_for_geoms,
+)
 from .abd.manual_bw import (
     kernel_manual_compute_qacc_bw,
     kernel_manual_forward_kinematics_bw,
     kernel_manual_forward_velocity_bw,
+)
+from .abd.misc import (
+    func_apply_coupling_force,
+    kernel_apply_links_external_wrench,
+    kernel_apply_links_external_wrench_at_pos,
+    kernel_bit_reduction,
+    kernel_clear_external_force,
+    kernel_init_entity_fields,
+    kernel_init_equality_fields,
+    kernel_init_geom_fields,
+    kernel_init_link_dynamics,
+    kernel_init_vert_fields,
+    kernel_reset_hibernation,
+    kernel_set_zero,
+    kernel_update_geoms_render_T,
+    kernel_update_heterogeneous_link_info,
+    kernel_wakeup_coupled_links,
+)
+from .collider import Collider
+from .constraint import ConstraintSolver
+from .constraint.backward import (
+    kernel_accumulate_constraint_solver_grads,
+    kernel_load_dL_dqacc_from_acc_grad,
+    kernel_manual_add_collision_constraints_bw,
+    kernel_manual_add_equality_constraints_bw,
+    kernel_manual_add_frictionloss_constraints_bw,
+    kernel_manual_add_joint_limit_constraints_bw,
 )
 
 if TYPE_CHECKING:
@@ -778,6 +739,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Gravity lives with the rigid arrays, which the kernels read, so that array is the one handed over to hold it.
         self._build_gravity(self.rigid_info.gravity)
 
+    def _init_forward_update_state(self):
+        # Rigid stepping specializes these flags as compile-time kernel arguments
+        self._is_forward_pos_updated = False
+        self._is_forward_vel_updated = False
+
+    def _update_forward_after_dofs_velocity(self, envs_idx, is_all_envs, skip_forward):
+        if skip_forward:
+            self._is_forward_vel_updated = False
+            return
+        if not self._is_forward_pos_updated:
+            # Let the rigid pose refresh satisfy velocity propagation when its Cartesian state is stale
+            self._is_forward_vel_updated = False
+            self.update_forward_vel()
+            return
+        if envs_idx.dtype == torch.bool:
+            fn = kernel_masked_forward_velocity
+        else:
+            fn = kernel_forward_velocity
+        fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+        if is_all_envs:
+            self._is_forward_vel_updated = True
+
     def _sanitize_joint_sol_params(self, sol_params):
         return _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
 
@@ -1267,6 +1250,24 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self.scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
         )
         self._is_forward_pos_updated = True
+        # kernel_forward_kinematics_links_geoms propagates link velocities with the pose
+        self._is_forward_vel_updated = True
+
+    def update_forward_vel(self):
+        if self._is_forward_vel_updated:
+            return
+        self.update_forward_pos()
+        if self._is_forward_vel_updated:
+            return
+        kernel_forward_velocity(
+            self.scene._envs_idx,
+            self.dyn_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+            is_backward=False,
+        )
+        self._is_forward_vel_updated = True
 
     def substep(self, f):
         # from genesis.utils.tools import create_timer
@@ -2943,6 +2944,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             is_relative=is_relative,
         )
         return _tensor
+
+    # Rigid stepping owns link-velocity propagation, so this getter reads its state directly
+    def get_links_ang(self, links_idx=None, envs_idx=None):
+        tensor = qd_to_torch(self.dyn_state.links.cd_ang, envs_idx, links_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 else tensor
 
     def get_links_acc(self, links_idx=None, envs_idx=None, *, relative=False):
         idx = links_idx if isinstance(links_idx, int) else slice(None)

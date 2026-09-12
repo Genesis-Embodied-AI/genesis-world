@@ -18,6 +18,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
+from .forward_kinematics import func_COM_links, func_forward_kinematics_batch
 from .misc import func_apply_link_external_wrench, func_wakeup_island
 
 
@@ -951,6 +952,65 @@ def kernel_set_dofs_zero_velocity(
         dyn_state.dofs.vel[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
 
 
+@qd.func
+def func_sync_dofs_position_to_qpos(
+    i_e,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if dyn_info.links.n_dofs[I_l] == 0:
+            continue
+
+        i_d_start = dyn_info.links.dof_start[I_l]
+        i_q_start = dyn_info.links.q_start[I_l]
+
+        i_j = dyn_info.links.joint_start[I_l]
+        I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+        joint_type = dyn_info.joints.type[I_j]
+
+        if joint_type == gs.JOINT_TYPE.FIXED:
+            pass
+        elif joint_type == gs.JOINT_TYPE.FREE:
+            xyz = qd.Vector(
+                [
+                    dyn_state.dofs.pos[0 + 3 + i_d_start, i_b],
+                    dyn_state.dofs.pos[1 + 3 + i_d_start, i_b],
+                    dyn_state.dofs.pos[2 + 3 + i_d_start, i_b],
+                ],
+                dt=gs.qd_float,
+            )
+            quat = gu.qd_xyz_to_quat(xyz)
+
+            for i_d_ in qd.static(range(3)):
+                rigid_info.qpos[i_d_ + i_q_start, i_b] = dyn_state.dofs.pos[i_d_ + i_d_start, i_b]
+
+            for i_q_ in qd.static(range(4)):
+                rigid_info.qpos[i_q_ + 3 + i_q_start, i_b] = quat[i_q_]
+        elif joint_type == gs.JOINT_TYPE.SPHERICAL:
+            xyz = qd.Vector(
+                [
+                    dyn_state.dofs.pos[0 + i_d_start, i_b],
+                    dyn_state.dofs.pos[1 + i_d_start, i_b],
+                    dyn_state.dofs.pos[2 + i_d_start, i_b],
+                ],
+                dt=gs.qd_float,
+            )
+            quat = gu.qd_xyz_to_quat(xyz)
+            for i_q_ in qd.static(range(4)):
+                i_q = i_q_start + i_q_
+                rigid_info.qpos[i_q, i_b] = quat[i_q_]
+        else:  # (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            for i_d_ in range(dyn_info.links.dof_end[I_l] - i_d_start):
+                i_q = i_q_start + i_d_
+                i_d = i_d_start + i_d_
+                rigid_info.qpos[i_q, i_b] = rigid_info.qpos0[i_q, i_b] + dyn_state.dofs.pos[i_d, i_b]
+
+
 @qd.kernel(fastcache=True)
 def kernel_set_dofs_position(
     dofs_idx: qd.types.ndarray(),
@@ -972,54 +1032,34 @@ def kernel_set_dofs_position(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_e, i_b_ in qd.ndrange(n_entities, envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.n_dofs[I_l] == 0:
-                continue
+        func_sync_dofs_position_to_qpos(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-            dof_start = dyn_info.links.dof_start[I_l]
-            q_start = dyn_info.links.q_start[I_l]
 
-            i_j = dyn_info.links.joint_start[I_l]
-            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-            joint_type = dyn_info.joints.type[I_j]
+@qd.kernel(fastcache=True)
+def kernel_set_dofs_position_forward_kinematics(
+    dofs_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    position: qd.types.ndarray(),
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    n_entities = dyn_info.entities.link_start.shape[0]
 
-            if joint_type == gs.JOINT_TYPE.FIXED:
-                pass
-            elif joint_type == gs.JOINT_TYPE.FREE:
-                xyz = qd.Vector(
-                    [
-                        dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
-                        dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
-                        dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
-                    ],
-                    dt=gs.qd_float,
-                )
-                quat = gu.qd_xyz_to_quat(xyz)
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
+        dyn_state.dofs.pos[dofs_idx[i_d_], envs_idx[i_b_]] = position[i_b_, i_d_]
 
-                for j in qd.static(range(3)):
-                    rigid_info.qpos[j + q_start, i_b] = dyn_state.dofs.pos[j + dof_start, i_b]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_e, i_b_ in qd.ndrange(n_entities, envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        func_sync_dofs_position_to_qpos(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-                for j in qd.static(range(4)):
-                    rigid_info.qpos[j + 3 + q_start, i_b] = quat[j]
-            elif joint_type == gs.JOINT_TYPE.SPHERICAL:
-                xyz = qd.Vector(
-                    [
-                        dyn_state.dofs.pos[0 + dof_start, i_b],
-                        dyn_state.dofs.pos[1 + dof_start, i_b],
-                        dyn_state.dofs.pos[2 + dof_start, i_b],
-                    ],
-                    dt=gs.qd_float,
-                )
-                quat = gu.qd_xyz_to_quat(xyz)
-                for i_q_ in qd.static(range(4)):
-                    i_q = q_start + i_q_
-                    rigid_info.qpos[i_q, i_b] = quat[i_q_]
-            else:  # (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
-                for i_d_ in range(dyn_info.links.dof_end[I_l] - dof_start):
-                    i_q = q_start + i_d_
-                    i_d = dof_start + i_d_
-                    rigid_info.qpos[i_q, i_b] = rigid_info.qpos0[i_q, i_b] + dyn_state.dofs.pos[i_d, i_b]
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = qd.cast(envs_idx[i_b_], gs.qd_int)
+        func_forward_kinematics_batch(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+        func_COM_links(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
 @qd.kernel(fastcache=True)

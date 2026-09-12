@@ -32,11 +32,11 @@ class KinematicSolverCheckpoint(SolverCheckpoint):
 
     The flags decide whether the next step recomputes the Cartesian pose and velocity of the links. Recomputing them
     where the saved scene skipped it rounds differently on some backends, so the flags travel with the derived arrays
-    they describe.
+    they describe. Rigid solvers carry scalar booleans. Kinematic solvers carry one value per environment.
     """
 
-    is_forward_pos_updated: bool
-    is_forward_vel_updated: bool
+    is_forward_pos_updated: torch.Tensor | np.ndarray | bool
+    is_forward_vel_updated: torch.Tensor | np.ndarray | bool
 
 
 class FrameField(NamedTuple):
