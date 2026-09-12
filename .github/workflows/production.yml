@@ -63,7 +63,7 @@ jobs:
     name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
     needs: image-version
-    runs-on: [self-hosted, coreweave, genesis-world]
+    runs-on: arc-genesis-world
 
     strategy:
       fail-fast: true
@@ -152,7 +152,7 @@ jobs:
     name: production-benchmarks-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
     needs: [image-version, unit-tests]
-    runs-on: [self-hosted, coreweave, genesis-world]
+    runs-on: arc-genesis-world
 
     strategy:
       matrix:
