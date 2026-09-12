@@ -332,8 +332,20 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
-        # The kinematic trees (see trees_root_idx in array_class.py) are the links sharing a root
-        self._n_trees = len({link.root_idx for link in self.links})
+        # The kinematic roots and trees, see roots_link_idx and trees_root_idx in array_class.py. A moving link roots
+        # the tree of its parent, or its own when its parent is static or absent, and the parents precede the children.
+        self._n_roots = len({link.root_idx for link in self.links})
+        self.n_roots_ = max(1, self._n_roots)
+        links_tree_root_idx = np.full(self.n_links, -1, dtype=gs.np_int)
+        for link in self.links:
+            if link.is_fixed:
+                continue
+            if link.parent_idx == -1 or self.links[link.parent_idx].is_fixed:
+                links_tree_root_idx[link.idx] = link.idx
+            else:
+                links_tree_root_idx[link.idx] = links_tree_root_idx[link.parent_idx]
+        self._links_tree_root_idx = links_tree_root_idx
+        self._n_trees = np.unique(links_tree_root_idx[links_tree_root_idx >= 0]).size
         self.n_trees_ = max(1, self._n_trees)
 
         # batch_links_info is required when heterogeneous simulation is used.
@@ -454,35 +466,52 @@ class KinematicSolver(Solver):
         self.dyn_state.dofs.force.fill(0)
 
     def _init_tree_fields(self):
-        """Initialize the fields describing the kinematic trees, which the kernels walk tree by tree.
+        """Initialize the fields describing the kinematic roots and trees, which the kernels walk one at a time.
 
-        The trees carrying a dof come first in ascending dof order, the dof-less ones after them in root order (see
-        trees_root_idx in array_class.py). The links come parent first, so the dofs of a tree form one contiguous range
-        and the trees are disjoint in dof space, whatever 0-dof links sit inside a span.
+        The roots come in link order (see roots_link_idx in array_class.py) and the trees in ascending dof order (see
+        trees_root_idx). The links come parent first and each branch occupies a contiguous index range, so the dofs of
+        a tree form one contiguous range and the trees are disjoint in dof space, whatever static links sit inside a
+        span.
         """
-        if self._n_trees:
+        if self._n_roots:
             links_root_idx = np.array([link.root_idx for link in self.links], dtype=gs.np_int)
+            roots_link_idx, links_root_rank = np.unique(links_root_idx, return_inverse=True)
+            roots_link_end = np.zeros(self._n_roots, dtype=gs.np_int)
+            np.maximum.at(roots_link_end, links_root_rank, np.arange(1, self.n_links + 1, dtype=gs.np_int))
+            self.rigid_info.roots_link_idx.from_numpy(roots_link_idx)
+            self.rigid_info.roots_link_end.from_numpy(roots_link_end)
+            self.rigid_info.links_root_rank.from_numpy(links_root_rank)
+        if self._n_trees:
             links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
             links_dof_start = np.array([link.dof_start for link in self.links], dtype=gs.np_int)
-            roots_idx, links_root_pos = np.unique(links_root_idx, return_inverse=True)
+            links_dof_end = np.array([link.dof_end for link in self.links], dtype=gs.np_int)
+            tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
+            trees_root_idx, links_tree_rank = np.unique(self._links_tree_root_idx[tree_links], return_inverse=True)
             trees_n_dofs = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.add.at(trees_n_dofs, links_root_pos, links_n_dofs)
+            np.add.at(trees_n_dofs, links_tree_rank, links_n_dofs[tree_links])
+            # A dof-less link carries no dof range of its own
+            dof_links = np.flatnonzero(links_n_dofs[tree_links])
             trees_dof_start = np.full(self._n_trees, self.n_dofs, dtype=gs.np_int)
-            dof_links = np.flatnonzero(links_n_dofs)
-            np.minimum.at(trees_dof_start, links_root_pos[dof_links], links_dof_start[dof_links])
+            np.minimum.at(trees_dof_start, links_tree_rank[dof_links], links_dof_start[tree_links][dof_links])
+            trees_dof_end = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.maximum.at(trees_dof_end, links_tree_rank[dof_links], links_dof_end[tree_links][dof_links])
+            if (trees_dof_end - trees_dof_start != trees_n_dofs).any():
+                gs.raise_exception("The dofs of a kinematic tree must be contiguous.")
             trees_link_end = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.maximum.at(trees_link_end, links_root_pos, np.arange(1, self.n_links + 1, dtype=gs.np_int))
+            np.maximum.at(trees_link_end, links_tree_rank, tree_links + 1)
             trees_n_links = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.add.at(trees_n_links, links_root_pos, 1)
-            trees_order = np.lexsort((np.where(trees_n_dofs > 0, trees_dof_start, roots_idx), trees_n_dofs == 0))
+            np.add.at(trees_n_links, links_tree_rank, 1)
+            trees_order = np.argsort(trees_dof_start)
             trees_rank = np.empty(self._n_trees, dtype=gs.np_int)
             trees_rank[trees_order] = np.arange(self._n_trees, dtype=gs.np_int)
-            self.rigid_info.trees_root_idx.from_numpy(roots_idx[trees_order])
+            links_tree_idx = np.full(self.n_links, -1, dtype=gs.np_int)
+            links_tree_idx[tree_links] = trees_rank[links_tree_rank]
+            self.rigid_info.trees_root_idx.from_numpy(trees_root_idx[trees_order])
             self.rigid_info.trees_link_end.from_numpy(trees_link_end[trees_order])
             self.rigid_info.trees_n_links.from_numpy(trees_n_links[trees_order])
             self.rigid_info.trees_dof_start.from_numpy(trees_dof_start[trees_order])
             self.rigid_info.trees_n_dofs.from_numpy(trees_n_dofs[trees_order])
-            self.rigid_info.links_tree_idx.from_numpy(trees_rank[links_root_pos])
+            self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
 
     def _init_link_fields(self):
         if self.links:

@@ -193,6 +193,85 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     assert ((free_body_z > 0.0) & (free_body_z < 0.5)).all()
 
 
+@pytest.fixture
+def arms_mjcf():
+    # Two 2-link arms on fixed bases in one file, and the same arm alone: the two branches of the first must simulate
+    # as two entities of the second.
+    arms_xml = []
+    for n_arms in (2, 1):
+        mjcf = ET.Element("mujoco", model="arms")
+        ET.SubElement(mjcf, "option", timestep="0.01")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        for i_arm in range(n_arms):
+            base = ET.SubElement(worldbody, "body", name=f"base_{i_arm}", pos=f"{0.6 * i_arm} 0.0 0.5")
+            ET.SubElement(base, "geom", type="box", size="0.05 0.05 0.05")
+            parent = base
+            for i_link in range(2):
+                link = ET.SubElement(parent, "body", name=f"arm{i_arm}_link{i_link}", pos="0.0 0.0 0.2")
+                ET.SubElement(link, "joint", type="hinge", axis="0 1 0")
+                ET.SubElement(link, "geom", type="capsule", size="0.02", fromto="0 0 0 0 0 0.2")
+                parent = link
+        arms_xml.append(ET.tostring(mjcf, encoding="unicode"))
+    return arms_xml
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_fixed_base_branches_are_islands(show_viewer, n_envs, arms_mjcf):
+    two_arms_xml, one_arm_xml = arms_mjcf
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.0, -8.0, 3.0),
+            camera_lookat=(3.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        gs.morphs.URDF(
+            file="urdf/go2/urdf/go2.urdf",
+            pos=(0.0, 0.0, 0.6),
+            fixed=True,
+        )
+    )
+    two_arms = scene.add_entity(
+        gs.morphs.MJCF(
+            file=two_arms_xml,
+            pos=(3.0, 0.0, 0.0),
+        )
+    )
+    arm_a = scene.add_entity(
+        gs.morphs.MJCF(
+            file=one_arm_xml,
+            pos=(6.0, 0.0, 0.0),
+        )
+    )
+    arm_b = scene.add_entity(
+        gs.morphs.MJCF(
+            file=one_arm_xml,
+            pos=(6.6, 0.0, 0.0),
+        )
+    )
+    scene.build(n_envs=n_envs)
+
+    # One island per branch hanging from a fixed base: the four legs, the two arms of the file, the two lone arms
+    two_arms.set_dofs_position([0.3, 0.0, 0.3, 0.0])
+    arm_a.set_dofs_position([0.3, 0.0])
+    arm_b.set_dofs_position([0.3, 0.0])
+    scene.step()
+    island_state = scene.rigid_solver.constraint_solver.constraint_state.island
+    assert_equal(qd_to_numpy(island_state.n_islands), 8)
+    islands_n_dofs = np.sort(qd_to_numpy(island_state.dof_slices.n, transpose=True)[..., :8], axis=-1)
+    assert_equal(islands_n_dofs, [2, 2, 2, 2, 3, 3, 3, 3])
+
+    # The two branches of one file swing as the two files of one branch
+    for _ in range(50):
+        scene.step()
+    arms_qpos = two_arms.get_dofs_position()
+    assert_allclose(arms_qpos[..., :2], arm_a.get_dofs_position(), tol=1e-6)
+    assert_allclose(arms_qpos[..., 2:], arm_b.get_dofs_position(), tol=1e-6)
+
+
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_partition_track_changes(show_viewer, n_envs):

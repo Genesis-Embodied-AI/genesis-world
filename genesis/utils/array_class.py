@@ -238,13 +238,20 @@ class RigidInfo:
     mass_mat_D_inv: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
     mass_mat_mask: qd.Tensor = of_kind(DataKind.STATE)
-    # The kinematic trees, the links sharing a root link (links.root_idx). Tree i_t is rooted at trees_root_idx[i_t],
-    # holds the trees_n_links[i_t] links of the span [trees_root_idx[i_t], trees_link_end[i_t]) whose root it is (the
-    # span may interleave links of 0-dof entities created between attached ones, so consumers gate each link on the
-    # root) and the contiguous dofs [trees_dof_start[i_t], trees_dof_start[i_t] + trees_n_dofs[i_t]). The trees
-    # carrying a dof come first, in ascending dof order, so the island partition (see island.py) lists the dofs of the
-    # trees it groups in ascending order; the dof-less trees (fixed bodies) follow in root order and join no island.
-    # links_tree_idx maps every link to its tree.
+    # The kinematic roots, the links sharing a root link (links.root_idx, the top link of the parent chain). Root i_r
+    # is the link roots_link_idx[i_r] and spans the links [roots_link_idx[i_r], roots_link_end[i_r]) whose root it is
+    # (the span may interleave links of other roots created between attached entities, so consumers gate each link on
+    # the root). links_root_rank maps every link to its root. The composite inertia and the center of mass are walked
+    # per root, and every link's inertial is expressed about the center of mass of its root.
+    roots_link_idx: qd.Tensor
+    roots_link_end: qd.Tensor
+    links_root_rank: qd.Tensor
+    # The kinematic trees, the moving links a chain of moving joints connects: a static link (reaching the world
+    # through fixed joints alone) belongs to no tree, so the branches hanging from a fixed base are as many trees.
+    # Tree i_t is rooted at trees_root_idx[i_t], its topmost moving link, holds the trees_n_links[i_t] links of the
+    # span [trees_root_idx[i_t], trees_link_end[i_t]) that links_tree_idx (-1 for a static link) maps to it, and the
+    # contiguous dofs [trees_dof_start[i_t], trees_dof_start[i_t] + trees_n_dofs[i_t]). The trees come in ascending
+    # dof order, so the island partition (see island.py) lists the dofs of the trees it groups in ascending order.
     trees_root_idx: qd.Tensor
     trees_link_end: qd.Tensor
     trees_n_links: qd.Tensor
@@ -334,6 +341,9 @@ def get_rigid_info(solver, kinematic_only):
             mass_mat_D_inv=V(dtype=gs.qd_float, shape=()),
             mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=()),
             mass_mat_mask=V(dtype=gs.qd_bool, shape=()),
+            roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+            roots_link_end=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+            links_root_rank=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
@@ -380,6 +390,9 @@ def get_rigid_info(solver, kinematic_only):
         mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), needs_grad=requires_grad),
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
         mass_mat_mask=V(dtype=gs.qd_bool, shape=(solver.n_entities_, _B)),
+        roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+        roots_link_end=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+        links_root_rank=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),

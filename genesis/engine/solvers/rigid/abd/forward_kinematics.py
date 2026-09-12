@@ -137,22 +137,22 @@ def func_COM_links(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Compute the center of mass of every kinematic tree of one environment and the inertial of every link about it."""
+    """Compute the center of mass of every kinematic root of one environment and the inertial of every link about it."""
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_t in range(rigid_info.trees_root_idx.shape[0]):
-        # A tree sleeps as a unit, so its root tells whether it is awake
-        i_l_root = rigid_info.trees_root_idx[i_t]
+    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+        # The links of a root sleep as a unit, so the root tells whether they are awake
+        i_l_root = rigid_info.roots_link_idx[i_r]
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
             is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
         if is_awake:
-            func_COM_links_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+            func_COM_links_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
-def func_COM_links_tree(
-    i_t,
+def func_COM_links_root(
+    i_r,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -160,18 +160,18 @@ def func_COM_links_tree(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Compute the center of mass of one kinematic tree and the inertial of each of its links about it.
+    """Compute the center of mass of the links of one kinematic root and the inertial of each of them about it.
 
-    One call handles the whole tree, walking its link span and gating each link on its root (see trees_root_idx in
-    array_class.py), so that a tree spanning several entities, one attached beneath another, accumulates every link of
-    its own before it divides. Mirrors the tree walk of func_crb_fold. The callers pass awake trees, and a tree sleeps
+    One call handles the whole root, walking its link span and gating each link on its root (see roots_link_idx in
+    array_class.py), so that a root spanning several entities, one attached beneath another, accumulates every link of
+    its own before it divides. Mirrors the root walk of func_crb_fold. The callers pass awake roots, whose links sleep
     as a unit, so no link of it is hibernated here.
     """
     EPS = rigid_info.EPS[None]
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
-    i_l_root = rigid_info.trees_root_idx[i_t]
-    i_l_end = rigid_info.trees_link_end[i_t]
+    i_l_root = rigid_info.roots_link_idx[i_r]
+    i_l_end = rigid_info.roots_link_end[i_r]
 
     dyn_state.links.root_COM_bw[i_l_root, i_b].fill(0.0)
     dyn_state.links.mass_sum[i_l_root, i_b] = 0.0
@@ -1090,12 +1090,12 @@ def func_update_cartesian_space_tree(
     force_update_fixed_geoms: qd.template(),
     is_backward: qd.template(),
 ):
-    """Update the kinematic trees of entity i_e and of every entity attached beneath one of its links.
+    """Update the kinematic roots of entity i_e and of every entity attached beneath one of its links.
 
     An attached entity roots at a link of the entity it hangs from, which may be a jointed link rather than the base,
     and comes after that entity. The forward kinematics run over these entities in order, so the poses a parent passes
-    down are final when its children read them; the center of mass of each tree then walks the tree whole (see
-    func_COM_links_tree), and the geoms follow.
+    down are final when its children read them; the center of mass of each root then walks its links whole (see
+    func_COM_links_root), and the geoms follow.
     """
     i_l_start = dyn_info.entities.link_start[i_e]
     i_l_end = dyn_info.entities.link_end[i_e]
@@ -1107,8 +1107,8 @@ def func_update_cartesian_space_tree(
     for i_l in range(i_l_start, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l:
-            func_COM_links_tree(
-                rigid_info.links_tree_idx[i_l], i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
+            func_COM_links_root(
+                rigid_info.links_root_rank[i_l], i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
             )
     for j_e in range(i_e, n_entities):
         if func_is_entity_in_tree(j_e, i_b, i_l_start, i_l_end, dyn_info, rigid_config):

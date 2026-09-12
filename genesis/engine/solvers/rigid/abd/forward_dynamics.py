@@ -162,7 +162,7 @@ def func_crb_initialize(
 
 @qd.func
 def func_crb_fold(
-    i_t,
+    i_r,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -173,18 +173,17 @@ def func_crb_fold(
     """Fold the composite-rigid-body inertia of one kinematic tree, from its leaves up to its root.
 
     One thread handles the whole tree, walking its link span in descending order so that children fold before their
-    parent propagates, and gating each link on the tree's root (see trees_root_idx in array_class.py). The top link of a
-    tree may fold into a fixed 0-DOF anchor belonging to another tree, whose composite inertia is never read. Mirrors
-    the tree walk of func_COM_links_tree. A tree sleeps as a unit, so its root tells whether it is awake.
+    parent propagates, and gating each link on its root (see roots_link_idx in array_class.py). Mirrors the root walk
+    of func_COM_links_root. The links of a root sleep as a unit, so the root tells whether they are awake.
     """
-    i_l_root = rigid_info.trees_root_idx[i_t]
+    i_l_root = rigid_info.roots_link_idx[i_r]
     is_awake = True
     if qd.static(rigid_config.use_hibernation):
         is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
     if is_awake:
-        tree_end = rigid_info.trees_link_end[i_t]
-        for k in range(tree_end - i_l_root):
-            i_l = tree_end - 1 - k
+        i_l_end = rigid_info.roots_link_end[i_r]
+        for k in range(i_l_end - i_l_root):
+            i_l = i_l_end - 1 - k
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             i_p = dyn_info.links.parent_idx[I_l]
             I_p = [i_p, i_b]
@@ -364,8 +363,8 @@ def func_compute_mass_matrix(
         func_crb_initialize(i_0, i_b, dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
-        func_crb_fold(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        func_crb_fold(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
     qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_0, i_b in (
@@ -424,8 +423,8 @@ def func_compute_mass_matrix_masked(
         func_crb_initialize(i_0, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_t, i_b_ in qd.ndrange(rigid_info.trees_root_idx.shape[0], envs_idx.shape[0]):
-        func_crb_fold(i_t, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+        func_crb_fold(i_r, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
     qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_0, i_b_ in (
@@ -1395,8 +1394,7 @@ def func_refresh_links_invweight_and_meaninertia(
 
         if is_tree_pending:
             # The span of a tree may interleave links of other trees, which their own root excludes here.
-            i_t = rigid_info.links_tree_idx[i_rl]
-            for i_l in range(i_rl, rigid_info.trees_link_end[i_t]):
+            for i_l in range(i_rl, rigid_info.roots_link_end[rigid_info.links_root_rank[i_rl]]):
                 I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
                 if dyn_info.links.root_idx[I_l] == i_rl:
                     if is_link_pending:
@@ -1460,13 +1458,13 @@ def kernel_refresh_invweight_and_meaninertia(
         envs_idx.shape[0] if qd.static(rigid_config.batch_links_info or rigid_config.batch_dofs_info) else 1
     )
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_, i_t in qd.ndrange(n_envs_pending, rigid_info.trees_root_idx.shape[0]):
+    for i_b_, i_r in qd.ndrange(n_envs_pending, rigid_info.roots_link_idx.shape[0]):
         i_b = envs_idx[i_b_]
         is_link_pending = True if qd.static(rigid_config.batch_links_info) else i_b_ == 0
         is_dofs_pending = True if qd.static(rigid_config.batch_dofs_info) else i_b_ == 0
         # One worker per tree, whose span may interleave links of other trees, which their own root excludes here
-        i_rl = rigid_info.trees_root_idx[i_t]
-        for i_l in range(i_rl, rigid_info.trees_link_end[i_t]):
+        i_rl = rigid_info.roots_link_idx[i_r]
+        for i_l in range(i_rl, rigid_info.roots_link_end[i_r]):
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             if dyn_info.links.root_idx[I_l] != i_rl:
                 continue
@@ -1778,15 +1776,15 @@ def func_update_force(
     # span on that root, like func_crb_fold: a tree spans several entities once one is attached beneath another, and a
     # child must fold into its parent before the parent folds further up.
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
-        i_l_root = rigid_info.trees_root_idx[i_t]
+    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        i_l_root = rigid_info.roots_link_idx[i_r]
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
             is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
         if is_awake:
-            tree_end = rigid_info.trees_link_end[i_t]
-            for k in range(tree_end - i_l_root):
-                i_l = tree_end - 1 - k
+            i_l_end = rigid_info.roots_link_end[i_r]
+            for k in range(i_l_end - i_l_root):
+                i_l = i_l_end - 1 - k
                 I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
                 i_p = dyn_info.links.parent_idx[I_l]
                 I_p = [i_p, i_b]
@@ -1915,8 +1913,7 @@ def func_midpoint_eligible(
         )
         if is_eligible:
             # The assembly marks the link a constraint acts on, a fixed child included, so the whole body is scanned.
-            i_t = rigid_info.links_tree_idx[i_l]
-            for j_l in range(i_l, rigid_info.trees_link_end[i_t]):
+            for j_l in range(i_l, rigid_info.roots_link_end[rigid_info.links_root_rank[i_l]]):
                 J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
                 if dyn_info.links.root_idx[J_l] == i_l and dyn_state.links.is_constrained[j_l, i_b]:
                     is_eligible = False
@@ -1937,8 +1934,7 @@ def func_midpoint_has_fixed_children(
 ):
     """Whether the body of the free root holds links other than the root itself."""
     has_fixed_children = False
-    i_t = rigid_info.links_tree_idx[i_l]
-    for j_l in range(i_l + 1, rigid_info.trees_link_end[i_t]):
+    for j_l in range(i_l + 1, rigid_info.roots_link_end[rigid_info.links_root_rank[i_l]]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
             has_fixed_children = True
@@ -2049,8 +2045,7 @@ def func_midpoint_free_body(
     # accelerating-frame gravity term regenerate only the velocity products and gravity.
     ext_ang = qd.Vector.zero(gs.qd_float, 3)
     ext_vel = qd.Vector.zero(gs.qd_float, 3)
-    i_t = rigid_info.links_tree_idx[i_l]
-    for j_l in range(i_l, rigid_info.trees_link_end[i_t]):
+    for j_l in range(i_l, rigid_info.roots_link_end[rigid_info.links_root_rank[i_l]]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
             ext_ang += dyn_state.links.cfrc_applied_ang[j_l, i_b] + dyn_state.links.cfrc_coupling_ang[j_l, i_b]

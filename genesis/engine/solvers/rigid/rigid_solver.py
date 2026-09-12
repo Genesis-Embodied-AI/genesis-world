@@ -572,10 +572,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         enable_cooperative_constraint_kernels = enable_tiled_island_seed and self._sim._B <= get_gpu_core_count()
         # Dofs per kinematic tree, counted from the links here since _init_tree_fields runs once the fields this config
-        # sizes are allocated. A dof-less tree labels no island (see func_build_islands), so a scene holding one
-        # dof-carrying tree forms at most one island per env, and the per-island passes read the env's plain ranges.
-        trees_n_dofs = np.bincount([link.root_idx for link in self.links], [link.n_dofs for link in self.links])
-        is_single_island = int((trees_n_dofs > 0).sum()) == 1
+        # sizes are allocated. A scene holding one tree forms at most one island per env, and the per-island passes
+        # read the env's plain ranges.
+        tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
+        trees_n_dofs = np.bincount(
+            self._links_tree_root_idx[tree_links], np.array([link.n_dofs for link in self.links])[tree_links]
+        )
+        is_single_island = self._n_trees == 1
         # Above the cooperative bound one thread per env saturates the GPU, where the scalar dense Cholesky of an env's
         # one block beats the tiled factor, so the seed kernel assembles the block and the monolith factors it.
         has_scalar_seed_factor = (
@@ -668,8 +671,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 # The cooperative per-island solve stages one island's tile in shared memory, in size classes (see
                 # island_tile_cap_first in array_class.py): the last cap is the largest tile-size multiple that fits in
                 # GPU shared memory (precision-aware), no larger than tiled_n_dofs. An island holds at least one
-                # dof-carrying tree, so a class below the smallest such tree never holds an island and the first cap
-                # starts at that tree.
+                # tree, so a class below the smallest tree never holds an island and the first cap starts at that
+                # tree.
                 island_tile_cap_last = tiled_n_dofs
                 while island_tile_cap_last > cholesky_tile_size and not fits_in_gpu_shared_memory(
                     island_tile_cap_last, island_tile_cap_last + 1

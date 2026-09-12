@@ -107,13 +107,9 @@ def func_edge_trees(
     i_ta = -1
     i_tb = -1
     if link_a >= 0 and link_b >= 0:
+        # A static link belongs to no tree (links_tree_idx -1) and joins no island
         i_ta = rigid_info.links_tree_idx[link_a]
         i_tb = rigid_info.links_tree_idx[link_b]
-        # A dof-less tree (a fixed body) joins no island
-        if rigid_info.trees_n_dofs[i_ta] == 0:
-            i_ta = -1
-        if rigid_info.trees_n_dofs[i_tb] == 0:
-            i_tb = -1
     return i_ta, i_tb
 
 
@@ -325,11 +321,10 @@ def func_build_islands(
         if i_ta >= 0 and i_tb >= 0:
             func_union_trees(i_ta, i_tb, i_b, constraint_state)
 
-    # A dof-less tree stays its own root, no edge reaching it, and labels no island
     n_islands = 0
     for i_t in range(n_trees):
         constraint_state.island.trees_island_idx[i_t, i_b] = -1
-        if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t and rigid_info.trees_n_dofs[i_t] > 0:
+        if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t:
             constraint_state.island.trees_island_idx[i_t, i_b] = n_islands
             n_islands = n_islands + 1
     for i_t in range(n_trees):
@@ -368,10 +363,8 @@ def func_build_islands(
 
     for i_t in range(n_trees):
         i_island = constraint_state.island.trees_island_idx[i_t, i_b]
-        i_root = rigid_info.trees_root_idx[i_t]
-        for i_l in range(i_root, rigid_info.trees_link_end[i_t]):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.root_idx[I_l] == i_root:
+        for i_l in range(rigid_info.trees_root_idx[i_t], rigid_info.trees_link_end[i_t]):
+            if rigid_info.links_tree_idx[i_l] == i_t:
                 constraint_state.island.links_island_idx[i_l, i_b] = i_island
                 if qd.static(rigid_config.use_hibernation):
                     if i_island >= 0:
@@ -549,10 +542,7 @@ def func_build_islands_coop(
         is_root = 0
         if i_t < n_trees:
             if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t:
-                if rigid_info.trees_n_dofs[i_t] > 0:
-                    is_root = 1
-                else:
-                    constraint_state.island.trees_island_idx[i_t, i_b] = -1
+                is_root = 1
         roots_incl = qd.simt.subgroup.inclusive_add(is_root)
         if is_root == 1:
             constraint_state.island.trees_island_idx[i_t, i_b] = n_islands + roots_incl - 1
@@ -628,8 +618,7 @@ def func_build_islands_coop(
                         i_link_pos = i_link_pos + rigid_info.trees_n_links[j_t]
                         i_dof_pos = i_dof_pos + rigid_info.trees_n_dofs[j_t]
             for i_tl in range(i_root, rigid_info.trees_link_end[i_t]):
-                I_l = [i_tl, i_b] if qd.static(rigid_config.batch_links_info) else i_tl
-                if dyn_info.links.root_idx[I_l] == i_root:
+                if rigid_info.links_tree_idx[i_tl] == i_t:
                     constraint_state.island.links_island_idx[i_tl, i_b] = i_island
                     if qd.static(rigid_config.use_hibernation):
                         if i_island >= 0:
@@ -712,11 +701,11 @@ def func_contact_tree_slots(
     i_lb = collider_state.contact_data.link_b[i_col, i_b]
     i_ta = rigid_info.links_tree_idx[i_la]
     i_tb = rigid_info.links_tree_idx[i_lb]
-    if constraint_state.island.trees_island_idx[i_ta, i_b] >= 0:
+    if i_ta >= 0 and constraint_state.island.trees_island_idx[i_ta, i_b] >= 0:
         i_ta = constraint_state.island.rcm_tree_pos[i_ta, i_b]
     else:
         i_ta = -1
-    if constraint_state.island.trees_island_idx[i_tb, i_b] >= 0:
+    if i_tb >= 0 and constraint_state.island.trees_island_idx[i_tb, i_b] >= 0:
         i_tb = constraint_state.island.rcm_tree_pos[i_tb, i_b]
     else:
         i_tb = -1
