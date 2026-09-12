@@ -441,26 +441,6 @@ class KinematicEntity(Entity):
                         desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *hint
                     )
 
-        # The slots of the free and fixed vertex pools follow the flags: this entity's links and geoms move between the
-        # pools, and the entities created after it shift behind them. A kinematic entity holds no collision vertex.
-        n_free_verts = self._free_verts_state_start
-        n_fixed_verts = self._fixed_verts_state_start
-        for entity in self._solver.entities[self._idx_in_solver :]:
-            if not isinstance(entity, RigidEntity):
-                continue
-            entity._free_verts_state_start = n_free_verts
-            entity._fixed_verts_state_start = n_fixed_verts
-            for link in entity.links:
-                is_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
-                link._verts_state_start = n_fixed_verts if is_fixed_pool else n_free_verts
-                for geom in link.geoms:
-                    if is_fixed_pool:
-                        geom._verts_state_start = n_fixed_verts
-                        n_fixed_verts += geom.n_verts
-                    else:
-                        geom._verts_state_start = n_free_verts
-                        n_free_verts += geom.n_verts
-
         # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,
         # and the attached links now extend that body. Its frame and qpos stay where they are, so the anchor stops
         # standing for the body: the mass block keeps its off-diagonal terms and the midpoint pass turns the body about
@@ -1897,6 +1877,36 @@ class RigidEntity(KinematicEntity):
         # Add equality constraints sequentially
         for e_desc in self._desc.equalities:
             self._add_equality(e_desc)
+
+    def attach(
+        self,
+        parent_entity,
+        parent_link_name: str | None = None,
+        pos: Vec3FType | None = None,
+        quat: UnitVec4FType | None = None,
+    ):
+        """Attach this entity beneath a link of another one (see KinematicEntity.attach), the slots of its collision
+        vertices following the fixed flags the attach leaves."""
+        super().attach(parent_entity, parent_link_name, pos, quat)
+
+        # This entity's links and geoms move between the free and fixed pools, and the rigid entities created after it
+        # shift behind them
+        n_free_verts = self._free_verts_state_start
+        n_fixed_verts = self._fixed_verts_state_start
+        for entity in self._solver.entities[self._idx_in_solver :]:
+            if isinstance(entity, RigidEntity):
+                entity._free_verts_state_start = n_free_verts
+                entity._fixed_verts_state_start = n_fixed_verts
+                for link in entity.links:
+                    is_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
+                    link._verts_state_start = n_fixed_verts if is_fixed_pool else n_free_verts
+                    for geom in link.geoms:
+                        if is_fixed_pool:
+                            geom._verts_state_start = n_fixed_verts
+                            n_fixed_verts += geom.n_verts
+                        else:
+                            geom._verts_state_start = n_free_verts
+                            n_free_verts += geom.n_verts
 
     def _add_link(self, l_desc):
         """Create one link from a description the resolution completed, with the joints and geoms it carries."""
