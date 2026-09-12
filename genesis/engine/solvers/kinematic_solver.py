@@ -332,18 +332,19 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
-        # The kinematic roots and trees, see roots_link_idx and trees_root_idx in array_class.py. A moving link roots
-        # the tree of its parent, or its own when its parent is static or absent, and the parents precede the children.
+        # The kinematic roots and trees, see roots_link_idx and trees_root_idx in array_class.py. A link no dof moves,
+        # its own or an ancestor's, is static and belongs to no tree. A moving link roots the tree of its parent, or its
+        # own when its parent is static or absent. The parents precede the children.
         self._n_roots = len({link.root_idx for link in self.links})
         self.n_roots_ = max(1, self._n_roots)
+        links_is_static = np.ones(self.n_links, dtype=bool)
         links_tree_root_idx = np.full(self.n_links, -1, dtype=gs.np_int)
         for link in self.links:
-            if link.is_fixed:
+            is_parent_static = link.parent_idx == -1 or links_is_static[link.parent_idx]
+            links_is_static[link.idx] = is_parent_static and link.n_dofs == 0
+            if links_is_static[link.idx]:
                 continue
-            if link.parent_idx == -1 or self.links[link.parent_idx].is_fixed:
-                links_tree_root_idx[link.idx] = link.idx
-            else:
-                links_tree_root_idx[link.idx] = links_tree_root_idx[link.parent_idx]
+            links_tree_root_idx[link.idx] = link.idx if is_parent_static else links_tree_root_idx[link.parent_idx]
         self._links_tree_root_idx = links_tree_root_idx
         self._n_trees = np.unique(links_tree_root_idx[links_tree_root_idx >= 0]).size
         self.n_trees_ = max(1, self._n_trees)
