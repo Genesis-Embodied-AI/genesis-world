@@ -58,6 +58,7 @@
 ## Kernels
 
 - **A kernel that runs under `requires_grad` takes no `continue` and no `while`**: quadrants' autodiff rejects both. A gate inside such a kernel (the kinematics and dynamics walks, the constraint solve) is a flag set under the static condition and tested by an `if`, never an early `continue`.
+- **An index read from a field is bound to a temporary before it indexes another field** (`i_r = rigid_info.links_root_rank[i_l]` then `rigid_info.roots_link_end[i_r]`). Nested indirect indexing (`a[b[i]]`) is prohibited in kernels and funcs.
 - **New code:** Free function `@qd.kernel`, no `@qd.data_oriented`. Use `V_ANNOTATION` from `genesis.utils.array_class` for type-polymorphic parameters.
 - **FEM solver:** Follows old `@qd.data_oriented` method pattern. Any kernel added to FEM solver must stay consistent with this.
 - **Rigid kernel and func calls are positional for self-named arguments**, relying on the canonical parameter order below; anonymous constants (bare literals such as trailing static flags) are passed by keyword. A func call that passes a struct member alongside its parent struct stays keyword-only, because quadrants' positional func-argument expansion duplicates the member.

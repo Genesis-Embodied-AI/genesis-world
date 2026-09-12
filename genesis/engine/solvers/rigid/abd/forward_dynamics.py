@@ -1394,7 +1394,8 @@ def func_refresh_links_invweight_and_meaninertia(
 
         if is_tree_pending:
             # The span of a tree may interleave links of other trees, which their own root excludes here.
-            for i_l in range(i_rl, rigid_info.roots_link_end[rigid_info.links_root_rank[i_rl]]):
+            i_r = rigid_info.links_root_rank[i_rl]
+            for i_l in range(i_rl, rigid_info.roots_link_end[i_r]):
                 I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
                 if dyn_info.links.root_idx[I_l] == i_rl:
                     if is_link_pending:
@@ -1913,7 +1914,8 @@ def func_midpoint_eligible(
         )
         if is_eligible:
             # The assembly marks the link a constraint acts on, a fixed child included, so the whole body is scanned.
-            for j_l in range(i_l, rigid_info.roots_link_end[rigid_info.links_root_rank[i_l]]):
+            i_r = rigid_info.links_root_rank[i_l]
+            for j_l in range(i_l, rigid_info.roots_link_end[i_r]):
                 J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
                 if dyn_info.links.root_idx[J_l] == i_l and dyn_state.links.is_constrained[j_l, i_b]:
                     is_eligible = False
@@ -1934,7 +1936,8 @@ def func_midpoint_has_fixed_children(
 ):
     """Whether the body of the free root holds links other than the root itself."""
     has_fixed_children = False
-    for j_l in range(i_l + 1, rigid_info.roots_link_end[rigid_info.links_root_rank[i_l]]):
+    i_r = rigid_info.links_root_rank[i_l]
+    for j_l in range(i_l + 1, rigid_info.roots_link_end[i_r]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
             has_fixed_children = True
@@ -2045,7 +2048,8 @@ def func_midpoint_free_body(
     # accelerating-frame gravity term regenerate only the velocity products and gravity.
     ext_ang = qd.Vector.zero(gs.qd_float, 3)
     ext_vel = qd.Vector.zero(gs.qd_float, 3)
-    for j_l in range(i_l, rigid_info.roots_link_end[rigid_info.links_root_rank[i_l]]):
+    i_r = rigid_info.links_root_rank[i_l]
+    for j_l in range(i_l, rigid_info.roots_link_end[i_r]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
             ext_ang += dyn_state.links.cfrc_applied_ang[j_l, i_b] + dyn_state.links.cfrc_coupling_ang[j_l, i_b]
