@@ -447,6 +447,31 @@ def test_glb_parse_material(glb_file):
 
 
 @pytest.mark.required
+def test_glb_alpha_mode(alpha_mode_variants_glb):
+    # A cutoff of 0.6 lands at an opacity of 153, between the third and the fourth texel of the ramp
+    expected_opacities = {
+        "masked": [0, 0, 0, 255, 255],
+        "blended": [0, 64, 128, 192, 255],
+        "opaque": [255, 255, 255, 255, 255],
+    }
+    gs_meshes = gltf_utils.parse_mesh_glb(
+        alpha_mode_variants_glb,
+        group_by_material=True,
+        scale=None,
+        is_mesh_zup=True,
+        surface=gs.surfaces.Default(),
+    )
+    assert {gs_mesh.metadata["name"] for gs_mesh in gs_meshes} == set(expected_opacities)
+    for gs_mesh in gs_meshes:
+        material_name = gs_mesh.metadata["name"]
+        assert_equal(
+            gs_mesh.surface.opacity_texture.image_array[0],
+            expected_opacities[material_name],
+            err_msg=material_name,
+        )
+
+
+@pytest.mark.required
 def test_glb_shared_texture_not_duplicated(tmp_path):
     from genesis.vis.batch_renderer import GenesisGeomRetriever
 

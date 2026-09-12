@@ -641,6 +641,76 @@ def emissive_material_variants_glb(asset_tmp_path):
     return str(path)
 
 
+@pytest.fixture(scope="session")
+def alpha_mode_variants_glb(asset_tmp_path):
+    """Path to a GLB whose three materials read one base color texture under the three alpha modes.
+
+    The texture is a single row whose alpha ramps from fully transparent to fully opaque, the gradient a cutout has
+    along its edge. The masked material cuts that ramp at 0.6, above the third texel of five, while the blended and
+    the opaque materials leave their own cutoff at the 0.5 default."""
+    alpha = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+    rgba = np.full((1, len(alpha), 4), 255, dtype=np.uint8)
+    rgba[..., 3] = alpha
+    buffer = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buffer, format="PNG")
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    uvs = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    alpha_modes = (("masked", "MASK", 0.6), ("blended", "BLEND", 0.5), ("opaque", "OPAQUE", 0.5))
+
+    blob = b""
+    buffer_views = []
+    for data in (buffer.getvalue(), positions.tobytes(), uvs.tobytes()):
+        blob += bytes(-len(blob) % 4)
+        buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
+        blob += data
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=[0])],
+        nodes=[pygltflib.Node(mesh=0)],
+        meshes=[
+            pygltflib.Mesh(
+                primitives=[
+                    pygltflib.Primitive(
+                        attributes=pygltflib.Attributes(POSITION=0, TEXCOORD_0=1), material=material_idx
+                    )
+                    for material_idx in range(len(alpha_modes))
+                ]
+            )
+        ],
+        materials=[
+            pygltflib.Material(
+                name=name,
+                pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+                    baseColorTexture=pygltflib.TextureInfo(index=0, texCoord=0)
+                ),
+                alphaMode=alpha_mode,
+                alphaCutoff=alpha_cutoff,
+            )
+            for name, alpha_mode, alpha_cutoff in alpha_modes
+        ],
+        textures=[pygltflib.Texture(source=0)],
+        images=[pygltflib.Image(bufferView=0, mimeType="image/png")],
+        accessors=[
+            pygltflib.Accessor(
+                bufferView=1,
+                componentType=pygltflib.FLOAT,
+                count=len(positions),
+                type="VEC3",
+                min=positions.min(axis=0).tolist(),
+                max=positions.max(axis=0).tolist(),
+            ),
+            pygltflib.Accessor(bufferView=2, componentType=pygltflib.FLOAT, count=len(uvs), type="VEC2"),
+        ],
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    )
+    gltf.set_binary_blob(blob)
+    path = str(asset_tmp_path / "alpha_mode_variants.glb")
+    gltf.save_binary(path)
+    return path
+
+
 @pytest.fixture
 def material_mjcf(tmp_path):
     """Generate an MJCF model with materials and geom-level colors."""
