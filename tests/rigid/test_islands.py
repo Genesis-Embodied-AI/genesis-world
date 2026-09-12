@@ -198,7 +198,11 @@ def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
     # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
     # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike. The
     # arms of the first env start lower, so its islands merge first.
+    # The time constant of the weld is floored at twice the substep, and its compliance is what separates the twins
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            substeps=2,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, -4.0, 1.5),
             camera_lookat=(1.5, 0.0, 0.8),
@@ -237,10 +241,10 @@ def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
             assert not is_arms_touching.any()
         if i_step == 39:
             arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
-            assert_allclose(arms_qpos_diff[~is_arms_touching], 0.0, tol=1e-3)
-            assert_allclose(arms_qpos_diff[is_arms_touching], 0.0, tol=5e-3)
+            assert_allclose(arms_qpos_diff[~is_arms_touching], 0.0, tol=1e-4)
+            assert_allclose(arms_qpos_diff[is_arms_touching], 0.0, tol=2e-3)
     assert has_envs_differed
-    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
+    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=2e-3)
 
 
 @pytest.mark.required
