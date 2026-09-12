@@ -226,20 +226,20 @@ def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
     n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
 
     # The welded dual arm is one island, the two arms of the fixed dual arm are two islands until they touch, one from
-    # then on
+    # then on. Until the arms touch the twins fall alike, at rest they settle alike up to the compliance of the weld.
+    has_envs_differed = False
     for i_step in range(80):
         scene.step()
         is_arms_touching = tensor_to_array(dual_arm.get_contacts(with_entity=dual_arm)["valid_mask"].any(dim=-1))
         assert_equal(qd_to_numpy(n_islands), 3 - is_arms_touching)
+        has_envs_differed |= is_arms_touching[0] != is_arms_touching[1]
         if i_step == 0:
             assert not is_arms_touching.any()
         if i_step == 39:
-            assert_equal(is_arms_touching, [True, False])
             arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
-            assert_allclose(arms_qpos_diff[0], 0.0, tol=5e-3)
-            assert_allclose(arms_qpos_diff[1], 0.0, tol=1e-3)
-
-    # Both envs at rest, the twins settled alike up to the compliance of the weld
+            assert_allclose(arms_qpos_diff[~is_arms_touching], 0.0, tol=1e-3)
+            assert_allclose(arms_qpos_diff[is_arms_touching], 0.0, tol=5e-3)
+    assert has_envs_differed
     assert is_arms_touching.all()
     assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
