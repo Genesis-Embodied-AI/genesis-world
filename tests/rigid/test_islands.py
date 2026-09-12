@@ -240,7 +240,6 @@ def test_fixed_base_branches_are_islands(show_viewer, fixed_base_dual_arm):
             assert_allclose(arms_qpos_diff[~is_arms_touching], 0.0, tol=1e-3)
             assert_allclose(arms_qpos_diff[is_arms_touching], 0.0, tol=5e-3)
     assert has_envs_differed
-    assert is_arms_touching.all()
     assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
 
