@@ -130,6 +130,29 @@ def func_constraint_island(i_c, i_b, constraint_state: array_class.ConstraintSta
 
 
 @qd.func
+def func_island_rows(i_b, i_island, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+    """First list position and count of the rows of island i_island of env i_b: the env's whole row range in a
+    single-island scene, whose one island holds every row in constraint order, the island's slice of constraint_id
+    otherwise."""
+    row_lo = 0
+    row_n = constraint_state.n_constraints[i_b]
+    if qd.static(not rigid_config.is_single_island):
+        row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
+        row_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    return row_lo, row_n
+
+
+@qd.func
+def func_island_row(i_pos, i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+    """Row at position i_pos of the island lists of env i_b: the position itself in a single-island scene, the
+    constraint_id entry otherwise."""
+    i_c = i_pos
+    if qd.static(not rigid_config.is_single_island):
+        i_c = constraint_state.island.constraint_id[i_pos, i_b]
+    return i_c
+
+
+@qd.func
 def func_group_constraints_by_island(i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
     """Group the constraints of one env by island and start every island iterating.
 
@@ -142,42 +165,45 @@ def func_group_constraints_by_island(i_b, constraint_state: array_class.Constrai
     """
     n_islands = constraint_state.island.n_islands[i_b]
     n_con = constraint_state.n_constraints[i_b]
-    if n_islands == 1:
-        # A single island spans the whole env, so every constraint belongs to island 0 in index order and the grouping
-        # is the identity. A constraint touching no dof carries jac == 0, so listing it in island 0 is harmless.
-        constraint_state.island.constraint_slices.start[0, i_b] = 0
-        constraint_state.island.constraint_slices.n[0, i_b] = n_con
-        constraint_state.island.constraint_slices.curr[0, i_b] = n_con
-        for i_c in range(n_con):
-            constraint_state.island.constraint_id[i_c, i_b] = i_c
-            constraint_state.island.constraint_island_idx[i_c, i_b] = 0
-    else:
-        for i_island in range(n_islands):
-            constraint_state.island.constraint_slices.n[i_island, i_b] = 0
+    # A single-island scene keeps no list, every reader indexing the rows directly (see func_island_rows)
+    if qd.static(not rigid_config.is_single_island):
+        if n_islands == 1:
+            # A single island spans the whole env, so every constraint belongs to island 0 in index order and the
+            # grouping is the identity. A constraint touching no dof carries jac == 0, so listing it in island 0 is
+            # harmless.
+            constraint_state.island.constraint_slices.start[0, i_b] = 0
+            constraint_state.island.constraint_slices.n[0, i_b] = n_con
+            constraint_state.island.constraint_slices.curr[0, i_b] = n_con
+            for i_c in range(n_con):
+                constraint_state.island.constraint_id[i_c, i_b] = i_c
+                constraint_state.island.constraint_island_idx[i_c, i_b] = 0
+        else:
+            for i_island in range(n_islands):
+                constraint_state.island.constraint_slices.n[i_island, i_b] = 0
 
-        for i_c in range(n_con):
-            i_island = func_constraint_island(i_c, i_b, constraint_state)
-            constraint_state.island.constraint_island_idx[i_c, i_b] = i_island
-            if i_island >= 0:
-                constraint_state.island.constraint_slices.n[i_island, i_b] = (
-                    constraint_state.island.constraint_slices.n[i_island, i_b] + 1
-                )
+            for i_c in range(n_con):
+                i_island = func_constraint_island(i_c, i_b, constraint_state)
+                constraint_state.island.constraint_island_idx[i_c, i_b] = i_island
+                if i_island >= 0:
+                    constraint_state.island.constraint_slices.n[i_island, i_b] = (
+                        constraint_state.island.constraint_slices.n[i_island, i_b] + 1
+                    )
 
-        con_list_start = 0
-        for i_island in range(n_islands):
-            constraint_state.island.constraint_slices.start[i_island, i_b] = con_list_start
-            constraint_state.island.constraint_slices.curr[i_island, i_b] = con_list_start
-            con_list_start = con_list_start + constraint_state.island.constraint_slices.n[i_island, i_b]
+            con_list_start = 0
+            for i_island in range(n_islands):
+                constraint_state.island.constraint_slices.start[i_island, i_b] = con_list_start
+                constraint_state.island.constraint_slices.curr[i_island, i_b] = con_list_start
+                con_list_start = con_list_start + constraint_state.island.constraint_slices.n[i_island, i_b]
 
-        for i_c in range(n_con):
-            i_island = constraint_state.island.constraint_island_idx[i_c, i_b]
-            if i_island >= 0:
-                constraint_state.island.constraint_id[
-                    constraint_state.island.constraint_slices.curr[i_island, i_b], i_b
-                ] = i_c
-                constraint_state.island.constraint_slices.curr[i_island, i_b] = (
-                    constraint_state.island.constraint_slices.curr[i_island, i_b] + 1
-                )
+            for i_c in range(n_con):
+                i_island = constraint_state.island.constraint_island_idx[i_c, i_b]
+                if i_island >= 0:
+                    constraint_state.island.constraint_id[
+                        constraint_state.island.constraint_slices.curr[i_island, i_b], i_b
+                    ] = i_c
+                    constraint_state.island.constraint_slices.curr[i_island, i_b] = (
+                        constraint_state.island.constraint_slices.curr[i_island, i_b] + 1
+                    )
 
     # Every awake island starts iterating, a constraint-free one included: a warm start leaves its acceleration at the
     # previous step's, which its own iteration brings back to the unconstrained one.
@@ -213,57 +239,59 @@ def func_group_constraints_by_island_coop(
     _K = qd.static(32)
     n_islands = constraint_state.island.n_islands[i_b]
     n_con = constraint_state.n_constraints[i_b]
-    if n_islands == 1:
-        if tid == 0:
-            constraint_state.island.constraint_slices.start[0, i_b] = 0
-            constraint_state.island.constraint_slices.n[0, i_b] = n_con
-            constraint_state.island.constraint_slices.curr[0, i_b] = n_con
-        i_c = tid
-        while i_c < n_con:
-            constraint_state.island.constraint_id[i_c, i_b] = i_c
-            constraint_state.island.constraint_island_idx[i_c, i_b] = 0
-            i_c = i_c + _K
-    else:
-        i_island = tid
-        while i_island < n_islands:
-            constraint_state.island.constraint_slices.n[i_island, i_b] = 0
-            i_island = i_island + _K
-        qd.simt.block.sync()
-        i_c = tid
-        while i_c < n_con:
-            i_island = func_constraint_island(i_c, i_b, constraint_state)
-            constraint_state.island.constraint_island_idx[i_c, i_b] = i_island
-            if i_island >= 0:
-                qd.atomic_add(constraint_state.island.constraint_slices.n[i_island, i_b], 1)
-            i_c = i_c + _K
-        qd.simt.block.sync()
-        carry = 0
-        for i_chunk in range((n_islands + _K - 1) // _K):
-            i_island = i_chunk * _K + tid
-            count = 0
-            if i_island < n_islands:
-                count = constraint_state.island.constraint_slices.n[i_island, i_b]
-            count_incl = qd.simt.subgroup.inclusive_add(count)
-            if i_island < n_islands:
-                constraint_state.island.constraint_slices.start[i_island, i_b] = carry + count_incl - count
-                constraint_state.island.constraint_slices.curr[i_island, i_b] = carry + count_incl - count
-            carry = carry + qd.simt.subgroup.broadcast(count_incl, qd.u32(_K - 1))
-        qd.simt.block.sync()
-        for i_chunk in range((n_con + _K - 1) // _K):
-            i_c = i_chunk * _K + tid
-            i_island = -1
-            if i_c < n_con:
-                i_island = constraint_state.island.constraint_island_idx[i_c, i_b]
-            sh_chunk[tid] = i_island
+    # A single-island scene keeps no list, every reader indexing the rows directly (see func_island_rows)
+    if qd.static(not rigid_config.is_single_island):
+        if n_islands == 1:
+            if tid == 0:
+                constraint_state.island.constraint_slices.start[0, i_b] = 0
+                constraint_state.island.constraint_slices.n[0, i_b] = n_con
+                constraint_state.island.constraint_slices.curr[0, i_b] = n_con
+            i_c = tid
+            while i_c < n_con:
+                constraint_state.island.constraint_id[i_c, i_b] = i_c
+                constraint_state.island.constraint_island_idx[i_c, i_b] = 0
+                i_c = i_c + _K
+        else:
+            i_island = tid
+            while i_island < n_islands:
+                constraint_state.island.constraint_slices.n[i_island, i_b] = 0
+                i_island = i_island + _K
             qd.simt.block.sync()
-            if i_island >= 0:
-                i_pos = constraint_state.island.constraint_slices.curr[i_island, i_b]
-                i_pos = i_pos + func_chunk_island_rank(tid, i_island, sh_chunk)
-                constraint_state.island.constraint_id[i_pos, i_b] = i_c
+            i_c = tid
+            while i_c < n_con:
+                i_island = func_constraint_island(i_c, i_b, constraint_state)
+                constraint_state.island.constraint_island_idx[i_c, i_b] = i_island
+                if i_island >= 0:
+                    qd.atomic_add(constraint_state.island.constraint_slices.n[i_island, i_b], 1)
+                i_c = i_c + _K
             qd.simt.block.sync()
-            if i_island >= 0:
-                qd.atomic_add(constraint_state.island.constraint_slices.curr[i_island, i_b], 1)
+            carry = 0
+            for i_chunk in range((n_islands + _K - 1) // _K):
+                i_island = i_chunk * _K + tid
+                count = 0
+                if i_island < n_islands:
+                    count = constraint_state.island.constraint_slices.n[i_island, i_b]
+                count_incl = qd.simt.subgroup.inclusive_add(count)
+                if i_island < n_islands:
+                    constraint_state.island.constraint_slices.start[i_island, i_b] = carry + count_incl - count
+                    constraint_state.island.constraint_slices.curr[i_island, i_b] = carry + count_incl - count
+                carry = carry + qd.simt.subgroup.broadcast(count_incl, qd.u32(_K - 1))
             qd.simt.block.sync()
+            for i_chunk in range((n_con + _K - 1) // _K):
+                i_c = i_chunk * _K + tid
+                i_island = -1
+                if i_c < n_con:
+                    i_island = constraint_state.island.constraint_island_idx[i_c, i_b]
+                sh_chunk[tid] = i_island
+                qd.simt.block.sync()
+                if i_island >= 0:
+                    i_pos = constraint_state.island.constraint_slices.curr[i_island, i_b]
+                    i_pos = i_pos + func_chunk_island_rank(tid, i_island, sh_chunk)
+                    constraint_state.island.constraint_id[i_pos, i_b] = i_c
+                qd.simt.block.sync()
+                if i_island >= 0:
+                    qd.atomic_add(constraint_state.island.constraint_slices.curr[i_island, i_b], 1)
+                qd.simt.block.sync()
 
     # Every awake island starts iterating, a constraint-free one included, see func_group_constraints_by_island
     i_island = tid

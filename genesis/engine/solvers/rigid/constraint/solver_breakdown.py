@@ -7,6 +7,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 from . import linesearch
 from . import solver
+from .island import func_island_row, func_island_rows
 
 # Shared-memory reduction block size for the _jv path.
 _JV_BLOCK = 32
@@ -90,7 +91,7 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
         len_constraints, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
         if i_c < constraint_state.n_constraints[i_b] and constraint_state.improved[i_b]:
-            if solver.func_is_row_moving(i_c, i_b, constraint_state, skip_settled_islands=True):
+            if solver.func_is_row_moving(i_c, i_b, constraint_state, rigid_config, skip_settled_islands=True):
                 _func_update_constraint_forces_body(i_c, i_b, constraint_state, rigid_config)
             elif qd.static(
                 rigid_config.solver_type == gs.constraint_solver.Newton and not rigid_config.enable_elliptic_friction
@@ -120,19 +121,15 @@ def _func_update_qfrc_constraint_per_dof(constraint_state: array_class.Constrain
             # A dof of an island standing still keeps its value, see func_update_constraint_batch. A single-island
             # scene sums the env's rows by index, its one island holding every row in order.
             is_island_moving = True
-            con_base = 0
-            con_n = constraint_state.n_constraints[i_b]
+            i_island = 0
             if qd.static(not rigid_config.is_single_island):
                 i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
                 is_island_moving = constraint_state.island.improved[i_island, i_b]
-                con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-                con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
             if is_island_moving:
+                con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
                 qfrc = gs.qd_float(0.0)
                 for i_lcon in range(con_n):
-                    i_c = con_base + i_lcon
-                    if qd.static(not rigid_config.is_single_island):
-                        i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+                    i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
                     qfrc += constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
                 constraint_state.qfrc_constraint[i_d, i_b] = qfrc
 

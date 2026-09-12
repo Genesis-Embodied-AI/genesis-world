@@ -513,9 +513,12 @@ def get_island_state(solver, collider):
     # The (env, island) work-lists of the tiled seed are read where an env can hold several islands (see
     # func_island_tiled_factor_solve_all in solver.py)
     worklist_active = solver.rigid_config.enable_tiled_island_seed and not solver.rigid_config.is_single_island
+    # A single-island scene reads its rows by index, see func_island_rows in island.py
+    has_row_lists = not solver.rigid_config.is_single_island
     # Batch-first under the cooperative kernels, whose block serves one env: the lanes then read consecutive items of
     # their env from consecutive addresses (see the constraint-state layouts in get_constraint_state).
     island_layout = (1, 0) if solver.rigid_config.constraint_layout_batch_first else None
+    row_layout = island_layout if has_row_lists else None
     n_classes = len(
         island_tile_caps(solver.rigid_config.island_tile_cap_first, solver.rigid_config.island_tile_cap_last)
     )
@@ -554,9 +557,11 @@ def get_island_state(solver, collider):
             shape=maybe_shape((max_candidate_contacts, _B), rcm_active or coop_active),
             layout=island_layout if rcm_active or coop_active else None,
         ),
-        constraint_slices=get_slices(solver, island_layout),
-        constraint_id=V(dtype=gs.qd_int, shape=(n_constraints_max, _B), layout=island_layout),
-        constraint_island_idx=V(dtype=gs.qd_int, shape=(n_constraints_max, _B), layout=island_layout),
+        constraint_slices=get_slices(solver, island_layout, has_row_lists),
+        constraint_id=V(dtype=gs.qd_int, shape=maybe_shape((n_constraints_max, _B), has_row_lists), layout=row_layout),
+        constraint_island_idx=V(
+            dtype=gs.qd_int, shape=maybe_shape((n_constraints_max, _B), has_row_lists), layout=row_layout
+        ),
         is_hibernated=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), solver._use_hibernation)),
         hibernated_next_link=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_hibernation)),
         factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),

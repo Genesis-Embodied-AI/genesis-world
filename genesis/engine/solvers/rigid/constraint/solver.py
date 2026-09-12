@@ -21,6 +21,8 @@ from .island import (
     func_build_single_island_coop,
     func_group_constraints_by_island,
     func_group_constraints_by_island_coop,
+    func_island_row,
+    func_island_rows,
     func_sort_contacts,
     func_sort_contacts_coop,
 )
@@ -2001,8 +2003,7 @@ def func_compute_island_envelope(
         # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
         n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
 
     for i_d_local in range(n):
         constraint_state.island.dof_env_start_local[dof_base + i_d_local, i_b] = i_d_local
@@ -2013,7 +2014,7 @@ def func_compute_island_envelope(
     # matches the whole-island scan it replaces and the assembly's outer guard, so DOFs that are structurally in the
     # support but currently have a zero Jacobian column are excluded identically, keeping the envelope deterministic.
     for i_lcon in range(con_n):
-        i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+        i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
         col_min = n
         for i_jd in range(constraint_state.jac_n_dofs[i_c, i_b]):
             i_d_local = constraint_state.island.dof_local_pos[constraint_state.jac_dofs_idx[i_c, i_jd, i_b], i_b]
@@ -2155,10 +2156,9 @@ def func_add_cone_hessian_block_island(
     ne = constraint_state.n_constraints_equality[i_b]
     nef = ne + constraint_state.n_constraints_frictionloss[i_b]
     n_cone = constraint_state.n_constraints_cone[i_b]
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
     for i_lcon in range(con_n):
-        i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+        i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
         if i_c >= nef and i_c < nef + n_cone and (i_c - nef) % n_rows == 0:
             rows_efc_D, rows_friction, con_mu, rows_jaref = _func_cone_head_load(
                 i_c, i_b, constraint_state, rigid_config
@@ -2292,19 +2292,18 @@ def func_hessian_direct_batch(
         # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
         n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
     # Self-contained scale refresh over the island's own DOFs and constraints: assembly consumes it below, and a
     # lone island's rebuild must not depend on any other island assembling (see nt_jacobi in array_class.py).
     if qd.static(rigid_config.enable_jacobi_equilibration):
-        con_n_scale = constraint_state.island.constraint_slices.n[i_island, i_b]
         for i_d in range(n):
             i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
             constraint_state.nt_jacobi[i_dg, i_b] = rigid_info.mass_mat[i_dg, i_dg, i_b]
         # Each active row adds D * jac^2 to the diagonal of every dof of its support, the rows in list order so every
         # dof sums its rows in that order. Walking the rows' supports costs their total size, where a sweep of every dof
         # of the island over every row would read n_dofs * n_rows Jacobian entries, most of them structural zeros.
-        for i_lcon in range(con_n_scale):
-            i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+        for i_lcon in range(con_n):
+            i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
             if constraint_state.active[i_c, i_b]:
                 efc_D = constraint_state.efc_D[i_c, i_b]
                 for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
@@ -2316,8 +2315,8 @@ def func_hessian_direct_batch(
             n_rows_scale = qd.static(rigid_config.rows_per_contact)
             nef_scale = constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
             n_cone_scale = constraint_state.n_constraints_cone[i_b]
-            for i_lcon in range(con_n_scale):
-                i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+            for i_lcon in range(con_n):
+                i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
                 if i_c >= nef_scale and i_c < nef_scale + n_cone_scale and (i_c - nef_scale) % n_rows_scale == 0:
                     rows_efc_D, rows_friction, con_mu, rows_jaref = _func_cone_head_load(
                         i_c, i_b, constraint_state, rigid_config
@@ -2343,7 +2342,6 @@ def func_hessian_direct_batch(
             if hess_diag > 0.0:
                 s = 1.0 / qd.sqrt(hess_diag)
             constraint_state.nt_jacobi[i_dg, i_b] = s
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
     # The assembly and the factor visit only the row's skyline envelope [env_start, i_d]: entries below env_start are
     # structurally zero (no constraint or mass coupling reaches them). The skyline solve reads within the same band; the
     # dense block solve (see func_cholesky_solve_batch) reads the whole lower triangle, so off the skyline path the
@@ -2362,13 +2360,13 @@ def func_hessian_direct_batch(
     n_rows = qd.static(rigid_config.rows_per_contact)
     i_lcon = 0
     while i_lcon < con_n:
-        i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+        i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
         jac_n = constraint_state.jac_n_dofs[i_c, i_b]
         n_block = 1
         if i_lcon + n_rows <= con_n:
             is_block = True
             for i_r in qd.static(range(1, n_rows)):
-                i_cr = constraint_state.island.constraint_id[con_base + i_lcon + i_r, i_b]
+                i_cr = func_island_row(con_base + i_lcon + i_r, i_b, constraint_state, rigid_config)
                 if i_cr != i_c + i_r or constraint_state.jac_n_dofs[i_cr, i_b] != jac_n:
                     is_block = False
                 else:
@@ -2491,8 +2489,7 @@ def func_island_assemble_factor_solve_tiled(
         # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
         n = constraint_state.nt_H.shape[1]
     dof_base = constraint_state.island.dof_slices.start[i_island, i_b]
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
     # The dof list of a single-island scene is the identity (its one island holds every dof in order), so its block
     # is the whole of nt_H and its dofs read by index; another scene reads them through the list.
     i_d_start = 0
@@ -2778,8 +2775,7 @@ def func_island_hessian_assemble_block(
         n = constraint_state.nt_H.shape[1]
     dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
     dof_base = constraint_state.island.dof_range_start[i_island, i_b]
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
     n_tri = n * (n + 1) // 2
     i_tri = tid
     while i_tri < n_tri:
@@ -2802,9 +2798,7 @@ def func_island_hessian_assemble_block(
             while i_flat < n_rows * n:
                 i_r = i_flat // n
                 i_d_local = i_flat % n
-                i_c = con_base + i_lcon_chunk + i_r
-                if qd.static(not rigid_config.is_single_island):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon_chunk + i_r, i_b]
+                i_c = func_island_row(con_base + i_lcon_chunk + i_r, i_b, constraint_state, rigid_config)
                 i_d = i_d_local
                 if qd.static(not rigid_config.is_single_island):
                     i_d = linesearch.func_list_item(
@@ -2813,9 +2807,7 @@ def func_island_hessian_assemble_block(
                 sh_jac[i_r, i_d_local] = constraint_state.jac[i_c, i_d, i_b]
                 i_flat = i_flat + block_dim
             if tid < n_rows:
-                i_c = con_base + i_lcon_chunk + tid
-                if qd.static(not rigid_config.is_single_island):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon_chunk + tid, i_b]
+                i_c = func_island_row(con_base + i_lcon_chunk + tid, i_b, constraint_state, rigid_config)
                 sh_D[tid] = constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
             qd.simt.block.sync()
             i_tri = tid
@@ -2848,9 +2840,7 @@ def func_island_hessian_assemble_block(
                 )
             h = constraint_state.nt_H[i_b, i_d, j_d]
             for i_lcon in range(con_n):
-                i_c = con_base + i_lcon
-                if qd.static(not rigid_config.is_single_island):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+                i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
                 if constraint_state.active[i_c, i_b]:
                     h = (
                         h
@@ -2913,8 +2903,7 @@ def func_island_hessian_patch_block(
     """
     _K = qd.static(32)
     N_SUBGROUPS = qd.static(block_dim // _K)
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
     n_changed = 0
     i_chunk = 0
     while i_chunk < con_n:
@@ -2922,7 +2911,7 @@ def func_island_hessian_patch_block(
         i_c = -1
         is_flipped = 0
         if i_lcon < con_n:
-            i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+            i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
             if constraint_state.active[i_c, i_b] ^ constraint_state.prev_active[i_c, i_b]:
                 is_flipped = 1
         rank_incl = qd.simt.subgroup.inclusive_add(is_flipped)
@@ -3356,9 +3345,11 @@ def func_factor_island_incremental_dense(
 
     Returns True on a non-positive downdate pivot, the caller then refactoring the island directly.
     """
-    con_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_hi = con_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
-    con_base = linesearch.func_list_range_start(constraint_state.island.constraint_id, con_lo, con_hi, i_b)
+    con_lo, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
+    con_hi = con_lo + con_n
+    con_base = 0
+    if qd.static(not rigid_config.is_single_island):
+        con_base = linesearch.func_list_range_start(constraint_state.island.constraint_id, con_lo, con_hi, i_b)
     is_degenerated = False
     for i_pos in range(con_lo, con_hi):
         i_c = linesearch.func_list_item(constraint_state.island.constraint_id, i_pos, con_lo, con_base, i_b)
@@ -3533,8 +3524,7 @@ def func_cone_rank_update_island(
     ne = constraint_state.n_constraints_equality[i_b]
     nef = ne + constraint_state.n_constraints_frictionloss[i_b]
     n_cone = constraint_state.n_constraints_cone[i_b]
-    con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
-    con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
     n = constraint_state.island.dof_slices.n[i_island, i_b]
     if qd.static(rigid_config.is_single_island):
         # The env's one island holds every dof, a count the compiler knows and fixes the trip counts below with.
@@ -3547,7 +3537,7 @@ def func_cone_rank_update_island(
     is_degenerated = False
     for i_lcon in range(con_n):
         if not is_degenerated:
-            i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
+            i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
             if i_c >= nef and i_c < nef + n_cone and (i_c - nef) % n_rows == 0:
                 i_cone_row = i_c - nef
                 rows_efc_D, rows_friction, con_mu, rows_jaref_cur = _func_cone_head_load(
@@ -3693,8 +3683,7 @@ def func_factor_island_incremental_or_direct(
     needlessly refactor quiescent islands whenever flips are spread thin across many of them (e.g. several separated
     piles each toggling a single contact).
     """
-    c_start = constraint_state.island.constraint_slices.start[i_island, i_b]
-    c_n = constraint_state.island.constraint_slices.n[i_island, i_b]
+    con_base, con_n = func_island_rows(i_b, i_island, constraint_state, rigid_config)
 
     # Count active-set flips and, for the elliptic cone, the middle-zone cone contacts whose coupled block must be
     # refreshed this iteration (each fires one downdate + update below). A cone whose current AND previous
@@ -3706,8 +3695,8 @@ def func_factor_island_incremental_or_direct(
     if qd.static(rigid_config.enable_elliptic_friction):
         nef = constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
         ncone = nef + constraint_state.n_constraints_cone[i_b]
-        for i_lcon in range(c_n):
-            i_c = constraint_state.island.constraint_id[c_start + i_lcon, i_b]
+        for i_lcon in range(con_n):
+            i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
             if constraint_state.active[i_c, i_b] ^ constraint_state.prev_active[i_c, i_b]:
                 n_changed = n_changed + 1
                 # Keep the persisted cone-free Hessian synced with the current active set, whichever factor path
@@ -3719,8 +3708,8 @@ def func_factor_island_incremental_or_direct(
                 if _func_cone_head_is_middle(i_c, i_b, nef, constraint_state, rigid_config):
                     cone_passes = cone_passes + 1
     else:
-        for i_lcon in range(c_n):
-            i_c = constraint_state.island.constraint_id[c_start + i_lcon, i_b]
+        for i_lcon in range(con_n):
+            i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
             if constraint_state.active[i_c, i_b] ^ constraint_state.prev_active[i_c, i_b]:
                 n_changed = n_changed + 1
 
@@ -3756,8 +3745,8 @@ def func_factor_island_incremental_or_direct(
             # Gather the flipped constraints into fixed-size batches; apply each batch as one fused column sweep.
             batch_ic = qd.Vector.zero(gs.qd_int, rigid_config.hessian_rank_update_batch)
             n_u = 0
-            for i_lcon in range(c_n):
-                i_c = constraint_state.island.constraint_id[c_start + i_lcon, i_b]
+            for i_lcon in range(con_n):
+                i_c = func_island_row(con_base + i_lcon, i_b, constraint_state, rigid_config)
                 if constraint_state.active[i_c, i_b] ^ constraint_state.prev_active[i_c, i_b]:
                     batch_ic[n_u] = i_c
                     n_u = n_u + 1
@@ -4502,7 +4491,13 @@ def func_cone_update_rows(
 
 
 @qd.func
-def func_is_row_moving(i_c, i_b, constraint_state: array_class.ConstraintState, skip_settled_islands: qd.template()):
+def func_is_row_moving(
+    i_c,
+    i_b,
+    constraint_state: array_class.ConstraintState,
+    rigid_config: qd.template(),
+    skip_settled_islands: qd.template(),
+):
     """Whether constraint row i_c belongs to an island still iterating (see improved in IslandState).
 
     A row coupling no dof belongs to no island and is taken as moving, its update costing nothing. Always True unless
@@ -4510,7 +4505,7 @@ def func_is_row_moving(i_c, i_b, constraint_state: array_class.ConstraintState, 
     island then moves as a whole, and the island lookup is spared.
     """
     is_moving = True
-    if qd.static(skip_settled_islands):
+    if qd.static(skip_settled_islands and not rigid_config.is_single_island):
         if constraint_state.island.n_islands[i_b] > 1:
             i_island = constraint_state.island.constraint_island_idx[i_c, i_b]
             if i_island >= 0:

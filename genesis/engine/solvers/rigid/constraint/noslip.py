@@ -3,6 +3,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 
+from .island import func_island_row, func_island_rows
+
 
 @qd.func
 def func_solve_mass_block(i_d0, i_b, vec: qd.Tensor, rigid_info: array_class.RigidInfo):
@@ -122,9 +124,8 @@ def func_refresh_qacc_batch(
     list regardless of the skyline dof reorder).
     """
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
     dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
-    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
+    row_start, n_rows = func_island_rows(i_b, i_island, constraint_state, rigid_config)
 
     for i_d_ in range(n_dofs):
         i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
@@ -132,7 +133,7 @@ def func_refresh_qacc_batch(
         constraint_state.qacc[i_d, i_b] = gs.qd_float(0.0)
 
     for i_c_ in range(n_rows):
-        i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+        i_c = func_island_row(row_start + i_c_, i_b, constraint_state, rigid_config)
         force = constraint_state.efc_force[i_c, i_b]
         for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
             i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
@@ -190,8 +191,7 @@ def func_noslip_batch(
     const_end = const_start + qd.static(rigid_config.rows_per_contact) * collider_state.n_contacts[i_b]
 
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
-    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
+    row_start, n_rows = func_island_rows(i_b, i_island, constraint_state, rigid_config)
 
     scale = 1.0 / (rigid_info.meaninertia[i_b] * qd.max(1.0, n_dofs))
 
@@ -205,7 +205,7 @@ def func_noslip_batch(
         # opposing pyramid-edge pair (j_efc, j_efc + 1) projected with the normal force fixed. Equality and joint
         # limit rows only contribute to the iter-0 improvement correction.
         for i_c_ in range(n_rows):
-            i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+            i_c = func_island_row(row_start + i_c_, i_b, constraint_state, rigid_config)
 
             if i_iter == 0:
                 improvement += 0.5 * constraint_state.efc_force[i_c, i_b] ** 2 * constraint_state.diag[i_c, i_b]
