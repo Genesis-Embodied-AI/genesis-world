@@ -214,30 +214,30 @@ def compute_support(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
 ):
-    v1 = support_driver(
-        i_ga,
-        i_b,
-        direction,
-        pos_a,
-        quat_a,
-        collider_state,
-        dyn_info,
-        collider_info,
-        rigid_config,
-        collider_static_config,
-    )
-    v2 = support_driver(
-        i_gb,
-        i_b,
-        -direction,
-        pos_b,
-        quat_b,
-        collider_state,
-        dyn_info,
-        collider_info,
-        rigid_config,
-        collider_static_config,
-    )
+    v1 = qd.Vector.zero(gs.qd_float, 3)
+    v2 = qd.Vector.zero(gs.qd_float, 3)
+    # One runtime loop over the two geoms keeps a single inlined copy of the support switch per call site
+    for i_side in range(2):
+        i_g = i_ga if i_side == 0 else i_gb
+        side_direction = direction if i_side == 0 else -direction
+        pos = pos_a if i_side == 0 else pos_b
+        quat = quat_a if i_side == 0 else quat_b
+        v = support_driver(
+            i_g,
+            i_b,
+            side_direction,
+            pos,
+            quat,
+            collider_state,
+            dyn_info,
+            collider_info,
+            rigid_config,
+            collider_static_config,
+        )
+        if i_side == 0:
+            v1 = v
+        else:
+            v2 = v
 
     v = v1 - v2
     return v, v1, v2
