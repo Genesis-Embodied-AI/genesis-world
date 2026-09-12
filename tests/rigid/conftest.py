@@ -77,6 +77,35 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
 
 
 @pytest.fixture(scope="session")
+def fixed_base_dual_arm():
+    # A torso the world carries and two one-link arms hanging from it, mounted close enough that the arms overlap
+    # once they hang at rest, so that the arms touch when they fall under gravity
+    robot = ET.Element("robot", name="dual_arm")
+    torso = ET.SubElement(robot, "link", name="torso")
+    inertial = ET.SubElement(torso, "inertial")
+    ET.SubElement(inertial, "mass", value="5.0")
+    ET.SubElement(inertial, "inertia", ixx="0.1", iyy="0.1", izz="0.1", ixy="0", ixz="0", iyz="0")
+    ET.SubElement(ET.SubElement(ET.SubElement(torso, "collision"), "geometry"), "box", size="0.1 0.3 0.1")
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        link = ET.SubElement(robot, "link", name=f"{side}_arm")
+        inertial = ET.SubElement(link, "inertial")
+        ET.SubElement(inertial, "origin", xyz=f"{sign * 0.15} 0 0")
+        ET.SubElement(inertial, "mass", value="1.0")
+        ET.SubElement(inertial, "inertia", ixx="0.001", iyy="0.01", izz="0.01", ixy="0", ixz="0", iyz="0")
+        collision = ET.SubElement(link, "collision")
+        ET.SubElement(collision, "origin", xyz=f"{sign * 0.15} 0 0")
+        ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.3 0.12 0.12")
+        joint = ET.SubElement(robot, "joint", name=f"{side}_shoulder", type="revolute")
+        ET.SubElement(joint, "parent", link="torso")
+        ET.SubElement(joint, "child", link=f"{side}_arm")
+        ET.SubElement(joint, "origin", xyz=f"{sign * 0.05} 0 0")
+        ET.SubElement(joint, "axis", xyz="0 1 0")
+        ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
+        ET.SubElement(joint, "dynamics", damping="0.5")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def box_plan():
     """Generate an MJCF model for a box on a plane."""
     mjcf = _build_plane_contact_model("box_plan", condim="3", friction="1. 0.5 0.5", plane_size="40. 40. 40.")

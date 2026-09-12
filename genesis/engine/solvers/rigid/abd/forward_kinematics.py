@@ -147,12 +147,12 @@ def func_COM_links(
         if qd.static(rigid_config.use_hibernation):
             is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
         if is_awake:
-            func_COM_links_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+            func_COM_links_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
 def func_COM_links_root(
-    i_r,
+    i_l_root,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -160,7 +160,7 @@ def func_COM_links_root(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Compute the center of mass of the links of one kinematic root and the inertial of each of them about it.
+    """Compute the center of mass of the links of root link i_l_root and the inertial of each of them about it.
 
     One call handles the whole root, walking its link span and gating each link on its root (see roots_link_idx in
     array_class.py), so that a root spanning several entities, one attached beneath another, accumulates every link of
@@ -170,8 +170,7 @@ def func_COM_links_root(
     EPS = rigid_info.EPS[None]
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
-    i_l_root = rigid_info.roots_link_idx[i_r]
-    i_l_end = rigid_info.roots_link_end[i_r]
+    i_l_end = rigid_info.links_root_end[i_l_root]
 
     dyn_state.links.root_COM_bw[i_l_root, i_b].fill(0.0)
     dyn_state.links.mass_sum[i_l_root, i_b] = 0.0
@@ -1107,9 +1106,7 @@ def func_update_cartesian_space_tree(
     for i_l in range(i_l_start, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l:
-            func_COM_links_root(
-                rigid_info.links_root_rank[i_l], i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
-            )
+            func_COM_links_root(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     for j_e in range(i_e, n_entities):
         if func_is_entity_in_tree(j_e, i_b, i_l_start, i_l_end, dyn_info, rigid_config):
             func_update_geoms_entity(

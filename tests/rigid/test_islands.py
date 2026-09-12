@@ -193,83 +193,64 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     assert ((free_body_z > 0.0) & (free_body_z < 0.5)).all()
 
 
-@pytest.fixture
-def arms_mjcf():
-    # Two 2-link arms on fixed bases in one file, and the same arm alone: the two branches of the first must simulate
-    # as two entities of the second.
-    arms_xml = []
-    for n_arms in (2, 1):
-        mjcf = ET.Element("mujoco", model="arms")
-        ET.SubElement(mjcf, "option", timestep="0.01")
-        worldbody = ET.SubElement(mjcf, "worldbody")
-        for i_arm in range(n_arms):
-            base = ET.SubElement(worldbody, "body", name=f"base_{i_arm}", pos=f"{0.6 * i_arm} 0.0 0.5")
-            ET.SubElement(base, "geom", type="box", size="0.05 0.05 0.05")
-            parent = base
-            for i_link in range(2):
-                link = ET.SubElement(parent, "body", name=f"arm{i_arm}_link{i_link}", pos="0.0 0.0 0.2")
-                ET.SubElement(link, "joint", type="hinge", axis="0 1 0")
-                ET.SubElement(link, "geom", type="capsule", size="0.02", fromto="0 0 0 0 0 0.2")
-                parent = link
-        arms_xml.append(ET.tostring(mjcf, encoding="unicode"))
-    return arms_xml
-
-
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_fixed_base_branches_are_islands(show_viewer, n_envs, arms_mjcf):
-    two_arms_xml, one_arm_xml = arms_mjcf
+def test_fixed_base_branches_are_islands(show_viewer, n_envs, fixed_base_dual_arm):
+    # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
+    # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike.
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(3.0, -8.0, 3.0),
-            camera_lookat=(3.0, 0.0, 0.5),
+            camera_pos=(1.5, -5.0, 2.0),
+            camera_lookat=(1.5, 0.0, 0.8),
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
-    scene.add_entity(
+    plane = scene.add_entity(gs.morphs.Plane())
+    quadruped = scene.add_entity(
         gs.morphs.URDF(
             file="urdf/go2/urdf/go2.urdf",
-            pos=(0.0, 0.0, 0.6),
+            pos=(-3.0, 0.0, 0.6),
             fixed=True,
         )
     )
-    two_arms = scene.add_entity(
-        gs.morphs.MJCF(
-            file=two_arms_xml,
-            pos=(3.0, 0.0, 0.0),
+    dual_arm = scene.add_entity(
+        gs.morphs.URDF(
+            file=fixed_base_dual_arm,
+            pos=(0.0, 0.0, 1.0),
+            fixed=True,
         )
     )
-    arm_a = scene.add_entity(
-        gs.morphs.MJCF(
-            file=one_arm_xml,
-            pos=(6.0, 0.0, 0.0),
-        )
-    )
-    arm_b = scene.add_entity(
-        gs.morphs.MJCF(
-            file=one_arm_xml,
-            pos=(6.6, 0.0, 0.0),
+    dual_arm_welded = scene.add_entity(
+        gs.morphs.URDF(
+            file=fixed_base_dual_arm,
+            pos=(3.0, 0.0, 1.0),
         )
     )
     scene.build(n_envs=n_envs)
-
-    # One island per branch hanging from a fixed base: the four legs, the two arms of the file, the two lone arms
-    two_arms.set_dofs_position([0.3, 0.0, 0.3, 0.0])
-    arm_a.set_dofs_position([0.3, 0.0])
-    arm_b.set_dofs_position([0.3, 0.0])
-    scene.step()
+    scene.rigid_solver.add_weld_constraint(dual_arm_welded.base_link_idx, plane.base_link_idx)
     island_state = scene.rigid_solver.constraint_solver.constraint_state.island
-    assert_equal(qd_to_numpy(island_state.n_islands), 8)
-    islands_n_dofs = np.sort(qd_to_numpy(island_state.dof_slices.n, transpose=True)[..., :8], axis=-1)
-    assert_equal(islands_n_dofs, [2, 2, 2, 2, 3, 3, 3, 3])
 
-    # The two branches of one file swing as the two files of one branch
-    for _ in range(50):
+    def links_island(entity):
+        links_idx = [link.idx for link in entity.links if not link.is_fixed]
+        return qd_to_numpy(island_state.links_island_idx, transpose=True)[..., links_idx]
+
+    # Every leg of the quadruped and every arm of the fixed dual arm is an island, the welded dual arm one island
+    scene.step()
+    assert_equal(qd_to_numpy(island_state.n_islands), 7)
+    assert np.unique(links_island(quadruped), axis=-1).shape[-1] == 4
+    assert (links_island(dual_arm)[..., :1] != links_island(dual_arm)[..., 1:]).all()
+    for _ in range(39):
         scene.step()
-    arms_qpos = two_arms.get_dofs_position()
-    assert_allclose(arms_qpos[..., :2], arm_a.get_dofs_position(), tol=1e-6)
-    assert_allclose(arms_qpos[..., 2:], arm_b.get_dofs_position(), tol=1e-6)
+    assert (links_island(dual_arm_welded) == links_island(dual_arm_welded)[..., :1]).all()
+    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=1e-3)
+
+    # The arms come to rest against each other: the two islands of the fixed dual arm merge and both twins settle alike
+    for _ in range(60):
+        scene.step()
+    assert_equal(qd_to_numpy(island_state.n_islands), 6)
+    assert (links_island(dual_arm) == links_island(dual_arm)[..., :1]).all()
+    assert (links_island(dual_arm_welded) == links_island(dual_arm_welded)[..., :1]).all()
+    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
 
 @pytest.mark.required

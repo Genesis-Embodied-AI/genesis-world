@@ -478,8 +478,7 @@ class KinematicSolver(Solver):
             roots_link_end = np.zeros(self._n_roots, dtype=gs.np_int)
             np.maximum.at(roots_link_end, links_root_rank, np.arange(1, self.n_links + 1, dtype=gs.np_int))
             self.rigid_info.roots_link_idx.from_numpy(roots_link_idx)
-            self.rigid_info.roots_link_end.from_numpy(roots_link_end)
-            self.rigid_info.links_root_rank.from_numpy(links_root_rank)
+            self.rigid_info.links_root_end.from_numpy(roots_link_end[links_root_rank])
         if self._n_trees:
             links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
             links_dof_start = np.array([link.dof_start for link in self.links], dtype=gs.np_int)

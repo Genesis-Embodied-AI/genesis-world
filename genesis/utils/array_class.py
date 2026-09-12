@@ -238,13 +238,11 @@ class RigidInfo:
     mass_mat_D_inv: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
     mass_mat_mask: qd.Tensor = of_kind(DataKind.STATE)
-    # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. Root i_r spans the links
-    # [roots_link_idx[i_r], roots_link_end[i_r]) whose root it is (a span may interleave links of other roots, so the
-    # walks gate each link on its root), links_root_rank maps a link to its root. The composite inertia and the center
-    # of mass are per root.
+    # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. A root spans the links
+    # [root, links_root_end[root]) whose root it is (a span may interleave links of other roots, so the walks gate each
+    # link on its root). The composite inertia and the center of mass are per root.
     roots_link_idx: qd.Tensor
-    roots_link_end: qd.Tensor
-    links_root_rank: qd.Tensor
+    links_root_end: qd.Tensor
     # Kinematic trees: the links a chain of moving joints connects, so a static link belongs to none (links_tree_idx
     # -1) and each branch of a fixed base is a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
     # [trees_root_idx[i_t], trees_link_end[i_t]) mapped to it and the contiguous dofs [trees_dof_start[i_t],
@@ -339,8 +337,7 @@ def get_rigid_info(solver, kinematic_only):
             mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=()),
             mass_mat_mask=V(dtype=gs.qd_bool, shape=()),
             roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
-            roots_link_end=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
-            links_root_rank=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+            links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
@@ -388,8 +385,7 @@ def get_rigid_info(solver, kinematic_only):
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
         mass_mat_mask=V(dtype=gs.qd_bool, shape=(solver.n_entities_, _B)),
         roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
-        roots_link_end=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
-        links_root_rank=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+        links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
