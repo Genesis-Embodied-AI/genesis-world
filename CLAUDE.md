@@ -216,6 +216,6 @@ cocoapy.NSOpenGLPFAMaximumPolicy = 0x00020400  # kCGLRendererGenericFloatID
 ## Tooling & Contributing
 
 - Lint/format: ruff (check + format, line length 120) via pre-commit; install hooks with `pre-commit install` - they run on every commit.
-- PR titles carry a bracket tag: `[BUG FIX]`, `[FEATURE]`, `[MISC]`, `[CHANGING]` (behavior change), `[BREAKING]` (API break). Commit titles are plain single-line sentences without the tag. Both PR and commit titles end with a period.
+- PR titles carry a bracket tag: `[BUG FIX]`, `[FEATURE]`, `[MISC]`, `[CHANGING]` (the simulated physics change by default: a different model, or different default parameters; solver-internal restructuring is `[MISC]`), `[BREAKING]` (API break). Commit titles are plain single-line sentences without the tag. Both PR and commit titles end with a period.
 - PR titles state the benefit for end users, not the implementation. Implementation details go in the PR description.
 - Contributors must follow `CODING_GUIDELINES.md` and the reference docs in `.github/contributing/`: ARCHITECTURE, TESTING, CODING_CONVENTIONS, EXAMPLES, PULL_REQUESTS, USD_PARSER. On conflict, ask.
