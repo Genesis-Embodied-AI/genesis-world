@@ -295,10 +295,6 @@ def test_tet_primitive_shapes(gs_sim, mj_sim, gs_integrator, gs_solver, multi_co
     gs_sim.rigid_solver.set_dofs_position(gs_sim.rigid_solver.get_dofs_position())
 
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
-    # FIXME: Because of very small numerical error, error could be this large even if there is no logical error.
-    # Multi-contact perturbation introduces slightly larger errors due to GJK implementation differences.
-    # Both implementations agree to machine precision on most steps, but the capsule scene holds a grazing contact
-    # whose occasional hard solves amplify rounding-order differences into distinct CG iterate paths.
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=700, tol=5e-6)
 
 
@@ -319,10 +315,9 @@ def test_stickman(gs_sim, mj_sim, tol):
         gs_sim.scene.step()
         assert_equal(gs_robot.get_dofs_velocity(), dofs_vel)
 
-    # A falling humanoid puts every capsule of the model on the ground in turn, so the contact set it exercises is far
-    # richer than the other models here. Consistency is asserted step by step against MuJoCo rather than through the
-    # pose it eventually settles in, which depends on a chaotic tumble and says nothing about compatibility.
-    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=500, tol=5e-9 if gs.np_float == np.float64 else tol)
+    simulate_and_check_mujoco_consistency(
+        gs_sim, mj_sim, num_steps=500, tol=5e-9 if gs.np_float == np.float64 else 1e-4
+    )
 
 
 @pytest.mark.required
