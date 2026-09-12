@@ -41,14 +41,17 @@ def get_triangle_vertices(i_f: int, i_b: int, dyn_state: array_class.DynState, d
 def bvh_ray_cast(
     i_t: int,
     i_b: int,
+    i_s: int,  # sensor index selecting the link_excluded row
     ray_start: qd.types.vector(3),
     ray_dir: qd.types.vector(3),
     max_range: float,
     bvh_nodes: qd.template(),
     bvh_morton_codes: qd.template(),
+    link_excluded: qd.types.ndarray(ndim=2),  # [n_sensors, n_links] bool - 0 marks an excluded link
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     eps: float,
+    is_link_excluded: qd.template(),  # compile-time: whether any sensor excludes links
 ):
     """
     Cast a ray through a BVH and find the closest intersection.
@@ -56,6 +59,9 @@ def bvh_ray_cast(
     ``i_t`` selects the BVH tree slot (nodes / morton codes) and ``i_b`` the env whose verts back the leaf
     triangles: ``i_t == i_b`` for a per-env BVH, while a grouped static BVH shared by several envs routes ``i_t``
     through ``env_bvh_idx`` (the routed envs have bit-identical verts, so each env reads its own).
+
+    ``i_s`` selects the sensor whose ``link_excluded`` row a leaf is checked against; when ``is_link_excluded``
+    is False (compile time) that check is compiled out, so non-filtering sensors pay no per-leaf cost.
 
     Returns
     -------
@@ -72,6 +78,9 @@ def bvh_ray_cast(
     hit_face = -1
     closest_distance = gs.qd_float(max_range)
     hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
+    # Declared before the compile-time branch: stays 0 (not excluded) when
+    # is_link_excluded is False, keeping that path a no-op.
+    is_excluded = gs.qd_int(0)
 
     axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
 
@@ -105,7 +114,13 @@ def bvh_ray_cast(
                 # Perform ray-triangle intersection
                 hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
 
-                if hit_distance >= 0.0 and hit_distance < closest_distance:
+                if qd.static(is_link_excluded):
+                    # A ray must not hit faces owned by this sensor's excluded
+                    # links (e.g. the robot's own links for a terrain scan).
+                    # mask[row, link] == 0 marks an excluded link.
+                    is_excluded = link_excluded[i_s, dyn_info.geoms.link_idx[dyn_info.faces.geom_idx[i_f]]] == 0
+
+                if is_excluded == 0 and hit_distance >= 0.0 and hit_distance < closest_distance:
                     closest_distance = hit_distance
                     hit_face = i_f
                     hit_normal = triangle_face_normal(v0, v1, v2)
@@ -677,18 +692,24 @@ def kernel_cast_ray(
                 eps,
             )
         else:
+            # Single-ray (viewer) path: no per-sensor context, so i_s=0, an
+            # empty link_excluded mask and is_link_excluded=False (no filtering).
             cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast(
                 i_b,
                 i_b,
+                0,
                 ray_start_world - env_offset,
                 ray_direction_world,
                 max_range,
                 bvh_nodes,
                 bvh_morton_codes,
+                None,
                 dyn_state,
                 dyn_info,
                 eps,
+                False,
             )
+
         if cur_hit_face >= 0:
             result.distance[i_b] = cur_distance
             if qd.static(is_visual):
@@ -780,6 +801,7 @@ def kernel_cast_rays(
     sensor_point_offsets: qd.types.ndarray(ndim=1),  # [n_sensors] - point start index for each sensor
     sensor_point_counts: qd.types.ndarray(ndim=1),  # [n_sensors] - number of points for each sensor
     sensor_return_points: qd.types.ndarray(ndim=1),  # [n_sensors] - True to store hit points, False for distances-only
+    link_excluded: qd.types.ndarray(ndim=2),  # [n_sensors, n_links] bool - 0 marks an excluded link's faces
     output_hits: qd.types.ndarray(ndim=2),  # [total_cache_size, n_env]
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -787,6 +809,7 @@ def kernel_cast_rays(
     is_merge: qd.template(),
     is_last: qd.template(),
     is_env_major: qd.template(),
+    is_link_excluded: qd.template(),
 ):
     """Cast rays against a collision-mesh BVH.
 
@@ -829,14 +852,17 @@ def kernel_cast_rays(
         hit_face, hit_distance, _hit_normal = bvh_ray_cast(
             env_bvh_idx[i_b],
             i_b,
+            i_s,
             ray_start_world,
             ray_direction_world,
             max_ranges[i_s],
             bvh_nodes,
             bvh_morton_codes,
+            link_excluded,
             dyn_state,
             dyn_info,
             eps,
+            is_link_excluded,
         )
 
         i_p_sensor = i_p - sensor_point_offsets[i_s]
