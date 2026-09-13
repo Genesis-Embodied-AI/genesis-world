@@ -827,7 +827,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("broadphase_traversal", [None, gs.broadphase_traversal.ALL_VS_ALL], ids=["sap", "allvsall"])
+@pytest.mark.parametrize("broadphase_traversal", [gs.broadphase_traversal.SAP, gs.broadphase_traversal.ALL_VS_ALL])
 def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversal, multi_free_body_path):
     # An awake body striking a sleeping one must wake it so it responds instead of acting as an immovable obstacle.
     # This needs the broad-phase sort-buffer refresh of awake geoms (so the contact is detected) and the wake-on-contact

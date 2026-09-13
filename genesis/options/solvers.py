@@ -581,8 +581,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         otherwise. Defaults to None.
     broadphase_traversal : gs.broadphase_traversal, optional
         Broadphase traversal strategy. ``SAP`` (sweep-and-prune) or ``ALL_VS_ALL`` (parallel pair iteration). Defaults
-        to ``None`` (auto: ``SAP`` on CPU or when hibernation/heterogeneous entities are enabled, ``ALL_VS_ALL`` on GPU
-        otherwise). See ``gs.broadphase_traversal`` for details on each strategy.
+        to ``None`` (auto: ``SAP`` on CPU or with heterogeneous entities, ``ALL_VS_ALL`` on GPU otherwise). See
+        ``gs.broadphase_traversal`` for details on each strategy.
 
     Warning
     -------

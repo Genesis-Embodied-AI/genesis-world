@@ -374,7 +374,7 @@ def func_compute_mass_matrix(
     ):
         func_mass_mat_force(i_0, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels and not rigid_config.use_hibernation):
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
         BLOCK_DIM = qd.static(32)
         n_entities = dyn_info.entities.n_links.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
@@ -383,7 +383,12 @@ def func_compute_mass_matrix(
             i_eb = i_flat // BLOCK_DIM
             i_e = i_eb % n_entities
             i_b = i_eb // n_entities
-            func_mass_mat_assemble_cooperative(tid, i_e, i_b, dyn_state, dyn_info, rigid_info, BLOCK_DIM)
+            # A hibernated entity keeps the mass matrix of its last awake step, see func_awake_entity
+            is_awake = True
+            if qd.static(rigid_config.use_hibernation):
+                is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+            if is_awake:
+                func_mass_mat_assemble_cooperative(tid, i_e, i_b, dyn_state, dyn_info, rigid_info, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_0, i_b in (
@@ -434,7 +439,7 @@ def func_compute_mass_matrix_masked(
     ):
         func_mass_mat_force(i_0, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
 
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels and not rigid_config.use_hibernation):
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
         BLOCK_DIM = qd.static(32)
         n_entities = dyn_info.entities.n_links.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
@@ -443,7 +448,12 @@ def func_compute_mass_matrix_masked(
             i_eb = i_flat // BLOCK_DIM
             i_e = i_eb % n_entities
             i_b = envs_idx[i_eb // n_entities]
-            func_mass_mat_assemble_cooperative(tid, i_e, i_b, dyn_state, dyn_info, rigid_info, BLOCK_DIM)
+            # A hibernated entity keeps the mass matrix of its last awake step, see func_awake_entity
+            is_awake = True
+            if qd.static(rigid_config.use_hibernation):
+                is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+            if is_awake:
+                func_mass_mat_assemble_cooperative(tid, i_e, i_b, dyn_state, dyn_info, rigid_info, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_0, i_b_ in (
