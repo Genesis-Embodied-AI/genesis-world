@@ -148,11 +148,13 @@ def func_hibernate_island_if_settled(
     if constraint_state.island.is_hibernated[i_island, i_b] == 0:
         link_ref_n = constraint_state.island.link_slices.n[i_island, i_b]
         link_ref_start = constraint_state.island.link_slices.start[i_island, i_b]
+        # The walk stops at the first unsettled link: a moving island costs one read per step
         is_settled = link_ref_n > 0
         for i_link_ref_offset_ in range(link_ref_n):
             i_l = constraint_state.island.link_id[link_ref_start + i_link_ref_offset_, i_b]
             if dyn_state.links.awake_steps[i_l, i_b] < rigid_config.hibernation_min_steps:
                 is_settled = False
+                break
         if is_settled:
             prev_link_idx = constraint_state.island.link_id[link_ref_start + link_ref_n - 1, i_b]
             for i_link_ref_offset_ in range(link_ref_n):

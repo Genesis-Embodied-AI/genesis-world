@@ -328,6 +328,11 @@ def func_forward_kinematics_entity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
+    # The sleep flags are read only in an env holding a sleeper (see n_awake_dofs in array_class.py): one read per
+    # item of the walk is what costs, one read per env is free
+    has_sleepers = False
+    if qd.static(rigid_config.use_hibernation):
+        has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
     BW = qd.static(is_backward)
     W = qd.static(func_write_field_if)
     R = qd.static(func_read_field_if)
@@ -339,7 +344,10 @@ def func_forward_kinematics_entity(
         # A hibernated link's pose is frozen and still valid, so skip recomputing it. All links of a component sleep
         # together, so a hibernated link never has an awake child whose pose depends on it.
         if qd.static(rigid_config.use_hibernation):
-            if dyn_state.links.is_hibernated[i_l, i_b]:
+            is_hibernated = False
+            if has_sleepers:
+                is_hibernated = dyn_state.links.is_hibernated[i_l, i_b]
+            if is_hibernated:
                 continue
 
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
@@ -520,13 +528,21 @@ def func_update_geoms_entity(
     """
     NOTE: this only update geom pose, not its verts and else.
     """
+    # The sleep flags are read only in an env holding a sleeper (see n_awake_dofs in array_class.py): one read per
+    # item of the walk is what costs, one read per env is free
+    has_sleepers = False
+    if qd.static(rigid_config.use_hibernation):
+        has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
 
     for i_g_ in range(dyn_info.entities.n_geoms[i_e]):
         i_g = dyn_info.entities.geom_start[i_e] + i_g_
         if qd.static(rigid_config.use_hibernation):
-            if dyn_state.geoms.is_hibernated[i_g, i_b]:
+            is_hibernated = False
+            if has_sleepers:
+                is_hibernated = dyn_state.geoms.is_hibernated[i_g, i_b]
+            if is_hibernated:
                 continue
         if func_check_index_range(i_g, dyn_info.entities.geom_start[i_e], dyn_info.entities.geom_end[i_e], BW):
             if force_update_fixed_geoms or not dyn_info.geoms.is_fixed[i_g]:
@@ -616,6 +632,11 @@ def func_forward_velocity_entity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
+    # The sleep flags are read only in an env holding a sleeper (see n_awake_dofs in array_class.py): one read per
+    # item of the walk is what costs, one read per env is free
+    has_sleepers = False
+    if qd.static(rigid_config.use_hibernation):
+        has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
     BW = qd.static(is_backward)
     W = qd.static(func_write_field_if)
     R = qd.static(func_read_field_if)
@@ -624,10 +645,13 @@ def func_forward_velocity_entity(
 
     for i_l_ in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
         i_l = gs.qd_int(i_l_)
-        # A hibernated link's velocity is zero and frozen; skip it. Components sleep as a unit, so a hibernated link
+        # A hibernated link's velocity is zero and frozen, so skip it. Components sleep as a unit, so a hibernated link
         # never has an awake child whose velocity propagates from it.
         if qd.static(rigid_config.use_hibernation):
-            if dyn_state.links.is_hibernated[i_l, i_b]:
+            is_hibernated = False
+            if has_sleepers:
+                is_hibernated = dyn_state.links.is_hibernated[i_l, i_b]
+            if is_hibernated:
                 continue
 
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l

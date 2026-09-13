@@ -430,8 +430,8 @@ def func_build_single_island(
 
     The lists are the identity and the island's inertia the trace of the mass matrix. Reserved for scenes off the CPU
     skyline path, which alone reads the tree labels the full build resolves (see _sort_contacts_and_build_islands in
-    solver.py). Under hibernation the island is awake and lists the links of the one tree, which the sleep decision
-    and the wake paths read (see func_hibernate_island_if_settled). An env holding a sleeper takes the full build.
+    solver.py). Under hibernation the island is awake and its link list, written once at build (see
+    ConstraintSolver.__init__), stands. An env holding a sleeper takes the full build.
     """
     n_dofs = constraint_state.island.dof_id.shape[0]
     constraint_state.island.n_islands[i_b] = 1
@@ -447,26 +447,7 @@ def func_build_single_island(
         inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
     constraint_state.island.inertia[0, i_b] = inertia
     if qd.static(rigid_config.use_hibernation):
-        func_list_single_island_links(i_b, constraint_state, rigid_info)
-
-
-@qd.func
-def func_list_single_island_links(
-    i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
-):
-    """List the links of the one tree of a single-island scene as the awake island's links, in index order (see
-    func_build_single_island)."""
-    n_links = rigid_info.links_tree_idx.shape[0]
-    n_island_links = 0
-    for i_l in range(n_links):
-        if rigid_info.links_tree_idx[i_l] == 0:
-            constraint_state.island.links_island_idx[i_l, i_b] = 0
-            constraint_state.island.link_id[n_island_links, i_b] = i_l
-            n_island_links = n_island_links + 1
-    constraint_state.island.link_slices.start[0, i_b] = 0
-    constraint_state.island.link_slices.n[0, i_b] = n_island_links
-    constraint_state.island.link_slices.curr[0, i_b] = n_island_links
-    constraint_state.island.is_hibernated[0, i_b] = 0
+        constraint_state.island.is_hibernated[0, i_b] = 0
 
 
 @qd.func
@@ -488,7 +469,7 @@ def func_build_single_island_coop(
         constraint_state.island.dof_slices.curr[0, i_b] = n_dofs
         constraint_state.island.dof_range_start[0, i_b] = 0
         if qd.static(rigid_config.use_hibernation):
-            func_list_single_island_links(i_b, constraint_state, rigid_info)
+            constraint_state.island.is_hibernated[0, i_b] = 0
     inertia = gs.qd_float(0.0)
     i_d = tid
     while i_d < n_dofs:

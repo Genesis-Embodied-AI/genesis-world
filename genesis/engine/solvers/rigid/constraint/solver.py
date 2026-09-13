@@ -12,7 +12,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
 from genesis.engine.solvers.rigid.abd.misc import func_hibernate_island_if_settled, linear_to_lower_tri
-from genesis.utils.misc import qd_to_torch, indices_to_mask, assign_indexed_tensor
+from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from .island import (
     func_build_islands,
@@ -188,6 +188,23 @@ class ConstraintSolver:
         self.constraint_state.island.links_island_idx.fill(-1)
         if self._solver._use_hibernation:
             self.constraint_state.island.hibernated_next_link.fill(-1)
+            # A single-island scene keeps one island holding the links of its one tree, which the sleep and wake paths
+            # read: the list is written once here, and the partition build leaves it (see func_build_single_island).
+            if self._solver.rigid_config.is_single_island:
+                links_idx = np.flatnonzero(qd_to_numpy(self._solver.rigid_info.links_tree_idx) == 0)
+                link_id = qd_to_numpy(self.constraint_state.island.link_id)
+                link_id[: len(links_idx)] = links_idx[:, None]
+                self.constraint_state.island.link_id.from_numpy(link_id)
+                links_island_idx = qd_to_numpy(self.constraint_state.island.links_island_idx)
+                links_island_idx[links_idx] = 0
+                self.constraint_state.island.links_island_idx.from_numpy(links_island_idx)
+                for link_slice in (
+                    self.constraint_state.island.link_slices.n,
+                    self.constraint_state.island.link_slices.curr,
+                ):
+                    link_slice_np = qd_to_numpy(link_slice)
+                    link_slice_np[0] = len(links_idx)
+                    link_slice.from_numpy(link_slice_np)
 
     @property
     def data(self) -> Iterator[array_class.DataItem]:
