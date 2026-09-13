@@ -56,6 +56,9 @@ def build_mujoco_sim(
     else:
         model.opt.cone = mujoco.mjtCone.mjCONE_PYRAMIDAL
     model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ISLAND
+    # A dense constraint jacobian, whatever the dof count, so its rows compare column by column with Genesis's (see
+    # _pair_constraint_rows in mujoco_parity.py)
+    model.opt.jacobian = mujoco.mjtJacobian.mjJAC_DENSE
     # FIXME: Genesis gives every contact at least the sliding-friction basis, so a geom asking for a frictionless
     # contact through 'condim' is not honoured. Raising those to 3 keeps the constraint sets comparable, since MuJoCo
     # would otherwise emit a single normal row where Genesis emits the whole basis. Geoms asking for torsional or

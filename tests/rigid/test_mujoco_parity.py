@@ -315,9 +315,7 @@ def test_stickman(gs_sim, mj_sim, tol):
         gs_sim.scene.step()
         assert_equal(gs_robot.get_dofs_velocity(), dofs_vel)
 
-    simulate_and_check_mujoco_consistency(
-        gs_sim, mj_sim, num_steps=500, tol=5e-9 if gs.np_float == np.float64 else 1e-4
-    )
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=500, tol=5e-9 if gs.np_float == np.float64 else tol)
 
 
 @pytest.mark.required
