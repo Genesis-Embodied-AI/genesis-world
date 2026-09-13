@@ -221,12 +221,9 @@ class RigidInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     # *_bw: Cache for backward pass
+    # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes; an env whose
+    # count is zero has every body asleep and skips the passes that gate on it whole.
     n_awake_dofs: qd.Tensor = of_kind(DataKind.STATE)
-    awake_dofs: qd.Tensor = of_kind(DataKind.STATE)
-    n_awake_entities: qd.Tensor = of_kind(DataKind.STATE)
-    awake_entities: qd.Tensor = of_kind(DataKind.STATE)
-    n_awake_links: qd.Tensor = of_kind(DataKind.STATE)
-    awake_links: qd.Tensor = of_kind(DataKind.STATE)
     qpos0: qd.Tensor = of_kind(DataKind.INFO)
     qpos: qd.Tensor = of_kind(DataKind.STATE)
     qpos_next: qd.Tensor = of_kind(DataKind.SCRATCH)
@@ -321,11 +318,6 @@ def get_rigid_info(solver, kinematic_only):
             gravity=V_VEC(3, dtype=gs.qd_float, shape=()),
             meaninertia=V(dtype=gs.qd_float, shape=()),
             n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-            n_awake_entities=V(dtype=gs.qd_int, shape=(_B,)),
-            n_awake_links=V(dtype=gs.qd_int, shape=(_B,)),
-            awake_dofs=V(dtype=gs.qd_int, shape=(solver.n_dofs_, _B)),
-            awake_entities=V(dtype=gs.qd_int, shape=(solver.n_entities_, _B)),
-            awake_links=V(dtype=gs.qd_int, shape=(solver.n_links_, _B)),
             qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
@@ -369,11 +361,6 @@ def get_rigid_info(solver, kinematic_only):
         gravity=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
         meaninertia=V(dtype=gs.qd_float, shape=(_B,)),
         n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-        n_awake_entities=V(dtype=gs.qd_int, shape=(_B,)),
-        n_awake_links=V(dtype=gs.qd_int, shape=(_B,)),
-        awake_dofs=V(dtype=gs.qd_int, shape=(solver.n_dofs_, _B)),
-        awake_entities=V(dtype=gs.qd_int, shape=(solver.n_entities_, _B)),
-        awake_links=V(dtype=gs.qd_int, shape=(solver.n_links_, _B)),
         qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
         qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
         qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),

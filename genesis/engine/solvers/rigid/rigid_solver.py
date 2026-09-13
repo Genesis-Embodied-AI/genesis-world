@@ -79,7 +79,6 @@ from .abd.misc import (
     kernel_wakeup_coupled_links,
 )
 from .abd.forward_kinematics import (
-    func_aggregate_awake_entities,
     func_COM_links,
     func_forward_kinematics_batch,
     func_forward_kinematics_entity,
@@ -771,11 +770,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.kinematics_scratch = self.data_manager.kinematics_scratch
         if self._use_hibernation:
             self.n_awake_dofs = self.rigid_info.n_awake_dofs
-            self.awake_dofs = self.rigid_info.awake_dofs
-            self.n_awake_links = self.rigid_info.n_awake_links
-            self.awake_links = self.rigid_info.awake_links
-            self.n_awake_entities = self.rigid_info.n_awake_entities
-            self.awake_entities = self.rigid_info.awake_entities
         if self._requires_grad:
             self.dyn_state_adjoint_cache = self.data_manager.dyn_state_adjoint_cache
 
@@ -1791,7 +1785,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             cfrc_ang_dst = qd_to_torch(self.dyn_state.links.cfrc_applied_ang, transpose=True, copy=False)
             fric_dst = qd_to_torch(self.dyn_state.geoms.friction_ratio, transpose=True, copy=False)
             # Setting the state is a discontinuity: wake every body in the affected envs (a body left hibernated would
-            # stay frozen), restoring the flags and the compact awake lists alongside the other state buffers.
+            # stay frozen), restoring the flags and the awake-dof count alongside the other state buffers.
             if self._use_hibernation:
                 links_hibernated_dst = qd_to_torch(self.dyn_state.links.is_hibernated, transpose=True, copy=False)
                 awake_steps_dst = qd_to_torch(self.dyn_state.links.awake_steps, transpose=True, copy=False)
@@ -1804,17 +1798,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 islands_next_link_dst = qd_to_torch(
                     self.constraint_solver.constraint_state.island.hibernated_next_link, transpose=True, copy=False
                 )
-                awake_links_dst = qd_to_torch(self.rigid_info.awake_links, transpose=True, copy=False)
-                awake_dofs_dst = qd_to_torch(self.rigid_info.awake_dofs, transpose=True, copy=False)
-                awake_entities_dst = qd_to_torch(self.rigid_info.awake_entities, transpose=True, copy=False)
-                n_awake_links_dst = qd_to_torch(self.rigid_info.n_awake_links, copy=False)
                 n_awake_dofs_dst = qd_to_torch(self.rigid_info.n_awake_dofs, copy=False)
-                n_awake_entities_dst = qd_to_torch(self.rigid_info.n_awake_entities, copy=False)
-                # Fill to the padded buffer capacity but keep n_awake at the real count below, so a scene with no
-                # DOFs writes its padded slot yet reports zero awake DOFs.
-                awake_links_src = torch.arange(self.n_links_, device=gs.device, dtype=gs.tc_int)
-                awake_dofs_src = torch.arange(self.n_dofs_, device=gs.device, dtype=gs.tc_int)
-                awake_entities_src = torch.arange(self.n_entities_, device=gs.device, dtype=gs.tc_int)
 
             if envs_idx is not None and not isinstance(envs_idx, torch.Tensor):
                 (envs_idx,) = indices_to_mask(envs_idx)
@@ -1846,12 +1830,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     entities_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     islands_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     islands_next_link_dst.masked_fill_(envs_mask[:, None], -1)
-                    torch.where(envs_mask[:, None], awake_links_src, awake_links_dst, out=awake_links_dst)
-                    torch.where(envs_mask[:, None], awake_dofs_src, awake_dofs_dst, out=awake_dofs_dst)
-                    torch.where(envs_mask[:, None], awake_entities_src, awake_entities_dst, out=awake_entities_dst)
-                    n_awake_links_dst.masked_fill_(envs_mask, self.n_links)
                     n_awake_dofs_dst.masked_fill_(envs_mask, self.n_dofs)
-                    n_awake_entities_dst.masked_fill_(envs_mask, self.n_entities)
             else:
                 if self.n_qs:
                     errno[envs_idx] = 0
@@ -1874,12 +1853,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     entities_hibernated_dst[envs_idx] = 0
                     islands_hibernated_dst[envs_idx] = 0
                     islands_next_link_dst[envs_idx] = -1
-                    awake_links_dst[envs_idx] = awake_links_src
-                    awake_dofs_dst[envs_idx] = awake_dofs_src
-                    awake_entities_dst[envs_idx] = awake_entities_src
-                    n_awake_links_dst[envs_idx] = self.n_links
                     n_awake_dofs_dst[envs_idx] = self.n_dofs
-                    n_awake_entities_dst[envs_idx] = self.n_entities
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -3522,4 +3496,3 @@ def kernel_step_2(
         func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, errno
         )
-        func_aggregate_awake_entities(dyn_state, dyn_info, rigid_info, rigid_config)

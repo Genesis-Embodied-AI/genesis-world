@@ -479,14 +479,11 @@ def func_forward_kinematics_batch(
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_e_ in (
-        range(rigid_info.n_awake_entities[i_b])
-        if qd.static(rigid_config.use_hibernation)
-        else range(dyn_info.entities.n_links.shape[0])
-    ):
-        if func_check_index_range(i_e_, 0, rigid_info.n_awake_entities[i_b], rigid_config.use_hibernation):
-            i_e = rigid_info.awake_entities[i_e_, i_b] if qd.static(rigid_config.use_hibernation) else i_e_
-
+    for i_e in range(dyn_info.entities.n_links.shape[0]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake:
             func_forward_kinematics_entity(
                 i_e, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
             )
@@ -558,14 +555,11 @@ def func_update_geoms_batch(
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_e_ in (
-        range(rigid_info.n_awake_entities[i_b])
-        if qd.static(rigid_config.use_hibernation)
-        else range(dyn_info.entities.n_links.shape[0])
-    ):
-        if func_check_index_range(i_e_, 0, rigid_info.n_awake_entities[i_b], rigid_config.use_hibernation):
-            i_e = rigid_info.awake_entities[i_e_, i_b] if qd.static(rigid_config.use_hibernation) else i_e_
-
+    for i_e in range(dyn_info.entities.n_links.shape[0]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake:
             func_update_geoms_entity(
                 i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
             )
@@ -735,14 +729,11 @@ def func_forward_velocity_batch(
     BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_e_ in (
-        range(rigid_info.n_awake_entities[i_b])
-        if qd.static(rigid_config.use_hibernation)
-        else range(dyn_info.entities.n_links.shape[0])
-    ):
-        if func_check_index_range(i_e_, 0, rigid_info.n_awake_entities[i_b], rigid_config.use_hibernation):
-            i_e = rigid_info.awake_entities[i_e_, i_b] if qd.static(rigid_config.use_hibernation) else i_e_
-
+    for i_e in range(dyn_info.entities.n_links.shape[0]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake:
             func_forward_velocity_entity(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
@@ -960,77 +951,37 @@ def func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_
                         link_ref = link_ref_start + i_link_ref_offset_
                         link_idx = constraint_state.island.link_id[link_ref, i_b]
 
-                        func_hibernate_link_and_zero_dof_velocities(link_idx, i_b, dyn_state, dyn_info, rigid_config)
+                        func_hibernate_link_and_zero_dof_velocities(
+                            link_idx, i_b, dyn_state, dyn_info, rigid_info, rigid_config
+                        )
 
                         # store links of the hibernated island by daisy chaining them
                         constraint_state.island.hibernated_next_link[prev_link_idx, i_b] = link_idx
                         prev_link_idx = link_idx
 
-
-@qd.func
-def func_aggregate_awake_entities(
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_entities = dyn_state.entities.is_hibernated.shape[0]
-    n_links = dyn_state.links.is_hibernated.shape[0]
-    _B = dyn_state.entities.is_hibernated.shape[1]
-
-    # Recompute each entity's hibernation flag from its links: with per-component islands a single entity's free bodies
-    # can sleep independently, so the entity is hibernated only when every one of its movable links is. Fixed (welded
-    # to the world) links never hibernate, so they are ignored - otherwise a ground plane living in a multi-free-body
-    # entity's worldbody would keep that entity awake forever and force its whole forward-kinematics pass every step.
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_e, i_b in qd.ndrange(n_entities, _B):
-        are_all_links_hibernated = True
-        for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-            link_idx = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if not dyn_info.links.is_fixed[link_idx] and not dyn_state.links.is_hibernated[i_l, i_b]:
-                are_all_links_hibernated = False
-                break
-        dyn_state.entities.is_hibernated[i_e, i_b] = are_all_links_hibernated
-
-    # Reset counts once per batch (not per entity!)
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b in range(_B):
-        rigid_info.n_awake_entities[i_b] = 0
-        rigid_info.n_awake_links[i_b] = 0
-        rigid_info.n_awake_dofs[i_b] = 0
-
-    # Awake links and their DOFs are gathered per-link, so a partially-awake entity contributes only its awake
-    # components (the forward-dynamics passes iterate these lists and skip the sleeping ones).
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_l, i_b in qd.ndrange(n_links, _B):
-        if dyn_state.links.is_hibernated[i_l, i_b]:
-            continue
-
-        next_awake_link_idx = qd.atomic_add(rigid_info.n_awake_links[i_b], 1)
-        rigid_info.awake_links[next_awake_link_idx, i_b] = i_l
-
-        link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        n_dofs = dyn_info.links.n_dofs[link_I]
-        if n_dofs > 0:
-            link_dofs_base_idx = dyn_info.links.dof_start[link_I]
-            awake_dofs_base_idx = qd.atomic_add(rigid_info.n_awake_dofs[i_b], n_dofs)
-            for i_d_ in range(n_dofs):
-                rigid_info.awake_dofs[awake_dofs_base_idx + i_d_, i_b] = link_dofs_base_idx + i_d_
-
-    # Awake entities (the entity-level forward-kinematics passes traverse the whole entity tree, so an entity is awake
-    # whenever any of its links is - i.e. it is not fully hibernated).
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_e, i_b in qd.ndrange(n_entities, _B):
-        if dyn_state.entities.is_hibernated[i_e, i_b] or dyn_info.entities.n_dofs[i_e] == 0:
-            continue
-
-        next_awake_entity_idx = qd.atomic_add(rigid_info.n_awake_entities[i_b], 1)
-        rigid_info.awake_entities[next_awake_entity_idx, i_b] = i_e
+                    # An entity is hibernated once every one of its movable links is: the entity-level passes then skip
+                    # it whole. Fixed links never hibernate and are left out, otherwise a ground plane held by an
+                    # entity of several free bodies would keep that entity awake forever.
+                    for i_link_ref_offset_ in range(link_ref_n):
+                        link_idx = constraint_state.island.link_id[link_ref_start + i_link_ref_offset_, i_b]
+                        link_I = [link_idx, i_b] if qd.static(rigid_config.batch_links_info) else link_idx
+                        i_e = dyn_info.links.entity_idx[link_I]
+                        are_all_links_hibernated = True
+                        for j_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
+                            J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
+                            if not dyn_info.links.is_fixed[J_l] and not dyn_state.links.is_hibernated[j_l, i_b]:
+                                are_all_links_hibernated = False
+                        dyn_state.entities.is_hibernated[i_e, i_b] = are_all_links_hibernated
 
 
 @qd.func
 def func_hibernate_link_and_zero_dof_velocities(
-    i_l: int, i_b: int, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
+    i_l: int,
+    i_b: int,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Mark a link, its DOFs, and its geoms as hibernated, and zero out the DOF and link velocities and accelerations.
 
@@ -1040,11 +991,16 @@ def func_hibernate_link_and_zero_dof_velocities(
     what every velocity getter reports for as long as the link sleeps, and a restored state recomputes it from the
     zeroed dof velocities.
     """
+    link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    # An island falling asleep may hold links already asleep (a sleeper an awake body settled against); the awake-dof
+    # count of the env (see n_awake_dofs in array_class.py) drops only for the links that were awake. The islands of one
+    # env sleep on its own thread, so the count needs no atomic here.
+    if not dyn_state.links.is_hibernated[i_l, i_b]:
+        rigid_info.n_awake_dofs[i_b] = rigid_info.n_awake_dofs[i_b] - dyn_info.links.n_dofs[link_I]
     dyn_state.links.is_hibernated[i_l, i_b] = True
     dyn_state.links.cd_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
     dyn_state.links.cd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
-    link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     for i_d in range(dyn_info.links.dof_start[link_I], dyn_info.links.dof_end[link_I]):
         dyn_state.dofs.is_hibernated[i_d, i_b] = True
         dyn_state.dofs.vel[i_d, i_b] = 0.0
@@ -1134,24 +1090,22 @@ def func_update_cartesian_space_batch(
 
     # These loops are considered inner loops
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_e_ in (
-        range(rigid_info.n_awake_entities[i_b])
-        if qd.static(rigid_config.use_hibernation)
-        else range(dyn_info.entities.n_links.shape[0])
-    ):
-        i_e = rigid_info.awake_entities[i_e_, i_b] if qd.static(rigid_config.use_hibernation) else i_e_
-        func_forward_kinematics_entity(i_e, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_e in range(dyn_info.entities.n_links.shape[0]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake:
+            func_forward_kinematics_entity(i_e, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_COM_links(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_e_ in (
-        range(rigid_info.n_awake_entities[i_b])
-        if qd.static(rigid_config.use_hibernation)
-        else range(dyn_info.entities.n_links.shape[0])
-    ):
-        i_e = rigid_info.awake_entities[i_e_, i_b] if qd.static(rigid_config.use_hibernation) else i_e_
-        func_update_geoms_entity(
-            i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
-        )
+    for i_e in range(dyn_info.entities.n_links.shape[0]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake:
+            func_update_geoms_entity(
+                i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+            )
 
 
 @qd.func

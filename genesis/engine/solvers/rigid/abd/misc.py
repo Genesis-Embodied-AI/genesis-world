@@ -42,46 +42,37 @@ def func_wakeup_island(
     rigid_config: qd.template(),
 ):
     # Wake a hibernated component-island as a unit: every link in the island (and its DOFs and geoms) is revived and
-    # appended to the awake lists, and the owning entities' flags are cleared. Waking the whole island clears its
-    # daisy-chain links, which would otherwise keep re-connecting the woken links to their previous island at the next
-    # partition build.
+    # the owning entities' flags are cleared. Waking the whole island clears its daisy-chain links, which would
+    # otherwise keep re-connecting the woken links to their previous island at the next partition build.
     if i_island >= 0:
         for li in range(constraint_state.island.link_slices.n[i_island, i_b]):
             link_ref = constraint_state.island.link_slices.start[i_island, i_b] + li
             i_l = constraint_state.island.link_id[link_ref, i_b]
 
             # Atomically claim the link by clearing its hibernation flag and reading the previous value. Only the
-            # caller that observes the True->False transition appends it to the awake lists. A plain read-check-set
-            # would let several wake threads targeting the same link (redundant grid threads a backend may launch, or
-            # several triggers in one step) all pass the guard and append the link/DOFs once each, corrupting counts.
+            # caller that observes the True->False transition counts its dofs awake. A plain read-check-set would let
+            # several wake threads targeting the same link (redundant grid threads a backend may launch, or several
+            # triggers in one step) all pass the guard and count the dofs once each, corrupting the count.
             was_hibernated = qd.atomic_exchange(dyn_state.links.is_hibernated[i_l, i_b], 0)
 
             if was_hibernated:
                 constraint_state.island.hibernated_next_link[i_l, i_b] = -1
                 dyn_state.links.awake_steps[i_l, i_b] = 0
 
-                n_awake_links = qd.atomic_add(rigid_info.n_awake_links[i_b], 1)
-                rigid_info.awake_links[n_awake_links, i_b] = i_l
-
                 link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
                 n_dofs = dyn_info.links.n_dofs[link_I]
                 if n_dofs > 0:
                     base_dof_idx = dyn_info.links.dof_start[link_I]
-                    base_awake_dof_idx = qd.atomic_add(rigid_info.n_awake_dofs[i_b], n_dofs)
+                    # Several threads may wake links of one env at once, hence the atomic on the env's count
+                    qd.atomic_add(rigid_info.n_awake_dofs[i_b], n_dofs)
                     for i in range(n_dofs):
-                        i_d = base_dof_idx + i
-                        dyn_state.dofs.is_hibernated[i_d, i_b] = False
-                        rigid_info.awake_dofs[base_awake_dof_idx + i, i_b] = i_d
+                        dyn_state.dofs.is_hibernated[base_dof_idx + i, i_b] = False
 
                 for i_g in range(dyn_info.links.geom_start[link_I], dyn_info.links.geom_end[link_I]):
                     dyn_state.geoms.is_hibernated[i_g, i_b] = False
 
-                # The entity owning this link now has an awake link; claim it for awake_entities exactly once.
-                i_e = dyn_info.links.entity_idx[link_I]
-                was_entity_hibernated = qd.atomic_exchange(dyn_state.entities.is_hibernated[i_e, i_b], 0)
-                if was_entity_hibernated:
-                    n_awake_entities = qd.atomic_add(rigid_info.n_awake_entities[i_b], 1)
-                    rigid_info.awake_entities[n_awake_entities, i_b] = i_e
+                # The entity owning this link now has an awake link
+                dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
 
 
 # --------------------------------------------------------------------------------------
@@ -140,7 +131,6 @@ def kernel_init_dof_fields(
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_d, i_b in qd.ndrange(n_dofs, _B):
             dyn_state.dofs.is_hibernated[i_d, i_b] = False
-            rigid_info.awake_dofs[i_d, i_b] = i_d
 
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
@@ -156,10 +146,10 @@ def kernel_reset_hibernation(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    # Wake every body in the given envs and rebuild the compact awake lists. A scene whose state is set (reset or
-    # set_state) must resume fully awake: the restored positions and velocities are a discontinuity, and any body left
-    # hibernated would stay frozen and never be re-simulated. DOFs are gathered per link (so a DOF-less scene reports
-    # zero awake DOFs even though its DOF buffers are padded to at least one slot).
+    # Wake every body in the given envs. A scene whose state is set (reset or set_state) must resume fully awake: the
+    # restored positions and velocities are a discontinuity, and any body left hibernated would stay frozen and never
+    # be re-simulated. DOFs are counted per link (so a DOF-less scene reports zero awake DOFs even though its DOF
+    # buffers are padded to at least one slot).
     n_links = dyn_state.links.is_hibernated.shape[0]
     n_geoms = dyn_state.geoms.is_hibernated.shape[0]
     n_entities = dyn_state.entities.is_hibernated.shape[0]
@@ -173,21 +163,15 @@ def kernel_reset_hibernation(
             dyn_state.links.is_hibernated[i_l, i_b] = False
             dyn_state.links.awake_steps[i_l, i_b] = 0
             constraint_state.island.hibernated_next_link[i_l, i_b] = -1
-            rigid_info.awake_links[i_l, i_b] = i_l
             link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             for i_d_ in range(dyn_info.links.n_dofs[link_I]):
-                i_d = dyn_info.links.dof_start[link_I] + i_d_
-                dyn_state.dofs.is_hibernated[i_d, i_b] = False
-                rigid_info.awake_dofs[n_awake_dofs, i_b] = i_d
+                dyn_state.dofs.is_hibernated[dyn_info.links.dof_start[link_I] + i_d_, i_b] = False
                 n_awake_dofs = n_awake_dofs + 1
-        rigid_info.n_awake_links[i_b] = n_links
         rigid_info.n_awake_dofs[i_b] = n_awake_dofs
         for i_g in range(n_geoms):
             dyn_state.geoms.is_hibernated[i_g, i_b] = False
         for i_e in range(n_entities):
             dyn_state.entities.is_hibernated[i_e, i_b] = False
-            rigid_info.awake_entities[i_e, i_b] = i_e
-        rigid_info.n_awake_entities[i_b] = n_entities
         for i_island in range(max_islands):
             constraint_state.island.is_hibernated[i_island, i_b] = 0
 
@@ -258,11 +242,6 @@ def kernel_init_link_fields(
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_l, i_b in qd.ndrange(n_links, _B):
             dyn_state.links.is_hibernated[i_l, i_b] = False
-            rigid_info.awake_links[i_l, i_b] = i_l
-
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_b in range(_B):
-            rigid_info.n_awake_links[i_b] = n_links
 
 
 @qd.kernel(fastcache=True)
@@ -654,11 +633,6 @@ def kernel_init_entity_fields(
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_e, i_b in qd.ndrange(n_entities, _B):
             dyn_state.entities.is_hibernated[i_e, i_b] = False
-            rigid_info.awake_entities[i_e, i_b] = i_e
-
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_b in range(_B):
-            rigid_info.n_awake_entities[i_b] = n_entities
 
 
 @qd.kernel(fastcache=True)
@@ -832,14 +806,11 @@ def func_clear_external_force(
     n_links = dyn_state.links.pos.shape[0]
     _B = dyn_state.links.pos.shape[1]
 
+    # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_0, i_b in qd.ndrange(1, _B) if qd.static(rigid_config.use_hibernation) else qd.ndrange(n_links, _B):
-        for i_1 in (
-            range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-            dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-            dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    for i_l, i_b in qd.ndrange(n_links, _B):
+        dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 # --------------------------------------------------------------------------------------
