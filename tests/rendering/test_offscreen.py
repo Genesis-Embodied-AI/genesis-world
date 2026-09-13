@@ -14,6 +14,7 @@ from genesis.utils import set_random_seed
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array
 from genesis.utils.video_encoder import VideoEncoder
+from genesis.vis.rasterizer_context import HIBERNATION_TINT_WEIGHT
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match, rgb_array_to_png_bytes
@@ -1823,3 +1824,136 @@ def test_transparent_surfaces_show_what_lies_behind_them(renderer, show_viewer):
     patch_blue_across = centre_patch(PARKED, (-0.6, 0.0, 0.5))
     patch_pair_across = centre_patch((0.6, 0.0, 0.5), (-0.6, 0.0, 0.5))
     assert_allclose(patch_pair_across, patch_blue_across + (1.0 - ALPHA) * patch_red_across, atol=1.0)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_visualize_islands_and_hibernation(n_envs, renderer, show_viewer):
+    RES = (160, 120)
+    BOX_COLOR = (0.85, 0.45, 0.2, 1.0)
+    # The stacked box is the same color at half the brightness, telling the geoms of one island apart by brightness
+    DARK_BOX_COLOR = (0.425, 0.225, 0.1, 1.0)
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_hibernation=True,
+        ),
+        vis_options=gs.options.VisOptions(
+            visualize_islands=True,
+            visualize_hibernation=True,
+            # Ambient light alone shades every face of a link with its exact color, which is read back pixel by pixel
+            ambient_light=(1.0, 1.0, 1.0),
+            lights=[],
+            split_envs=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -2.4, 1.4),
+            camera_lookat=(0.3, 0.0, 0.15),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    # The ground is a fixed box, which belongs to no island and stays drawn as it is. Software rendering backends
+    # misrasterize geometry reaching outside the frustum, so it is sized to stay in frame.
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(2.0, 1.0, 0.02),
+            pos=(0.3, 0.0, -0.01),
+            fixed=True,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.6, 0.85, 0.55, 1.0),
+        ),
+    )
+    # Two boxes stacked on the ground, one island through their contact, and a third one resting on its own
+    boxes = [
+        scene.add_entity(
+            gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+                pos=pos,
+            ),
+            surface=gs.surfaces.Default(
+                color=color,
+            ),
+        )
+        for pos, color in (
+            ((0.0, 0.0, 0.1), BOX_COLOR),
+            ((0.0, 0.0, 0.3), DARK_BOX_COLOR),
+            ((0.7, 0.0, 0.1), BOX_COLOR),
+        )
+    ]
+    cam = scene.add_camera(
+        res=RES,
+        pos=(0.3, -2.4, 1.4),
+        lookat=(0.3, 0.0, 0.15),
+        fov=45,
+    )
+    scene.build(n_envs=n_envs)
+    solver = scene.rigid_solver
+    context = scene.visualizer.context
+    # In the second environment the third box tops the stack, so every box shares one island there
+    if n_envs > 0:
+        boxes[2].set_pos((0.0, 0.0, 0.5), envs_idx=1)
+    links_idxc = {key[1]: idxc for idxc, key in scene.segmentation_idx_dict.items() if idxc > 0}
+
+    def links_color():
+        rgb, _, seg, _ = cam.render(rgb=True, segmentation=True, force_render=True)
+        rgb = tensor_to_array(rgb).reshape((max(n_envs, 1), RES[1], RES[0], 3))
+        seg = tensor_to_array(seg).reshape((max(n_envs, 1), RES[1], RES[0]))
+        # The median over the pixels of a link leaves its antialiased edges out
+        return np.array(
+            [
+                [np.median(rgb_env[seg_env == links_idxc[link.idx]], axis=0) for link in solver.links]
+                for rgb_env, seg_env in zip(rgb, seg)
+            ]
+        )
+
+    for _ in range(3):
+        scene.step()
+    islands_idx = np.atleast_2d(tensor_to_array(solver.get_links_island_idx()))
+    assert_equal(islands_idx[:, 0], -1)
+    assert_equal(islands_idx[:, 1], islands_idx[:, 2])
+    assert islands_idx[0, 3] != islands_idx[0, 1]
+    if n_envs > 0:
+        assert islands_idx[1, 3] == islands_idx[1, 1]
+
+    # Awake, the links of one island share one hue, each at the brightness of its own material, and the islands of one
+    # environment have distinct hues
+    colors_awake = links_color()
+    # Pixels encode the shaded color through a gamma that is no exact inverse of the sRGB decode of the material, so a
+    # brightness scaling shifts their chromaticity by a few percent
+    chroma_awake = colors_awake / colors_awake.sum(axis=-1, keepdims=True)
+    assert_allclose(chroma_awake[:, 1], chroma_awake[:, 2], atol=0.04)
+    assert_allclose(colors_awake[:, 2].sum(axis=-1) / colors_awake[:, 1].sum(axis=-1), 0.5, atol=0.05)
+    assert np.abs(chroma_awake[0, 3] - chroma_awake[0, 1]).max() > 0.2
+    if n_envs > 0:
+        assert_allclose(colors_awake[1, 3], colors_awake[1, 1], atol=1.0)
+
+    # Asleep, the links keep the hue of their island, faded toward grey
+    for _ in range(50):
+        scene.step()
+        if tensor_to_array(solver.get_links_is_hibernated())[..., 1:].all():
+            break
+    assert tensor_to_array(solver.get_links_is_hibernated())[..., 1:].all()
+    colors_asleep = links_color()
+
+    # Without the islands, a sleeping link is its material faded toward the same grey, and without hibernation either
+    # the links are drawn as they are, the ground throughout
+    context.off_islands()
+    colors_asleep_plain = links_color()
+    context.off_hibernation()
+    colors_plain = links_color()
+    assert_allclose(colors_plain[:, (1, 3)], 255.0 * np.array(BOX_COLOR[:3]), atol=4.0)
+    assert_allclose(colors_plain[:, 2].sum(axis=-1) / colors_plain[:, 1].sum(axis=-1), 0.5, atol=0.05)
+    for colors in (colors_awake, colors_asleep, colors_asleep_plain):
+        assert_equal(colors[:, 0], colors_plain[:, 0])
+    # The grey a sleeping link fades toward is read off the fade of its material, then the fade of its island color
+    # must land on the same grey
+    grey = (colors_asleep_plain - (1.0 - HIBERNATION_TINT_WEIGHT) * colors_plain) / HIBERNATION_TINT_WEIGHT
+    faded_awake = (1.0 - HIBERNATION_TINT_WEIGHT) * colors_awake + HIBERNATION_TINT_WEIGHT * grey
+    assert_allclose(colors_asleep[:, 1:], faded_awake[:, 1:], atol=6.0)
+    assert (grey[:, 1:].std(axis=-1) < 6.0).all()
+
+    # The islands alone color the sleeping links as when they were awake
+    context.on_islands()
+    assert_allclose(links_color(), colors_awake, atol=1.0)

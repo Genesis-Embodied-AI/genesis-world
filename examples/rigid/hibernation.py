@@ -9,8 +9,9 @@ Two scenes exercise the same pipeline:
   wave or already fallen behind it. Only the handful of dominoes in the travelling front stay awake.
 
 While a body is awake the full constraint solve runs for its island; once it hibernates that island is skipped by
-forward kinematics, forward dynamics, integration, and the constraint solve. The step rate is streamed to a live plot
-and, with --record, both the scene and the plot are saved to video.
+forward kinematics, forward dynamics, integration, and the constraint solve. The viewer colors every body by island and
+fades the sleeping ones, with a GUI to toggle both and to grab a body with the mouse, which wakes it. The step rate is
+streamed to a live plot and, with --record, both the scene and the plot are saved to video.
 """
 
 import argparse
@@ -18,7 +19,6 @@ import os
 import time
 
 import genesis as gs
-from genesis.utils.misc import qd_to_numpy
 from genesis.utils.tools import FPSTracker
 
 
@@ -47,6 +47,13 @@ def main():
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=3000,
             use_hibernation=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            enable_gui=True,
+        ),
+        vis_options=gs.options.VisOptions(
+            visualize_islands=True,
+            visualize_hibernation=True,
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
@@ -122,6 +129,8 @@ def main():
     )
 
     scene.build(n_envs=1)
+    if args.vis:
+        scene.viewer.set_camera_pose(pos=camera_pos, lookat=camera_lookat)
 
     n_bodies = sum(1 for link in scene.rigid_solver.links if link.n_dofs > 0)
     n_awake[0] = n_bodies
@@ -143,9 +152,10 @@ def main():
         if measured is not None:
             step_rate[0] = measured
         # Read the awake count outside the timed region so it does not enter the reported step rate.
-        n_awake[0] = n_bodies - int(qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated, transpose=True).sum())
+        n_awake[0] = n_bodies - int(scene.rigid_solver.get_links_is_hibernated().sum())
     if args.record:
         camera.stop_recording()
+    scene.stop_recording()
 
     gs.logger.info(
         f"{n_bodies - n_awake[0]}/{n_bodies} bodies hibernated; final step rate {step_rate[0]:,.0f} steps/s."

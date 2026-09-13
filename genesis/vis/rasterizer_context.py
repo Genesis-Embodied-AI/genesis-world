@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 
 # Magnitude beyond which a transform entry marks a pose that blew up, which the drawn node then stops following
 POSE_MAX_ABS = 1e20
+# The island coloring keys a color on a link index (see 'update_rigid_tints'): the hue steps by the golden ratio
+# conjugate from one index to the next, so the close indices of the links of one entity get colors far apart
+ISLANDS_HUE_STEP = 0.618034
+# A hibernated link is drawn blended toward this grey by this weight, be it its island color or its material, so a
+# sleeping body reads as faded and dimmed while staying identifiable
+HIBERNATION_TINT_GREY = (0.35, 0.35, 0.38)
+HIBERNATION_TINT_WEIGHT = 0.7
 
 
 class RigidNodeBatch(NamedTuple):
@@ -28,6 +35,7 @@ class RigidNodeBatch(NamedTuple):
     is_visual: bool
     geoms_idx: list[int]
     geoms_uid: list[int]
+    links_idx: list[int]
     is_plane: list[bool]
 
 
@@ -61,30 +69,9 @@ class SegmentationColorMap:
         rng = np.random.default_rng(seed=self.seed)
         rng.shuffle(hues)
 
-        # Fixed saturation/value
-        s, v = 0.8, 0.95
-
-        # HSV to RGB conversion
-        rgb = np.zeros((num_keys, 3), dtype=np.float32)
-        i = (hues * 6).astype(np.int32)
-        f = hues * 6 - i
-        p = v * (1 - s)
-        q = v * (1 - f * s)
-        t = v * (1 - (1 - f) * s)
-        for k in range(1, num_keys):  # Skip first color to enforce black background
-            match i[k] % 6:
-                case 0:
-                    rgb[k] = (v, t[k], p)
-                case 1:
-                    rgb[k] = (q[k], v, p)
-                case 2:
-                    rgb[k] = (p, v, t[k])
-                case 3:
-                    rgb[k] = (p, q[k], v)
-                case 4:
-                    rgb[k] = (t[k], p, v)
-                case 5:
-                    rgb[k] = (v, p, q[k])
+        rgb = mu.hsv_to_rgb(hues, saturation=0.8, value=0.95)
+        # The first color is black to enforce black background
+        rgb[0] = 0.0
         rgb = mu.color_f32_to_u8(rgb)
 
         # Store the generated map
@@ -101,6 +88,8 @@ class RasterizerContext:
         self.show_link_frame = options.show_link_frame
         self.link_frame_size = options.link_frame_size
         self.show_cameras = options.show_cameras
+        self.visualize_islands = options.visualize_islands
+        self.visualize_hibernation = options.visualize_hibernation
         self.shadow = options.shadow
         self.plane_reflection = options.plane_reflection
         self.ambient_light = options.ambient_light
@@ -132,6 +121,8 @@ class RasterizerContext:
         self.external_nodes = dict()  # nodes added by external user
         self.seg_node_map = dict()
         self.seg_color_map = SegmentationColorMap()
+        # One color per rigid link, an island taking the color of its smallest link (see 'update_rigid_tints')
+        self._islands_palette = None
 
         self.init_meshes()
 
@@ -139,6 +130,8 @@ class RasterizerContext:
         self.world_frame_shown = False
         self.link_frame_shown = False
         self.camera_frustum_shown = False
+        self.is_islands_shown = False
+        self.is_hibernation_shown = False
 
         self.world_frame_mesh = mu.create_frame(
             origin_radius=0.012,
@@ -188,6 +181,17 @@ class RasterizerContext:
         self.on_sph()
         self.on_pbd()
         self.on_fem()
+
+        rigid_solver = self.sim.rigid_solver
+        if self.visualize_hibernation and not (rigid_solver.is_active and rigid_solver.use_hibernation):
+            gs.raise_exception("'VisOptions.visualize_hibernation' requires 'RigidOptions.use_hibernation'.")
+        n_links = rigid_solver.n_links if rigid_solver.is_active else 0
+        hues = (np.arange(n_links) * ISLANDS_HUE_STEP) % 1.0
+        self._islands_palette = mu.hsv_to_rgb(hues, saturation=0.8, value=0.95)
+        if self.visualize_islands:
+            self.on_islands()
+        if self.visualize_hibernation:
+            self.on_hibernation()
 
         # segmentation mapping
         self.seg_color_map.generate_seg_colors()
@@ -242,10 +246,11 @@ class RasterizerContext:
             is_visual = geom.entity.surface.vis_mode == "visual"
             batch_key = (geom.solver, is_visual)
             if batch_key not in self._rigid_batches:
-                self._rigid_batches[batch_key] = RigidNodeBatch(geom.solver, is_visual, [], [], [])
+                self._rigid_batches[batch_key] = RigidNodeBatch(geom.solver, is_visual, [], [], [], [])
             batch = self._rigid_batches[batch_key]
             batch.geoms_idx.append(geom.idx)
             batch.geoms_uid.append(geom.uid)
+            batch.links_idx.append(geom.link.idx)
             batch.is_plane.append(isinstance(geom.entity._morph, gs.morphs.Plane))
 
         # create segemtation id
@@ -290,6 +295,8 @@ class RasterizerContext:
             geom_T = geom_T[:1]
             envs = None
         is_collision = "collision" in vis_mode
+        # The links of the rigid solver carry a tint for the island and hibernation coloring (see 'update_rigid_tints')
+        inst_tints = np.zeros((len(geom_T), 4), dtype=np.float32) if geom.solver is self.sim.rigid_solver else None
         mesh_node = pyrender.Mesh.from_trimesh(
             mesh=mesh,
             poses=geom_T,
@@ -298,6 +305,7 @@ class RasterizerContext:
             is_floor=isinstance(entity._morph, gs.morphs.Plane),
             envs=envs,
             material=material,
+            inst_tints=inst_tints,
         )
         self.add_rigid_node(geom, mesh_node, track_pose=not is_shared_floor)
         if isinstance(entity._morph, gs.morphs.Plane):
@@ -312,7 +320,7 @@ class RasterizerContext:
         for batch_key, batch in self._rigid_batches.items():
             if geom.uid in batch.geoms_uid:
                 i = batch.geoms_uid.index(geom.uid)
-                del batch.geoms_idx[i], batch.geoms_uid[i], batch.is_plane[i]
+                del batch.geoms_idx[i], batch.geoms_uid[i], batch.links_idx[i], batch.is_plane[i]
                 if not batch.geoms_uid:
                     del self._rigid_batches[batch_key]
                 break
@@ -461,6 +469,67 @@ class RasterizerContext:
                 links_T = self._link_frame_grid_T()
                 self.link_frame_node.mesh.primitives[0].poses = links_T
                 self.jit.update_buffer(self.link_frame_node, "model", links_T.transpose((0, 2, 1)))
+
+    def on_islands(self):
+        if not self.is_islands_shown:
+            self.is_islands_shown = True
+            with self.scene._visualizer.viewer_lock:
+                self.update_rigid_tints()
+
+    def off_islands(self):
+        if self.is_islands_shown:
+            self.is_islands_shown = False
+            with self.scene._visualizer.viewer_lock:
+                self.update_rigid_tints()
+
+    def on_hibernation(self):
+        if not self.is_hibernation_shown:
+            self.is_hibernation_shown = True
+            with self.scene._visualizer.viewer_lock:
+                self.update_rigid_tints()
+
+    def off_hibernation(self):
+        if self.is_hibernation_shown:
+            self.is_hibernation_shown = False
+            with self.scene._visualizer.viewer_lock:
+                self.update_rigid_tints()
+
+    def update_rigid_tints(self):
+        """Upload the tint of every rigid link in every rendered environment: the color of its island when the islands
+        are shown, blended toward grey when hibernation is shown and the link sleeps, and a transparent tint leaving
+        the link drawn as it is otherwise."""
+        solver = self.sim.rigid_solver
+        if not solver.is_active:
+            return
+        n_envs = len(self.rendered_envs_idx)
+        tints = np.zeros((n_envs, solver.n_links, 4), dtype=np.float32)
+        if self.is_islands_shown:
+            islands_idx = np.atleast_2d(tensor_to_array(solver.get_links_island_idx(envs_idx=self.rendered_envs_idx)))
+            is_in_island = islands_idx >= 0
+            envs_grid, links_grid = np.nonzero(is_in_island)
+            # The islands are labeled in the order of their smallest tree, so a merge or a split relabels every island
+            # after it. The color is keyed on the smallest link of the island instead, which only changes when that
+            # island itself merges into a lower one.
+            islands_key = np.full((n_envs, solver.n_links), solver.n_links, dtype=np.int32)
+            np.minimum.at(islands_key, (envs_grid, islands_idx[is_in_island]), links_grid)
+            links_key = np.take_along_axis(islands_key, np.maximum(islands_idx, 0), axis=1)
+            tints[..., :3] = self._islands_palette[np.where(is_in_island, links_key, 0)]
+            tints[..., 3] = is_in_island
+        if self.is_hibernation_shown:
+            is_hibernated = np.atleast_2d(
+                tensor_to_array(solver.get_links_is_hibernated(envs_idx=self.rendered_envs_idx))
+            )
+            if self.is_islands_shown:
+                tints[is_hibernated, :3] *= 1.0 - HIBERNATION_TINT_WEIGHT
+                tints[is_hibernated, :3] += HIBERNATION_TINT_WEIGHT * np.array(HIBERNATION_TINT_GREY, dtype=np.float32)
+            else:
+                tints[is_hibernated] = (*HIBERNATION_TINT_GREY, HIBERNATION_TINT_WEIGHT)
+        for batch in self._rigid_batches.values():
+            if batch.solver is not solver:
+                continue
+            geoms_tints = tints[:, batch.links_idx].transpose((1, 0, 2))
+            for geom_tints, geom_uid in zip(geoms_tints, batch.geoms_uid):
+                self.jit.update_buffer(self.rigid_nodes[geom_uid], "inst_tint", geom_tints)
 
     def on_tool(self):
         if self.sim.tool_solver.is_active:
@@ -1211,6 +1280,8 @@ class RasterizerContext:
             self.update_link_frame()
             self.update_tool()
             self.update_rigid()
+            if self.is_islands_shown or self.is_hibernation_shown:
+                self.update_rigid_tints()
             self.update_contact()
             self.update_mpm()
             self.update_sph()

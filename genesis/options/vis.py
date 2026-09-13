@@ -144,6 +144,16 @@ class VisOptions(Options):
         The length (in meters) of the link frames' axes.
     show_cameras : bool
         Whether to render the cameras added to the scene, together with their frustums. Default to False.
+    visualize_islands : bool
+        Whether to color the rigid links by island, the set of bodies the constraint solver couples through contacts
+        and joints and solves together. The links of one island share one color, which only changes when their island
+        merges into another, and the links no constraint moves (fixed bodies) keep their appearance. The color sets
+        the hue of whatever geometry is drawn, visual or collision, and every geom keeps its own brightness, so the
+        pieces of a collision decomposition stay told apart as shades of it. Defaults to False.
+    visualize_hibernation : bool
+        Whether to fade the rigid links that sleep, which requires `RigidOptions.use_hibernation`. Alone, a sleeping
+        link is drawn blended toward grey; together with `visualize_islands`, a sleeping island keeps a faded version
+        of its color. Defaults to False.
     shadow : bool
         Whether to render shadow. Defaults to True.
     plane_reflection : bool
@@ -194,6 +204,8 @@ class VisOptions(Options):
     show_link_frame: StrictBool = False
     link_frame_size: float = 0.2
     show_cameras: StrictBool = False
+    visualize_islands: StrictBool = False
+    visualize_hibernation: StrictBool = False
     shadow: StrictBool = True
     plane_reflection: StrictBool = False
     split_envs: StrictBool = False

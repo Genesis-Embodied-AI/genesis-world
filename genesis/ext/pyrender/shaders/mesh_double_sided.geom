@@ -28,6 +28,10 @@ out vec2 uv_1;
 in vec4 v_color_multiplier[];
 out vec4 color_multiplier;
 #endif
+#ifdef INST_TINT_LOC
+flat in vec4 v_tint[];
+flat out vec4 tint;
+#endif
 
 void emit_vertex(int i, bool reversed) {
     gl_Position = gl_in[i].gl_Position;
@@ -64,6 +68,10 @@ void emit_vertex(int i, bool reversed) {
 
 #ifdef COLOR_0_LOC
     color_multiplier = v_color_multiplier[i];
+#endif
+
+#ifdef INST_TINT_LOC
+    tint = v_tint[i];
 #endif
 
     EmitVertex();

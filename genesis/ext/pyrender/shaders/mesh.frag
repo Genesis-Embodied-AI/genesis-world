@@ -137,6 +137,9 @@ in vec2 uv_1;
 #ifdef COLOR_0_LOC
 in vec4 color_multiplier;
 #endif
+#ifdef INST_TINT_LOC
+flat in vec4 tint;
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // OUTPUTS
@@ -354,6 +357,20 @@ void main()
 
 #ifdef COLOR_0_LOC
     base_color *= color_multiplier;
+#endif
+
+#ifdef INST_TINT_LOC
+    // The tint sets the chromaticity and the material keeps its brightness, scaled by its luminance relative to
+    // mid-grey, so the geoms and textures of one instance stay told apart. A color pushed out of gamut is pulled toward
+    // the grey of its luminance, which keeps that luminance rather than shifting the hue.
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    vec3 tinted = tint.rgb * (2.0 * dot(base_color.rgb, luma));
+    float lum_tinted = dot(tinted, luma);
+    float peak = max(max(tinted.r, tinted.g), tinted.b);
+    if (peak > 1.0) {
+        tinted = mix(vec3(lum_tinted), tinted, clamp((1.0 - lum_tinted) / max(peak - lum_tinted, 1e-6), 0.0, 1.0));
+    }
+    base_color.rgb = mix(base_color.rgb, tinted, tint.a);
 #endif
 
     base_color = srgb_to_linear(base_color);

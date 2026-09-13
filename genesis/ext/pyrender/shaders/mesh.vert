@@ -25,6 +25,10 @@ layout(location = WEIGHTS_0_LOC) in vec4 weights_0;
 #endif
 layout(location = INST_M_LOC) in mat4 inst_m;
 layout(location = INST_ENV_OFFSET_LOC) in vec3 inst_env_offset;
+#ifdef INST_TINT_LOC
+// Color the base color of the instance takes the chromaticity of, weighted by its alpha (see Primitive.inst_tints)
+layout(location = INST_TINT_LOC) in vec4 inst_tint;
+#endif
 
 // Uniforms
 uniform mat4 M;
@@ -57,6 +61,9 @@ uniform float env_offset_scale;
     #ifdef COLOR_0_LOC
     out vec4 v_color_multiplier;
     #endif
+    #ifdef INST_TINT_LOC
+    flat out vec4 v_tint;
+    #endif
 #else
     out vec3 frag_position;
     #ifdef NORMAL_LOC
@@ -77,6 +84,9 @@ uniform float env_offset_scale;
     #endif
     #ifdef COLOR_0_LOC
     out vec4 color_multiplier;
+    #endif
+    #ifdef INST_TINT_LOC
+    flat out vec4 tint;
     #endif
 #endif
 
@@ -115,6 +125,9 @@ void main()
     #ifdef COLOR_0_LOC
         v_color_multiplier = color_0;
     #endif
+    #ifdef INST_TINT_LOC
+        v_tint = inst_tint;
+    #endif
 #else
     frag_position = world_position.xyz;
 
@@ -142,6 +155,9 @@ void main()
     #endif
     #ifdef COLOR_0_LOC
         color_multiplier = color_0;
+    #endif
+    #ifdef INST_TINT_LOC
+        tint = inst_tint;
     #endif
 #endif
 }
