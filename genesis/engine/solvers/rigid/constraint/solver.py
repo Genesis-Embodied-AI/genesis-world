@@ -4927,8 +4927,9 @@ def func_update_gradient_batch(
         if constraint_state.island.improved[i_island, i_b]:
             for i_pos in range(dof_lo, dof_hi):
                 i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
-                # The smooth force is read from its own field: dofs.force holds the total force of the last solve for
-                # a body woken this step, whose forward dynamics did not run (see func_wakeup_island_sleepers).
+                # The smooth force is read from its own field: for a body woken this step, whose forward dynamics last
+                # ran the step it fell asleep, dofs.force holds the total force of its last solve (see
+                # func_wakeup_island_sleepers).
                 constraint_state.grad[i_d, i_b] = (
                     constraint_state.Ma[i_d, i_b]
                     - dyn_state.dofs.qf_smooth[i_d, i_b]

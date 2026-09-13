@@ -220,7 +220,7 @@ class RigidInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     # *_bw: Cache for backward pass
-    # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes; an env whose
+    # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes. An env whose
     # count is zero has every body asleep and skips the passes that gate on it whole.
     n_awake_dofs: qd.Tensor = of_kind(DataKind.STATE)
     qpos0: qd.Tensor = of_kind(DataKind.INFO)

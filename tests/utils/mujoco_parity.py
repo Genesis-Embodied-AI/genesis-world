@@ -527,7 +527,7 @@ def _pair_constraint_rows(gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, *, qvel_prev
     A row is identified by its jacobian, its impedance, its reference acceleration and its velocity, each compared
     to its own tolerance: the assignment minimizing the summed normalized mismatches pairs the rows, and every pair is
     then validated criterion by criterion. The jacobian alone tells apart the rows of different contacts, the rows of
-    a friction pyramid whichever tangent the engines label first, and the limit rows; the reference acceleration and
+    a friction pyramid whichever tangent the engines label first, and the limit rows. The reference acceleration and
     the row velocity separate rows sharing a jacobian, such as the two sides of a bilateral constraint.
     """
     gs_n_constraints = gs_sim.rigid_solver.constraint_solver.n_constraints.to_numpy()[0]

@@ -326,9 +326,9 @@ def func_build_islands(
     tree. Each island then lists its dofs (the trees in ascending order, the dofs of each in ascending order, so an
     island's dofs ascend) and, under hibernation, which alone reads them, its links, and holds its inertia (the trace
     of the mass matrix over its dofs, the scale of its convergence tests) and, under hibernation, its sleeping flag.
-    The sleepers of an island an awake body reaches wake here (func_wakeup_island_sleepers); a settled island falls
-    asleep after the solve (func_hibernate_island_if_settled). The CPU skyline path then reorders each island's dofs
-    by contact adjacency, see func_reorder_island_dofs.
+    The sleepers of an island an awake body reaches wake here (func_wakeup_island_sleepers), and a settled island
+    falls asleep after the solve (func_hibernate_island_if_settled). The CPU skyline path then reorders each island's
+    dofs by contact adjacency, see func_reorder_island_dofs.
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     n_links = rigid_info.links_tree_idx.shape[0]
@@ -449,7 +449,7 @@ def func_build_single_island(
     The lists are the identity and the island's inertia the trace of the mass matrix. Reserved for scenes off the CPU
     skyline path, which alone reads the tree labels the full build resolves (see _sort_contacts_and_build_islands in
     solver.py). Under hibernation the island is awake and lists the links of the one tree, which the sleep decision
-    and the wake paths read (see func_hibernate_island_if_settled); an env holding a sleeper takes the full build.
+    and the wake paths read (see func_hibernate_island_if_settled). An env holding a sleeper takes the full build.
     """
     n_dofs = constraint_state.island.dof_id.shape[0]
     constraint_state.island.n_islands[i_b] = 1

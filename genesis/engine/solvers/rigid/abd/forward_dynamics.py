@@ -2275,7 +2275,7 @@ def func_count_settled_step(
 
     Each dof velocity is weighted by dof_length (1 for translation, the swept radius for rotation), so the tolerance is
     a single linear speed across mixed dofs: the rotational jitter of a small body produces a tiny surface speed and
-    keeps it awake no longer. The next velocity is read, the one the copy that follows makes current.
+    counts as rest. The next velocity is read, the one the copy that follows makes current.
     """
     link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     max_vel = gs.qd_float(0.0)
