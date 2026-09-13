@@ -127,7 +127,7 @@ def wrecking_ball_mjcf():
     )
 
     chain_length = (N_RINGS + 1) * pitch_taut + eye_to_sphere
-    return ET.tostring(mjcf, encoding="unicode"), chain_length
+    return mjcf, chain_length
 
 
 def main():
