@@ -2721,9 +2721,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def _wake_dofs(self, dofs_idx, envs_idx):
-        # Revive any hibernated entity owning these (already sanitized) dofs before an input is written to or
-        # targeted at them; forward dynamics and integration act only on awake dofs, so an input applied to a
-        # sleeping body would otherwise be silently dropped until it is woken by some other means.
+        # Revive any hibernated entity owning these (already sanitized) dofs before a state is written to them;
+        # forward dynamics and integration act only on awake dofs, so a state written to a sleeping body would
+        # otherwise be silently dropped until it is woken by some other means.
         if self._use_hibernation:
             kernel_wake_up_entities_by_dofs(
                 dofs_idx,
@@ -2745,7 +2745,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
 
     def control_dofs_force(self, force, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        # A control target is consumed by the actuation pass of the next step, which wakes a sleeping link it actuates
+        # (see func_torque_and_passive_force), so the target is written without waking anything here.
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.FORCE
@@ -2761,11 +2763,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             force = force[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_force(dofs_idx, envs_idx, force, self.dyn_state, self.rigid_config)
 
     def control_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.VELOCITY
@@ -2783,11 +2784,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             velocity = velocity[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.POSITION
@@ -2805,11 +2805,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             position = position[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_position(dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
 
     def control_dofs_position_velocity(self, position, velocity, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.POSITION
@@ -2831,7 +2830,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             position = position[None]
             velocity = velocity[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_position_velocity(dofs_idx, envs_idx, position, velocity, self.dyn_state, self.rigid_config)
 
     def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None):
