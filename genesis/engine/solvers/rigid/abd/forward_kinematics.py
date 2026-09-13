@@ -528,8 +528,7 @@ def func_update_geoms_entity(
     """
     NOTE: this only update geom pose, not its verts and else.
     """
-    # The sleep flags are read only in an env holding a sleeper (see n_awake_dofs in array_class.py): one read per
-    # item of the walk is what costs, one read per env is free
+    # The sleep flags are read only in an env holding a sleeper, see func_forward_kinematics_entity
     has_sleepers = False
     if qd.static(rigid_config.use_hibernation):
         has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
@@ -632,8 +631,7 @@ def func_forward_velocity_entity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    # The sleep flags are read only in an env holding a sleeper (see n_awake_dofs in array_class.py): one read per
-    # item of the walk is what costs, one read per env is free
+    # The sleep flags are read only in an env holding a sleeper, see func_forward_kinematics_entity
     has_sleepers = False
     if qd.static(rigid_config.use_hibernation):
         has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
