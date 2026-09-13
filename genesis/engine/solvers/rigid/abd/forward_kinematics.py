@@ -755,15 +755,13 @@ def func_forward_velocity(
     is_backward: qd.template(),
 ):
     # This loop must be the outermost loop to be differentiable
-    if qd.static(rigid_config.use_hibernation):
-        qd.loop_config(name="forward_velocity_batch", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-        for i_b in range(dyn_state.links.pos.shape[1]):
-            func_forward_velocity_batch(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-    else:
-        qd.loop_config(
-            name="forward_velocity_entity", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        )
-        for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
+    qd.loop_config(name="forward_velocity_entity", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
+        # A hibernated entity keeps the velocities of its last awake step, zero for its sleeping links
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake:
             func_forward_velocity_entity(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
@@ -1106,7 +1104,12 @@ def func_update_cartesian_space_tree(
     for i_l in range(i_l_start, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l:
-            func_COM_links_root(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+            # The links of a root sleep as a unit, so the root tells whether they are awake
+            is_awake = True
+            if qd.static(rigid_config.use_hibernation):
+                is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+            if is_awake:
+                func_COM_links_root(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     for j_e in range(i_e, n_entities):
         if func_is_entity_in_tree(j_e, i_b, i_l_start, i_l_end, dyn_info, rigid_config):
             func_update_geoms_entity(
@@ -1163,10 +1166,20 @@ def func_update_cartesian_space(
     BW = qd.static(is_backward)
 
     # This loop must be the outermost loop to be differentiable
-    if qd.static(rigid_config.use_hibernation):
-        qd.loop_config(name="update_carteisan_space_batch", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-        for i_b in range(dyn_state.links.pos.shape[1]):
-            func_update_cartesian_space_batch(
+    # FIXME: Implement parallelization at tree-level (based on root_idx) instead of entity-level
+    qd.loop_config(name="update_cartesian_space", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
+        # An entity roots at one of its own links unless it hangs from another entity, whose thread carries it. A
+        # hibernated entity keeps the poses of its last awake step.
+        i_l_start = dyn_info.entities.link_start[i_e]
+        I_l_start = [i_l_start, i_b] if qd.static(rigid_config.batch_links_info) else i_l_start
+        i_l_root = dyn_info.links.root_idx[I_l_start]
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
+        if is_awake and i_l_start <= i_l_root and i_l_root < dyn_info.entities.link_end[i_e]:
+            func_update_cartesian_space_tree(
+                i_e,
                 i_b,
                 rigid_info.qpos,
                 dyn_state,
@@ -1176,28 +1189,6 @@ def func_update_cartesian_space(
                 force_update_fixed_geoms,
                 is_backward,
             )
-    else:
-        # FIXME: Implement parallelization at tree-level (based on root_idx) instead of entity-level
-        qd.loop_config(
-            name="update_cartesian_space", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        )
-        for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
-            # An entity roots at one of its own links unless it hangs from another entity, whose thread carries it.
-            i_l_start = dyn_info.entities.link_start[i_e]
-            I_l_start = [i_l_start, i_b] if qd.static(rigid_config.batch_links_info) else i_l_start
-            i_l_root = dyn_info.links.root_idx[I_l_start]
-            if i_l_start <= i_l_root and i_l_root < dyn_info.entities.link_end[i_e]:
-                func_update_cartesian_space_tree(
-                    i_e,
-                    i_b,
-                    rigid_info.qpos,
-                    dyn_state,
-                    dyn_info,
-                    rigid_info,
-                    rigid_config,
-                    force_update_fixed_geoms,
-                    is_backward,
-                )
 
 
 @qd.kernel(fastcache=True)
