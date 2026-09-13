@@ -11,11 +11,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
-from genesis.engine.solvers.rigid.abd.misc import (
-    func_has_sleepers,
-    func_hibernate_island_if_settled,
-    linear_to_lower_tri,
-)
+from genesis.engine.solvers.rigid.abd.misc import func_hibernate_island_if_settled, linear_to_lower_tri
 from genesis.utils.misc import qd_to_torch, indices_to_mask, assign_indexed_tensor
 
 from .island import (
@@ -667,11 +663,11 @@ def _is_contact_inert(
     """Whether a contact carries no constraint because neither endpoint is an awake dynamic body.
 
     A sleeper struck by an awake body is revived as the island partition is built, before the constraints are
-    assembled (see func_wakeup_island_sleepers in island.py), so only hibernated-fixed pairs reach this state.
+    assembled (see func_build_islands), so only hibernated-fixed pairs reach this state.
     """
     is_inert = False
     # A pair of fixed links is dropped at build time, so an env with no sleeper holds no inert contact
-    if func_has_sleepers(i_b, dyn_state, rigid_info):
+    if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
         link_a_maybe_batch = [link_a, i_b] if qd.static(rigid_config.batch_links_info) else link_a
         link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
         is_a_awake = not (dyn_info.links.is_fixed[link_a_maybe_batch] or dyn_state.links.is_hibernated[link_a, i_b])
@@ -1448,16 +1444,12 @@ def _sort_contacts_and_build_islands(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
 ):
-    """Order the contacts of every env (see add_inequality_constraints) and build its island partition, the two per-env
-    steps sharing one launch.
+    """Order the contacts of every env (see add_inequality_constraints) and build its island partition in one launch.
 
     Where the cooperative kernels run, a block serves each env: the lanes sort together (func_sort_contacts_coop), then
-    build the partition together (func_build_islands_coop); elsewhere one thread per env does both. The order and the
-    partition are the same whichever way they are built, so the constraint order the caller assembles is too. A
-    single-island scene writes its partition outright (func_build_single_island), off the CPU skyline path, which
-    alone reads the tree labels the full build resolves, and in every env where nothing sleeps. Under hibernation the
-    build also wakes the sleepers an awake body reaches (see func_build_islands), so the constraints below are
-    assembled against the partition that is solved.
+    build the partition together (func_build_islands_coop); elsewhere one thread per env does both. Both ways give the
+    same order and partition. A single-island scene writes its partition outright (func_build_single_island), off the
+    CPU skyline path and in every env where nothing sleeps.
     """
     _B = constraint_state.jac.shape[2]
     # Under hibernation the trivial partition serves the envs where nothing sleeps, the full build the others
@@ -1481,7 +1473,7 @@ def _sort_contacts_and_build_islands(
             if qd.static(has_trivial_partition):
                 is_partition_trivial = True
                 if qd.static(rigid_config.use_hibernation):
-                    is_partition_trivial = not func_has_sleepers(i_b, dyn_state, rigid_info)
+                    is_partition_trivial = rigid_info.n_awake_dofs[i_b] >= dyn_state.dofs.is_hibernated.shape[0]
                 if is_partition_trivial:
                     func_build_single_island_coop(i_b, tid, constraint_state, rigid_info, rigid_config)
                 else:
@@ -1517,7 +1509,7 @@ def _sort_contacts_and_build_islands(
             if qd.static(has_trivial_partition):
                 is_partition_trivial = True
                 if qd.static(rigid_config.use_hibernation):
-                    is_partition_trivial = not func_has_sleepers(i_b, dyn_state, rigid_info)
+                    is_partition_trivial = rigid_info.n_awake_dofs[i_b] >= dyn_state.dofs.is_hibernated.shape[0]
                 if is_partition_trivial:
                     func_build_single_island(i_b, constraint_state, rigid_info, rigid_config)
                 else:
@@ -4927,9 +4919,8 @@ def func_update_gradient_batch(
         if constraint_state.island.improved[i_island, i_b]:
             for i_pos in range(dof_lo, dof_hi):
                 i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
-                # The smooth force is read from its own field: for a body woken this step, whose forward dynamics last
-                # ran the step it fell asleep, dofs.force holds the total force of its last solve (see
-                # func_wakeup_island_sleepers).
+                # dofs.force holds the smooth force only where the forward dynamics ran this step: a body woken at the
+                # island build (see func_build_islands) still carries the total force of its last solve there.
                 constraint_state.grad[i_d, i_b] = (
                     constraint_state.Ma[i_d, i_b]
                     - dyn_state.dofs.qf_smooth[i_d, i_b]

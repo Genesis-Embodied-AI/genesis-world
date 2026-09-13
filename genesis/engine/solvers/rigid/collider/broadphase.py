@@ -10,7 +10,6 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 
-from ..abd.misc import func_has_sleepers
 from .contact import func_collider_clear_env
 from .utils import func_is_geom_aabbs_overlap
 
@@ -45,7 +44,7 @@ def func_check_collision_valid(
         # kept from the last awake solve (see func_collider_clear_env) or settled, and an awake link striking either
         # one is the only motion that reaches them.
         if qd.static(rigid_config.use_hibernation):
-            if func_has_sleepers(i_b, dyn_state, rigid_info):
+            if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
                 I_la = [i_la, i_b] if qd.static(rigid_config.batch_links_info) else i_la
                 I_lb = [i_lb, i_b] if qd.static(rigid_config.batch_links_info) else i_lb
                 is_a_hibernated = dyn_state.links.is_hibernated[i_la, i_b]

@@ -32,17 +32,6 @@ def linear_to_lower_tri(i_pair: qd.i32, strict: qd.template() = False):
 
 
 @qd.func
-def func_has_sleepers(i_b, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo) -> bool:
-    """Whether any link of env i_b sleeps, read off the env's awake-dof count (see n_awake_dofs in array_class.py).
-
-    The passes that look for sleepers (the chain edges and the wake pass of the island build, the pair filter of the
-    broad phase, the contact advection, the inert rows) skip an env with none, so hibernation costs an env one read
-    per pass until something sleeps in it. A dof-less scene pads its dof buffers to one slot and takes the slow path.
-    """
-    return rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
-
-
-@qd.func
 def func_wakeup_island(
     i_island,
     i_b,
@@ -52,9 +41,11 @@ def func_wakeup_island(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Wake island i_island of env i_b as a unit, every one of its links (see func_wakeup_link). Waking the whole
-    island clears its daisy chain, which would otherwise keep re-connecting the woken links to their previous island
-    at the next partition build."""
+    """Wake every link of island i_island of env i_b (see func_wakeup_link).
+
+    Waking the whole island clears its daisy chain, which would otherwise keep re-connecting the woken links to their
+    previous island at the next partition build.
+    """
     if i_island >= 0:
         for li in range(constraint_state.island.link_slices.n[i_island, i_b]):
             link_ref = constraint_state.island.link_slices.start[i_island, i_b] + li

@@ -221,7 +221,11 @@ class RigidInfo:
 
     # *_bw: Cache for backward pass
     # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes. An env whose
-    # count is zero has every body asleep and skips the passes that gate on it whole.
+    # count is zero has every body asleep and skips the passes that gate on it whole. An env whose count is the dof
+    # count has no sleeper and skips the passes that look for one (the chain edges and the wake pass of the island
+    # build, the pair filter of the broad phase, the contact advection, the inert rows), so hibernation costs it one
+    # read per pass until something sleeps in it. A dof-less scene pads its dof buffers to one slot and takes the slow
+    # path.
     n_awake_dofs: qd.Tensor = of_kind(DataKind.STATE)
     qpos0: qd.Tensor = of_kind(DataKind.INFO)
     qpos: qd.Tensor = of_kind(DataKind.STATE)

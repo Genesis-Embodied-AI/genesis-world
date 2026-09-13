@@ -2269,11 +2269,11 @@ def func_count_settled_step(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Count this substep in the settled-step counter of awake link i_l of env i_b (see awake_steps in array_class.py):
-    the counter grows, up to hibernation_min_steps, while the link's maximum dof speed stays below the hibernation
-    tolerance, and drops to zero the step it exceeds it.
+    """Count this substep in the settled-step counter of awake link i_l of env i_b.
 
-    Each dof velocity is weighted by dof_length (1 for translation, the swept radius for rotation), so the tolerance is
+    The counter (see awake_steps in array_class.py) grows, up to hibernation_min_steps, while the link's maximum dof
+    speed stays below the hibernation tolerance, and drops to zero the step it exceeds it. Each dof velocity is
+    weighted by dof_length (1 for translation, the swept radius for rotation), so the tolerance is
     a single linear speed across mixed dofs: the rotational jitter of a small body produces a tiny surface speed and
     counts as rest. The next velocity is read, the one the copy that follows makes current.
     """

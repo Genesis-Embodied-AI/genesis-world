@@ -11,8 +11,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
-from ..abd.misc import func_has_sleepers
-
 
 @qd.func
 def func_refine_smooth_contact_pos(
@@ -192,10 +190,10 @@ def func_collider_clear_env(
         # front of the buffer with the force of the last solve it took part in. The kept contacts are read through the
         # permutation (see has_prunable_contacts in array_class.py), so they are first flagged on their raw slot, in
         # the sort key the narrowphase rewrites before reading it, then compacted in raw order: every slot written to
-        # was already read, so no kept contact is overwritten. An env with no sleeper keeps none (see
-        # func_has_sleepers).
+        # was already read, so no kept contact is overwritten. An env with no sleeper keeps none (see n_awake_dofs in
+        # array_class.py).
         n_hib = 0
-        if func_has_sleepers(i_b, dyn_state, rigid_info):
+        if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
             n_raw = 0
             for i_c_ in range(collider_state.n_contacts[i_b]):
                 n_raw = qd.max(n_raw, collider_state.contact_sort_idx[i_c_, i_b] + 1)
