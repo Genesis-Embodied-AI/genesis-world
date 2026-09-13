@@ -5,9 +5,6 @@ plane by a quarter turn and hold together by contact alone. The top link hangs t
 through an eye welded to a dense steel sphere. Every link is a non-convex mesh, so its collision geometry is
 convex-decomposed at build time. The whole chain starts pulled back as a straight line inclined from the vertical, so
 gravity alone swings the ball into the pile, whose cubes are free boxes stacked with a hairline gap.
-
-The pile size is a command-line argument and the run reports its step rate, to find the largest pile a machine still
-simulates in real time.
 """
 
 import argparse
@@ -21,7 +18,7 @@ import trimesh
 import genesis as gs
 
 
-DT = 5e-3
+DT = 1e-2
 RECORDING_FPS = 30
 
 # Chain link: tube radius, radius of the semicircular ends of the centreline, length of its straight sides, and the
@@ -85,9 +82,7 @@ def ring_mesh():
 
 
 def wrecking_ball_mjcf():
-    """MJCF model of the wrecking ball hanging from the model origin: a fixed hook link, free links interlocked with
-    the plane alternating by a quarter turn, and an eye link welded to the steel sphere, all inclined by the release
-    angle about y. Returns the model and the hook-to-sphere-centre length of the taut chain."""
+    """MJCF model of the wrecking ball hanging from the origin, and the hook-to-sphere-centre length of the taut chain."""
     ring = ring_mesh()
     half_length = 0.5 * RING_SIDE_LENGTH + RING_END_RADIUS
     # Successive link centres along the chain when taut, the tube of one link against the inner end of the next. The
@@ -111,7 +106,7 @@ def wrecking_ball_mjcf():
     # The chain hangs along -z. Rotating the frame about +y by the release angle tilts the whole chain towards -x, so
     # the ball swings towards +x, where the pile stands.
     frame = ET.SubElement(worldbody, "frame", euler=f"0 {RELEASE_ANGLE_DEG} 0")
-    ET.SubElement(frame, "geom", {"class": "ring"}, euler="0 0 90")
+    ET.SubElement(frame, "geom", {"class": "ring"})
     for i_ring in range(N_RINGS):
         body = ET.SubElement(frame, "body", pos=f"0 0 {-(i_ring + 1) * pitch}", euler=f"0 0 {90 * ((i_ring + 1) % 2)}")
         ET.SubElement(body, "freejoint")
@@ -133,13 +128,15 @@ def wrecking_ball_mjcf():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pile-width", type=int, default=6, help="Cubes across the pile, facing the ball")
-    parser.add_argument("--pile-depth", type=int, default=6, help="Cubes through the pile, along the swing")
+    parser.add_argument("--pile-depth", type=int, default=7, help="Cubes through the pile, along the swing")
     parser.add_argument("--pile-height", type=int, default=5, help="Cubes up the pile")
-    parser.add_argument("-s", "--steps", type=int, default=800, help="Number of simulation steps")
+    parser.add_argument("-s", "--steps", type=int, default=400, help="Number of simulation steps")
     parser.add_argument("-v", "--vis", action="store_true", help="Show the interactive viewer")
     parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     parser.add_argument("-r", "--record", action="store_true", help="Record the scene to 'out/wrecking_ball.mp4'")
     args = parser.parse_args()
+    if args.steps < 2:
+        parser.error("--steps must be at least 2: the first step is warm-up and the step rate needs one more.")
     horizon = 20 if "PYTEST_VERSION" in os.environ else args.steps
 
     # The step rate is the point of the script, so the solver runs on field storage, its fastest layout on CPU.
@@ -225,8 +222,7 @@ def main():
         camera.stop_recording()
 
     # The first step carries the warm-up of the kernels and is left out. Rendering a frame from within 'scene.step'
-    # counts in the step time, so read the rates without '--record'. Real time is sustained when the slowest
-    # half-second window of simulated time still runs faster than the clock.
+    # counts in the step time, so read the rates without '--record'.
     step_times = step_times[1:]
     window = min(round(0.5 / DT), len(step_times))
     step_time_window_max = np.convolve(step_times, np.full(window, 1.0 / window), mode="valid").max()
