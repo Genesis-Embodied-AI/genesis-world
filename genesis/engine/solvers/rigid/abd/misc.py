@@ -41,38 +41,52 @@ def func_wakeup_island(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    # Wake a hibernated component-island as a unit: every link in the island (and its DOFs and geoms) is revived and
-    # the owning entities' flags are cleared. Waking the whole island clears its daisy-chain links, which would
-    # otherwise keep re-connecting the woken links to their previous island at the next partition build.
+    """Wake island i_island of env i_b as a unit, every one of its links (see func_wakeup_link). Waking the whole
+    island clears its daisy chain, which would otherwise keep re-connecting the woken links to their previous island
+    at the next partition build."""
     if i_island >= 0:
         for li in range(constraint_state.island.link_slices.n[i_island, i_b]):
             link_ref = constraint_state.island.link_slices.start[i_island, i_b] + li
             i_l = constraint_state.island.link_id[link_ref, i_b]
+            func_wakeup_link(i_l, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
-            # Atomically claim the link by clearing its hibernation flag and reading the previous value. Only the
-            # caller that observes the True->False transition counts its dofs awake. A plain read-check-set would let
-            # several wake threads targeting the same link (redundant grid threads a backend may launch, or several
-            # triggers in one step) all pass the guard and count the dofs once each, corrupting the count.
-            was_hibernated = qd.atomic_exchange(dyn_state.links.is_hibernated[i_l, i_b], 0)
 
-            if was_hibernated:
-                constraint_state.island.hibernated_next_link[i_l, i_b] = -1
-                dyn_state.links.awake_steps[i_l, i_b] = 0
+@qd.func
+def func_wakeup_link(
+    i_l,
+    i_b,
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Wake link i_l of env i_b where it sleeps: its dofs and geoms are revived, the owning entity's flag cleared, the
+    link taken off its daisy chain, and its dofs counted awake (see n_awake_dofs in array_class.py)."""
+    # Atomically claim the link by clearing its hibernation flag and reading the previous value. Only the caller that
+    # observes the True->False transition counts its dofs awake. A plain read-check-set would let several wake threads
+    # targeting the same link (redundant grid threads a backend may launch, or several triggers in one step) all pass
+    # the guard and count the dofs once each, corrupting the count.
+    was_hibernated = qd.atomic_exchange(dyn_state.links.is_hibernated[i_l, i_b], 0)
 
-                link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                n_dofs = dyn_info.links.n_dofs[link_I]
-                if n_dofs > 0:
-                    base_dof_idx = dyn_info.links.dof_start[link_I]
-                    # Several threads may wake links of one env at once, hence the atomic on the env's count
-                    qd.atomic_add(rigid_info.n_awake_dofs[i_b], n_dofs)
-                    for i in range(n_dofs):
-                        dyn_state.dofs.is_hibernated[base_dof_idx + i, i_b] = False
+    if was_hibernated:
+        constraint_state.island.hibernated_next_link[i_l, i_b] = -1
+        dyn_state.links.awake_steps[i_l, i_b] = 0
 
-                for i_g in range(dyn_info.links.geom_start[link_I], dyn_info.links.geom_end[link_I]):
-                    dyn_state.geoms.is_hibernated[i_g, i_b] = False
+        link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        n_dofs = dyn_info.links.n_dofs[link_I]
+        if n_dofs > 0:
+            base_dof_idx = dyn_info.links.dof_start[link_I]
+            # Several threads may wake links of one env at once, hence the atomic on the env's count
+            qd.atomic_add(rigid_info.n_awake_dofs[i_b], n_dofs)
+            for i in range(n_dofs):
+                dyn_state.dofs.is_hibernated[base_dof_idx + i, i_b] = False
 
-                # The entity owning this link now has an awake link
-                dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
+        for i_g in range(dyn_info.links.geom_start[link_I], dyn_info.links.geom_end[link_I]):
+            dyn_state.geoms.is_hibernated[i_g, i_b] = False
+
+        # The entity owning this link now has an awake link
+        dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
 
 
 # --------------------------------------------------------------------------------------

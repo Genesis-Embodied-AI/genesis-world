@@ -182,8 +182,10 @@ class ConstraintSolver:
 
         self.reset()
 
-        # The hibernated-island daisy chain must start empty (-1 = no successor); it persists across steps, written
-        # when an island hibernates and cleared on wakeup.
+        # A static link belongs to no tree, so the partition build labels it with no island (see func_build_islands):
+        # its slot of links_island_idx holds -1 for the life of the scene. The hibernated-island daisy chain must start
+        # empty (-1 = no successor); it persists across steps, written when an island hibernates and cleared on wakeup.
+        self.constraint_state.island.links_island_idx.fill(-1)
         if self._solver._use_hibernation:
             self.constraint_state.island.hibernated_next_link.fill(-1)
 
@@ -658,8 +660,8 @@ def _is_contact_inert(
 ) -> bool:
     """Whether a contact carries no constraint because neither endpoint is an awake dynamic body.
 
-    A sleeper struck by an awake body is revived before the constraints are assembled
-    (kernel_wake_up_entities_on_new_contact), so only hibernated-fixed pairs reach this state.
+    A sleeper struck by an awake body is revived as the island partition is built, before the constraints are
+    assembled (see func_wakeup_island_sleepers in island.py), so only hibernated-fixed pairs reach this state.
     """
     link_a_maybe_batch = [link_a, i_b] if qd.static(rigid_config.batch_links_info) else link_a
     link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b

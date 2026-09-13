@@ -433,9 +433,9 @@ class IslandState:
     # Partition of the dof-carrying kinematic trees (see trees_root_idx in RigidInfo) into islands, the connected
     # components of the trees under the contact, equality and hibernation couplings, rebuilt every step by island.py.
     # trees_parent_idx is the union-find forest over the trees, trees_island_idx the island of each tree and
-    # links_island_idx that of each link, -1 for a dof-less tree and its links. link_slices maps an island to its slice
-    # of link_id, dof_slices to its slice of dof_id (island-local dof -> global dof, ascending unless the CPU skyline
-    # path reorders it by contact adjacency).
+    # links_island_idx that of each link, -1 for a static link and for a dof-less tree and its links. link_slices maps
+    # an island to its slice of link_id, dof_slices to its slice of dof_id (island-local dof -> global dof, ascending
+    # unless the CPU skyline path reorders it by contact adjacency).
     trees_parent_idx: qd.Tensor
     trees_island_idx: qd.Tensor
     links_island_idx: qd.Tensor

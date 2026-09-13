@@ -174,7 +174,6 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_dofs,
     kernel_wake_up_entities_by_links,
     kernel_wake_up_entities_by_qs,
-    kernel_wake_up_entities_on_new_contact,
 )
 from .abd.diff import (
     func_copy_cartesian_space,
@@ -1378,17 +1377,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if self._enable_collision:
             self.collider.detection()
-            # A collision against a sleeping body must wake it before the solve, so it joins the island partition
-            # and responds dynamically this step instead of letting the awake body pass through.
-            if self._use_hibernation:
-                kernel_wake_up_entities_on_new_contact(
-                    self.dyn_state,
-                    self.collider.collider_state,
-                    self.constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                )
 
         if not self._disable_constraint:
             self.constraint_solver.add_inequality_constraints()
