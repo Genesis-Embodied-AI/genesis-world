@@ -300,7 +300,8 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
 
     # A local force and a local application point are both expressed in the frame that 'ref' designates, which only
-    # shows on a link whose inertial frame is rotated with respect to its own frame.
+    # shows on a link whose inertial frame is rotated with respect to its own frame. The kernel rotates by quaternion
+    # where the reference multiplies by the rotation matrix, two fp32 formulas a few ulps apart.
     base_link = robot.get_link("base")
     with pytest.raises(AssertionError):
         assert_allclose(base_link.desc.inertial_quat, gu.identity_quat(), tol=gs.EPS)
@@ -320,21 +321,21 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
     force_world = base_link_R @ force_local
     point_world = base_link_pos + base_link_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     # A world application point locates the point on its own, so it reproduces the local one it is derived from.
     rigid_solver.clear_external_force()
     base_link.apply_external_force(force_world, pos=point_world)
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     rigid_solver.clear_external_force()
@@ -343,11 +344,11 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
     force_world = base_inertial_R @ force_local
     point_world = base_link_COM + base_inertial_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     with pytest.raises(gs.GenesisException, match="'ref' must be one of"):
