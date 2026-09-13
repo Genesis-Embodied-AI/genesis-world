@@ -85,7 +85,6 @@ from .abd.forward_kinematics import (
     func_forward_velocity,
     func_forward_velocity_batch,
     func_forward_velocity_entity,
-    func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer,
     func_update_all_verts,
     func_update_cartesian_space,
     func_update_cartesian_space_batch,
@@ -1300,7 +1299,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._func_constraint_force()
             kernel_step_2(
                 self.dyn_state,
-                self.collider.collider_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
                 self.rigid_info,
@@ -1353,8 +1351,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             gs.raise_exception("Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep.")
         if errno & array_class.ErrorCode.INVALID_ACC_NAN:
             gs.raise_exception("Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep.")
-        if errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
-            gs.raise_exception("Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'.")
 
     def _kernel_detect_collision(self):
         self.collider.clear()
@@ -1650,7 +1646,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         kernel_step_2.grad(
             self.dyn_state,
-            self.collider.collider_state,
             self.constraint_solver.constraint_state,
             self.dyn_info,
             self.rigid_info,
@@ -1696,7 +1691,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
             kernel_step_2(
                 self.dyn_state,
-                self.collider.collider_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
                 self.rigid_info,
@@ -3448,7 +3442,6 @@ def kernel_step_1(
 @qd.kernel(fastcache=True)
 def kernel_step_2(
     dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -3476,11 +3469,3 @@ def kernel_step_2(
                 dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=is_backward
             )
             func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-
-    # Hibernating comes last, after the post-integrate refresh above: both only visit awake entities, so deciding to
-    # sleep first would drop the newly-hibernated island from that refresh and freeze its Cartesian pose one
-    # integration behind the qpos this step just advanced, for as long as it sleeps.
-    if qd.static(rigid_config.use_hibernation):
-        func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, errno
-        )

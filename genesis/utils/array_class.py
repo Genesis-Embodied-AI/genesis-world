@@ -207,7 +207,6 @@ class ErrorCode(IntEnum):
     OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
     OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
     OVERFLOW_CONTACTS = 0b00000000000000000000000000000100
-    OVERFLOW_HIBERNATION_ISLANDS = 0b00000000000000000000000000001000
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
@@ -2188,6 +2187,9 @@ class LinksState:
     cfrc_coupling_ang: qd.Tensor
     cfrc_coupling_vel: qd.Tensor
     contact_force: qd.Tensor
+    # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
+    # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
+    # again the step it exceeds the tolerance or wakes.
     is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
     awake_steps: qd.Tensor = of_kind(DataKind.STATE)
 

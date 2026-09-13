@@ -89,6 +89,88 @@ def func_wakeup_link(
         dyn_state.entities.is_hibernated[dyn_info.links.entity_idx[link_I], i_b] = False
 
 
+@qd.func
+def func_hibernate_link(
+    i_l,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Put link i_l of env i_b to sleep: the link, its dofs and its geoms are flagged, the dof and link velocities and
+    accelerations zeroed, and its dofs counted asleep (see n_awake_dofs in array_class.py).
+
+    The next-velocity buffer is zeroed too: the integration copy runs over every dof, so a stale value there would be
+    restored as the sleeper's velocity on the following substep. The link Cartesian velocity is zeroed as well: the
+    velocity pass skips a sleeping link (see func_forward_velocity_entity), so the value it holds at the transition is
+    what every velocity getter reports for as long as the link sleeps, and a restored state recomputes it from the
+    zeroed dof velocities.
+    """
+    link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    # The islands of one env sleep on its own thread, so the count needs no atomic here
+    rigid_info.n_awake_dofs[i_b] = rigid_info.n_awake_dofs[i_b] - dyn_info.links.n_dofs[link_I]
+    dyn_state.links.is_hibernated[i_l, i_b] = True
+    dyn_state.links.cd_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    dyn_state.links.cd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+    for i_d in range(dyn_info.links.dof_start[link_I], dyn_info.links.dof_end[link_I]):
+        dyn_state.dofs.is_hibernated[i_d, i_b] = True
+        dyn_state.dofs.vel[i_d, i_b] = 0.0
+        dyn_state.dofs.vel_next[i_d, i_b] = 0.0
+        dyn_state.dofs.acc[i_d, i_b] = 0.0
+
+    for i_g in range(dyn_info.links.geom_start[link_I], dyn_info.links.geom_end[link_I]):
+        dyn_state.geoms.is_hibernated[i_g, i_b] = True
+
+
+@qd.func
+def func_hibernate_island_if_settled(
+    i_island,
+    i_b,
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Put awake island i_island of env i_b to sleep once every one of its links has stayed below the hibernation speed
+    tolerance for hibernation_min_steps consecutive steps (see awake_steps in array_class.py).
+
+    The island sleeps as a unit: every link is flagged (see func_hibernate_link) and daisy-chained to the next, so the
+    partition build keeps the component one island for as long as it sleeps. An entity is hibernated once every one of
+    its movable links is, the entity-level passes then skipping it whole. Fixed links never hibernate and are left out,
+    otherwise a ground plane held by an entity of several free bodies would keep that entity awake forever. Runs on the
+    thread of its env, after the solve wrote the forces the sleepers keep reporting.
+    """
+    if constraint_state.island.is_hibernated[i_island, i_b] == 0:
+        link_ref_n = constraint_state.island.link_slices.n[i_island, i_b]
+        link_ref_start = constraint_state.island.link_slices.start[i_island, i_b]
+        is_settled = link_ref_n > 0
+        for i_link_ref_offset_ in range(link_ref_n):
+            i_l = constraint_state.island.link_id[link_ref_start + i_link_ref_offset_, i_b]
+            if dyn_state.links.awake_steps[i_l, i_b] < rigid_config.hibernation_min_steps:
+                is_settled = False
+        if is_settled:
+            prev_link_idx = constraint_state.island.link_id[link_ref_start + link_ref_n - 1, i_b]
+            for i_link_ref_offset_ in range(link_ref_n):
+                i_l = constraint_state.island.link_id[link_ref_start + i_link_ref_offset_, i_b]
+                func_hibernate_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+                constraint_state.island.hibernated_next_link[prev_link_idx, i_b] = i_l
+                prev_link_idx = i_l
+            for i_link_ref_offset_ in range(link_ref_n):
+                i_l = constraint_state.island.link_id[link_ref_start + i_link_ref_offset_, i_b]
+                link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                i_e = dyn_info.links.entity_idx[link_I]
+                are_all_links_hibernated = True
+                for j_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
+                    J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
+                    if not dyn_info.links.is_fixed[J_l] and not dyn_state.links.is_hibernated[j_l, i_b]:
+                        are_all_links_hibernated = False
+                dyn_state.entities.is_hibernated[i_e, i_b] = are_all_links_hibernated
+            constraint_state.island.is_hibernated[i_island, i_b] = 1
+
+
 # --------------------------------------------------------------------------------------
 # Initialization kernels
 # --------------------------------------------------------------------------------------

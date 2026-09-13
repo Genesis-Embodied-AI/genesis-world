@@ -227,7 +227,7 @@ def func_dof_p0_terms(i_d, i_b, dyn_state: array_class.DynState, constraint_stat
         [
             s * s,
             constraint_state.grad[i_d, i_b] ** 2,
-            s * constraint_state.Ma[i_d, i_b] - s * dyn_state.dofs.force[i_d, i_b],
+            s * constraint_state.Ma[i_d, i_b] - s * dyn_state.dofs.qf_smooth[i_d, i_b],
             0.5 * s * constraint_state.mv[i_d, i_b],
         ]
     )

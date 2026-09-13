@@ -326,7 +326,9 @@ def func_build_islands(
     tree. Each island then lists its dofs (the trees in ascending order, the dofs of each in ascending order, so an
     island's dofs ascend) and, under hibernation, which alone reads them, its links, and holds its inertia (the trace
     of the mass matrix over its dofs, the scale of its convergence tests) and, under hibernation, its sleeping flag.
-    The CPU skyline path then reorders each island's dofs by contact adjacency, see func_reorder_island_dofs.
+    The sleepers of an island an awake body reaches wake here (func_wakeup_island_sleepers); a settled island falls
+    asleep after the solve (func_hibernate_island_if_settled). The CPU skyline path then reorders each island's dofs
+    by contact adjacency, see func_reorder_island_dofs.
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     n_links = rigid_info.links_tree_idx.shape[0]

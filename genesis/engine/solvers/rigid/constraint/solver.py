@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
-from genesis.engine.solvers.rigid.abd.misc import linear_to_lower_tri
+from genesis.engine.solvers.rigid.abd.misc import func_hibernate_island_if_settled, linear_to_lower_tri
 from genesis.utils.misc import qd_to_torch, indices_to_mask, assign_indexed_tensor
 
 from .island import (
@@ -300,6 +300,7 @@ class ConstraintSolver:
             self._collider.collider_state,
             self.constraint_state,
             self._solver.dyn_info,
+            self._solver.rigid_info,
             self._solver.rigid_config,
         )
 
@@ -1445,7 +1446,9 @@ def _sort_contacts_and_build_islands(
     build the partition together (func_build_islands_coop); elsewhere one thread per env does both. The order and the
     partition are the same whichever way they are built, so the constraint order the caller assembles is too. A
     single-island scene writes its partition outright (func_build_single_island), off the CPU skyline path and
-    hibernation, which alone read the tree and link labels the full build resolves.
+    hibernation, which alone read the tree and link labels the full build resolves. Under hibernation the build also
+    wakes the sleepers an awake body reaches (see func_build_islands), so the constraints below are assembled against
+    the partition that is solved.
     """
     _B = constraint_state.jac.shape[2]
     has_trivial_partition = qd.static(
@@ -4652,7 +4655,7 @@ def func_update_constraint_batch(
         if is_moving:
             for i_pos in range(dof_lo, dof_hi):
                 i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
-                cost_i = cost_i + 0.5 * (Ma[i_d, i_b] - dyn_state.dofs.force[i_d, i_b]) * (
+                cost_i = cost_i + 0.5 * (Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b]) * (
                     qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b]
                 )
             for i_pos in range(row_lo, row_hi):
@@ -4812,7 +4815,7 @@ def _func_update_cost_coop(
         while i_d < n_dofs:
             v = (
                 0.5
-                * (Ma[i_d, i_b] - dyn_state.dofs.force[i_d, i_b])
+                * (Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b])
                 * (qacc[i_d, i_b] - dyn_state.dofs.acc_smooth[i_d, i_b])
             )
             cost_i = cost_i + v
@@ -4898,9 +4901,11 @@ def func_update_gradient_batch(
         if constraint_state.island.improved[i_island, i_b]:
             for i_pos in range(dof_lo, dof_hi):
                 i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
+                # The smooth force is read from its own field: dofs.force holds the total force of the last solve for
+                # a body woken this step, whose forward dynamics did not run (see func_wakeup_island_sleepers).
                 constraint_state.grad[i_d, i_b] = (
                     constraint_state.Ma[i_d, i_b]
-                    - dyn_state.dofs.force[i_d, i_b]
+                    - dyn_state.dofs.qf_smooth[i_d, i_b]
                     - constraint_state.qfrc_constraint[i_d, i_b]
                 )
     if qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
@@ -4945,7 +4950,7 @@ def func_update_gradient_no_solve(
             if constraint_state.island.improved[i_island, i_b]:
                 constraint_state.grad[i_d, i_b] = (
                     constraint_state.Ma[i_d, i_b]
-                    - dyn_state.dofs.force[i_d, i_b]
+                    - dyn_state.dofs.qf_smooth[i_d, i_b]
                     - constraint_state.qfrc_constraint[i_d, i_b]
                 )
 
@@ -5404,6 +5409,7 @@ def func_update_contact_force(
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
     n_links = dyn_state.links.contact_force.shape[0]
@@ -5464,6 +5470,14 @@ def func_update_contact_force(
             dyn_state.links.contact_force[contact_data_link_b, i_b] = (
                 dyn_state.links.contact_force[contact_data_link_b, i_b] + force
             )
+
+        # The settled islands fall asleep here, once the solve has written the forces their contacts and dofs keep
+        # reporting for as long as they sleep, and before the integration skips their dofs.
+        if qd.static(rigid_config.use_hibernation):
+            for i_island in range(constraint_state.island.n_islands[i_b]):
+                func_hibernate_island_if_settled(
+                    i_island, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config
+                )
 
 
 @qd.kernel(fastcache=True)

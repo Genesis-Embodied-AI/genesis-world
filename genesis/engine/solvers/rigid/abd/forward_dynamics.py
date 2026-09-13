@@ -2252,9 +2252,41 @@ def func_integrate(
     # The coupling wrench of this substep is consumed: the bias force read it during forward dynamics and the midpoint
     # pass above read it last. The coupler accumulates the next one after the substep.
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.links.cfrc_coupling_ang.shape)):
-        dyn_state.links.cfrc_coupling_ang[I] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_coupling_vel[I] = qd.Vector.zero(gs.qd_float, 3)
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(rigid_config.use_hibernation and not is_backward):
+            if not dyn_state.links.is_hibernated[i_l, i_b]:
+                func_count_settled_step(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.func
+def func_count_settled_step(
+    i_l,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Count this substep in the settled-step counter of awake link i_l of env i_b (see awake_steps in array_class.py):
+    the counter grows, up to hibernation_min_steps, while the link's maximum dof speed stays below the hibernation
+    tolerance, and drops to zero the step it exceeds it.
+
+    Each dof velocity is weighted by dof_length (1 for translation, the swept radius for rotation), so the tolerance is
+    a single linear speed across mixed dofs: the rotational jitter of a small body produces a tiny surface speed and
+    keeps it awake no longer. The next velocity is read, the one the copy that follows makes current.
+    """
+    link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    max_vel = gs.qd_float(0.0)
+    for i_d in range(dyn_info.links.dof_start[link_I], dyn_info.links.dof_end[link_I]):
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        max_vel = qd.max(max_vel, dyn_info.dofs.dof_length[I_d] * qd.abs(dyn_state.dofs.vel_next[i_d, i_b]))
+    if max_vel < rigid_info.hibernation_thresh_vel[None]:
+        if dyn_state.links.awake_steps[i_l, i_b] < rigid_config.hibernation_min_steps:
+            dyn_state.links.awake_steps[i_l, i_b] = dyn_state.links.awake_steps[i_l, i_b] + 1
+    else:
+        dyn_state.links.awake_steps[i_l, i_b] = 0
 
 
 @qd.kernel(fastcache=True)
