@@ -11,7 +11,11 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
-from genesis.engine.solvers.rigid.abd.misc import func_hibernate_island_if_settled, linear_to_lower_tri
+from genesis.engine.solvers.rigid.abd.misc import (
+    func_has_sleepers,
+    func_hibernate_island_if_settled,
+    linear_to_lower_tri,
+)
 from genesis.utils.misc import qd_to_torch, indices_to_mask, assign_indexed_tensor
 
 from .island import (
@@ -657,6 +661,7 @@ def _is_contact_inert(
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ) -> bool:
     """Whether a contact carries no constraint because neither endpoint is an awake dynamic body.
@@ -664,13 +669,17 @@ def _is_contact_inert(
     A sleeper struck by an awake body is revived as the island partition is built, before the constraints are
     assembled (see func_wakeup_island_sleepers in island.py), so only hibernated-fixed pairs reach this state.
     """
-    link_a_maybe_batch = [link_a, i_b] if qd.static(rigid_config.batch_links_info) else link_a
-    link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
-    is_a_awake = not (dyn_info.links.is_fixed[link_a_maybe_batch] or dyn_state.links.is_hibernated[link_a, i_b])
-    is_b_awake = link_b >= 0 and not (
-        dyn_info.links.is_fixed[link_b_maybe_batch] or dyn_state.links.is_hibernated[link_b, i_b]
-    )
-    return not is_a_awake and not is_b_awake
+    is_inert = False
+    # A pair of fixed links is dropped at build time, so an env with no sleeper holds no inert contact
+    if func_has_sleepers(i_b, dyn_state, rigid_info):
+        link_a_maybe_batch = [link_a, i_b] if qd.static(rigid_config.batch_links_info) else link_a
+        link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
+        is_a_awake = not (dyn_info.links.is_fixed[link_a_maybe_batch] or dyn_state.links.is_hibernated[link_a, i_b])
+        is_b_awake = link_b >= 0 and not (
+            dyn_info.links.is_fixed[link_b_maybe_batch] or dyn_state.links.is_hibernated[link_b, i_b]
+        )
+        is_inert = not is_a_awake and not is_b_awake
+    return is_inert
 
 
 @qd.func
@@ -910,7 +919,7 @@ def _add_collision_constraints_per_friction(
                 i_col = collider_state.contact_sort_idx[i_col_, i_b]
                 link_a = collider_state.contact_data.link_a[i_col, i_b]
                 link_b = collider_state.contact_data.link_b[i_col, i_b]
-                is_inert = _is_contact_inert(link_a, link_b, i_b, dyn_state, dyn_info, rigid_config)
+                is_inert = _is_contact_inert(link_a, link_b, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
             if is_inert:
                 n_con = constraint_state.n_constraints[i_b] + i_col_ * rows_per_contact + i_friction
                 _clear_inert_collision_row(n_con, i_b, constraint_state, rigid_config)
@@ -969,7 +978,7 @@ def _add_collision_constraints_per_contact(
             link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
 
             if qd.static(rigid_config.use_hibernation):
-                if _is_contact_inert(link_a, link_b, i_b, dyn_state, dyn_info, rigid_config):
+                if _is_contact_inert(link_a, link_b, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
                     for i_friction in range(rows_per_contact):
                         n_con = collision_con_start + i_col_ * rows_per_contact + i_friction
                         _clear_inert_collision_row(n_con, i_b, constraint_state, rigid_config)
@@ -5460,7 +5469,9 @@ def func_update_contact_force(
             # An inert contact keeps the force of the last solve it took part in, so a resting sleeper keeps reporting
             # the support force it is at rest under.
             if qd.static(rigid_config.use_hibernation):
-                if _is_contact_inert(contact_data_link_a, contact_data_link_b, i_b, dyn_state, dyn_info, rigid_config):
+                if _is_contact_inert(
+                    contact_data_link_a, contact_data_link_b, i_b, dyn_state, dyn_info, rigid_info, rigid_config
+                ):
                     force = collider_state.contact_data.force[i_col, i_b]
             collider_state.contact_data.force[i_col, i_b] = force
 

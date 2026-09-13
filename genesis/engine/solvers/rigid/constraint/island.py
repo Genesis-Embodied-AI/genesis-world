@@ -4,7 +4,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
-from ..abd.misc import func_wakeup_link
+from ..abd.misc import func_has_sleepers, func_wakeup_link
 from ..collider.contact import func_contact_order_key
 
 
@@ -335,8 +335,13 @@ def func_build_islands(
     n_contacts = collider_state.n_contacts[i_b]
     n_equalities = constraint_state.qd_n_equalities[i_b]
     n_edges = n_contacts + n_equalities
+    # An env with no sleeper has no chain edge to union, no island flag to derive and no sleeper to wake, see
+    # func_has_sleepers
+    has_sleepers = False
     if qd.static(rigid_config.use_hibernation):
-        n_edges = n_edges + n_links
+        has_sleepers = func_has_sleepers(i_b, dyn_state, rigid_info)
+        if has_sleepers:
+            n_edges = n_edges + n_links
 
     for i_t in range(n_trees):
         constraint_state.island.trees_parent_idx[i_t, i_b] = i_t
@@ -420,12 +425,16 @@ def func_build_islands(
     # An island is hibernated unless one of its links is awake. The sleeping links of an awake island then wake (see
     # func_wakeup_island_sleepers), so an island is solved whole or sleeps whole.
     if qd.static(rigid_config.use_hibernation):
-        for i_l in range(n_links):
-            i_island = constraint_state.island.links_island_idx[i_l, i_b]
-            if i_island >= 0 and not dyn_state.links.is_hibernated[i_l, i_b]:
+        if has_sleepers:
+            for i_l in range(n_links):
+                i_island = constraint_state.island.links_island_idx[i_l, i_b]
+                if i_island >= 0 and not dyn_state.links.is_hibernated[i_l, i_b]:
+                    constraint_state.island.is_hibernated[i_island, i_b] = 0
+            for i_l in range(n_links):
+                func_wakeup_island_sleepers(i_l, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+        else:
+            for i_island in range(n_islands):
                 constraint_state.island.is_hibernated[i_island, i_b] = 0
-        for i_l in range(n_links):
-            func_wakeup_island_sleepers(i_l, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
     if qd.static(rigid_config.sparse_solve):
         func_reorder_island_dofs(i_b, collider_state, constraint_state, rigid_info)
@@ -520,8 +529,12 @@ def func_build_islands_coop(
     n_contacts = collider_state.n_contacts[i_b]
     n_equalities = constraint_state.qd_n_equalities[i_b]
     n_edges = n_contacts + n_equalities
+    # Every lane reads the env's sleeper gate, see func_build_islands
+    has_sleepers = False
     if qd.static(rigid_config.use_hibernation):
-        n_edges = n_edges + n_links
+        has_sleepers = func_has_sleepers(i_b, dyn_state, rigid_info)
+        if has_sleepers:
+            n_edges = n_edges + n_links
 
     i_t = tid
     while i_t < n_trees:
@@ -678,17 +691,23 @@ def func_build_islands_coop(
     # An island is hibernated unless one of its links is awake, the sleeping links of an awake island then waking, see
     # func_build_islands
     if qd.static(rigid_config.use_hibernation):
-        i_l = tid
-        while i_l < n_links:
-            i_island = constraint_state.island.links_island_idx[i_l, i_b]
-            if i_island >= 0 and not dyn_state.links.is_hibernated[i_l, i_b]:
+        if has_sleepers:
+            i_l = tid
+            while i_l < n_links:
+                i_island = constraint_state.island.links_island_idx[i_l, i_b]
+                if i_island >= 0 and not dyn_state.links.is_hibernated[i_l, i_b]:
+                    constraint_state.island.is_hibernated[i_island, i_b] = 0
+                i_l = i_l + _K
+            qd.simt.block.sync()
+            i_l = tid
+            while i_l < n_links:
+                func_wakeup_island_sleepers(i_l, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+                i_l = i_l + _K
+        else:
+            i_island = tid
+            while i_island < n_islands:
                 constraint_state.island.is_hibernated[i_island, i_b] = 0
-            i_l = i_l + _K
-        qd.simt.block.sync()
-        i_l = tid
-        while i_l < n_links:
-            func_wakeup_island_sleepers(i_l, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
-            i_l = i_l + _K
+                i_island = i_island + _K
 
     # The inertia of every island, the mass diagonal summed over the dof list per chunk of _K dofs: the lanes of one
     # island reduce as one segment, whose last lane adds it into the island's total. The segments of an island come one

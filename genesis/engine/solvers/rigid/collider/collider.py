@@ -855,7 +855,14 @@ class Collider:
             fn = kernel_masked_collider_clear
         else:
             fn = kernel_collider_clear
-        fn(envs_idx, self._solver.dyn_state, self.collider_state, self._solver.dyn_info, self._solver.rigid_config)
+        fn(
+            envs_idx,
+            self._solver.dyn_state,
+            self.collider_state,
+            self._solver.dyn_info,
+            self._solver.rigid_info,
+            self._solver.rigid_config,
+        )
 
     def _call_multicontact(self):
         narrowphase._func_narrowphase_multicontact(
