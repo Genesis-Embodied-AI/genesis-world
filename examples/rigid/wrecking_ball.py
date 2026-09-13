@@ -40,27 +40,14 @@ CUBE_SIZE = 0.25
 CUBE_GAP = 2e-3
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pile-width", type=int, default=6, help="Cubes across the pile, facing the ball")
-    parser.add_argument("--pile-depth", type=int, default=6, help="Cubes through the pile, along the swing")
-    parser.add_argument("--pile-height", type=int, default=5, help="Cubes up the pile")
-    parser.add_argument("-s", "--steps", type=int, default=800, help="Number of simulation steps")
-    parser.add_argument("-v", "--vis", action="store_true", help="Show the interactive viewer")
-    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
-    parser.add_argument("-r", "--record", action="store_true", help="Record the scene to 'out/wrecking_ball.mp4'")
-    args = parser.parse_args()
-    horizon = 20 if "PYTEST_VERSION" in os.environ else args.steps
-
-    # The step rate is the point of the script, so the solver runs on field storage, its fastest layout on CPU.
-    gs.init(backend=gs.gpu if args.gpu else gs.cpu, performance_mode=True)
-
-    # Stadium-shaped chain link lying in the x-z plane with its straight sides along z: a tube swept along a closed
-    # centreline of two straight sides joined by semicircular ends. The centreline points and outward normals walk
-    # the right side up, the top end, the left side down and the bottom end.
+def ring_mesh():
+    """Stadium-shaped chain link lying in the x-z plane with its straight sides along z: a tube swept along a closed
+    centreline of two straight sides joined by semicircular ends."""
     n_side = 6
     n_end = 12
     n_around = 10
+    # Centreline points and outward normals in the x-z plane, walking the right side up, the top end, the left side
+    # down and the bottom end.
     z_side = np.linspace(-0.5 * RING_SIDE_LENGTH, 0.5 * RING_SIDE_LENGTH, n_side, endpoint=False)
     angle_end = np.linspace(0.0, np.pi, n_end, endpoint=False)
     normals_end = np.stack((np.cos(angle_end), np.sin(angle_end)), axis=-1)
@@ -94,16 +81,21 @@ def main():
             np.stack((corner_00, corner_01, corner_11), axis=-1).reshape(-1, 3),
         )
     )
-    ring = trimesh.Trimesh(verts.reshape(-1, 3), faces, process=False)
+    return trimesh.Trimesh(verts.reshape(-1, 3), faces, process=False)
 
-    # MJCF model of the wrecking ball hanging from the model origin: a fixed hook link, free links interlocked with
-    # the plane alternating by a quarter turn, and an eye link welded to the steel sphere, all inclined by the release
-    # angle about y. Successive link centres along the taut chain sit one pitch apart, the tube of one link against
-    # the inner end of the next; the links are laid out with one tube radius of slack each so none starts in contact.
+
+def wrecking_ball_mjcf():
+    """MJCF model of the wrecking ball hanging from the model origin: a fixed hook link, free links interlocked with
+    the plane alternating by a quarter turn, and an eye link welded to the steel sphere, all inclined by the release
+    angle about y. Returns the model and the hook-to-sphere-centre length of the taut chain."""
+    ring = ring_mesh()
     half_length = 0.5 * RING_SIDE_LENGTH + RING_END_RADIUS
+    # Successive link centres along the chain when taut, the tube of one link against the inner end of the next. The
+    # links are laid out with one tube radius of slack per link so none starts in contact.
     pitch_taut = 2.0 * (half_length - RING_TUBE_RADIUS)
     pitch = pitch_taut - RING_TUBE_RADIUS
     eye_to_sphere = half_length + BALL_RADIUS - RING_TUBE_RADIUS
+
     mjcf = ET.Element("mujoco", model="wrecking_ball")
     asset = ET.SubElement(mjcf, "asset")
     ET.SubElement(
@@ -134,8 +126,28 @@ def main():
         sphere, "geom", type="sphere", size=f"{BALL_RADIUS}", density=f"{BALL_DENSITY}", rgba="0.3 0.3 0.32 1"
     )
 
-    # At the bottom of the swing the taut chain puts the ball centre at mid-pile height.
     chain_length = (N_RINGS + 1) * pitch_taut + eye_to_sphere
+    return ET.tostring(mjcf, encoding="unicode"), chain_length
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pile-width", type=int, default=6, help="Cubes across the pile, facing the ball")
+    parser.add_argument("--pile-depth", type=int, default=6, help="Cubes through the pile, along the swing")
+    parser.add_argument("--pile-height", type=int, default=5, help="Cubes up the pile")
+    parser.add_argument("-s", "--steps", type=int, default=800, help="Number of simulation steps")
+    parser.add_argument("-v", "--vis", action="store_true", help="Show the interactive viewer")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
+    parser.add_argument("-r", "--record", action="store_true", help="Record the scene to 'out/wrecking_ball.mp4'")
+    args = parser.parse_args()
+    horizon = 20 if "PYTEST_VERSION" in os.environ else args.steps
+
+    # The step rate is the point of the script, so the solver runs on field storage, its fastest layout on CPU.
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu, performance_mode=True)
+
+    mjcf, chain_length = wrecking_ball_mjcf()
+
+    # At the bottom of the swing the taut chain puts the ball centre at mid-pile height.
     anchor_height = 0.5 * args.pile_height * CUBE_SIZE + chain_length
     camera_pos = (-4.6, -6.3, 2.4)
     camera_lookat = (0.8, 0.0, 0.6)
@@ -167,7 +179,7 @@ def main():
     scene.add_entity(
         gs.morphs.MJCF(
             pos=(0.0, 0.0, anchor_height),
-            file=ET.tostring(mjcf, encoding="unicode"),
+            file=mjcf,
         ),
     )
 
