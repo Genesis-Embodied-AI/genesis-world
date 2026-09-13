@@ -407,11 +407,19 @@ def func_build_single_island(i_b, constraint_state: array_class.ConstraintState,
     """Write the partition of one env of a single-island scene serially: one island holding every dof in order.
 
     The lists are the identity and the island's inertia the trace of the mass matrix. Reserved for scenes off the CPU
-    skyline path and hibernation, which alone read the tree and link labels (see _sort_contacts_and_build_islands in
-    solver.py).
+    skyline path and hibernation, which alone read the tree labels (see _sort_contacts_and_build_islands in solver.py).
+    The link labels are written for the readers outside the solve (see RigidSolver.get_links_island_idx): the links of
+    the dof-carrying tree take the island, the links of a dof-less tree the label of no island.
     """
     n_dofs = constraint_state.island.dof_id.shape[0]
+    n_links = rigid_info.links_tree_idx.shape[0]
     constraint_state.island.n_islands[i_b] = 1
+    for i_l in range(n_links):
+        i_t = rigid_info.links_tree_idx[i_l]
+        i_island = -1
+        if rigid_info.trees_n_dofs[i_t] > 0:
+            i_island = 0
+        constraint_state.island.links_island_idx[i_l, i_b] = i_island
     constraint_state.island.dof_slices.start[0, i_b] = 0
     constraint_state.island.dof_slices.n[0, i_b] = n_dofs
     constraint_state.island.dof_slices.curr[0, i_b] = n_dofs
@@ -433,12 +441,21 @@ def func_build_single_island_coop(
     func_build_single_island."""
     _K = qd.static(32)
     n_dofs = constraint_state.island.dof_id.shape[0]
+    n_links = rigid_info.links_tree_idx.shape[0]
     if tid == 0:
         constraint_state.island.n_islands[i_b] = 1
         constraint_state.island.dof_slices.start[0, i_b] = 0
         constraint_state.island.dof_slices.n[0, i_b] = n_dofs
         constraint_state.island.dof_slices.curr[0, i_b] = n_dofs
         constraint_state.island.dof_range_start[0, i_b] = 0
+    i_l = tid
+    while i_l < n_links:
+        i_t = rigid_info.links_tree_idx[i_l]
+        i_island = -1
+        if rigid_info.trees_n_dofs[i_t] > 0:
+            i_island = 0
+        constraint_state.island.links_island_idx[i_l, i_b] = i_island
+        i_l = i_l + _K
     inertia = gs.qd_float(0.0)
     i_d = tid
     while i_d < n_dofs:

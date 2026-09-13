@@ -815,6 +815,8 @@ class Renderer(object):
             buf_idx += 1
         defines["INST_M_LOC"] = buf_idx
         defines["INST_ENV_OFFSET_LOC"] = buf_idx + 4
+        if primitive.inst_tints is not None:
+            defines["INST_TINT_LOC"] = buf_idx + 5
 
         # Set up shadow mapping defines
         if flags & RenderFlags.SHADOWS_DIRECTIONAL:

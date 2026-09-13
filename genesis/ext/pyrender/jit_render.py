@@ -536,6 +536,8 @@ class JITRenderer:
         self.env_active = np.ones((n, n_env), np.bool_)
         self.n_indices = np.zeros(n, np.int32)  # positive: indices, negative: positions
         self.model_buffer_id = np.zeros(n, np.int32)
+        # GL buffer of the instance tints of a primitive carrying them, 0 otherwise (see Primitive.inst_tints)
+        self.inst_tint_buffer_id = np.zeros(n, np.int32)
         self.inst_attr_start = np.zeros(n, np.int32)
         # Centre of each primitive in the frame of its node, per environment. Sorting on it rather than on the node
         # origin places a mesh where its geometry actually is, which is what decides whether it occludes another one.
@@ -649,6 +651,7 @@ class JITRenderer:
             self.n_instances[i] = len(primitive.poses) if primitive.poses is not None else 1
             self.n_indices[i] = primitive.indices.size if primitive.indices is not None else -len(primitive.positions)
             self.model_buffer_id[i] = primitive._buffers.get("model", 0)
+            self.inst_tint_buffer_id[i] = primitive._buffers.get("inst_tint", 0)
             self.inst_attr_start[i] = getattr(primitive, "_inst_attr_start", 0)
 
         # Gate the per-env culling to scenes with heterogeneous variants or primitives standing in one environment
@@ -731,6 +734,7 @@ class JITRenderer:
                 nb.int32,
                 nb.int32[:],
                 nb.int32[:],
+                nb.int32[:],
                 nb.boolean[:, :],
                 nb.int32[:],
                 nb.float32,
@@ -765,6 +769,7 @@ class JITRenderer:
             screen_size,
             env_idx,
             model_buffer_id,
+            inst_tint_buffer_id,
             inst_attr_start,
             env_active,
             draw_order,
@@ -915,17 +920,27 @@ class JITRenderer:
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(k * 12)
                                     )
+                                if inst_tint_buffer_id[id]:
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, inst_tint_buffer_id[id])
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(k * 16)
+                                    )
                                 if n_indices[id] > 0:
                                     gl.glDrawElementsInstanced(
                                         mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1
                                     )
                                 else:
                                     gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
+                                if inst_tint_buffer_id[id]:
+                                    gl.glVertexAttribPointer(
+                                        inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(0)
+                                    )
                                 if is_env_instanced[id]:
+                                    gl.glBindBuffer(GL_ARRAY_BUFFER, env_offset_buffer)
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + 4, 3, GL_FLOAT, 0, 12, address_to_ptr(0)
                                     )
-                                    gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
+                                gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
                                 for j in range(4):
                                     gl.glVertexAttribPointer(
                                         inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16)
@@ -950,11 +965,19 @@ class JITRenderer:
                         gl.glVertexAttribPointer(
                             inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(env_idx * 64 + j * 16)
                         )
+                    if inst_tint_buffer_id[id]:
+                        gl.glBindBuffer(GL_ARRAY_BUFFER, inst_tint_buffer_id[id])
+                        gl.glVertexAttribPointer(
+                            inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(env_idx * 16)
+                        )
                     if n_indices[id] > 0:
                         gl.glDrawElementsInstanced(mode[id], n_indices[id], GL_UNSIGNED_INT, address_to_ptr(0), 1)
                     else:
                         gl.glDrawArraysInstanced(mode[id], 0, -n_indices[id], 1)
                     # Restore default attribute pointer (offset 0) to avoid corrupting VAO state
+                    if inst_tint_buffer_id[id]:
+                        gl.glVertexAttribPointer(inst_attr_start[id] + 5, 4, GL_FLOAT, 0, 16, address_to_ptr(0))
+                        gl.glBindBuffer(GL_ARRAY_BUFFER, model_buffer_id[id])
                     for j in range(4):
                         gl.glVertexAttribPointer(inst_attr_start[id] + j, 4, GL_FLOAT, 0, 64, address_to_ptr(j * 16))
 
@@ -1375,6 +1398,7 @@ class JITRenderer:
                 screen_size,
                 env_idx,
                 self.model_buffer_id,
+                self.inst_tint_buffer_id,
                 self.inst_attr_start,
                 self.env_active,
                 draw_order,

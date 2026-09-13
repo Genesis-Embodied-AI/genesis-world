@@ -210,6 +210,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         ctx = self.viewer.gs_context
         ctx.update_link_frame()
         ctx.update_rigid()
+        ctx.update_rigid_tints()
 
     def _apply_entity_vis_mode(self, entity, mode: str):
         """Switch the entity's rendered mesh between ``"visual"`` and ``"collision"``. Removes the previous
@@ -608,6 +609,26 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         changed, new_val = imgui.checkbox("Camera Frustum", gs_context.camera_frustum_shown)
         if changed:
             (gs_context.on_camera_frustum if new_val else gs_context.off_camera_frustum)()
+
+        # Island and hibernation coloring of the rigid links. Both are disabled rather than removed where the scene
+        # offers nothing to show, so the panel layout stays the same across scenes.
+        rigid_solver = self.scene.rigid_solver
+        islands_disabled = not rigid_solver.is_active
+        imgui.begin_disabled(islands_disabled)
+        changed, new_val = imgui.checkbox("Islands", gs_context.is_islands_shown)
+        imgui.end_disabled()
+        if islands_disabled and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
+            imgui.set_tooltip("No rigid entity in the scene")
+        if changed:
+            (gs_context.on_islands if new_val else gs_context.off_islands)()
+        hibernation_disabled = islands_disabled or not rigid_solver.use_hibernation
+        imgui.begin_disabled(hibernation_disabled)
+        changed, new_val = imgui.checkbox("Hibernation", gs_context.is_hibernation_shown)
+        imgui.end_disabled()
+        if hibernation_disabled and imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled.value):
+            imgui.set_tooltip("Requires RigidOptions.use_hibernation")
+        if changed:
+            (gs_context.on_hibernation if new_val else gs_context.off_hibernation)()
 
         # Face Normals
         changed, new_val = imgui.checkbox("Face Normals", render_flags["face_normals"])

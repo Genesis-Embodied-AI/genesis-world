@@ -62,6 +62,21 @@ def color_u8_to_f32(color) -> np.ndarray:
     return np.asarray(color, dtype=np.uint8).astype(np.float32) / 255.0
 
 
+def hsv_to_rgb(hue: np.ndarray, saturation: float, value: float) -> np.ndarray:
+    """Convert colors given by hue, saturation and value, each in [0, 1], to RGB in [0, 1], the channels stacked on a
+    trailing axis of the shape of 'hue'."""
+    sector = np.floor(hue * 6.0)
+    fraction = hue * 6.0 - sector
+    sector = sector.astype(np.int32) % 6
+    p = value * (1.0 - saturation)
+    q = value * (1.0 - fraction * saturation)
+    t = value * (1.0 - (1.0 - fraction) * saturation)
+    red = np.choose(sector, (value, q, p, p, t, value))
+    green = np.choose(sector, (t, value, value, q, p, p))
+    blue = np.choose(sector, (p, p, t, value, value, q))
+    return np.stack((red, green, blue), axis=-1)
+
+
 def glossiness_to_roughness(glossiness: float) -> float:
     return (2 / (glossiness + 2)) ** (1.0 / 4.0)
 

@@ -3012,6 +3012,24 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_info.links.invweight, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
+    def get_links_island_idx(self, links_idx=None, envs_idx=None):
+        """Island of every link at the last constraint solve, the links coupled through contacts, joints and equalities
+        sharing one, and -1 for a link no constraint moves (under a jointless tree)."""
+        links_island_idx = self.constraint_solver.constraint_state.island.links_island_idx
+        tensor = qd_to_torch(links_island_idx, envs_idx, links_idx, transpose=True, copy=True)
+        # The partition labels the links tree by tree, so a link outside every tree (a fixed body) never receives a
+        # label and takes the one of no island here
+        links_tree_idx = qd_to_torch(self.rigid_info.links_tree_idx, links_idx)
+        tensor[..., links_tree_idx < 0] = -1
+        return tensor[0] if self.n_envs == 0 else tensor
+
+    def get_links_is_hibernated(self, links_idx=None, envs_idx=None):
+        """Whether every link sleeps, see 'RigidOptions.use_hibernation'."""
+        if not self._use_hibernation:
+            gs.raise_exception("Hibernation is disabled, see 'RigidOptions.use_hibernation'.")
+        tensor = qd_to_torch(self.dyn_state.links.is_hibernated, envs_idx, links_idx, transpose=True) > 0
+        return tensor[0] if self.n_envs == 0 else tensor
+
     def get_geoms_friction_ratio(self, geoms_idx=None, envs_idx=None):
         tensor = qd_to_torch(self.dyn_state.geoms.friction_ratio, envs_idx, geoms_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
@@ -3409,6 +3427,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.is_built:
             return self._n_geoms
         return len(self.geoms)
+
+    @property
+    def use_hibernation(self):
+        """Whether the bodies that come to rest sleep, see 'RigidOptions.use_hibernation'."""
+        return self._use_hibernation
 
     @property
     def n_cells(self):
