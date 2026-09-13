@@ -271,17 +271,18 @@ def kernel_accumulate_constraint_solver_grads(
     rigid_config: qd.template(),
 ):
     """Fold the constraint-solver adjoint outputs into the autodiff grad fields:
-    dyn_state.dofs.force.grad += constraint_state.dL_dforce
-    rigid_info.mass_mat.grad  += constraint_state.dL_dM
+    dyn_state.dofs.qf_smooth.grad += constraint_state.dL_dforce
+    rigid_info.mass_mat.grad      += constraint_state.dL_dM
+    The solve reads its smooth force from qf_smooth (see func_solve_init), so its gradient lands there.
     """
-    _B = dyn_state.dofs.force.shape[1]
-    n_dofs = dyn_state.dofs.force.shape[0]
+    _B = dyn_state.dofs.qf_smooth.shape[1]
+    n_dofs = dyn_state.dofs.qf_smooth.shape[0]
     qd.loop_config(
         name="kernel_accumulate_constraint_solver_grads",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
     for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.force.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
+        dyn_state.dofs.qf_smooth.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
     for i, j, i_b in qd.ndrange(n_dofs, n_dofs, _B):
         rigid_info.mass_mat.grad[i, j, i_b] += constraint_state.dL_dM[i, j, i_b]
 
