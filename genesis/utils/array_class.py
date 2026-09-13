@@ -486,8 +486,8 @@ class IslandState:
     is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
     hibernated_next_link: qd.Tensor = of_kind(DataKind.STATE)
     # (env, island) work-lists of the cooperative per-island factor+solve, one per island size class (see
-    # island_tile_caps): class c holds factor_worklist_size[c] items in its own region of the two index lists, of
-    # n_trees * _B slots each, in the order of the atomic reservation of the partition pass.
+    # island_tile_caps): class c holds its factor_worklist_size[c] awake islands in its own region of the two index
+    # lists, of n_trees * _B slots each, in the order of the atomic reservation of the partition pass.
     factor_worklist_i_b: qd.Tensor
     factor_worklist_i_island: qd.Tensor
     factor_worklist_size: qd.Tensor

@@ -1506,20 +1506,28 @@ def func_append_factor_worklist(
     i_b, i_island, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
 ):
     """Append island i_island of env i_b to the factor work-list of its size class, the smallest tile cap holding the
-    island's dofs and the last class for the islands above every cap (see island_tile_caps)."""
-    CAPS = qd.static(
-        array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last)
-    )
-    N_CLASSES = qd.static(len(CAPS))
-    region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
-    n_island_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
-    i_class = N_CLASSES - 1
-    for k in qd.static(range(N_CLASSES - 2, -1, -1)):
-        if n_island_dofs <= CAPS[k]:
-            i_class = k
-    i_slot = i_class * region + qd.atomic_add(constraint_state.island.factor_worklist_size[i_class], 1)
-    constraint_state.island.factor_worklist_i_b[i_slot] = i_b
-    constraint_state.island.factor_worklist_i_island[i_slot] = i_island
+    island's dofs and the last class for the islands above every cap (see island_tile_caps).
+
+    A hibernated island is left off the lists: its factor and solve are skipped for the whole step, every pass reading
+    its gradient or direction being gated on improved (see IslandState).
+    """
+    is_listed = True
+    if qd.static(rigid_config.use_hibernation):
+        is_listed = constraint_state.island.is_hibernated[i_island, i_b] == 0
+    if is_listed:
+        CAPS = qd.static(
+            array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last)
+        )
+        N_CLASSES = qd.static(len(CAPS))
+        region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
+        n_island_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+        i_class = N_CLASSES - 1
+        for k in qd.static(range(N_CLASSES - 2, -1, -1)):
+            if n_island_dofs <= CAPS[k]:
+                i_class = k
+        i_slot = i_class * region + qd.atomic_add(constraint_state.island.factor_worklist_size[i_class], 1)
+        constraint_state.island.factor_worklist_i_b[i_slot] = i_b
+        constraint_state.island.factor_worklist_i_island[i_slot] = i_island
 
 
 @qd.kernel(fastcache=True)
@@ -3111,7 +3119,8 @@ def func_island_tiled_factor_solve_all(
                         i_b = constraint_state.island.factor_worklist_i_b[i_class * region + i_work]
                         i_island = constraint_state.island.factor_worklist_i_island[i_class * region + i_work]
                     if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-                        # An island standing still (asleep, or converged in the iterations) keeps its factor and solve
+                        # An island converged in the iterations keeps its factor and solve; a hibernated one is off the
+                        # lists (see func_append_factor_worklist)
                         if constraint_state.island.improved[i_island, i_b]:
                             func_island_assemble_factor_solve_tiled(
                                 i_b,
@@ -3129,18 +3138,6 @@ def func_island_tiled_factor_solve_all(
                                 IS_LAST_CLASS,
                                 write_L,
                             )
-                        elif qd.static(rigid_config.use_hibernation):
-                            if constraint_state.island.is_hibernated[i_island, i_b]:
-                                # A hibernated island, whose factor and solve are skipped for the whole step, carries a
-                                # zero gradient and search direction so that no stale direction steps its dofs. The
-                                # gradient is zeroed where it is computed (func_update_gradient_no_solve,
-                                # func_update_gradient_batch).
-                                dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
-                                i_d_ = tid
-                                while i_d_ < constraint_state.island.dof_slices.n[i_island, i_b]:
-                                    i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
-                                    constraint_state.Mgrad[i_d, i_b] = gs.qd_float(0.0)
-                                    i_d_ = i_d_ + T
 
 
 @qd.func
@@ -4884,8 +4881,8 @@ def func_update_gradient_batch(
     rigid_config: qd.template(),
 ):
     """Gradient of every island of one env that still iterates and its Newton direction Mgrad through the island's
-    factor, a hibernated island carrying zeros. The dofs are walked through the island list by offset where it holds
-    consecutive indices, and over the env's plain range in a scene holding one island per env (see is_single_island).
+    factor. The dofs are walked through the island list by offset where it holds consecutive indices, and over the
+    env's plain range in a scene holding one island per env (see is_single_island).
     """
     n_dofs = constraint_state.grad.shape[0]
     for i_island in range(constraint_state.island.n_islands[i_b]):
@@ -4904,12 +4901,6 @@ def func_update_gradient_batch(
                     - dyn_state.dofs.force[i_d, i_b]
                     - constraint_state.qfrc_constraint[i_d, i_b]
                 )
-        elif qd.static(rigid_config.use_hibernation):
-            if constraint_state.island.is_hibernated[i_island, i_b]:
-                for i_pos in range(dof_lo, dof_hi):
-                    i_d = linesearch.func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
-                    constraint_state.grad[i_d, i_b] = gs.qd_float(0.0)
-                    constraint_state.Mgrad[i_d, i_b] = gs.qd_float(0.0)
     if qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
         func_solve_mass_batch(
             i_b, constraint_state.grad, constraint_state.Mgrad, dyn_state, dyn_info, rigid_info, rigid_config
@@ -4947,8 +4938,7 @@ def func_update_gradient_no_solve(
         n_dofs, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
         if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-            # The gradient of an island standing still is kept (see improved in IslandState), and a hibernated island
-            # carries a zero gradient, see func_island_tiled_factor_solve_all.
+            # The gradient of an island standing still is kept (see improved in IslandState)
             i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
             if constraint_state.island.improved[i_island, i_b]:
                 constraint_state.grad[i_d, i_b] = (
@@ -4956,9 +4946,6 @@ def func_update_gradient_no_solve(
                     - dyn_state.dofs.force[i_d, i_b]
                     - constraint_state.qfrc_constraint[i_d, i_b]
                 )
-            elif qd.static(rigid_config.use_hibernation):
-                if constraint_state.island.is_hibernated[i_island, i_b]:
-                    constraint_state.grad[i_d, i_b] = gs.qd_float(0.0)
 
 
 @qd.func
