@@ -1503,42 +1503,88 @@ def func_torque_and_passive_force(
 ):
     BW = qd.static(is_backward)
 
-    # compute force based on each dof's ctrl mode
+    # Actuation forces per dof from its ctrl mode, one thread per link, so a scene of many free bodies spreads over as
+    # many threads as it holds links. Every link is visited, asleep or awake: an actuated sleeping link wakes below.
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+    for i_l, i_b in qd.ndrange(dyn_info.links.parent_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         EPS = rigid_info.EPS[None]
 
-        wakeup = False
-        for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.n_dofs[I_l] > 0:
-                i_j = dyn_info.links.joint_start[I_l]
-                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                joint_type = dyn_info.joints.type[I_j]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if dyn_info.links.n_dofs[I_l] > 0:
+            wakeup = False
+            i_j = dyn_info.links.joint_start[I_l]
+            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+            joint_type = dyn_info.joints.type[I_j]
 
-                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                force = gs.qd_float(0.0)
+                if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
+                    force = dyn_state.dofs.ctrl_force[i_d, i_b]
+                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
+                    force = -dyn_info.dofs.act_bias[I_d][2] * (
+                        dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
+                    )
+                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION and not (
+                    joint_type == gs.JOINT_TYPE.FREE and i_d >= dyn_info.links.dof_start[I_l] + 3
+                ):
+                    # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
+                    # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
+                    force = (
+                        dyn_info.dofs.act_gain[I_d] * (dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b])
+                        + dyn_info.dofs.act_bias[I_d][0]
+                        + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
+                        + dyn_info.dofs.act_bias[I_d][2]
+                        * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
+                    )
+
+                dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
+                    force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
+                )
+
+                if qd.abs(force) > EPS:
+                    wakeup = True
+
+            dof_start = dyn_info.links.dof_start[I_l]
+            if joint_type == gs.JOINT_TYPE.FREE and (
+                dyn_state.dofs.ctrl_mode[dof_start + 3, i_b] == gs.CTRL_MODE.POSITION
+                or dyn_state.dofs.ctrl_mode[dof_start + 4, i_b] == gs.CTRL_MODE.POSITION
+                or dyn_state.dofs.ctrl_mode[dof_start + 5, i_b] == gs.CTRL_MODE.POSITION
+            ):
+                xyz = qd.Vector(
+                    [
+                        dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
+                        dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
+                        dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
+                    ],
+                    dt=gs.qd_float,
+                )
+
+                ctrl_xyz = qd.Vector(
+                    [
+                        dyn_state.dofs.ctrl_pos[0 + 3 + dof_start, i_b],
+                        dyn_state.dofs.ctrl_pos[1 + 3 + dof_start, i_b],
+                        dyn_state.dofs.ctrl_pos[2 + 3 + dof_start, i_b],
+                    ],
+                    dt=gs.qd_float,
+                )
+
+                quat = gu.qd_xyz_to_quat(xyz)
+                ctrl_quat = gu.qd_xyz_to_quat(ctrl_xyz)
+
+                q_diff = gu.qd_transform_quat_by_quat(ctrl_quat, gu.qd_inv_quat(quat))
+                rotvec = gu.qd_quat_to_rotvec(q_diff, EPS)
+
+                for j in qd.static(range(3)):
+                    i_d = dof_start + 3 + j
                     I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                    force = gs.qd_float(0.0)
-                    if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
-                        force = dyn_state.dofs.ctrl_force[i_d, i_b]
-                    elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
-                        force = -dyn_info.dofs.act_bias[I_d][2] * (
-                            dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
-                        )
-                    elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION and not (
-                        joint_type == gs.JOINT_TYPE.FREE and i_d >= dyn_info.links.dof_start[I_l] + 3
-                    ):
-                        # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
-                        # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
-                        force = (
-                            dyn_info.dofs.act_gain[I_d]
-                            * (dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b])
-                            + dyn_info.dofs.act_bias[I_d][0]
-                            + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1])
-                            * dyn_state.dofs.pos[i_d, i_b]
-                            + dyn_info.dofs.act_bias[I_d][2]
-                            * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
-                        )
+                    force = (
+                        dyn_info.dofs.act_gain[I_d] * rotvec[j]
+                        + dyn_info.dofs.act_bias[I_d][0]
+                        + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
+                        + dyn_info.dofs.act_bias[I_d][2]
+                        * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
+                    )
 
                     dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
                         force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
@@ -1547,63 +1593,12 @@ def func_torque_and_passive_force(
                     if qd.abs(force) > EPS:
                         wakeup = True
 
-                dof_start = dyn_info.links.dof_start[I_l]
-                if joint_type == gs.JOINT_TYPE.FREE and (
-                    dyn_state.dofs.ctrl_mode[dof_start + 3, i_b] == gs.CTRL_MODE.POSITION
-                    or dyn_state.dofs.ctrl_mode[dof_start + 4, i_b] == gs.CTRL_MODE.POSITION
-                    or dyn_state.dofs.ctrl_mode[dof_start + 5, i_b] == gs.CTRL_MODE.POSITION
-                ):
-                    xyz = qd.Vector(
-                        [
-                            dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
-                            dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
-                            dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
-                        ],
-                        dt=gs.qd_float,
-                    )
-
-                    ctrl_xyz = qd.Vector(
-                        [
-                            dyn_state.dofs.ctrl_pos[0 + 3 + dof_start, i_b],
-                            dyn_state.dofs.ctrl_pos[1 + 3 + dof_start, i_b],
-                            dyn_state.dofs.ctrl_pos[2 + 3 + dof_start, i_b],
-                        ],
-                        dt=gs.qd_float,
-                    )
-
-                    quat = gu.qd_xyz_to_quat(xyz)
-                    ctrl_quat = gu.qd_xyz_to_quat(ctrl_xyz)
-
-                    q_diff = gu.qd_transform_quat_by_quat(ctrl_quat, gu.qd_inv_quat(quat))
-                    rotvec = gu.qd_quat_to_rotvec(q_diff, EPS)
-
-                    for j in qd.static(range(3)):
-                        i_d = dof_start + 3 + j
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                        force = (
-                            dyn_info.dofs.act_gain[I_d] * rotvec[j]
-                            + dyn_info.dofs.act_bias[I_d][0]
-                            + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1])
-                            * dyn_state.dofs.pos[i_d, i_b]
-                            + dyn_info.dofs.act_bias[I_d][2]
-                            * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
-                        )
-
-                        dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
-                            force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
-                        )
-
-                        if qd.abs(force) > EPS:
-                            wakeup = True
-
-        if qd.static(rigid_config.use_hibernation):
-            if wakeup:
-                # Actuation may target any sleeping component of this entity; wake each one's island (a single call
-                # revives the whole island, so already-awake links are skipped).
-                for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-                    if dyn_state.links.is_hibernated[i_l, i_b]:
-                        i_is = constraint_state.island.links_island_idx[i_l, i_b]
-                        func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            if qd.static(rigid_config.use_hibernation):
+                # Actuation on a sleeping link wakes its island, the unit that sleeps and wakes together (see
+                # func_wakeup_island, whose atomic claim serves the links of one island waking it at once)
+                if wakeup and dyn_state.links.is_hibernated[i_l, i_b]:
+                    i_is = constraint_state.island.links_island_idx[i_l, i_b]
+                    func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_0, i_b in (
