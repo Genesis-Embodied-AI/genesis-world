@@ -921,10 +921,14 @@ def get_constraint_state(constraint_solver, solver, collider):
     # striding i_d in cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on
     # a per-consumer basis under the same enable_cooperative_constraint_kernels flag.
     dof_vec_layout = (1, 0) if batch_first else None
-    # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one
-    # slot per fused update on the CPU per-island path (func_rank_batch_update_island), a single slot elsewhere
-    # (indexing then reduces to [i_d]). Flat 2D so the buffer keeps the DOF-vec rank and layout on every backend.
-    nt_vec_n_slots = solver.rigid_config.hessian_rank_update_batch if constraint_solver.sparse_solve else 1
+    # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one slot
+    # per fused update of the per-island factor (func_rank_batch_update_island), a single slot for the whole-env factor
+    # of a single-island scene (indexing then reduces to [i_d]). Flat 2D to keep the DOF-vec rank and layout everywhere.
+    nt_vec_n_slots = (
+        solver.rigid_config.hessian_rank_update_batch
+        if constraint_solver.sparse_solve or not solver.rigid_config.is_single_island
+        else 1
+    )
     # The noslip scratch holds one M^{-1} J^T column per env, or per lane of the 32-lane blocks of the cooperative sweep
     # (see kernel_noslip in noslip.py).
     is_noslip_active = solver._options.noslip_iterations > 0
@@ -2938,7 +2942,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
 
     @property
     def hessian_rank_update_batch(self) -> int:
-        """Number of rank-1 Cholesky updates fused into one column sweep by the CPU incremental factor.
+        """Number of rank-1 Cholesky updates fused into one column sweep by the per-island incremental factor.
 
         Sizes the nt_vec slots and the static per-column unroll of func_rank_batch_update_island: 8 amortizes the
         active-set flip batching, widened when the coupled elliptic-cone update must stage 2 slots per cone row
