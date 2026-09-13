@@ -1454,15 +1454,14 @@ def _sort_contacts_and_build_islands(
     Where the cooperative kernels run, a block serves each env: the lanes sort together (func_sort_contacts_coop), then
     build the partition together (func_build_islands_coop); elsewhere one thread per env does both. The order and the
     partition are the same whichever way they are built, so the constraint order the caller assembles is too. A
-    single-island scene writes its partition outright (func_build_single_island), off the CPU skyline path and
-    hibernation, which alone read the tree and link labels the full build resolves. Under hibernation the build also
-    wakes the sleepers an awake body reaches (see func_build_islands), so the constraints below are assembled against
-    the partition that is solved.
+    single-island scene writes its partition outright (func_build_single_island), off the CPU skyline path, which
+    alone reads the tree labels the full build resolves, and in every env where nothing sleeps. Under hibernation the
+    build also wakes the sleepers an awake body reaches (see func_build_islands), so the constraints below are
+    assembled against the partition that is solved.
     """
     _B = constraint_state.jac.shape[2]
-    has_trivial_partition = qd.static(
-        rigid_config.is_single_island and not rigid_config.sparse_solve and not rigid_config.use_hibernation
-    )
+    # Under hibernation the trivial partition serves the envs where nothing sleeps, the full build the others
+    has_trivial_partition = qd.static(rigid_config.is_single_island and not rigid_config.sparse_solve)
     if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
         # Reset the per-class (env, island) work-list counters before the per-env builds append to them
         N_CLASSES = qd.static(
@@ -1480,7 +1479,16 @@ def _sort_contacts_and_build_islands(
                 func_sort_contacts_coop(i_b, tid, dyn_state, collider_state, constraint_state)
                 qd.simt.block.sync()
             if qd.static(has_trivial_partition):
-                func_build_single_island_coop(i_b, tid, constraint_state, rigid_info)
+                is_partition_trivial = True
+                if qd.static(rigid_config.use_hibernation):
+                    is_partition_trivial = not func_has_sleepers(i_b, dyn_state, rigid_info)
+                if is_partition_trivial:
+                    func_build_single_island_coop(i_b, tid, constraint_state, rigid_info, rigid_config)
+                else:
+                    if qd.static(rigid_config.use_hibernation):
+                        func_build_islands_coop(
+                            i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+                        )
             else:
                 func_build_islands_coop(
                     i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
@@ -1507,7 +1515,16 @@ def _sort_contacts_and_build_islands(
                     dyn_state.geoms.quat,
                 )
             if qd.static(has_trivial_partition):
-                func_build_single_island(i_b, constraint_state, rigid_info)
+                is_partition_trivial = True
+                if qd.static(rigid_config.use_hibernation):
+                    is_partition_trivial = not func_has_sleepers(i_b, dyn_state, rigid_info)
+                if is_partition_trivial:
+                    func_build_single_island(i_b, constraint_state, rigid_info, rigid_config)
+                else:
+                    if qd.static(rigid_config.use_hibernation):
+                        func_build_islands(
+                            i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
+                        )
             else:
                 func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
             if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
