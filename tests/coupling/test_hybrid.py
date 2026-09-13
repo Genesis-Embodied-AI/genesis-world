@@ -441,6 +441,129 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
     assert robot_2_max_corner[2] > robot_1_max_corner[2] + 0.05
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["64"])
+@pytest.mark.parametrize("n_envs, is_batched", [(0, False), (2, True)])
+def test_sap_joint_equality_polynomial(show_viewer, scaled_mjcf_joint_equalities, n_envs, is_batched, tol):
+    DT = 1e-2
+    SCALE = 2.0
+    COEFFICIENTS = (0.2, 0.4, -0.3, 0.2, -0.1)
+    DRIVER_POSITION = 0.5
+    DRIVER_VELOCITY = 0.4
+    FOLLOWER_POSITION = sum(coefficient * DRIVER_POSITION**degree for degree, coefficient in enumerate(COEFFICIENTS))
+    DERIVATIVE = sum(
+        degree * coefficient * DRIVER_POSITION ** (degree - 1)
+        for degree, coefficient in enumerate(COEFFICIENTS[1:], start=1)
+    )
+    FOLLOWER_VELOCITY = DRIVER_VELOCITY * DERIVATIVE
+    TARGET_POSITION = 0.25
+    UNRELATED_POSITION = 1.0
+    MAX_RESIDUAL_RATIO = 1e-3
+    JOINT_PAIRS = (
+        ("hinge_hinge", "hinge", "hinge"),
+        ("slide_slide", "slide", "slide"),
+        ("slide_hinge", "slide", "hinge"),
+        ("hinge_slide", "hinge", "slide"),
+    )
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            batch_joints_info=is_batched,
+            batch_dofs_info=is_batched,
+        ),
+        coupler_options=gs.options.SAPCouplerOptions(
+            rigid_floor_contact_type="none",
+            rigid_rigid_contact_type="none",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -0.75, 4.0),
+            camera_lookat=(1.0, -0.75, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=scaled_mjcf_joint_equalities,
+            scale=SCALE,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # A velocity tangent to the polynomial must not trigger a constraint impulse.
+    qpos = entity.get_qpos()
+    velocity = entity.get_dofs_velocity()
+    for name, driver_type, follower_type in JOINT_PAIRS:
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        (i_driver_d,) = entity.get_joint(f"{name}_driver").dofs_idx_local
+        (i_follower_d,) = entity.get_joint(f"{name}_follower").dofs_idx_local
+        qpos[..., i_driver_q] = DRIVER_POSITION * (SCALE if driver_type == "slide" else 1.0)
+        qpos[..., i_follower_q] = FOLLOWER_POSITION * (SCALE if follower_type == "slide" else 1.0)
+        velocity[..., i_driver_d] = DRIVER_VELOCITY * (SCALE if driver_type == "slide" else 1.0)
+        velocity[..., i_follower_d] = FOLLOWER_VELOCITY * (SCALE if follower_type == "slide" else 1.0)
+    (i_target_q,) = entity.get_joint("target").qs_idx_local
+    (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
+    qpos[..., i_target_q] = TARGET_POSITION * SCALE
+    qpos[..., i_unrelated_q] = UNRELATED_POSITION * SCALE
+    entity.set_qpos(qpos)
+    entity.set_dofs_velocity(velocity)
+    expected_qpos = qpos + velocity * DT
+    scene.step()
+    assert_allclose(entity.get_qpos(), expected_qpos, tol=tol)
+
+    # From rest, SAP reduces the linearized residual by R / (R + J M^-1 J^T).
+    # With default regularization, the largest effective inertia (8.1, including armature) gives a ratio below 8.1e-4.
+    # Move the driver to its reference pose to check the updated Jacobian: poly(0) = a0 and poly'(0) = a1.
+    qpos = entity.get_qpos()
+    for name, _, _ in JOINT_PAIRS:
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        qpos[..., i_driver_q] = 0.0
+        qpos[..., i_follower_q] = 0.0
+    qpos[..., i_target_q] = 0.0
+    qpos[..., i_unrelated_q] = UNRELATED_POSITION * SCALE
+    entity.set_qpos(qpos)
+    mass_mat = entity.get_mass_mat()
+    scene.step()
+
+    qpos_after = entity.get_qpos()
+    for name, driver_type, follower_type in JOINT_PAIRS:
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        (i_driver_d,) = entity.get_joint(f"{name}_driver").dofs_idx_local
+        (i_follower_d,) = entity.get_joint(f"{name}_follower").dofs_idx_local
+        driver_scale = SCALE if driver_type == "slide" else 1.0
+        follower_scale = SCALE if follower_type == "slide" else 1.0
+        driver_displacement = (qpos_after[..., i_driver_q] - qpos[..., i_driver_q]) / driver_scale
+        expected_follower_position = COEFFICIENTS[0] + COEFFICIENTS[1] * driver_displacement
+        assert_allclose(
+            qpos_after[..., i_follower_q] / follower_scale,
+            expected_follower_position,
+            atol=MAX_RESIDUAL_RATIO * abs(COEFFICIENTS[0]),
+        )
+
+        # Each joint has its own root link, so its generalized impulse is M_ii * delta_q / dt.
+        # The two impulses must have the ratio -poly'(driver), including coordinate scaling.
+        driver_impulse = (
+            mass_mat[..., i_driver_d, i_driver_d] * (qpos_after[..., i_driver_q] - qpos[..., i_driver_q]) / DT
+        )
+        follower_impulse = (
+            mass_mat[..., i_follower_d, i_follower_d] * (qpos_after[..., i_follower_q] - qpos[..., i_follower_q]) / DT
+        )
+        assert_allclose(driver_impulse, -COEFFICIENTS[1] * follower_scale / driver_scale * follower_impulse, tol=tol)
+
+    assert_allclose(
+        qpos_after[..., i_target_q] / SCALE,
+        TARGET_POSITION,
+        atol=MAX_RESIDUAL_RATIO * abs(TARGET_POSITION),
+    )
+    assert_allclose(qpos_after[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
