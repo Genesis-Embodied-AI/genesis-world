@@ -371,7 +371,8 @@ def kernel_manual_add_joint_limit_constraints_bw(
         )
         if qd.static(enable_collision):
             n_con_counter = n_con_counter + gs.qd_int(
-                collider_state.n_contacts[i_b] * qd.static(rigid_config.rows_per_contact)
+                (collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b])
+                * qd.static(rigid_config.rows_per_contact)
             )
 
         for i_l in range(n_links):
@@ -479,10 +480,10 @@ def kernel_manual_add_collision_constraints_bw(
     for flat_idx in range(max_contact_pairs * _B):
         i_b = flat_idx % _B
         i_col_ = flat_idx // _B
-        if i_col_ < collider_state.n_contacts[i_b]:
-            # The forward assembles the contact rows in logical (sorted) contact order: row group i_col_ maps to
-            # physical contact contact_sort_idx[i_col_] (see add_inequality_constraints).
-            i_col = collider_state.contact_sort_idx[i_col_, i_b]
+        if i_col_ < collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]:
+            # The forward assembles the contact rows in logical (sorted) order of the live contacts: row group i_col_
+            # maps to physical contact contact_sort_idx[n_contacts_hibernated + i_col_] (see add_inequality_constraints).
+            i_col = collider_state.contact_sort_idx[collider_state.n_contacts_hibernated[i_b] + i_col_, i_b]
             link_a = collider_state.contact_data.link_a[i_col, i_b]
             link_b = collider_state.contact_data.link_b[i_col, i_b]
             contact_pos = collider_state.contact_data.pos[i_col, i_b]

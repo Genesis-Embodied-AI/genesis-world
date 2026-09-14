@@ -464,7 +464,9 @@ def func_noslip_batch(
     ne = constraint_state.n_constraints_equality[i_b]
     nf = constraint_state.n_constraints_frictionloss[i_b]
     const_start = ne + nf
-    const_end = const_start + qd.static(rigid_config.rows_per_contact) * collider_state.n_contacts[i_b]
+    const_end = const_start + qd.static(rigid_config.rows_per_contact) * (
+        collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]
+    )
 
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
     n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]

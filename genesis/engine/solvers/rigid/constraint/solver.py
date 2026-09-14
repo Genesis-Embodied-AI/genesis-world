@@ -21,6 +21,7 @@ from .island import (
     func_build_single_island_coop,
     func_group_constraints_by_island,
     func_group_constraints_by_island_coop,
+    func_reorder_island_dofs,
     func_sort_contacts,
     func_sort_contacts_coop,
 )
@@ -668,63 +669,6 @@ def _func_contact_row_direction(
 
 
 @qd.func
-def _is_contact_inert(
-    link_a,
-    link_b,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-) -> bool:
-    """Whether a contact carries no constraint because neither endpoint is an awake dynamic body.
-
-    A sleeper struck by an awake body is revived as the island partition is built, before the constraints are
-    assembled (see func_build_islands), so only hibernated-fixed pairs reach this state.
-    """
-    is_inert = False
-    # A pair of fixed links is dropped at build time, so an env with no sleeper holds no inert contact
-    if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
-        link_a_maybe_batch = [link_a, i_b] if qd.static(rigid_config.batch_links_info) else link_a
-        link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
-        is_a_awake = not (dyn_info.links.is_fixed[link_a_maybe_batch] or dyn_state.links.is_hibernated[link_a, i_b])
-        is_b_awake = link_b >= 0 and not (
-            dyn_info.links.is_fixed[link_b_maybe_batch] or dyn_state.links.is_hibernated[link_b, i_b]
-        )
-        is_inert = not is_a_awake and not is_b_awake
-    return is_inert
-
-
-@qd.func
-def _clear_inert_collision_row(n_con, i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
-    """Write an inert (force-free) collision row in slot n_con.
-
-    The slots are reused by index across steps, so a contact that carries no constraint must actively clear its
-    slots and mark them inert: leaving the stale jacobian of a prior step (when those dofs were awake and in contact)
-    would leak that contact force into the qfrc_constraint of a since-woken body that now shares the slot. The dof
-    support is emptied too, so every sparse consumer (jv products, island resolve, noslip) skips the row.
-    """
-    if qd.static(rigid_config.sparse_solve):
-        for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
-            i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
-            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-    else:
-        for i_d in range(constraint_state.jac.shape[1]):
-            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-    constraint_state.jac_n_dofs[n_con, i_b] = 0
-    constraint_state.diag[n_con, i_b] = gs.qd_float(1.0)
-    constraint_state.aref[n_con, i_b] = gs.qd_float(0.0)
-    # The elliptic cone reads efc_D as con_mu = friction * sqrt(d0 / d1). A zero would give sqrt(0 / 0) = NaN that the
-    # cleared jacobian cannot mask (0 * NaN = NaN), poisoning the solve. A finite efc_D = 1 / diag keeps con_mu finite,
-    # so the zero residuals classify this inert row as inactive. The pyramidal path is unaffected by efc_D once its
-    # jacobian is zero, so it keeps 0.
-    if qd.static(rigid_config.enable_elliptic_friction):
-        constraint_state.efc_D[n_con, i_b] = 1.0
-    else:
-        constraint_state.efc_D[n_con, i_b] = 0.0
-
-
-@qd.func
 def _add_friction_constraint(
     i_b,
     i_col_,
@@ -747,7 +691,7 @@ def _add_friction_constraint(
 
     collision_con_start = constraint_state.n_constraints[i_b]
 
-    i_col = collider_state.contact_sort_idx[i_col_, i_b]
+    i_col = collider_state.contact_sort_idx[collider_state.n_contacts_hibernated[i_b] + i_col_, i_b]
     contact_data_link_a = collider_state.contact_data.link_a[i_col, i_b]
     contact_data_link_b = collider_state.contact_data.link_b[i_col, i_b]
 
@@ -926,28 +870,20 @@ def _add_collision_constraints_per_friction(
         i_b = flat_idx // (max_candidate_contacts * rows_per_contact)
         i_col_ = slot // rows_per_contact
         i_friction = slot % rows_per_contact
-        if i_col_ < collider_state.n_contacts[i_b]:
-            is_inert = False
-            if qd.static(rigid_config.use_hibernation):
-                i_col = collider_state.contact_sort_idx[i_col_, i_b]
-                link_a = collider_state.contact_data.link_a[i_col, i_b]
-                link_b = collider_state.contact_data.link_b[i_col, i_b]
-                is_inert = _is_contact_inert(link_a, link_b, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
-            if is_inert:
-                n_con = constraint_state.n_constraints[i_b] + i_col_ * rows_per_contact + i_friction
-                _clear_inert_collision_row(n_con, i_b, constraint_state, rigid_config)
-            else:
-                _add_friction_constraint(
-                    i_b,
-                    i_col_,
-                    i_friction,
-                    dyn_state,
-                    collider_state,
-                    constraint_state,
-                    dyn_info,
-                    rigid_info,
-                    rigid_config,
-                )
+        # i_col_ counts the live contacts, the ones after the kept contacts of the sleepers (see n_contacts_hibernated
+        # in array_class.py), and numbers the row group
+        if i_col_ < collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]:
+            _add_friction_constraint(
+                i_b,
+                i_col_,
+                i_friction,
+                dyn_state,
+                collider_state,
+                constraint_state,
+                dyn_info,
+                rigid_info,
+                rigid_config,
+            )
 
 
 @qd.func
@@ -972,10 +908,12 @@ def _add_collision_constraints_per_contact(
     for i_col_, i_b in qd.ndrange(
         max_candidate_contacts, _B, axes=qd.static((1, 0) if rigid_config.constraint_layout_batch_first else None)
     ):
-        if i_col_ < collider_state.n_contacts[i_b]:
+        # i_col_ counts the live contacts, the ones after the kept contacts of the sleepers (see n_contacts_hibernated
+        # in array_class.py), and numbers the row group
+        if i_col_ < collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]:
             collision_con_start = constraint_state.n_constraints[i_b]
 
-            i_col = collider_state.contact_sort_idx[i_col_, i_b]
+            i_col = collider_state.contact_sort_idx[collider_state.n_contacts_hibernated[i_b] + i_col_, i_b]
             contact_data_link_a = collider_state.contact_data.link_a[i_col, i_b]
             contact_data_link_b = collider_state.contact_data.link_b[i_col, i_b]
 
@@ -989,13 +927,6 @@ def _add_collision_constraints_per_contact(
             link_b = contact_data_link_b
             link_a_maybe_batch = [link_a, i_b] if qd.static(rigid_config.batch_links_info) else link_a
             link_b_maybe_batch = [link_b, i_b] if qd.static(rigid_config.batch_links_info) else link_b
-
-            if qd.static(rigid_config.use_hibernation):
-                if _is_contact_inert(link_a, link_b, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
-                    for i_friction in range(rows_per_contact):
-                        n_con = collision_con_start + i_col_ * rows_per_contact + i_friction
-                        _clear_inert_collision_row(n_con, i_b, constraint_state, rigid_config)
-                    continue
 
             dyn_state.links.is_constrained[link_a, i_b] = True
             if link_b > -1:
@@ -1161,7 +1092,9 @@ def add_collision_constraints(
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
     qd.loop_config(name="add_collision_count", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
-        n_collision_rows = collider_state.n_contacts[i_b] * rows_per_contact
+        n_collision_rows = (
+            collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]
+        ) * rows_per_contact
         constraint_state.n_constraints[i_b] = constraint_state.n_constraints[i_b] + n_collision_rows
         # The elliptic cone rows are the whole collision segment (rows_per_contact contiguous per contact); joint
         # limits follow.
@@ -1461,12 +1394,14 @@ def _sort_contacts_and_build_islands(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
 ):
-    """Order the contacts of every env (see add_inequality_constraints) and build its island partition in one launch.
+    """Build the island partition of every env and order its live contacts (see add_inequality_constraints) in one
+    launch.
 
-    Where the cooperative kernels run, a block serves each env: the lanes sort together (func_sort_contacts_coop), then
-    build the partition together (func_build_islands_coop); elsewhere one thread per env does both. Both ways give the
-    same order and partition. A single-island scene writes its partition outright (func_build_single_island), off the
-    CPU skyline path and in every env where nothing sleeps.
+    Where the cooperative kernels run, a block serves each env: the lanes build the partition together
+    (func_build_islands_coop), then sort together (func_sort_contacts_coop); elsewhere one thread per env does both.
+    Both ways give the same partition and order. The build comes first: waking a struck sleeper promotes its kept
+    contacts among the live ones, which the sort then orders with the rest. A single-island scene writes its partition
+    outright (func_build_single_island), off the CPU skyline path and in every env where nothing sleeps.
     """
     _B = constraint_state.jac.shape[2]
     # Under hibernation the trivial partition serves the envs where nothing sleeps, the full build the others
@@ -1484,9 +1419,6 @@ def _sort_contacts_and_build_islands(
         for i_flat in range(_B * _K):
             tid = i_flat % _K
             i_b = i_flat // _K
-            if qd.static(collider_static_config.spatial_sort_supported):
-                func_sort_contacts_coop(i_b, tid, dyn_state, collider_state, constraint_state)
-                qd.simt.block.sync()
             if qd.static(has_trivial_partition):
                 is_partition_trivial = True
                 if qd.static(rigid_config.use_hibernation):
@@ -1502,6 +1434,10 @@ def _sort_contacts_and_build_islands(
                 func_build_islands_coop(
                     i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
                 )
+            if qd.static(collider_static_config.spatial_sort_supported):
+                qd.simt.block.sync()
+                func_sort_contacts_coop(i_b, tid, dyn_state, collider_state, constraint_state)
+                qd.simt.block.sync()
             if qd.static(not rigid_config.is_single_island):
                 i_island = tid
                 while i_island < constraint_state.island.n_islands[i_b]:
@@ -1512,17 +1448,6 @@ def _sort_contacts_and_build_islands(
             name="sort_contacts_and_build_islands", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL)
         )
         for i_b in range(_B):
-            if qd.static(collider_static_config.spatial_sort_supported):
-                func_sort_contacts(
-                    i_b,
-                    collider_state.contact_sort_idx,
-                    collider_state.n_contacts[i_b],
-                    collider_state.contact_data.pos,
-                    collider_state.contact_data.geom_a,
-                    collider_state.contact_data.geom_b,
-                    dyn_state.geoms.pos,
-                    dyn_state.geoms.quat,
-                )
             if qd.static(has_trivial_partition):
                 is_partition_trivial = True
                 if qd.static(rigid_config.use_hibernation):
@@ -1536,6 +1461,20 @@ def _sort_contacts_and_build_islands(
                         )
             else:
                 func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            if qd.static(collider_static_config.spatial_sort_supported):
+                func_sort_contacts(
+                    i_b,
+                    collider_state.contact_sort_idx,
+                    collider_state.n_contacts_hibernated[i_b],
+                    collider_state.n_contacts[i_b],
+                    collider_state.contact_data.pos,
+                    collider_state.contact_data.geom_a,
+                    collider_state.contact_data.geom_b,
+                    dyn_state.geoms.pos,
+                    dyn_state.geoms.quat,
+                )
+            if qd.static(rigid_config.sparse_solve and not has_trivial_partition):
+                func_reorder_island_dofs(i_b, collider_state, constraint_state, rigid_info)
             if qd.static(rigid_config.enable_tiled_island_seed and not rigid_config.is_single_island):
                 for i_island in range(constraint_state.island.n_islands[i_b]):
                     func_append_factor_worklist(i_b, i_island, constraint_state, rigid_config)
@@ -5458,7 +5397,10 @@ def func_update_contact_force(
     for i_b in range(_B):
         const_start = constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
 
-        # contact constraints should be after equality and frictionloss constraints and before joint limit constraints
+        # contact constraints should be after equality and frictionloss constraints and before joint limit constraints.
+        # A kept contact of a sleeper (see n_contacts_hibernated in array_class.py) has no row and keeps the force of
+        # the last solve it took part in, so a resting sleeper keeps reporting the support force it is at rest under.
+        n_first_contact = collider_state.n_contacts_hibernated[i_b]
         for i_c in range(collider_state.n_contacts[i_b]):
             i_col = collider_state.contact_sort_idx[i_c, i_b]
             contact_data_normal = collider_state.contact_data.normal[i_col, i_b]
@@ -5467,39 +5409,37 @@ def func_update_contact_force(
             contact_data_link_b = collider_state.contact_data.link_b[i_col, i_b]
 
             rows_per_contact = qd.static(rigid_config.rows_per_contact)
-            force = qd.Vector.zero(gs.qd_float, 3)
-            d1, d2 = gu.qd_orthogonals(contact_data_normal)
-            if qd.static(rigid_config.enable_elliptic_friction):
-                # Cone rows [normal, t1, t2(, spin)(, roll1, roll2)] contiguous in the collision segment; the spin
-                # and rolling rows carry torque only, so the linear contact force sums the three translational
-                # directions.
-                base = i_c * rows_per_contact + const_start
-                force = -contact_data_normal * constraint_state.efc_force[base, i_b]
-                force = force + d1 * constraint_state.efc_force[base + 1, i_b]
-                force = force + d2 * constraint_state.efc_force[base + 2, i_b]
-            else:
-                for i_dir in qd.static(range(4)):
-                    d = (2 * (i_dir % 2) - 1) * (d1 if i_dir < 2 else d2)
-                    n = d * contact_data_friction - contact_data_normal
-                    force = force + n * constraint_state.efc_force[i_c * rows_per_contact + i_dir + const_start, i_b]
-                # The torsional and rolling pyramid pairs mix the spin and tangent axes through the angular
-                # jacobian; their linear part is the shared normal opposition.
-                if qd.static(rigid_config.enable_torsional_friction):
-                    for i_dir in qd.static(range(4, rows_per_contact)):
+            force = collider_state.contact_data.force[i_col, i_b]
+            if i_c >= n_first_contact:
+                i_row_group = i_c - n_first_contact
+                force = qd.Vector.zero(gs.qd_float, 3)
+                d1, d2 = gu.qd_orthogonals(contact_data_normal)
+                if qd.static(rigid_config.enable_elliptic_friction):
+                    # Cone rows [normal, t1, t2(, spin)(, roll1, roll2)] contiguous in the collision segment; the spin
+                    # and rolling rows carry torque only, so the linear contact force sums the three translational
+                    # directions.
+                    base = i_row_group * rows_per_contact + const_start
+                    force = -contact_data_normal * constraint_state.efc_force[base, i_b]
+                    force = force + d1 * constraint_state.efc_force[base + 1, i_b]
+                    force = force + d2 * constraint_state.efc_force[base + 2, i_b]
+                else:
+                    for i_dir in qd.static(range(4)):
+                        d = (2 * (i_dir % 2) - 1) * (d1 if i_dir < 2 else d2)
+                        n = d * contact_data_friction - contact_data_normal
                         force = (
                             force
-                            - contact_data_normal
-                            * constraint_state.efc_force[i_c * rows_per_contact + i_dir + const_start, i_b]
+                            + n * constraint_state.efc_force[i_row_group * rows_per_contact + i_dir + const_start, i_b]
                         )
-
-            # An inert contact keeps the force of the last solve it took part in, so a resting sleeper keeps reporting
-            # the support force it is at rest under.
-            if qd.static(rigid_config.use_hibernation):
-                if _is_contact_inert(
-                    contact_data_link_a, contact_data_link_b, i_b, dyn_state, dyn_info, rigid_info, rigid_config
-                ):
-                    force = collider_state.contact_data.force[i_col, i_b]
-            collider_state.contact_data.force[i_col, i_b] = force
+                    # The torsional and rolling pyramid pairs mix the spin and tangent axes through the angular
+                    # jacobian; their linear part is the shared normal opposition.
+                    if qd.static(rigid_config.enable_torsional_friction):
+                        for i_dir in qd.static(range(4, rows_per_contact)):
+                            force = (
+                                force
+                                - contact_data_normal
+                                * constraint_state.efc_force[i_row_group * rows_per_contact + i_dir + const_start, i_b]
+                            )
+                collider_state.contact_data.force[i_col, i_b] = force
 
             dyn_state.links.contact_force[contact_data_link_a, i_b] = (
                 dyn_state.links.contact_force[contact_data_link_a, i_b] - force
