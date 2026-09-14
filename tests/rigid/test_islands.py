@@ -923,8 +923,8 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
         if rest_z_at_wake is None and not asleep(box_rest):
             rest_z_at_wake = box_rest.get_pos()[..., 2]
 
-    # The struck sleeper woke and was knocked; the striker was stopped by it (did not tunnel through). The step it
-    # woke, the ground contacts kept while it slept were solved with the blow, so it held its height.
+    # The struck box woke and slid, and the striker stopped against it. The box held its height the step it woke
+    # because the ground contacts kept while it slept joined that solve.
     assert not asleep(box_rest)
     assert (rest_z_at_wake > rest_z0 - 5e-4).all()
     rest_x1 = box_rest.get_pos()[..., 0]

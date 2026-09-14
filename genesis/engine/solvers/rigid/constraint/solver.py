@@ -691,7 +691,8 @@ def _add_friction_constraint(
 
     collision_con_start = constraint_state.n_constraints[i_b]
 
-    i_col = collider_state.contact_sort_idx[collider_state.n_contacts_hibernated[i_b] + i_col_, i_b]
+    n_hib = collider_state.n_contacts_hibernated[i_b]
+    i_col = collider_state.contact_sort_idx[n_hib + i_col_, i_b]
     contact_data_link_a = collider_state.contact_data.link_a[i_col, i_b]
     contact_data_link_b = collider_state.contact_data.link_b[i_col, i_b]
 
@@ -910,10 +911,11 @@ def _add_collision_constraints_per_contact(
     ):
         # i_col_ counts the live contacts, the ones after the kept contacts of the sleepers (see n_contacts_hibernated
         # in array_class.py), and numbers the row group
-        if i_col_ < collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]:
+        n_hib = collider_state.n_contacts_hibernated[i_b]
+        if i_col_ < collider_state.n_contacts[i_b] - n_hib:
             collision_con_start = constraint_state.n_constraints[i_b]
 
-            i_col = collider_state.contact_sort_idx[collider_state.n_contacts_hibernated[i_b] + i_col_, i_b]
+            i_col = collider_state.contact_sort_idx[n_hib + i_col_, i_b]
             contact_data_link_a = collider_state.contact_data.link_a[i_col, i_b]
             contact_data_link_b = collider_state.contact_data.link_b[i_col, i_b]
 
@@ -5415,9 +5417,8 @@ def func_update_contact_force(
                 force = qd.Vector.zero(gs.qd_float, 3)
                 d1, d2 = gu.qd_orthogonals(contact_data_normal)
                 if qd.static(rigid_config.enable_elliptic_friction):
-                    # Cone rows [normal, t1, t2(, spin)(, roll1, roll2)] contiguous in the collision segment; the spin
-                    # and rolling rows carry torque only, so the linear contact force sums the three translational
-                    # directions.
+                    # The cone rows [normal, t1, t2(, spin)(, roll1, roll2)] are contiguous in the collision segment.
+                    # The spin and rolling rows carry torque only, so the linear contact force sums the first three.
                     base = i_row_group * rows_per_contact + const_start
                     force = -contact_data_normal * constraint_state.efc_force[base, i_b]
                     force = force + d1 * constraint_state.efc_force[base + 1, i_b]

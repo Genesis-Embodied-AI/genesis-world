@@ -190,8 +190,9 @@ def func_collider_clear_env(
         # front of the buffer with the force of the last solve it took part in (see n_contacts_hibernated in
         # array_class.py for what reads the kept range). The contacts are first flagged on their raw slot, in the sort
         # key the narrowphase rewrites before reading it, then compacted in raw order: every slot written to was
-        # already read, so no kept contact is overwritten. An env with no sleeper keeps none (see n_awake_dofs in
-        # array_class.py).
+        # already read, so no kept contact is overwritten. The kept range then lists them in their last logical order
+        # (see func_sort_contacts), the raw order following the narrowphase's slot allocation, which the GPU leaves to
+        # atomics. An env with no sleeper keeps none (see n_awake_dofs in array_class.py).
         n_hib = 0
         if rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]:
             n_raw = 0
@@ -212,6 +213,8 @@ def func_collider_clear_env(
             n_hib = 0
             for i_c in range(n_raw):
                 if collider_state.contact_sort_key[i_c, i_b] > 0.0:
+                    # The key takes the compact slot, read back by the logical walk below
+                    collider_state.contact_sort_key[i_c, i_b] = n_hib + 1.0
                     if i_c != n_hib:
                         # fmt: off
                         collider_state.contact_data.geom_a[n_hib, i_b] = collider_state.contact_data.geom_a[i_c, i_b]
@@ -228,6 +231,14 @@ def func_collider_clear_env(
                         collider_state.contact_data.link_b[n_hib, i_b] = collider_state.contact_data.link_b[i_c, i_b]
                         # fmt: on
                     n_hib = n_hib + 1
+            # Rank r of the kept range never overtakes the logical position it reads, so the walk is in place
+            rank = 0
+            for i_c_ in range(collider_state.n_contacts[i_b]):
+                i_c = collider_state.contact_sort_idx[i_c_, i_b]
+                slot_key = collider_state.contact_sort_key[i_c, i_b]
+                if slot_key > 0.0:
+                    collider_state.contact_sort_idx[rank, i_b] = qd.cast(slot_key, gs.qd_int) - 1
+                    rank = rank + 1
         collider_state.n_contacts_hibernated[i_b] = n_hib
 
     for i_c in range(collider_state.n_contacts[i_b]):

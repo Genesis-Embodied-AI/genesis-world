@@ -480,10 +480,11 @@ def kernel_manual_add_collision_constraints_bw(
     for flat_idx in range(max_contact_pairs * _B):
         i_b = flat_idx % _B
         i_col_ = flat_idx // _B
-        if i_col_ < collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]:
+        n_hib = collider_state.n_contacts_hibernated[i_b]
+        if i_col_ < collider_state.n_contacts[i_b] - n_hib:
             # The forward assembles the contact rows in logical (sorted) order of the live contacts: row group i_col_
-            # maps to physical contact contact_sort_idx[n_contacts_hibernated + i_col_] (see add_inequality_constraints).
-            i_col = collider_state.contact_sort_idx[collider_state.n_contacts_hibernated[i_b] + i_col_, i_b]
+            # maps to physical contact contact_sort_idx[n_hib + i_col_] (see add_inequality_constraints).
+            i_col = collider_state.contact_sort_idx[n_hib + i_col_, i_b]
             link_a = collider_state.contact_data.link_a[i_col, i_b]
             link_b = collider_state.contact_data.link_b[i_col, i_b]
             contact_pos = collider_state.contact_data.pos[i_col, i_b]
