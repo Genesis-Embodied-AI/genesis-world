@@ -801,12 +801,10 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     # A body its controller holds at the target stays awake for as long as the hold lasts, since the actuation pass
     # wakes any sleeping link it actuates. It settles where the controller's stiffness carries its weight.
-    is_asleep_while_held = []
     for _ in range(40):
         scene.step()
-        is_asleep_while_held.append(asleep(box_cpos))
-    assert not any(is_asleep_while_held)
-    assert_allclose(z_of(box_cpos), 0.6 - float(box_cpos.get_mass()) * G / 400.0, atol=0.01)
+        assert not asleep(box_cpos)
+    assert_allclose(z_of(box_cpos), 0.6 - box_cpos.get_mass() * G / 400.0, atol=0.01)
 
     # A mass or an armature written moves the equilibrium a resting body found, so a body it is written on must wake
     # to settle into the new one. Both writes are made while the body sleeps, and the weight they land on is the
