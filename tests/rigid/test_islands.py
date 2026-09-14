@@ -930,12 +930,29 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     rest_x0 = box_rest.get_pos()[..., 0]
     rest_z0 = box_rest.get_pos()[..., 2]
 
+    # The contacts of the bodies that stay asleep through the strike are listed as they stood before it.
+    sleepers_links_idx = [link.idx for link in multibody_bases if link_asleep(link)]
+
+    def sleepers_contacts():
+        contacts = multibody.get_contacts()
+        links_a = tensor_to_array(contacts["link_a"])
+        links_b = tensor_to_array(contacts["link_b"])
+        is_sleeper = np.isin(links_a, sleepers_links_idx) | np.isin(links_b, sleepers_links_idx)
+        if n_envs > 0:
+            is_sleeper &= tensor_to_array(contacts["valid_mask"])
+        return links_a[is_sleeper], links_b[is_sleeper], tensor_to_array(contacts["position"])[is_sleeper]
+
+    sleepers_contacts0 = sleepers_contacts()
+
     box_hit.set_dofs_velocity([-2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     rest_z_at_wake = None
     for _ in range(30):
         scene.step()
         if rest_z_at_wake is None and not asleep(box_rest):
             rest_z_at_wake = box_rest.get_pos()[..., 2]
+    assert all(link_asleep(link) for link in multibody_bases if link.idx in sleepers_links_idx)
+    for contacts_field, contacts_field0 in zip(sleepers_contacts(), sleepers_contacts0):
+        assert_equal(contacts_field, contacts_field0)
 
     # The struck box woke and slid, and the striker stopped against it. The box held its height the step it woke
     # because the ground contacts kept while it slept joined that solve.

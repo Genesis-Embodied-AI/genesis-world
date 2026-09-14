@@ -267,9 +267,10 @@ def func_promote_woken_contacts(i_b, dyn_state: array_class.DynState, collider_s
     """Move the kept contacts of the links of env i_b that woke this step among the live contacts.
 
     A kept contact holds where its sleeper rests, and the narrowphase left the sleeper's pairs out while it slept, so
-    the woken link would solve its wake step without its support otherwise. The kept range shrinks from its end onto
-    the promoted slot and the promoted contact takes the first live slot (see n_contacts_hibernated in
-    array_class.py); the caller then sorts the live range.
+    the woken link would solve its wake step without its support otherwise. The promoted contact moves to the end of
+    the kept range, which shrinks past it onto the first live slot (see n_contacts_hibernated in array_class.py), and
+    the kept contacts behind it close the gap in their order, so the getters keep listing the contacts of the links
+    still asleep as they stood. The caller then sorts the live range.
     """
     n_hib = collider_state.n_contacts_hibernated[i_b]
     i_c_ = 0
@@ -282,7 +283,8 @@ def func_promote_woken_contacts(i_b, dyn_state: array_class.DynState, collider_s
             i_c_ = i_c_ + 1
         else:
             n_hib = n_hib - 1
-            collider_state.contact_sort_idx[i_c_, i_b] = collider_state.contact_sort_idx[n_hib, i_b]
+            for j_c_ in range(i_c_, n_hib):
+                collider_state.contact_sort_idx[j_c_, i_b] = collider_state.contact_sort_idx[j_c_ + 1, i_b]
             collider_state.contact_sort_idx[n_hib, i_b] = i_c
     collider_state.n_contacts_hibernated[i_b] = n_hib
 
