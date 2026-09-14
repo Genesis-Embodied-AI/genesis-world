@@ -709,6 +709,20 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     has_island_above_tile_cap=self.n_dofs > island_tile_cap_last,
                 )
 
+                # One thread block assembles and factors an island above the last cap for the Newton solver (see
+                # func_island_assemble_factor_solve_tiled), at a cost growing with the cube of its dof count whatever
+                # the environment count, where the skyline factor of the CPU backend exploits the sparsity of the
+                # contact graph.
+                if (
+                    self._options.constraint_solver == gs.constraint_solver.Newton
+                    and self.n_dofs > 4 * island_tile_cap_last
+                ):
+                    gs.logger.warning(
+                        f"The scene holds {self.n_dofs} dofs. A contact island wider than {4 * island_tile_cap_last} "
+                        "dofs takes seconds per step with the Newton constraint solver on the GPU backend. If the "
+                        "bodies can pile up into one island, use the CPU backend or the CG constraint solver."
+                    )
+
                 # Manually pin the solve arm only where the winner is determinable in advance AND confirmed across
                 # CUDA + Metal; genuinely backend-dependent cases fall through to the per-step autotuner.
                 if not enable_cooperative_constraint_kernels:
