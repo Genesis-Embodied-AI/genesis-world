@@ -705,13 +705,13 @@ def func_clamp_prune_contacts(
     for i_b in range(_B):
         n_con = qd.min(collider_state.n_contacts[i_b], max_candidate_contacts)
         collider_state.n_contacts[i_b] = n_con
-        # The kept contacts of the sleepers lead the buffer and keep the identity permutation; the prune runs on the
-        # live contacts after them (see n_contacts_hibernated in array_class.py)
+        # The kept contacts of the sleepers lead the buffer in the order func_collider_clear_env gave them, and the
+        # prune runs on the live contacts after them (see n_contacts_hibernated in array_class.py)
         n_hib = collider_state.n_contacts_hibernated[i_b]
 
-        # Identity permutation. Required so downstream consumers can always indirect through contact_sort_idx,
-        # even when pruning is inactive.
-        for i_c in range(n_con):
+        # Identity permutation of the live contacts. Required so downstream consumers can always indirect through
+        # contact_sort_idx, even when pruning is inactive.
+        for i_c in range(n_hib, n_con):
             collider_state.contact_sort_idx[i_c, i_b] = i_c
 
         # === Pruning phase (link-pair support polygon). Gated by static config: only emitted when the
@@ -1115,11 +1115,11 @@ def func_clamp_prune_contacts_coop(
             collider_state.n_contacts[i_b] = n_con
 
         # PARALLEL: clamp+init. Mirrors the fused kernel's unconditional init block: every env (including n_con < 5
-        # where the prune/sort branch below is skipped) needs contact_sort_idx set to identity so downstream consumers
-        # that always indirect through contact_sort_idx (constraint solver, sensors) read valid permutations rather
-        # than stale data from the previous step. contact_keep default-keep is set here for the same reason. 32 lanes
-        # stride.
-        i_c_ = tid
+        # where the prune/sort branch below is skipped) needs contact_sort_idx set to identity over the live contacts
+        # so downstream consumers that always indirect through contact_sort_idx (constraint solver, sensors) read
+        # valid permutations rather than stale data from the previous step. contact_keep default-keep is set here for
+        # the same reason. 32 lanes stride.
+        i_c_ = n_hib + tid
         while i_c_ < n_con:
             collider_state.contact_keep[i_c_, i_b] = 1
             collider_state.contact_sort_idx[i_c_, i_b] = i_c_

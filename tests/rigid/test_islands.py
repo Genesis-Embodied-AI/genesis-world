@@ -895,8 +895,22 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     lifted[..., 2] += 0.6
     solver.set_base_links_pos(lifted, links_idx=late.idx)
 
+    # A sleeper keeps the contacts of the step it fell asleep, listed in the same order, so the getters report them
+    # where they stood.
+    boxes_contacts_pos = None
+    is_boxes_asleep = False
     for _ in range(60):
         scene.step()
+        contacts = [box.get_contacts() for box in (box_rest, box_hit)]
+        if n_envs > 0:
+            contacts_pos = [contact["position"][contact["valid_mask"]] for contact in contacts]
+        else:
+            contacts_pos = [contact["position"] for contact in contacts]
+        if is_boxes_asleep:
+            for contact_pos, contact_pos_prev in zip(contacts_pos, boxes_contacts_pos):
+                assert_equal(contact_pos, contact_pos_prev)
+        boxes_contacts_pos = contacts_pos
+        is_boxes_asleep = asleep(box_rest) and asleep(box_hit)
     assert asleep(box_rest) and asleep(box_hit)
     # The bodies that landed first sleep while the one still falling does not.
     assert all(link_asleep(link) for link in multibody_bases[:-1])
