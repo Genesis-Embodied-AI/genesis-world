@@ -914,13 +914,19 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
         assert_equal(box.get_links_net_contact_force(), contact_force)
         assert_allclose(contact_force[..., 0, 2], -GRAVITY * box.get_mass(), tol=2e-3)
     rest_x0 = box_rest.get_pos()[..., 0]
+    rest_z0 = box_rest.get_pos()[..., 2]
 
     box_hit.set_dofs_velocity([-2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    rest_z_at_wake = None
     for _ in range(30):
         scene.step()
+        if rest_z_at_wake is None and not asleep(box_rest):
+            rest_z_at_wake = box_rest.get_pos()[..., 2]
 
-    # The struck sleeper woke and was knocked; the striker was stopped by it (did not tunnel through).
+    # The struck sleeper woke and was knocked; the striker was stopped by it (did not tunnel through). The step it
+    # woke, the ground contacts kept while it slept were solved with the blow, so it held its height.
     assert not asleep(box_rest)
+    assert (rest_z_at_wake > rest_z0 - 5e-4).all()
     rest_x1 = box_rest.get_pos()[..., 0]
     hit_x1 = box_hit.get_pos()[..., 0]
     assert (rest_x1 < rest_x0 - 1e-3).all()
