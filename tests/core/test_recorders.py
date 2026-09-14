@@ -237,6 +237,12 @@ def test_file_writers(tmp_path):
     for _ in range(STEPS):
         scene.step()
 
+    # The physics, the sensor and the recorder phases of the step each took time, and the step held them all
+    timings = scene.timings
+    assert timings["physics"] > 0.0 and timings["recorders"] > 0.0
+    assert timings["sensors"] >= timings[f"sensors/{type(contact_sensor).__name__}"] > 0.0
+    assert timings["total"] >= sum(time for phase, time in timings.items() if phase != "total" and "/" not in phase)
+
     scene.stop_recording()
 
     assert csv_file.exists()

@@ -51,7 +51,6 @@ from genesis.utils import serialization
 from genesis.utils.array_class import check_data
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
-from genesis.utils.tools import FPSTracker
 from genesis.utils.warnings import warn_once
 from genesis.vis import Visualizer
 
@@ -882,9 +881,6 @@ class Scene(RBC):
         with gs.logger.timer("Building visualizer..."):
             self._visualizer.build()
 
-        if self.options.profiling.show_FPS:
-            self.FPS_tracker = FPSTracker(self.n_envs, alpha=self.options.profiling.FPS_tracker_alpha)
-
         # recorders
         self._recorder_manager.build()
 
@@ -1062,6 +1058,8 @@ class Scene(RBC):
         # frame's advance by returning True. The scene treats them opaquely, without knowing what they do or who
         # registered them (e.g. an InteractiveScene driving GUI-requested rebuild/pause). The visualizer is still
         # refreshed when the advance is vetoed, so the viewer keeps rendering and stays responsive while paused.
+        fps_tracker = self._sim.fps_tracker
+        fps_tracker.start()
         advance = not any([callback() for callback in tuple(self._pre_step_callbacks)])
 
         if advance:
@@ -1069,19 +1067,21 @@ class Scene(RBC):
                 gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
             # The recorders read the state a step starts from, with the inputs the step consumes: 'Simulator.step'
             # zeroes the applied forces at its end. The pre-step callbacks ran, so their inputs are read as well.
-            self._recorder_manager.step(self._sim.cur_step_global)
+            with fps_tracker.phase("recorders"):
+                self._recorder_manager.step(self._sim.cur_step_global)
             self._sim.step()
 
         if update_visualizer:
             # Force the refresh when the sim did not advance (e.g. paused) so edits made off the step loop -
             # like a GUI joint slider calling set_qpos - are still drawn and the viewer does not appear frozen.
-            self._visualizer.update(force=not advance, auto=refresh_visualizer)
+            with fps_tracker.phase("rendering"):
+                self._visualizer.update(force=not advance, auto=refresh_visualizer)
 
         if advance:
-            if self.options.profiling.show_FPS:
-                self.FPS_tracker.step()
-            for camera in self._visualizer.cameras:
-                camera.update_recording()
+            with fps_tracker.phase("video"):
+                for camera in self._visualizer.cameras:
+                    camera.update_recording()
+        fps_tracker.step(count=advance)
 
     def stop_recording(self):
         # The recorders read before each step, so the state the last step left is recorded here, whatever the
@@ -1848,6 +1848,25 @@ class Scene(RBC):
     def substeps(self):
         """The number of substeps per simulation step."""
         return self._sim.substeps
+
+    @property
+    def timings(self):
+        """Wall time in seconds of the phases of a call to `step`, averaged over the latest `timings_window` steps
+        (see ProfilingOptions) among the steps that ran the phase, keyed by phase:
+
+        - physics: the solvers advancing the state over the substeps.
+        - sensors: the sensor updates, and sensors/<class name> the share of each sensor class.
+        - rendering: the viewer refresh.
+        - recorders: the recorders reading the state.
+        - video: the cameras rendering and encoding the frame of a recording.
+        - total: the whole step, the pre-step callbacks included.
+
+        A phase the step left out (the simulation vetoed by a pre-step callback, the visualizer update skipped) is
+        absent from that step, so the mapping is empty before the first step. On the GPU backends a phase covers the
+        host work of launching its kernels, which the device completes asynchronously, so the phases split the step on
+        the CPU backend and the total holds on every backend once a step reads the device back.
+        """
+        return self._sim.fps_tracker.timings
 
     @property
     def requires_grad(self):

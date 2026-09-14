@@ -8,14 +8,15 @@ gravity alone swings the ball into the pile, whose cubes are free boxes stacked 
 """
 
 import argparse
+import math
 import os
-import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
 import trimesh
 
 import genesis as gs
+from genesis.utils.misc import qd_to_numpy
 
 
 DT = 1e-2
@@ -82,7 +83,8 @@ def ring_mesh():
 
 
 def wrecking_ball_mjcf():
-    """MJCF model of the wrecking ball hanging from the origin, and the hook-to-sphere-centre length of the taut chain."""
+    """MJCF model of the wrecking ball, hung so that the sphere centre passes through the origin at the bottom of the
+    swing, with the chain taut."""
     ring = ring_mesh()
     half_length = 0.5 * RING_SIDE_LENGTH + RING_END_RADIUS
     # Successive link centres along the chain when taut, the tube of one link against the inner end of the next. The
@@ -103,9 +105,10 @@ def wrecking_ball_mjcf():
     ring_class = ET.SubElement(ET.SubElement(mjcf, "default"), "default", {"class": "ring"})
     ET.SubElement(ring_class, "geom", type="mesh", mesh="ring", density=f"{RING_DENSITY}", rgba="0.38 0.38 0.4 1")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    # The chain hangs along -z. Rotating the frame about +y by the release angle tilts the whole chain towards -x, so
-    # the ball swings towards +x, where the pile stands.
-    frame = ET.SubElement(worldbody, "frame", euler=f"0 {RELEASE_ANGLE_DEG} 0")
+    # The chain hangs along -z from a hook one taut chain above the origin. Rotating the frame about +y by the release
+    # angle tilts the whole chain towards -x, so the ball swings towards +x, where the pile stands.
+    chain_length = (N_RINGS + 1) * pitch_taut + eye_to_sphere
+    frame = ET.SubElement(worldbody, "frame", pos=f"0 0 {chain_length}", euler=f"0 {RELEASE_ANGLE_DEG} 0")
     ET.SubElement(frame, "geom", {"class": "ring"})
     for i_ring in range(N_RINGS):
         body = ET.SubElement(frame, "body", pos=f"0 0 {-(i_ring + 1) * pitch}", euler=f"0 0 {90 * ((i_ring + 1) % 2)}")
@@ -120,9 +123,7 @@ def wrecking_ball_mjcf():
     ET.SubElement(
         sphere, "geom", type="sphere", size=f"{BALL_RADIUS}", density=f"{BALL_DENSITY}", rgba="0.3 0.3 0.32 1"
     )
-
-    chain_length = (N_RINGS + 1) * pitch_taut + eye_to_sphere
-    return mjcf, chain_length
+    return mjcf
 
 
 def main():
@@ -130,22 +131,26 @@ def main():
     parser.add_argument("--pile-width", type=int, default=6, help="Cubes across the pile, facing the ball")
     parser.add_argument("--pile-depth", type=int, default=7, help="Cubes through the pile, along the swing")
     parser.add_argument("--pile-height", type=int, default=5, help="Cubes up the pile")
-    parser.add_argument("-s", "--steps", type=int, default=400, help="Number of simulation steps")
+    parser.add_argument("-s", "--steps", type=int, default=500, help="Number of simulation steps")
     parser.add_argument("-v", "--vis", action="store_true", help="Show the interactive viewer")
     parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
-    parser.add_argument("-r", "--record", action="store_true", help="Record the scene to 'out/wrecking_ball.mp4'")
+    parser.add_argument("--hibernation", action="store_true", help="Put the bodies at rest to sleep")
+    parser.add_argument(
+        "-r",
+        "--record",
+        action="store_true",
+        help="Record the scene and the step-rate plot to 'out/wrecking_ball*.mp4'",
+    )
     args = parser.parse_args()
-    if args.steps < 2:
-        parser.error("--steps must be at least 2: the first step is warm-up and the step rate needs one more.")
-    horizon = 20 if "PYTEST_VERSION" in os.environ else args.steps
+    # The step rate the plot shows is averaged over a fifth of a simulated second
+    timings_window = round(0.2 / DT)
+    if args.steps <= timings_window:
+        parser.error(f"--steps must exceed {timings_window}, the number of steps the step rate is averaged over.")
+    horizon = timings_window + 1 if "PYTEST_VERSION" in os.environ else args.steps
 
     # The step rate is the point of the script, so the solver runs on field storage, its fastest layout on CPU.
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, performance_mode=True)
 
-    mjcf, chain_length = wrecking_ball_mjcf()
-
-    # At the bottom of the swing the taut chain puts the ball centre at mid-pile height.
-    anchor_height = 0.5 * args.pile_height * CUBE_SIZE + chain_length
     camera_pos = (-4.6, -6.3, 2.4)
     camera_lookat = (0.8, 0.0, 0.6)
 
@@ -156,6 +161,7 @@ def main():
         rigid_options=gs.options.RigidOptions(
             # Once the pile is compressed every cube can touch its six neighbours and the ground.
             max_collision_pairs=20 * args.pile_width * args.pile_depth * args.pile_height + 500,
+            use_hibernation=args.hibernation,
         ),
         vis_options=gs.options.VisOptions(
             # The camera looks along +x and +y, so the light shines the same way to lift the faces it sees.
@@ -167,16 +173,21 @@ def main():
             camera_pos=camera_pos,
             camera_lookat=camera_lookat,
         ),
+        profiling_options=gs.options.ProfilingOptions(
+            show_FPS=False,
+            timings_window=timings_window,
+        ),
         show_viewer=args.vis,
     )
 
     scene.add_entity(
         gs.morphs.Plane(),
     )
+    # The ball passes through the model origin at the bottom of the swing, placed at mid-pile height.
     scene.add_entity(
         gs.morphs.MJCF(
-            pos=(0.0, 0.0, anchor_height),
-            file=mjcf,
+            pos=(0.0, 0.0, 0.5 * args.pile_height * CUBE_SIZE),
+            file=wrecking_ball_mjcf(),
         ),
     )
 
@@ -209,27 +220,48 @@ def main():
             lookat=camera_lookat,
         )
 
+    # The step rate of the physics alone, read from the scene's timings, and the number of awake bodies, streamed to a
+    # live plot.
+    plot_values = {"step_rate": [math.nan], "awake_bodies": [0]}
+
+    def plot_data():
+        return plot_values
+
+    scene.add_recorder(
+        plot_data,
+        gs.recorders.MPLLinePlot(
+            labels={"step_rate": ["steps/s"], "awake_bodies": ["awake bodies"]},
+            history_length=10000,
+            hz=RECORDING_FPS,
+            title="Wrecking ball",
+            y_log_scale=("step_rate",),
+            save_to_filename="out/wrecking_ball_fps.mp4" if args.record else None,
+        ),
+    )
+
     scene.build()
 
+    n_bodies = sum(1 for link in scene.rigid_solver.links if link.n_dofs > 0)
+    plot_values["awake_bodies"][0] = n_bodies
     if camera is not None:
         camera.start_recording(save_to_filename="out/wrecking_ball.mp4", fps=RECORDING_FPS)
-    step_times = np.empty(horizon)
+    # The step rate of the physics alone, read once the first step, which carries the kernel compilation, has left
+    # the averaging window
+    step_times = np.full(horizon, np.nan)
     for i_step in range(horizon):
-        time_start = time.perf_counter()
         scene.step()
-        step_times[i_step] = time.perf_counter() - time_start
+        if i_step >= timings_window:
+            step_times[i_step] = scene.timings["physics"]
+            plot_values["step_rate"][0] = 1.0 / step_times[i_step]
+        plot_values["awake_bodies"][0] = n_bodies - qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated).sum()
     if camera is not None:
         camera.stop_recording()
 
-    # The first step carries the warm-up of the kernels and is left out. Rendering a frame from within 'scene.step'
-    # counts in the step time, so read the rates without '--record'.
-    step_times = step_times[1:]
-    window = min(round(0.5 / DT), len(step_times))
-    step_time_window_max = np.convolve(step_times, np.full(window, 1.0 / window), mode="valid").max()
+    step_times = step_times[timings_window:]
     n_cubes = args.pile_width * args.pile_depth * args.pile_height
     gs.logger.info(
-        f"{n_cubes} cubes: mean step {1e3 * step_times.mean():.2f} ms, slowest step {1e3 * step_times.max():.2f} ms, "
-        f"real-time factor {DT / step_times.mean():.2f} (mean), {DT / step_time_window_max:.2f} (slowest 0.5 s window)."
+        f"{n_cubes} cubes: mean step {1e3 * step_times.mean():.2f} ms, slowest window {1e3 * step_times.max():.2f} ms, "
+        f"real-time factor {DT / step_times.mean():.2f} (mean), {DT / step_times.max():.2f} (slowest window)."
     )
 
 
