@@ -799,7 +799,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         scene.step()
     assert not asleep(box_cpos) and (z_of(box_cpos) > z0 + 0.05).all()
     # A body its controller holds at the target stays awake for as long as the hold lasts, its actuation being what
-    # would wake it right after any sleep; it settles where the controller's stiffness carries its weight.
+    # would wake it right after any sleep. It settles where the controller's stiffness carries its weight.
     is_asleep_while_held = []
     for _ in range(40):
         scene.step()
