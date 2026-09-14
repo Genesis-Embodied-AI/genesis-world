@@ -2271,13 +2271,12 @@ def func_count_settled_step(
 ):
     """Count this substep in the settled-step counter of awake link i_l of env i_b.
 
-    The counter (see awake_steps in array_class.py) grows, up to hibernation_min_steps, while the link's maximum dof
-    speed stays below the hibernation tolerance, and drops to zero the step it exceeds it. Each dof velocity is
-    weighted by dof_length (1 for translation, the swept radius for rotation), so the tolerance is a single linear speed
-    across mixed dofs: the rotational jitter of a small body produces a tiny surface speed and counts as rest. The speed
-    is that of the next velocity, which the copy right after this pass makes the current one. An actuated link stays
-    awake: the actuation pass wakes any sleeping link it actuates (see func_torque_and_passive_force), so a sleeping
-    actuated link would wake at the very next step.
+    The counter (see awake_steps in array_class.py) grows, up to hibernation_min_steps, while the largest dof speed of
+    the link stays below the hibernation tolerance, and drops to zero the step it exceeds it. The speed of a dof is its
+    next velocity scaled by dof_length (1 for translation, the swept radius for rotation), so the tolerance is one
+    linear speed for every kind of dof: the rotational jitter of a small body is a tiny surface speed and counts as
+    rest. An actuated link stays awake, since the actuation pass wakes any sleeping link it actuates (see
+    func_torque_and_passive_force).
     """
     link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     EPS = rigid_info.EPS[None]
