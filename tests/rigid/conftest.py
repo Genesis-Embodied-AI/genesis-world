@@ -1350,3 +1350,44 @@ def spring_double_pendulum():
     ET.SubElement(lower, "joint", name="elbow", type="hinge", axis="0 1 0", stiffness="20.0", damping="0")
     ET.SubElement(lower, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", density="1000")
     return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def resting_light_stick():
+    """Generate an MJCF model of a light flat stick lying at ground level, with the mass and inertia MuJoCo's
+    compiler gives a body stating none and the elliptic friction of the YCB and GSO clutter assets."""
+    mjcf = ET.Element("mujoco")
+    stick = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="stick", pos="0 0 0.0071")
+    ET.SubElement(stick, "freejoint")
+    ET.SubElement(stick, "inertial", pos="0 0 0", mass="0.01", diaginertia="1.4e-6 2.0e-6 1.7e-6")
+    ET.SubElement(stick, "geom", type="box", size="0.04 0.0116 0.007", condim="6", friction="1 0.01 0.01")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def damped_pendulum_and_tilted_light_capsule():
+    """Generate an MJCF model holding a damped pendulum and a light capsule lying on the ground with a slight tilt,
+    as a body dropped on a table settles with, so that it touches at one end first and rocks onto its length.
+
+    The capsule carries the mass and inertia MuJoCo's compiler gives a body stating none, the contact parameters of
+    the YCB and GSO clutter assets, and the joint damping puts the whole entity, capsule included, through the implicit
+    damping pass."""
+    mjcf = ET.Element("mujoco")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    arm = ET.SubElement(worldbody, "body", name="arm", pos="1.0 0 0.5")
+    ET.SubElement(arm, "joint", name="shoulder", type="hinge", axis="0 1 0", damping="0.5")
+    ET.SubElement(arm, "geom", type="capsule", fromto="0 0 0 0.3 0 0", size="0.02", density="1000")
+    capsule = ET.SubElement(worldbody, "body", name="capsule", pos="0 0 0.00701", quat="0.9939 -0.0052 0.0033 0.1102")
+    ET.SubElement(capsule, "freejoint")
+    ET.SubElement(capsule, "inertial", pos="0 0 0", mass="0.01", diaginertia="1.7e-6 1.6e-6 1.0e-6")
+    ET.SubElement(
+        capsule,
+        "geom",
+        type="capsule",
+        fromto="-0.033 0 0 0.033 0 0",
+        size="0.007",
+        condim="6",
+        friction="1.0 0.01 0.01",
+        solref="0.004 1",
+    )
+    return ET.tostring(mjcf, encoding="unicode")
