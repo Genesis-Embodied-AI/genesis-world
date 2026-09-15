@@ -1,5 +1,4 @@
 import math
-import os
 import sys
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -79,21 +78,14 @@ from .abd.misc import (
     kernel_wakeup_coupled_links,
 )
 from .abd.forward_kinematics import (
-    func_COM_links,
-    func_forward_kinematics_batch,
-    func_forward_kinematics_entity,
+    func_forward_kinematics_root,
     func_forward_velocity,
-    func_forward_velocity_batch,
-    func_forward_velocity_entity,
     func_update_all_verts,
     func_update_cartesian_space,
-    func_update_cartesian_space_batch,
     func_update_geoms,
-    func_update_geoms_batch,
-    func_update_geoms_entity,
+    func_update_geoms_root,
     func_update_verts_for_geom,
     kernel_COM_links_replay,
-    kernel_forward_kinematics_entity,
     kernel_forward_kinematics_links_geoms,
     kernel_forward_kinematics_replay,
     kernel_forward_velocity,
@@ -383,6 +375,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._init_geom_fields()
         self._init_equality_fields()
         self._init_dof_length()
+
+        # Compute the pose of every link in the neutral configuration and update the pose of all the geometries,
+        # including inactive variants for a given env: the step updates the active variant alone, so this is the only
+        # pose the inactive ones get (see func_update_geoms_link). The collider built next relies on these updated poses
+        # to determine whether some collision pairs must be filtered out.
+        kernel_update_cartesian_space(
+            self.dyn_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+            force_update_all_geoms=True,
+            is_backward=False,
+        )
 
         self._init_collider()
         self._init_constraint_solver()
@@ -1473,11 +1478,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _func_update_acc(self):
         kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
 
-    def _func_forward_kinematics_entity(self, i_e, envs_idx):
-        kernel_forward_kinematics_entity(
-            i_e, envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
-
     def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
         func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
 
@@ -1953,7 +1953,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                force_update_fixed_geoms=False,
+                force_update_all_geoms=False,
                 is_backward=False,
             )
             kernel_forward_velocity(
@@ -3444,7 +3444,7 @@ def kernel_step_1(
 ):
     if qd.static(not is_forward_pos_updated):
         func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=is_backward
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
         )
 
     if qd.static(not is_forward_vel_updated):
@@ -3480,6 +3480,6 @@ def kernel_step_2(
 
         if qd.static(not rigid_config.enable_mujoco_compatibility):
             func_update_cartesian_space(
-                dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=is_backward
+                dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
             )
             func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)

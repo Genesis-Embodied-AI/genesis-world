@@ -941,7 +941,7 @@ def test_track_rigid(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_kinematics_queries_span_entities_and_solvers(n_envs, show_viewer, tol):
+def test_kinematics_queries(n_envs, show_viewer, tol):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, 1.0, 1.2),

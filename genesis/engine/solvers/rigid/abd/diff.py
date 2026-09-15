@@ -148,7 +148,7 @@ def kernel_prepare_backward_substep(
     # because the cartesian space is overwritten later by other kernels if mujoco compatibility was disabled.
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=True
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=True
         )
         func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
 

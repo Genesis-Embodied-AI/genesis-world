@@ -20,7 +20,6 @@ import genesis.utils.array_class as array_class
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch, tensor_to_array
 from genesis.utils.sdf import SDF
 
-from ..abd.forward_kinematics import kernel_update_cartesian_space
 from . import gjk, mpr, narrowphase, support_field
 from .broadphase import func_broad_phase
 from .constants import CCD_ALGORITHM_CODE
@@ -54,17 +53,6 @@ NEUTRAL_COLLISION_RES_REL = 0.05
 class Collider:
     def __init__(self, rigid_solver: "RigidSolver"):
         self._solver = rigid_solver
-
-        # Which pairs are kept is decided by their poses, so the links are brought to the configuration the scene is
-        # in and the geoms placed on them first.
-        kernel_update_cartesian_space(
-            rigid_solver.dyn_state,
-            rigid_solver.dyn_info,
-            rigid_solver.rigid_info,
-            rigid_solver.rigid_config,
-            force_update_fixed_geoms=True,
-            is_backward=False,
-        )
 
         self._mc_perturbation = 1e-3 if self._solver._enable_mujoco_compatibility else 3e-3
         self._mc_tolerance = 1e-3 if self._solver._enable_mujoco_compatibility else 1.5e-2

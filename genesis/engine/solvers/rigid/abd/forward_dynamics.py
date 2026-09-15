@@ -20,7 +20,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
-from .forward_kinematics import func_forward_velocity_batch, func_update_cartesian_space_batch
+from .forward_kinematics import func_forward_velocity_root, func_update_cartesian_space_root
 from .misc import func_add_safe_backward, func_wakeup_island, linear_to_lower_tri
 
 
@@ -172,7 +172,7 @@ def func_crb_fold(
 
     One thread handles the whole tree, walking its link span in descending order so that children fold before their
     parent propagates, and gating each link on its root (see roots_link_idx in array_class.py). Mirrors the root walk
-    of func_COM_links_root. The links of a root sleep as a unit, so the root tells whether they are awake.
+    of func_COM_root. The links of a root sleep as a unit, so the root tells whether they are awake.
     """
     i_l_root = rigid_info.roots_link_idx[i_r]
     is_awake = True
@@ -1114,16 +1114,17 @@ def func_enter_neutral_configuration(
     Only the environments in `envs_idx` are assembled and factorized, hence the masked implementation of those passes.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_update_cartesian_space_batch(
+        func_update_cartesian_space_root(
+            i_r,
             i_b,
             rigid_info.qpos0,
             dyn_state,
             dyn_info,
             rigid_info,
             rigid_config,
-            force_update_fixed_geoms=False,
+            force_update_all_geoms=False,
             is_backward=False,
         )
 
@@ -1143,16 +1144,17 @@ def func_exit_neutral_configuration(
 ):
     """Evaluate forward kinematics again at the configuration the scene is in, which the neutral pass overwrote."""
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_update_cartesian_space_batch(
+        func_update_cartesian_space_root(
+            i_r,
             i_b,
             rigid_info.qpos,
             dyn_state,
             dyn_info,
             rigid_info,
             rigid_config,
-            force_update_fixed_geoms=True,
+            force_update_all_geoms=True,
             is_backward=False,
         )
 
@@ -1399,9 +1401,9 @@ def func_refresh_links_invweight_and_meaninertia(
     # from here. Both readings are brought back where the caller held them current, since this is what moved them.
     if qd.static(refresh_velocity):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_b_ in range(envs_idx.shape[0]):
-            func_forward_velocity_batch(
-                envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+        for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+            func_forward_velocity_root(
+                i_r, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
             )
 
 
@@ -1467,9 +1469,9 @@ def kernel_refresh_invweight_and_meaninertia(
 
     if qd.static(refresh_velocity):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_b_ in range(envs_idx.shape[0]):
-            func_forward_velocity_batch(
-                envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+        for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+            func_forward_velocity_root(
+                i_r, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
             )
 
 

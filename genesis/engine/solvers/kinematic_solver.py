@@ -473,6 +473,9 @@ class KinematicSolver(Solver):
         The links come parent first and each branch occupies a contiguous index range, so the dofs of a tree form one
         contiguous range and the trees are disjoint in dof space.
         """
+        # A static link belongs to no tree, and a scene without any tree keeps its padded tree slot empty (see
+        # trees_root_idx in array_class.py)
+        links_tree_idx = np.full(self.n_links_, -1, dtype=gs.np_int)
         if self._n_roots:
             links_root_idx = np.array([link.root_idx for link in self.links], dtype=gs.np_int)
             roots_link_idx, links_root_rank = np.unique(links_root_idx, return_inverse=True)
@@ -503,14 +506,16 @@ class KinematicSolver(Solver):
             trees_order = np.argsort(trees_dof_start)
             trees_rank = np.empty(self._n_trees, dtype=gs.np_int)
             trees_rank[trees_order] = np.arange(self._n_trees, dtype=gs.np_int)
-            links_tree_idx = np.full(self.n_links, -1, dtype=gs.np_int)
             links_tree_idx[tree_links] = trees_rank[links_tree_rank]
             self.rigid_info.trees_root_idx.from_numpy(trees_root_idx[trees_order])
             self.rigid_info.trees_link_end.from_numpy(trees_link_end[trees_order])
             self.rigid_info.trees_n_links.from_numpy(trees_n_links[trees_order])
             self.rigid_info.trees_dof_start.from_numpy(trees_dof_start[trees_order])
             self.rigid_info.trees_n_dofs.from_numpy(trees_n_dofs[trees_order])
-            self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
+        else:
+            self.rigid_info.trees_root_idx.fill(0)
+            self.rigid_info.trees_link_end.fill(0)
+        self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
 
     def _init_link_fields(self):
         if self.links:
