@@ -1350,3 +1350,24 @@ def spring_double_pendulum():
     ET.SubElement(lower, "joint", name="elbow", type="hinge", axis="0 1 0", stiffness="20.0", damping="0")
     ET.SubElement(lower, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", density="1000")
     return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def damped_pendulum_and_light_box():
+    """Generate an MJCF model holding a damped pendulum and a light free box tilted above the ground plane.
+
+    The joint damping sends the whole entity through the implicit damping pass, and the box carries the inertia
+    MuJoCo's compiler gives a body stating none, so any generalized force that pass integrates in place of the
+    constraint solver's acceleration turns into a large spurious motion of the box.
+    """
+    mjcf = ET.Element("mujoco")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "geom", type="plane", size="2 2 0.1")
+    arm = ET.SubElement(worldbody, "body", name="arm", pos="0.15 0 0.25")
+    ET.SubElement(arm, "joint", name="shoulder", type="hinge", axis="0 1 0", damping="0.5")
+    ET.SubElement(arm, "geom", type="capsule", fromto="0 0 0 0.15 0 0", size="0.02", density="1000")
+    box = ET.SubElement(worldbody, "body", name="light_box", pos="0 0 0.05", euler="0.3 0.2 0")
+    ET.SubElement(box, "freejoint")
+    ET.SubElement(box, "inertial", pos="0 0 0", mass="0.01", diaginertia="1e-6 1e-6 1e-6")
+    ET.SubElement(box, "geom", type="box", size="0.04 0.01 0.01", condim="6", friction="1 0.01 0.01")
+    return ET.tostring(mjcf, encoding="unicode")

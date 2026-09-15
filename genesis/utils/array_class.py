@@ -2092,6 +2092,10 @@ class DofsState:
     acc_smooth_bw: qd.Tensor
     qf_smooth: qd.Tensor
     qf_constraint: qd.Tensor
+    # Implicit share of the damping force, h D qacc for the diagonal D the damped mass factor adds (see
+    # func_factor_mass_entity in forward_dynamics.py), then in place the correction (M + hD)^-1 h D qacc that implicit
+    # damping subtracts from the acceleration (see func_implicit_damping).
+    qf_damping_implicit: qd.Tensor = of_kind(DataKind.SCRATCH)
     cdof_ang: qd.Tensor
     cdof_vel: qd.Tensor
     cdofvel_ang: qd.Tensor
@@ -2128,6 +2132,7 @@ def get_dofs_state(solver):
         acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
         qf_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         qf_constraint=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        qf_damping_implicit=V(dtype=gs.qd_float, shape=shape),
         cdof_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cdof_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cdofvel_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),

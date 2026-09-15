@@ -2334,8 +2334,6 @@ def func_implicit_damping(
     _B = rigid_info.mass_mat_mask.shape[1]
 
     # Determine whether the mass matrix must be re-computed to take into account first-order correction terms.
-    # Note that avoiding inverting the mass matrix twice would not only speed up simulation but also improving
-    # numerical stability as computing post-damping accelerations from forces is not necessary anymore.
     if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
         for i_e, i_b in qd.ndrange(n_entities, _B):
             rigid_info.mass_mat_mask[i_e, i_b] = False
@@ -2359,7 +2357,40 @@ def func_implicit_damping(
                         rigid_info.mass_mat_mask[i_e, i_b] = True
 
     func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True)
-    func_solve_mass(dyn_state.dofs.force, dyn_state.dofs.acc, dyn_state, dyn_info, rigid_info, rigid_config)
+
+    # The damped acceleration solves (M + hD) a' = M a, applied as the correction a' = a - (M + hD)^-1 (hD a): only the
+    # damped DOFs move, and an unconverged constraint solve integrates as the bounded step it took, where re-solving
+    # from the force balance would integrate its residual as M^-1 r, a spurious impulse on a light body. hD is the
+    # diagonal func_factor_mass_entity adds; the block solve runs in place, on the entities the factor visited.
+    n_dofs = dyn_state.dofs.acc.shape[0]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_d, i_b in qd.ndrange(n_dofs, _B):
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        i_e = dyn_info.dofs.entity_idx[I_d]
+        if rigid_info.mass_mat_mask[i_e, i_b]:
+            damping = dyn_info.dofs.damping[I_d]
+            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                    damping = damping - dyn_info.dofs.act_bias[I_d][2]
+            dyn_state.dofs.qf_damping_implicit[i_d, i_b] = (
+                damping * rigid_info.substep_dt[None] * dyn_state.dofs.acc[i_d, i_b]
+            )
+
+    func_solve_mass(
+        dyn_state.dofs.qf_damping_implicit,
+        dyn_state.dofs.qf_damping_implicit,
+        dyn_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+    )
+
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_d, i_b in qd.ndrange(n_dofs, _B):
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        i_e = dyn_info.dofs.entity_idx[I_d]
+        if rigid_info.mass_mat_mask[i_e, i_b]:
+            dyn_state.dofs.acc[i_d, i_b] = dyn_state.dofs.acc[i_d, i_b] - dyn_state.dofs.qf_damping_implicit[i_d, i_b]
 
     # Disable pre-computed factorization mask right away
     if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
