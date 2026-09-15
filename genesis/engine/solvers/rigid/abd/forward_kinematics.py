@@ -13,14 +13,15 @@ This module contains Quadrants kernels and functions for:
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
 from .misc import (
-    func_check_index_range,
-    func_read_field_if,
-    func_write_field_if,
-    func_write_and_read_field_if,
     func_atomic_add_if,
+    func_check_index_range,
+    func_is_tree_awake,
+    func_read_field_if,
+    func_write_and_read_field_if,
+    func_write_field_if,
 )
 
 
@@ -141,13 +142,30 @@ def func_COM_links(
     i_b = qd.cast(i_b, qd.i32)
 
     for i_r in range(rigid_info.roots_link_idx.shape[0]):
-        # The links of a root sleep as a unit, so the root tells whether they are awake
-        i_l_root = rigid_info.roots_link_idx[i_r]
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
-        if is_awake:
-            func_COM_links_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+        func_COM_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+
+
+@qd.func
+def func_COM_root(
+    i_r,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
+):
+    """Compute the center of mass of kinematic root i_r of env i_b and the inertial of its links about it.
+
+    The links of a root sleep as a unit, so the root link tells whether they are awake, and a sleeping root keeps the
+    values of its last awake step.
+    """
+    i_l_root = rigid_info.roots_link_idx[i_r]
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+    if is_awake:
+        func_COM_links_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
@@ -318,6 +336,197 @@ def func_COM_links_root(
 
 
 @qd.func
+def func_forward_kinematics_link(
+    i_l,
+    i_b,
+    qpos: qd.Tensor,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
+):
+    """Pose link i_l of env i_b from its parent's pose and its joint coordinates.
+
+    Also writes the anchor and axis of each of its joints and the dof positions its coordinates map to. The parent's
+    pose must be current.
+    """
+    BW = qd.static(is_backward)
+    W = qd.static(func_write_field_if)
+    R = qd.static(func_read_field_if)
+    WR = qd.static(func_write_and_read_field_if)
+    i_b = qd.cast(i_b, qd.i32)
+
+    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    I_l0 = (i_l, 0, i_b)
+
+    pos = W(I_l0, dyn_info.links.pos[I_l], dyn_state.links.pos_bw, BW)
+    quat = W(I_l0, dyn_info.links.quat[I_l], dyn_state.links.quat_bw, BW)
+    if dyn_info.links.parent_idx[I_l] != -1:
+        parent_pos = dyn_state.links.pos[dyn_info.links.parent_idx[I_l], i_b]
+        parent_quat = dyn_state.links.quat[dyn_info.links.parent_idx[I_l], i_b]
+        pos_ = parent_pos + gu.qd_transform_by_quat(dyn_info.links.pos[I_l], parent_quat)
+        quat_ = gu.qd_transform_quat_by_quat(dyn_info.links.quat[I_l], parent_quat)
+
+        pos = W(I_l0, pos_, dyn_state.links.pos_bw, BW)
+        quat = W(I_l0, quat_, dyn_state.links.quat_bw, BW)
+
+    n_joints = dyn_info.links.joint_end[I_l] - dyn_info.links.joint_start[I_l]
+
+    for i_j_ in range(n_joints):
+        i_j = i_j_ + dyn_info.links.joint_start[I_l]
+
+        curr_I = (i_l, 0 if qd.static(not BW) else i_j_, i_b)
+        next_I = (i_l, 0 if qd.static(not BW) else i_j_ + 1, i_b)
+
+        I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+        joint_type = dyn_info.joints.type[I_j]
+        q_start = dyn_info.joints.q_start[I_j]
+        dof_start = dyn_info.joints.dof_start[I_j]
+        I_d = [dof_start, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start
+
+        # compute axis and anchor
+        if joint_type == gs.JOINT_TYPE.FREE:
+            dyn_state.joints.xanchor[i_j, i_b] = qd.Vector(
+                [
+                    qpos[q_start, i_b],
+                    qpos[q_start + 1, i_b],
+                    qpos[q_start + 2, i_b],
+                ]
+            )
+            dyn_state.joints.xaxis[i_j, i_b] = qd.Vector([0.0, 0.0, 1.0])
+        elif joint_type == gs.JOINT_TYPE.FIXED:
+            pass
+        else:
+            axis = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+            if joint_type == gs.JOINT_TYPE.REVOLUTE:
+                axis = dyn_info.dofs.motion_ang[I_d]
+            elif joint_type == gs.JOINT_TYPE.PRISMATIC:
+                axis = dyn_info.dofs.motion_vel[I_d]
+
+            pos_ = R(curr_I, pos, dyn_state.links.pos_bw, BW)
+            quat_ = R(curr_I, quat, dyn_state.links.quat_bw, BW)
+
+            dyn_state.joints.xanchor[i_j, i_b] = gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat_) + pos_
+            dyn_state.joints.xaxis[i_j, i_b] = gu.qd_transform_by_quat(axis, quat_)
+
+        if joint_type == gs.JOINT_TYPE.FREE:
+            pos_ = qd.Vector(
+                [
+                    qpos[q_start, i_b],
+                    qpos[q_start + 1, i_b],
+                    qpos[q_start + 2, i_b],
+                ],
+                dt=gs.qd_float,
+            )
+            quat_ = qd.Vector(
+                [
+                    qpos[q_start + 3, i_b],
+                    qpos[q_start + 4, i_b],
+                    qpos[q_start + 5, i_b],
+                    qpos[q_start + 6, i_b],
+                ],
+                dt=gs.qd_float,
+            )
+            quat_ = quat_ / quat_.norm()
+            pos = WR(next_I, pos_, dyn_state.links.pos_bw, BW)
+            quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
+
+            xyz = gu.qd_quat_to_xyz(quat, rigid_info.EPS[None])
+            for j in qd.static(range(3)):
+                dyn_state.dofs.pos[dof_start + j, i_b] = pos[j]
+                dyn_state.dofs.pos[dof_start + 3 + j, i_b] = xyz[j]
+        elif joint_type == gs.JOINT_TYPE.FIXED:
+            pass
+        elif joint_type == gs.JOINT_TYPE.SPHERICAL:
+            qloc = qd.Vector(
+                [
+                    qpos[q_start, i_b],
+                    qpos[q_start + 1, i_b],
+                    qpos[q_start + 2, i_b],
+                    qpos[q_start + 3, i_b],
+                ],
+                dt=gs.qd_float,
+            )
+            xyz = gu.qd_quat_to_xyz(qloc, rigid_info.EPS[None])
+            for j in qd.static(range(3)):
+                dyn_state.dofs.pos[dof_start + j, i_b] = xyz[j]
+            quat_ = gu.qd_transform_quat_by_quat(qloc, R(curr_I, quat, dyn_state.links.quat_bw, BW))
+            quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
+            pos_ = dyn_state.joints.xanchor[i_j, i_b] - gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat)
+            pos = W(next_I, pos_, dyn_state.links.pos_bw, BW)
+        elif joint_type == gs.JOINT_TYPE.REVOLUTE:
+            axis = dyn_info.dofs.motion_ang[I_d]
+            dyn_state.dofs.pos[dof_start, i_b] = qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
+            qloc = gu.qd_rotvec_to_quat(axis * dyn_state.dofs.pos[dof_start, i_b], rigid_info.EPS[None])
+            quat_ = gu.qd_transform_quat_by_quat(qloc, R(curr_I, quat, dyn_state.links.quat_bw, BW))
+            quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
+            pos_ = dyn_state.joints.xanchor[i_j, i_b] - gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat)
+            pos = W(next_I, pos_, dyn_state.links.pos_bw, BW)
+        else:  # joint_type == gs.JOINT_TYPE.PRISMATIC:
+            dyn_state.dofs.pos[dof_start, i_b] = qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
+            pos_ = (
+                R(curr_I, pos, dyn_state.links.pos_bw, BW)
+                + dyn_state.joints.xaxis[i_j, i_b] * dyn_state.dofs.pos[dof_start, i_b]
+            )
+            pos = W(next_I, pos_, dyn_state.links.pos_bw, BW)
+            # A prismatic joint leaves the link orientation unchanged, but the backward per-joint cache still
+            # needs the next slot populated: the final R(quat_bw, I_jf, ...) below reads it in backward mode and
+            # would get uninitialized memory (NaN gradients on qpos) otherwise.
+            quat = W(next_I, quat, dyn_state.links.quat_bw, BW)
+
+    # Skip link pose update for fixed root links to let users manually overwrite them
+    I_jf = (i_l, 0 if qd.static(not BW) else n_joints, i_b)
+    if not (dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]):
+        dyn_state.links.pos[i_l, i_b] = R(I_jf, pos, dyn_state.links.pos_bw, BW)
+        dyn_state.links.quat[i_l, i_b] = R(I_jf, quat, dyn_state.links.quat_bw, BW)
+
+
+@qd.func
+def func_forward_kinematics_tree(
+    i_t,
+    i_b,
+    qpos: qd.Tensor,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
+):
+    """Pose the links of kinematic tree i_t of env i_b, parents first (see trees_root_idx in array_class.py).
+
+    A tree sleeps as a unit, so a hibernated tree keeps the poses of its last awake step.
+    """
+    if func_is_tree_awake(i_t, i_b, dyn_state, rigid_info, rigid_config):
+        for i_l in range(rigid_info.trees_root_idx[i_t], rigid_info.trees_link_end[i_t]):
+            if rigid_info.links_tree_idx[i_l] == i_t:
+                func_forward_kinematics_link(i_l, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+
+
+@qd.func
+def func_forward_kinematics_static_links(
+    i_r,
+    i_b,
+    qpos: qd.Tensor,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
+):
+    """Pose the static links of kinematic root i_r of env i_b, parents first (see roots_link_idx in array_class.py).
+
+    A static link moves only when a setter writes the pose of its fixed root, so the setters run this pass and the step
+    sweep skips it (see func_update_cartesian_space).
+    """
+    i_l_root = rigid_info.roots_link_idx[i_r]
+    for i_l in range(i_l_root, rigid_info.links_root_end[i_l_root]):
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if dyn_info.links.root_idx[I_l] == i_l_root and rigid_info.links_tree_idx[i_l] == -1:
+            func_forward_kinematics_link(i_l, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+
+
+@qd.func
 def func_forward_kinematics_entity(
     i_e,
     i_b,
@@ -328,151 +537,12 @@ def func_forward_kinematics_entity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    # The sleep flags are read only in an env holding a sleeper (see n_awake_dofs in array_class.py): one read per
-    # item of the walk is what costs, one read per env is free
-    has_sleepers = False
-    if qd.static(rigid_config.use_hibernation):
-        has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
-    BW = qd.static(is_backward)
-    W = qd.static(func_write_field_if)
-    R = qd.static(func_read_field_if)
-    WR = qd.static(func_write_and_read_field_if)
-    i_b = qd.cast(i_b, qd.i32)
+    """Pose every link of entity i_e of env i_b, parents first, its sleeping links included.
 
-    for i_l_ in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-        i_l = gs.qd_int(i_l_)
-        # A hibernated link's pose is frozen and still valid, so skip recomputing it. All links of a component sleep
-        # together, so a hibernated link never has an awake child whose pose depends on it.
-        if qd.static(rigid_config.use_hibernation):
-            is_hibernated = False
-            if has_sleepers:
-                is_hibernated = dyn_state.links.is_hibernated[i_l, i_b]
-            if is_hibernated:
-                continue
-
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        I_l0 = (i_l, 0, i_b)
-
-        pos = W(I_l0, dyn_info.links.pos[I_l], dyn_state.links.pos_bw, BW)
-        quat = W(I_l0, dyn_info.links.quat[I_l], dyn_state.links.quat_bw, BW)
-        if dyn_info.links.parent_idx[I_l] != -1:
-            parent_pos = dyn_state.links.pos[dyn_info.links.parent_idx[I_l], i_b]
-            parent_quat = dyn_state.links.quat[dyn_info.links.parent_idx[I_l], i_b]
-            pos_ = parent_pos + gu.qd_transform_by_quat(dyn_info.links.pos[I_l], parent_quat)
-            quat_ = gu.qd_transform_quat_by_quat(dyn_info.links.quat[I_l], parent_quat)
-
-            pos = W(I_l0, pos_, dyn_state.links.pos_bw, BW)
-            quat = W(I_l0, quat_, dyn_state.links.quat_bw, BW)
-
-        n_joints = dyn_info.links.joint_end[I_l] - dyn_info.links.joint_start[I_l]
-
-        for i_j_ in range(n_joints):
-            i_j = i_j_ + dyn_info.links.joint_start[I_l]
-
-            curr_I = (i_l, 0 if qd.static(not BW) else i_j_, i_b)
-            next_I = (i_l, 0 if qd.static(not BW) else i_j_ + 1, i_b)
-
-            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-            joint_type = dyn_info.joints.type[I_j]
-            q_start = dyn_info.joints.q_start[I_j]
-            dof_start = dyn_info.joints.dof_start[I_j]
-            I_d = [dof_start, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start
-
-            # compute axis and anchor
-            if joint_type == gs.JOINT_TYPE.FREE:
-                dyn_state.joints.xanchor[i_j, i_b] = qd.Vector(
-                    [
-                        qpos[q_start, i_b],
-                        qpos[q_start + 1, i_b],
-                        qpos[q_start + 2, i_b],
-                    ]
-                )
-                dyn_state.joints.xaxis[i_j, i_b] = qd.Vector([0.0, 0.0, 1.0])
-            elif joint_type == gs.JOINT_TYPE.FIXED:
-                pass
-            else:
-                axis = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
-                if joint_type == gs.JOINT_TYPE.REVOLUTE:
-                    axis = dyn_info.dofs.motion_ang[I_d]
-                elif joint_type == gs.JOINT_TYPE.PRISMATIC:
-                    axis = dyn_info.dofs.motion_vel[I_d]
-
-                pos_ = R(curr_I, pos, dyn_state.links.pos_bw, BW)
-                quat_ = R(curr_I, quat, dyn_state.links.quat_bw, BW)
-
-                dyn_state.joints.xanchor[i_j, i_b] = gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat_) + pos_
-                dyn_state.joints.xaxis[i_j, i_b] = gu.qd_transform_by_quat(axis, quat_)
-
-            if joint_type == gs.JOINT_TYPE.FREE:
-                pos_ = qd.Vector(
-                    [
-                        qpos[q_start, i_b],
-                        qpos[q_start + 1, i_b],
-                        qpos[q_start + 2, i_b],
-                    ],
-                    dt=gs.qd_float,
-                )
-                quat_ = qd.Vector(
-                    [
-                        qpos[q_start + 3, i_b],
-                        qpos[q_start + 4, i_b],
-                        qpos[q_start + 5, i_b],
-                        qpos[q_start + 6, i_b],
-                    ],
-                    dt=gs.qd_float,
-                )
-                quat_ = quat_ / quat_.norm()
-                pos = WR(next_I, pos_, dyn_state.links.pos_bw, BW)
-                quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
-
-                xyz = gu.qd_quat_to_xyz(quat, rigid_info.EPS[None])
-                for j in qd.static(range(3)):
-                    dyn_state.dofs.pos[dof_start + j, i_b] = pos[j]
-                    dyn_state.dofs.pos[dof_start + 3 + j, i_b] = xyz[j]
-            elif joint_type == gs.JOINT_TYPE.FIXED:
-                pass
-            elif joint_type == gs.JOINT_TYPE.SPHERICAL:
-                qloc = qd.Vector(
-                    [
-                        qpos[q_start, i_b],
-                        qpos[q_start + 1, i_b],
-                        qpos[q_start + 2, i_b],
-                        qpos[q_start + 3, i_b],
-                    ],
-                    dt=gs.qd_float,
-                )
-                xyz = gu.qd_quat_to_xyz(qloc, rigid_info.EPS[None])
-                for j in qd.static(range(3)):
-                    dyn_state.dofs.pos[dof_start + j, i_b] = xyz[j]
-                quat_ = gu.qd_transform_quat_by_quat(qloc, R(curr_I, quat, dyn_state.links.quat_bw, BW))
-                quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
-                pos_ = dyn_state.joints.xanchor[i_j, i_b] - gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat)
-                pos = W(next_I, pos_, dyn_state.links.pos_bw, BW)
-            elif joint_type == gs.JOINT_TYPE.REVOLUTE:
-                axis = dyn_info.dofs.motion_ang[I_d]
-                dyn_state.dofs.pos[dof_start, i_b] = qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
-                qloc = gu.qd_rotvec_to_quat(axis * dyn_state.dofs.pos[dof_start, i_b], rigid_info.EPS[None])
-                quat_ = gu.qd_transform_quat_by_quat(qloc, R(curr_I, quat, dyn_state.links.quat_bw, BW))
-                quat = WR(next_I, quat_, dyn_state.links.quat_bw, BW)
-                pos_ = dyn_state.joints.xanchor[i_j, i_b] - gu.qd_transform_by_quat(dyn_info.joints.pos[I_j], quat)
-                pos = W(next_I, pos_, dyn_state.links.pos_bw, BW)
-            else:  # joint_type == gs.JOINT_TYPE.PRISMATIC:
-                dyn_state.dofs.pos[dof_start, i_b] = qpos[q_start, i_b] - rigid_info.qpos0[q_start, i_b]
-                pos_ = (
-                    R(curr_I, pos, dyn_state.links.pos_bw, BW)
-                    + dyn_state.joints.xaxis[i_j, i_b] * dyn_state.dofs.pos[dof_start, i_b]
-                )
-                pos = W(next_I, pos_, dyn_state.links.pos_bw, BW)
-                # A prismatic joint leaves the link orientation unchanged, but the backward per-joint cache still
-                # needs the next slot populated: the final R(quat_bw, I_jf, ...) below reads it in backward mode and
-                # would get uninitialized memory (NaN gradients on qpos) otherwise.
-                quat = W(next_I, quat, dyn_state.links.quat_bw, BW)
-
-        # Skip link pose update for fixed root links to let users manually overwrite them
-        I_jf = (i_l, 0 if qd.static(not BW) else n_joints, i_b)
-        if not (dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]):
-            dyn_state.links.pos[i_l, i_b] = R(I_jf, pos, dyn_state.links.pos_bw, BW)
-            dyn_state.links.quat[i_l, i_b] = R(I_jf, quat, dyn_state.links.quat_bw, BW)
+    The callers write the joint coordinates of the entity and read the poses back (inverse kinematics, path planning).
+    """
+    for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
+        func_forward_kinematics_link(i_l, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
@@ -484,17 +554,17 @@ def func_forward_kinematics_batch(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    BW = qd.static(is_backward)
+    """Pose every link of env i_b: the static links of each root, then the awake trees."""
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_e in range(dyn_info.entities.n_links.shape[0]):
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake:
-            func_forward_kinematics_entity(
-                i_e, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
-            )
+    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+        func_forward_kinematics_static_links(
+            i_r, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
+        )
+    for i_t in range(rigid_info.trees_root_idx.shape[0]):
+        func_forward_kinematics_tree(
+            i_t, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -515,8 +585,39 @@ def kernel_forward_kinematics_entity(
 
 
 @qd.func
-def func_update_geoms_entity(
-    i_e,
+def func_update_geoms_link(
+    i_l,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_config: qd.template(),
+    force_update_fixed_geoms: qd.template(),
+    is_backward: qd.template(),
+):
+    """Pose the geoms of link i_l of env i_b from its pose, the fixed geoms only under force_update_fixed_geoms.
+
+    The verts follow lazily (see verts_updated).
+    """
+    BW = qd.static(is_backward)
+    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    i_g_start = dyn_info.links.geom_start[I_l]
+    i_g_end = dyn_info.links.geom_end[I_l]
+
+    for i_g in range(i_g_start, i_g_end):
+        if func_check_index_range(i_g, i_g_start, i_g_end, BW):
+            if force_update_fixed_geoms or not dyn_info.geoms.is_fixed[i_g]:
+                dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
+                    dyn_info.geoms.pos[i_g],
+                    dyn_info.geoms.quat[i_g],
+                    dyn_state.links.pos[i_l, i_b],
+                    dyn_state.links.quat[i_l, i_b],
+                )
+                dyn_state.geoms.verts_updated[i_g, i_b] = False
+
+
+@qd.func
+def func_update_geoms_tree(
+    i_t,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -525,32 +626,35 @@ def func_update_geoms_entity(
     force_update_fixed_geoms: qd.template(),
     is_backward: qd.template(),
 ):
-    """
-    NOTE: this only update geom pose, not its verts and else.
-    """
-    has_sleepers = False
-    if qd.static(rigid_config.use_hibernation):
-        has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
-    BW = qd.static(is_backward)
-    i_b = qd.cast(i_b, qd.i32)
+    """Pose the geoms of the links of kinematic tree i_t of env i_b.
 
-    for i_g_ in range(dyn_info.entities.n_geoms[i_e]):
-        i_g = dyn_info.entities.geom_start[i_e] + i_g_
-        if qd.static(rigid_config.use_hibernation):
-            is_hibernated = False
-            if has_sleepers:
-                is_hibernated = dyn_state.geoms.is_hibernated[i_g, i_b]
-            if is_hibernated:
-                continue
-        if func_check_index_range(i_g, dyn_info.entities.geom_start[i_e], dyn_info.entities.geom_end[i_e], BW):
-            if force_update_fixed_geoms or not dyn_info.geoms.is_fixed[i_g]:
-                dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
-                    dyn_info.geoms.pos[i_g],
-                    dyn_info.geoms.quat[i_g],
-                    dyn_state.links.pos[dyn_info.geoms.link_idx[i_g], i_b],
-                    dyn_state.links.quat[dyn_info.geoms.link_idx[i_g], i_b],
+    A hibernated tree keeps the geom poses of its last awake step (see func_forward_kinematics_tree).
+    """
+    if func_is_tree_awake(i_t, i_b, dyn_state, rigid_info, rigid_config):
+        for i_l in range(rigid_info.trees_root_idx[i_t], rigid_info.trees_link_end[i_t]):
+            if rigid_info.links_tree_idx[i_l] == i_t:
+                func_update_geoms_link(
+                    i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_fixed_geoms, is_backward
                 )
-                dyn_state.geoms.verts_updated[i_g, i_b] = False
+
+
+@qd.func
+def func_update_geoms_static_links(
+    i_r,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    force_update_fixed_geoms: qd.template(),
+    is_backward: qd.template(),
+):
+    """Pose the geoms of the static links of kinematic root i_r of env i_b (see func_forward_kinematics_static_links)."""
+    i_l_root = rigid_info.roots_link_idx[i_r]
+    for i_l in range(i_l_root, rigid_info.links_root_end[i_l_root]):
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if dyn_info.links.root_idx[I_l] == i_l_root and rigid_info.links_tree_idx[i_l] == -1:
+            func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_fixed_geoms, is_backward)
 
 
 @qd.func
@@ -563,20 +667,18 @@ def func_update_geoms_batch(
     force_update_fixed_geoms: qd.template(),
     is_backward: qd.template(),
 ):
-    """
-    NOTE: this only update geom pose, not its verts and else.
-    """
-    BW = qd.static(is_backward)
+    """Pose the geoms of every awake link of env i_b, and those of the static links under force_update_fixed_geoms."""
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_e in range(dyn_info.entities.n_links.shape[0]):
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake:
-            func_update_geoms_entity(
-                i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+    if qd.static(force_update_fixed_geoms):
+        for i_r in range(rigid_info.roots_link_idx.shape[0]):
+            func_update_geoms_static_links(
+                i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
             )
+    for i_t in range(rigid_info.trees_root_idx.shape[0]):
+        func_update_geoms_tree(
+            i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+        )
 
 
 @qd.func
@@ -588,19 +690,21 @@ def func_update_geoms(
     force_update_fixed_geoms: qd.template(),
     is_backward: qd.template(),
 ):
-    # This loop must be the outermost loop to be differentiable
-    if qd.static(rigid_config.use_hibernation):
-        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-        for i_b in range(dyn_state.links.pos.shape[1]):
-            func_update_geoms_batch(
-                i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+    """Pose the geoms of every env, one thread per kinematic tree.
+
+    The loops are the outermost ones of their kernel, which differentiability requires.
+    """
+    if qd.static(force_update_fixed_geoms):
+        qd.loop_config(name="update_geoms_static", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+            func_update_geoms_static_links(
+                i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
             )
-    else:
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
-            func_update_geoms_entity(
-                i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
-            )
+    qd.loop_config(name="update_geoms", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        func_update_geoms_tree(
+            i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -621,8 +725,8 @@ def kernel_update_geoms(
 
 
 @qd.func
-def func_forward_velocity_entity(
-    i_e,
+def func_forward_velocity_link(
+    i_l,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -630,111 +734,135 @@ def func_forward_velocity_entity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    has_sleepers = False
-    if qd.static(rigid_config.use_hibernation):
-        has_sleepers = rigid_info.n_awake_dofs[i_b] < dyn_state.dofs.is_hibernated.shape[0]
+    """Cartesian velocity of link i_l of env i_b from its parent's velocity and its dof velocities.
+
+    Also writes the velocity derivative of the motion subspace of each of its dofs. The parent's velocity must be
+    current.
+    """
     BW = qd.static(is_backward)
     W = qd.static(func_write_field_if)
     R = qd.static(func_read_field_if)
     A = qd.static(func_atomic_add_if)
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_l_ in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-        i_l = gs.qd_int(i_l_)
-        # A hibernated link's velocity is zero and frozen, so skip it. Components sleep as a unit, so a hibernated link
-        # never has an awake child whose velocity propagates from it.
-        if qd.static(rigid_config.use_hibernation):
-            is_hibernated = False
-            if has_sleepers:
-                is_hibernated = dyn_state.links.is_hibernated[i_l, i_b]
-            if is_hibernated:
-                continue
+    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    n_joints = dyn_info.links.joint_end[I_l] - dyn_info.links.joint_start[I_l]
 
+    I_j0 = (i_l, 0, i_b)
+    cvel_vel = W(I_j0, qd.Vector.zero(gs.qd_float, 3), dyn_state.links.cd_vel_bw, BW)
+    cvel_ang = W(I_j0, qd.Vector.zero(gs.qd_float, 3), dyn_state.links.cd_ang_bw, BW)
+
+    if dyn_info.links.parent_idx[I_l] != -1:
+        cvel_vel = W(I_j0, dyn_state.links.cd_vel[dyn_info.links.parent_idx[I_l], i_b], dyn_state.links.cd_vel_bw, BW)
+        cvel_ang = W(I_j0, dyn_state.links.cd_ang[dyn_info.links.parent_idx[I_l], i_b], dyn_state.links.cd_ang_bw, BW)
+
+    for i_j_ in range(n_joints):
+        i_j = i_j_ + dyn_info.links.joint_start[I_l]
+
+        I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+        joint_type = dyn_info.joints.type[I_j]
+        dof_start = dyn_info.joints.dof_start[I_j]
+
+        curr_I = (i_l, 0 if qd.static(not BW) else i_j_, i_b)
+        next_I = (i_l, 0 if qd.static(not BW) else i_j_ + 1, i_b)
+
+        if joint_type == gs.JOINT_TYPE.FREE:
+            for i_3 in qd.static(range(3)):
+                _vel = dyn_state.dofs.cdof_vel[dof_start + i_3, i_b] * dyn_state.dofs.vel[dof_start + i_3, i_b]
+                _ang = dyn_state.dofs.cdof_ang[dof_start + i_3, i_b] * dyn_state.dofs.vel[dof_start + i_3, i_b]
+
+                cvel_vel = cvel_vel + A(curr_I, _vel, dyn_state.links.cd_vel_bw, BW)
+                cvel_ang = cvel_ang + A(curr_I, _ang, dyn_state.links.cd_ang_bw, BW)
+
+            for i_3 in qd.static(range(3)):
+                dyn_state.dofs.cdofd_ang[dof_start + i_3, i_b], dyn_state.dofs.cdofd_vel[dof_start + i_3, i_b] = (
+                    qd.Vector.zero(gs.qd_float, 3),
+                    qd.Vector.zero(gs.qd_float, 3),
+                )
+
+                (
+                    dyn_state.dofs.cdofd_ang[dof_start + i_3 + 3, i_b],
+                    dyn_state.dofs.cdofd_vel[dof_start + i_3 + 3, i_b],
+                ) = gu.motion_cross_motion(
+                    R(curr_I, cvel_ang, dyn_state.links.cd_ang_bw, BW),
+                    R(curr_I, cvel_vel, dyn_state.links.cd_vel_bw, BW),
+                    dyn_state.dofs.cdof_ang[dof_start + i_3 + 3, i_b],
+                    dyn_state.dofs.cdof_vel[dof_start + i_3 + 3, i_b],
+                )
+
+            if qd.static(BW):
+                dyn_state.links.cd_vel_bw[next_I] = dyn_state.links.cd_vel_bw[curr_I]
+                dyn_state.links.cd_ang_bw[next_I] = dyn_state.links.cd_ang_bw[curr_I]
+
+            for i_3 in qd.static(range(3)):
+                _vel = dyn_state.dofs.cdof_vel[dof_start + i_3 + 3, i_b] * dyn_state.dofs.vel[dof_start + i_3 + 3, i_b]
+                _ang = dyn_state.dofs.cdof_ang[dof_start + i_3 + 3, i_b] * dyn_state.dofs.vel[dof_start + i_3 + 3, i_b]
+                cvel_vel = cvel_vel + A(next_I, _vel, dyn_state.links.cd_vel_bw, BW)
+                cvel_ang = cvel_ang + A(next_I, _ang, dyn_state.links.cd_ang_bw, BW)
+
+        else:
+            for i_d in range(dof_start, dyn_info.joints.dof_end[I_j]):
+                dyn_state.dofs.cdofd_ang[i_d, i_b], dyn_state.dofs.cdofd_vel[i_d, i_b] = gu.motion_cross_motion(
+                    R(curr_I, cvel_ang, dyn_state.links.cd_ang_bw, BW),
+                    R(curr_I, cvel_vel, dyn_state.links.cd_vel_bw, BW),
+                    dyn_state.dofs.cdof_ang[i_d, i_b],
+                    dyn_state.dofs.cdof_vel[i_d, i_b],
+                )
+
+            if qd.static(BW):
+                dyn_state.links.cd_vel_bw[next_I] = dyn_state.links.cd_vel_bw[curr_I]
+                dyn_state.links.cd_ang_bw[next_I] = dyn_state.links.cd_ang_bw[curr_I]
+
+            for i_d in range(dof_start, dyn_info.joints.dof_end[I_j]):
+                _vel = dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+                _ang = dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+                cvel_vel = cvel_vel + A(next_I, _vel, dyn_state.links.cd_vel_bw, BW)
+                cvel_ang = cvel_ang + A(next_I, _ang, dyn_state.links.cd_ang_bw, BW)
+
+    I_jf = (i_l, 0 if qd.static(not BW) else n_joints, i_b)
+    dyn_state.links.cd_vel[i_l, i_b] = R(I_jf, cvel_vel, dyn_state.links.cd_vel_bw, BW)
+    dyn_state.links.cd_ang[i_l, i_b] = R(I_jf, cvel_ang, dyn_state.links.cd_ang_bw, BW)
+
+
+@qd.func
+def func_forward_velocity_tree(
+    i_t,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
+):
+    """Cartesian velocities of the links of kinematic tree i_t of env i_b, parents first.
+
+    A hibernated tree keeps the zero velocities it was put to sleep with (see func_hibernate_link in misc.py).
+    """
+    if func_is_tree_awake(i_t, i_b, dyn_state, rigid_info, rigid_config):
+        for i_l in range(rigid_info.trees_root_idx[i_t], rigid_info.trees_link_end[i_t]):
+            if rigid_info.links_tree_idx[i_l] == i_t:
+                func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+
+
+@qd.func
+def func_forward_velocity_static_links(
+    i_r,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_backward: qd.template(),
+):
+    """Cartesian velocities of the static links of kinematic root i_r of env i_b, zero by construction.
+
+    The backward mode runs it to fill the per-joint caches the reverse reads for every link.
+    """
+    i_l_root = rigid_info.roots_link_idx[i_r]
+    for i_l in range(i_l_root, rigid_info.links_root_end[i_l_root]):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        n_joints = dyn_info.links.joint_end[I_l] - dyn_info.links.joint_start[I_l]
-
-        I_j0 = (i_l, 0, i_b)
-        cvel_vel = W(I_j0, qd.Vector.zero(gs.qd_float, 3), dyn_state.links.cd_vel_bw, BW)
-        cvel_ang = W(I_j0, qd.Vector.zero(gs.qd_float, 3), dyn_state.links.cd_ang_bw, BW)
-
-        if dyn_info.links.parent_idx[I_l] != -1:
-            cvel_vel = W(
-                I_j0, dyn_state.links.cd_vel[dyn_info.links.parent_idx[I_l], i_b], dyn_state.links.cd_vel_bw, BW
-            )
-            cvel_ang = W(
-                I_j0, dyn_state.links.cd_ang[dyn_info.links.parent_idx[I_l], i_b], dyn_state.links.cd_ang_bw, BW
-            )
-
-        for i_j_ in range(n_joints):
-            i_j = i_j_ + dyn_info.links.joint_start[I_l]
-
-            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-            joint_type = dyn_info.joints.type[I_j]
-            dof_start = dyn_info.joints.dof_start[I_j]
-
-            curr_I = (i_l, 0 if qd.static(not BW) else i_j_, i_b)
-            next_I = (i_l, 0 if qd.static(not BW) else i_j_ + 1, i_b)
-
-            if joint_type == gs.JOINT_TYPE.FREE:
-                for i_3 in qd.static(range(3)):
-                    _vel = dyn_state.dofs.cdof_vel[dof_start + i_3, i_b] * dyn_state.dofs.vel[dof_start + i_3, i_b]
-                    _ang = dyn_state.dofs.cdof_ang[dof_start + i_3, i_b] * dyn_state.dofs.vel[dof_start + i_3, i_b]
-
-                    cvel_vel = cvel_vel + A(curr_I, _vel, dyn_state.links.cd_vel_bw, BW)
-                    cvel_ang = cvel_ang + A(curr_I, _ang, dyn_state.links.cd_ang_bw, BW)
-
-                for i_3 in qd.static(range(3)):
-                    dyn_state.dofs.cdofd_ang[dof_start + i_3, i_b], dyn_state.dofs.cdofd_vel[dof_start + i_3, i_b] = (
-                        qd.Vector.zero(gs.qd_float, 3),
-                        qd.Vector.zero(gs.qd_float, 3),
-                    )
-
-                    (
-                        dyn_state.dofs.cdofd_ang[dof_start + i_3 + 3, i_b],
-                        dyn_state.dofs.cdofd_vel[dof_start + i_3 + 3, i_b],
-                    ) = gu.motion_cross_motion(
-                        R(curr_I, cvel_ang, dyn_state.links.cd_ang_bw, BW),
-                        R(curr_I, cvel_vel, dyn_state.links.cd_vel_bw, BW),
-                        dyn_state.dofs.cdof_ang[dof_start + i_3 + 3, i_b],
-                        dyn_state.dofs.cdof_vel[dof_start + i_3 + 3, i_b],
-                    )
-
-                if qd.static(BW):
-                    dyn_state.links.cd_vel_bw[next_I] = dyn_state.links.cd_vel_bw[curr_I]
-                    dyn_state.links.cd_ang_bw[next_I] = dyn_state.links.cd_ang_bw[curr_I]
-
-                for i_3 in qd.static(range(3)):
-                    _vel = (
-                        dyn_state.dofs.cdof_vel[dof_start + i_3 + 3, i_b] * dyn_state.dofs.vel[dof_start + i_3 + 3, i_b]
-                    )
-                    _ang = (
-                        dyn_state.dofs.cdof_ang[dof_start + i_3 + 3, i_b] * dyn_state.dofs.vel[dof_start + i_3 + 3, i_b]
-                    )
-                    cvel_vel = cvel_vel + A(next_I, _vel, dyn_state.links.cd_vel_bw, BW)
-                    cvel_ang = cvel_ang + A(next_I, _ang, dyn_state.links.cd_ang_bw, BW)
-
-            else:
-                for i_d in range(dof_start, dyn_info.joints.dof_end[I_j]):
-                    dyn_state.dofs.cdofd_ang[i_d, i_b], dyn_state.dofs.cdofd_vel[i_d, i_b] = gu.motion_cross_motion(
-                        R(curr_I, cvel_ang, dyn_state.links.cd_ang_bw, BW),
-                        R(curr_I, cvel_vel, dyn_state.links.cd_vel_bw, BW),
-                        dyn_state.dofs.cdof_ang[i_d, i_b],
-                        dyn_state.dofs.cdof_vel[i_d, i_b],
-                    )
-
-                if qd.static(BW):
-                    dyn_state.links.cd_vel_bw[next_I] = dyn_state.links.cd_vel_bw[curr_I]
-                    dyn_state.links.cd_ang_bw[next_I] = dyn_state.links.cd_ang_bw[curr_I]
-
-                for i_d in range(dof_start, dyn_info.joints.dof_end[I_j]):
-                    _vel = dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-                    _ang = dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-                    cvel_vel = cvel_vel + A(next_I, _vel, dyn_state.links.cd_vel_bw, BW)
-                    cvel_ang = cvel_ang + A(next_I, _ang, dyn_state.links.cd_ang_bw, BW)
-
-        I_jf = (i_l, 0 if qd.static(not BW) else n_joints, i_b)
-        dyn_state.links.cd_vel[i_l, i_b] = R(I_jf, cvel_vel, dyn_state.links.cd_vel_bw, BW)
-        dyn_state.links.cd_ang[i_l, i_b] = R(I_jf, cvel_ang, dyn_state.links.cd_ang_bw, BW)
+        if dyn_info.links.root_idx[I_l] == i_l_root and rigid_info.links_tree_idx[i_l] == -1:
+            func_forward_velocity_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
@@ -746,15 +874,17 @@ def func_forward_velocity_batch(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    BW = qd.static(is_backward)
+    """Cartesian velocities of every awake link of env i_b.
+
+    A static link keeps its zero velocity, so the forward sweep skips it (see func_forward_velocity_static_links).
+    """
     i_b = qd.cast(i_b, qd.i32)
 
-    for i_e in range(dyn_info.entities.n_links.shape[0]):
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake:
-            func_forward_velocity_entity(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    if qd.static(is_backward):
+        for i_r in range(rigid_info.roots_link_idx.shape[0]):
+            func_forward_velocity_static_links(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_t in range(rigid_info.trees_root_idx.shape[0]):
+        func_forward_velocity_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.func
@@ -765,15 +895,19 @@ def func_forward_velocity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    # This loop must be the outermost loop to be differentiable
-    qd.loop_config(name="forward_velocity_entity", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
-        # A hibernated entity keeps the velocities of its last awake step, zero for its sleeping links
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake:
-            func_forward_velocity_entity(i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    """Cartesian velocities of every env, one thread per kinematic tree (see func_forward_velocity_batch).
+
+    The loops are the outermost ones of their kernel, which differentiability requires.
+    """
+    if qd.static(is_backward):
+        qd.loop_config(
+            name="forward_velocity_static", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+        )
+        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+            func_forward_velocity_static_links(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    qd.loop_config(name="forward_velocity", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        func_forward_velocity_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.kernel(fastcache=True)
@@ -904,68 +1038,6 @@ def kernel_update_vverts_for_vgeoms(
 
 
 @qd.func
-def func_is_entity_in_tree(
-    j_e,
-    i_b,
-    i_l_start,
-    i_l_end,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
-):
-    """Whether entity j_e belongs to the kinematic tree of the entity holding links [i_l_start, i_l_end).
-
-    An entity roots at its own base link, or, once attached beneath another entity, at a link of that entity. The
-    root of its base link therefore tells which entity carries it.
-    """
-    j_l_start = dyn_info.entities.link_start[j_e]
-    J_l_start = [j_l_start, i_b] if qd.static(rigid_config.batch_links_info) else j_l_start
-    j_l_root = dyn_info.links.root_idx[J_l_start]
-    return i_l_start <= j_l_root and j_l_root < i_l_end
-
-
-@qd.func
-def func_update_cartesian_space_tree(
-    i_e,
-    i_b,
-    qpos: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    force_update_fixed_geoms: qd.template(),
-    is_backward: qd.template(),
-):
-    """Update the kinematic roots of entity i_e and of every entity attached beneath one of its links.
-
-    An attached entity roots at a link of the entity it hangs from, which may be a jointed link rather than the base,
-    and comes after that entity. The forward kinematics run over these entities in order, so the poses a parent passes
-    down are final when its children read them; the center of mass of each root then walks its links whole (see
-    func_COM_links_root), and the geoms follow.
-    """
-    i_l_start = dyn_info.entities.link_start[i_e]
-    i_l_end = dyn_info.entities.link_end[i_e]
-    n_entities = dyn_info.entities.n_links.shape[0]
-
-    for j_e in range(i_e, n_entities):
-        if func_is_entity_in_tree(j_e, i_b, i_l_start, i_l_end, dyn_info, rigid_config):
-            func_forward_kinematics_entity(j_e, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-    for i_l in range(i_l_start, i_l_end):
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.root_idx[I_l] == i_l:
-            # The links of a root sleep as a unit, so the root tells whether they are awake
-            is_awake = True
-            if qd.static(rigid_config.use_hibernation):
-                is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
-            if is_awake:
-                func_COM_links_root(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-    for j_e in range(i_e, n_entities):
-        if func_is_entity_in_tree(j_e, i_b, i_l_start, i_l_end, dyn_info, rigid_config):
-            func_update_geoms_entity(
-                j_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
-            )
-
-
-@qd.func
 def func_update_cartesian_space_batch(
     i_b,
     qpos: qd.Tensor,
@@ -976,28 +1048,16 @@ def func_update_cartesian_space_batch(
     force_update_fixed_geoms: qd.template(),
     is_backward: qd.template(),
 ):
-    """Update the Cartesian space of one environment: forward kinematics, centers of mass, then geoms."""
-    BW = qd.static(is_backward)
+    """Update the Cartesian space of one environment: the static links, the awake trees, the centers of mass of the
+    roots, then the geoms."""
     i_b = qd.cast(i_b, qd.i32)
 
-    # These loops are considered inner loops
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_e in range(dyn_info.entities.n_links.shape[0]):
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake:
-            func_forward_kinematics_entity(i_e, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+        func_forward_kinematics_static_links(i_r, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_t in range(rigid_info.trees_root_idx.shape[0]):
+        func_forward_kinematics_tree(i_t, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_COM_links(i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_e in range(dyn_info.entities.n_links.shape[0]):
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake:
-            func_update_geoms_entity(
-                i_e, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
-            )
+    func_update_geoms_batch(i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward)
 
 
 @qd.func
@@ -1009,32 +1069,39 @@ def func_update_cartesian_space(
     force_update_fixed_geoms: qd.template(),
     is_backward: qd.template(),
 ):
-    BW = qd.static(is_backward)
+    """Update the Cartesian space of every env, one thread per kinematic tree.
 
-    # This loop must be the outermost loop to be differentiable
-    # FIXME: Implement parallelization at tree-level (based on root_idx) instead of entity-level
-    qd.loop_config(name="update_cartesian_space", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1]):
-        # An entity roots at one of its own links unless it hangs from another entity, whose thread carries it. A
-        # hibernated entity keeps the poses of its last awake step.
-        i_l_start = dyn_info.entities.link_start[i_e]
-        I_l_start = [i_l_start, i_b] if qd.static(rigid_config.batch_links_info) else i_l_start
-        i_l_root = dyn_info.links.root_idx[I_l_start]
-        is_awake = True
-        if qd.static(rigid_config.use_hibernation):
-            is_awake = not dyn_state.entities.is_hibernated[i_e, i_b]
-        if is_awake and i_l_start <= i_l_root and i_l_root < dyn_info.entities.link_end[i_e]:
-            func_update_cartesian_space_tree(
-                i_e,
-                i_b,
-                rigid_info.qpos,
-                dyn_state,
-                dyn_info,
-                rigid_info,
-                rigid_config,
-                force_update_fixed_geoms,
-                is_backward,
+    Each awake tree poses its links and geoms, then each root computes its centers of mass, which span every tree of
+    the root. A static link moves through the setters alone, which run the per-env pass with force_update_fixed_geoms
+    (see func_update_cartesian_space_batch), so the sweep poses the static links under that flag and in backward mode
+    only, whose per-joint caches the reverse reads for every link. The loops are the outermost ones of their kernel,
+    which differentiability requires.
+    """
+    # Autodiff takes a kernel made of loops alone, so the loop bounds are read inline
+    if qd.static(force_update_fixed_geoms or is_backward):
+        qd.loop_config(
+            name="update_cartesian_space_static", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+        )
+        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+            func_forward_kinematics_static_links(
+                i_r, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
             )
+            func_update_geoms_static_links(
+                i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+            )
+    qd.loop_config(name="update_cartesian_space", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        func_forward_kinematics_tree(
+            i_t, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
+        )
+        func_update_geoms_tree(
+            i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms, is_backward
+        )
+    qd.loop_config(
+        name="update_cartesian_space_com", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    )
+    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        func_COM_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
 @qd.kernel(fastcache=True)

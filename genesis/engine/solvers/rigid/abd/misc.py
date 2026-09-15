@@ -92,6 +92,26 @@ def func_wakeup_link(
 
 
 @qd.func
+def func_is_tree_awake(
+    i_t,
+    i_b,
+    dyn_state: array_class.DynState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Whether kinematic tree i_t of env i_b is awake.
+
+    The links of a tree sleep as a unit (see func_hibernate_island_if_settled), so its root link tells. A sleeping tree
+    keeps the poses, velocities, mass matrix and factor of its last awake step, which stay valid until it wakes.
+    """
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        i_l_root = rigid_info.trees_root_idx[i_t]
+        is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+    return is_awake
+
+
+@qd.func
 def func_hibernate_link(
     i_l,
     i_b,
@@ -105,7 +125,7 @@ def func_hibernate_link(
 
     The next-velocity buffer is zeroed too: the integration copy runs over every dof, so a stale value there would be
     restored as the sleeper's velocity on the following substep. The link Cartesian velocity is zeroed as well: the
-    velocity pass skips a sleeping link (see func_forward_velocity_entity), so the value it holds at the transition is
+    velocity pass skips a sleeping link (see func_forward_velocity_tree), so the value it holds at the transition is
     what every velocity getter reports for as long as the link sleeps, and a restored state recomputes it from the
     zeroed dof velocities.
     """
