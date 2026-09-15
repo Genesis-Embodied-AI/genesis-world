@@ -641,6 +641,60 @@ def emissive_material_variants_glb(asset_tmp_path):
     return str(path)
 
 
+@pytest.fixture(scope="session")
+def triangle_strip_nodes_glb(asset_tmp_path):
+    """Path to a GLB with two nodes a unit apart, each holding one TRIANGLE_STRIP primitive of the same material.
+
+    Sharing the material leaves the node each primitive comes from as the only thing separating the two meshes."""
+    positions = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]],
+        dtype=np.float32,
+    )
+    indices = np.arange(len(positions), dtype=np.uint32)
+
+    blob = b""
+    buffer_views = []
+    for data in (positions.tobytes(), indices.tobytes()):
+        buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
+        blob += data
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=[0, 1])],
+        nodes=[
+            pygltflib.Node(mesh=0, name="near_strip"),
+            pygltflib.Node(mesh=1, name="far_strip", translation=[10.0, 0.0, 0.0]),
+        ],
+        meshes=[
+            pygltflib.Mesh(
+                name=name,
+                primitives=[
+                    pygltflib.Primitive(attributes=pygltflib.Attributes(POSITION=0), indices=1, mode=5, material=0)
+                ],
+            )
+            for name in ("near_strip", "far_strip")
+        ],
+        materials=[pygltflib.Material(name="shared")],
+        accessors=[
+            pygltflib.Accessor(
+                bufferView=0,
+                componentType=pygltflib.FLOAT,
+                count=len(positions),
+                type="VEC3",
+                min=positions.min(axis=0).tolist(),
+                max=positions.max(axis=0).tolist(),
+            ),
+            pygltflib.Accessor(bufferView=1, componentType=pygltflib.UNSIGNED_INT, count=len(indices), type="SCALAR"),
+        ],
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    )
+    gltf.set_binary_blob(blob)
+    path = str(asset_tmp_path / "triangle_strip_nodes.glb")
+    gltf.save_binary(path)
+    return path
+
+
 @pytest.fixture
 def material_mjcf(tmp_path):
     """Generate an MJCF model with materials and geom-level colors."""
