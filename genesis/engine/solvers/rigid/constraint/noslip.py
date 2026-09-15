@@ -2,6 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+import genesis.utils.simt as su
 
 
 @qd.func
@@ -500,9 +501,8 @@ def func_noslip_batch(
                 qd.simt.block.sync()
 
         if qd.static(rigid_config.enable_cooperative_noslip):
-            # Every lane reads the block total from lane 0: the exit test below must be lane-uniform, and the lanes'
-            # own copies of a butterfly reduction may differ in their last bits.
-            improvement = qd.simt.subgroup.broadcast(qd.simt.subgroup.reduce_all_add_tiled(improvement, 5), qd.u32(0))
+            # The exit test below must be lane-uniform (see qd_block_sum)
+            improvement = su.qd_block_sum(improvement)
 
         improvement *= scale
 

@@ -10,6 +10,7 @@ import genesis as gs
 
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
 from genesis.engine.solvers.rigid.abd.misc import func_hibernate_island_if_settled, linear_to_lower_tri
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
@@ -2571,7 +2572,7 @@ def func_island_assemble_factor_solve_tiled(
             while j_d_local < i_r:
                 dot = dot + sh_L[i_r, j_d_local] * sh_v[j_d_local]
                 j_d_local = j_d_local + T
-            dot = qd.simt.subgroup.reduce_all_add_tiled(dot, LOG2_T)
+            dot = su.qd_block_sum(dot, LOG2_T)
             if tid == 0:
                 sh_v[i_r] = (sh_v[i_r] - dot) / sh_L[i_r, i_r]
             qd.simt.block.sync()
@@ -2582,7 +2583,7 @@ def func_island_assemble_factor_solve_tiled(
             while j_d_local < n:
                 dot = dot + sh_L[j_d_local, i_r] * sh_v[j_d_local]
                 j_d_local = j_d_local + T
-            dot = qd.simt.subgroup.reduce_all_add_tiled(dot, LOG2_T)
+            dot = su.qd_block_sum(dot, LOG2_T)
             if tid == 0:
                 sh_v[i_r] = (sh_v[i_r] - dot) / sh_L[i_r, i_r]
             qd.simt.block.sync()
@@ -2720,7 +2721,7 @@ def func_island_assemble_factor_solve_tiled(
                 )
                 dot = dot + constraint_state.nt_H[i_b, i_d, j_d] * constraint_state.Mgrad[j_d, i_b]
                 j_d_local = j_d_local + T
-            dot = qd.simt.subgroup.reduce_all_add_tiled(dot, LOG2_T)
+            dot = su.qd_block_sum(dot, LOG2_T)
             if tid == 0:
                 constraint_state.Mgrad[i_d, i_b] = (constraint_state.Mgrad[i_d, i_b] - dot) / constraint_state.nt_H[
                     i_b, i_d, i_d
@@ -2737,7 +2738,7 @@ def func_island_assemble_factor_solve_tiled(
                 )
                 dot = dot + constraint_state.nt_H[i_b, j_d, i_d] * constraint_state.Mgrad[j_d, i_b]
                 j_d_local = j_d_local + T
-            dot = qd.simt.subgroup.reduce_all_add_tiled(dot, LOG2_T)
+            dot = su.qd_block_sum(dot, LOG2_T)
             if tid == 0:
                 constraint_state.Mgrad[i_d, i_b] = (constraint_state.Mgrad[i_d, i_b] - dot) / constraint_state.nt_H[
                     i_b, i_d, i_d
@@ -2973,7 +2974,7 @@ def func_island_hessian_patch_block(
             i_c = constraint_state.island.constraint_id[con_base + i_lcon, i_b]
             if constraint_state.active[i_c, i_b] ^ constraint_state.prev_active[i_c, i_b]:
                 is_flipped = 1
-        rank_incl = qd.simt.subgroup.inclusive_add(is_flipped)
+        rank_incl, _n_flipped = su.qd_block_scan(is_flipped)
         if tid % _K == _K - 1:
             sh_scan[tid // _K] = rank_incl
         qd.simt.block.sync()
@@ -3977,28 +3978,28 @@ def func_cholesky_solve_batch(
 
 
 @qd.func
-def update_bracket_no_eval_local(p_alpha, p_cost, p_grad, p_hess, alphas, costs, grads, hess):
+def update_bracket_no_eval_local(p_alpha, p_cost, p_grad, p_hess, p_kink, alphas, costs, grads, hess, kinks):
     """Bracket update using local candidate values. No global memory access or _func_linesearch_eval_at_alpha call.
 
     Args:
-        p_alpha, p_cost, p_grad, p_hess: current bracket point (scalar).
-        alphas, costs, grads, hess: qd.Vector(3) of candidate values.
+        p_alpha, p_cost, p_grad, p_hess, p_kink: current bracket point (scalar), with the regime change next beyond it.
+        alphas, costs, grads, hess, kinks: qd.Vector(3) of candidate values.
     """
     flag = 0
 
     for i in qd.static(range(3)):
         if p_grad < 0 and grads[i] < 0 and p_grad < grads[i]:
-            p_alpha, p_cost, p_grad, p_hess = alphas[i], costs[i], grads[i], hess[i]
+            p_alpha, p_cost, p_grad, p_hess, p_kink = alphas[i], costs[i], grads[i], hess[i], kinks[i]
             flag = 1
         elif p_grad > 0 and grads[i] > 0 and p_grad > grads[i]:
-            p_alpha, p_cost, p_grad, p_hess = alphas[i], costs[i], grads[i], hess[i]
+            p_alpha, p_cost, p_grad, p_hess, p_kink = alphas[i], costs[i], grads[i], hess[i], kinks[i]
             flag = 2
 
     p_next_alpha = p_alpha
     if flag > 0:
         p_next_alpha = p_alpha - p_grad / p_hess
 
-    return flag, p_alpha, p_cost, p_grad, p_hess, p_next_alpha
+    return flag, p_alpha, p_cost, p_grad, p_hess, p_kink, p_next_alpha
 
 
 # =====================================================================================================================
@@ -4811,7 +4812,7 @@ def _func_update_qfrc_constraint_coop(constraint_state: array_class.ConstraintSt
         while i_c < n_con:
             qfrc_lane = qfrc_lane + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
             i_c = i_c + _K
-        qfrc_total = qd.simt.subgroup.reduce_all_add_tiled(qfrc_lane, 5)
+        qfrc_total = su.qd_block_sum(qfrc_lane)
         if tid == 0:
             constraint_state.qfrc_constraint[i_d, i_b] = qfrc_total
 
@@ -4880,7 +4881,7 @@ def _func_update_cost_coop(
                 cost_i = cost_i + func_cone_middle_cost(i_c, i_b, constraint_state, rigid_config)
             i_c = i_c + _K
 
-        cost_i = qd.simt.subgroup.reduce_all_add_tiled(cost_i, 5)
+        cost_i = su.qd_block_sum(cost_i)
 
         if tid == 0:
             cost[i_b] = cost_i

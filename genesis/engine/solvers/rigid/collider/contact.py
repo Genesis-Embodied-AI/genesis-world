@@ -10,6 +10,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+import genesis.utils.simt as su
 
 
 @qd.func
@@ -1280,15 +1281,15 @@ def func_clamp_prune_contacts_coop(
                         centroid_z_l += pos_c[2]
                         i_cb_ += _K
 
-                    mean_normal_x = qd.simt.subgroup.reduce_all_add_tiled(mean_normal_x_l, 5)
-                    mean_normal_y = qd.simt.subgroup.reduce_all_add_tiled(mean_normal_y_l, 5)
-                    mean_normal_z = qd.simt.subgroup.reduce_all_add_tiled(mean_normal_z_l, 5)
-                    centroid_x = qd.simt.subgroup.reduce_all_add_tiled(centroid_x_l, 5)
-                    centroid_y = qd.simt.subgroup.reduce_all_add_tiled(centroid_y_l, 5)
-                    centroid_z = qd.simt.subgroup.reduce_all_add_tiled(centroid_z_l, 5)
+                    mean_normal_x = su.qd_block_sum(mean_normal_x_l)
+                    mean_normal_y = su.qd_block_sum(mean_normal_y_l)
+                    mean_normal_z = su.qd_block_sum(mean_normal_z_l)
+                    centroid_x = su.qd_block_sum(centroid_x_l)
+                    centroid_y = su.qd_block_sum(centroid_y_l)
+                    centroid_z = su.qd_block_sum(centroid_z_l)
 
-                    # POST-REDUCE math runs on all 32 lanes (deterministic, cheap; redundant arithmetic is free vs.
-                    # broadcasting the reduce results).
+                    # Every lane holds the sums lane 0 does (see qd_block_sum in utils/simt.py), so the post-reduce math runs on
+                    # all 32 lanes and agrees bit for bit across them
                     inv_n_cb = gs.qd_float(1.0) / qd.cast(n_cb, gs.qd_float)
                     centroid_x *= inv_n_cb
                     centroid_y *= inv_n_cb
@@ -1326,8 +1327,8 @@ def func_clamp_prune_contacts_coop(
                                 max_radius_sq_l = radius_sq
                             i_cb_ += _K
 
-                        max_depth = qd.simt.subgroup.reduce_all_max_tiled(max_depth_l, 5)
-                        max_in_plane_r2 = qd.simt.subgroup.reduce_all_max_tiled(max_radius_sq_l, 5)
+                        max_depth = su.qd_block_max(max_depth_l)
+                        max_in_plane_r2 = su.qd_block_max(max_radius_sq_l)
 
                         if max_depth > tol * qd.sqrt(max_in_plane_r2):
                             coplanar = False
