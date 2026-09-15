@@ -183,7 +183,12 @@ def _func_islands_linesearch_and_apply(
                 if tid == 0:
                     constraint_state.improved[i_b] = is_moved
             elif qd.static(rigid_config.enable_cooperative_constraint_kernels):
-                sh_acc = qd.simt.block.SharedArray((9 * _K,), gs.qd_float)
+                sh_acc = qd.simt.block.SharedArray((10 * _K,), gs.qd_float)
+                # The regime changes of the latched-radius resolution alone; a single slot otherwise (see
+                # func_row_alpha_kinks in linesearch.py)
+                sh_kinks = qd.simt.block.SharedArray(
+                    (qd.static(3 * _K if rigid_config.enable_signorini_contact else 1),), gs.qd_float
+                )
                 sh_alphas = qd.simt.block.SharedArray((3 * _K,), gs.qd_float)
                 sh_n_alphas = qd.simt.block.SharedArray((_K,), gs.qd_int)
                 sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
@@ -192,6 +197,7 @@ def _func_islands_linesearch_and_apply(
                     i_b,
                     tid,
                     sh_acc,
+                    sh_kinks,
                     sh_alphas,
                     sh_n_alphas,
                     sh_pending,

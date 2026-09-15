@@ -3,6 +3,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+import genesis.utils.simt as su
 
 from ..abd.misc import func_wakeup_link
 from ..collider.contact import func_contact_order_key, func_promote_woken_contacts
@@ -744,11 +745,8 @@ def func_build_islands_coop(
             mass = rigid_info.mass_mat[i_d, i_d, i_b]
         i_island_prev = qd.simt.subgroup.shuffle_up(i_island, qd.u32(1))
         i_island_next = qd.simt.subgroup.shuffle_down(i_island, qd.u32(1))
-        is_head = 1
-        if tid > 0 and i_island_prev == i_island:
-            is_head = 0
-        total = qd.simt.subgroup.segmented_reduce_add_tiled(mass, is_head, 5)
-        if i_island >= 0 and (tid == _K - 1 or i_island_next != i_island):
+        total, is_tail = su.qd_segmented_sum(tid, i_island, i_island_prev, i_island_next, mass)
+        if is_tail:
             constraint_state.island.inertia[i_island, i_b] = constraint_state.island.inertia[i_island, i_b] + total
         qd.simt.block.sync()
 

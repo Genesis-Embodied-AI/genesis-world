@@ -3977,28 +3977,28 @@ def func_cholesky_solve_batch(
 
 
 @qd.func
-def update_bracket_no_eval_local(p_alpha, p_cost, p_grad, p_hess, alphas, costs, grads, hess):
+def update_bracket_no_eval_local(p_alpha, p_cost, p_grad, p_hess, p_kink, alphas, costs, grads, hess, kinks):
     """Bracket update using local candidate values. No global memory access or _func_linesearch_eval_at_alpha call.
 
     Args:
-        p_alpha, p_cost, p_grad, p_hess: current bracket point (scalar).
-        alphas, costs, grads, hess: qd.Vector(3) of candidate values.
+        p_alpha, p_cost, p_grad, p_hess, p_kink: current bracket point (scalar), with the regime change next beyond it.
+        alphas, costs, grads, hess, kinks: qd.Vector(3) of candidate values.
     """
     flag = 0
 
     for i in qd.static(range(3)):
         if p_grad < 0 and grads[i] < 0 and p_grad < grads[i]:
-            p_alpha, p_cost, p_grad, p_hess = alphas[i], costs[i], grads[i], hess[i]
+            p_alpha, p_cost, p_grad, p_hess, p_kink = alphas[i], costs[i], grads[i], hess[i], kinks[i]
             flag = 1
         elif p_grad > 0 and grads[i] > 0 and p_grad > grads[i]:
-            p_alpha, p_cost, p_grad, p_hess = alphas[i], costs[i], grads[i], hess[i]
+            p_alpha, p_cost, p_grad, p_hess, p_kink = alphas[i], costs[i], grads[i], hess[i], kinks[i]
             flag = 2
 
     p_next_alpha = p_alpha
     if flag > 0:
         p_next_alpha = p_alpha - p_grad / p_hess
 
-    return flag, p_alpha, p_cost, p_grad, p_hess, p_next_alpha
+    return flag, p_alpha, p_cost, p_grad, p_hess, p_kink, p_next_alpha
 
 
 # =====================================================================================================================
