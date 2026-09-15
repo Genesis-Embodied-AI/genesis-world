@@ -641,6 +641,52 @@ def emissive_material_variants_glb(asset_tmp_path):
     return str(path)
 
 
+@pytest.fixture(scope="session")
+def non_uniform_node_scale_glb(asset_tmp_path):
+    """Path to a GLB whose node scales its one triangle by a different factor along each axis.
+
+    The authored normals are the triangle's own geometric normal, which points diagonally, so the node scale has to
+    tilt them for them to stay perpendicular to the scaled triangle."""
+    positions = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    normal = np.cross(positions[1] - positions[0], positions[2] - positions[0])
+    normals = np.tile(normal / np.linalg.norm(normal), (3, 1)).astype(np.float32)
+
+    blob = b""
+    buffer_views = []
+    for data in (positions.tobytes(), normals.tobytes()):
+        buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
+        blob += data
+
+    gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=[0])],
+        nodes=[pygltflib.Node(mesh=0, scale=[2.0, 0.5, 0.5])],
+        meshes=[
+            pygltflib.Mesh(
+                name="scaled_triangle",
+                primitives=[pygltflib.Primitive(attributes=pygltflib.Attributes(POSITION=0, NORMAL=1))],
+            )
+        ],
+        accessors=[
+            pygltflib.Accessor(
+                bufferView=0,
+                componentType=pygltflib.FLOAT,
+                count=len(positions),
+                type="VEC3",
+                min=positions.min(axis=0).tolist(),
+                max=positions.max(axis=0).tolist(),
+            ),
+            pygltflib.Accessor(bufferView=1, componentType=pygltflib.FLOAT, count=len(normals), type="VEC3"),
+        ],
+        bufferViews=buffer_views,
+        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    )
+    gltf.set_binary_blob(blob)
+    path = str(asset_tmp_path / "non_uniform_node_scale.glb")
+    gltf.save_binary(path)
+    return path
+
+
 @pytest.fixture
 def material_mjcf(tmp_path):
     """Generate an MJCF model with materials and geom-level colors."""
