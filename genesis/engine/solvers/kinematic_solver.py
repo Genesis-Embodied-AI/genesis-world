@@ -365,7 +365,6 @@ class KinematicSolver(Solver):
         self._init_entity_fields()
         self._init_vfaces_raycast_mask()
 
-        self._init_envs_offset()
         self._init_vverts_state()
 
     def _init_vverts_state(self):
@@ -678,10 +677,6 @@ class KinematicSolver(Solver):
                 self.rigid_info,
                 self.rigid_config,
             )
-
-    def _init_envs_offset(self):
-        self.envs_offset = self.rigid_info.envs_offset
-        self.envs_offset.from_numpy(self._scene.envs_offset)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- simulation no-ops ----------------------------------

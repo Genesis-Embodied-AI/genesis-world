@@ -624,7 +624,7 @@ def kernel_update_grouped_visual_aabbs(
 # FIXME: Fastcache is not supported because of 'bvh_nodes', 'bvh_morton_codes'.
 @qd.kernel(fastcache=False)
 def kernel_cast_ray(
-    ray_start: qd.types.ndarray(ndim=1),  # (3,)
+    rays_start: qd.types.ndarray(ndim=2),  # (n_envs, 3)
     envs_idx: qd.types.ndarray(ndim=1),  # [n_envs]
     bvh_nodes: qd.template(),
     bvh_morton_codes: qd.template(),
@@ -632,22 +632,21 @@ def kernel_cast_ray(
     dyn_state: array_class.DynState,
     result: array_class.RaycastResult,
     dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
     max_range: float,
     eps: float,
     is_visual: qd.template(),
 ):
     """
-    Cast a single ray against each env's BVH in parallel.
+    Cast one ray of common direction against each env's BVH in parallel.
 
-    Per-env: the ray is shifted by -envs_offset[i_b] (each BVH is in env-local coordinates) and the closest hit on
-    that env is written to result[i_b]; envs not in envs_idx are left as no-hit (geom_idx == -1, distance == +inf).
-    Aggregation across envs is intentionally out of scope, because cross-env reduction has no use beyond the viewer.
+    Per-env: rays_start[i_b] is the start of the ray in the coordinates of env i_b, the ones its BVH and result[i_b] are
+    in, and the closest hit on that env is written to result[i_b]; envs not in envs_idx are left as no-hit (geom_idx ==
+    -1, distance == +inf). Aggregation across envs is intentionally out of scope, because cross-env reduction has no use
+    beyond the viewer.
 
     `is_visual` selects the mesh the BVH covers: the visual mesh (vfaces, result.geom_idx holds the hit vgeom) or
     the collision mesh (faces, result.geom_idx holds the hit geom).
     """
-    ray_start_world = qd.math.vec3(ray_start[0], ray_start[1], ray_start[2])
     ray_direction_world = qd.math.vec3(ray_direction[0], ray_direction[1], ray_direction[2])
 
     for i_b in range(result.geom_idx.shape[0]):
@@ -658,7 +657,7 @@ def kernel_cast_ray(
 
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        env_offset = rigid_info.envs_offset[i_b]
+        ray_start = qd.math.vec3(rays_start[i_b, 0], rays_start[i_b, 1], rays_start[i_b, 2])
         # Declared before the compile-time branch, whose body is a nested scope in quadrants.
         cur_hit_face = -1
         cur_distance = gs.qd_float(max_range)
@@ -667,7 +666,7 @@ def kernel_cast_ray(
             cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast_visual(
                 i_b,
                 i_b,
-                ray_start_world - env_offset,
+                ray_start,
                 ray_direction_world,
                 max_range,
                 bvh_nodes,
@@ -680,7 +679,7 @@ def kernel_cast_ray(
             cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast(
                 i_b,
                 i_b,
-                ray_start_world - env_offset,
+                ray_start,
                 ray_direction_world,
                 max_range,
                 bvh_nodes,
@@ -696,7 +695,7 @@ def kernel_cast_ray(
             else:
                 result.geom_idx[i_b] = dyn_info.faces.geom_idx[cur_hit_face]
             result.normal[i_b] = cur_hit_normal
-            result.hit_point[i_b] = ray_start_world + cur_distance * ray_direction_world
+            result.hit_point[i_b] = ray_start + cur_distance * ray_direction_world
 
 
 @qd.func

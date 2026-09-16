@@ -231,7 +231,6 @@ class RigidInfo:
     qpos: qd.Tensor = of_kind(DataKind.STATE)
     qpos_next: qd.Tensor = of_kind(DataKind.SCRATCH)
     links_T: qd.Tensor = of_kind(DataKind.DERIVED)
-    envs_offset: qd.Tensor
     geoms_init_AABB: qd.Tensor
     mass_mat: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_L: qd.Tensor = of_kind(DataKind.DERIVED)
@@ -314,7 +313,6 @@ def get_rigid_info(solver, kinematic_only):
     # FIXME: Add a better split between kinematic and Genesis
     if kinematic_only:
         return RigidInfo(
-            envs_offset=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
             gravity=V_VEC(3, dtype=gs.qd_float, shape=()),
             meaninertia=V(dtype=gs.qd_float, shape=()),
             n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
@@ -354,7 +352,6 @@ def get_rigid_info(solver, kinematic_only):
         )
 
     return RigidInfo(
-        envs_offset=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
         gravity=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
         meaninertia=V(dtype=gs.qd_float, shape=(_B,)),
         n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
