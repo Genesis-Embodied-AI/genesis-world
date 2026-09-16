@@ -4947,9 +4947,7 @@ def func_update_gradient_batch(
                     - constraint_state.qfrc_constraint[i_d, i_b]
                 )
     if qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
-        func_solve_mass_batch(
-            i_b, constraint_state.grad, constraint_state.Mgrad, dyn_state, dyn_info, rigid_info, rigid_config
-        )
+        func_solve_mass_batch(i_b, constraint_state.grad, constraint_state.Mgrad, dyn_state, rigid_info, rigid_config)
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
         for i_island in range(constraint_state.island.n_islands[i_b]):
             if constraint_state.island.improved[i_island, i_b]:

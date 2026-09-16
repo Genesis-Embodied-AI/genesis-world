@@ -109,8 +109,9 @@ def func_is_awake_tree(
 ):
     """Whether kinematic tree i_t of env i_b is awake.
 
-    The links of a tree sleep as a unit (see func_hibernate_island_if_settled), so its root link tells. A sleeping tree
-    keeps the poses, velocities, mass matrix and factor of its last awake step, which stay valid until it wakes.
+    The links of a tree sleep as a unit (see func_hibernate_island_if_settled), so the flag of the root link stands for
+    the tree. A sleeping tree keeps the poses, velocities, mass matrix and factor of its last awake step, which stay
+    valid until it wakes.
     """
     is_awake = True
     if qd.static(rigid_config.use_hibernation):

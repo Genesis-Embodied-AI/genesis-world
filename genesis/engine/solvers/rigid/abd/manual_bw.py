@@ -452,14 +452,13 @@ def kernel_manual_forward_velocity_bw(
 @qd.kernel(fastcache=True)
 def kernel_manual_compute_qacc_bw(
     dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
     """Manual backward for func_compute_qacc via the implicit function theorem (IFT).
 
     Forward chain (func_compute_qacc):
-        acc_smooth = M^{-1} . force   (per-block LDL^T solve in func_solve_mass)
+        acc_smooth = M^{-1} . force   (per-block LDL^T solve in func_solve_mass_block)
         acc[i]     = acc_smooth[i]    (identity copy)
 
     Reverse chain (manual, by IFT and symmetry of M = L^T D L):
@@ -474,68 +473,67 @@ def kernel_manual_compute_qacc_bw(
     mass_mat_L / mass_mat_D_inv already, so only mass_mat.grad is touched here; this kernel is the single place the
     backward path populates it, and kernel_forward_dynamics_without_qacc.grad then reverses it into link poses.
 
-    Like func_solve_mass_block, the triangular solves and the IFT outer product are restricted to the mass blocks
-    rooted in each entity (see entities_mass_block_dof_start in array_class.py): elimination never crosses a block,
-    and cross-block mass entries are structural zeros whose grads must stay zero.
+    Like func_solve_mass_block, the triangular solves and the IFT outer product are restricted to the mass blocks of
+    each kinematic tree (see dofs_mass_block_start in array_class.py): elimination never crosses a block, and
+    cross-block mass entries are structural zeros whose grads must stay zero.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.dofs.force.shape[1]):
-        if rigid_info.mass_mat_mask[i_e, i_b]:
-            blocks_dof_start = rigid_info.entities_mass_block_dof_start[i_e]
-            blocks_dof_end = rigid_info.entities_mass_block_dof_end[i_e]
+    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.dofs.force.shape[1]):
+        blocks_dof_start = rigid_info.trees_dof_start[i_t]
+        blocks_dof_end = blocks_dof_start + rigid_info.trees_n_dofs[i_t]
 
-            # Reverse of acc[i] = acc_smooth[i]: drain acc.grad into the acc_smooth.grad seed, stashed in
-            # acc_smooth_bw[0] as the input of the LDL^T reverse solve. acc.grad is consumed since the forward copy
-            # overwrites acc.
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                dyn_state.dofs.acc_smooth_bw[0, i_d, i_b] = (
-                    dyn_state.dofs.acc_smooth.grad[i_d, i_b] + dyn_state.dofs.acc.grad[i_d, i_b]
+        # Reverse of acc[i] = acc_smooth[i]: drain acc.grad into the acc_smooth.grad seed, stashed in
+        # acc_smooth_bw[0] as the input of the LDL^T reverse solve. acc.grad is consumed since the forward copy
+        # overwrites acc.
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            dyn_state.dofs.acc_smooth_bw[0, i_d, i_b] = (
+                dyn_state.dofs.acc_smooth.grad[i_d, i_b] + dyn_state.dofs.acc.grad[i_d, i_b]
+            )
+            dyn_state.dofs.acc.grad[i_d, i_b] = 0.0
+            dyn_state.dofs.acc_smooth.grad[i_d, i_b] = 0.0
+
+        # Step 1: solve L^T . u = seed (input from [0], output to [1])
+        #   u[i] = seed[i] - sum_{j>i} L[j,i] * u[j]
+        for i_d_ in range(blocks_dof_end - blocks_dof_start):
+            i_d = blocks_dof_end - i_d_ - 1
+            block_end = rigid_info.dofs_mass_block_end[i_d]
+            curr = dyn_state.dofs.acc_smooth_bw[0, i_d, i_b]
+            for j_d in range(i_d + 1, block_end):
+                curr = curr - rigid_info.mass_mat_L[j_d, i_d, i_b] * dyn_state.dofs.acc_smooth_bw[1, j_d, i_b]
+            dyn_state.dofs.acc_smooth_bw[1, i_d, i_b] = curr
+
+        # Step 2: v = D^{-1} . u (output to [0], overwriting input)
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            dyn_state.dofs.acc_smooth_bw[0, i_d, i_b] = (
+                dyn_state.dofs.acc_smooth_bw[1, i_d, i_b] * rigid_info.mass_mat_D_inv[i_d, i_b]
+            )
+
+        # Step 3: solve L . delta = v (input from [0], output to [1])
+        #   delta[i] = v[i] - sum_{j<i} L[i,j] * delta[j]
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            block_start = rigid_info.dofs_mass_block_start[i_d]
+            curr = dyn_state.dofs.acc_smooth_bw[0, i_d, i_b]
+            for j_d in range(block_start, i_d):
+                curr = curr - rigid_info.mass_mat_L[i_d, j_d, i_b] * dyn_state.dofs.acc_smooth_bw[1, j_d, i_b]
+            dyn_state.dofs.acc_smooth_bw[1, i_d, i_b] = curr
+
+        # Accumulate into force.grad.
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            dyn_state.dofs.force.grad[i_d, i_b] = (
+                dyn_state.dofs.force.grad[i_d, i_b] + dyn_state.dofs.acc_smooth_bw[1, i_d, i_b]
+            )
+
+        # IFT seed for mass_mat.grad, restricted to each lower-triangular in-block pair (see the docstring).
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            block_start = rigid_info.dofs_mass_block_start[i_d]
+            force_contrib_i = dyn_state.dofs.acc_smooth_bw[1, i_d, i_b]
+            acc_smooth_i = dyn_state.dofs.acc_smooth[i_d, i_b]
+            rigid_info.mass_mat.grad[i_d, i_d, i_b] = (
+                rigid_info.mass_mat.grad[i_d, i_d, i_b] - force_contrib_i * acc_smooth_i
+            )
+            for j_d in range(block_start, i_d):
+                force_contrib_j = dyn_state.dofs.acc_smooth_bw[1, j_d, i_b]
+                acc_smooth_j = dyn_state.dofs.acc_smooth[j_d, i_b]
+                rigid_info.mass_mat.grad[i_d, j_d, i_b] = rigid_info.mass_mat.grad[i_d, j_d, i_b] - (
+                    force_contrib_i * acc_smooth_j + force_contrib_j * acc_smooth_i
                 )
-                dyn_state.dofs.acc.grad[i_d, i_b] = 0.0
-                dyn_state.dofs.acc_smooth.grad[i_d, i_b] = 0.0
-
-            # Step 1: solve L^T . u = seed (input from [0], output to [1])
-            #   u[i] = seed[i] - sum_{j>i} L[j,i] * u[j]
-            for i_d_ in range(blocks_dof_end - blocks_dof_start):
-                i_d = blocks_dof_end - i_d_ - 1
-                block_end = rigid_info.dofs_mass_block_end[i_d]
-                curr = dyn_state.dofs.acc_smooth_bw[0, i_d, i_b]
-                for j_d in range(i_d + 1, block_end):
-                    curr = curr - rigid_info.mass_mat_L[j_d, i_d, i_b] * dyn_state.dofs.acc_smooth_bw[1, j_d, i_b]
-                dyn_state.dofs.acc_smooth_bw[1, i_d, i_b] = curr
-
-            # Step 2: v = D^{-1} . u (output to [0], overwriting input)
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                dyn_state.dofs.acc_smooth_bw[0, i_d, i_b] = (
-                    dyn_state.dofs.acc_smooth_bw[1, i_d, i_b] * rigid_info.mass_mat_D_inv[i_d, i_b]
-                )
-
-            # Step 3: solve L . delta = v (input from [0], output to [1])
-            #   delta[i] = v[i] - sum_{j<i} L[i,j] * delta[j]
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                block_start = rigid_info.dofs_mass_block_start[i_d]
-                curr = dyn_state.dofs.acc_smooth_bw[0, i_d, i_b]
-                for j_d in range(block_start, i_d):
-                    curr = curr - rigid_info.mass_mat_L[i_d, j_d, i_b] * dyn_state.dofs.acc_smooth_bw[1, j_d, i_b]
-                dyn_state.dofs.acc_smooth_bw[1, i_d, i_b] = curr
-
-            # Accumulate into force.grad.
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                dyn_state.dofs.force.grad[i_d, i_b] = (
-                    dyn_state.dofs.force.grad[i_d, i_b] + dyn_state.dofs.acc_smooth_bw[1, i_d, i_b]
-                )
-
-            # IFT seed for mass_mat.grad, restricted to each lower-triangular in-block pair (see the docstring).
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                block_start = rigid_info.dofs_mass_block_start[i_d]
-                force_contrib_i = dyn_state.dofs.acc_smooth_bw[1, i_d, i_b]
-                acc_smooth_i = dyn_state.dofs.acc_smooth[i_d, i_b]
-                rigid_info.mass_mat.grad[i_d, i_d, i_b] = (
-                    rigid_info.mass_mat.grad[i_d, i_d, i_b] - force_contrib_i * acc_smooth_i
-                )
-                for j_d in range(block_start, i_d):
-                    force_contrib_j = dyn_state.dofs.acc_smooth_bw[1, j_d, i_b]
-                    acc_smooth_j = dyn_state.dofs.acc_smooth[j_d, i_b]
-                    rigid_info.mass_mat.grad[i_d, j_d, i_b] = rigid_info.mass_mat.grad[i_d, j_d, i_b] - (
-                        force_contrib_i * acc_smooth_j + force_contrib_j * acc_smooth_i
-                    )

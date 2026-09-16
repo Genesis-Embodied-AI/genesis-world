@@ -237,7 +237,6 @@ class RigidInfo:
     mass_mat_L: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_D_inv: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
-    mass_mat_mask: qd.Tensor = of_kind(DataKind.STATE)
     # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. A root spans the links
     # [root, links_root_end[root]) whose root it is (a span may interleave links of other roots, so the walks gate each
     # link on its root). The composite inertia and the center of mass are per root.
@@ -254,17 +253,14 @@ class RigidInfo:
     trees_dof_start: qd.Tensor
     trees_n_dofs: qd.Tensor
     links_tree_idx: qd.Tensor
-    # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure
-    # ends (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across
-    # entities and kept contiguous by attach(). The assemble/factor/solve restrict to these bounds.
+    # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
+    # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
+    # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
+    # aligned free body splits into one block per dof), so the assemble/factor/solve walk the blocks of a tree and
+    # restrict to these bounds.
     dofs_mass_block_start: qd.Tensor
     dofs_mass_block_end: qd.Tensor
     dofs_mass_envelope_start: qd.Tensor
-    # DOF range spanned by the mass blocks rooted in each entity: a leading run merged into an earlier-rooted block is
-    # excluded, and the last rooted block may extend into a merged child (empty range for a fully-merged child). Lets
-    # the per-entity assemble/factor/solve iterate their blocks as one flat, autodiff-compatible loop over DOFs.
-    entities_mass_block_dof_start: qd.Tensor
-    entities_mass_block_dof_end: qd.Tensor
     # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
     # the dofs of its own link, within its mass block.
     mass_parent_mask: qd.Tensor
@@ -331,7 +327,6 @@ def get_rigid_info(solver, kinematic_only):
             mass_mat_L=V(dtype=gs.qd_float, shape=()),
             mass_mat_D_inv=V(dtype=gs.qd_float, shape=()),
             mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=()),
-            mass_mat_mask=V(dtype=gs.qd_bool, shape=()),
             roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
             links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
@@ -343,8 +338,6 @@ def get_rigid_info(solver, kinematic_only):
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
-            entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=()),
-            entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
             substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
             iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
@@ -374,7 +367,6 @@ def get_rigid_info(solver, kinematic_only):
         mass_mat_L=V(dtype=gs.qd_float, shape=mass_mat_shape, needs_grad=requires_grad),
         mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), needs_grad=requires_grad),
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
-        mass_mat_mask=V(dtype=gs.qd_bool, shape=(solver.n_entities_, _B)),
         roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
         links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
@@ -386,8 +378,6 @@ def get_rigid_info(solver, kinematic_only):
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
-        entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
-        entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
         substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
         iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),
