@@ -57,7 +57,7 @@
 
 ## Kernels
 
-- **A kernel that runs under `requires_grad` takes no `continue` and no `while`**: quadrants' autodiff rejects both. A gate inside such a kernel (the kinematics and dynamics walks, the constraint solve) is a flag set under the static condition and tested by an `if`, never an early `continue`.
+- **Every kernel is written so that quadrants' autodiff can reverse it**: no `continue`, no `while`, the top level of the kernel made of `for` loops alone. A gate is a flag set under the static condition and tested by an `if`, never an early `continue`; a walk over blocks is a `for` over the dof range with a block-start test, a lane stride is `for i_chunk_ in range((n + BLOCK_DIM - 1) // BLOCK_DIM)` with `i = i_chunk_ * BLOCK_DIM + tid` gated by `if i < n` (a `range` in a kernel takes one or two arguments), never a `while`. A hand-written backward kernel is strongly discouraged and demands a very good motivation, such as reversing an iterative algorithm (a constraint solve, an inverse kinematics) that autodiff cannot unroll.
 - **An index read from a field is bound to a temporary before it indexes another field** (`i_r = rigid_info.links_root_rank[i_l]` then `rigid_info.roots_link_end[i_r]`). Nested indirect indexing (`a[b[i]]`) is prohibited in kernels and funcs.
 - **New code:** Free function `@qd.kernel`, no `@qd.data_oriented`. Use `V_ANNOTATION` from `genesis.utils.array_class` for type-polymorphic parameters.
 - **FEM solver:** Follows old `@qd.data_oriented` method pattern. Any kernel added to FEM solver must stay consistent with this.
