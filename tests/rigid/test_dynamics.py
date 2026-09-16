@@ -571,6 +571,43 @@ def test_energy_analytical_and_conservation(
         assert_allclose(ke_rot, ke_rot[0], tol=10.0 * tol)
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+            # A single Newton iteration leaves the impact solve short of its fixed point, so the constraint force
+            # disagrees with the solver's acceleration by a residual the flap's inertia would magnify.
+            iterations=1,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.35, -0.55, 0.3),
+            camera_lookat=(0.05, 0.0, 0.03),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_flap,
+        ),
+    )
+    scene.build()
+
+    # Swung into the ground at zero restitution, the flap keeps a small fraction of its mechanical energy: the impact
+    # and the joint damping only take energy away, and the impact solve stopping short of its fixed point pumps a
+    # little back in. Integrating the residual of that solve as an impulse would instead throw the flap back up with
+    # half of its energy, or blow it up at a larger step.
+    entity.set_dofs_velocity(5.0)
+    energy_init = tensor_to_array(entity.get_total_energy())
+    for _ in range(20):
+        scene.step()
+    assert_allclose(entity.get_total_energy(), 0.0, atol=2e-2 * energy_init)
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["long_chain"])
@@ -806,13 +843,18 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     assert_allclose(reconstructed, mass_mat, tol=tol)
 
     # One step from a nontrivial pose at rest: the post-step velocities (accelerations times dt, from zero) match the
-    # single equivalent entity's, exercising the solve.
+    # single equivalent entity's, exercising the solve. Joint damping on every DOF sends the merged tree through the
+    # implicit damping pass, whose correction spans the attached entities as it spans the single equivalent entity.
+    DAMPING = 0.5
     q = np.linspace(-0.3, 0.3, mono.n_dofs)
     mono.set_dofs_position(q)
+    mono.set_dofs_damping(DAMPING)
     arm.set_dofs_position(q[: arm.n_dofs])
+    arm.set_dofs_damping(DAMPING)
     i_q = arm.n_dofs
     for h in hands:
         h.set_dofs_position(q[i_q : i_q + h.n_dofs])
+        h.set_dofs_damping(DAMPING)
         i_q += h.n_dofs
     scene.step()
 

@@ -2301,22 +2301,38 @@ def func_implicit_damping(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Make the joint damping of the integration implicit.
+    """Make the damping of the integration implicit, from the acceleration the constraint solver left in dofs.acc.
 
-    The trees whose mass factor carries the damping term (see func_has_implicit_damping_tree) re-solve their
-    acceleration from the forces through that factor, (M + hD) a = f, and the others keep the acceleration the
-    constraint solver holds. In MuJoCo compatibility mode under the implicitfast integrator every awake tree re-solves.
+    The damped acceleration solves (M + hD) a' = M a, applied as the correction a' = a - (M + hD)^-1 (hD a) on the
+    trees carrying a damping term, whose factor takes hD (see func_has_implicit_damping_tree). In MuJoCo compatibility
+    mode those trees re-solve their acceleration from the forces instead, (M + hD) a' = f, and under the implicitfast
+    integrator every awake tree does, as MuJoCo does.
     """
     _B = rigid_info.mass_mat.shape[2]
+    n_dofs = dyn_state.dofs.acc.shape[0]
 
-    # The damped acceleration comes from a second factor and a second solve of the mass matrix, from the forces. A
-    # correction of the acceleration the constraint solver holds would spare the second solve.
     func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True)
+
+    # The correction moves the damped DOFs alone, and a constraint solve short of its fixed point integrates as the
+    # bounded step it took. Re-solving from the force balance integrates its residual as M^-1 r, a spurious impulse on
+    # a light body, which the compatibility mode reproduces.
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+        for i_d, i_b in qd.ndrange(n_dofs, _B):
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            damping = dyn_info.dofs.damping[I_d]
+            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                    damping = damping - dyn_info.dofs.act_bias[I_d][2]
+            dyn_state.dofs.qf_damping_implicit[i_d, i_b] = (
+                damping * rigid_info.substep_dt[None] * dyn_state.dofs.acc[i_d, i_b]
+            )
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], _B):
-        # A tree without a damping term keeps its smooth factor, so re-solving it would only reproduce the acceleration
-        # the constraint solver holds, up to rounding: the pass takes the awake trees whose factor carries hD alone
+        # A tree without a damping term has a zero correction and keeps its smooth factor, so the pass takes the awake
+        # trees whose factor carries hD alone: re-solving such a tree would only reproduce the acceleration the
+        # constraint solver holds, up to rounding
         is_solved = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
         if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
             if is_solved:
@@ -2328,8 +2344,24 @@ def func_implicit_damping(
             for i_d in range(tree_dof_start, tree_dof_end):
                 if rigid_info.dofs_mass_block_start[i_d] == i_d:
                     block_end = rigid_info.dofs_mass_block_end[i_d]
-                    func_solve_mass_block(
-                        i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc, rigid_info, rigid_config
+                    if qd.static(not rigid_config.enable_mujoco_compatibility):
+                        func_solve_mass_block(
+                            i_b,
+                            i_d,
+                            block_end,
+                            dyn_state.dofs.qf_damping_implicit,
+                            dyn_state.dofs.qacc_damping_implicit,
+                            rigid_info,
+                            rigid_config,
+                        )
+                    else:
+                        func_solve_mass_block(
+                            i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc, rigid_info, rigid_config
+                        )
+            if qd.static(not rigid_config.enable_mujoco_compatibility):
+                for i_d in range(tree_dof_start, tree_dof_end):
+                    dyn_state.dofs.acc[i_d, i_b] = (
+                        dyn_state.dofs.acc[i_d, i_b] - dyn_state.dofs.qacc_damping_implicit[i_d, i_b]
                     )
 
 

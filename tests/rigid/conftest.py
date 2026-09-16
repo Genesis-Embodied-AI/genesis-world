@@ -542,6 +542,8 @@ def _build_multi_pendulum(n, joint_damping, joint_friction):
     ET.SubElement(urdf, "link", name="base")
 
     parent_link = "base"
+    if joint_damping is not None:
+        joints_damping = np.broadcast_to(joint_damping, (n,))
     for i in range(n):
         # Continuous joint between parent and this arm
         joint = ET.SubElement(urdf, "joint", name=f"PendulumJoint_{i}", type="continuous")
@@ -552,7 +554,7 @@ def _build_multi_pendulum(n, joint_damping, joint_friction):
         ET.SubElement(joint, "limit", effort=str(100.0 * (n - i)), velocity="30.0")
         dynamics = ET.SubElement(joint, "dynamics")
         if joint_damping is not None:
-            dynamics.set("damping", str(joint_damping))
+            dynamics.set("damping", str(joints_damping[i]))
         if joint_friction is not None:
             dynamics.set("friction", str(joint_friction))
 
@@ -1349,4 +1351,18 @@ def spring_double_pendulum():
     lower = ET.SubElement(upper, "body", name="arm_lower", pos="0.2 0 0")
     ET.SubElement(lower, "joint", name="elbow", type="hinge", axis="0 1 0", stiffness="20.0", damping="0")
     ET.SubElement(lower, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", density="1000")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def damped_flap():
+    """Generate an MJCF model holding a 10 g flap of 1e-6 kg m^2 inertia on a damped hinge, 2 cm above the ground
+    plane, so that a light body hits the ground from inside a kinematic tree going through the implicit damping pass."""
+    mjcf = ET.Element("mujoco")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "geom", type="plane", size="2 2 0.1")
+    flap = ET.SubElement(worldbody, "body", name="flap", pos="0 0 0.03")
+    ET.SubElement(flap, "joint", name="hinge", type="hinge", axis="0 1 0", damping="1e-3")
+    ET.SubElement(flap, "inertial", pos="0.05 0 0", mass="0.01", diaginertia="1e-6 1e-6 1e-6")
+    ET.SubElement(flap, "geom", type="box", pos="0.05 0 0", size="0.04 0.01 0.01", condim="6", friction="1 0.01 0.01")
     return ET.tostring(mjcf, encoding="unicode")
