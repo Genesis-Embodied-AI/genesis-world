@@ -191,7 +191,7 @@ def func_row_alpha_terms(
         if qd.static(row_kind == 0):
             is_cone_head = nef <= i_c and i_c < ncone and (i_c - nef) % n_rows == 0
         if is_cone_head:
-            rows_efc_D, rows_friction, con_mu, rows_jaref = constraint_solver._func_cone_head_load(
+            rows_efc_D, rows_friction, con_mu, rows_jaref, f_n_latched = constraint_solver._func_cone_head_load(
                 i_c, i_b, constraint_state, rigid_config
             )
             rows_jv = qd.Vector.zero(gs.qd_float, n_rows)
@@ -201,14 +201,14 @@ def func_row_alpha_terms(
                 if k < n_alphas:
                     alpha_k = alphas[k]
                     cost_diff_c, grad_c, hess_c = constraint_solver._func_cone_cost_diff_along_alpha(
-                        rows_jaref, rows_jv, alpha_k, rows_efc_D, con_mu, rows_friction, rigid_config
+                        rows_jaref, rows_jv, alpha_k, rows_efc_D, con_mu, rows_friction, f_n_latched, rigid_config
                     )
                     terms[3 * k] = cost_diff_c - grad_c * alpha_k + 0.5 * hess_c * alpha_k * alpha_k
                     terms[3 * k + 1] = grad_c - hess_c * alpha_k
                     terms[3 * k + 2] = 0.5 * hess_c
             if qd.static(rigid_config.enable_signorini_contact):
                 kinks = func_cone_head_kinks(
-                    rows_jaref, rows_jv, rows_efc_D, rows_friction, n_alphas, alphas, rigid_config
+                    rows_jaref, rows_jv, rows_efc_D, rows_friction, f_n_latched, n_alphas, alphas, rigid_config
                 )
     if qd.static(row_kind in (0, 4)):
         is_contact_row = True
@@ -263,18 +263,19 @@ def func_kinks_take_root(kinks, alpha_root, n_alphas, alphas):
 
 
 @qd.func
-def func_cone_head_kinks(rows_jaref, rows_jv, rows_efc_D, rows_friction, n_alphas, alphas, rigid_config: qd.template()):
+def func_cone_head_kinks(
+    rows_jaref, rows_jv, rows_efc_D, rows_friction, f_n_latched, n_alphas, alphas, rigid_config: qd.template()
+):
     """Smallest step beyond each of the first n_alphas candidate steps at which one elliptic contact changes regime.
 
-    A regime change is the normal row activating or releasing, or a friction block crossing its latched disc boundary
-    (see _func_disc_middle in solver.py). The cost along the direction is quadratic between such crossings and its
-    curvature jumps across them, so a trial step past one lands on a piece whose Newton model has no bearing on the
-    current one. Returns the three steps, infinite where no change lies ahead.
+    A regime change is the normal row activating or releasing, or a friction block crossing the disc of radius set by
+    f_n_latched, the latched normal force (see _func_disc_middle in solver.py). The cost along the direction is
+    quadratic between such crossings and its curvature jumps across them, so a trial step past one lands on a piece
+    whose Newton model has no bearing on the current one. Returns the three steps, infinite where no change lies ahead.
     """
     kinks = qd.Vector([qd.math.inf, qd.math.inf, qd.math.inf], dt=gs.qd_float)
     if qd.abs(rows_jv[0]) > 0.0:
         kinks = func_kinks_take_root(kinks, -rows_jaref[0] / rows_jv[0], n_alphas, alphas)
-    f_n = qd.max(-rows_efc_D[0] * rows_jaref[0], 0.0)
     for i_0, width in qd.static(constraint_solver._friction_blocks(rigid_config)):
         # D^2 T(alpha)^2 = radius^2 with T(alpha)^2 = a alpha^2 + 2 b alpha + c
         a = gs.qd_float(0.0)
@@ -284,7 +285,7 @@ def func_cone_head_kinks(rows_jaref, rows_jv, rows_efc_D, rows_friction, n_alpha
             a = a + rows_jv[i_r] ** 2
             b = b + rows_jaref[i_r] * rows_jv[i_r]
             c = c + rows_jaref[i_r] ** 2
-        c = c - (rows_friction[i_0] * f_n / rows_efc_D[i_0]) ** 2
+        c = c - (rows_friction[i_0] * f_n_latched / rows_efc_D[i_0]) ** 2
         discriminant = b * b - a * c
         if a > 0.0 and discriminant >= 0.0:
             # Roots as q / a and c / q with q = -(b + sign(b) sqrt(disc)): a tangential direction so small that a
@@ -298,16 +299,18 @@ def func_cone_head_kinks(rows_jaref, rows_jv, rows_efc_D, rows_friction, n_alpha
 
 @qd.func
 def func_dof_exit_terms(i_d, i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
-    """Per-dof terms of the convergence test: squared gradient, the descent grad .
-
-    Mgrad, and for CG the Hager-Zhang products (d . y, y . My, y . Mgrad, d . grad, |d|^2), see func_exit_decision.
+    """Per-dof terms of the convergence test: squared gradient, the descent grad . Mgrad, under 'signorini' the squared
+    constraint force, and for CG the Hager-Zhang products (d . y, y . My, y . Mgrad, d . grad, |d|^2), see
+    func_exit_decision.
     """
     grad = constraint_state.grad[i_d, i_b]
     Mgrad = constraint_state.Mgrad[i_d, i_b]
     terms = qd.Vector.zero(gs.qd_float, 7)
     terms[0] = grad * grad
     terms[1] = grad * Mgrad
-    if qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
+    if qd.static(rigid_config.enable_signorini_contact):
+        terms[2] = constraint_state.qfrc_constraint[i_d, i_b] ** 2
+    elif qd.static(rigid_config.solver_type == gs.constraint_solver.CG):
         search = constraint_state.search[i_d, i_b]
         y = grad - constraint_state.cg_prev_grad[i_d, i_b]
         My = Mgrad - constraint_state.cg_prev_Mgrad[i_d, i_b]
@@ -317,6 +320,48 @@ def func_dof_exit_terms(i_d, i_b, constraint_state: array_class.ConstraintState,
         terms[5] = search * grad
         terms[6] = search * search
     return terms
+
+
+@qd.func
+def func_island_latch_defect(
+    i_b, row_lo, row_hi, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+):
+    """Relatch defect of one island under the 'signorini' resolution, the sum of the defects of its elliptic cones (see
+    func_head_latch_defect in solver.py). The island's rows are the positions [row_lo, row_hi) of the constraint list.
+    """
+    ne = constraint_state.n_constraints_equality[i_b]
+    nef = ne + constraint_state.n_constraints_frictionloss[i_b]
+    ncone = nef + constraint_state.n_constraints_cone[i_b]
+    n_rows = qd.static(rigid_config.rows_per_contact)
+    defect = gs.qd_float(0.0)
+    for i_pos in range(row_lo, row_hi):
+        i_c = constraint_state.island.constraint_id[i_pos, i_b]
+        if nef <= i_c and i_c < ncone and (i_c - nef) % n_rows == 0:
+            defect = defect + constraint_solver.func_head_latch_defect(i_c, i_b, constraint_state, rigid_config)
+    return defect
+
+
+@qd.func
+def func_single_island_latch_defect(
+    i_b, tid, stride, constraint_state: array_class.ConstraintState, rigid_config: qd.template(), is_coop: qd.template()
+):
+    """Relatch defect of the one island of an env of a single-island scene (see func_island_latch_defect), the lanes
+    sweeping the cone heads, whose rows lead the collision segment (see n_constraints_cone), and the sum reduced across
+    the block under is_coop.
+    """
+    n_rows = qd.static(rigid_config.rows_per_contact)
+    nef = constraint_state.n_constraints_equality[i_b] + constraint_state.n_constraints_frictionloss[i_b]
+    n_heads = constraint_state.n_constraints_cone[i_b] // n_rows
+    defect = gs.qd_float(0.0)
+    for i_chunk_ in range((n_heads + stride - 1) // stride):
+        i_head = i_chunk_ * stride + tid
+        if i_head < n_heads:
+            defect = defect + constraint_solver.func_head_latch_defect(
+                nef + i_head * n_rows, i_b, constraint_state, rigid_config
+            )
+    if qd.static(is_coop):
+        defect = su.qd_block_sum(defect)
+    return defect
 
 
 # ======================================================================================================================
@@ -571,12 +616,21 @@ def func_ls_state_advance(
 
 
 @qd.func
-def func_exit_decision(terms, improvement, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
-    """Convergence test of one island from its exit terms (see func_dof_exit_terms) and the improvement of its last line
-    search, on the island's own inertia scale: a flat gradient or a stalled improvement stops the iteration, and for
-    Newton the descent grad .
+def func_exit_decision(
+    terms, improvement, defect, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+):
+    """Convergence test of one island from its exit terms (see func_dof_exit_terms), the improvement of its last line
+    search and under 'signorini' its relatch defect (see func_island_latch_defect), on the island's own inertia scale:
+    a flat gradient or a stalled improvement stops the iteration, and for Newton the descent grad . Mgrad must stay
+    above the tolerance; for CG also the Hager-Zhang conjugate coefficient the direction update reads.
 
-    Mgrad must stay above the tolerance; for CG also the Hager-Zhang conjugate coefficient the direction update reads.
+    Under 'signorini' the gradient of the frozen cost is the residual of the contact law only where the friction radii
+    have converged, so the defect adds to the gradient norm (see func_signorini_flat), and the relatch moves the kinks
+    of the frozen cost between two line searches, so a search that gains little or a Newton model that promises little
+    says nothing of the residual. A search that lowers the cost by nothing at all while the Newton model promises less
+    than the tolerance has reached the arithmetic floor of the frozen cost: the iteration stops there, whatever the
+    defect, since a radius the frozen cost no longer answers to cannot converge either (a contact near jamming, whose
+    normal force follows its friction bound one for one).
     """
     tol_scaled = inertia * rigid_info.tolerance[None]
     grad_norm = qd.sqrt(terms[0])
@@ -585,7 +639,8 @@ def func_exit_decision(terms, improvement, inertia, rigid_info: array_class.Rigi
     is_stalled = improvement > 0.0 and improvement < tol_scaled
     improved = not (is_flat or is_stalled)
     if qd.static(rigid_config.enable_signorini_contact):
-        improved = not (is_flat and 0.5 * descent <= tol_scaled)
+        is_settled = improvement <= 0.0 and 0.5 * descent <= tol_scaled
+        improved = not (func_signorini_flat(terms, defect, tol_scaled) or is_settled)
     elif qd.static(
         rigid_config.solver_type == gs.constraint_solver.Newton and not rigid_config.enable_mujoco_compatibility
     ):
@@ -602,17 +657,34 @@ def func_exit_decision(terms, improvement, inertia, rigid_info: array_class.Rigi
 
 
 @qd.func
-def func_certify_decision(terms, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
-    """Warm-start certificate of one island from its exit terms.
+def func_certify_decision(terms, defect, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
+    """Warm-start certificate of one island from its exit terms and under 'signorini' its relatch defect (see
+    func_island_latch_defect).
 
-    The warm-started acceleration is kept as the solution when its Newton decrement and, for Newton or the Signorini
-    contact, its gradient norm sit below the tolerance.
+    The warm-started acceleration is kept as the solution when its Newton decrement sits below the tolerance, and so
+    does its gradient norm for Newton, or the residual of the contact law under 'signorini' (see func_signorini_flat).
     """
     tolerance_scaled = inertia * rigid_info.tolerance[None]
     is_converged = qd.max(0.5 * terms[1], 0.0) < tolerance_scaled
-    if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton or rigid_config.enable_signorini_contact):
+    if qd.static(rigid_config.enable_signorini_contact):
+        is_converged = is_converged and func_signorini_flat(terms, defect, tolerance_scaled)
+    elif qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
         is_converged = is_converged and qd.sqrt(terms[0]) <= tolerance_scaled
     return is_converged
+
+
+@qd.func
+def func_signorini_flat(terms, defect, tolerance_scaled):
+    """Whether the residual of the contact law of one island sits below the tolerance under the 'signorini' resolution:
+    the gradient of the frozen cost plus the relatch defect, against the tolerance plus the rounding of the forces.
+
+    The gradient balances the constraint forces against the inertial ones, a sum of terms the size of the constraint
+    forces, so it is exact to a few units in the last place of their norm and can be asked for no more.
+    """
+    GRAD_FLOOR_RATIO = 4.0
+    FLOAT_EPS = qd.static(2.0**-23 if gs.qd_float == qd.f32 else 2.0**-52)
+    force_floor = GRAD_FLOOR_RATIO * FLOAT_EPS * qd.sqrt(terms[2])
+    return qd.sqrt(terms[0]) + defect <= tolerance_scaled + force_floor
 
 
 # ======================================================================================================================
@@ -777,7 +849,7 @@ def func_search_single_island(
     order, the CPU skyline path reading the dofs through its reordered list. mv and jv hold M @ search and J @ search
     on entry.
 
-    Returns whether the island moved.
+    Returns whether the island moved or, under 'signorini', awaits its relatch.
     """
     n_dofs = constraint_state.search.shape[0]
     ne = constraint_state.n_constraints_equality[i_b]
@@ -862,10 +934,17 @@ def func_search_single_island(
                 kink_0,
                 rigid_info,
             )
-        # A null step converges the island; otherwise its dofs and rows take the step
+        # A null step converges the island, unless under 'signorini' a relatch is pending: the force update then
+        # advances the latch, which moves the cost and the next direction with it (see func_head_latch_defect).
+        # Otherwise its dofs and rows take the step.
         if qd.abs(res_alpha) < rigid_info.EPS[None]:
+            is_pending = False
+            if qd.static(rigid_config.enable_signorini_contact):
+                defect = func_single_island_latch_defect(i_b, tid, stride, constraint_state, rigid_config, is_coop)
+                is_pending = defect > constraint_state.island.inertia[0, i_b] * rigid_info.tolerance[None]
             if tid == 0:
-                constraint_state.island.improved[0, i_b] = False
+                constraint_state.island.improved[0, i_b] = is_pending
+            is_moved = is_pending
         else:
             is_moved = True
             i_pos = tid
@@ -924,17 +1003,27 @@ def func_exit_single_island(
                 i_d = constraint_state.island.dof_id[i_pos, i_b]
             terms = terms + func_dof_exit_terms(i_d, i_b, constraint_state, rigid_config)
             i_pos = i_pos + stride
+        defect = gs.qd_float(0.0)
+        if qd.static(rigid_config.enable_signorini_contact):
+            defect = func_single_island_latch_defect(i_b, tid, stride, constraint_state, rigid_config, is_coop)
         if qd.static(is_coop):
-            # The Hager-Zhang terms stay zero under Newton, see func_dof_exit_terms
-            for k in qd.static(range(7 if rigid_config.solver_type == gs.constraint_solver.CG else 2)):
+            # The Hager-Zhang terms stay zero under Newton, the force term under 'convex', see func_dof_exit_terms
+            n_terms = qd.static(
+                7
+                if rigid_config.solver_type == gs.constraint_solver.CG
+                else 3
+                if rigid_config.enable_signorini_contact
+                else 2
+            )
+            for k in qd.static(range(n_terms)):
                 terms[k] = su.qd_block_sum(terms[k])
         inertia = constraint_state.island.inertia[0, i_b]
         cg_beta = gs.qd_float(0.0)
         if qd.static(certify):
-            improved = not func_certify_decision(terms, inertia, rigid_info, rigid_config)
+            improved = not func_certify_decision(terms, defect, inertia, rigid_info, rigid_config)
         else:
             improved, cg_beta = func_exit_decision(
-                terms, constraint_state.island.ls_improvement[0, i_b], inertia, rigid_info, rigid_config
+                terms, constraint_state.island.ls_improvement[0, i_b], defect, inertia, rigid_info, rigid_config
             )
         if tid == 0:
             constraint_state.island.improved[0, i_b] = improved
@@ -970,7 +1059,7 @@ def func_linesearch_islands_serial(
     evaluations sweeping its own dofs and rows through the island-ordered dof_id / constraint_id lists. A single-island
     scene searches its one island by index (func_search_single_island).
 
-    Returns whether any island moved.
+    Returns whether any island moved or, under 'signorini', awaits its relatch.
     """
     n_islands = constraint_state.island.n_islands[i_b]
     ne = constraint_state.n_constraints_equality[i_b]
@@ -1072,10 +1161,18 @@ def func_linesearch_islands_serial(
                         kink_0,
                         rigid_info,
                     )
-                # A null step converges the island; otherwise its dofs and rows take the step
+                # A null step converges the island, unless under 'signorini' a relatch is pending (see
+                # func_search_single_island); otherwise its dofs and rows take the step
                 if qd.abs(res_alpha) < rigid_info.EPS[None]:
                     res_alpha = 0.0
-                    constraint_state.island.improved[i_island, i_b] = False
+                    is_pending = False
+                    if qd.static(rigid_config.enable_signorini_contact):
+                        defect = func_island_latch_defect(i_b, row_lo, row_hi, constraint_state, rigid_config)
+                        inertia = constraint_state.island.inertia[i_island, i_b]
+                        is_pending = defect > inertia * rigid_info.tolerance[None]
+                    constraint_state.island.improved[i_island, i_b] = is_pending
+                    if is_pending:
+                        is_moved = True
                 else:
                     is_moved = True
                     for i_pos in range(dof_lo, dof_hi):
@@ -1129,14 +1226,24 @@ def func_exit_islands_serial(
                 for i_pos in range(dof_lo, dof_hi):
                     i_d = func_list_item(constraint_state.island.dof_id, i_pos, dof_lo, dof_base, i_b)
                     terms = terms + func_dof_exit_terms(i_d, i_b, constraint_state, rigid_config)
+                defect = gs.qd_float(0.0)
+                if qd.static(rigid_config.enable_signorini_contact):
+                    row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
+                    row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
+                    defect = func_island_latch_defect(i_b, row_lo, row_hi, constraint_state, rigid_config)
                 inertia = constraint_state.island.inertia[i_island, i_b]
                 improved = False
                 cg_beta = gs.qd_float(0.0)
                 if qd.static(certify):
-                    improved = not func_certify_decision(terms, inertia, rigid_info, rigid_config)
+                    improved = not func_certify_decision(terms, defect, inertia, rigid_info, rigid_config)
                 else:
                     improved, cg_beta = func_exit_decision(
-                        terms, constraint_state.island.ls_improvement[i_island, i_b], inertia, rigid_info, rigid_config
+                        terms,
+                        constraint_state.island.ls_improvement[i_island, i_b],
+                        defect,
+                        inertia,
+                        rigid_info,
+                        rigid_config,
                     )
                 constraint_state.island.improved[i_island, i_b] = improved
                 if improved:
@@ -1208,7 +1315,7 @@ def func_linesearch_islands_coop(
     slot in the shared accumulator (qd_segment_add in utils/simt.py), so the accumulation order is the chunk order. The
     rows read each island's pending flag and candidates from shared memory, the owner lane reads its sums back from it.
 
-    Returns whether any island moved.
+    Returns whether any island moved or, under 'signorini', awaits its relatch.
     """
     _K = qd.static(32)
     n_islands = constraint_state.island.n_islands[i_b]
@@ -1513,14 +1620,24 @@ def func_linesearch_islands_coop(
                     sh_kinks[k * _K + tid] = qd.math.inf
             qd.simt.block.sync()
 
-        # The owner records its island's search, a null step converging the island; then the group's step is applied
+        # The owner records its island's search, a null step converging the island unless under 'signorini' a relatch
+        # is pending (see func_search_single_island); then the group's step is applied
+        is_pending = False
         if phase == 3:
             if qd.abs(res_alpha) < rigid_info.EPS[None]:
                 res_alpha = 0.0
-                constraint_state.island.improved[i_island, i_b] = False
+                if qd.static(rigid_config.enable_signorini_contact):
+                    row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
+                    row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
+                    defect = func_island_latch_defect(i_b, row_lo, row_hi, constraint_state, rigid_config)
+                    inertia = constraint_state.island.inertia[i_island, i_b]
+                    is_pending = defect > inertia * rigid_info.tolerance[None]
+                constraint_state.island.improved[i_island, i_b] = is_pending
             constraint_state.island.ls_improvement[i_island, i_b] = improvement
         sh_alpha[tid] = res_alpha
         qd.simt.block.sync()
+        if qd.simt.subgroup.any_true(is_pending) != 0:
+            is_moved = True
         if qd.simt.subgroup.any_true(res_alpha != 0.0) != 0:
             is_moved = True
             i_pos = dof_lo + tid
@@ -1613,12 +1730,22 @@ def func_exit_islands_coop(
             terms = qd.Vector.zero(gs.qd_float, 7)
             for k in qd.static(range(7)):
                 terms[k] = sh_acc[k * _K + tid]
+            defect = gs.qd_float(0.0)
+            if qd.static(rigid_config.enable_signorini_contact):
+                row_lo = constraint_state.island.constraint_slices.start[i_island, i_b]
+                row_hi = row_lo + constraint_state.island.constraint_slices.n[i_island, i_b]
+                defect = func_island_latch_defect(i_b, row_lo, row_hi, constraint_state, rigid_config)
             inertia = constraint_state.island.inertia[i_island, i_b]
             if qd.static(certify):
-                improved = not func_certify_decision(terms, inertia, rigid_info, rigid_config)
+                improved = not func_certify_decision(terms, defect, inertia, rigid_info, rigid_config)
             else:
                 improved, cg_beta = func_exit_decision(
-                    terms, constraint_state.island.ls_improvement[i_island, i_b], inertia, rigid_info, rigid_config
+                    terms,
+                    constraint_state.island.ls_improvement[i_island, i_b],
+                    defect,
+                    inertia,
+                    rigid_info,
+                    rigid_config,
                 )
             constraint_state.island.improved[i_island, i_b] = improved
         qd.simt.block.sync()

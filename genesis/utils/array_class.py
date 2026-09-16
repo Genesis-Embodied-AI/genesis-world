@@ -795,6 +795,16 @@ class ConstraintState:
     # the torsional coefficient the same way (the tangent rows hold 0).
     efc_frictionloss: qd.Tensor
     efc_force: qd.Tensor = of_kind(DataKind.STATE)
+    # Latched friction radius of each elliptic-cone head row under the 'signorini' resolution: the normal force the
+    # friction discs of the contact are bounded against, which follows the normal force of the iterate across the
+    # Newton iterations (see func_cone_update_rows in constraint/solver.py). The row assembly writes a negative value,
+    # the unlatched state: the seed then latches the normal force of the warm start whole, the rows of a step numbering
+    # its own contacts. Empty under the other resolutions.
+    cone_latch: qd.Tensor
+    # Latch and gap (normal force of the iterate minus latch) of the previous relatch, the secant of the relatch; the
+    # latch also serves the downdate of the incremental factor with cone_prev_jaref.
+    cone_prev_latch: qd.Tensor
+    cone_prev_gap: qd.Tensor
     active: qd.Tensor = of_kind(DataKind.STATE)
     prev_active: qd.Tensor
     qfrc_constraint: qd.Tensor = of_kind(DataKind.STATE)
@@ -974,6 +984,21 @@ def get_constraint_state(constraint_solver, solver, collider):
         Jaref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
+        cone_latch=V(
+            dtype=gs.qd_float,
+            shape=maybe_shape((len_constraints_, _B), solver.rigid_config.enable_signorini_contact),
+            layout=serial_layout if solver.rigid_config.enable_signorini_contact else None,
+        ),
+        cone_prev_latch=V(
+            dtype=gs.qd_float,
+            shape=maybe_shape((len_constraints_, _B), solver.rigid_config.enable_signorini_contact),
+            layout=serial_layout if solver.rigid_config.enable_signorini_contact else None,
+        ),
+        cone_prev_gap=V(
+            dtype=gs.qd_float,
+            shape=maybe_shape((len_constraints_, _B), solver.rigid_config.enable_signorini_contact),
+            layout=serial_layout if solver.rigid_config.enable_signorini_contact else None,
+        ),
         efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),
