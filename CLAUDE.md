@@ -57,7 +57,8 @@
 
 ## Kernels
 
-- **A kernel that runs under `requires_grad` takes no `continue` and no `while`**: quadrants' autodiff rejects both. A gate inside such a kernel (the kinematics and dynamics walks, the constraint solve) is a flag set under the static condition and tested by an `if`, never an early `continue`.
+- **Every kernel is written so that quadrants' autodiff can reverse it**: no `continue`, no `while`, the top level of the kernel made of `for` loops alone. A gate is a flag set under the static condition and tested by an `if`, never an early `continue`; a walk over blocks is a `for` over the dof range with a block-start test, a lane stride is `for i_chunk_ in range((n + BLOCK_DIM - 1) // BLOCK_DIM)` with `i = i_chunk_ * BLOCK_DIM + tid` gated by `if i < n` (a `range` in a kernel takes one or two arguments), never a `while`. A hand-written backward kernel is strongly discouraged and demands a very good motivation, such as reversing an iterative algorithm (a constraint solve, an inverse kinematics) that autodiff cannot unroll.
+- **An index read from a field is bound to a temporary before it indexes another field** (`i_r = rigid_info.links_root_rank[i_l]` then `rigid_info.roots_link_end[i_r]`). Nested indirect indexing (`a[b[i]]`) is prohibited in kernels and funcs.
 - **New code:** Free function `@qd.kernel`, no `@qd.data_oriented`. Use `V_ANNOTATION` from `genesis.utils.array_class` for type-polymorphic parameters.
 - **FEM solver:** Follows old `@qd.data_oriented` method pattern. Any kernel added to FEM solver must stay consistent with this.
 - **Rigid kernel and func calls are positional for self-named arguments**, relying on the canonical parameter order below; anonymous constants (bare literals such as trailing static flags) are passed by keyword. A func call that passes a struct member alongside its parent struct stays keyword-only, because quadrants' positional func-argument expansion duplicates the member.
@@ -216,6 +217,6 @@ cocoapy.NSOpenGLPFAMaximumPolicy = 0x00020400  # kCGLRendererGenericFloatID
 ## Tooling & Contributing
 
 - Lint/format: ruff (check + format, line length 120) via pre-commit; install hooks with `pre-commit install` - they run on every commit.
-- PR titles carry a bracket tag: `[BUG FIX]`, `[FEATURE]`, `[MISC]`, `[CHANGING]` (behavior change), `[BREAKING]` (API break). Commit titles are plain single-line sentences without the tag. Both PR and commit titles end with a period.
+- PR titles carry a bracket tag: `[BUG FIX]`, `[FEATURE]`, `[MISC]`, `[CHANGING]` (the simulated physics change by default: a different model, or different default parameters; solver-internal restructuring is `[MISC]`), `[BREAKING]` (API break). Commit titles are plain single-line sentences without the tag. Both PR and commit titles end with a period.
 - PR titles state the benefit for end users, not the implementation. Implementation details go in the PR description.
 - Contributors must follow `CODING_GUIDELINES.md` and the reference docs in `.github/contributing/`: ARCHITECTURE, TESTING, CODING_CONVENTIONS, EXAMPLES, PULL_REQUESTS, USD_PARSER. On conflict, ask.

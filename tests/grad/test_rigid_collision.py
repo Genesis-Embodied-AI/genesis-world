@@ -458,7 +458,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
             rigid_solver.dyn_info,
             rigid_solver.rigid_info,
             rigid_solver.rigid_config,
-            is_decomposed=False,
+            write_L=True,
         )
         func_solve_body(
             rigid_solver.dyn_state,
@@ -491,7 +491,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         constraint_solver.constraint_state.jac.from_numpy(input_jac)
         constraint_solver.constraint_state.aref.from_numpy(input_aref)
         constraint_solver.constraint_state.efc_D.from_numpy(input_efc_D)
-        rigid_solver.dyn_state.dofs.force.from_numpy(input_force)
+        rigid_solver.dyn_state.dofs.qf_smooth.from_numpy(input_force)
         updated_acc_smooth = np.linalg.solve(input_mass[..., 0], input_force[..., 0])
         rigid_solver.dyn_state.dofs.acc_smooth.from_numpy(updated_acc_smooth[..., None])
         constraint_solver.resolve()
@@ -503,7 +503,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     init_input_jac = qd_to_numpy(constraint_solver.constraint_state.jac, copy=True)
     init_input_aref = qd_to_numpy(constraint_solver.constraint_state.aref, copy=True)
     init_input_efc_D = qd_to_numpy(constraint_solver.constraint_state.efc_D, copy=True)
-    init_input_force = qd_to_numpy(rigid_solver.dyn_state.dofs.force, copy=True)
+    init_input_force = qd_to_numpy(rigid_solver.dyn_state.dofs.qf_smooth, copy=True)
 
     set_random_seed(0)
     init_output_qacc = qd_to_torch(constraint_solver.qacc)

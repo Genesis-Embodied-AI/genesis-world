@@ -138,8 +138,8 @@ class broadphase_traversal(IntEnum):
     ALL_VS_ALL : int
         Checks every valid pair every step (AABB overlap test), dispatching them in parallel across GPU threads.  Cost
         per step is O(n_valid_pairs) which is efficient on GPU when the pair count is moderate, but becomes expensive
-        in scenes with many geometries since the valid pair count grows quadratically. Does not support hibernation or
-        heterogeneous entities at this time.
+        in scenes with many geometries since the valid pair count grows quadratically. Does not support heterogeneous
+        entities at this time.
 
     Notes
     -----
@@ -147,8 +147,7 @@ class broadphase_traversal(IntEnum):
 
     - **CPU backend** → ``SAP`` (sequential sweep is efficient on CPU).
     - **GPU backend** → ``ALL_VS_ALL`` (parallel pair checking is faster).
-    - **GPU with hibernation or heterogeneous entities** → ``SAP``
-      (``ALL_VS_ALL`` is not compatible with these features).
+    - **GPU with heterogeneous entities** → ``SAP`` (``ALL_VS_ALL`` is not compatible with them).
     """
 
     SAP = 0

@@ -228,7 +228,7 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_velocity, gs_robot.set_dofs_velocity, None),
         (gs_robot.n_dofs, n_envs, gs_robot.get_dofs_position, gs_robot.set_dofs_position, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_force_range, gs_robot.set_dofs_force_range, None),
-        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_limit, None, None),
+        (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_limit, gs_robot.set_dofs_limit, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_stiffness, None, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_invweight, None, None),
         (gs_robot.n_dofs, n_envs_info, gs_robot.get_dofs_armature, None, None),
@@ -629,6 +629,7 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
     ROBOT_EULER_ZERO = (0.0, 0.0, 90.0)
     CUBE_POS_ZERO = (0.65, 0.0, 0.02)
     CUBE_EULER_ZERO = (0.0, 90.0, 0.0)
+    DELTA_THETA = 0.7
 
     scene = gs.Scene(
         show_viewer=show_viewer,
@@ -774,6 +775,15 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
         else:
             raise AssertionError("Cube never collided with robot for at least one of the environments.")
 
+    # Writing the joint coordinates back leaves every link of the scene where the step put it, the static links of the
+    # fixed base and the free bodies included
+    entities_links_pos = [entity.get_links_pos() for entity in scene.entities]
+    entities_links_quat = [entity.get_links_quat() for entity in scene.entities]
+    robot.set_qpos(robot.get_qpos())
+    for entity, links_pos, links_quat in zip(scene.entities, entities_links_pos, entities_links_quat):
+        assert_allclose(entity.get_links_pos(), links_pos, tol=gs.EPS)
+        assert_allclose(entity.get_links_quat(), links_quat, tol=gs.EPS)
+
     for _ in range(2):
         scene.reset()
 
@@ -795,6 +805,10 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
             assert_allclose(base_aabb, base_aabb_init, tol=tol)
             assert_allclose(entity.get_AABB(), entity_aabb_init, tol=tol)
 
+            base_pos = entity.get_pos(relative=False)
+            base_quat = entity.get_quat(relative=False)
+            links_pos = entity.get_links_pos()
+            links_quat = entity.get_links_quat()
             pos_delta = torch.as_tensor(np.random.rand(3), dtype=gs.tc_float, device=gs.device).expand((2, 3))
             entity.set_pos(pos_delta, relative=relative)
 
@@ -808,6 +822,45 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
             quat_delta /= torch.linalg.norm(quat_delta, axis=1, keepdim=True)
             entity.set_quat(quat_delta, relative=relative)
             assert_allclose(entity.get_quat(relative=relative), quat_delta, tol=tol)
+
+            # Moving the root carries every link along as one rigid body, the static links of a fixed base included, the
+            # joints keeping their coordinates
+            base_delta_quat = gu.transform_quat_by_quat(gu.inv_quat(base_quat), entity.get_quat(relative=False))
+            links_delta_quat = base_delta_quat[..., None, :].expand(links_quat.shape)
+            links_pos_from_base = gu.transform_by_quat(links_pos - base_pos[..., None, :], links_delta_quat)
+            links_pos_expected = entity.get_pos(relative=False)[..., None, :] + links_pos_from_base
+            assert_allclose(entity.get_links_pos(), links_pos_expected, tol=tol)
+            assert_allclose(entity.get_links_quat(), gu.transform_quat_by_quat(links_quat, links_delta_quat), tol=tol)
+
+    # Turning joint7 by DELTA_THETA rotates the links below it (the ones following it in index order) about the joint
+    # anchor and axis by that angle and leaves the links above it in place. set_qpos and set_dofs_position must give
+    # the same poses.
+    joint = robot.get_joint("joint7")
+    i_l_child = joint.link.idx_local
+    anchor_pos = joint.get_anchor_pos()[..., None, :]
+    anchor_axis = joint.get_anchor_axis()
+    links_pos = robot.get_links_pos()
+    links_quat = robot.get_links_quat()
+    qpos = robot.get_qpos()
+    qpos_new = qpos.clone()
+    qpos_new[..., joint.qs_idx_local] += DELTA_THETA
+    robot.set_qpos(qpos_new)
+    links_pos_qpos = robot.get_links_pos()
+    links_quat_qpos = robot.get_links_quat()
+    robot.set_qpos(qpos)
+    robot.set_dofs_position(qpos_new)
+    assert_equal(robot.get_links_pos(), links_pos_qpos)
+    assert_equal(robot.get_links_quat(), links_quat_qpos)
+    angle = torch.full(anchor_axis.shape[:-1], DELTA_THETA, dtype=gs.tc_float, device=gs.device)
+    links_pos_from_anchor = links_pos[..., i_l_child:, :] - anchor_pos
+    links_quat_hanging = links_quat[..., i_l_child:, :]
+    links_delta_quat = gu.axis_angle_to_quat(angle, anchor_axis)[..., None, :].expand(links_quat_hanging.shape)
+    links_pos_expected = links_pos.clone()
+    links_quat_expected = links_quat.clone()
+    links_pos_expected[..., i_l_child:, :] = anchor_pos + gu.transform_by_quat(links_pos_from_anchor, links_delta_quat)
+    links_quat_expected[..., i_l_child:, :] = gu.transform_quat_by_quat(links_quat_hanging, links_delta_quat)
+    assert_allclose(links_pos_qpos, links_pos_expected, tol=tol)
+    assert_allclose(links_quat_qpos, links_quat_expected, tol=tol)
 
 
 @pytest.mark.slow  # ~200s

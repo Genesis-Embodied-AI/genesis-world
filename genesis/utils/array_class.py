@@ -207,7 +207,6 @@ class ErrorCode(IntEnum):
     OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
     OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
     OVERFLOW_CONTACTS = 0b00000000000000000000000000000100
-    OVERFLOW_HIBERNATION_ISLANDS = 0b00000000000000000000000000001000
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
@@ -221,47 +220,46 @@ class RigidInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     # *_bw: Cache for backward pass
+    # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes. An env whose
+    # count is zero has every body asleep and skips the passes that gate on it whole. An env whose count is the dof
+    # count has no sleeper and skips the passes that look for one (the chain edges and the wake pass of the island
+    # build, the pair filter of the broad phase, the contact advection, the inert rows), so hibernation costs it one
+    # read per pass until something sleeps in it. A dof-less scene pads its dof buffers to one slot and takes the slow
+    # path.
     n_awake_dofs: qd.Tensor = of_kind(DataKind.STATE)
-    awake_dofs: qd.Tensor = of_kind(DataKind.STATE)
-    n_awake_entities: qd.Tensor = of_kind(DataKind.STATE)
-    awake_entities: qd.Tensor = of_kind(DataKind.STATE)
-    n_awake_links: qd.Tensor = of_kind(DataKind.STATE)
-    awake_links: qd.Tensor = of_kind(DataKind.STATE)
     qpos0: qd.Tensor = of_kind(DataKind.INFO)
     qpos: qd.Tensor = of_kind(DataKind.STATE)
     qpos_next: qd.Tensor = of_kind(DataKind.SCRATCH)
     links_T: qd.Tensor = of_kind(DataKind.DERIVED)
-    envs_offset: qd.Tensor
     geoms_init_AABB: qd.Tensor
     mass_mat: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_L: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_D_inv: qd.Tensor = of_kind(DataKind.DERIVED)
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
-    mass_mat_mask: qd.Tensor = of_kind(DataKind.STATE)
-    # The kinematic trees, the links sharing a root link (links.root_idx). Tree i_t is rooted at trees_root_idx[i_t],
-    # holds the trees_n_links[i_t] links of the span [trees_root_idx[i_t], trees_link_end[i_t]) whose root it is (the
-    # span may interleave links of 0-dof entities created between attached ones, so consumers gate each link on the
-    # root) and the contiguous dofs [trees_dof_start[i_t], trees_dof_start[i_t] + trees_n_dofs[i_t]). The trees
-    # carrying a dof come first, in ascending dof order, so the island partition (see island.py) lists the dofs of the
-    # trees it groups in ascending order; the dof-less trees (fixed bodies) follow in root order and join no island.
-    # links_tree_idx maps every link to its tree.
+    # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. A root spans the links
+    # [root, links_root_end[root]) whose root it is (a span may interleave links of other roots, so the walks gate each
+    # link on its root). The composite inertia and the center of mass are per root.
+    roots_link_idx: qd.Tensor
+    links_root_end: qd.Tensor
+    # Kinematic trees: the links a chain of moving joints connects, so a static link belongs to none (links_tree_idx
+    # -1) and each branch of a fixed base is a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
+    # [trees_root_idx[i_t], trees_link_end[i_t]) mapped to it and the contiguous dofs [trees_dof_start[i_t],
+    # trees_dof_start[i_t] + trees_n_dofs[i_t]), in ascending dof order. The islands are built on the trees. A scene
+    # without any tree keeps one padded slot at root 0 and link end 0, so every tree walk is empty.
     trees_root_idx: qd.Tensor
     trees_link_end: qd.Tensor
     trees_n_links: qd.Tensor
     trees_dof_start: qd.Tensor
     trees_n_dofs: qd.Tensor
     links_tree_idx: qd.Tensor
-    # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure
-    # ends (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across
-    # entities and kept contiguous by attach(). The assemble/factor/solve restrict to these bounds.
+    # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
+    # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
+    # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
+    # aligned free body splits into one block per dof), so the assemble/factor/solve walk the blocks of a tree and
+    # restrict to these bounds.
     dofs_mass_block_start: qd.Tensor
     dofs_mass_block_end: qd.Tensor
     dofs_mass_envelope_start: qd.Tensor
-    # DOF range spanned by the mass blocks rooted in each entity: a leading run merged into an earlier-rooted block is
-    # excluded, and the last rooted block may extend into a merged child (empty range for a fully-merged child). Lets
-    # the per-entity assemble/factor/solve iterate their blocks as one flat, autodiff-compatible loop over DOFs.
-    entities_mass_block_dof_start: qd.Tensor
-    entities_mass_block_dof_end: qd.Tensor
     # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
     # the dofs of its own link, within its mass block.
     mass_parent_mask: qd.Tensor
@@ -315,15 +313,9 @@ def get_rigid_info(solver, kinematic_only):
     # FIXME: Add a better split between kinematic and Genesis
     if kinematic_only:
         return RigidInfo(
-            envs_offset=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
             gravity=V_VEC(3, dtype=gs.qd_float, shape=()),
             meaninertia=V(dtype=gs.qd_float, shape=()),
             n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-            n_awake_entities=V(dtype=gs.qd_int, shape=(_B,)),
-            n_awake_links=V(dtype=gs.qd_int, shape=(_B,)),
-            awake_dofs=V(dtype=gs.qd_int, shape=(solver.n_dofs_, _B)),
-            awake_entities=V(dtype=gs.qd_int, shape=(solver.n_entities_, _B)),
-            awake_links=V(dtype=gs.qd_int, shape=(solver.n_links_, _B)),
             qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
@@ -333,7 +325,8 @@ def get_rigid_info(solver, kinematic_only):
             mass_mat_L=V(dtype=gs.qd_float, shape=()),
             mass_mat_D_inv=V(dtype=gs.qd_float, shape=()),
             mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=()),
-            mass_mat_mask=V(dtype=gs.qd_bool, shape=()),
+            roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+            links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
             trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
@@ -343,8 +336,6 @@ def get_rigid_info(solver, kinematic_only):
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
-            entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=()),
-            entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
             substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
             iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
@@ -361,15 +352,9 @@ def get_rigid_info(solver, kinematic_only):
         )
 
     return RigidInfo(
-        envs_offset=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
         gravity=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
         meaninertia=V(dtype=gs.qd_float, shape=(_B,)),
         n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-        n_awake_entities=V(dtype=gs.qd_int, shape=(_B,)),
-        n_awake_links=V(dtype=gs.qd_int, shape=(_B,)),
-        awake_dofs=V(dtype=gs.qd_int, shape=(solver.n_dofs_, _B)),
-        awake_entities=V(dtype=gs.qd_int, shape=(solver.n_entities_, _B)),
-        awake_links=V(dtype=gs.qd_int, shape=(solver.n_links_, _B)),
         qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
         qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
         qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
@@ -379,7 +364,8 @@ def get_rigid_info(solver, kinematic_only):
         mass_mat_L=V(dtype=gs.qd_float, shape=mass_mat_shape, needs_grad=requires_grad),
         mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), needs_grad=requires_grad),
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
-        mass_mat_mask=V(dtype=gs.qd_bool, shape=(solver.n_entities_, _B)),
+        roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+        links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
         trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
@@ -389,8 +375,6 @@ def get_rigid_info(solver, kinematic_only):
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
-        entities_mass_block_dof_start=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
-        entities_mass_block_dof_end=V(dtype=gs.qd_int, shape=(solver.n_entities_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
         substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
         iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),
@@ -440,9 +424,9 @@ class IslandState:
     # Partition of the dof-carrying kinematic trees (see trees_root_idx in RigidInfo) into islands, the connected
     # components of the trees under the contact, equality and hibernation couplings, rebuilt every step by island.py.
     # trees_parent_idx is the union-find forest over the trees, trees_island_idx the island of each tree and
-    # links_island_idx that of each link, -1 for a dof-less tree and its links. link_slices maps an island to its slice
-    # of link_id, dof_slices to its slice of dof_id (island-local dof -> global dof, ascending unless the CPU skyline
-    # path reorders it by contact adjacency).
+    # links_island_idx that of each link, -1 for a static link and for a dof-less tree and its links. link_slices maps
+    # an island to its slice of link_id, dof_slices to its slice of dof_id (island-local dof -> global dof, ascending
+    # unless the CPU skyline path reorders it by contact adjacency).
     trees_parent_idx: qd.Tensor
     trees_island_idx: qd.Tensor
     links_island_idx: qd.Tensor
@@ -480,8 +464,8 @@ class IslandState:
     is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
     hibernated_next_link: qd.Tensor = of_kind(DataKind.STATE)
     # (env, island) work-lists of the cooperative per-island factor+solve, one per island size class (see
-    # island_tile_caps): class c holds factor_worklist_size[c] items in its own region of the two index lists, of
-    # n_trees * _B slots each, in the order of the atomic reservation of the partition pass.
+    # island_tile_caps): class c holds its factor_worklist_size[c] awake islands in its own region of the two index
+    # lists, of n_trees * _B slots each, in the order of the atomic reservation of the partition pass.
     factor_worklist_i_b: qd.Tensor
     factor_worklist_i_island: qd.Tensor
     factor_worklist_size: qd.Tensor
@@ -510,10 +494,15 @@ def get_island_state(solver, collider):
     # island_state itself holds only the partition maps and the per-island iteration state.
     rcm_active = solver.rigid_config.sparse_solve
     coop_active = solver.rigid_config.enable_cooperative_constraint_kernels
+    # The (env, island) work-lists of the tiled seed are read where an env can hold several islands (see
+    # func_island_tiled_factor_solve_all in solver.py)
+    worklist_active = solver.rigid_config.enable_tiled_island_seed and not solver.rigid_config.is_single_island
     # Batch-first under the cooperative kernels, whose block serves one env: the lanes then read consecutive items of
     # their env from consecutive addresses (see the constraint-state layouts in get_constraint_state).
     island_layout = (1, 0) if solver.rigid_config.constraint_layout_batch_first else None
-    n_classes = len(island_tile_caps(solver.rigid_config))
+    n_classes = len(
+        island_tile_caps(solver.rigid_config.island_tile_cap_first, solver.rigid_config.island_tile_cap_last)
+    )
     max_candidate_contacts = max(collider.collider_info.max_candidate_contacts[None], 1)
     # Safe upper bound on active constraints, mirroring ConstraintSolver.len_constraints: rows_per_contact per
     # contact + joint-limit/frictionloss (<= n_dofs each) + equality rows (<= 6 each). The equality term must use the
@@ -554,9 +543,9 @@ def get_island_state(solver, collider):
         constraint_island_idx=V(dtype=gs.qd_int, shape=(n_constraints_max, _B), layout=island_layout),
         is_hibernated=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), solver._use_hibernation)),
         hibernated_next_link=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_hibernation)),
-        factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), coop_active)),
-        factor_worklist_i_island=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), coop_active)),
-        factor_worklist_size=V(dtype=gs.qd_int, shape=maybe_shape((n_classes,), coop_active)),
+        factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),
+        factor_worklist_i_island=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),
+        factor_worklist_size=V(dtype=gs.qd_int, shape=maybe_shape((n_classes,), worklist_active)),
         rcm_tree_pos=V(
             dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
         ),
@@ -832,10 +821,10 @@ class ConstraintState:
     # TODO: Optimize storage to only allocate memory half of the Hessian matrix to sparse memory resources.
     nt_H: qd.Tensor
     # Per-DOF Jacobi scale s_i = 1/sqrt(diag(M + J^T D J)_i), at natural DOF id, refreshed ahead of every direct
-    # rebuild (func_jacobi_scale; 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
-    # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A unit diagonal keeps the Hessian's mixed-unit spread within float32's
-    # conditioning capability at any geometry scale and makes the bare-EPS pivot floor scale-relative. Only meaningful
-    # with enable_jacobi_equilibration.
+    # rebuild (func_jacobi_scale, 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
+    # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A
+    # unit diagonal keeps the Hessian's mixed-unit spread within float32's conditioning capability at any geometry
+    # scale and makes the bare-EPS pivot floor scale-relative. Only meaningful with enable_jacobi_equilibration.
     nt_jacobi: qd.Tensor
     # Diagonal of the persisted cone-free Hessian packed in nt_H's mirror slots (see nt_H). Only meaningful with
     # enable_cone_free_hessian_reuse.
@@ -867,6 +856,14 @@ class ConstraintState:
     # Always ndarray (not field): graph.do_while requires the same physical ndarray on every call.
     graph_counter: qd.types.ndarray()
     early_exit_flag: qd.Tensor
+    # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the row being updated, in the column of the
+    # env, or of the lane of the cooperative sweep at [i_d, i_b * 32 + tid] (see kernel_noslip in noslip.py).
+    noslip_MinvJT: qd.Tensor
+    # Row coloring of the cooperative noslip sweep (empty otherwise, see func_color_rows_batch in noslip.py): the color
+    # of each row, the color count of each island and the next free color of the mass block starting at each dof.
+    noslip_rows_color: qd.Tensor
+    noslip_islands_n_colors: qd.Tensor
+    noslip_blocks_n_colors: qd.Tensor
 
 
 def get_constraint_state(constraint_solver, solver, collider):
@@ -902,10 +899,19 @@ def get_constraint_state(constraint_solver, solver, collider):
     # striding i_d in cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on
     # a per-consumer basis under the same enable_cooperative_constraint_kernels flag.
     dof_vec_layout = (1, 0) if batch_first else None
-    # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one
-    # slot per fused update on the CPU per-island path (func_rank_batch_update_island), a single slot elsewhere
-    # (indexing then reduces to [i_d]). Flat 2D so the buffer keeps the DOF-vec rank and layout on every backend.
-    nt_vec_n_slots = solver.rigid_config.hessian_rank_update_batch if constraint_solver.sparse_solve else 1
+    # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one slot
+    # per fused update of the per-island factor (func_rank_batch_update_island), a single slot for the whole-env factor
+    # of a single-island scene (indexing then reduces to [i_d]). Flat 2D to keep the DOF-vec rank and layout everywhere.
+    nt_vec_n_slots = (
+        solver.rigid_config.hessian_rank_update_batch
+        if constraint_solver.sparse_solve or not solver.rigid_config.is_single_island
+        else 1
+    )
+    # The noslip scratch holds one M^{-1} J^T column per env, or per lane of the 32-lane blocks of the cooperative sweep
+    # (see kernel_noslip in noslip.py).
+    is_noslip_active = solver._options.noslip_iterations > 0
+    is_noslip_cooperative = solver.rigid_config.enable_cooperative_noslip
+    noslip_n_lanes = 32 if is_noslip_cooperative else 1
 
     jac_shape = (len_constraints_, solver.n_dofs_, _B)
     # The sparse-Jacobian representation is always active, so its index buffers are always allocated. The skyline DOF
@@ -997,6 +1003,26 @@ def get_constraint_state(constraint_solver, solver, collider):
         nt_H_cone_free_diag=V(
             dtype=gs.qd_float,
             shape=maybe_shape((_B, solver.n_dofs_), solver.rigid_config.enable_cone_free_hessian_reuse),
+        ),
+        noslip_MinvJT=V(
+            dtype=gs.qd_float,
+            shape=maybe_shape((solver.n_dofs_, noslip_n_lanes * _B), is_noslip_active),
+            layout=dof_vec_layout if is_noslip_active else None,
+        ),
+        noslip_rows_color=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((len_constraints_, _B), is_noslip_cooperative),
+            layout=con_layout if is_noslip_cooperative else None,
+        ),
+        noslip_islands_n_colors=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((solver.n_trees_, _B), is_noslip_cooperative),
+            layout=con_layout if is_noslip_cooperative else None,
+        ),
+        noslip_blocks_n_colors=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((solver.n_dofs_, _B), is_noslip_cooperative),
+            layout=dof_vec_layout if is_noslip_cooperative else None,
         ),
         # Allocated last to preserve the allocation order of the tensors above (see the warning at the top).
         island=get_island_state(solver, collider),
@@ -1187,6 +1213,10 @@ class ColliderState:
     xyz_max_min: qd.Tensor
     prism: qd.Tensor
     n_contacts: qd.Tensor = of_kind(DataKind.STATE)
+    # Kept contacts of the sleepers, at the front of the contact buffer with the identity permutation: a hibernated
+    # link's contacts against fixed bodies are carried from step to step with the force of the last solve they took
+    # part in, for the contact getters and the per-link contact force alone. Every per-step pass (prune, sort, island
+    # edges, constraint rows, noslip) walks the live contacts after them, [n_contacts_hibernated, n_contacts).
     n_contacts_hibernated: qd.Tensor = of_kind(DataKind.STATE)
     first_time: qd.Tensor = of_kind(DataKind.WARMSTART)
     contact_cache: ContactCache
@@ -2050,6 +2080,11 @@ class DofsState:
     acc_smooth_bw: qd.Tensor
     qf_smooth: qd.Tensor
     qf_constraint: qd.Tensor
+    # Implicit damping correction (see func_implicit_damping in forward_dynamics.py): qf_damping_implicit holds the
+    # implicit share of the damping force, h D qacc for the diagonal D the damped mass factor adds, and
+    # qacc_damping_implicit the correction (M + hD)^-1 h D qacc subtracted from the acceleration.
+    qf_damping_implicit: qd.Tensor = of_kind(DataKind.SCRATCH)
+    qacc_damping_implicit: qd.Tensor = of_kind(DataKind.SCRATCH)
     cdof_ang: qd.Tensor
     cdof_vel: qd.Tensor
     cdofvel_ang: qd.Tensor
@@ -2086,6 +2121,8 @@ def get_dofs_state(solver):
         acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
         qf_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
         qf_constraint=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        qf_damping_implicit=V(dtype=gs.qd_float, shape=shape),
+        qacc_damping_implicit=V(dtype=gs.qd_float, shape=shape),
         cdof_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cdof_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cdofvel_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
@@ -2153,6 +2190,9 @@ class LinksState:
     cfrc_coupling_ang: qd.Tensor
     cfrc_coupling_vel: qd.Tensor
     contact_force: qd.Tensor
+    # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
+    # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
+    # again the step it exceeds the tolerance or wakes.
     is_hibernated: qd.Tensor = of_kind(DataKind.STATE)
     awake_steps: qd.Tensor = of_kind(DataKind.STATE)
 
@@ -2841,11 +2881,25 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # single mass block (the common case: one kinematic tree). The tile width is always 32: the path is only taken
     # when the per-entity block exceeds shared memory, which on any real GPU means well over 48 DOFs.
     enable_register_tiled_mass: bool = False
+    # When True, func_solve_init seeds every island's factor with the tiled per-island kernels at any env count. The
+    # monolith self-seeds with the scalar per-island factor otherwise. See the rigid solver's resolution for the gating.
+    enable_tiled_island_seed: bool = False
+    # When True, the scene holds one dof-carrying kinematic tree, so an env forms at most one island and the
+    # per-island passes of the solve read the env's plain dof and row ranges. See the rigid solver's resolution.
+    is_single_island: bool = False
+    # When True, the seed kernel assembles the env's one Hessian block and the monolith factors it with the scalar
+    # dense Cholesky (see _kernel_solve_monolith), a single-island scene above the cooperative bound.
+    has_scalar_seed_factor: bool = False
     # When True, the constraint solver uses the GPU subgroup-cooperative kernel variants (warp-cooperative linesearch
     # refinement, per-friction constraint builder, cooperative mass-matrix assembly), together with the batch-first
     # tensor layouts they expect, eg (_B, len_constraints_) for Jaref / efc_D / ... which unlocks coalesced cross-lane
     # reads.
     enable_cooperative_constraint_kernels: bool = False
+    # When True, the noslip sweep of an island runs on a block of 32 lanes: the island's rows are colored so that the
+    # rows of a color touch disjoint mass blocks, the lanes update the rows of a color in parallel and the colors are
+    # swept in order (see kernel_noslip in noslip.py). The rows are visited in another order than by the one-thread
+    # sweep, so the two sweeps give different iterates. See the rigid solver's resolution for the gating.
+    enable_cooperative_noslip: bool = False
     # Purely descriptive layout flag: True whenever the layout-flippable constraint-state tensors are physically
     # batch-first, i.e. enable_cooperative_constraint_kernels or serialized execution (env loop outermost, so per-env
     # rows must be contiguous). Consumers that only need iteration order to follow the physical layout (ndrange axes,
@@ -2862,14 +2916,8 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # global memory.
     island_tile_cap_first: int = 0
     island_tile_cap_last: int = 0
-    # Number of lanes of each launch of the cooperative per-island factor+solve, grid-striding over its class's
-    # (env, island) work-list in blocks of the class's tile size: static for CUDA-graph capture, independent of the env
-    # count, and sized to keep several warps resident per streaming multiprocessor.
-    island_factor_n_lanes: int = 32
-    max_n_geoms_per_entity: int = -1
-    n_entities: int = -1
-    n_links: int = -1
-    n_geoms: int = -1
+    # Whether an island can hold more dofs than the last cap, which compiles the factor paths above it.
+    has_island_above_tile_cap: bool = False
 
     @property
     def rows_per_contact(self) -> int:
@@ -2886,7 +2934,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
 
     @property
     def hessian_rank_update_batch(self) -> int:
-        """Number of rank-1 Cholesky updates fused into one column sweep by the CPU incremental factor.
+        """Number of rank-1 Cholesky updates fused into one column sweep by the per-island incremental factor.
 
         Sizes the nt_vec slots and the static per-column unroll of func_rank_batch_update_island: 8 amortizes the
         active-set flip batching, widened when the coupled elliptic-cone update must stage 2 slots per cone row
@@ -2904,15 +2952,15 @@ def cholesky_tile_size_for(n_dofs):
     return 16 if (n_dofs <= 16 or 32 < n_dofs <= 48) else 32
 
 
-def island_tile_caps(rigid_config):
+def island_tile_caps(cap_first, cap_last):
     """Ascending dof caps of the shared tiles of the cooperative per-island factor+solve, see island_tile_cap_first:
     the doublings of the first cap below the last one, then the last one."""
     caps = []
-    cap = rigid_config.island_tile_cap_first
-    while cap < rigid_config.island_tile_cap_last:
+    cap = cap_first
+    while cap < cap_last:
         caps.append(cap)
         cap *= 2
-    caps.append(rigid_config.island_tile_cap_last)
+    caps.append(cap_last)
     return tuple(caps)
 
 

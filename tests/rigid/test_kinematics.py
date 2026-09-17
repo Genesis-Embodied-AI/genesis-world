@@ -749,7 +749,7 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
 
     # A limit tightened once the scene is built is the one the planner samples within: a goal it excludes cannot be
     # reached, while one it allows still can, and no waypoint leaves what the solver would let the robot hold.
-    scene.rigid_solver.set_dofs_limit(-DOF_LIMIT, DOF_LIMIT, dofs_idx=range(franka.dof_start, franka.dof_start + 7))
+    franka.set_dofs_limit(-DOF_LIMIT, DOF_LIMIT, dofs_idx_local=slice(0, 7))
     assert_allclose(franka.get_dofs_limit()[1][..., :7], DOF_LIMIT, tol=gs.EPS)
     franka.set_qpos(torch.zeros_like(qpos_goal))
 
@@ -941,7 +941,7 @@ def test_track_rigid(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_kinematics_queries_span_entities_and_solvers(n_envs, show_viewer, tol):
+def test_kinematics_queries(n_envs, show_viewer, tol):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, 1.0, 1.2),

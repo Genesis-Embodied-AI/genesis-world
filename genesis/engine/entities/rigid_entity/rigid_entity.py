@@ -405,12 +405,16 @@ class KinematicEntity(Entity):
 
         # Re-root the whole tree hanging from this entity's base link - scene-wide, because entities previously
         # attached into this one already share its root and must follow it (chained attaches may run in any order);
-        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight.
+        # links of other trees declared in the same file keep their own root, as do the fixed flag and invweight. A
+        # link is fixed when its own joints and every joint above it are fixed, the base link's being gone, so the
+        # flag follows the parent link's down the tree, which the link order walks parents first.
         for link in self._solver.links:
             if link.root_idx == base_link.idx:
                 was_fixed = link.is_fixed
                 link._root_idx = parent_link.root_idx
-                link._is_fixed &= parent_link.is_fixed
+                link._is_fixed = self._solver.links[link.parent_idx].is_fixed and all(
+                    joint.type is gs.JOINT_TYPE.FIXED for joint in link.joints
+                )
 
                 # The attach moves this link into another kinematic tree, so its old tree's inverse weight no longer
                 # applies. The sentinel makes the solver recompute it during its refresh.
@@ -1874,6 +1878,36 @@ class RigidEntity(KinematicEntity):
         for e_desc in self._desc.equalities:
             self._add_equality(e_desc)
 
+    def attach(
+        self,
+        parent_entity,
+        parent_link_name: str | None = None,
+        pos: Vec3FType | None = None,
+        quat: UnitVec4FType | None = None,
+    ):
+        """Attach this entity beneath a link of another one (see KinematicEntity.attach), the slots of its collision
+        vertices following the fixed flags the attach leaves."""
+        super().attach(parent_entity, parent_link_name, pos, quat)
+
+        # This entity's links and geoms move between the free and fixed pools, and the rigid entities created after it
+        # shift behind them
+        n_free_verts = self._free_verts_state_start
+        n_fixed_verts = self._fixed_verts_state_start
+        for entity in self._solver.entities[self._idx_in_solver :]:
+            if isinstance(entity, RigidEntity):
+                entity._free_verts_state_start = n_free_verts
+                entity._fixed_verts_state_start = n_fixed_verts
+                for link in entity.links:
+                    is_fixed_pool = link.is_fixed and not entity._batch_fixed_verts
+                    link._verts_state_start = n_fixed_verts if is_fixed_pool else n_free_verts
+                    for geom in link.geoms:
+                        if is_fixed_pool:
+                            geom._verts_state_start = n_fixed_verts
+                            n_fixed_verts += geom.n_verts
+                        else:
+                            geom._verts_state_start = n_free_verts
+                            n_free_verts += geom.n_verts
+
     def _add_link(self, l_desc):
         """Create one link from a description the resolution completed, with the joints and geoms it carries."""
         parent_idx = l_desc.parent_idx
@@ -2645,6 +2679,26 @@ class RigidEntity(KinematicEntity):
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         self._solver.set_dofs_force_range(lower, upper, dofs_idx, envs_idx)
+
+    @gs.assert_built
+    def set_dofs_limit(self, lower, upper, dofs_idx_local=None, envs_idx=None):
+        """
+        Set the positional limits for the entity's dofs.
+
+        Parameters
+        ----------
+        lower : array_like
+            The lower positional limits.
+        upper : array_like
+            The upper positional limits.
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to set. If None, all dofs will be set. Note that these are local indices, not
+            scene-level indices. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        self._solver.set_dofs_limit(lower, upper, dofs_idx, envs_idx)
 
     @gs.assert_built
     def set_dofs_stiffness(self, stiffness, dofs_idx_local=None, envs_idx=None):

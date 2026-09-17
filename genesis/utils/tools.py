@@ -1,3 +1,6 @@
+import collections
+import contextlib
+import math
 import os
 import time
 
@@ -187,24 +190,79 @@ class Rate:
 
 
 class FPSTracker:
-    """Estimates and logs the achieved step rate over fixed wall-clock windows.
+    """Times the phases of a stepped process and logs its achieved step rate.
 
-    The per-window rate is the actual step count divided by the actual window duration (so it is phase-stable, unlike
+    A step opens with `start`, its phases run under `phase`, named freely, or between `start_phase` and the next
+    `start_phase` or `stop_phase` where a `with` block would indent too much, and `step` closes it: the wall time of
+    every phase timed in the step and of the whole step, under the name `total`, is kept, and `timings` averages the
+    latest `timings_window` of them. When `log` is set, the step rate is logged over fixed wall-clock windows: the
+    per-window rate is the actual step count divided by the actual window duration (so it is phase-stable, unlike
     dividing a raw count by a smoothed time), then lightly EMA-smoothed for readability.
     """
 
-    def __init__(self, n_envs, alpha=0.95, minimum_interval_seconds: float | None = 0.05):
+    def __init__(
+        self,
+        n_envs,
+        alpha=0.95,
+        minimum_interval_seconds: float | None = 0.05,
+        timings_window: int = 1,
+        log: bool = True,
+    ):
         self.n_envs = n_envs
         self.alpha = alpha
         self.minimum_interval_seconds = minimum_interval_seconds
+        self.log = log
         self.window_start = None
         self.steps_since_last_print: int = 0
         self.fps_ema = None
         self.total_fps = 0.0
+        self._step_start = None
+        self._phase_open: tuple[str, float] | None = None
+        self._phases_time: dict[str, float] = {}
+        self._timings_history: collections.deque[dict[str, float]] = collections.deque(maxlen=timings_window)
 
-    def step(self, current_time: float | None = None) -> float | None:
-        if not current_time:
+    def start(self):
+        """Open a step: the phases timed from here on belong to it."""
+        self._step_start = time.perf_counter()
+        self._phase_open = None
+        self._phases_time.clear()
+
+    def start_phase(self, phase: str):
+        """Time the code that follows as part of the phase, until the next `start_phase` or `stop_phase`, which lets
+        a loop time each of its iterations under its own phase without a `with` block. A phase running from a previous
+        `start_phase` stops here."""
+        self.stop_phase()
+        self._phase_open = (phase, time.perf_counter())
+
+    def stop_phase(self):
+        """Stop the phase `start_phase` opened, adding its time to what the phase already took in this step."""
+        if self._phase_open is not None:
+            phase, tic = self._phase_open
+            self._phases_time[phase] = self._phases_time.get(phase, 0.0) + time.perf_counter() - tic
+            self._phase_open = None
+
+    @contextlib.contextmanager
+    def phase(self, phase: str):
+        """Time the enclosed code as part of the phase of the current step, adding to the time the phase already
+        took in this step. Blocks nest, each adding to its own phase."""
+        tic = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._phases_time[phase] = self._phases_time.get(phase, 0.0) + time.perf_counter() - tic
+
+    def step(self, count: bool = True, current_time: float | None = None) -> float | None:
+        """Close the step and keep its timings. A counted step enters the step rate, which is logged once the
+        wall-clock window is long enough for a stable estimate, and returned then. current_time stands in for the
+        clock, for a step whose phases were not timed."""
+        self.stop_phase()
+        if current_time is None:
             current_time = time.perf_counter()
+        if self._step_start is not None:
+            self._phases_time["total"] = current_time - self._step_start
+        self._timings_history.append(dict(self._phases_time))
+        if not self.log or not count:
+            return None
 
         if self.window_start is None:
             self.window_start = current_time
@@ -232,3 +290,13 @@ class FPSTracker:
         self.window_start = current_time
         self.steps_since_last_print = 0
         return self.total_fps
+
+    @property
+    def timings(self) -> dict[str, float]:
+        """Wall time in seconds of every phase timed in the latest `timings_window` steps, averaged over the steps that
+        timed it."""
+        phases_time = collections.defaultdict(list)
+        for step_phases_time in self._timings_history:
+            for phase, phase_time in step_phases_time.items():
+                phases_time[phase].append(phase_time)
+        return {phase: sum(phase_times) / len(phase_times) for phase, phase_times in phases_time.items()}

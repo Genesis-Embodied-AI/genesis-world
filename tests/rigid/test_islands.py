@@ -194,6 +194,56 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
 
 
 @pytest.mark.required
+def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
+    # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
+    # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike. The
+    # arms of the first env start lower, so its islands merge first.
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -4.0, 1.5),
+            camera_lookat=(1.5, 0.0, 0.8),
+        ),
+        show_viewer=show_viewer,
+    )
+    plane = scene.add_entity(gs.morphs.Plane())
+    dual_arm = scene.add_entity(
+        gs.morphs.URDF(
+            file=fixed_base_dual_arm,
+            pos=(0.0, 0.0, 1.0),
+            fixed=True,
+        )
+    )
+    dual_arm_welded = scene.add_entity(
+        gs.morphs.URDF(
+            file=fixed_base_dual_arm,
+            pos=(3.0, 0.0, 1.0),
+        )
+    )
+    scene.build(n_envs=2)
+    scene.rigid_solver.add_weld_constraint(dual_arm_welded.base_link_idx, plane.base_link_idx)
+    dual_arm.set_dofs_position([[0.9, -0.9], [0.0, 0.0]])
+    dual_arm_welded.set_dofs_position([[0.9, -0.9], [0.0, 0.0]], dofs_idx_local=[6, 7])
+    n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
+
+    # The welded dual arm is one island, the two arms of the fixed dual arm are two islands until they touch, one from
+    # then on. Until the arms touch the twins fall alike, at rest they settle alike up to the compliance of the weld.
+    has_envs_differed = False
+    for i_step in range(80):
+        scene.step()
+        is_arms_touching = tensor_to_array(dual_arm.get_contacts(with_entity=dual_arm)["valid_mask"].any(dim=-1))
+        assert_equal(qd_to_numpy(n_islands), 3 - is_arms_touching)
+        has_envs_differed |= is_arms_touching[0] != is_arms_touching[1]
+        if i_step == 0:
+            assert not is_arms_touching.any()
+        if i_step == 39:
+            arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
+            assert_allclose(arms_qpos_diff[~is_arms_touching], 0.0, tol=1e-3)
+            assert_allclose(arms_qpos_diff[is_arms_touching], 0.0, tol=5e-3)
+    assert has_envs_differed
+    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_partition_track_changes(show_viewer, n_envs):
     # The partition is rebuilt every step, so it must track contacts forming (merge) and breaking (split).
@@ -225,17 +275,14 @@ def test_partition_track_changes(show_viewer, n_envs):
     # The step rebuilds the partition; read the island count the solver actually used this step.
     island_state = scene.rigid_solver.constraint_solver.constraint_state.island
 
-    def n_islands_now():
-        return qd_to_numpy(island_state.n_islands)
-
     scene.step()
-    assert_equal(n_islands_now(), 2)
+    assert_equal(qd_to_numpy(island_state.n_islands), 2)
     for _ in range(45):
         scene.step()
-    assert_equal(n_islands_now(), 1)
+    assert_equal(qd_to_numpy(island_state.n_islands), 1)
     box_upper.set_pos([0.0, 0.0, 0.40])
     scene.step()
-    assert_equal(n_islands_now(), 2)
+    assert_equal(qd_to_numpy(island_state.n_islands), 2)
 
 
 @pytest.mark.required
@@ -752,6 +799,13 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         scene.step()
     assert not asleep(box_cpos) and (z_of(box_cpos) > z0 + 0.05).all()
 
+    # A body its controller holds at the target stays awake for as long as the hold lasts, since the actuation pass
+    # wakes any sleeping link it actuates. It settles where the controller's stiffness carries its weight.
+    for _ in range(40):
+        scene.step()
+        assert not asleep(box_cpos)
+    assert_allclose(z_of(box_cpos), 0.6 - box_cpos.get_mass() * G / 400.0, atol=0.01)
+
     # A mass or an armature written moves the equilibrium a resting body found, so a body it is written on must wake
     # to settle into the new one. Both writes are made while the body sleeps, and the weight they land on is the
     # analytic one of a free body.
@@ -780,7 +834,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("broadphase_traversal", [None, gs.broadphase_traversal.ALL_VS_ALL], ids=["sap", "allvsall"])
+@pytest.mark.parametrize("broadphase_traversal", [gs.broadphase_traversal.SAP, gs.broadphase_traversal.ALL_VS_ALL])
 def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversal, multi_free_body_path):
     # An awake body striking a sleeping one must wake it so it responds instead of acting as an immovable obstacle.
     # This needs the broad-phase sort-buffer refresh of awake geoms (so the contact is detected) and the wake-on-contact
@@ -841,8 +895,22 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     lifted[..., 2] += 0.6
     solver.set_base_links_pos(lifted, links_idx=late.idx)
 
+    # A sleeper keeps the contacts of the step it fell asleep, listed in the same order, so the getters report them
+    # where they stood.
+    boxes_contacts_pos = None
+    is_boxes_asleep = False
     for _ in range(60):
         scene.step()
+        contacts = [box.get_contacts() for box in (box_rest, box_hit)]
+        if n_envs > 0:
+            contacts_pos = [contact["position"][contact["valid_mask"]] for contact in contacts]
+        else:
+            contacts_pos = [contact["position"] for contact in contacts]
+        if is_boxes_asleep:
+            for contact_pos, contact_pos_prev in zip(contacts_pos, boxes_contacts_pos):
+                assert_equal(contact_pos, contact_pos_prev)
+        boxes_contacts_pos = contacts_pos
+        is_boxes_asleep = asleep(box_rest) and asleep(box_hit)
     assert asleep(box_rest) and asleep(box_hit)
     # The bodies that landed first sleep while the one still falling does not.
     assert all(link_asleep(link) for link in multibody_bases[:-1])
@@ -860,13 +928,36 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
         assert_equal(box.get_links_net_contact_force(), contact_force)
         assert_allclose(contact_force[..., 0, 2], -GRAVITY * box.get_mass(), tol=2e-3)
     rest_x0 = box_rest.get_pos()[..., 0]
+    rest_z0 = box_rest.get_pos()[..., 2]
+
+    # The contacts of the bodies that stay asleep through the strike are listed as they stood before it.
+    sleepers_links_idx = [link.idx for link in multibody_bases if link_asleep(link)]
+
+    def sleepers_contacts():
+        contacts = multibody.get_contacts()
+        links_a = tensor_to_array(contacts["link_a"])
+        links_b = tensor_to_array(contacts["link_b"])
+        is_sleeper = np.isin(links_a, sleepers_links_idx) | np.isin(links_b, sleepers_links_idx)
+        if n_envs > 0:
+            is_sleeper &= tensor_to_array(contacts["valid_mask"])
+        return links_a[is_sleeper], links_b[is_sleeper], tensor_to_array(contacts["position"])[is_sleeper]
+
+    sleepers_contacts0 = sleepers_contacts()
 
     box_hit.set_dofs_velocity([-2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    rest_z_at_wake = None
     for _ in range(30):
         scene.step()
+        if rest_z_at_wake is None and not asleep(box_rest):
+            rest_z_at_wake = box_rest.get_pos()[..., 2]
+    assert all(link_asleep(link) for link in multibody_bases if link.idx in sleepers_links_idx)
+    for contacts_field, contacts_field0 in zip(sleepers_contacts(), sleepers_contacts0):
+        assert_equal(contacts_field, contacts_field0)
 
-    # The struck sleeper woke and was knocked; the striker was stopped by it (did not tunnel through).
+    # The struck box woke and slid, and the striker stopped against it. The box held its height the step it woke
+    # because the ground contacts kept while it slept joined that solve.
     assert not asleep(box_rest)
+    assert (rest_z_at_wake > rest_z0 - 5e-4).all()
     rest_x1 = box_rest.get_pos()[..., 0]
     hit_x1 = box_hit.get_pos()[..., 0]
     assert (rest_x1 < rest_x0 - 1e-3).all()

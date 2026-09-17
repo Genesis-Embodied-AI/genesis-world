@@ -9,6 +9,7 @@ from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAP
 from genesis.repr_base import RBC
 from genesis.utils.array_class import DataItem, DataKind
 from genesis.utils.misc import indices_to_mask
+from genesis.utils.tools import FPSTracker
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
@@ -54,6 +55,13 @@ class Simulator(RBC):
 
     def __init__(self, scene: "Scene", options: "SceneOptions"):
         self._scene = scene
+        # The environment count the FPS log reports is known at `build`
+        self._fps_tracker = FPSTracker(
+            n_envs=0,
+            alpha=options.profiling.FPS_tracker_alpha,
+            timings_window=options.profiling.timings_window,
+            log=options.profiling.show_FPS,
+        )
 
         # options
         self.options = options.sim
@@ -155,6 +163,7 @@ class Simulator(RBC):
 
     def build(self):
         self.n_envs = self.scene.n_envs
+        self._fps_tracker.n_envs = self.n_envs
         self._B = self.scene._B
         self._para_level = self.scene._para_level
 
@@ -346,23 +355,25 @@ class Simulator(RBC):
         if not in_backward:
             self._steps += 1
 
-        if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
-            for _ in range(self._substeps):
-                self.rigid_solver.substep(self.cur_substep_local)
-                self._cur_substep_global += 1
-        else:
-            self.process_input(in_backward=in_backward)
-            for _ in range(self._substeps):
-                self.substep(self.cur_substep_local)
+        with self._fps_tracker.phase("physics"):
+            if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
+                for _ in range(self._substeps):
+                    self.rigid_solver.substep(self.cur_substep_local)
+                    self._cur_substep_global += 1
+            else:
+                self.process_input(in_backward=in_backward)
+                for _ in range(self._substeps):
+                    self.substep(self.cur_substep_local)
 
-                self._cur_substep_global += 1
-                if self.cur_substep_local == 0 and not in_backward:
-                    self.save_ckpt()
+                    self._cur_substep_global += 1
+                    if self.cur_substep_local == 0 and not in_backward:
+                        self.save_ckpt()
 
-        if self.rigid_solver.is_active:
-            self.rigid_solver.clear_external_force()
+            if self.rigid_solver.is_active:
+                self.rigid_solver.clear_external_force()
 
-        self._sensor_manager.step()
+        with self._fps_tracker.phase("sensors"):
+            self._sensor_manager.step()
 
     def _step_grad(self):
         self._steps -= 1
@@ -568,6 +579,11 @@ class Simulator(RBC):
     def cur_step_local(self):
         """The current step of the simulation in local memory."""
         return self.f_global_to_s_local(self._cur_substep_global)
+
+    @property
+    def fps_tracker(self):
+        """The tracker timing the phases of the steps and logging the step rate (FPSTracker in genesis.utils.tools)."""
+        return self._fps_tracker
 
     @property
     def cur_step_global(self):

@@ -1332,6 +1332,7 @@ def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_to
             max_collision_pairs=1200,
             contact_pruning_tolerance=contact_pruning_tolerance,
             use_gjk_collision=True,
+            noslip_iterations=2,
         ),
         show_viewer=show_viewer,
     )

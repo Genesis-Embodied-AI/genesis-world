@@ -4,6 +4,7 @@ from typing import Literal, Sequence
 import mujoco
 import numpy as np
 import pytest
+import scipy.optimize
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -521,121 +522,39 @@ def _compute_efc_tolerances(mj_sim, tol):
 
 
 def _pair_constraint_rows(gs_sim, mj_sim, gs_dofs_idx, mj_dofs_idx, *, qvel_prev, tol, efc_atol):
-    """Pair the engines' constraint rows, validating each candidate pairing on the row jacobians, impedances,
-    reference accelerations and row velocities. Returns the (gs_sidx, mj_sidx) permutations of the first candidate
-    that passes, raising the last validation error when none does.
+    """Pair the engines' constraint rows and return the (gs_sidx, mj_sidx) permutations that align them.
+
+    A row is identified by its jacobian, its impedance, its reference acceleration and its velocity, each compared
+    to its own tolerance: the assignment minimizing the summed normalized mismatches pairs the rows, and every pair is
+    then validated criterion by criterion. The jacobian alone tells apart the rows of different contacts, the rows of
+    a friction pyramid whichever tangent the engines label first, and the limit rows. The reference acceleration and
+    the row velocity separate rows sharing a jacobian, such as the two sides of a bilateral constraint.
     """
     gs_n_constraints = gs_sim.rigid_solver.constraint_solver.n_constraints.to_numpy()[0]
     mj_n_constraints = mj_sim.data.nefc
     assert gs_n_constraints == mj_n_constraints
-    gs_n_contacts = gs_sim.rigid_solver.collider.collider_state.n_contacts.to_numpy()[0]
-    mj_n_contacts = mj_sim.data.ncon
-    gs_contact_pos = gs_sim.rigid_solver.collider.collider_state.contact_data.pos.to_numpy()[:gs_n_contacts, 0]
-    mj_contact_pos = mj_sim.data.contact.pos
-    gs_contact_geoms = np.stack(
-        (
-            gs_sim.rigid_solver.collider.collider_state.contact_data.geom_a.to_numpy()[:gs_n_contacts, 0],
-            gs_sim.rigid_solver.collider.collider_state.contact_data.geom_b.to_numpy()[:gs_n_contacts, 0],
-        ),
-        axis=-1,
-    )
-    mj_contact_geoms = np.stack(
-        (mj_sim.data.contact.geom1[:mj_n_contacts], mj_sim.data.contact.geom2[:mj_n_contacts]), axis=-1
-    )
-
-    # FIXME: It is not always possible to reshape Mujoco jacobian because joint bound constraints are computed in
-    # "sparse" dof space, unlike contact constraints.
-    error = None
     gs_jac = gs_sim.rigid_solver.constraint_solver.jac.to_numpy()[:gs_n_constraints, :, 0]
     mj_jac = mj_sim.data.efc_J.reshape([mj_n_constraints, -1])
+    gs_jac_dofs, mj_jac_dofs = gs_jac[:, gs_dofs_idx], mj_jac[:, mj_dofs_idx]
     gs_efc_D = gs_sim.rigid_solver.constraint_solver.efc_D.to_numpy()[:gs_n_constraints, 0]
     mj_efc_D = mj_sim.data.efc_D
     gs_efc_aref = gs_sim.rigid_solver.constraint_solver.aref.to_numpy()[:gs_n_constraints, 0]
     mj_efc_aref = mj_sim.data.efc_aref
 
-    # Constraint rows are paired by identity. A contact's rows are contiguous on both sides, since Genesis places
-    # them after the equality and frictionloss rows in the order contact_sort_idx defines and MuJoCo labels them
-    # by efc_id, so pairing the contacts pairs their rows. Genesis orders the two opposing rows of a pyramidal
-    # friction axis the other way round from MuJoCo, hence the swap in twos; an elliptic cone has no such pairs
-    # and keeps its order. A joint-limit row constrains a single DOF, which identifies it within its own family.
-    mj_efc_type = mj_sim.data.efc_type[:mj_n_constraints]
-    mj_efc_id = mj_sim.data.efc_id[:mj_n_constraints]
-    is_mj_contact = np.isin(
-        mj_efc_type,
-        (
-            int(mujoco.mjtConstraint.mjCNSTR_CONTACT_FRICTIONLESS),
-            int(mujoco.mjtConstraint.mjCNSTR_CONTACT_PYRAMIDAL),
-            int(mujoco.mjtConstraint.mjCNSTR_CONTACT_ELLIPTIC),
-        ),
-    )
-    is_mj_limit = np.isin(
-        mj_efc_type,
-        (int(mujoco.mjtConstraint.mjCNSTR_LIMIT_JOINT), int(mujoco.mjtConstraint.mjCNSTR_LIMIT_TENDON)),
-    )
-    is_mj_pyramidal = mj_efc_type == int(mujoco.mjtConstraint.mjCNSTR_CONTACT_PYRAMIDAL)
-    n_mj_contact_rows = int(is_mj_contact.sum())
-    n_head = mj_n_constraints - n_mj_contact_rows - int(is_mj_limit.sum())
-    rows_per_contact = n_mj_contact_rows // mj_n_contacts if mj_n_contacts else 0
-
-    gs_contact_sort_idx = gs_sim.rigid_solver.collider.collider_state.contact_sort_idx.to_numpy()[:gs_n_contacts, 0]
-    gs_block_of_contact = np.empty(gs_n_contacts, dtype=int)
-    gs_block_of_contact[gs_contact_sort_idx] = np.arange(gs_n_contacts)
-
-    # Contacts are paired by ordering both sides the same way: geom pair first, then position. Positions agree to
-    # rounding once the pair is fixed, so the order is the same sequence on both sides.
-    gs_order = np.lexsort((*gs_contact_pos.T[::-1], *gs_contact_geoms.T[::-1]))
-    mj_order = np.lexsort((*mj_contact_pos.T[::-1], *mj_contact_geoms.T[::-1]))
-    gs_rows, mj_rows = list(range(n_head)), list(np.flatnonzero(~(is_mj_contact | is_mj_limit)))
-    for i_c, i_m in zip(gs_order, mj_order):
-        mj_contact_rows = np.flatnonzero(is_mj_contact & (mj_efc_id == i_m))
-        if len(mj_contact_rows) and is_mj_pyramidal[mj_contact_rows].all():
-            mj_contact_rows = mj_contact_rows.reshape(-1, 2)[:, ::-1].ravel()
-        gs_rows.extend(n_head + gs_block_of_contact[i_c] * rows_per_contact + np.arange(rows_per_contact))
-        mj_rows.extend(mj_contact_rows)
-
-    gs_limit_rows = np.arange(n_head + n_mj_contact_rows, gs_n_constraints)
-    mj_limit_rows = np.flatnonzero(is_mj_limit)
-    gs_dof_of_mj_dof = {mj_d: gs_d for gs_d, mj_d in zip(gs_dofs_idx, mj_dofs_idx)}
-    gs_rows.extend(gs_limit_rows[np.argsort([int(np.argmax(np.abs(gs_jac[i]))) for i in gs_limit_rows], kind="stable")])
-    mj_rows.extend(
-        mj_limit_rows[
-            np.argsort([gs_dof_of_mj_dof[int(np.argmax(np.abs(mj_jac[i])))] for i in mj_limit_rows], kind="stable")
-        ]
-    )
-
-    # The value sorts come first because they need nothing of the layout; the identity pairing is the fallback
-    # for rows sharing their sorting key. The row velocities separate what the other keys tie on: symmetric
-    # contacts, and friction pyramids whose tangent pair the engines label in a different order at fp32.
-    pairing_candidates = [
-        (np.argsort(gs_jac.sum(axis=1)), np.argsort(mj_jac.sum(axis=1))),
-        (np.argsort(gs_efc_aref), np.argsort(mj_efc_aref)),
-    ]
+    cost = np.abs(gs_jac_dofs[:, None] - mj_jac_dofs[None]).max(axis=-1) / tol
+    cost += np.abs(gs_efc_D[:, None] - mj_efc_D[None]) / efc_atol
+    cost += np.abs(gs_efc_aref[:, None] - mj_efc_aref[None]) / efc_atol
     if qvel_prev is not None:
-        pairing_candidates.append((np.argsort(gs_jac @ qvel_prev), np.argsort(mj_sim.data.efc_vel)))
-    pairing_candidates.append((np.array(gs_rows, dtype=int), np.array(mj_rows, dtype=int)))
-    for gs_sidx, mj_sidx in pairing_candidates:
-        try:
-            gs_jac_nz_mask = (np.abs(gs_jac[gs_sidx]) > 0.0).all(axis=0)
-            gs_jac_nz = gs_jac[gs_sidx][:, np.array(gs_dofs_idx)[gs_jac_nz_mask[gs_dofs_idx]]]
-            mj_jac_nz_mask = np.zeros_like(gs_jac_nz_mask, dtype=np.bool_)
-            mj_jac_nz_mask[mj_dofs_idx] = gs_jac_nz_mask[gs_dofs_idx]
-            if mj_jac.shape[-1] == len(mj_dofs_idx):
-                mj_jac_nz = mj_jac[mj_sidx][:, np.array(mj_dofs_idx)[mj_jac_nz_mask[mj_dofs_idx]]]
-            else:
-                mj_jac_nz = mj_jac[mj_sidx]
+        gs_efc_vel = gs_jac @ qvel_prev
+        cost += np.abs(gs_efc_vel[:, None] - mj_sim.data.efc_vel[None]) / tol
+    gs_sidx, mj_sidx = scipy.optimize.linear_sum_assignment(cost)
 
-            assert_allclose(gs_jac_nz, mj_jac_nz, tol=tol)
-            assert_allclose(gs_efc_D[gs_sidx], mj_efc_D[mj_sidx], atol=efc_atol, rtol=tol)
-            assert_allclose(gs_efc_aref[gs_sidx], mj_efc_aref[mj_sidx], atol=efc_atol, rtol=tol)
-            # Row velocities discriminate identically-parameterized rows (e.g. symmetric contacts), which the
-            # jacobian column mask and the amplified D/aref floors cannot separate.
-            if qvel_prev is not None:
-                assert_allclose((gs_jac @ qvel_prev)[gs_sidx], mj_sim.data.efc_vel[mj_sidx], tol=tol)
-            return gs_sidx, mj_sidx
-        except AssertionError as e:
-            error = e
-    assert error is not None
-    raise error
+    assert_allclose(gs_jac_dofs[gs_sidx], mj_jac_dofs[mj_sidx], tol=tol)
+    assert_allclose(gs_efc_D[gs_sidx], mj_efc_D[mj_sidx], atol=efc_atol, rtol=tol)
+    assert_allclose(gs_efc_aref[gs_sidx], mj_efc_aref[mj_sidx], atol=efc_atol, rtol=tol)
+    if qvel_prev is not None:
+        assert_allclose(gs_efc_vel[gs_sidx], mj_sim.data.efc_vel[mj_sidx], tol=tol)
+    return gs_sidx, mj_sidx
 
 
 def check_mujoco_data_consistency(

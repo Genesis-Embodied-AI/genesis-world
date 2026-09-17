@@ -271,17 +271,18 @@ def kernel_accumulate_constraint_solver_grads(
     rigid_config: qd.template(),
 ):
     """Fold the constraint-solver adjoint outputs into the autodiff grad fields:
-    dyn_state.dofs.force.grad += constraint_state.dL_dforce
-    rigid_info.mass_mat.grad  += constraint_state.dL_dM
+    dyn_state.dofs.qf_smooth.grad += constraint_state.dL_dforce
+    rigid_info.mass_mat.grad      += constraint_state.dL_dM
+    The solve reads its smooth force from qf_smooth (see func_solve_init), so its gradient lands there.
     """
-    _B = dyn_state.dofs.force.shape[1]
-    n_dofs = dyn_state.dofs.force.shape[0]
+    _B = dyn_state.dofs.qf_smooth.shape[1]
+    n_dofs = dyn_state.dofs.qf_smooth.shape[0]
     qd.loop_config(
         name="kernel_accumulate_constraint_solver_grads",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
     for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.force.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
+        dyn_state.dofs.qf_smooth.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
     for i, j, i_b in qd.ndrange(n_dofs, n_dofs, _B):
         rigid_info.mass_mat.grad[i, j, i_b] += constraint_state.dL_dM[i, j, i_b]
 
@@ -370,7 +371,8 @@ def kernel_manual_add_joint_limit_constraints_bw(
         )
         if qd.static(enable_collision):
             n_con_counter = n_con_counter + gs.qd_int(
-                collider_state.n_contacts[i_b] * qd.static(rigid_config.rows_per_contact)
+                (collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b])
+                * qd.static(rigid_config.rows_per_contact)
             )
 
         for i_l in range(n_links):
@@ -478,10 +480,11 @@ def kernel_manual_add_collision_constraints_bw(
     for flat_idx in range(max_contact_pairs * _B):
         i_b = flat_idx % _B
         i_col_ = flat_idx // _B
-        if i_col_ < collider_state.n_contacts[i_b]:
-            # The forward assembles the contact rows in logical (sorted) contact order: row group i_col_ maps to
-            # physical contact contact_sort_idx[i_col_] (see add_inequality_constraints).
-            i_col = collider_state.contact_sort_idx[i_col_, i_b]
+        n_hib = collider_state.n_contacts_hibernated[i_b]
+        if i_col_ < collider_state.n_contacts[i_b] - n_hib:
+            # The forward assembles the contact rows in logical (sorted) order of the live contacts: row group i_col_
+            # maps to physical contact contact_sort_idx[n_hib + i_col_] (see add_inequality_constraints).
+            i_col = collider_state.contact_sort_idx[n_hib + i_col_, i_b]
             link_a = collider_state.contact_data.link_a[i_col, i_b]
             link_b = collider_state.contact_data.link_b[i_col, i_b]
             contact_pos = collider_state.contact_data.pos[i_col, i_b]
