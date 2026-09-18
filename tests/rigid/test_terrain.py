@@ -442,3 +442,78 @@ def test_multicontact_sphere_vs_terrain(show_viewer, tol):
 
     vel_final = tensor_to_array(sphere.get_dofs_velocity())
     assert_allclose(vel_final, 0.0, tol=1e-5)
+
+
+@pytest.mark.required
+def test_terrain_has_no_support_table(tol):
+    # A terrain is queried through the prism built from its height field, never through the sampled support table, so
+    # it must not pay for one: its vertex count (one per height field sample) makes it the costliest of the scene.
+    BOX_SIZE = (0.2, 0.2, 0.1)
+
+    scene = gs.Scene(
+        show_viewer=False,
+        show_FPS=False,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Terrain(
+            pos=(-2.0, -2.0, 0.0),
+            height_field=np.zeros((17, 17), dtype=np.float32),
+            horizontal_scale=0.25,
+        ),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=(trimesh.creation.box(extents=BOX_SIZE),),
+            pos=(0.0, 0.0, BOX_SIZE[2] / 2 + 0.05),
+            decimate=False,
+        ),
+    )
+    scene.build()
+
+    support_field = scene.rigid_solver.collider._support_field
+    assert support_field.is_active
+    info = support_field._support_field_info
+    cell_start = info.support_cell_start.to_numpy()
+    n_cells = np.diff((*cell_start, info.support_v.shape[0]))
+    geoms_type = np.array([geom.type for geom in scene.rigid_solver.geoms])
+    assert (geoms_type == gs.GEOM_TYPE.TERRAIN).sum() == 1
+    assert_allclose(n_cells[geoms_type == gs.GEOM_TYPE.TERRAIN], 0, tol=0)
+    assert (n_cells[geoms_type == gs.GEOM_TYPE.MESH] > 0).all()
+
+    # The mesh still collides with the terrain through its own table.
+    for _ in range(200):
+        scene.step()
+    assert_allclose(box.get_pos()[2], BOX_SIZE[2] / 2, tol=5e-3)
+    assert_allclose(box.get_vel(), 0.0, tol=5e-3)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("double_sided", [False, True])
+def test_heightfield_mesh_simplified_only_if_double_sided(double_sided, monkeypatch):
+    # The simplified closed mesh is only rendered by a double-sided surface; simplifying is the costliest step of the
+    # conversion by far, so a single-sided surface must skip it.
+    n_calls = 0
+    simplify = tu.fast_simplification.simplify
+
+    def counting_simplify(*args, **kwargs):
+        nonlocal n_calls
+        n_calls += 1
+        return simplify(*args, **kwargs)
+
+    monkeypatch.setattr(tu.fast_simplification, "simplify", counting_simplify)
+
+    height_field = np.zeros((9, 7), dtype=np.float32)
+    height_field[3:6, 2:5] = 40.0
+    surface = gs.surfaces.Default(double_sided=double_sided)
+    vmesh, sdf_mesh = tu.convert_heightfield_to_watertight_trimesh(
+        height_field, horizontal_scale=0.25, vertical_scale=0.005, surface=surface
+    )
+
+    assert n_calls == int(double_sided)
+    assert sdf_mesh.is_watertight
+    assert len(sdf_mesh.vertices) == 2 * height_field.size
+    if double_sided:
+        assert vmesh.is_watertight
+    else:
+        assert len(vmesh.vertices) == height_field.size
+        assert_allclose(vmesh.vertices[:, 2].reshape(height_field.shape), height_field * 0.005, tol=gs.EPS)

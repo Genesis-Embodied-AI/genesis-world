@@ -387,6 +387,11 @@ def convert_heightfield_to_watertight_trimesh(
 
     sdf_mesh = trimesh.Trimesh(vertices, triangles, process=False, visual=visual)
 
+    # A single-sided surface renders the top face alone, so the closed mesh needs no simplified twin. Simplifying it is
+    # the costliest step of the conversion by far on a large height field.
+    if not surface.double_sided:
+        return vmesh_single, sdf_mesh
+
     # This is the mesh used for non-sdf purposes.
     # It's losslessly simplified from the full mesh, to save memory cost for storing verts and faces.
     v_simp, f_simp = fast_simplification.simplify(sdf_mesh.vertices, sdf_mesh.faces, target_count=0, lossless=True)
@@ -401,8 +406,7 @@ def convert_heightfield_to_watertight_trimesh(
         visual = trimesh.visual.TextureVisuals(uv=uv_simp)
     vmesh_full = trimesh.Trimesh(v_simp, f_simp, visual=visual)
 
-    vmesh_out = vmesh_single if not surface.double_sided else vmesh_full
-    return vmesh_out, sdf_mesh
+    return vmesh_full, sdf_mesh
 
 
 def mesh_to_heightfield(
