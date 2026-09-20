@@ -2096,6 +2096,62 @@ def func_add_cone_hessian_block(
 
 
 @qd.func
+def func_add_cone_hessian_block_coop(
+    i_b,
+    tid,
+    constraint_state: array_class.ConstraintState,
+    rigid_config: qd.template(),
+    is_removal: qd.template(),
+    scale_by_jacobi: qd.template(),
+):
+    """Accumulate J_c^T H_c J_c into nt_H[i_b] (see func_add_cone_hessian_block) by the _K lanes of the env's block.
+
+    The cones are taken in turn, every lane forming the cone's local block and the lanes striping the square of its
+    dof support, the lower triangle written and the upper one skipped, one entry of nt_H per pair. Two cones on the
+    same links share entries, so the lanes sync between cones. The lanes leave in sync.
+    """
+    _K = qd.static(32)
+    n_rows = qd.static(rigid_config.rows_per_contact)
+    ne = constraint_state.n_constraints_equality[i_b]
+    nef = ne + constraint_state.n_constraints_frictionloss[i_b]
+    n_cone = constraint_state.n_constraints_cone[i_b]
+    for i_cone in range(n_cone // n_rows):
+        i_head = nef + i_cone * n_rows
+        rows_efc_D, rows_friction, con_mu, rows_jaref = _func_cone_head_load(
+            i_head, i_b, constraint_state, rigid_config
+        )
+        zone, N, T = _func_cone_zone(rows_jaref, rows_efc_D, con_mu, rows_friction, rigid_config)
+        if zone == 2:
+            _rows_force, _cost, cone_H = _func_cone_middle(
+                rows_jaref, rows_efc_D, con_mu, rows_friction, N, T, rigid_config
+            )
+            jac_n = constraint_state.jac_n_dofs[i_head, i_b]
+            n_pairs = jac_n * jac_n
+            for i_chunk_ in range((n_pairs + _K - 1) // _K):
+                i_pair = i_chunk_ * _K + tid
+                i_d1_ = i_pair // jac_n
+                i_d2_ = i_pair - i_d1_ * jac_n
+                if i_pair < n_pairs and i_d2_ <= i_d1_:
+                    i_d1 = constraint_state.jac_dofs_idx[i_head, i_d1_, i_b]
+                    i_d2 = constraint_state.jac_dofs_idx[i_head, i_d2_, i_b]
+                    row = qd.max(i_d1, i_d2)
+                    col = qd.min(i_d1, i_d2)
+                    rows_jac_row = qd.Vector.zero(gs.qd_float, n_rows)
+                    rows_jac_col = qd.Vector.zero(gs.qd_float, n_rows)
+                    for i_r in qd.static(range(n_rows)):
+                        rows_jac_row[i_r] = constraint_state.jac[i_head + i_r, row, i_b]
+                        rows_jac_col[i_r] = constraint_state.jac[i_head + i_r, col, i_b]
+                    block = _func_cone_block_product(cone_H, rows_jac_row, rows_jac_col)
+                    # The block rides the stored Jacobi scale of nt_H, see nt_jacobi in array_class.py
+                    if qd.static(scale_by_jacobi):
+                        block = block * constraint_state.nt_jacobi[row, i_b] * constraint_state.nt_jacobi[col, i_b]
+                    if qd.static(is_removal):
+                        block = -block
+                    constraint_state.nt_H[i_b, row, col] = constraint_state.nt_H[i_b, row, col] + block
+        qd.simt.block.sync()
+
+
+@qd.func
 def func_wrap_cone_hessian(
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
@@ -2112,16 +2168,35 @@ def func_wrap_cone_hessian(
     """
     if qd.static(rigid_config.enable_elliptic_friction):
         _B = constraint_state.jac.shape[2]
-        qd.loop_config(name="wrap_cone_hessian", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32)
-        for i_b in range(_B):
-            if is_enabled and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
-                func_add_cone_hessian_block(
-                    i_b,
-                    constraint_state,
-                    rigid_config,
-                    is_removal=is_removal,
-                    scale_by_jacobi=rigid_config.enable_jacobi_equilibration,
-                )
+        if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+            # The cones of an env by the lanes of its block, see func_add_cone_hessian_block_coop.
+            _K = qd.static(32)
+            qd.loop_config(name="wrap_cone_hessian", block_dim=_K)
+            for i_flat in range(_B * _K):
+                tid = i_flat % _K
+                i_b = i_flat // _K
+                if is_enabled and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
+                    func_add_cone_hessian_block_coop(
+                        i_b,
+                        tid,
+                        constraint_state,
+                        rigid_config,
+                        is_removal=is_removal,
+                        scale_by_jacobi=rigid_config.enable_jacobi_equilibration,
+                    )
+        else:
+            qd.loop_config(
+                name="wrap_cone_hessian", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL, block_dim=32
+            )
+            for i_b in range(_B):
+                if is_enabled and constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
+                    func_add_cone_hessian_block(
+                        i_b,
+                        constraint_state,
+                        rigid_config,
+                        is_removal=is_removal,
+                        scale_by_jacobi=rigid_config.enable_jacobi_equilibration,
+                    )
 
 
 @qd.func
