@@ -23,7 +23,8 @@ from functools import lru_cache, partial
 from typing import Callable, NamedTuple
 
 import numpy as np
-from pydantic import TypeAdapter, ValidationError
+from frozendict import frozendict
+from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInfo
 
 import genesis as gs
 from genesis.options.options import Options
@@ -125,6 +126,27 @@ def _class_codec(cls) -> tuple[Callable, Callable] | None:
         if parent in _REGISTERED:
             return _REGISTERED[parent]
     return None
+
+
+# Validators receive it as 'info.context' while a value read from a file is checked (see 'ignore_invalid_load').
+_FROM_FILE = frozendict({"from_file": True})
+
+
+def ignore_invalid_load(accepted: Iterable) -> AfterValidator:
+    """Returns a validator loading a recorded value outside 'accepted' as None, the unset state of an optional field.
+
+    A value a file records holds wherever the file was written. A field whose values hold there and nowhere else
+    declares beside its type, through this, which of them hold on this machine, so the file opens here whatever it
+    asked for. What a caller gives is left as given, to be rejected where it is used.
+    """
+    accepted = tuple(accepted)
+
+    def settle(value, info: ValidationInfo):
+        if value in accepted or info.context is None or not info.context.get("from_file", False):
+            return value
+        return None
+
+    return AfterValidator(settle)
 
 
 @lru_cache(maxsize=None)
@@ -491,7 +513,7 @@ def _load_value(raw, expect, loaded: "Loaded"):
                 ):
                     continue
                 try:
-                    _field_check(cls, name).validate_python(value)
+                    values[name] = _field_check(cls, name).validate_python(value, context=_FROM_FILE)
                 except ValidationError as e:
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)

@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING, NamedTuple
+
 import numpy as np
 import torch
 import trimesh
@@ -9,6 +11,24 @@ import genesis.utils.particle as pu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
 from genesis.utils.misc import tensor_to_array, qd_to_numpy
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.kinematic_solver import KinematicSolver
+    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
+
+# Magnitude beyond which a transform entry marks a pose that blew up, which the drawn node then stops following
+POSE_MAX_ABS = 1e20
+
+
+class RigidNodeBatch(NamedTuple):
+    """Rigid geoms of one solver drawn in one visual mode, placed together from one conversion of their poses."""
+
+    solver: "RigidSolver | KinematicSolver"
+    is_visual: bool
+    geoms_idx: list[int]
+    geoms_uid: list[int]
+    is_plane: list[bool]
 
 
 class SegmentationColorMap:
@@ -94,7 +114,7 @@ class RasterizerContext:
         self.contact_force_scale = options.contact_force_scale
         self.render_particle_as = options.render_particle_as
         self.rendered_envs_idx = list(options.rendered_envs_idx) if options.rendered_envs_idx is not None else None
-        self.env_separate_rigid = options.env_separate_rigid
+        self.split_envs = options.split_envs
 
         # nodes
         self.world_frame_node = None
@@ -102,6 +122,8 @@ class RasterizerContext:
         self.link_frame_nodes = dict()
         self.frustum_nodes = dict()  # nodes camera frustums
         self.rigid_nodes = dict()
+        # The geoms behind the rigid nodes, grouped by solver and visual mode for placement at update time
+        self._rigid_batches: dict[tuple["RigidSolver | KinematicSolver", bool], RigidNodeBatch] = {}
         # (env_idx, geom.uid) -> per-env pyrender node for kinematic entities currently driven by set_vverts
         self.vverts_nodes = dict()
         self._per_env_vverts_entity_uids: set = set()
@@ -142,13 +164,14 @@ class RasterizerContext:
 
         if self.rendered_envs_idx is None:
             self.rendered_envs_idx = list(range(self.sim._B))
+        self.rendered_envs_mask = np.ones(len(self.rendered_envs_idx), dtype=np.bool_)
 
         # pyrender scene
         self._scene = pyrender.Scene(
             ambient_light=self.ambient_light, bg_color=self.background_color, n_envs=len(self.rendered_envs_idx)
         )
 
-        self.jit = JITRenderer(self._scene, [], [])
+        self.jit = JITRenderer(self._scene, [], [], self.scene.envs_offset[self.rendered_envs_idx])
 
         self.on_lights()
 
@@ -210,9 +233,20 @@ class RasterizerContext:
             return np.intersect1d(geom_active_envs_idx, rendered_envs_idx)
         return rendered_envs_idx
 
-    def add_rigid_node(self, geom, obj, **kwargs):
+    def add_rigid_node(self, geom, obj, track_pose=True, **kwargs):
+        """Add the node drawing a geom. With 'track_pose' the node follows the geom pose in every rendered environment at
+        update time, which a node drawn once for all of them does without."""
         rigid_node = self.add_node(obj, **kwargs)
         self.rigid_nodes[geom.uid] = rigid_node
+        if track_pose:
+            is_visual = geom.entity.surface.vis_mode == "visual"
+            batch_key = (geom.solver, is_visual)
+            if batch_key not in self._rigid_batches:
+                self._rigid_batches[batch_key] = RigidNodeBatch(geom.solver, is_visual, [], [], [])
+            batch = self._rigid_batches[batch_key]
+            batch.geoms_idx.append(geom.idx)
+            batch.geoms_uid.append(geom.uid)
+            batch.is_plane.append(isinstance(geom.entity._morph, gs.morphs.Plane))
 
         # create segemtation id
         if self.segmentation_level == "geom":
@@ -224,6 +258,66 @@ class RasterizerContext:
         else:
             gs.raise_exception(f"Unsupported segmentation level: {self.segmentation_level}")
         self.create_node_seg(seg_key, rigid_node)
+
+    def add_geom_node(self, geom, geoms_T, material=None):
+        """Add the node drawing a rigid geom, one instance per rendered environment and present in the environments
+        holding the geom, and return its mesh (None when no rendered environment holds it). 'geoms_T' holds the
+        transforms of every geom of its solver in its visual mode, as 'rigid_geoms_T' returns them.
+
+        A horizontal plane wider than the environment spacing is one shared floor: one instance where the plane stands,
+        in place of one copy per environment fighting over the same depth once laid out on the grid. Drawn where it
+        stands, it lies under every environment in a pass drawing one environment as well.
+        """
+        geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
+        if len(geom_envs_idx) == 0:
+            return None
+
+        entity = geom.entity
+        vis_mode = entity.surface.vis_mode
+        mesh = geom.get_sdf_trimesh() if "sdf" in vis_mode else geom.get_trimesh()
+        geom_T = geoms_T[:, geom.idx]
+        envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
+        is_shared_floor = False
+        if envs.all() and isinstance(entity.main_morph, gs.morphs.Plane):
+            plane_normal, plane_size = entity.main_morph.normal, entity.main_morph.plane_size
+            is_shared_floor = (
+                abs(plane_normal[0]) < gs.EPS
+                and abs(plane_normal[1]) < gs.EPS
+                and self.scene.env_spacing[0] < plane_size[0]
+                and self.scene.env_spacing[1] < plane_size[1]
+            )
+        if is_shared_floor:
+            geom_T = geom_T[:1]
+            envs = None
+        is_collision = "collision" in vis_mode
+        mesh_node = pyrender.Mesh.from_trimesh(
+            mesh=mesh,
+            poses=geom_T,
+            smooth=geom.surface.smooth and not is_collision,
+            double_sided=geom.surface.double_sided and not is_collision,
+            is_floor=isinstance(entity._morph, gs.morphs.Plane),
+            envs=envs,
+            material=material,
+        )
+        self.add_rigid_node(geom, mesh_node, track_pose=not is_shared_floor)
+        if isinstance(entity._morph, gs.morphs.Plane):
+            self.set_reflection_mat(geom_T)
+        return mesh_node
+
+    def remove_rigid_node(self, geom):
+        """Remove the node drawing a geom, if any: a geom present in no rendered environment has none."""
+        rigid_node = self.rigid_nodes.pop(geom.uid, None)
+        if rigid_node is None:
+            return
+        for batch_key, batch in self._rigid_batches.items():
+            if geom.uid in batch.geoms_uid:
+                i = batch.geoms_uid.index(geom.uid)
+                del batch.geoms_idx[i], batch.geoms_uid[i], batch.is_plane[i]
+                if not batch.geoms_uid:
+                    del self._rigid_batches[batch_key]
+                break
+        self.remove_node_seg(rigid_node)
+        self.remove_node(rigid_node)
 
     def add_static_node(self, entity, obj, i_b, **kwargs):
         static_node = self.add_node(obj, **kwargs)
@@ -303,36 +397,48 @@ class RasterizerContext:
             self.world_frame_node = None
             self.world_frame_shown = False
 
-    def _link_frame_T(self, solver):
-        """World-space 4x4 transforms for every (env, link) of solver, flattened in env-major, link-minor order."""
-        pos = qd_to_numpy(solver.dyn_state.links.pos, self.rendered_envs_idx, transpose=True, copy=True)
-        quat = qd_to_numpy(solver.dyn_state.links.quat, self.rendered_envs_idx, transpose=True)
-        pos += self.scene.envs_offset[self.rendered_envs_idx, None]
-        return gu.trans_quat_to_T(pos.reshape(-1, 3), quat.reshape(-1, 4))
+    def _states_T(self, states):
+        """4x4 transform of every element of a solver state (links, geoms or visual geoms) in every rendered
+        environment, shaped (n_envs, n_elements, 4, 4)."""
+        pos = qd_to_numpy(states.pos, self.rendered_envs_idx, transpose=True)
+        quat = qd_to_numpy(states.quat, self.rendered_envs_idx, transpose=True)
+        return gu.trans_quat_to_T(pos, quat)
+
+    def rigid_geoms_T(self, solver, is_visual):
+        """4x4 transform of every geom of the solver (its visual geoms when 'is_visual') in every rendered environment,
+        shaped (n_envs, n_geoms, 4, 4)."""
+        return self._states_T(solver.dyn_state.vgeoms if is_visual else solver.dyn_state.geoms)
+
+    def _link_frame_grid_T(self):
+        """Transforms of the link frames of every rigid solver, laid out on the environment grid, stacked in one array
+        for the single node drawing them all when the environments are rendered together."""
+        links_T = [self._states_T(solver.dyn_state.links) for solver in self._rigid_solvers()]
+        if not links_T:
+            return None
+        links_T = np.concatenate(links_T, axis=1)
+        links_T[..., :3, 3] += self.scene.envs_offset[self.rendered_envs_idx, np.newaxis]
+        return links_T.reshape((-1, 4, 4))
 
     def on_link_frame(self):
         if not self.link_frame_shown:
-            if self.env_separate_rigid:
+            if self.split_envs:
                 for solver in self._rigid_solvers():
-                    all_T = self._link_frame_T(solver)
-                    n_links = len(solver.links)
+                    links_T = self._states_T(solver.dyn_state.links)
                     for i, link in enumerate(solver.links):
                         mesh = pyrender.Mesh.from_trimesh(
-                            mesh=self.link_frame_mesh, poses=all_T[i::n_links], env_shared=False, is_marker=True
+                            mesh=self.link_frame_mesh, poses=links_T[:, i], is_marker=True, envs=self.rendered_envs_mask
                         )
                         self.link_frame_nodes[link.uid] = self.add_node(mesh)
             else:
-                all_T_parts = [self._link_frame_T(solver) for solver in self._rigid_solvers()]
-                if all_T_parts:
-                    mesh = pyrender.Mesh.from_trimesh(
-                        mesh=self.link_frame_mesh, poses=np.concatenate(all_T_parts, axis=0), is_marker=True
-                    )
+                links_T = self._link_frame_grid_T()
+                if links_T is not None:
+                    mesh = pyrender.Mesh.from_trimesh(mesh=self.link_frame_mesh, poses=links_T, is_marker=True)
                     self.link_frame_node = self.add_node(mesh)
             self.link_frame_shown = True
 
     def off_link_frame(self):
         if self.link_frame_shown:
-            if self.env_separate_rigid:
+            if self.split_envs:
                 for node in self.link_frame_nodes.values():
                     self.remove_node(node)
                 self.link_frame_nodes.clear()
@@ -343,25 +449,24 @@ class RasterizerContext:
 
     def update_link_frame(self):
         if self.link_frame_shown:
-            if self.env_separate_rigid:
+            if self.split_envs:
                 for solver in self._rigid_solvers():
-                    all_T = self._link_frame_T(solver)
-                    n_links = len(solver.links)
+                    links_T = self._states_T(solver.dyn_state.links)
                     for i, link in enumerate(solver.links):
-                        link_T = all_T[i::n_links]
+                        link_T = links_T[:, i]
                         node = self.link_frame_nodes[link.uid]
                         node.mesh.primitives[0].poses = link_T
                         self.jit.update_buffer(node, "model", link_T.transpose((0, 2, 1)))
             elif self.link_frame_node is not None:
-                all_T = np.concatenate([self._link_frame_T(solver) for solver in self._rigid_solvers()], axis=0)
-                self.link_frame_node.mesh.primitives[0].poses = all_T
-                self.jit.update_buffer(self.link_frame_node, "model", all_T.transpose((0, 2, 1)))
+                links_T = self._link_frame_grid_T()
+                self.link_frame_node.mesh.primitives[0].poses = links_T
+                self.jit.update_buffer(self.link_frame_node, "model", links_T.transpose((0, 2, 1)))
 
     def on_tool(self):
         if self.sim.tool_solver.is_active:
             for tool_entity in self.sim.tool_solver.entities:
                 if tool_entity.mesh is not None:
-                    for idx in self.rendered_envs_idx:
+                    for env_i, idx in enumerate(self.rendered_envs_idx):
                         mesh = trimesh.Trimesh(
                             tool_entity.mesh.raw_vertices,
                             tool_entity.mesh.faces_np.reshape([-1, 3]),
@@ -373,13 +478,16 @@ class RasterizerContext:
                         pose = gu.trans_quat_to_T(tool_entity.init_pos, tool_entity.init_quat)
                         double_sided = tool_entity.surface.double_sided
                         self.add_static_node(
-                            tool_entity, pyrender.Mesh.from_trimesh(mesh, double_sided=double_sided), i_b=idx, pose=pose
+                            tool_entity,
+                            pyrender.Mesh.from_trimesh(mesh, double_sided=double_sided, envs=env_i),
+                            i_b=idx,
+                            pose=pose,
                         )
 
     def update_tool(self):
         if self.sim.tool_solver.is_active:
             for tool_entity in self.sim.tool_solver.entities:
-                poss = qd_to_numpy(tool_entity.pos)[self.sim.cur_substep_local] + self.scene.envs_offset
+                poss = qd_to_numpy(tool_entity.pos)[self.sim.cur_substep_local]
                 quats = qd_to_numpy(tool_entity.quat)[self.sim.cur_substep_local]
                 for idx in self.rendered_envs_idx:
                     pose = gu.trans_quat_to_T(poss[idx], quats[idx])
@@ -410,177 +518,104 @@ class RasterizerContext:
         # same Texture instances. The renderer then keeps a single host copy and GPU upload instead of one per geom.
         vis_materials = {}
         for solver in self._rigid_solvers():
-            # TODO: support dynamic switching in GUI later
+            # One conversion of the geom poses per visual mode in use
+            geoms_T_by_mode = {}
             for entity in solver.entities:
-                if entity.surface.vis_mode == "visual":
-                    geoms = entity.vgeoms
-                    geoms_T = solver._vgeoms_render_T
-                else:
-                    geoms = entity.geoms
-                    geoms_T = solver._geoms_render_T
+                is_visual = entity.surface.vis_mode == "visual"
+                geoms = entity.vgeoms if is_visual else entity.geoms
+                if is_visual not in geoms_T_by_mode:
+                    geoms_T_by_mode[is_visual] = self.rigid_geoms_T(solver, is_visual)
+                geoms_T = geoms_T_by_mode[is_visual]
 
                 for geom in geoms:
-                    # For heterogeneous simulation, filter envs based on geom's assigned environments
-                    geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
-                    if len(geom_envs_idx) == 0:
-                        continue
-
-                    if "sdf" in entity.surface.vis_mode:
-                        mesh = geom.get_sdf_trimesh()
-                    else:
-                        mesh = geom.get_trimesh()
-                    # A heterogeneous variant is present in only a subset of environments. Render its full per-env pose
-                    # set with a per-env visibility mask, so the per-env draw places the variant in its own environment
-                    # instead of collapsing the subset of poses onto the wrong environments.
-                    active_envs = None
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
-                        geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
-                        active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
-                    else:
-                        geom_T = geoms_T[geom.idx][geom_envs_idx]
-
-                    # For z-axis normal planes, render a single instance shared across all envs to avoid z-fighting,
-                    # unless they do not overlap. Env-masked variants always take the per-env path.
-                    env_shared = active_envs is None and not self.env_separate_rigid
-                    if not env_shared and active_envs is None and isinstance(entity.main_morph, gs.morphs.Plane):
-                        plane_normal, plane_size = entity.main_morph.normal, entity.main_morph.plane_size
-                        if (
-                            abs(plane_normal[0]) < gs.EPS
-                            and abs(plane_normal[1]) < gs.EPS
-                            and self.scene.env_spacing[0] < plane_size[0]
-                            and self.scene.env_spacing[1] < plane_size[1]
-                        ):
-                            geom_T = geom_T[:1]
-                            env_shared = True
-
                     surface_key = id(geom.surface)
-                    mesh_node = pyrender.Mesh.from_trimesh(
-                        mesh=mesh,
-                        poses=geom_T,
-                        smooth=geom.surface.smooth if "collision" not in entity.surface.vis_mode else False,
-                        double_sided=(
-                            geom.surface.double_sided if "collision" not in entity.surface.vis_mode else False
-                        ),
-                        is_floor=isinstance(entity._morph, gs.morphs.Plane),
-                        env_shared=env_shared,
-                        active_envs=active_envs,
-                        material=vis_materials.get(surface_key),
-                    )
-                    vis_materials.setdefault(surface_key, mesh_node.primitives[0].material)
-                    self.add_rigid_node(geom, mesh_node)
-                    if isinstance(entity._morph, gs.morphs.Plane):
-                        self.set_reflection_mat(geom_T)
+                    mesh_node = self.add_geom_node(geom, geoms_T, material=vis_materials.get(surface_key))
+                    if mesh_node is not None:
+                        vis_materials.setdefault(surface_key, mesh_node.primitives[0].material)
 
     def update_rigid(self):
         for solver in self._rigid_solvers():
             for entity in solver.entities:
-                if entity.surface.vis_mode == "visual":
-                    geoms = entity.vgeoms
-                    geoms_T = solver._vgeoms_render_T
-                    if entity._morph.enable_custom_vverts:
-                        if entity.uid not in self._per_env_vverts_entity_uids:
-                            # Seed primitive.positions with the current world-space vverts: buffer updates bypass
-                            # primitive.positions, which keeps feeding the scene bounds (shadow map extents), so it
-                            # must hold world-space data.
-                            vverts = qd_to_numpy(solver.dyn_state.vverts.pos, self.rendered_envs_idx, transpose=True)
-                            envs_offset = self.scene.envs_offset
-                            custom_offset = entity._custom_vvert_start - entity._vvert_start
-                            for geom in entity.vgeoms:
-                                old_node = self.rigid_nodes.pop(geom.uid, None)
-                                if old_node is not None:
-                                    self.remove_node_seg(old_node)
-                                    self.remove_node(old_node)
-
-                                geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
-                                if len(geom_envs_idx) == 0:
-                                    continue
-
-                                mesh = geom.get_trimesh()
-                                v_start = geom.vvert_start + custom_offset
-                                v_end = geom.vvert_end + custom_offset
-                                for i_b in geom_envs_idx:
-                                    node = self.add_node(
-                                        pyrender.Mesh.from_trimesh(
-                                            mesh=mesh,
-                                            smooth=geom.surface.smooth,
-                                            double_sided=geom.surface.double_sided,
-                                        )
-                                    )
-                                    env_i = self.rendered_envs_idx.index(i_b)
-                                    geom_vverts = vverts[env_i, v_start:v_end, :] + envs_offset[i_b]
-                                    node.mesh.primitives[0].positions = self._scene.reorder_vertices(
-                                        node, geom_vverts.astype(np.float32)
-                                    )
-                                    self.vverts_nodes[(i_b, geom.uid)] = node
-                                    if self.segmentation_level == "geom":
-                                        seg_key = (geom.entity.idx, geom.link.idx, geom.idx)
-                                    elif self.segmentation_level == "link":
-                                        seg_key = (geom.entity.idx, geom.link.idx)
-                                    elif self.segmentation_level == "entity":
-                                        seg_key = geom.entity.idx
-                                    else:
-                                        gs.raise_exception(f"Unsupported segmentation level: {self.segmentation_level}")
-                                    self.create_node_seg(seg_key, node)
-                            self._per_env_vverts_entity_uids.add(entity.uid)
-
+                if entity.surface.vis_mode == "visual" and entity._morph.enable_custom_vverts:
+                    if entity.uid not in self._per_env_vverts_entity_uids:
+                        # Seed primitive.positions with the current vverts: buffer updates bypass primitive.positions,
+                        # which seeds the bounds of the geometry (shadow map extents)
                         vverts = qd_to_numpy(solver.dyn_state.vverts.pos, self.rendered_envs_idx, transpose=True)
-                        envs_offset = self.scene.envs_offset
                         custom_offset = entity._custom_vvert_start - entity._vvert_start
                         for geom in entity.vgeoms:
+                            self.remove_rigid_node(geom)
+
                             geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
                             if len(geom_envs_idx) == 0:
                                 continue
+
+                            mesh = geom.get_trimesh()
                             v_start = geom.vvert_start + custom_offset
                             v_end = geom.vvert_end + custom_offset
-                            for env_i, i_b in enumerate(self.rendered_envs_idx):
-                                if i_b not in geom_envs_idx:
-                                    continue
-                                node = self.vverts_nodes[(i_b, geom.uid)]
-                                geom_vverts = vverts[env_i, v_start:v_end, :] + envs_offset[i_b]
-                                update_data = self._scene.reorder_vertices(node, geom_vverts.astype(np.float32))
-                                self.jit.update_buffer(node, "pos", update_data)
-                                normal_data = self.jit.update_normal(node, update_data)
-                                if normal_data is not None:
-                                    self.jit.update_buffer(node, "normal", normal_data)
-                        continue
-                else:
-                    geoms = entity.geoms
-                    geoms_T = solver._geoms_render_T
+                            for i_b in geom_envs_idx:
+                                env_i = self.rendered_envs_idx.index(i_b)
+                                node = self.add_node(
+                                    pyrender.Mesh.from_trimesh(
+                                        mesh=mesh,
+                                        smooth=geom.surface.smooth,
+                                        double_sided=geom.surface.double_sided,
+                                        envs=env_i,
+                                    )
+                                )
+                                geom_vverts = vverts[env_i, v_start:v_end, :]
+                                node.mesh.primitives[0].positions = self._scene.reorder_vertices(
+                                    node, geom_vverts.astype(np.float32)
+                                )
+                                self.vverts_nodes[(i_b, geom.uid)] = node
+                                if self.segmentation_level == "geom":
+                                    seg_key = (geom.entity.idx, geom.link.idx, geom.idx)
+                                elif self.segmentation_level == "link":
+                                    seg_key = (geom.entity.idx, geom.link.idx)
+                                elif self.segmentation_level == "entity":
+                                    seg_key = geom.entity.idx
+                                else:
+                                    gs.raise_exception(f"Unsupported segmentation level: {self.segmentation_level}")
+                                self.create_node_seg(seg_key, node)
+                        self._per_env_vverts_entity_uids.add(entity.uid)
 
-                for geom in geoms:
-                    # Skip geoms that weren't added - in heterogeneous simulation, some geoms
-                    # may not be rendered in any of the requested environments
-                    if geom.uid not in self.rigid_nodes:
-                        continue
+                    vverts = qd_to_numpy(solver.dyn_state.vverts.pos, self.rendered_envs_idx, transpose=True)
+                    custom_offset = entity._custom_vvert_start - entity._vvert_start
+                    for geom in entity.vgeoms:
+                        geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
+                        if len(geom_envs_idx) == 0:
+                            continue
+                        v_start = geom.vvert_start + custom_offset
+                        v_end = geom.vvert_end + custom_offset
+                        for env_i, i_b in enumerate(self.rendered_envs_idx):
+                            if i_b not in geom_envs_idx:
+                                continue
+                            node = self.vverts_nodes[(i_b, geom.uid)]
+                            geom_vverts = vverts[env_i, v_start:v_end, :]
+                            update_data = self._scene.reorder_vertices(node, geom_vverts.astype(np.float32))
+                            self.jit.update_buffer(node, "pos", update_data)
+                            normal_data = self.jit.update_normal(node, update_data)
+                            if normal_data is not None:
+                                self.jit.update_buffer(node, "normal", normal_data)
 
-                    # For heterogeneous simulation, filter envs based on geom's assigned environments
-                    geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
-                    if len(geom_envs_idx) == 0:
-                        continue
-
-                    # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise.
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
-                        geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
-                    else:
-                        geom_T = geoms_T[geom.idx][geom_envs_idx]
-
-                    # Keep single-instance for z-axis normal planes (see on_rigid)
-                    if isinstance(entity.main_morph, gs.morphs.Plane):
-                        plane_normal, plane_size = entity.main_morph.normal, entity.main_morph.plane_size
-                        if (
-                            abs(plane_normal[0]) < gs.EPS
-                            and abs(plane_normal[1]) < gs.EPS
-                            and self.scene.env_spacing[0] < plane_size[0]
-                            and self.scene.env_spacing[1] < plane_size[1]
-                        ):
-                            geom_T = geom_T[:1]
-
-                    node = self.rigid_nodes[geom.uid]
-                    node.mesh._bounds = None
-                    node.mesh.primitives[0].poses = geom_T
-                    self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
-                    if isinstance(entity._morph, gs.morphs.Plane):
-                        self.set_reflection_mat(geom_T)
+        # One conversion of the geom poses per solver and visual mode, and one transposed copy the buffer flush uploads
+        # as is: each node then takes a view of both, and the reductions the draw order and the scene bounds need run
+        # over the stack
+        for batch in self._rigid_batches.values():
+            geoms_T = self.rigid_geoms_T(batch.solver, batch.is_visual)[:, batch.geoms_idx].transpose((1, 0, 2, 3))
+            # A geom whose pose blew up keeps the transform it was last drawn with, rather than vanishing and dragging
+            # the scene bounds, and the shadow map fitted to them, along
+            is_pose_valid = (np.abs(geoms_T) < POSE_MAX_ABS).all(axis=(-2, -1))
+            if not is_pose_valid.all():
+                geoms_T_prev = np.stack([self.rigid_nodes[uid].mesh.primitives[0].poses for uid in batch.geoms_uid])
+                geoms_T[~is_pose_valid] = geoms_T_prev[~is_pose_valid]
+            models = np.ascontiguousarray(geoms_T.transpose((0, 1, 3, 2)))
+            for geom_T, model, geom_uid in zip(geoms_T, models, batch.geoms_uid):
+                node = self.rigid_nodes[geom_uid]
+                node.mesh._bounds = None
+                node.mesh.primitives[0].poses = geom_T
+                self.jit.update_buffer(node, "model", model)
+            for i_plane in np.flatnonzero(batch.is_plane):
+                self.set_reflection_mat(geoms_T[i_plane])
 
     def update_contact(self):
         if self.sim.rigid_solver.is_active and any(link.visualize_contact for link in self.sim.rigid_solver.links):
@@ -618,7 +653,7 @@ class RasterizerContext:
                 lb_size = links_init_AABB_size[contacts_info["link_b"]]
                 arrow_scale = np.minimum(la_size, lb_size)
                 radius = np.minimum(arrow_scale * 0.04, 0.005)
-                contact_pos = contacts_info["position"] + self.scene.envs_offset[batch_idx]
+                contact_pos = contacts_info["position"]
                 contact_normal_scaled = contacts_info["normal"] * arrow_scale[:, None]
                 contact_force = contacts_info["force"]
 
@@ -643,7 +678,7 @@ class RasterizerContext:
                 if mpm_entity.surface.vis_mode in ("recon", "visual"):
                     self.add_dynamic_node(mpm_entity, None)
                 elif mpm_entity.surface.vis_mode == "particle":
-                    for idx in self.rendered_envs_idx:
+                    for env_i, idx in enumerate(self.rendered_envs_idx):
                         mesh = mu.create_sphere(
                             self.sim.mpm_solver.particle_radius * self.particle_size_scale, subdivisions=1
                         )
@@ -652,33 +687,34 @@ class RasterizerContext:
                         tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
                         tfs[:, :3, 3] = mpm_entity.init_particles
                         self.add_static_node(
-                            mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
+                            mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
                         )
 
             # boundary
             if self.visualize_mpm_boundary:
-                for idx in self.rendered_envs_idx:
-                    offset = self.scene.envs_offset[idx]
-                    lower = self.sim.mpm_solver.boundary.lower + offset
-                    upper = self.sim.mpm_solver.boundary.upper + offset
+                for env_i in range(len(self.rendered_envs_idx)):
                     self.add_node(
                         pyrender.Mesh.from_trimesh(
                             mu.create_box(
-                                bounds=np.array([lower, upper], dtype=np.float32),
+                                bounds=np.array(
+                                    [self.sim.mpm_solver.boundary.lower, self.sim.mpm_solver.boundary.upper],
+                                    dtype=np.float32,
+                                ),
                                 wireframe=True,
                                 color=(1.0, 1.0, 0.0, 1.0),
                             ),
                             smooth=True,
+                            envs=env_i,
                         )
                     )
 
     def update_mpm(self):
         if self.sim.mpm_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos) + self.scene.envs_offset
+            particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
             active_all = qd_to_numpy(self.sim.mpm_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            vverts_all = qd_to_numpy(self.sim.mpm_solver.vverts_render.pos) + self.scene.envs_offset
+            vverts_all = qd_to_numpy(self.sim.mpm_solver.vverts_render.pos)
             for mpm_entity in self.sim.mpm_solver.entities:
-                for idx in self.rendered_envs_idx:
+                for env_i, idx in enumerate(self.rendered_envs_idx):
                     if mpm_entity.surface.vis_mode == "recon":
                         mesh = pu.particles_to_mesh(
                             positions=particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx][
@@ -688,7 +724,7 @@ class RasterizerContext:
                             backend=mpm_entity.surface.recon_backend,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(mpm_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                        self.add_dynamic_node(mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i))
                     elif mpm_entity.surface.vis_mode == "particle":
                         tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
                         tfs[:, :3, 3] = particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
@@ -702,7 +738,9 @@ class RasterizerContext:
                         ]
                         self.add_dynamic_node(
                             mpm_entity,
-                            pyrender.Mesh.from_trimesh(mpm_entity.vmesh.trimesh, smooth=mpm_entity.surface.smooth),
+                            pyrender.Mesh.from_trimesh(
+                                mpm_entity.vmesh.trimesh, smooth=mpm_entity.surface.smooth, envs=env_i
+                            ),
                         )
 
     def on_sph(self):
@@ -711,7 +749,7 @@ class RasterizerContext:
                 if sph_entity.surface.vis_mode == "recon":
                     self.add_dynamic_node(sph_entity, None)
                 elif sph_entity.surface.vis_mode == "particle":
-                    for idx in self.rendered_envs_idx:
+                    for env_i, idx in enumerate(self.rendered_envs_idx):
                         mesh = mu.create_sphere(
                             self.sim.sph_solver.particle_radius * self.particle_size_scale, subdivisions=1
                         )
@@ -720,33 +758,34 @@ class RasterizerContext:
                         tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
                         tfs[:, :3, 3] = sph_entity.init_particles
                         self.add_static_node(
-                            sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
+                            sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
                         )
 
             # boundary
             if self.visualize_sph_boundary:
-                for idx in self.rendered_envs_idx:
-                    offset = self.scene.envs_offset[idx]
-                    lower = self.sim.sph_solver.boundary.lower + offset
-                    upper = self.sim.sph_solver.boundary.upper + offset
+                for env_i in range(len(self.rendered_envs_idx)):
                     self.add_node(
                         pyrender.Mesh.from_trimesh(
                             mu.create_box(
-                                bounds=np.array([lower, upper], dtype=np.float32),
+                                bounds=np.array(
+                                    [self.sim.sph_solver.boundary.lower, self.sim.sph_solver.boundary.upper],
+                                    dtype=np.float32,
+                                ),
                                 wireframe=True,
                                 color=(0.0, 1.0, 1.0, 1.0),
                             ),
                             smooth=True,
+                            envs=env_i,
                         )
                     )
 
     def update_sph(self):
         if self.sim.sph_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos) + self.scene.envs_offset
+            particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
             active_all = qd_to_numpy(self.sim.sph_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
 
             for sph_entity in self.sim.sph_solver.entities:
-                for idx in self.rendered_envs_idx:
+                for env_i, idx in enumerate(self.rendered_envs_idx):
                     if sph_entity.surface.vis_mode == "recon":
                         mesh = pu.particles_to_mesh(
                             positions=particles_all[sph_entity.particle_start : sph_entity.particle_end, idx][
@@ -756,7 +795,7 @@ class RasterizerContext:
                             backend=sph_entity.surface.recon_backend,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(sph_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                        self.add_dynamic_node(sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i))
                     elif sph_entity.surface.vis_mode == "particle":
                         tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
                         tfs[:, :3, 3] = particles_all[sph_entity.particle_start : sph_entity.particle_end, idx]
@@ -772,7 +811,7 @@ class RasterizerContext:
                     pbd_entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
                         pbd_entity.surface, uvs=pbd_entity.vmesh.uvs, n_verts=len(pbd_entity.vmesh.trimesh.vertices)
                     )
-                for idx in self.rendered_envs_idx:
+                for env_i, idx in enumerate(self.rendered_envs_idx):
                     if pbd_entity.surface.vis_mode == "recon":
                         self.add_dynamic_node(pbd_entity, None)
                     elif pbd_entity.surface.vis_mode == "particle":
@@ -786,7 +825,9 @@ class RasterizerContext:
                             tfs = np.tile(np.eye(4), (pbd_entity.n_particles, 1, 1))
                             tfs[:, :3, 3] = pbd_entity.init_particles
                             self.add_static_node(
-                                pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
+                                pbd_entity,
+                                pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i),
+                                i_b=idx,
                             )
                         elif self.render_particle_as == "tet":
                             mesh = mu.create_tets_mesh(
@@ -796,7 +837,9 @@ class RasterizerContext:
                                 pbd_entity.surface, n_verts=len(mesh.vertices)
                             )
                             pbd_entity._tets_mesh = mesh
-                            self.add_static_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=False), i_b=idx)
+                            self.add_static_node(
+                                pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=False, envs=env_i), i_b=idx
+                            )
                     elif pbd_entity.surface.vis_mode == "visual":
                         self.add_static_node(
                             pbd_entity,
@@ -804,6 +847,7 @@ class RasterizerContext:
                                 pbd_entity.vmesh.trimesh,
                                 smooth=pbd_entity.surface.smooth,
                                 double_sided=pbd_entity._surface.double_sided,
+                                envs=env_i,
                             ),
                             i_b=idx,
                         )
@@ -826,12 +870,12 @@ class RasterizerContext:
 
     def update_pbd(self):
         if self.sim.pbd_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos) + self.scene.envs_offset
+            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos)
             particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel)
             active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos) + self.scene.envs_offset
+            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos)
             for pbd_entity in self.sim.pbd_solver.entities:
-                for idx in self.rendered_envs_idx:
+                for env_i, idx in enumerate(self.rendered_envs_idx):
                     particles_env = particles_all[:, idx]
                     particles_vel_env = particles_vel_all[:, idx]
                     active_env = active_all[:, idx]
@@ -847,7 +891,7 @@ class RasterizerContext:
                             backend=pbd_entity.surface.recon_backend,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                        self.add_dynamic_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i))
 
                     # TODO: need to support multi-env visulaization for tet mode (it's using static node)
                     elif pbd_entity.surface.vis_mode == "particle":
@@ -896,7 +940,7 @@ class RasterizerContext:
                         mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
                         mesh.visual = visual
                         node = pyrender.Mesh.from_trimesh(
-                            mesh, smooth=vgeom.surface.smooth, double_sided=vgeom.surface.double_sided
+                            mesh, smooth=vgeom.surface.smooth, double_sided=vgeom.surface.double_sided, envs=env_i
                         )
                         static_node = self.add_node(node)
                         self.static_nodes[(i_b, vgeom.uid)] = static_node
@@ -945,19 +989,20 @@ class RasterizerContext:
         if length > gs.EPS:
             mesh = mu.create_arrow(length=length, radius=radius, body_color=color, head_color=color)
 
-            # Build per-env poses when env_idx is specified for env_separate rendering
+            # An arrow of one environment is drawn in that environment alone, where that environment is. An arrow
+            # without environment is shared by all of them.
             pos = tensor_to_array(pos)
-            if env_idx is not None and self.env_separate_rigid:
+            if env_idx is not None:
                 poses = np.zeros((len(self.rendered_envs_idx), 4, 4), dtype=np.float32)
                 gu.trans_R_to_T(pos, gu.z_up_to_R(vec), out=poses[env_idx])
-                env_shared = False
+                envs = np.arange(len(self.rendered_envs_idx)) == env_idx
             else:
                 poses = np.zeros((1, 4, 4), dtype=np.float32)
                 gu.trans_R_to_T(pos, gu.z_up_to_R(vec), out=poses[0])
-                env_shared = True
+                envs = None
 
             node = pyrender.Mesh.from_trimesh(
-                mesh, name=f"debug_arrow_{gs.UID()}", poses=poses, env_shared=env_shared, is_marker=True
+                mesh, name=f"debug_arrow_{gs.UID()}", poses=poses, is_marker=True, envs=envs
             )
             if persistent:
                 self.add_external_node(node)
@@ -978,7 +1023,9 @@ class RasterizerContext:
             poses = np.tile(poses[np.newaxis], (n_envs, 1, 1))
         assert len(poses) == n_envs, "Inconsistent batch size."
 
-        node = pyrender.Mesh.from_trimesh(mesh, name=f"debug_frame_{gs.UID()}", poses=poses, is_marker=True)
+        node = pyrender.Mesh.from_trimesh(
+            mesh, name=f"debug_frame_{gs.UID()}", poses=poses, is_marker=True, envs=self.rendered_envs_mask
+        )
         self.add_external_node(node)
         return node
 
@@ -1001,7 +1048,9 @@ class RasterizerContext:
             poses = np.tile(poses[np.newaxis], (n_envs, 1, 1))
         assert len(poses) == n_envs, "Inconsistent batch size."
 
-        node = pyrender.Mesh.from_trimesh(mesh, name=f"debug_mesh_{gs.UID()}", poses=poses, is_marker=True)
+        node = pyrender.Mesh.from_trimesh(
+            mesh, name=f"debug_mesh_{gs.UID()}", poses=poses, is_marker=True, envs=self.rendered_envs_mask
+        )
         self.add_external_node(node)
         return node
 
@@ -1019,7 +1068,12 @@ class RasterizerContext:
         assert len(poses) == n_envs, "Inconsistent batch size."
 
         node = pyrender.Mesh.from_trimesh(
-            mesh, name=f"debug_sphere_{gs.UID()}", smooth=True, poses=poses, is_marker=True
+            mesh,
+            name=f"debug_sphere_{gs.UID()}",
+            smooth=True,
+            poses=poses,
+            is_marker=True,
+            envs=self.rendered_envs_mask,
         )
         if persistent:
             self.add_external_node(node)
@@ -1140,31 +1194,33 @@ class RasterizerContext:
         if not force_render and self._t >= self.scene.sim.cur_step_global:
             return
 
-        # Update current time right away
-        self._t = self.scene.sim.cur_step_global
+        # The interactive viewer draws from its own thread whatever is uploaded here
+        with self.scene._visualizer.viewer_lock:
+            # Update current time right away
+            self._t = self.scene.sim.cur_step_global
 
-        # Remove up old dynamic nodes
-        self.clear_dynamic_nodes(only_outdated=True)
+            # Remove up old dynamic nodes
+            self.clear_dynamic_nodes(only_outdated=True)
 
-        # Force updating rendering-only quantities that are not updated automatically during simulation
-        self.visualizer.update_visual_states(force_render)
+            # Force updating rendering-only quantities that are not updated automatically during simulation
+            self.visualizer.update_visual_states(force_render)
 
-        # Reset scene bounds to trigger recomputation. They are involved in shadow map.
-        self._scene._bounds = None
+            # Reset scene bounds to trigger recomputation. They are involved in shadow map.
+            self._scene._bounds = None
 
-        self.update_link_frame()
-        self.update_tool()
-        self.update_rigid()
-        self.update_contact()
-        self.update_mpm()
-        self.update_sph()
-        self.update_pbd()
-        self.update_fem()
-        self.update_sensors()
+            self.update_link_frame()
+            self.update_tool()
+            self.update_rigid()
+            self.update_contact()
+            self.update_mpm()
+            self.update_sph()
+            self.update_pbd()
+            self.update_fem()
+            self.update_sensors()
 
-        # Update camera fructum
-        for camera in self.visualizer.cameras:
-            self.update_camera_frustum(camera)
+            # Update camera fructum
+            for camera in self.visualizer.cameras:
+                self.update_camera_frustum(camera)
 
     def add_light(self, light):
         # light direction is light pose's -z frame

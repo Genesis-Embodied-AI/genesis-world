@@ -74,7 +74,7 @@ class OffscreenRenderer(object):
         camera_node=None,
         shadow=False,
         plane_reflection=False,
-        env_separate_rigid=False,
+        split_envs=False,
         skip_markers=False,
     ):
         """Render a scene with the given set of flags.
@@ -117,7 +117,7 @@ class OffscreenRenderer(object):
         if plane_reflection and not self._is_software:
             flags |= RenderFlags.REFLECTIVE_FLOOR
 
-        if env_separate_rigid:
+        if split_envs:
             flags |= RenderFlags.ENV_SEPARATE
 
         if skip_markers:
@@ -148,7 +148,7 @@ class OffscreenRenderer(object):
             renderer._program_cache = renderer._normal_program_cache
 
             flags = RenderFlags.FLAT | RenderFlags.OFFSCREEN
-            if env_separate_rigid:
+            if split_envs:
                 flags |= RenderFlags.ENV_SEPARATE
             if skip_markers:
                 flags |= RenderFlags.SKIP_MARKERS

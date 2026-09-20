@@ -77,6 +77,35 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
 
 
 @pytest.fixture(scope="session")
+def fixed_base_dual_arm():
+    # A torso the world carries and two one-link arms hanging from it, mounted close enough that the arms overlap
+    # once they hang at rest, so that the arms touch when they fall under gravity
+    robot = ET.Element("robot", name="dual_arm")
+    torso = ET.SubElement(robot, "link", name="torso")
+    inertial = ET.SubElement(torso, "inertial")
+    ET.SubElement(inertial, "mass", value="5.0")
+    ET.SubElement(inertial, "inertia", ixx="0.1", iyy="0.1", izz="0.1", ixy="0", ixz="0", iyz="0")
+    ET.SubElement(ET.SubElement(ET.SubElement(torso, "collision"), "geometry"), "box", size="0.1 0.3 0.1")
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        link = ET.SubElement(robot, "link", name=f"{side}_arm")
+        inertial = ET.SubElement(link, "inertial")
+        ET.SubElement(inertial, "origin", xyz=f"{sign * 0.15} 0 0")
+        ET.SubElement(inertial, "mass", value="1.0")
+        ET.SubElement(inertial, "inertia", ixx="0.001", iyy="0.01", izz="0.01", ixy="0", ixz="0", iyz="0")
+        collision = ET.SubElement(link, "collision")
+        ET.SubElement(collision, "origin", xyz=f"{sign * 0.15} 0 0")
+        ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.3 0.12 0.12")
+        joint = ET.SubElement(robot, "joint", name=f"{side}_shoulder", type="revolute")
+        ET.SubElement(joint, "parent", link="torso")
+        ET.SubElement(joint, "child", link=f"{side}_arm")
+        ET.SubElement(joint, "origin", xyz=f"{sign * 0.05} 0 0")
+        ET.SubElement(joint, "axis", xyz="0 1 0")
+        ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
+        ET.SubElement(joint, "dynamics", damping="0.5")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def box_plan():
     """Generate an MJCF model for a box on a plane."""
     mjcf = _build_plane_contact_model("box_plan", condim="3", friction="1. 0.5 0.5", plane_size="40. 40. 40.")
@@ -84,25 +113,28 @@ def box_plan():
     return mjcf
 
 
-def _build_free_box_model(model_name, boxes):
-    """Generate an MJCF model holding the given free boxes and nothing else, as (name, pos) pairs."""
-    mjcf = ET.Element("mujoco", model=model_name)
-    ET.SubElement(mjcf, "option", timestep="0.01")
-    worldbody = ET.SubElement(mjcf, "worldbody")
-    for name, pos in boxes:
-        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
-        ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
-        ET.SubElement(body, "joint", name=f"{name}_root", type="free")
-    return mjcf
-
-
-FREE_BOXES = (("box_left", "-0.5 0. 1."), ("box_right", "0.5 0. 1."))
-
-
 @pytest.fixture(scope="session")
-def two_free_boxes():
-    """Generate an MJCF model for two free boxes, which Mujoco holds as one model."""
-    return _build_free_box_model("two_free_boxes", FREE_BOXES)
+def free_boxes_and_slider():
+    """Generate an MJCF model for two free boxes a thousandfold apart in mass resting on a plane, each with an off-
+    center inertial frame, and a box sliding on the world along one axis with a rotor armature.
+    """
+    mjcf = _build_plane_contact_model(
+        "free_boxes_and_slider", condim="3", friction="1. 0.5 0.5", plane_size="40. 40. 40."
+    )
+    worldbody = mjcf.find("worldbody")
+    # A yaw of its own per box spreads the corner contacts along x, which is what pairs them with MuJoCo's
+    for name, pos, euler, mass, inertia in (
+        ("box_left", "-0.5 0. 0.1999", "0. 0. 20.", "64.", "1.7 1.7 1.7"),
+        ("box_right", "0.5 0. 0.1999", "0. 0. -35.", "0.064", "0.0017 0.0017 0.0017"),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos, euler=euler)
+        ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+        ET.SubElement(body, "inertial", pos="0.01 -0.02 0.03", mass=mass, diaginertia=inertia)
+        ET.SubElement(body, "joint", name=f"{name}_root", type="free")
+    body = ET.SubElement(worldbody, "body", name="box_slider", pos="0. 1. 1.")
+    ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+    ET.SubElement(body, "joint", name="box_slider_root", type="slide", axis="1 0 0", armature="0.1")
+    return mjcf
 
 
 @pytest.fixture(scope="session")
@@ -156,7 +188,7 @@ def tet_meshball():
     ET.SubElement(worldbody, "geom", name="tet", type="mesh", mesh="tet")
     # The first ball lands off the tetrahedron's symmetry plane: a centered drop leaves the deepest face an exact
     # tie between two mirror faces, whose resolution is platform rounding in both engines.
-    for i, pos in enumerate(("0.02 0 1.2", "0.3 0 1.2", "0.3 0.29 1.2")):
+    for i, pos in enumerate(("0.03 0 1.2", "0.3 0 1.2", "0.3 0.29 1.2")):
         body = ET.SubElement(worldbody, "body", name=f"ball{i + 1}", pos=pos)
         ET.SubElement(body, "joint", name=f"root{i + 1}", type="free")
         ET.SubElement(body, "geom", name=f"ball{i + 1}_geom", type="mesh", mesh="icosphere")
@@ -239,17 +271,17 @@ def scaled_mjcf_joint_equalities():
     mjcf = ET.Element("mujoco", model="scaled_mjcf_joint_equalities")
     worldbody = ET.SubElement(mjcf, "worldbody")
     equality = ET.SubElement(mjcf, "equality")
-    for driver_type, follower_type in (
-        ("hinge", "hinge"),
-        ("slide", "slide"),
-        ("slide", "hinge"),
-        ("hinge", "slide"),
+    for driver_type, follower_type, position_y in (
+        ("hinge", "hinge", -0.25),
+        ("slide", "slide", -0.5),
+        ("slide", "hinge", -0.75),
+        ("hinge", "slide", -1.0),
     ):
         pair_name = f"{driver_type}_{follower_type}"
-        driver_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_driver_body")
+        driver_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_driver_body", pos=f"0 {position_y} 0")
         ET.SubElement(driver_body, "joint", name=f"{pair_name}_driver", type=driver_type, axis="1 0 0")
         ET.SubElement(driver_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
-        follower_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_follower_body")
+        follower_body = ET.SubElement(worldbody, "body", name=f"{pair_name}_follower_body", pos=f"0.15 {position_y} 0")
         ET.SubElement(follower_body, "joint", name=f"{pair_name}_follower", type=follower_type, axis="1 0 0")
         ET.SubElement(follower_body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
         ET.SubElement(
@@ -260,7 +292,12 @@ def scaled_mjcf_joint_equalities():
             joint2=f"{pair_name}_driver",
             polycoef="0.2 0.4 -0.3 0.2 -0.1",
         )
-    return ET.tostring(mjcf, encoding="unicode")
+    for name, position_y in (("target", 0.0), ("unrelated", 0.25)):
+        body = ET.SubElement(worldbody, "body", name=f"{name}_body", pos=f"0 {position_y} 0")
+        ET.SubElement(body, "joint", name=name, type="slide", axis="1 0 0")
+        ET.SubElement(body, "geom", type="sphere", size="0.05", mass="1", contype="0", conaffinity="0")
+    ET.SubElement(equality, "joint", name="fixed_target", joint1="target", polycoef="0.25 1 0 0 0")
+    return mjcf
 
 
 @pytest.fixture(scope="session")
@@ -505,6 +542,8 @@ def _build_multi_pendulum(n, joint_damping, joint_friction):
     ET.SubElement(urdf, "link", name="base")
 
     parent_link = "base"
+    if joint_damping is not None:
+        joints_damping = np.broadcast_to(joint_damping, (n,))
     for i in range(n):
         # Continuous joint between parent and this arm
         joint = ET.SubElement(urdf, "joint", name=f"PendulumJoint_{i}", type="continuous")
@@ -515,7 +554,7 @@ def _build_multi_pendulum(n, joint_damping, joint_friction):
         ET.SubElement(joint, "limit", effort=str(100.0 * (n - i)), velocity="30.0")
         dynamics = ET.SubElement(joint, "dynamics")
         if joint_damping is not None:
-            dynamics.set("damping", str(joint_damping))
+            dynamics.set("damping", str(joints_damping[i]))
         if joint_friction is not None:
             dynamics.set("friction", str(joint_friction))
 
@@ -899,16 +938,18 @@ def general_actuator():
     ET.SubElement(mjcf, "option", timestep="0.01")
     worldbody = ET.SubElement(mjcf, "worldbody")
     body1 = ET.SubElement(worldbody, "body", name="link1", pos="0 0 1")
-    ET.SubElement(body1, "joint", name="hinge_pd", type="hinge", axis="0 1 0", damping="0.5")
+    ET.SubElement(body1, "joint", name="hinge_pd", type="hinge", axis="0 1 0", damping="0.5", actuatorfrcrange="-20 20")
     ET.SubElement(body1, "geom", type="capsule", size="0.05 0.3", mass="1.0")
     body2 = ET.SubElement(body1, "body", name="link2", pos="0 0 -0.6")
     ET.SubElement(body2, "joint", name="hinge_general", type="hinge", axis="0 1 0", damping="0.3")
     ET.SubElement(body2, "geom", type="capsule", size="0.04 0.2", mass="0.5")
     body3 = ET.SubElement(body2, "body", name="link3", pos="0 0 -0.4")
-    ET.SubElement(body3, "joint", name="hinge_motor", type="hinge", axis="0 1 0", damping="0.2")
+    ET.SubElement(
+        body3, "joint", name="hinge_motor", type="hinge", axis="0 1 0", damping="0.2", actuatorfrcrange="-4 4"
+    )
     ET.SubElement(body3, "geom", type="capsule", size="0.03 0.15", mass="0.3")
     actuator = ET.SubElement(mjcf, "actuator")
-    ET.SubElement(actuator, "position", name="act_pd", joint="hinge_pd", kp="100")
+    ET.SubElement(actuator, "position", name="act_pd", joint="hinge_pd", kp="100", kv="2")
     ET.SubElement(
         actuator,
         "general",
@@ -918,7 +959,9 @@ def general_actuator():
         biastype="affine",
         biasprm="0.5 -10 -1",
     )
-    ET.SubElement(actuator, "motor", name="act_motor", joint="hinge_motor", gear="5")
+    ET.SubElement(
+        actuator, "motor", name="act_motor", joint="hinge_motor", gear="5", ctrlrange="-1 1", forcerange="6 8"
+    )
     return mjcf
 
 
@@ -1070,6 +1113,28 @@ def freeflyer_mjcf():
     ET.SubElement(greatgrandchild, "inertial", pos="0 0 0", mass="0.1", diaginertia="0.0001 0.0001 0.0001")
     ET.SubElement(greatgrandchild, "geom", type="sphere", size="0.01")
     return mjcf
+
+
+@pytest.fixture(scope="session")
+def trees_and_slider_mjcf():
+    """Generate an MJCF model holding three kinematic trees: a free body with a hinged child twice, the second hinge
+    with an authored armature, and a body sliding on the world along one axis with an authored armature."""
+    mjcf = ET.Element("mujoco", model="trees_and_slider")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, pos, joint_attrs in (("tree_a", "0 0 1", {}), ("tree_b", "1 0 1", {"armature": "0.3"})):
+        body = ET.SubElement(worldbody, "body", name=name, pos=pos)
+        ET.SubElement(body, "joint", type="free")
+        ET.SubElement(body, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+        ET.SubElement(body, "geom", type="sphere", size="0.05")
+        child = ET.SubElement(body, "body", name=f"{name}_child", pos="0 0 0.1")
+        ET.SubElement(child, "joint", type="hinge", axis="0 1 0", **joint_attrs)
+        ET.SubElement(child, "inertial", pos="0 0 0", mass="0.5", diaginertia="0.001 0.001 0.001")
+        ET.SubElement(child, "geom", type="sphere", size="0.02")
+    slider = ET.SubElement(worldbody, "body", name="slider", pos="2 0 1")
+    ET.SubElement(slider, "joint", type="slide", axis="1 0 0", armature="0.3")
+    ET.SubElement(slider, "inertial", pos="0 0 0", mass="1.0", diaginertia="0.01 0.01 0.01")
+    ET.SubElement(slider, "geom", type="sphere", size="0.05")
+    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
@@ -1286,4 +1351,18 @@ def spring_double_pendulum():
     lower = ET.SubElement(upper, "body", name="arm_lower", pos="0.2 0 0")
     ET.SubElement(lower, "joint", name="elbow", type="hinge", axis="0 1 0", stiffness="20.0", damping="0")
     ET.SubElement(lower, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", density="1000")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def damped_flap():
+    """Generate an MJCF model holding a 10 g flap of 1e-6 kg m^2 inertia on a damped hinge, 2 cm above the ground
+    plane, so that a light body hits the ground from inside a kinematic tree going through the implicit damping pass."""
+    mjcf = ET.Element("mujoco")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "geom", type="plane", size="2 2 0.1")
+    flap = ET.SubElement(worldbody, "body", name="flap", pos="0 0 0.03")
+    ET.SubElement(flap, "joint", name="hinge", type="hinge", axis="0 1 0", damping="1e-3")
+    ET.SubElement(flap, "inertial", pos="0.05 0 0", mass="0.01", diaginertia="1e-6 1e-6 1e-6")
+    ET.SubElement(flap, "geom", type="box", pos="0.05 0 0", size="0.04 0.01 0.01", condim="6", friction="1 0.01 0.01")
     return ET.tostring(mjcf, encoding="unicode")

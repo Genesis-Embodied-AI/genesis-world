@@ -350,6 +350,20 @@ def test_scene_rebuild():
     scene.step()
     assert_allclose(scene.rigid_solver.get_qpos(), qpos_before, tol=gs.EPS)
 
+    # Switching the visual mode of an entity gives its geoms fresh nodes, which must keep following the simulation:
+    # the arm sags under gravity once unpaused, so the frames before and after must differ
+    interactive.set_entity_vis_mode(scene.get_entity("panda"), "collision")
+    interactive.resume()
+    rgb_collision_before, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    for _ in range(20):
+        scene.step()
+    rgb_collision_after, *_ = window_before.render_offscreen(
+        window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
+    )
+    assert (rgb_collision_after != rgb_collision_before).any(axis=-1).mean() > 0.01
+
 
 @pytest.mark.required
 def test_capture_pending_entities_preserves_heterogeneous_morphs():

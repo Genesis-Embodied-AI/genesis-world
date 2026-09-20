@@ -13,7 +13,7 @@ struct SpotLight {
     float light_angle_offset;
 
     #ifdef SPOT_LIGHT_SHADOWS
-    sampler2D shadow_map;
+    sampler2DShadow shadow_map;
     mat4 light_matrix;
     #endif
 };
@@ -24,7 +24,7 @@ struct DirectionalLight {
     vec3 direction;
 
     #ifdef DIRECTIONAL_LIGHT_SHADOWS
-    sampler2D shadow_map;
+    sampler2DShadow shadow_map;
     mat4 light_matrix;
     #endif
 };
@@ -267,39 +267,21 @@ vec3 compute_brdf(vec3 n, vec3 v, vec3 l,
         return color;
 }
 
-float texture2DCompare(sampler2D depths, vec2 uv, float compare) {
-    if(abs(uv.x*2-1)>0.99 || abs(uv.y*2-1)>0.99) return 0.0;
-    return compare > texture(depths, uv.xy).r ? 1.0 : 0.0;
-}
-
-float texture2DShadowLerp(sampler2D depths, vec2 size, vec2 uv, float compare) {
-    vec2 texelSize = vec2(1.0)/size;
-    vec2 f = fract(uv*size+0.5);
-    vec2 centroidUV = floor(uv*size+0.5)/size;
-
-    float lb = texture2DCompare(depths, centroidUV+texelSize*vec2(0.0, 0.0), compare);
-    float lt = texture2DCompare(depths, centroidUV+texelSize*vec2(0.0, 1.0), compare);
-    float rb = texture2DCompare(depths, centroidUV+texelSize*vec2(1.0, 0.0), compare);
-    float rt = texture2DCompare(depths, centroidUV+texelSize*vec2(1.0, 1.0), compare);
-    float a = mix(lb, lt, f.y);
-    float b = mix(rb, rt, f.y);
-    float c = mix(a, b, f.x);
-    return c;
-}
-
-float PCF(sampler2D depths, vec2 size, vec2 uv, float compare){
+// Percentage-closer filtering over a 3x3 texel neighborhood. Each tap is one fetch: the sampler compares the reference
+// depth against the four texels around the tap and blends the outcomes bilinearly (see the depth textures in
+// texture.py), the result a fetch of each texel followed by the comparison and the blend in the shader would give.
+float PCF(sampler2DShadow shadow_map, vec3 coords){
+    vec2 texel_size = 1.0 / vec2(textureSize(shadow_map, 0));
     float result = 0.0;
-    int range = 1;
-    for(int x=-range; x<=range; x++){
-        for(int y=-range; y<=range; y++){
-            vec2 off = vec2(x,y)*1/size;
-            result += texture2DShadowLerp(depths, size, uv+off, compare);
+    for(int x=-1; x<=1; x++){
+        for(int y=-1; y<=1; y++){
+            result += texture(shadow_map, coords + vec3(vec2(x, y) * texel_size, 0.0));
         }
     }
-    return result/((range*2+1)*(range*2+1));
+    return result / 9.0;
 }
 
-float shadow_calc(mat4 light_matrix, sampler2D shadow_map, float nl)
+float shadow_calc(mat4 light_matrix, sampler2DShadow shadow_map, float nl)
 {
     // Compute light texture UV coords
     vec4 proj_coords = vec4(light_matrix * vec4(frag_position.xyz, 1.0));
@@ -308,7 +290,7 @@ float shadow_calc(mat4 light_matrix, sampler2D shadow_map, float nl)
     float current_depth = light_coords.z;
     float bias = max(0.001 * (1.0 - nl), 0.0001) / proj_coords.w;
     float compare = (current_depth - bias);
-    float shadow = PCF(shadow_map, textureSize(shadow_map, 0), light_coords.xy, compare);
+    float shadow = PCF(shadow_map, vec3(light_coords.xy, compare));
     //if (light_coords.z > 1.0) {
         //shadow = 0.0;
     //}

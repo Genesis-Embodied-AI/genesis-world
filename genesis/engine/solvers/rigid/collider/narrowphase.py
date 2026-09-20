@@ -2233,10 +2233,14 @@ def _func_multicontact_run_detection(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     gjk_static_config: qd.template(),
-    use_gjk: qd.template(),
-    is_initial_detection: qd.template(),
+    use_gjk: bool,
+    is_initial_detection: bool,
 ):
-    """Run one detection (capsule/plane/MPR/GJK) and return (is_col, normal, contact_pos, penetration, used_gjk)."""
+    """Run one detection (capsule/plane/MPR/GJK) and return (is_col, normal, contact_pos, penetration, used_gjk).
+
+    use_gjk selects GJK over MPR where both are compiled, is_initial_detection lets MPR retry without the cached
+    normal. Both are runtime flags so the kernel inlines this pipeline once whatever the mix of its detections.
+    """
     EPS = rigid_info.EPS[None]
     is_col = False
     penetration = gs.qd_float(0.0)
@@ -2290,70 +2294,68 @@ def _func_multicontact_run_detection(
             is_col = penetration > -EPS * geom_pair_scale
             penetration = qd.max(penetration, 0.0)
     else:
-        if qd.static(
-            collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.MJ_MPR) and not use_gjk
-        ):
-            is_mpr_updated = False
-            normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
-            is_mpr_guess_direction_available = (qd.abs(normal_ws) > EPS).any()
-            for i_mpr in range(2):
-                if i_mpr == 1:
-                    if qd.static(is_initial_detection and not rigid_config.enable_mujoco_compatibility):
-                        if not is_col and is_mpr_guess_direction_available:
-                            normal_ws = qd.Vector.zero(gs.qd_float, 3)
-                            is_mpr_guess_direction_available = False
-                            is_mpr_updated = False
+        if qd.static(collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MPR, CCD_ALGORITHM_CODE.MJ_MPR)):
+            if not use_gjk:
+                is_mpr_updated = False
+                normal_ws = collider_state.contact_cache.normal[i_pair, i_b]
+                is_mpr_guess_direction_available = (qd.abs(normal_ws) > EPS).any()
+                for i_mpr in range(2):
+                    if i_mpr == 1:
+                        if qd.static(not rigid_config.enable_mujoco_compatibility):
+                            if is_initial_detection and not is_col and is_mpr_guess_direction_available:
+                                normal_ws = qd.Vector.zero(gs.qd_float, 3)
+                                is_mpr_guess_direction_available = False
+                                is_mpr_updated = False
 
-                if not is_mpr_updated:
-                    is_col, normal, penetration, contact_pos = mpr.func_mpr_contact(
-                        i_ga,
-                        i_gb,
-                        i_scratch,
-                        normal_ws,
-                        ga_pos,
-                        ga_quat,
-                        gb_pos,
-                        gb_quat,
-                        geoms_init_AABB,
-                        collider_state,
-                        mpr_state,
-                        dyn_info,
-                        rigid_info,
-                        collider_info,
-                        rigid_config,
-                        collider_static_config,
-                    )
-                    is_mpr_updated = True
+                    if not is_mpr_updated:
+                        is_col, normal, penetration, contact_pos = mpr.func_mpr_contact(
+                            i_ga,
+                            i_gb,
+                            i_scratch,
+                            normal_ws,
+                            ga_pos,
+                            ga_quat,
+                            gb_pos,
+                            gb_quat,
+                            geoms_init_AABB,
+                            collider_state,
+                            mpr_state,
+                            dyn_info,
+                            rigid_info,
+                            collider_info,
+                            rigid_config,
+                            collider_static_config,
+                        )
+                        is_mpr_updated = True
 
         if qd.static(
-            collider_static_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR
-            and use_gjk
-            and not rigid_config.requires_grad
+            collider_static_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR and not rigid_config.requires_grad
         ):
-            gjk.func_gjk_contact(
-                i_ga,
-                i_gb,
-                i_scratch,
-                ga_pos,
-                ga_quat,
-                gb_pos,
-                gb_quat,
-                dyn_state,
-                collider_state,
-                gjk_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_static_config,
-                gjk_static_config,
-            )
-            is_col = gjk_state.is_col[i_scratch] == 1
-            penetration = gjk_state.penetration[i_scratch]
-            if is_col:
-                contact_pos = gjk_state.contact_pos[i_scratch, 0]
-                normal = gjk_state.normal[i_scratch, 0]
-            used_gjk = True
+            if use_gjk:
+                gjk.func_gjk_contact(
+                    i_ga,
+                    i_gb,
+                    i_scratch,
+                    ga_pos,
+                    ga_quat,
+                    gb_pos,
+                    gb_quat,
+                    dyn_state,
+                    collider_state,
+                    gjk_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    rigid_config,
+                    collider_static_config,
+                    gjk_static_config,
+                )
+                is_col = gjk_state.is_col[i_scratch] == 1
+                penetration = gjk_state.penetration[i_scratch]
+                if is_col:
+                    contact_pos = gjk_state.contact_pos[i_scratch, 0]
+                    normal = gjk_state.normal[i_scratch, 0]
+                used_gjk = True
 
     return is_col, normal, contact_pos, penetration, used_gjk
 
@@ -2420,95 +2422,7 @@ def _func_multicontact_mpr(
 
     contact0_normal = normal_0
     contact0_pos = contact_pos_0
-
-    if prefer_gjk_0:
-        # Contact 0 fell back to GJK. Re-detect it with GJK on the unperturbed pose, expanding a native multi-contact
-        # manifold (and skipping perturbation) when one is found.
-        is_col, normal, contact_pos, penetration, _used_gjk = _func_multicontact_run_detection(
-            i_ga,
-            i_gb,
-            i_scratch,
-            i_b,
-            i_pair,
-            ga_pos_original,
-            ga_quat_original,
-            gb_pos_original,
-            gb_quat_original,
-            geoms_init_AABB,
-            dyn_state,
-            collider_state,
-            mpr_state,
-            gjk_state,
-            dyn_info,
-            rigid_info,
-            collider_info,
-            rigid_config,
-            collider_static_config,
-            gjk_static_config,
-            use_gjk=True,
-            is_initial_detection=True,
-        )
-        if is_col:
-            collider_state.contact_cache.normal[i_pair, i_b] = normal
-            collider_state.contact_cache.penetration[i_pair, i_b] = penetration
-            if _used_gjk:
-                # GJK populated gjk_state: take the single contact (i_c 0) or, when a native manifold was returned, all
-                # of its points (which sets gjk_multi_done to skip perturbation). The single contact is gjk_state[0],
-                # so it is just a one-point manifold.
-                gjk_multi_done = gjk_state.multi_contact_flag[i_scratch] == 1
-                n_contacts_gjk = gjk_state.n_contacts[i_scratch] if gjk_multi_done else 1
-                for i_c in range(n_contacts_gjk):
-                    if n_con < collider_static_config.n_contacts_per_convex_pair:
-                        gjk_normal = gjk_state.normal[i_scratch, i_c]
-                        gjk_contact_pos = func_apply_smooth_refinement(
-                            i_ga,
-                            i_gb,
-                            gjk_normal,
-                            penetration,
-                            gjk_state.contact_pos[i_scratch, i_c],
-                            ga_pos_original,
-                            ga_quat_original,
-                            gb_pos_original,
-                            gb_quat_original,
-                            dyn_info,
-                            rigid_config,
-                        )
-                        for i_3 in qd.static(range(3)):
-                            local_contact_pos[n_con, i_3] = gjk_contact_pos[i_3]
-                            local_normal[n_con, i_3] = gjk_normal[i_3]
-                        local_penetration[n_con, 0] = penetration
-                        if i_c == 0:
-                            contact0_normal = gjk_normal
-                            contact0_pos = gjk_contact_pos
-                        n_con = n_con + 1
-            else:
-                # Analytic detection (plane/capsule/sphere-box) leaves gjk_state untouched, so use the returned contact
-                # directly. Reading gjk_state here would pick up a stale contact from another pair on this thread,
-                # which is non-deterministic because the thread-to-pair assignment is racy.
-                contact_pos = func_apply_smooth_refinement(
-                    i_ga,
-                    i_gb,
-                    normal,
-                    penetration,
-                    contact_pos,
-                    ga_pos_original,
-                    ga_quat_original,
-                    gb_pos_original,
-                    gb_quat_original,
-                    dyn_info,
-                    rigid_config,
-                )
-                contact0_normal = normal
-                contact0_pos = contact_pos
-                for i_3 in qd.static(range(3)):
-                    local_contact_pos[0, i_3] = contact_pos[i_3]
-                    local_normal[0, i_3] = normal[i_3]
-                local_penetration[0, 0] = penetration
-                n_con = 1
-        else:
-            collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
-            collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
-    else:
+    if not prefer_gjk_0:
         # Contact 0 from the MPR seed already detected, refined and cached by the contact0 kernel.
         for i_3 in qd.static(range(3)):
             local_contact_pos[0, i_3] = contact_pos_0[i_3]
@@ -2516,101 +2430,164 @@ def _func_multicontact_mpr(
         local_penetration[0, 0] = penetration_0
         n_con = 1
 
-    if multi_contact and n_con > 0 and not gjk_multi_done:
-        axis_0, axis_1 = func_contact_orthogonals(
-            i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
-        )
-
-        for i_detection in range(4):
-            i_det = i_detection + 1
-            # Declared ahead of the static branches that assign it, as quadrants scoping requires.
+    # Detection 0 re-detects contact 0 with GJK when its penetration gate fired in the contact0 kernel, expanding a
+    # native multi-contact manifold and skipping perturbation when one is returned. Detections 1 to 4 are the
+    # perturbed contacts, each tried again with GJK when its own gate fires. One runtime loop drives them all, so the
+    # detection pipeline is inlined once in the kernel.
+    axis_0 = qd.Vector.zero(gs.qd_float, 3)
+    axis_1 = qd.Vector.zero(gs.qd_float, 3)
+    for i_det in range(5):
+        is_initial_detection = i_det == 0
+        is_active = prefer_gjk_0
+        if not is_initial_detection:
+            is_active = multi_contact and n_con > 0 and not gjk_multi_done
+        if is_active:
+            if i_det == 1:
+                axis_0, axis_1 = func_contact_orthogonals(
+                    i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
+                )
+            # Declared ahead of the branches that assign them, as quadrants scoping requires.
             qrot = qd.Vector.zero(gs.qd_float, 4)
-            if qd.static(rigid_config.enable_mujoco_compatibility):
-                # Single-axis perturbation pattern: see the twin loop in func_convex_convex_contact.
-                axis_idx = (i_det - 1) // 2
-                angle_sign = 2 * ((i_det - 1) % 2) - 1
-                axis = axis_0 if axis_idx == 0 else axis_1
-                qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
-            else:
-                # Combined-axes perturbation: see the twin loop in func_convex_convex_contact.
-                axis = (2 * (i_det % 2) - 1) * axis_0 + (1 - 2 * ((i_det // 2) % 2)) * axis_1
-                qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
+            ga_pos_current = ga_pos_original
+            ga_quat_current = ga_quat_original
+            gb_pos_current = gb_pos_original
+            gb_quat_current = gb_quat_original
+            if not is_initial_detection:
+                if qd.static(rigid_config.enable_mujoco_compatibility):
+                    # Single-axis perturbation pattern: see the twin loop in func_convex_convex_contact.
+                    axis_idx = (i_det - 1) // 2
+                    angle_sign = 2 * ((i_det - 1) % 2) - 1
+                    axis = axis_0 if axis_idx == 0 else axis_1
+                    qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+                else:
+                    # Combined-axes perturbation: see the twin loop in func_convex_convex_contact.
+                    axis = (2 * (i_det % 2) - 1) * axis_0 + (1 - 2 * ((i_det // 2) % 2)) * axis_1
+                    qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
+                ga_pos_current, ga_quat_current = func_rotate_frame(
+                    ga_pos_original, ga_quat_original, contact0_pos, qrot
+                )
+                gb_pos_current, gb_quat_current = func_rotate_frame(
+                    gb_pos_original, gb_quat_original, contact0_pos, gu.qd_inv_quat(qrot)
+                )
 
-            ga_pos_current, ga_quat_current = func_rotate_frame(ga_pos_original, ga_quat_original, contact0_pos, qrot)
-            gb_pos_current, gb_quat_current = func_rotate_frame(
-                gb_pos_original, gb_quat_original, contact0_pos, gu.qd_inv_quat(qrot)
-            )
-
-            is_col, normal, contact_pos, penetration, _used_gjk = _func_multicontact_run_detection(
-                i_ga,
-                i_gb,
-                i_scratch,
-                i_b,
-                i_pair,
-                ga_pos_current,
-                ga_quat_current,
-                gb_pos_current,
-                gb_quat_current,
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                mpr_state,
-                gjk_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_static_config,
-                gjk_static_config,
-                # Perturbed contacts try MPR first under the MPR algorithm (falling back to GJK per contact below).
-                # The pure GJK algorithms detect every perturbed contact with GJK directly.
-                use_gjk=qd.static(
-                    collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.GJK, CCD_ALGORITHM_CODE.MJ_GJK)
-                ),
-                is_initial_detection=False,
-            )
-
-            if qd.static(collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.MPR):
-                if is_col:
-                    # When the refinement is called for it applies to this perturbed contact only, rather than
-                    # upgrading the whole pair, which keeps the MPR-first model.
-                    prefer_gjk = func_prefer_gjk_refinement(
-                        i_pair,
+            # Perturbed contacts try MPR first under the MPR algorithm and fall back to GJK per contact. The pure GJK
+            # algorithms detect every contact with GJK directly.
+            use_gjk = is_initial_detection
+            if qd.static(collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.GJK, CCD_ALGORITHM_CODE.MJ_GJK)):
+                use_gjk = True
+            is_col = False
+            normal = qd.Vector.zero(gs.qd_float, 3)
+            contact_pos = qd.Vector.zero(gs.qd_float, 3)
+            penetration = gs.qd_float(0.0)
+            _used_gjk = False
+            is_detected = False
+            for i_try in range(2):
+                if not is_detected:
+                    is_col, normal, contact_pos, penetration, _used_gjk = _func_multicontact_run_detection(
+                        i_ga,
+                        i_gb,
+                        i_scratch,
                         i_b,
-                        mpr_state.portal_status[i_scratch],
-                        penetration,
-                        geom_pair_scale,
-                        tolerance,
+                        i_pair,
+                        ga_pos_current,
+                        ga_quat_current,
+                        gb_pos_current,
+                        gb_quat_current,
+                        geoms_init_AABB,
+                        dyn_state,
                         collider_state,
+                        mpr_state,
+                        gjk_state,
+                        dyn_info,
+                        rigid_info,
                         collider_info,
+                        rigid_config,
+                        collider_static_config,
+                        gjk_static_config,
+                        use_gjk,
+                        is_initial_detection,
                     )
-                    if prefer_gjk:
-                        is_col, normal, contact_pos, penetration, _used_gjk = _func_multicontact_run_detection(
+                    is_detected = True
+                    if qd.static(collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.MPR):
+                        # When the refinement is called for it applies to this perturbed contact only, rather than
+                        # upgrading the whole pair, which keeps the MPR-first model.
+                        if not is_initial_detection and is_col and not use_gjk:
+                            prefer_gjk = func_prefer_gjk_refinement(
+                                i_pair,
+                                i_b,
+                                mpr_state.portal_status[i_scratch],
+                                penetration,
+                                geom_pair_scale,
+                                tolerance,
+                                collider_state,
+                                collider_info,
+                            )
+                            if prefer_gjk:
+                                use_gjk = True
+                                is_detected = False
+
+            if is_initial_detection:
+                if is_col:
+                    collider_state.contact_cache.normal[i_pair, i_b] = normal
+                    collider_state.contact_cache.penetration[i_pair, i_b] = penetration
+                    if _used_gjk:
+                        # GJK populated gjk_state: take the single contact (i_c 0) or, when a native manifold was
+                        # returned, all of its points (which sets gjk_multi_done to skip perturbation). The single
+                        # contact is gjk_state[0], so it is just a one-point manifold.
+                        gjk_multi_done = gjk_state.multi_contact_flag[i_scratch] == 1
+                        n_contacts_gjk = gjk_state.n_contacts[i_scratch] if gjk_multi_done else 1
+                        for i_c in range(n_contacts_gjk):
+                            if n_con < collider_static_config.n_contacts_per_convex_pair:
+                                gjk_normal = gjk_state.normal[i_scratch, i_c]
+                                gjk_contact_pos = func_apply_smooth_refinement(
+                                    i_ga,
+                                    i_gb,
+                                    gjk_normal,
+                                    penetration,
+                                    gjk_state.contact_pos[i_scratch, i_c],
+                                    ga_pos_original,
+                                    ga_quat_original,
+                                    gb_pos_original,
+                                    gb_quat_original,
+                                    dyn_info,
+                                    rigid_config,
+                                )
+                                for i_3 in qd.static(range(3)):
+                                    local_contact_pos[n_con, i_3] = gjk_contact_pos[i_3]
+                                    local_normal[n_con, i_3] = gjk_normal[i_3]
+                                local_penetration[n_con, 0] = penetration
+                                if i_c == 0:
+                                    contact0_normal = gjk_normal
+                                    contact0_pos = gjk_contact_pos
+                                n_con = n_con + 1
+                    else:
+                        # Analytic detection (plane/capsule/sphere-box) leaves gjk_state untouched, so use the returned
+                        # contact directly. Reading gjk_state here would pick up a stale contact from another pair on
+                        # this thread, which is non-deterministic because the thread-to-pair assignment is racy.
+                        contact_pos = func_apply_smooth_refinement(
                             i_ga,
                             i_gb,
-                            i_scratch,
-                            i_b,
-                            i_pair,
-                            ga_pos_current,
-                            ga_quat_current,
-                            gb_pos_current,
-                            gb_quat_current,
-                            geoms_init_AABB,
-                            dyn_state,
-                            collider_state,
-                            mpr_state,
-                            gjk_state,
+                            normal,
+                            penetration,
+                            contact_pos,
+                            ga_pos_original,
+                            ga_quat_original,
+                            gb_pos_original,
+                            gb_quat_original,
                             dyn_info,
-                            rigid_info,
-                            collider_info,
                             rigid_config,
-                            collider_static_config,
-                            gjk_static_config,
-                            use_gjk=True,
-                            is_initial_detection=False,
                         )
-
-            if is_col:
+                        contact0_normal = normal
+                        contact0_pos = contact_pos
+                        for i_3 in qd.static(range(3)):
+                            local_contact_pos[0, i_3] = contact_pos[i_3]
+                            local_normal[0, i_3] = normal[i_3]
+                        local_penetration[0, 0] = penetration
+                        n_con = 1
+                else:
+                    collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                    collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
+            elif is_col:
                 # The perturbed contact is refined inside func_recompute_perturbed_contact (after the perturbation is
                 # reverted, on the canonical pose); no pre-reversal refinement is needed here.
                 is_exact = False

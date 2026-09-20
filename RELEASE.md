@@ -1,5 +1,33 @@
 # Genesis Release Note
 
+## 1.4.1
+
+This release focuses on significantly improving performance on large scale scenes for both CPU and GPU. The speed is now slowing down sub-linearly wrt the number of islands on both CPU and GPU, and Jacobi equilibration for imbalanced scenes is much cheaper, and contact-rich scenes are much faster on CPU.
+
+### New Features
+
+* Support MJCF joint equalities without joint2. (@ktyang512) (#3290)
+
+### Bug Fixes
+
+* Decode normalized integer glTF accessors instead of reading their raw values. (@VihaanAgarwal) (#3330)
+* Preserve glTF normals and texture coordinates. (@jeetrex17) (#3323)
+* Honor joint actuator force range for MJCF. (@duburcqa) (#3328)
+* Open an exported scene on any platform and through gs launch. (@duburcqa) (#3340)
+
+### Miscellaneous
+
+* Speed up the constraint solver on multi-island scenes on GPU. (@duburcqa) (#3331, #3347, #3349, #3350, #3352, #3353)
+* Speed up the constraint solver when Jacobi equilibration is active. (@duburcqa) (#3344)
+* Speed up the constraint solver on contact-heavy scenes on CPU. (@duburcqa) (#3345)
+* Speed up noslip stage for small batch size on GPU. (@hughperkins) (#3273)
+* Speed up cameras and the interactive viewer for rasterizer. (@duburcqa) (#3326)
+* Speed up live plot recorders. (@duburcqa) (#3358)
+* Reduce the compilation time of the rigid solver. (@duburcqa) (#3359)
+* Decompose the rigid scene into its maximal kinematic trees. (@duburcqa) (#3356)
+* Support heterogeneous default armature. (@duburcqa) (#3326)
+* Expose entity-level public API for setting dofs limit. (@jeetrex17) (#3348)
+
 ## 1.4.0
 
 This release introduces the capability to export a scene plus a complete trajectory as a standalone archive that can be loaded on any machine while ensuring bit-exact replay using `gs replay`. The objective is making bug report much easier in the future. Only the rigid solver is supported for now. Beyond that, the static description of entities is now clearly separated from runtime getters to avoid confusion. Finally, a large number of minor bugs have been fixed, most of them related to asset parsing.

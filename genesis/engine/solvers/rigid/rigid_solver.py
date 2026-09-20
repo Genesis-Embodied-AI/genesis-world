@@ -1,5 +1,4 @@
 import math
-import os
 import sys
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -36,6 +35,7 @@ from genesis.utils.sdf import SDF
 from ..base_solver import GravityMixin, MutatedLinks, Solver, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
+    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
@@ -74,29 +74,18 @@ from .abd.misc import (
     kernel_init_vvert_fields,
     kernel_reset_hibernation,
     kernel_set_zero,
-    kernel_update_geoms_render_T,
     kernel_update_heterogeneous_link_info,
-    kernel_update_vgeoms_render_T,
     kernel_wakeup_coupled_links,
 )
 from .abd.forward_kinematics import (
-    func_aggregate_awake_entities,
-    func_COM_links,
-    func_forward_kinematics_batch,
-    func_forward_kinematics_entity,
+    func_forward_kinematics_root,
     func_forward_velocity,
-    func_forward_velocity_batch,
-    func_forward_velocity_entity,
-    func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer,
     func_update_all_verts,
     func_update_cartesian_space,
-    func_update_cartesian_space_batch,
     func_update_geoms,
-    func_update_geoms_batch,
-    func_update_geoms_entity,
+    func_update_geoms_root,
     func_update_verts_for_geom,
     kernel_COM_links_replay,
-    kernel_forward_kinematics_entity,
     kernel_forward_kinematics_links_geoms,
     kernel_forward_kinematics_replay,
     kernel_forward_velocity,
@@ -118,7 +107,6 @@ from .abd.forward_dynamics import (
     func_forward_dynamics,
     func_implicit_damping,
     func_integrate,
-    func_solve_mass,
     func_solve_mass_batch,
     func_torque_and_passive_force,
     func_update_acc,
@@ -176,7 +164,6 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_dofs,
     kernel_wake_up_entities_by_links,
     kernel_wake_up_entities_by_qs,
-    kernel_wake_up_entities_on_new_contact,
 )
 from .abd.diff import (
     func_copy_cartesian_space,
@@ -284,16 +271,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
-        # Contact islands are off by default (opt in explicitly). The gate further below still disables them under
-        # requires_grad (the differentiable adjoint reads the dense global Hessian) and for single-island scenes
-        # (where the partition is pure overhead, unless hibernation needs it).
-        self._use_contact_island = options.use_contact_island
-        # Hibernation builds on islands, so requesting it without islands is a genuine conflict.
-        self._use_hibernation = options.use_hibernation
-        if self._use_hibernation and not self._use_contact_island:
-            gs.raise_exception(
-                "`use_hibernation=True` requires `use_contact_island=True`, as hibernation builds on islands."
-            )
+        # The differentiable solve keeps every body in its iteration trace, so hibernation stays off there (see the
+        # use_hibernation option).
+        self._use_hibernation = options.use_hibernation and not self._requires_grad
 
         # Resolve the hibernation velocity tolerance. MuJoCo compatibility uses MuJoCo's own default (1e-4); otherwise
         # use a coarser floor that a body reliably settles below across float precisions and dense contact piles, where
@@ -380,7 +360,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
 
         # Resolve precision-dependent tolerance default. The convergence thresholds reference the scene's free-motion
-        # cost (see func_terminate_or_update_descent_batch), which stands an order of magnitude above the bare inertia
+        # cost (see func_exit_decision in linesearch.py), which stands an order of magnitude above the bare inertia
         # for a metre-scale scene under standard gravity, so the ratio drops by as much to leave the thresholds where
         # they stood. Reproducing the reference behaviour compares against the inertia and keeps its value.
         if self._options.tolerance is None:
@@ -395,9 +375,66 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._init_equality_fields()
         self._init_dof_length()
 
+        # Compute the pose of every link in the neutral configuration and update the pose of all the geometries,
+        # including inactive variants for a given env: the step updates the active variant alone, so this is the only
+        # pose the inactive ones get (see func_update_geoms_link). The collider built next relies on these updated poses
+        # to determine whether some collision pairs must be filtered out.
+        kernel_update_cartesian_space(
+            self.dyn_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+            force_update_all_geoms=True,
+            is_backward=False,
+        )
+
         self._init_collider()
         self._init_constraint_solver()
         self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
+
+        # Fill in the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. It is
+        # written to the armature field from the host once the parsed inverse weights stand, and a second refresh
+        # recomputes the ones it changes: those of every degree of freedom and link of the kinematic trees holding a
+        # defaulted joint. The parsed inverse weights stand everywhere else.
+        dofs_idx, dofs_default, dofs_link = [], [], []
+        for entity in self._entities:
+            rotor_links = [
+                link
+                for link in entity.links
+                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            ]
+            if not rotor_links:
+                continue
+            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
+            if entity.desc.variants:
+                variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            else:
+                variants_default = np.array([entity.main_morph.default_armature or 0.0])
+            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
+            if (envs_default <= 0.0).all():
+                continue
+            dofs_idx.extend(link.dof_start for link in rotor_links)
+            dofs_default.extend([envs_default] * len(rotor_links))
+            dofs_link.extend(rotor_links)
+        if dofs_idx:
+            # Field layout, batch last, since the arrays are written back as fields.
+            dofs_armature = qd_to_numpy(self.dyn_info.dofs.armature, transpose=False, copy=True)
+            is_default = (np.atleast_2d(dofs_armature[dofs_idx].T) <= 0.0).all(axis=0)
+            if is_default.any():
+                dofs_idx = np.array(dofs_idx)[is_default]
+                default_armature = np.stack(dofs_default, axis=1)[:, is_default]
+                dofs_armature[dofs_idx] = default_armature.T if self._options.batch_dofs_info else default_armature[0]
+                self.dyn_info.dofs.armature.from_numpy(dofs_armature)
+                roots_idx = {link.root_idx for link, is_dof_default in zip(dofs_link, is_default) if is_dof_default}
+                trees_links = [link for link in self.links if link.root_idx in roots_idx]
+                dofs_invweight = qd_to_numpy(self.dyn_info.dofs.invweight, transpose=False, copy=True)
+                dofs_invweight[[i_d for link in trees_links for i_d in range(link.dof_start, link.dof_end)]] = -1.0
+                self.dyn_info.dofs.invweight.from_numpy(dofs_invweight)
+                links_idx = [link.idx for link in trees_links]
+                links_invweight = qd_to_numpy(self.dyn_info.links.invweight, transpose=False, copy=True)
+                links_invweight[links_idx] = -1.0
+                self.dyn_info.links.invweight.from_numpy(links_invweight)
+                self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
 
         # The constraint solver decides it has converged from quantities summed over the whole scene, and every DOF of
         # a link contributes a cost of the order of the link's mass. A link whose mass is a tolerance-fraction of the
@@ -451,8 +488,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _resolve_broadphase_traversal(self):
         if self._options.broadphase_traversal is not None:
             return self._options.broadphase_traversal
-        # For hibernation, the main missing piece is skipping hibernated-vs-hibernated pairs. This means reading two
-        # additional values from global memory, and the associated pipeline stall etc associated with this.
         # For heterogeneous, the valid_collision_pairs array is built once at init from the global geom pair
         # matrix, but with heterogeneous entities different batch elements have different geoms (different geom_start/
         # geom_end per link per batch), so a pair (ga, gb) might be valid in batch 0 but not exist in batch 3. To
@@ -460,29 +495,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # in the current batch element. Per-batch lists multiply the memory footprint by the batch size, increasing
         # memory usage, and increasing L1/L2 cache contention. Runtime filtering keeps the single list, but it will
         # no longer be compact, and we will have thread divergence.
-        if gs.backend == gs.cpu or self._use_hibernation or self._enable_heterogeneous:
+        if gs.backend == gs.cpu or self._enable_heterogeneous:
             return gs.broadphase_traversal.SAP
         return gs.broadphase_traversal.ALL_VS_ALL
 
     def _build_static_config(self):
         # The scene has multi-island block structure when it holds several independent DOF-carrying bodies or free
-        # joints (the Hessian then splits into per-island blocks instead of one dense tree). This gates both the CPU
-        # skyline solver and the GPU per-island force below: a single dense-coupled tree (e.g. one big robot) is one
-        # island and gains nothing from either.
+        # joints (the Hessian then splits into per-island blocks instead of one dense tree), where the sparse Jacobian
+        # of the CPU solve pays off; a single dense-coupled tree (e.g. one big robot) gains nothing from it.
         n_dof_entities = sum(entity.n_dofs > 0 for entity in self.entities)
         n_free_joints = sum(joint.type == gs.JOINT_TYPE.FREE for joint in self.joints)
         has_multi_island_structure = n_dof_entities >= 2 or n_free_joints >= 2
-
-        # Islands only reduce work when the scene splits into several blocks. With a single dense-coupled tree (one
-        # island) the partition is pure overhead, so disable it in computation even if the user opted in. Hibernation
-        # does not force islands on (a scene with no island structure has nothing to gain from sleeping a lone tree);
-        # use_hibernation is gated off below to follow this decision. The differentiable solve reads the dense global
-        # Hessian (nt_H), not the per-island tiles, so islands stay off under requires_grad regardless.
-        self._use_contact_island = self._use_contact_island and has_multi_island_structure and not self._requires_grad
-
-        # Hibernation builds on the island partition, so it cannot outlive islands being turned off by any gate above.
-        # Re-sync it to the final island decision so the two never disagree.
-        self._use_hibernation = self._use_hibernation and self._use_contact_island
 
         # A heterogeneous entity has a different body size (hence rotational dof_length) per variant, so its dof_length
         # is genuinely per-env and dofs_info must be batched to hold it. dof_length is read only by the hibernation
@@ -490,59 +513,43 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # get_dofs_info reads from solver._options.batch_dofs_info.
         if self._enable_heterogeneous and self._use_hibernation:
             self._options.batch_dofs_info = True
+        # Likewise, the variants of a heterogeneous entity each state their own default armature (see build), which is
+        # per-env on every joint carrying a rotor whenever those defaults differ.
+        for entity in self._entities:
+            variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            if variants_default.size < 2 or np.ptp(variants_default) <= gs.EPS:
+                continue
+            has_rotor = any(
+                link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+                for link in entity.links
+            )
+            if has_rotor:
+                self._options.batch_dofs_info = True
 
-        # sparse_solve=None resolves automatically: the skyline-envelope solver pays off on CPU only when the scene
-        # has block structure, whereas a single dense-coupled tree gains nothing and pays the per-step envelope tax. An
-        # explicit value overrides this. On GPU the envelope factorization is dropped (the dense tiled path is faster
-        # there); an explicit True still enables the assembly-level sparsity, with a warning.
+        # sparse_solve=None resolves automatically: the sparse Jacobian makes the per-iteration Jacobian-vector
+        # products, the constraint-to-island lookup and the per-island Hessian assembly cost O(nonzeros) instead of
+        # O(n_constraints * n_dofs), which pays off on CPU when the scene has block structure, whereas a single
+        # dense-coupled tree gains nothing. An explicit value overrides this on CPU. On GPU the dense tiled path is
+        # faster, so the sparse representation is dropped there whatever the option says.
         if self._options.sparse_solve is None:
             sparse_solve = gs.backend == gs.cpu and not self._enable_mujoco_compatibility and has_multi_island_structure
         else:
             sparse_solve = self._options.sparse_solve
             if sparse_solve and gs.backend != gs.cpu:
                 gs.logger.warning(
-                    "Enabling 'sparse_solve' on the GPU backend likely impedes performance; the dense tiled "
-                    "factorization is faster there. Use with caution."
+                    "'sparse_solve' is ignored on the GPU backend, where the dense tiled factorization is faster."
                 )
-
-        # sparse-skyline and per-island exploit the block-diagonal Hessian from complementary angles, so on CPU
-        # they COMPOSE rather than compete: islands give each block its own cheap Hessian factorization, while the
-        # sparse Jacobian representation makes the per-iteration Jacobian-vector products, the constraint-to-island
-        # lookup, and the Hessian assembly cost O(nonzeros) instead of O(n_constraints * n_dofs). With both on, the
-        # many-small-bodies solve scales near-linearly in body count (measured ~2.7x faster than sparse alone and
-        # ~8x faster than islands alone at 256 boxes); the island Hessian branch naturally bypasses the skyline
-        # envelope factorization. The differentiable adjoint solve reads the dense Hessian, so the composition is
-        # restricted to the forward (non-grad) path. On GPU the dense tiled path is faster, so sparse is dropped and
-        # islands stand alone.
-        if sparse_solve and gs.backend == gs.cpu and self._use_contact_island and not self.sim.options.requires_grad:
-            pass  # compose islands + sparse Jacobian
-        elif sparse_solve and gs.backend == gs.cpu:
-            self._use_contact_island = False
-        elif self._use_contact_island:
-            sparse_solve = False
-
-        # The skyline-envelope factorization and its DOF reorder are CPU-only and incompatible with the differentiable
-        # adjoint solve (which reuses nt_H with natural, dense indexing). Under requires_grad only the assembly-level
-        # sparsity applies, matching the pre-existing behaviour. When islands are also active (the CPU composition),
-        # the per-island Hessian branch factorizes each block directly and never reads the skyline envelope, so the
-        # O(n_dofs^2) per-step envelope computation would be pure waste - drop it and let islands own the factorization.
-        sparse_envelope = (
-            sparse_solve
-            and gs.backend == gs.cpu
-            and not self.sim.options.requires_grad
-            and not self._use_contact_island
-        )
+        sparse_solve = sparse_solve and gs.backend == gs.cpu
 
         # Under the elliptic cone any middle-zone contact invalidates the Cholesky factor every Newton iteration, so
         # a contact-dense solve rebuilds it nearly every iteration; persisting the cone-free assembled Hessian turns
         # each rebuild into an envelope copy (see the nt_H declaration in array_class.py for the packed storage).
-        # Confined to the CPU skyline paths that own per-iteration rebuilds: the differentiable adjoint solve reuses
-        # nt_H with dense indexing and the GPU arms rebuild through the tiled assembly.
+        # Confined to the CPU per-island skyline path that owns per-iteration rebuilds, the GPU arms rebuilding through
+        # the tiled assembly.
         enable_cone_free_hessian_reuse = (
             self._options.friction_cone == gs.friction_cone.elliptic
             and gs.backend == gs.cpu
             and sparse_solve
-            and not self.sim.options.requires_grad
             and self._options.constraint_solver == gs.constraint_solver.Newton
         )
 
@@ -551,19 +558,33 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # stride-n_envs access. Batched sweeps key their iteration-axis order on the same flag, so that iteration order
         # always follows the physical layout.
         #
-        # The subgroup-cooperative constraint kernels (and the batch-first layout they expect) win when per-env compute
-        # density amortizes the warp-per-env overhead, and lose when envs are sparse and many (the 1-thread-per-env path
-        # is already coalesced under (len_constraints_, _B)). They are also the layout the decomposed solve arm requires.
-        # Empirically the cooperative path wins from ~4096 envs at n_dofs >= ~18 and loses once the env dimension alone
-        # saturates the GPU, so the env bound is get_gpu_core_count() (the threshold envs_undersaturate uses below), not
-        # a fixed literal, combined with n_dofs >= 16. Sparse solve is excluded (the cooperative qfrc kernel and the
+        # The tiled per-island seed of the factor (see enable_tiled_island_seed in array_class.py) runs on GPU at any
+        # env count: the scalar per-island seed it replaces is a per-env thread walking O(n^3) dependent loads, which
+        # above the core count costs more than the whole Newton iteration body. The subgroup-cooperative body kernels
+        # (and the batch-first layout they expect, also the layout the decomposed solve arm requires) win when per-env
+        # compute density amortizes the warp-per-env overhead and lose once the env dimension alone saturates the GPU,
+        # so they add the get_gpu_core_count() env bound (the threshold envs_undersaturate uses below), winning from
+        # ~4096 envs at n_dofs >= ~18. Sparse solve is excluded from both (the cooperative qfrc kernel and the
         # flipped-layout jac readers are dense-only).
-        enable_cooperative_constraint_kernels = (
-            gs.backend != gs.cpu
-            and not self.sim.options.requires_grad
-            and not sparse_solve
-            and self._sim._B <= get_gpu_core_count()
-            and self.n_dofs >= 16
+        enable_tiled_island_seed = (
+            gs.backend != gs.cpu and not self.sim.options.requires_grad and not sparse_solve and self.n_dofs >= 16
+        )
+        enable_cooperative_constraint_kernels = enable_tiled_island_seed and self._sim._B <= get_gpu_core_count()
+        # The noslip sweep of an island is the last one-thread process of the cooperative regime, so its block-per-island
+        # variant takes the same bound (see kernel_noslip in noslip.py).
+        enable_cooperative_noslip = enable_cooperative_constraint_kernels and self._options.noslip_iterations > 0
+        # Dofs per kinematic tree, counted from the links here since _init_tree_fields runs once the fields this config
+        # sizes are allocated. A scene holding one tree forms at most one island per env, and the per-island passes
+        # read the env's plain ranges.
+        tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
+        trees_n_dofs = np.bincount(
+            self._links_tree_root_idx[tree_links], np.array([link.n_dofs for link in self.links])[tree_links]
+        )
+        is_single_island = self._n_trees == 1
+        # Above the cooperative bound one thread per env saturates the GPU, where the scalar dense Cholesky of an env's
+        # one block beats the tiled factor, so the seed kernel assembles the block and the monolith factors it.
+        has_scalar_seed_factor = (
+            enable_tiled_island_seed and is_single_island and not enable_cooperative_constraint_kernels
         )
         constraint_layout_batch_first = (
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
@@ -586,13 +607,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             enable_collision=self._enable_collision,
             enable_joint_limit=self._enable_joint_limit,
             box_box_detection=self._box_box_detection,
-            use_contact_island=self._use_contact_island,
-            # The per-island solve engages wherever islands are on by default (CPU, where it composes with the sparse
-            # skyline). The GPU block below narrows it to exclude the whole-env-fits-shared no-hibernation case, which
-            # factors faster through the whole-env path (its block-diagonal Cholesky is the exact per-island result).
-            enable_per_island_solve=self._use_contact_island,
             sparse_solve=sparse_solve,
-            sparse_envelope=sparse_envelope,
             enable_cone_free_hessian_reuse=enable_cone_free_hessian_reuse,
             integrator=self._integrator,
             solver_type=self._options.constraint_solver,
@@ -601,7 +616,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             parallel_init=(
                 gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
             ),
+            enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
+            enable_cooperative_noslip=enable_cooperative_noslip,
+            is_single_island=is_single_island,
+            has_scalar_seed_factor=has_scalar_seed_factor,
             constraint_layout_batch_first=constraint_layout_batch_first,
         )
 
@@ -646,37 +665,25 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 max_tiled_envs = get_gpu_core_count()
                 envs_undersaturate = self.n_envs <= max_tiled_envs
 
-                # n_dofs-based dispatch between Tile16x16 and Tile32x32 Cholesky kernels (Hessian only).
-                # Derived from a padded-volume + sub-warp utilization model:
-                #   n_dofs in [1..16]    -> T=16 (one tight tile, no benefit going to T=32)
-                #   n_dofs in [17..32]   -> T=32 (single 32-lane tile beats two sequential 16-lane tiles)
-                #   n_dofs in [33..48]   -> T=16 (T=32 pads to 64 = ~29 wasted lanes; T=16 pads to 48 = ~13 wasted)
-                #   n_dofs in [49..]     -> T=32 (lane utilization wins, T=16 needs many sequential tiles)
-                # Confirmed by dex_hand (n_dofs=62, T=32 +2.6 %) and g1_fall (n_dofs=35, T=16 +2.9 %).
-                cholesky_tile_size = 16 if (self.n_dofs <= 16 or 32 < self.n_dofs <= 48) else 32
+                # Register tile of the mass-matrix Cholesky kernels and unit of the island tile caps, see
+                # cholesky_tile_size_for in array_class.py.
+                cholesky_tile_size = array_class.cholesky_tile_size_for(self.n_dofs)
                 tiled_n_dofs = max(math.ceil(self.n_dofs / cholesky_tile_size), 1) * cholesky_tile_size
                 tiled_n_dofs_per_block = max(math.ceil(max_block_dofs / 32), 1) * 32
 
-                # The decomposed arm's cooperative per-island solve stages one island's tile in shared memory.
-                # Size it to the largest tile-size multiple that fits shared (precision-aware), but no larger
-                # than tiled_n_dofs; an island exceeding this falls back to the serial per-island solve. Unlike
-                # hessian_fits_shared (which sizes the whole-env tile and is often False for big envs), this is
-                # always usable because islands are small - it only caps how big a single island may be before
-                # it loses the cooperative path.
-                tiled_n_island_dofs = tiled_n_dofs
-                while tiled_n_island_dofs > cholesky_tile_size and not fits_in_gpu_shared_memory(
-                    tiled_n_island_dofs, tiled_n_island_dofs
+                # The cooperative per-island solve stages one island's tile in shared memory, in size classes (see
+                # island_tile_cap_first in array_class.py): the last cap is the largest tile-size multiple that fits in
+                # GPU shared memory (precision-aware), no larger than tiled_n_dofs. An island holds at least one
+                # tree, so a class below the smallest tree never holds an island: the first cap starts at that tree.
+                island_tile_cap_last = tiled_n_dofs
+                while island_tile_cap_last > cholesky_tile_size and not fits_in_gpu_shared_memory(
+                    island_tile_cap_last, island_tile_cap_last + 1
                 ):
-                    tiled_n_island_dofs -= cholesky_tile_size
-
-                # enable_tiled_cholesky_hessian selects the register-streaming tiled factor (no shared-memory cap):
-                # worth tiling from n_dofs >= 16, and below the shared cap only when envs undersaturate (above it the
-                # scalar O(n_dofs^3) per-env factor is always worse). hessian_fits_shared additionally gates the
-                # shared-memory tiled triangular solve and fused factor+solve, which stage the full L tile in shared.
-                hessian_fits_shared = fits_in_gpu_shared_memory(tiled_n_dofs, tiled_n_dofs + 1)
-                # The elliptic cone Hessian block is added as an additive post-pass after func_hessian_direct_tiled
-                # (before the tiled factor reads the assembled H), so the tiled factor path supports elliptic.
-                enable_tiled_cholesky_hessian = self.n_dofs >= 16 and (not hessian_fits_shared or envs_undersaturate)
+                    island_tile_cap_last -= cholesky_tile_size
+                min_tree_dofs = trees_n_dofs[trees_n_dofs > 0].min() if self.n_dofs else 0
+                island_tile_cap_first = cholesky_tile_size
+                while island_tile_cap_first < min_tree_dofs:
+                    island_tile_cap_first *= 2
 
                 # The cooperative in-place LDL^T has no cap; the shared-memory tile is faster but capped. Same env logic
                 # as the Hessian: tile from the largest block >= 8 DOFs, drop the env guard above the cap where the
@@ -693,39 +700,32 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     enable_tiled_cholesky_mass_matrix and not mass_matrix_fits_shared and not self._requires_grad
                 )
 
-                # Route the per-step warm-start factor+solve through the fused kernel whenever the shared tiled solve is
-                # available (factor tiled and L fits shared). The monolith body's incremental rank-1 update needs L in
-                # nt_H, so the fused kernel also writes L back via the ``write_L_to_nt_H`` argument; see
-                # ``func_update_gradient_tiled``. Disabled for ``sparse_solve`` because the sparse path runs the per-env
-                # factor inside ``func_hessian_and_cholesky_factor_direct_batch`` (leaving nt_H = L); routing the
-                # warm-start through the fused kernel would then re-factor L as if it were H.
-                enable_fused_factor_solve_init = (
-                    enable_tiled_cholesky_hessian and hessian_fits_shared and not sparse_solve
-                )
-
                 rigid_config.update(
                     enable_tiled_cholesky_mass_matrix=enable_tiled_cholesky_mass_matrix,
                     mass_matrix_fits_shared=mass_matrix_fits_shared,
                     enable_register_tiled_mass=enable_register_tiled_mass,
-                    enable_tiled_cholesky_hessian=enable_tiled_cholesky_hessian,
-                    hessian_fits_shared=hessian_fits_shared,
                     cholesky_tile_size=cholesky_tile_size,
-                    enable_fused_factor_solve_init=enable_fused_factor_solve_init,
-                    enable_per_island_solve=(
-                        self._use_contact_island and (self._use_hibernation or not hessian_fits_shared)
-                    ),
                     tiled_n_dofs_per_block=tiled_n_dofs_per_block,
-                    tiled_n_dofs=tiled_n_dofs,
-                    tiled_n_island_dofs=tiled_n_island_dofs,
-                    # Persistent block grid for the cooperative per-island factor+solve: enough T-lane blocks to fill the
-                    # GPU (one block ~= one tile = cholesky_tile_size lanes). The blocks grid-stride over the (env,
-                    # island) work-list, so a small batch with many islands fans out across blocks instead of
-                    # serializing inside one block-per-env. The count is independent of the body/env count (only the GPU
-                    # size and cholesky_tile_size, which already varies the kernels via n_dofs): an ndarray-mode kernel
-                    # must compile once and run for any n_objs/n_envs, and a block with no work exits at the grid-stride
-                    # guard (blk >= work_size) within the same scheduling wave, so over-launching a tiny work-list is free.
-                    island_factor_n_blocks=max(1, max_tiled_envs // cholesky_tile_size),
+                    island_tile_cap_first=island_tile_cap_first,
+                    island_tile_cap_last=island_tile_cap_last,
+                    # An island holds at most every dof of the scene, so below this bound the factor paths above the
+                    # last cap (see func_island_assemble_factor_solve_tiled) are dead code and stay uncompiled.
+                    has_island_above_tile_cap=self.n_dofs > island_tile_cap_last,
                 )
+
+                # One thread block assembles and factors an island above the last cap for the Newton solver (see
+                # func_island_assemble_factor_solve_tiled), at a cost growing with the cube of its dof count whatever
+                # the environment count, where the skyline factor of the CPU backend exploits the sparsity of the
+                # contact graph.
+                if (
+                    self._options.constraint_solver == gs.constraint_solver.Newton
+                    and self.n_dofs > 4 * island_tile_cap_last
+                ):
+                    gs.logger.warning(
+                        f"The scene holds {self.n_dofs} dofs. A contact island wider than {4 * island_tile_cap_last} "
+                        "dofs takes seconds per step with the Newton constraint solver on the GPU backend. If the "
+                        "bodies can pile up into one island, use the CPU backend or the CG constraint solver."
+                    )
 
                 # Manually pin the solve arm only where the winner is determinable in advance AND confirmed across
                 # CUDA + Metal; genuinely backend-dependent cases fall through to the per-step autotuner.
@@ -740,15 +740,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 # leaves open, every case that description settles in the monolith's favor being pinned above already.
                 if gs.use_deterministic_algorithms and rigid_config.get("prefer_decomposed_solver", -1) == -1:
                     rigid_config["prefer_decomposed_solver"] = 1
-
-            # Add terms for static inner loops, use -1 if not requires_grad to avoid re-compilation
-            if self.sim.options.requires_grad:
-                rigid_config.update(
-                    max_n_geoms_per_entity=max(len(entity.geoms) for entity in self.entities) if self.links else 0,
-                    n_entities=self._n_entities,
-                    n_links=self._n_links,
-                    n_geoms=self._n_geoms,
-                )
 
         # Jacobi equilibration of the Newton system (see nt_jacobi in array_class.py): every factor, incremental
         # update and solve of every arm rides the scaled coordinates; the reference behaviour keeps the raw factor.
@@ -795,11 +786,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.kinematics_scratch = self.data_manager.kinematics_scratch
         if self._use_hibernation:
             self.n_awake_dofs = self.rigid_info.n_awake_dofs
-            self.awake_dofs = self.rigid_info.awake_dofs
-            self.n_awake_links = self.rigid_info.n_awake_links
-            self.awake_links = self.rigid_info.awake_links
-            self.n_awake_entities = self.rigid_info.n_awake_entities
-            self.awake_entities = self.rigid_info.awake_entities
         if self._requires_grad:
             self.dyn_state_adjoint_cache = self.data_manager.dyn_state_adjoint_cache
 
@@ -812,88 +798,127 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _jacobi_mass_spread_bound(self):
         """Upper-bound the spread of the mass matrix diagonal over every configuration, from the model alone.
 
-        Each DOF's diagonal entry is bracketed without kinematics. A translational entry is exactly its per-DOF
-        armature plus the subtree mass. A rotational entry is the link the joint carries plus its descendants: with a
-        single joint the link's axis, anchor and centre of mass (COM) are fixed in its frame, so its own term
-        armature + a^T I_anchor a is exact for a revolute axis and bracketed by the principal inertias about the
-        anchor for free/spherical DOFs whose axes turn with the configuration; descendants add at least nothing, at
-        most their largest principal inertia plus their mass carried at an anchor-to-COM distance no configuration
-        exceeds (frame offsets summed along the chain, each joint anchor counted twice since a joint rotation swings
-        the child origin around it, and each prismatic descendant's full travel span, infinite when unlimited). The
-        largest upper bracket over the smallest lower one thus bounds the true diagonal spread at every configuration:
-        equilibration may enable for scenes whose reachable configurations stay better conditioned, never the reverse.
+        Each entry gets a lower and an upper bound that hold in every configuration. A translational entry is armature
+        plus subtree mass exactly. A rotational entry is at least armature plus the link inertia about its axis (the
+        smallest principal inertia for free and spherical DOFs), and at most the same with the largest principal inertia
+        plus, per descendant, its largest principal inertia and its mass times the squared anchor-to-COM distance no
+        configuration exceeds (frame offsets along the chain, each anchor twice, prismatic spans, infinite when
+        unlimited). A build-time default armature adds the value of the variant an entity takes to the entries it fills
+        in, and any variant may be dispatched to any environment, so the bounds are kept per variant of each entity and
+        the spread is the largest over every combination of variants across entities. That spread is at least the true
+        one, so the gate never leaves a scene that needs equilibration without it; its only error is to enable it for a
+        scene that does not, at a small runtime cost.
         """
-        links = [link for entity in self._entities for link in entity.links]
         children = {}
-        for link in links:
-            children.setdefault(link.parent_idx, []).append(link)
+        for entity in self._entities:
+            for link in entity.links:
+                children.setdefault(link.parent_idx, []).append(link)
 
-        lower, upper = [], []
-        for link in links:
-            if link.is_fixed:
-                continue
-            for joint in link.joints:
-                if joint.type == gs.JOINT_TYPE.FIXED:
+        # Per entity, the smallest lower bound and the largest upper bound over its entries, per variant.
+        entities_lower, entities_upper = [], []
+        for entity in self._entities:
+            rotor_links = [
+                link
+                for link in entity.links
+                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            ]
+            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
+            if entity.desc.variants:
+                variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+            elif rotor_links:
+                variants_default = np.array([entity.main_morph.default_armature or 0.0])
+            else:
+                variants_default = np.zeros(1)
+            lower, upper = [], []
+            for link in entity.links:
+                if link.is_fixed:
                     continue
-                anchor = joint.pos
-                # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own term is
-                # exact only when this joint is its sole joint, since later chained joints re-rotate the link about
-                # their own anchors.
-                is_sole_joint = len(link.joints) == 1
-                if is_sole_joint:
-                    dist_com = {link.idx: np.linalg.norm(link.desc.inertial_pos - anchor)}
-                else:
-                    dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(link.desc.inertial_pos)}
-                dist_origin = {link.idx: np.linalg.norm(anchor)}
-                sub, stack = [], [link]
-                while stack:
-                    cur = stack.pop()
-                    sub.append(cur)
-                    for child in children.get(cur.idx, []):
-                        hop = np.linalg.norm(child.desc.pos) + 2.0 * sum(np.linalg.norm(j.pos) for j in child.joints)
-                        # A prismatic descendant carries the subtree outward by up to its full travel span (which
-                        # covers the offset from any zero configuration within limits); an unlimited slide makes the
-                        # upper bracket infinite and the gate enables.
-                        hop += sum(np.ptp(j.desc.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC)
-                        dist_origin[child.idx] = dist_origin[cur.idx] + hop
-                        dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.desc.inertial_pos)
-                        stack.append(child)
-                sub_mass = sum(l.desc.mass for l in sub)
-                eigvals = np.linalg.eigvalsh(link.desc.inertia)
-                rot_desc_upper = sum(
-                    np.linalg.eigvalsh(l.desc.inertia)[-1] + l.desc.mass * dist_com[l.idx] ** 2
-                    for l in sub
-                    if l is not link
-                )
-                # Carrying link's inertia about the anchor: exact along a fixed axis, principal bracket otherwise.
-                if is_sole_joint:
-                    R_inertial = gu.quat_to_R(link.desc.inertial_quat)
-                    inertia_com = R_inertial @ link.desc.inertia @ R_inertial.T
-                    offset_com = link.desc.inertial_pos - anchor
-                    rot_self_lower = eigvals[0]
-                    rot_self_upper = eigvals[-1] + link.desc.mass * np.dot(offset_com, offset_com)
-                else:
-                    inertia_com = None
-                    offset_com = None
-                    rot_self_lower = eigvals[0]
-                    rot_self_upper = eigvals[-1] + link.desc.mass * dist_com[link.idx] ** 2
-                for i_d, armature_d in enumerate(joint.desc.dofs_armature):
-                    if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
-                        lower.append(armature_d + sub_mass)
-                        upper.append(armature_d + sub_mass)
-                    elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
-                        axis = joint.desc.dofs_motion_ang[i_d]
-                        lever = np.cross(axis, offset_com)
-                        rot_self = axis @ inertia_com @ axis + link.desc.mass * np.dot(lever, lever)
-                        lower.append(armature_d + rot_self)
-                        upper.append(armature_d + rot_self + rot_desc_upper)
+                is_rotor = link in rotor_links
+                for joint in link.joints:
+                    if joint.type == gs.JOINT_TYPE.FIXED:
+                        continue
+                    anchor = joint.pos
+                    # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own term is
+                    # exact only when this joint is its sole joint, since later chained joints re-rotate the link about
+                    # their own anchors.
+                    is_sole_joint = len(link.joints) == 1
+                    if is_sole_joint:
+                        dist_com = {link.idx: np.linalg.norm(link.desc.inertial_pos - anchor)}
                     else:
-                        lower.append(armature_d + max(rot_self_lower, 0.0))
-                        upper.append(armature_d + rot_self_upper + rot_desc_upper)
-        lower = [val for val in lower if val > 0.0]
-        if not lower or not upper:
+                        dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(link.desc.inertial_pos)}
+                    dist_origin = {link.idx: np.linalg.norm(anchor)}
+                    sub, stack = [], [link]
+                    while stack:
+                        cur = stack.pop()
+                        sub.append(cur)
+                        for child in children.get(cur.idx, []):
+                            hop = np.linalg.norm(child.desc.pos) + 2.0 * sum(
+                                np.linalg.norm(j.pos) for j in child.joints
+                            )
+                            # A prismatic descendant carries the subtree outward by up to its full travel span (which
+                            # covers the offset from any zero configuration within limits); an unlimited slide makes the
+                            # upper bound infinite and the gate enables.
+                            hop += sum(
+                                np.ptp(j.desc.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC
+                            )
+                            dist_origin[child.idx] = dist_origin[cur.idx] + hop
+                            dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.desc.inertial_pos)
+                            stack.append(child)
+                    sub_mass = sum(l.desc.mass for l in sub)
+                    eigvals = np.linalg.eigvalsh(link.desc.inertia)
+                    rot_desc_upper = sum(
+                        np.linalg.eigvalsh(l.desc.inertia)[-1] + l.desc.mass * dist_com[l.idx] ** 2
+                        for l in sub
+                        if l is not link
+                    )
+                    # Carrying link's inertia about the anchor: exact along a fixed axis, otherwise between its smallest
+                    # and largest principal inertia.
+                    if is_sole_joint:
+                        R_inertial = gu.quat_to_R(link.desc.inertial_quat)
+                        inertia_com = R_inertial @ link.desc.inertia @ R_inertial.T
+                        offset_com = link.desc.inertial_pos - anchor
+                        rot_self_lower = eigvals[0]
+                        rot_self_upper = eigvals[-1] + link.desc.mass * np.dot(offset_com, offset_com)
+                    else:
+                        inertia_com = None
+                        offset_com = None
+                        rot_self_lower = eigvals[0]
+                        rot_self_upper = eigvals[-1] + link.desc.mass * dist_com[link.idx] ** 2
+                    for i_d, armature_d in enumerate(joint.desc.dofs_armature):
+                        if is_rotor and armature_d <= 0.0:
+                            armature = variants_default
+                        else:
+                            armature = np.full(variants_default.size, armature_d)
+                        if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
+                            lower.append(armature + sub_mass)
+                            upper.append(armature + sub_mass)
+                        elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
+                            axis = joint.desc.dofs_motion_ang[i_d]
+                            lever = np.cross(axis, offset_com)
+                            rot_self = axis @ inertia_com @ axis + link.desc.mass * np.dot(lever, lever)
+                            lower.append(armature + rot_self)
+                            upper.append(armature + rot_self + rot_desc_upper)
+                        else:
+                            lower.append(armature + max(rot_self_lower, 0.0))
+                            upper.append(armature + rot_self_upper + rot_desc_upper)
+            if lower:
+                lower, upper = np.array(lower), np.array(upper)
+                entities_lower.append(np.where(lower > 0.0, lower, np.inf).min(axis=0))
+                entities_upper.append(upper.max(axis=0))
+        if not entities_lower:
             return 0.0
-        return max(upper) / min(lower)
+
+        # The largest upper bound of a variant pairs with the smallest lower bound reachable alongside it: its own, or
+        # the one of any variant of another entity. A variant without a positive lower bound has no spread to speak of.
+        lower_min = np.array([entity_lower.min() for entity_lower in entities_lower])
+        mass_spread = 0.0
+        for i_e, (entity_lower, entity_upper) in enumerate(zip(entities_lower, entities_upper)):
+            lower_paired = np.minimum(entity_lower, np.delete(lower_min, i_e).min(initial=np.inf))
+            is_bounded = np.isfinite(lower_paired)
+            mass_spread_entity = np.zeros_like(entity_upper)
+            np.divide(entity_upper, lower_paired, out=mass_spread_entity, where=is_bounded)
+            mass_spread = max(mass_spread, mass_spread_entity.max())
+        return mass_spread
 
     def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True, in_place=False):
         # Every kinematic tree of the solver is recomputed. A change limited to some links is handled by the setter
@@ -940,10 +965,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.mass_mat = self.rigid_info.mass_mat
         self.mass_mat_L = self.rigid_info.mass_mat_L
         self.mass_mat_D_inv = self.rigid_info.mass_mat_D_inv
-        self.mass_mat_mask = self.rigid_info.mass_mat_mask
         self.meaninertia = self.rigid_info.meaninertia
-
-        self.mass_mat_mask.fill(True)
 
         # tree structure information
         mass_parent_mask = np.zeros((self.n_dofs_, self.n_dofs_), dtype=gs.np_float)
@@ -983,26 +1005,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 dofs_mass_block_start[i_d] = i_d
                 dofs_mass_block_end[i_d] = i_d + 1
 
-        # See entities_mass_block_dof_start in array_class.py: skip a leading run of DOFs merged into an earlier-rooted
-        # block; the end is the last rooted block's end, which may extend past the entity's own DOFs into a merged
-        # child.
-        entities_mass_block_dof_start = np.zeros(self.n_entities_, dtype=gs.np_int)
-        entities_mass_block_dof_end = np.zeros(self.n_entities_, dtype=gs.np_int)
-        for i_e, entity in enumerate(self.entities):
-            blocks_dof_start = entity.dof_start
-            blocks_dof_end = entity.dof_start
-            if entity.n_dofs > 0:
-                if dofs_mass_block_start[entity.dof_start] != entity.dof_start:
-                    blocks_dof_start = dofs_mass_block_end[entity.dof_start]
-                blocks_dof_end = dofs_mass_block_end[entity.dof_end - 1]
-            entities_mass_block_dof_start[i_e] = blocks_dof_start
-            entities_mass_block_dof_end[i_e] = blocks_dof_end
-
+        # Smallest dof structurally coupled to each dof by the mass matrix (itself when none lies below it), read by the
+        # skyline envelope of the per-island solver (see dof_env_start_local in array_class.py).
+        dofs_mass_envelope_start = ((mass_parent_mask + mass_parent_mask.T) > 0.5).argmax(axis=1).astype(gs.np_int)
         self.rigid_info.mass_parent_mask.from_numpy(mass_parent_mask)
+        self.rigid_info.dofs_mass_envelope_start.from_numpy(dofs_mass_envelope_start)
         self.rigid_info.dofs_mass_block_start.from_numpy(dofs_mass_block_start)
         self.rigid_info.dofs_mass_block_end.from_numpy(dofs_mass_block_end)
-        self.rigid_info.entities_mass_block_dof_start.from_numpy(entities_mass_block_dof_start)
-        self.rigid_info.entities_mass_block_dof_end.from_numpy(entities_mass_block_dof_end)
 
     def _dispatch_heterogeneous_vgeoms(self):
         """
@@ -1012,8 +1021,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
         link._build() from actual geom objects, using analytic formulas for primitives.
         """
-        from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
-
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue
@@ -1102,7 +1109,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Characteristic length of each dof (1 for translation, the body radius for rotation), used to weight dof
         # velocities in the hibernation rest test. Computed here, after geom dispatch, because a heterogeneous entity's
         # per-variant geoms (and hence body radius) are only assigned to environments at that point. Only needed when
-        # hibernation is on, which already implies use_contact_island and a non-differentiable solve.
+        # hibernation is on.
         if not self._use_hibernation:
             return
 
@@ -1119,7 +1126,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def _init_geom_fields(self):
         self.geoms_init_AABB = self.rigid_info.geoms_init_AABB
-        self._geoms_render_T = np.empty((self.n_geoms_, self._B, 4, 4), dtype=np.float32)
 
         if self.n_geoms > 0:
             geoms = self.geoms
@@ -1240,7 +1246,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.collider = Collider(self)
 
     def _init_constraint_solver(self):
-        # Islands are a per-island Newton solve inside ConstraintSolver.resolve, gated on use_contact_island.
         self.constraint_solver = ConstraintSolver(self)
 
     def update_forward_pos(self):
@@ -1292,7 +1297,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._func_constraint_force()
             kernel_step_2(
                 self.dyn_state,
-                self.collider.collider_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
                 self.rigid_info,
@@ -1368,9 +1372,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         elif errno & array_class.ErrorCode.INVALID_ACC_NAN:
             code = array_class.ErrorCode.INVALID_ACC_NAN
             message = "Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep."
-        elif errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
-            code = array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS
-            message = "Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'."
         else:
             return
 
@@ -1414,17 +1415,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if self._enable_collision:
             self.collider.detection()
-            # A collision against a sleeping body must wake it before the solve, so it joins the island partition
-            # and responds dynamically this step instead of letting the awake body pass through.
-            if self._use_hibernation:
-                kernel_wake_up_entities_on_new_contact(
-                    self.dyn_state,
-                    self.collider.collider_state,
-                    self.constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                )
 
         if not self._disable_constraint:
             self.constraint_solver.add_inequality_constraints()
@@ -1510,11 +1500,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def _func_update_acc(self):
         kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-
-    def _func_forward_kinematics_entity(self, i_e, envs_idx):
-        kernel_forward_kinematics_entity(
-            i_e, envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
 
     def _func_integrate_dq_entity(self, dq, i_e, i_b, respect_joint_limit):
         func_integrate_dq_entity(i_e, i_b, dq, self.dyn_info, self.rigid_info, self.rigid_config, respect_joint_limit)
@@ -1698,7 +1683,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         kernel_step_2.grad(
             self.dyn_state,
-            self.collider.collider_state,
             self.constraint_solver.constraint_state,
             self.dyn_info,
             self.rigid_info,
@@ -1715,7 +1699,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if not self._disable_constraint:
             self._constraint_force_grad()
         else:
-            kernel_manual_compute_qacc_bw(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+            kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)
         kernel_copy_acc(f, self.dyn_state, self._rigid_adjoint_cache, self.rigid_config)
 
         kernel_forward_dynamics_without_qacc.grad(
@@ -1744,7 +1728,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
             kernel_step_2(
                 self.dyn_state,
-                self.collider.collider_state,
                 self.constraint_solver.constraint_state,
                 self.dyn_info,
                 self.rigid_info,
@@ -1757,13 +1740,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
             if self.sim.coupler.has_any_rigid_coupling:
                 self.substep(f)
-
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- render -----------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def update_geoms_render_T(self):
-        kernel_update_geoms_render_T(self._geoms_render_T, self.dyn_state, self.rigid_info, self.rigid_config)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -1828,7 +1804,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             cfrc_ang_dst = qd_to_torch(self.dyn_state.links.cfrc_applied_ang, transpose=True, copy=False)
             fric_dst = qd_to_torch(self.dyn_state.geoms.friction_ratio, transpose=True, copy=False)
             # Setting the state is a discontinuity: wake every body in the affected envs (a body left hibernated would
-            # stay frozen), restoring the flags and the compact awake lists alongside the other state buffers.
+            # stay frozen), restoring the flags and the awake-dof count alongside the other state buffers.
             if self._use_hibernation:
                 links_hibernated_dst = qd_to_torch(self.dyn_state.links.is_hibernated, transpose=True, copy=False)
                 awake_steps_dst = qd_to_torch(self.dyn_state.links.awake_steps, transpose=True, copy=False)
@@ -1841,17 +1817,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 islands_next_link_dst = qd_to_torch(
                     self.constraint_solver.constraint_state.island.hibernated_next_link, transpose=True, copy=False
                 )
-                awake_links_dst = qd_to_torch(self.rigid_info.awake_links, transpose=True, copy=False)
-                awake_dofs_dst = qd_to_torch(self.rigid_info.awake_dofs, transpose=True, copy=False)
-                awake_entities_dst = qd_to_torch(self.rigid_info.awake_entities, transpose=True, copy=False)
-                n_awake_links_dst = qd_to_torch(self.rigid_info.n_awake_links, copy=False)
                 n_awake_dofs_dst = qd_to_torch(self.rigid_info.n_awake_dofs, copy=False)
-                n_awake_entities_dst = qd_to_torch(self.rigid_info.n_awake_entities, copy=False)
-                # Fill to the padded buffer capacity but keep n_awake at the real count below, so a scene with no
-                # DOFs writes its padded slot yet reports zero awake DOFs.
-                awake_links_src = torch.arange(self.n_links_, device=gs.device, dtype=gs.tc_int)
-                awake_dofs_src = torch.arange(self.n_dofs_, device=gs.device, dtype=gs.tc_int)
-                awake_entities_src = torch.arange(self.n_entities_, device=gs.device, dtype=gs.tc_int)
 
             if envs_idx is not None and not isinstance(envs_idx, torch.Tensor):
                 (envs_idx,) = indices_to_mask(envs_idx)
@@ -1883,12 +1849,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     entities_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     islands_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     islands_next_link_dst.masked_fill_(envs_mask[:, None], -1)
-                    torch.where(envs_mask[:, None], awake_links_src, awake_links_dst, out=awake_links_dst)
-                    torch.where(envs_mask[:, None], awake_dofs_src, awake_dofs_dst, out=awake_dofs_dst)
-                    torch.where(envs_mask[:, None], awake_entities_src, awake_entities_dst, out=awake_entities_dst)
-                    n_awake_links_dst.masked_fill_(envs_mask, self.n_links)
                     n_awake_dofs_dst.masked_fill_(envs_mask, self.n_dofs)
-                    n_awake_entities_dst.masked_fill_(envs_mask, self.n_entities)
             else:
                 if self.n_qs:
                     errno[envs_idx] = 0
@@ -1911,12 +1872,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     entities_hibernated_dst[envs_idx] = 0
                     islands_hibernated_dst[envs_idx] = 0
                     islands_next_link_dst[envs_idx] = -1
-                    awake_links_dst[envs_idx] = awake_links_src
-                    awake_dofs_dst[envs_idx] = awake_dofs_src
-                    awake_entities_dst[envs_idx] = awake_entities_src
-                    n_awake_links_dst[envs_idx] = self.n_links
                     n_awake_dofs_dst[envs_idx] = self.n_dofs
-                    n_awake_entities_dst[envs_idx] = self.n_entities
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
@@ -2020,7 +1976,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                force_update_fixed_geoms=False,
+                force_update_all_geoms=False,
                 is_backward=False,
             )
             kernel_forward_velocity(
@@ -2758,9 +2714,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def _wake_dofs(self, dofs_idx, envs_idx):
-        # Revive any hibernated entity owning these (already sanitized) dofs before an input is written to or
-        # targeted at them; forward dynamics and integration act only on awake dofs, so an input applied to a
-        # sleeping body would otherwise be silently dropped until it is woken by some other means.
+        # Revive any hibernated entity owning these (already sanitized) dofs before a state is written to them;
+        # forward dynamics and integration act only on awake dofs, so a state written to a sleeping body would
+        # otherwise be silently dropped until it is woken by some other means.
         if self._use_hibernation:
             kernel_wake_up_entities_by_dofs(
                 dofs_idx,
@@ -2782,7 +2738,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         super().set_dofs_velocity(velocity, dofs_idx, envs_idx, skip_forward=skip_forward)
 
     def control_dofs_force(self, force, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        # A control target is consumed by the actuation pass of the next step, which wakes a sleeping link it actuates
+        # (see func_torque_and_passive_force), so the target is written without waking anything here.
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.FORCE
@@ -2798,11 +2756,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             force = force[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_force(dofs_idx, envs_idx, force, self.dyn_state, self.rigid_config)
 
     def control_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.VELOCITY
@@ -2820,11 +2777,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             velocity = velocity[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.POSITION
@@ -2842,11 +2798,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             position = position[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_position(dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
 
     def control_dofs_position_velocity(self, position, velocity, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._use_hibernation:
+        if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.POSITION
@@ -2868,7 +2823,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             position = position[None]
             velocity = velocity[None]
 
-        self._wake_dofs(dofs_idx, envs_idx)
         kernel_control_dofs_position_velocity(dofs_idx, envs_idx, position, velocity, self.dyn_state, self.rigid_config)
 
     def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None):
@@ -3513,7 +3467,7 @@ def kernel_step_1(
 ):
     if qd.static(not is_forward_pos_updated):
         func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=is_backward
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
         )
 
     if qd.static(not is_forward_vel_updated):
@@ -3525,7 +3479,6 @@ def kernel_step_1(
 @qd.kernel(fastcache=True)
 def kernel_step_2(
     dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -3550,15 +3503,6 @@ def kernel_step_2(
 
         if qd.static(not rigid_config.enable_mujoco_compatibility):
             func_update_cartesian_space(
-                dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=is_backward
+                dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
             )
             func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-
-    # Hibernating comes last, after the post-integrate refresh above: both only visit awake entities, so deciding to
-    # sleep first would drop the newly-hibernated island from that refresh and freeze its Cartesian pose one
-    # integration behind the qpos this step just advanced, for as long as it sleeps.
-    if qd.static(rigid_config.use_hibernation):
-        func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, errno
-        )
-        func_aggregate_awake_entities(dyn_state, dyn_info, rigid_info, rigid_config)

@@ -1,9 +1,12 @@
+import sys
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, Sequence, Union
-from pydantic import StrictBool, StrictInt, Field, model_validator
+
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
 from genesis.datatypes import List
-from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, Vec3FType, UnitIntervalVec3Type
+from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, UnitIntervalVec3Type, Vec3FType
+from genesis.utils.serialization import ignore_invalid_load
 
 from .options import Options
 
@@ -29,8 +32,10 @@ class ViewerOptions(Options):
     res : tuple, shape (2,), optional
         The resolution of the viewer. If not set, will auto-compute using resolution of the connected display.
     run_in_thread : bool
-        Whether to run the viewer in a background thread. This option is not supported on MacOS. True by default if
-        available.
+        Whether to run the viewer in a background thread, where it stays responsive while the simulation is idle. If
+        None, it runs in a background thread wherever the platform supports it. MacOS only supports the main thread,
+        so asking for a background thread there raises an error. A scene file recording such a request is loaded
+        as asking for the platform default, so it opens on every platform.
     refresh_rate : int
         The rate (in frames per second) at which the viewer repaints on screen, and the framerate the video recorded
         from the viewer window is encoded at. Independent of the physics timestep, and of the framerate passed to
@@ -63,7 +68,10 @@ class ViewerOptions(Options):
     """
 
     res: PositiveVec2IType | None = None
-    run_in_thread: StrictBool | None = None
+    # MacOS serves the viewer window from its main thread only (see Visualizer).
+    run_in_thread: Annotated[
+        StrictBool | None, ignore_invalid_load((None, False) if sys.platform == "darwin" else (None, False, True))
+    ] = None
     refresh_rate: PositiveInt = 60
     realtime_factor: PositiveFloat | None = 1.0
     camera_pos: Vec3FType = (3.5, 0.5, 2.5)
@@ -140,9 +148,15 @@ class VisOptions(Options):
         Whether to render shadow. Defaults to True.
     plane_reflection : bool
         Whether to render plane reflection. Defaults to False.
-    env_separate_rigid : bool
-        Whether to render all the rigid objects in batched environments in isolation or as part of the same scene.
-        This is only an option for Rasterizer. This behavior is enforced for BatchRender. Defaults to False.
+    split_envs : bool
+        Whether the cameras render each environment in its own world, split from the others, or all the environments
+        as if they shared one scene, laid out side by side as the interactive viewer shows them. Split, a camera returns
+        one image per rendered environment, stacked along a leading dimension, each drawn from the same viewpoint with
+        lighting and shadows identical in every environment, at the cost of one render per environment. Merged, a
+        camera returns one image of the whole grid from a viewpoint bound to one environment, which is cheaper and
+        shows the environments next to each other. This is only an option for Rasterizer, and applies to the scene
+        cameras, debug cameras included. Camera sensors and BatchRender always render the environments split. Defaults
+        to False.
     background_color : tuple of float, shape (3,)
         The color of the scene background.
     ambient_light : tuple of float, shape (3,)
@@ -182,7 +196,7 @@ class VisOptions(Options):
     show_cameras: StrictBool = False
     shadow: StrictBool = True
     plane_reflection: StrictBool = False
-    env_separate_rigid: StrictBool = False
+    split_envs: StrictBool = False
     background_color: UnitIntervalVec3Type = (0.04, 0.08, 0.12)
     ambient_light: UnitIntervalVec3Type = (0.1, 0.1, 0.1)
     visualize_mpm_boundary: StrictBool = False
@@ -208,4 +222,13 @@ class VisOptions(Options):
             if data.get("rendered_envs_idx") is not None:
                 raise ValueError("Cannot specify both 'n_rendered_envs' and 'rendered_envs_idx'.")
             data["rendered_envs_idx"] = tuple(range(n_rendered_envs))
+        env_separate_rigid = data.pop("env_separate_rigid", None)
+        if env_separate_rigid is not None:
+            gs.logger.warning(
+                "Viewer option 'env_separate_rigid' is deprecated and will be removed in a future release. "
+                "Please use 'split_envs' instead."
+            )
+            if data.get("split_envs") is not None:
+                raise ValueError("Cannot specify both 'env_separate_rigid' and 'split_envs'.")
+            data["split_envs"] = env_separate_rigid
         return data

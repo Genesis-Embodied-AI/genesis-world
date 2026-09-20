@@ -46,7 +46,6 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
         rigid_options=gs.options.RigidOptions(
             enable_torsional_friction=True,
             enable_rolling_friction=True,
-            use_contact_island=True,
         ),
         show_viewer=show_viewer,
     )
@@ -67,29 +66,13 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_partition_logics(show_viewer, n_envs, multi_free_body_path, monkeypatch):
+def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     # The welded pair never touches, so only the equality edge couples them: without it the partition would split them
     # and the weld would be solved across two islands. A fixed body carries no dofs and joins no island. The
     # multi-free-body MJCF entity (offset clear of the boxes) is a single Genesis entity that must split into one island
     # per free-body subtree, never one dense block - its hinge child stays in its parent's island via a kinematic edge.
-    #
-    # This scene is small and fits-shared, so in production the GPU solve runs whole-env and never builds the island
-    # partition this test asserts (enable_per_island_solve is False without hibernation). Force the per-island path on
-    # so the partition is built; this patch only exists to keep this partition-structure test backend-agnostic.
-    from genesis.utils.array_class import RigidSimStaticConfig
-
-    _orig_static_config_init = RigidSimStaticConfig.__init__
-
-    def _force_per_island_solve(self, *args, **kwargs):
-        if kwargs.get("use_contact_island"):
-            kwargs["enable_per_island_solve"] = True
-        _orig_static_config_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(RigidSimStaticConfig, "__init__", _force_per_island_solve)
-
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=False,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -184,23 +167,19 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path, monkeypatch
     assert_equal(qd_to_numpy(island_state.n_islands), 6)
 
     # Per env: each free box has 6 dofs (stack and welded pair hold 12 each, lone box 6; the free bodies hold 6, 7 with
-    # the hinge child, and 6); per-island contact and constraint counts sum back to the env total; and the lone island
-    # holds exactly the lone box's dofs.
+    # the hinge child, and 6); per-island constraint counts sum back to the env total; and the lone island holds exactly
+    # the lone box's dofs.
     n_islands = qd_to_numpy(island_state.n_islands)
     island_dof_n = qd_to_numpy(island_state.dof_slices.n)
     island_dof_start = qd_to_numpy(island_state.dof_slices.start)
     dof_id = qd_to_numpy(island_state.dof_id)
-    island_contact_n = qd_to_numpy(island_state.contact_slices.n)
     island_constraint_n = qd_to_numpy(island_state.constraint_slices.n)
-    n_contacts = qd_to_numpy(solver.collider.collider_state.n_contacts)
     n_constraints = qd_to_numpy(solver.constraint_solver.constraint_state.n_constraints)
     alone_dofs = list(range(box_alone.dof_start, box_alone.dof_start + box_alone.n_dofs))
     for i_env in range(island_idx.shape[1]):
         n = n_islands[i_env]
         assert sorted(island_dof_n[:n, i_env].tolist()) == [6, 6, 6, 7, 12, 12]
-        assert island_contact_n[:n, i_env].sum() == n_contacts[i_env]
         assert island_constraint_n[:n, i_env].sum() == n_constraints[i_env]
-        assert island_contact_n[island_of["bottom"][i_env], i_env] >= 1
         assert island_constraint_n[island_of["weld_a"][i_env], i_env] >= 1
         k = island_of["alone"][i_env]
         seg = dof_id[island_dof_start[k, i_env] : island_dof_start[k, i_env] + island_dof_n[k, i_env], i_env]
@@ -215,27 +194,61 @@ def test_partition_logics(show_viewer, n_envs, multi_free_body_path, monkeypatch
 
 
 @pytest.mark.required
+def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
+    # The dual arm hanging from a fixed torso against its twin whose free torso is welded to the world at runtime:
+    # the twin is one island throughout, the fixed one splits per arm until the arms touch, and both fall alike. The
+    # arms of the first env start lower, so its islands merge first.
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -4.0, 1.5),
+            camera_lookat=(1.5, 0.0, 0.8),
+        ),
+        show_viewer=show_viewer,
+    )
+    plane = scene.add_entity(gs.morphs.Plane())
+    dual_arm = scene.add_entity(
+        gs.morphs.URDF(
+            file=fixed_base_dual_arm,
+            pos=(0.0, 0.0, 1.0),
+            fixed=True,
+        )
+    )
+    dual_arm_welded = scene.add_entity(
+        gs.morphs.URDF(
+            file=fixed_base_dual_arm,
+            pos=(3.0, 0.0, 1.0),
+        )
+    )
+    scene.build(n_envs=2)
+    scene.rigid_solver.add_weld_constraint(dual_arm_welded.base_link_idx, plane.base_link_idx)
+    dual_arm.set_dofs_position([[0.9, -0.9], [0.0, 0.0]])
+    dual_arm_welded.set_dofs_position([[0.9, -0.9], [0.0, 0.0]], dofs_idx_local=[6, 7])
+    n_islands = scene.rigid_solver.constraint_solver.constraint_state.island.n_islands
+
+    # The welded dual arm is one island, the two arms of the fixed dual arm are two islands until they touch, one from
+    # then on. Until the arms touch the twins fall alike, at rest they settle alike up to the compliance of the weld.
+    has_envs_differed = False
+    for i_step in range(80):
+        scene.step()
+        is_arms_touching = tensor_to_array(dual_arm.get_contacts(with_entity=dual_arm)["valid_mask"].any(dim=-1))
+        assert_equal(qd_to_numpy(n_islands), 3 - is_arms_touching)
+        has_envs_differed |= is_arms_touching[0] != is_arms_touching[1]
+        if i_step == 0:
+            assert not is_arms_touching.any()
+        if i_step == 39:
+            arms_qpos_diff = dual_arm_welded.get_dofs_position()[..., 6:] - dual_arm.get_dofs_position()
+            assert_allclose(arms_qpos_diff[~is_arms_touching], 0.0, tol=1e-3)
+            assert_allclose(arms_qpos_diff[is_arms_touching], 0.0, tol=5e-3)
+    assert has_envs_differed
+    assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_partition_track_changes(show_viewer, n_envs, monkeypatch):
+def test_partition_track_changes(show_viewer, n_envs):
     # The partition is rebuilt every step, so it must track contacts forming (merge) and breaking (split).
-    #
-    # This scene is small and fits-shared, so in production the GPU solve runs whole-env and never builds the island
-    # partition this test asserts (enable_per_island_solve is False without hibernation). Force the per-island path on
-    # so the partition is built; this patch only exists to keep this partition-structure test backend-agnostic.
-    from genesis.utils.array_class import RigidSimStaticConfig
-
-    _orig_static_config_init = RigidSimStaticConfig.__init__
-
-    def _force_per_island_solve(self, *args, **kwargs):
-        if kwargs.get("use_contact_island"):
-            kwargs["enable_per_island_solve"] = True
-        _orig_static_config_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(RigidSimStaticConfig, "__init__", _force_per_island_solve)
-
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=False,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -262,81 +275,117 @@ def test_partition_track_changes(show_viewer, n_envs, monkeypatch):
     # The step rebuilds the partition; read the island count the solver actually used this step.
     island_state = scene.rigid_solver.constraint_solver.constraint_state.island
 
-    def n_islands_now():
-        return qd_to_numpy(island_state.n_islands)
-
     scene.step()
-    assert_equal(n_islands_now(), 2)
+    assert_equal(qd_to_numpy(island_state.n_islands), 2)
     for _ in range(45):
         scene.step()
-    assert_equal(n_islands_now(), 1)
+    assert_equal(qd_to_numpy(island_state.n_islands), 1)
     box_upper.set_pos([0.0, 0.0, 0.40])
     scene.step()
-    assert_equal(n_islands_now(), 2)
+    assert_equal(qd_to_numpy(island_state.n_islands), 2)
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("noslip_iterations", [0, 5])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
-    # Partitioning the solve into per-island blocks must not change the result (the global Hessian is block-diagonal by
-    # island). The noslip pass is a global post-solve refinement reading the island-solved accelerations, so it
-    # composes too.
-    positions = []
-    for use_contact_island in (False, True):
-        scene = gs.Scene(
-            rigid_options=gs.options.RigidOptions(
-                noslip_iterations=noslip_iterations,
-                use_contact_island=use_contact_island,
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                camera_pos=(1.0, -4.0, 2.5),
-                camera_lookat=(1.0, 0.0, 0.1),
-            ),
-            show_viewer=show_viewer,
+    # Islands of different make-up (a two-box stack, a welded pair, a lone box) are solved side by side, each on its own
+    # block of the Hessian, and the noslip pass refines the island-solved accelerations. The ground truth is the rest
+    # state statics dictate: the heights of the boxes, the weld offset and a vanishing velocity.
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            noslip_iterations=noslip_iterations,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -4.0, 2.5),
+            camera_lookat=(1.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box_bottom = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 0.05),
         )
-        scene.add_entity(gs.morphs.Plane())
-        box_bottom = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(0.0, 0.0, 0.05),
-            )
+    )
+    box_top = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 0.16),
         )
-        box_top = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(0.0, 0.0, 0.16),
-            )
+    )
+    box_weld_a = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(1.0, 0.0, 0.05),
         )
-        box_weld_a = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(1.0, 0.0, 0.05),
-            )
+    )
+    box_weld_b = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(1.3, 0.0, 0.05),
         )
-        box_weld_b = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(1.3, 0.0, 0.05),
-            )
+    )
+    box_alone = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(2.0, 0.0, 0.05),
         )
-        box_alone = scene.add_entity(
-            gs.morphs.Box(
-                size=(0.1, 0.1, 0.1),
-                pos=(2.0, 0.0, 0.05),
-            )
-        )
-        scene.build(n_envs=n_envs)
+    )
+    scene.build(n_envs=n_envs)
 
-        scene.rigid_solver.add_weld_constraint(box_weld_a.base_link_idx, box_weld_b.base_link_idx)
-        for _ in range(45):
-            scene.step()
-        boxes = (box_bottom, box_top, box_weld_a, box_weld_b, box_alone)
-        positions.append(np.stack([tensor_to_array(b.get_pos()) for b in boxes]))
+    scene.rigid_solver.add_weld_constraint(box_weld_a.base_link_idx, box_weld_b.base_link_idx)
+    for _ in range(45):
+        scene.step()
+    boxes = (box_bottom, box_top, box_weld_a, box_weld_b, box_alone)
+    heights = np.stack([np.atleast_1d(tensor_to_array(box.get_pos())[..., 2]) for box in boxes])
+    assert_allclose(heights, np.array([0.05, 0.15, 0.05, 0.05, 0.05])[:, None], tol=5e-3)
+    weld_offset = tensor_to_array(box_weld_b.get_pos()) - tensor_to_array(box_weld_a.get_pos())
+    assert_allclose(weld_offset, [0.3, 0.0, 0.0], tol=5e-3)
+    assert (scene.rigid_solver.get_dofs_velocity().abs() < 1e-4).all()
 
-    # Loose tol: the monolith's incremental Cholesky vs the island path's direct rebuild are both exact in theory, but
-    # 80 steps of a chaotic stack drift apart at fp-accumulation level.
-    assert_allclose(positions[1], positions[0], tol=5e-3)
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_islands_converge_independently(show_viewer, n_envs):
+    # Each island converges on its own criterion: a 1 g die resting beside a Franka settles to the residual its own
+    # inertia allows, whatever the arm beside it tolerates. CG converges gradually, so its exit is where this shows.
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            constraint_solver=gs.constraint_solver.CG,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.5, -1.5, 1.0),
+            camera_lookat=(1.0, 0.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    franka = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    die = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.01, 0.01, 0.01),
+            pos=(1.5, 0.0, 0.005),
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    franka.control_dofs_position(franka.get_dofs_position())
+    for _ in range(40):
+        scene.step()
+    for _ in range(20):
+        scene.step()
+        assert (die.get_dofs_velocity()[..., 3:].abs() < 1e-4).all()
 
 
 @pytest.mark.required
@@ -344,9 +393,8 @@ def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
 def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
     # enable_cooperative_constraint_kernels is bounded by get_gpu_core_count(), so faking extreme GPU saturation
     # (get_gpu_core_count -> 1) disables the cooperative kernels at 2 envs - a small-scale stand-in for the
-    # >get_gpu_core_count() env regime. With islands on and the monolith arm pinned the whole env is a single
-    # shared-fitting block (enable_per_island_solve False), so the in-kernel branch A is gated off and func_solve_init
-    # must supply the seed factor + gradient; otherwise Mgrad stays stale and the boxes fall through the floor.
+    # >get_gpu_core_count() env regime. With the monolith arm pinned, the seed factor + gradient come from the
+    # monolith body itself (see is_self_seeding in func_solve_init); a stale Mgrad drops the boxes through the floor.
     import genesis.engine.solvers.rigid.rigid_solver as rigid_solver
     from genesis.utils.array_class import RigidSimStaticConfig
 
@@ -362,9 +410,6 @@ def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
     monkeypatch.setattr(RigidSimStaticConfig, "__init__", _force_monolith)
 
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
-        ),
         show_viewer=show_viewer,
     )
     scene.add_entity(gs.morphs.Plane())
@@ -384,8 +429,6 @@ def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
     cfg = scene.rigid_solver.rigid_config
     # Guard against the test silently ceasing to exercise the gap (e.g. if the saturation heuristic changes).
     assert not cfg.enable_cooperative_constraint_kernels
-    assert not cfg.enable_fused_factor_solve_init
-    assert not cfg.enable_per_island_solve
 
     for _ in range(150):
         scene.step()
@@ -406,9 +449,6 @@ def test_pruning(show_viewer, n_envs):
     # and islands run together; each box then settles with its bottom face on the plane, center at its half-height.
     half = 0.1
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
-        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.5, -4.0, 2.5),
             camera_lookat=(0.5, 0.0, 0.1),
@@ -455,7 +495,6 @@ def test_hibernation_with_pruning(show_viewer, n_envs):
         ),
         rigid_options=gs.options.RigidOptions(
             contact_pruning_tolerance=0.02,
-            use_contact_island=True,
             use_hibernation=True,
         ),
         show_viewer=show_viewer,
@@ -515,7 +554,6 @@ def test_dof_length_scales_with_body_size(mujoco_compatibility):
     variant_radii = (0.02, 0.06)
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=True,
             enable_mujoco_compatibility=mujoco_compatibility,
         ),
@@ -541,9 +579,6 @@ def test_weld_coupling(show_viewer, n_envs):
     # box2 hangs from a weld onto the anchored box1 at a horizontal offset, never touching it. Without the equality
     # edge in the partition the two land in different islands and the weld is dropped, letting box2 free-fall.
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
-        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.15, -4.0, 2.5),
             camera_lookat=(0.15, 0.0, 0.9),
@@ -583,7 +618,6 @@ def test_sparsity(show_viewer, n_envs):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             sparse_solve=True,
-            use_contact_island=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.5, -4.0, 2.5),
@@ -627,7 +661,6 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
             gravity=(0.0, 0.0, -G),
         ),
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=True,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -766,6 +799,13 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         scene.step()
     assert not asleep(box_cpos) and (z_of(box_cpos) > z0 + 0.05).all()
 
+    # A body its controller holds at the target stays awake for as long as the hold lasts, since the actuation pass
+    # wakes any sleeping link it actuates. It settles where the controller's stiffness carries its weight.
+    for _ in range(40):
+        scene.step()
+        assert not asleep(box_cpos)
+    assert_allclose(z_of(box_cpos), 0.6 - box_cpos.get_mass() * G / 400.0, atol=0.01)
+
     # A mass or an armature written moves the equilibrium a resting body found, so a body it is written on must wake
     # to settle into the new one. Both writes are made while the body sleeps, and the weight they land on is the
     # analytic one of a free body.
@@ -794,7 +834,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("broadphase_traversal", [None, gs.broadphase_traversal.ALL_VS_ALL], ids=["sap", "allvsall"])
+@pytest.mark.parametrize("broadphase_traversal", [gs.broadphase_traversal.SAP, gs.broadphase_traversal.ALL_VS_ALL])
 def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversal, multi_free_body_path):
     # An awake body striking a sleeping one must wake it so it responds instead of acting as an immovable obstacle.
     # This needs the broad-phase sort-buffer refresh of awake geoms (so the contact is detected) and the wake-on-contact
@@ -809,7 +849,6 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
             gravity=(0.0, 0.0, GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=True,
             broadphase_traversal=broadphase_traversal,
         ),
@@ -856,8 +895,22 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
     lifted[..., 2] += 0.6
     solver.set_base_links_pos(lifted, links_idx=late.idx)
 
+    # A sleeper keeps the contacts of the step it fell asleep, listed in the same order, so the getters report them
+    # where they stood.
+    boxes_contacts_pos = None
+    is_boxes_asleep = False
     for _ in range(60):
         scene.step()
+        contacts = [box.get_contacts() for box in (box_rest, box_hit)]
+        if n_envs > 0:
+            contacts_pos = [contact["position"][contact["valid_mask"]] for contact in contacts]
+        else:
+            contacts_pos = [contact["position"] for contact in contacts]
+        if is_boxes_asleep:
+            for contact_pos, contact_pos_prev in zip(contacts_pos, boxes_contacts_pos):
+                assert_equal(contact_pos, contact_pos_prev)
+        boxes_contacts_pos = contacts_pos
+        is_boxes_asleep = asleep(box_rest) and asleep(box_hit)
     assert asleep(box_rest) and asleep(box_hit)
     # The bodies that landed first sleep while the one still falling does not.
     assert all(link_asleep(link) for link in multibody_bases[:-1])
@@ -875,13 +928,36 @@ def test_hibernation_wakes_on_collision(show_viewer, n_envs, broadphase_traversa
         assert_equal(box.get_links_net_contact_force(), contact_force)
         assert_allclose(contact_force[..., 0, 2], -GRAVITY * box.get_mass(), tol=2e-3)
     rest_x0 = box_rest.get_pos()[..., 0]
+    rest_z0 = box_rest.get_pos()[..., 2]
+
+    # The contacts of the bodies that stay asleep through the strike are listed as they stood before it.
+    sleepers_links_idx = [link.idx for link in multibody_bases if link_asleep(link)]
+
+    def sleepers_contacts():
+        contacts = multibody.get_contacts()
+        links_a = tensor_to_array(contacts["link_a"])
+        links_b = tensor_to_array(contacts["link_b"])
+        is_sleeper = np.isin(links_a, sleepers_links_idx) | np.isin(links_b, sleepers_links_idx)
+        if n_envs > 0:
+            is_sleeper &= tensor_to_array(contacts["valid_mask"])
+        return links_a[is_sleeper], links_b[is_sleeper], tensor_to_array(contacts["position"])[is_sleeper]
+
+    sleepers_contacts0 = sleepers_contacts()
 
     box_hit.set_dofs_velocity([-2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    rest_z_at_wake = None
     for _ in range(30):
         scene.step()
+        if rest_z_at_wake is None and not asleep(box_rest):
+            rest_z_at_wake = box_rest.get_pos()[..., 2]
+    assert all(link_asleep(link) for link in multibody_bases if link.idx in sleepers_links_idx)
+    for contacts_field, contacts_field0 in zip(sleepers_contacts(), sleepers_contacts0):
+        assert_equal(contacts_field, contacts_field0)
 
-    # The struck sleeper woke and was knocked; the striker was stopped by it (did not tunnel through).
+    # The struck box woke and slid, and the striker stopped against it. The box held its height the step it woke
+    # because the ground contacts kept while it slept joined that solve.
     assert not asleep(box_rest)
+    assert (rest_z_at_wake > rest_z0 - 5e-4).all()
     rest_x1 = box_rest.get_pos()[..., 0]
     hit_x1 = box_hit.get_pos()[..., 0]
     assert (rest_x1 < rest_x0 - 1e-3).all()
@@ -920,7 +996,6 @@ def test_hibernation_wakes_on_daisy_chain(show_viewer, n_envs):
     # stack, whose micro-settling keeps it awake); a separated third box is its own island and stays asleep.
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=True,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -976,7 +1051,6 @@ def test_hibernation_repartitioning(show_viewer, n_envs):
     # must wake the WHOLE merged island (else the stale daisy chain keeps re-connecting both); they then split back.
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
-            use_contact_island=True,
             use_hibernation=True,
         ),
         viewer_options=gs.options.ViewerOptions(

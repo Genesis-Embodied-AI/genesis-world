@@ -4,6 +4,14 @@ on:
   workflow_run:
     workflows: ["Production"]
     types: [completed]
+  # Repositories running the Genesis benchmarks through production.yml call this workflow to compare their results
+  # against the same baseline, the history of the default branch of Genesis. A called workflow sees the event of its
+  # caller, a 'workflow_run' like the trigger above whose artifacts live in the calling run rather than in the run
+  # that completed.
+  workflow_call:
+    secrets:
+      WANDB_API_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -14,6 +22,7 @@ permissions:
 jobs:
   comment-if-regressed:
     runs-on: ubuntu-latest
+    # The workflow run is the completed Production run, or the one that started a calling workflow.
     if: >
       github.event.workflow_run.event == 'pull_request' &&
       contains(fromJson('["success","neutral"]'), github.event.workflow_run.conclusion)
@@ -22,6 +31,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          # The comparison script beside this very workflow file, whichever repository the run belongs to.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           fetch-depth: 1
 
       - name: Setup Python
@@ -35,12 +47,15 @@ jobs:
           # run.config in batch queries, breaking alarm.py's config["revision"] lookup.
           python -m pip install --quiet --upgrade 'wandb<0.25' frozendict
 
+      # The completed Production run when the run belongs to the repository of this file, the calling run otherwise:
+      # a call's benchmark jobs ran in that run, the workflow run of its event being the caller's own trigger, which
+      # holds no benchmark.
       - name: Download speed artifacts from triggering run
         id: dl_speed
         uses: actions/download-artifact@v4
         with:
           pattern: speed-test-*
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.repository == job.workflow_repository && github.event.workflow_run.id || github.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ./artifacts
 
@@ -49,7 +64,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: mem-test-*
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.repository == job.workflow_repository && github.event.workflow_run.id || github.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ./artifacts
 
@@ -92,6 +107,11 @@ jobs:
             --exit-code-alert 43
           EXIT_CODE=$?
           set -e
+          # Any other failure is the comparison itself breaking, which must never pass for a clean result
+          case "$EXIT_CODE" in
+            0|42|43) echo "HAS_ERRORS=0" >> "$GITHUB_ENV" ;;
+            *) echo "HAS_ERRORS=1" >> "$GITHUB_ENV" ;;
+          esac
           # Expose outputs to later steps
           if [ -f /tmp/check_output.md ]; then
             {
@@ -124,6 +144,7 @@ jobs:
           CHECK_OUTPUT: ${{ env.CHECK_OUTPUT }}
           HAS_REGRESSIONS: ${{ env.HAS_REGRESSIONS }}
           HAS_ALERTS: ${{ env.HAS_ALERTS }}
+          HAS_ERRORS: ${{ env.HAS_ERRORS }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
         with:
           script: |
@@ -135,7 +156,10 @@ jobs:
 
             let summary;
             let conclusion = 'success';
-            if ((process.env.HAS_REGRESSIONS || '0') === '1') {
+            if ((process.env.HAS_ERRORS || '0') === '1') {
+              summary = '❌ The comparison failed to run. See the job log.';
+              conclusion = 'failure';
+            } else if ((process.env.HAS_REGRESSIONS || '0') === '1') {
               summary = '🔴 Regressions detected. See tables below.';
               conclusion = 'failure';
             } else if ((process.env.HAS_ALERTS || '0') === '1') {
@@ -144,10 +168,16 @@ jobs:
               summary = '✅ No regressions detected. See tables below.';
             }
 
+            // The commit under test comes from whichever event started the run: a completed workflow run, or a pull
+            // request when this workflow is called from one. '?.' yields undefined through an absent member.
+            const headSha = context.payload.workflow_run?.head_sha
+              || context.payload.pull_request?.head.sha
+              || context.sha;
+
             const check = await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              head_sha: context.payload.workflow_run.head_sha,
+              head_sha: headSha,
               name: process.env.CHECK_NAME,
               status: 'completed',
               conclusion: conclusion,
@@ -170,14 +200,22 @@ jobs:
             // Getting PR number when using 'workflow_run' is tricky. For reference, see:
             // * https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_run
             // * https://stackoverflow.com/a/75420270/4820605
-            const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              owner: context.payload.workflow_run.head_repository.owner.login,
-              repo: context.payload.workflow_run.head_repository.name,
-              commit_sha: context.payload.workflow_run.head_sha,
-            });
-            if (!data || !data.length) {
-              core.info('No associated PR; skipping comment.');
-              return;
+            let prNumber = context.payload.pull_request?.number;
+            if (prNumber === undefined) {
+              const run = context.payload.workflow_run;
+              if (!run) {
+                throw new Error(`Event '${context.eventName}' carries no pull request to comment on.`);
+              }
+              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: run.head_repository.owner.login,
+                repo: run.head_repository.name,
+                commit_sha: run.head_sha,
+              });
+              if (!data || !data.length) {
+                throw new Error(
+                  `No pull request is associated with commit ${run.head_sha} of ${run.head_repository.full_name}.`);
+              }
+              prNumber = data[0].number;
             }
 
             const title = (process.env.HAS_REGRESSIONS || '0') === '1'
@@ -187,6 +225,10 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: data[0].number,
+              issue_number: prNumber,
               body: comment
             });
+
+      - name: Fail on comparison errors
+        if: ${{ env.HAS_ERRORS == '1' }}
+        run: exit 1

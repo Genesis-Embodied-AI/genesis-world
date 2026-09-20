@@ -416,6 +416,27 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
             pos=(10, 10, 0.49),
         ),
     )
+    # A settled stack of three boxes forms one island whose dof list the solver reorders, and a pair stacked at first
+    # then set apart leaves the factor of their former coupling in place.
+    for i_box in range(3):
+        scene.add_entity(
+            gs.morphs.Box(
+                size=(1, 1, 1),
+                pos=(-10, 10, 0.5 + 1.0 * i_box),
+            ),
+        )
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(1, 1, 1),
+            pos=(10, -10, 0.5),
+        ),
+    )
+    top_box = scene.add_entity(
+        gs.morphs.Box(
+            size=(1, 1, 1),
+            pos=(10, -10, 1.5),
+        ),
+    )
     franka = scene.add_entity(
         gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
@@ -425,6 +446,9 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     rigid_solver = scene._sim.rigid_solver
     constraint_solver = rigid_solver.constraint_solver
 
+    for _ in range(25):
+        scene.step()
+    top_box.set_pos((10, -14, 0.49))
     franka.set_qpos([-1.0124, 1.5559, 1.3662, -1.6878, -1.5799, 1.7757, 1.4602, 0.04, 0.04])
 
     def constraint_solver_resolve():
@@ -434,7 +458,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
             rigid_solver.dyn_info,
             rigid_solver.rigid_info,
             rigid_solver.rigid_config,
-            is_decomposed=False,
+            write_L=True,
         )
         func_solve_body(
             rigid_solver.dyn_state,
@@ -467,7 +491,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         constraint_solver.constraint_state.jac.from_numpy(input_jac)
         constraint_solver.constraint_state.aref.from_numpy(input_aref)
         constraint_solver.constraint_state.efc_D.from_numpy(input_efc_D)
-        rigid_solver.dyn_state.dofs.force.from_numpy(input_force)
+        rigid_solver.dyn_state.dofs.qf_smooth.from_numpy(input_force)
         updated_acc_smooth = np.linalg.solve(input_mass[..., 0], input_force[..., 0])
         rigid_solver.dyn_state.dofs.acc_smooth.from_numpy(updated_acc_smooth[..., None])
         constraint_solver.resolve()
@@ -479,7 +503,7 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     init_input_jac = qd_to_numpy(constraint_solver.constraint_state.jac, copy=True)
     init_input_aref = qd_to_numpy(constraint_solver.constraint_state.aref, copy=True)
     init_input_efc_D = qd_to_numpy(constraint_solver.constraint_state.efc_D, copy=True)
-    init_input_force = qd_to_numpy(rigid_solver.dyn_state.dofs.force, copy=True)
+    init_input_force = qd_to_numpy(rigid_solver.dyn_state.dofs.qf_smooth, copy=True)
 
     set_random_seed(0)
     init_output_qacc = qd_to_torch(constraint_solver.qacc)

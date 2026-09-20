@@ -324,58 +324,6 @@ def kernel_wake_up_entities_by_qs(
 
 
 @qd.kernel(fastcache=True)
-def kernel_wake_up_entities_on_new_contact(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    """Wake a sleeping body when an awake body collides with it, so it responds dynamically instead of acting as an
-    immovable obstacle. Runs after collision detection and before the solve, so the woken body joins the island
-    partition and is solved this step. Only a contact whose partner is an awake dynamic body wakes the sleeper:
-    hibernated-fixed (resting on the ground) and hibernated-hibernated (one sleeping island) contacts are left
-    asleep, as they generate no new motion."""
-    _B = collider_state.n_contacts.shape[0]
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        # The kept contacts are read through the permutation, see has_prunable_contacts in array_class.py.
-        for i_c_ in range(collider_state.n_contacts[i_b]):
-            i_c = collider_state.contact_sort_idx[i_c_, i_b]
-            i_la = collider_state.contact_data.link_a[i_c, i_b]
-            i_lb = collider_state.contact_data.link_b[i_c, i_b]
-            I_la = [i_la, i_b] if qd.static(rigid_config.batch_links_info) else i_la
-            I_lb = [i_lb, i_b] if qd.static(rigid_config.batch_links_info) else i_lb
-            is_a_hibernated = dyn_state.links.is_hibernated[i_la, i_b]
-            is_b_hibernated = dyn_state.links.is_hibernated[i_lb, i_b]
-
-            # Wake the sleeping side only when its partner is an awake dynamic body. Checking the per-link flag (not the
-            # owning entity's) is what lets a single Genesis entity's settled free body wake when another of its free
-            # bodies - or any awake body - strikes it.
-            if is_a_hibernated and not is_b_hibernated and not dyn_info.links.is_fixed[I_lb]:
-                func_wakeup_island(
-                    constraint_state.island.links_island_idx[i_la, i_b],
-                    i_b,
-                    dyn_state,
-                    constraint_state,
-                    dyn_info,
-                    rigid_info,
-                    rigid_config,
-                )
-            if is_b_hibernated and not is_a_hibernated and not dyn_info.links.is_fixed[I_la]:
-                func_wakeup_island(
-                    constraint_state.island.links_island_idx[i_lb, i_b],
-                    i_b,
-                    dyn_state,
-                    constraint_state,
-                    dyn_info,
-                    rigid_info,
-                    rigid_config,
-                )
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_links_pos_grad(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),

@@ -20,8 +20,14 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
-from .forward_kinematics import func_forward_velocity_batch, func_update_cartesian_space_batch
-from .misc import func_add_safe_backward, func_check_index_range, func_wakeup_island, linear_to_lower_tri
+from .forward_kinematics import func_forward_velocity_root, func_update_cartesian_space_root
+from .misc import (
+    func_add_safe_backward,
+    func_is_awake_link,
+    func_is_awake_tree,
+    func_wakeup_island,
+    linear_to_lower_tri,
+)
 
 
 @qd.kernel(fastcache=True)
@@ -34,16 +40,15 @@ def update_qacc_from_qvel_delta(
     _B = dyn_state.dofs.ctrl_mode.shape[1]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in qd.ndrange(1, _B) if qd.static(rigid_config.use_hibernation) else qd.ndrange(n_dofs, _B):
-        for i_1 in (
-            range(rigid_info.n_awake_dofs[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if i_1 < (rigid_info.n_awake_dofs[i_b] if qd.static(rigid_config.use_hibernation) else 1):
-                i_d = rigid_info.awake_dofs[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                dyn_state.dofs.acc[i_d, i_b] = (
-                    dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.vel_prev[i_d, i_b]
-                ) / rigid_info.substep_dt[None]
-                dyn_state.dofs.vel[i_d, i_b] = dyn_state.dofs.vel_prev[i_d, i_b]
+    for i_d, i_b in qd.ndrange(n_dofs, _B):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+        if is_awake:
+            dyn_state.dofs.acc[i_d, i_b] = (
+                dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.vel_prev[i_d, i_b]
+            ) / rigid_info.substep_dt[None]
+            dyn_state.dofs.vel[i_d, i_b] = dyn_state.dofs.vel_prev[i_d, i_b]
 
 
 @qd.kernel(fastcache=True)
@@ -56,16 +61,15 @@ def update_qvel(
     n_dofs = dyn_state.dofs.vel.shape[0]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in qd.ndrange(1, _B) if qd.static(rigid_config.use_hibernation) else qd.ndrange(n_dofs, _B):
-        for i_1 in (
-            range(rigid_info.n_awake_dofs[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if i_1 < (rigid_info.n_awake_dofs[i_b] if qd.static(rigid_config.use_hibernation) else 1):
-                i_d = rigid_info.awake_dofs[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                dyn_state.dofs.vel_prev[i_d, i_b] = dyn_state.dofs.vel[i_d, i_b]
-                dyn_state.dofs.vel[i_d, i_b] = (
-                    dyn_state.dofs.vel[i_d, i_b] + dyn_state.dofs.acc[i_d, i_b] * rigid_info.substep_dt[None]
-                )
+    for i_d, i_b in qd.ndrange(n_dofs, _B):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+        if is_awake:
+            dyn_state.dofs.vel_prev[i_d, i_b] = dyn_state.dofs.vel[i_d, i_b]
+            dyn_state.dofs.vel[i_d, i_b] = (
+                dyn_state.dofs.vel[i_d, i_b] + dyn_state.dofs.acc[i_d, i_b] * rigid_info.substep_dt[None]
+            )
 
 
 @qd.kernel(fastcache=True)
@@ -144,25 +148,25 @@ def func_vel_at_point(link_idx, i_b, pos_world, links_state: array_class.LinksSt
 
 @qd.func
 def func_crb_initialize(
-    i_0,
+    i_l,
     i_b,
     dyn_state: array_class.DynState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    for i_1 in range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1)):
-        if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-            i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-
-            dyn_state.links.crb_inertial[i_l, i_b] = dyn_state.links.cinr_inertial[i_l, i_b]
-            dyn_state.links.crb_pos[i_l, i_b] = dyn_state.links.cinr_pos[i_l, i_b]
-            dyn_state.links.crb_quat[i_l, i_b] = dyn_state.links.cinr_quat[i_l, i_b]
-            dyn_state.links.crb_mass[i_l, i_b] = dyn_state.links.cinr_mass[i_l, i_b]
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+    if is_awake:
+        dyn_state.links.crb_inertial[i_l, i_b] = dyn_state.links.cinr_inertial[i_l, i_b]
+        dyn_state.links.crb_pos[i_l, i_b] = dyn_state.links.cinr_pos[i_l, i_b]
+        dyn_state.links.crb_quat[i_l, i_b] = dyn_state.links.cinr_quat[i_l, i_b]
+        dyn_state.links.crb_mass[i_l, i_b] = dyn_state.links.cinr_mass[i_l, i_b]
 
 
 @qd.func
 def func_crb_fold(
-    i_0,
+    i_r,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -170,43 +174,33 @@ def func_crb_fold(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Fold the composite-rigid-body inertia of one kinematic tree, from its leaves up to its root.
+    """Fold the composite-rigid-body inertia of one kinematic root, from its leaves up to its root link.
 
-    One thread handles the whole tree whose root is this link (root_idx == itself), walking its link span in
-    descending order so that children fold before their parent propagates, and gating each link on that root (see
-    links_tree_end in array_class.py). The top link of a tree may fold into a fixed 0-DOF anchor belonging to another
-    tree, whose composite inertia is never read. Mirrors the root_idx tree walk in func_update_cartesian_space.
+    One thread handles the whole root, walking its link span in descending order so that children fold before their
+    parent propagates, and gating each link on its root (see roots_link_idx in array_class.py). Mirrors the root walk of
+    func_COM_root. The links of a root sleep as a unit, so the root link tells whether they are awake.
     """
-    for i_1 in range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1)):
-        if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-            i_l_root = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-            I_l_root = [i_l_root, i_b] if qd.static(rigid_config.batch_links_info) else i_l_root
-            if dyn_info.links.root_idx[I_l_root] == i_l_root:
-                tree_end = rigid_info.links_tree_end[i_l_root]
-                for k in range(tree_end - i_l_root):
-                    i_l = tree_end - 1 - k
-                    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                    i_p = dyn_info.links.parent_idx[I_l]
-                    I_p = [i_p, i_b]
+    i_l_root = rigid_info.roots_link_idx[i_r]
+    if func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config):
+        i_l_end = rigid_info.links_root_end[i_l_root]
+        for k in range(i_l_end - i_l_root):
+            i_l = i_l_end - 1 - k
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            i_p = dyn_info.links.parent_idx[I_l]
+            I_p = [i_p, i_b]
 
-                    if dyn_info.links.root_idx[I_l] == i_l_root and i_p != -1:
-                        func_add_safe_backward(
-                            I_p, dyn_state.links.crb_inertial[i_l, i_b], dyn_state.links.crb_inertial, is_backward
-                        )
-                        func_add_safe_backward(
-                            I_p, dyn_state.links.crb_mass[i_l, i_b], dyn_state.links.crb_mass, is_backward
-                        )
-                        func_add_safe_backward(
-                            I_p, dyn_state.links.crb_pos[i_l, i_b], dyn_state.links.crb_pos, is_backward
-                        )
-                        func_add_safe_backward(
-                            I_p, dyn_state.links.crb_quat[i_l, i_b], dyn_state.links.crb_quat, is_backward
-                        )
+            if dyn_info.links.root_idx[I_l] == i_l_root and i_p != -1:
+                func_add_safe_backward(
+                    I_p, dyn_state.links.crb_inertial[i_l, i_b], dyn_state.links.crb_inertial, is_backward
+                )
+                func_add_safe_backward(I_p, dyn_state.links.crb_mass[i_l, i_b], dyn_state.links.crb_mass, is_backward)
+                func_add_safe_backward(I_p, dyn_state.links.crb_pos[i_l, i_b], dyn_state.links.crb_pos, is_backward)
+                func_add_safe_backward(I_p, dyn_state.links.crb_quat[i_l, i_b], dyn_state.links.crb_quat, is_backward)
 
 
 @qd.func
 def func_mass_mat_force(
-    i_0,
+    i_l,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -214,32 +208,27 @@ def func_mass_mat_force(
     rigid_config: qd.template(),
 ):
     """Apply the composite inertia of one link to each of its own degrees of freedom."""
-    for i_1 in range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1)):
-        if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-            i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+    if is_awake:
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                dyn_state.dofs.f_ang[i_d, i_b], dyn_state.dofs.f_vel[i_d, i_b] = gu.inertial_mul(
-                    dyn_state.links.crb_pos[i_l, i_b],
-                    dyn_state.links.crb_inertial[i_l, i_b],
-                    dyn_state.links.crb_mass[i_l, i_b],
-                    dyn_state.dofs.cdof_vel[i_d, i_b],
-                    dyn_state.dofs.cdof_ang[i_d, i_b],
-                )
+        for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+            dyn_state.dofs.f_ang[i_d, i_b], dyn_state.dofs.f_vel[i_d, i_b] = gu.inertial_mul(
+                dyn_state.links.crb_pos[i_l, i_b],
+                dyn_state.links.crb_inertial[i_l, i_b],
+                dyn_state.links.crb_mass[i_l, i_b],
+                dyn_state.dofs.cdof_vel[i_d, i_b],
+                dyn_state.dofs.cdof_ang[i_d, i_b],
+            )
 
 
 @qd.func
-def func_mass_mat_assemble_cooperative(
-    tid,
-    i_e,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    BLOCK_DIM: qd.template(),
+def func_mass_mat_assemble_tree_cooperative(
+    tid, i_t, i_b, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, BLOCK_DIM: qd.template()
 ):
-    """Write the share that one warp lane owns of the mass blocks rooted in one entity.
+    """Write the share that one warp lane owns of the mass blocks of one kinematic tree.
 
     Every cell of the lower triangle, diagonal included, is computed once through the compressed pair index and
     written to both [i_d, j_d, i_b] and [j_d, i_d, i_b] right away, which saves the upper-triangle dot products that a
@@ -247,102 +236,53 @@ def func_mass_mat_assemble_cooperative(
     (i_d stride-1) the first write coalesces, and the strided second one costs about what the mirror pass it replaces
     used to cost.
     """
-    # Assemble each mass block whose root DOF lies in this entity over its full lower triangle: a merged child owns no
-    # root and assembles nothing, while the parent assembles the whole coupled block (its columns extend past the
-    # entity). mass_parent_mask zeroes the within-block ancestor gaps.
-    entity_dof_start = dyn_info.entities.dof_start[i_e]
-    entity_dof_end = dyn_info.entities.dof_end[i_e]
-    block_start = entity_dof_start
-    while block_start < entity_dof_end:
-        block_end = rigid_info.dofs_mass_block_end[block_start]
+    # Assemble each mass block of the tree over its full lower triangle (see dofs_mass_block_start in array_class.py).
+    # mass_parent_mask zeroes the within-block ancestor gaps.
+    tree_dof_start = rigid_info.trees_dof_start[i_t]
+    tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
+    for block_start in range(tree_dof_start, tree_dof_end):
         if rigid_info.dofs_mass_block_start[block_start] == block_start:
+            block_end = rigid_info.dofs_mass_block_end[block_start]
             n_block_dofs = block_end - block_start
             n_lower_tri = n_block_dofs * (n_block_dofs + 1) // 2
-            i_pair = tid
-            while i_pair < n_lower_tri:
-                # Compressed lower-tri-inclusive index: i_pair = i_d_ * (i_d_ + 1) / 2 + j_d_, with j_d_ in
-                # [0, i_d_]. The fast-math-robust inversion is required: a raw sqrt drops the j=0 entry of
-                # every perfect-square row on GPU, leaving M indefinite.
-                i_d_, j_d_ = linear_to_lower_tri(i_pair)
-                i_d = block_start + i_d_
-                j_d = block_start + j_d_
-                val = (
-                    dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
-                    + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
-                ) * rigid_info.mass_parent_mask[i_d, j_d]
-                rigid_info.mass_mat[i_d, j_d, i_b] = val
-                if i_d_ != j_d_:
-                    rigid_info.mass_mat[j_d, i_d, i_b] = val
-                i_pair += BLOCK_DIM
-        block_start = block_end
-
-
-@qd.func
-def func_mass_mat_assemble(
-    i_0,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    """Write the mass blocks rooted in one entity, then mirror them onto their upper triangle."""
-    for i_1 in (
-        range(rigid_info.n_awake_entities[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-    ):
-        if func_check_index_range(i_1, 0, rigid_info.n_awake_entities[i_b], rigid_config.use_hibernation):
-            i_e = rigid_info.awake_entities[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-
-            # Assemble each mass block rooted in this entity over its full range (see
-            # entities_mass_block_dof_start in array_class.py): the mirror pass reads rows of the whole block,
-            # so the block-root entity must write them all itself before mirroring.
-            blocks_dof_start = rigid_info.entities_mass_block_dof_start[i_e]
-            blocks_dof_end = rigid_info.entities_mass_block_dof_end[i_e]
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                for j_d in range(rigid_info.dofs_mass_block_start[i_d], rigid_info.dofs_mass_block_end[i_d]):
-                    rigid_info.mass_mat[i_d, j_d, i_b] = (
+            for i_chunk_ in range((n_lower_tri + BLOCK_DIM - 1) // BLOCK_DIM):
+                i_pair = i_chunk_ * BLOCK_DIM + tid
+                if i_pair < n_lower_tri:
+                    # Compressed lower-tri-inclusive index: i_pair = i_d_ * (i_d_ + 1) / 2 + j_d_, with j_d_ in [0,
+                    # i_d_]. The fast-math-robust inversion is required: a raw sqrt drops the j=0 entry of every
+                    # perfect-square row on GPU, leaving M indefinite.
+                    i_d_, j_d_ = linear_to_lower_tri(i_pair)
+                    i_d = block_start + i_d_
+                    j_d = block_start + j_d_
+                    val = (
                         dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
                         + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
                     ) * rigid_info.mass_parent_mask[i_d, j_d]
-
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                for j_d in range(i_d + 1, rigid_info.dofs_mass_block_end[i_d]):
-                    rigid_info.mass_mat[i_d, j_d, i_b] = rigid_info.mass_mat[j_d, i_d, i_b]
-
-
-@qd.func
-def func_mass_mat_armature(
-    i_d,
-    i_b,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    is_backward: qd.template(),
-):
-    """Add the armature of one motor to the mass matrix."""
-    I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-    func_add_safe_backward((i_d, i_d, i_b), dyn_info.dofs.armature[I_d], rigid_info.mass_mat, is_backward)
+                    rigid_info.mass_mat[i_d, j_d, i_b] = val
+                    if i_d_ != j_d_:
+                        rigid_info.mass_mat[j_d, i_d, i_b] = val
 
 
 @qd.func
-def func_mass_mat_implicit_damping(
-    i_d,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
+def func_mass_mat_assemble_tree(
+    i_t, i_b, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
-    """Add to the mass matrix the first-order terms that make the integration of one DOF implicit."""
-    I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-    rigid_info.mass_mat[i_d, i_d, i_b] = (
-        rigid_info.mass_mat[i_d, i_d, i_b] + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
-    )
-    if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
-        # qM += d qfrc_actuator / d qvel = -act_bias[2] * dt
-        rigid_info.mass_mat[i_d, i_d, i_b] = (
-            rigid_info.mass_mat[i_d, i_d, i_b] - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
-        )
+    """Write the mass blocks of one kinematic tree, then mirror them onto their upper triangle."""
+    if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
+        # The blocks partition the dof range of the tree (see dofs_mass_block_start in array_class.py), iterated flat
+        # with per-DOF block bounds since the mass matrix couples nothing across blocks.
+        blocks_dof_start = rigid_info.trees_dof_start[i_t]
+        blocks_dof_end = blocks_dof_start + rigid_info.trees_n_dofs[i_t]
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            for j_d in range(rigid_info.dofs_mass_block_start[i_d], rigid_info.dofs_mass_block_end[i_d]):
+                rigid_info.mass_mat[i_d, j_d, i_b] = (
+                    dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
+                    + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
+                ) * rigid_info.mass_parent_mask[i_d, j_d]
+
+        for i_d in range(blocks_dof_start, blocks_dof_end):
+            for j_d in range(i_d + 1, rigid_info.dofs_mass_block_end[i_d]):
+                rigid_info.mass_mat[i_d, j_d, i_b] = rigid_info.mass_mat[j_d, i_d, i_b]
 
 
 @qd.func
@@ -362,56 +302,49 @@ def func_compute_mass_matrix(
     launched twice per substep.
     """
     qd.loop_config(name="crb_initialize", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.links.pos.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1])
-    ):
-        func_crb_initialize(i_0, i_b, dyn_state, rigid_info, rigid_config)
+    for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
+        func_crb_initialize(i_l, i_b, dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.links.pos.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1])
-    ):
-        func_crb_fold(i_0, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        func_crb_fold(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
     qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.links.pos.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1])
-    ):
-        func_mass_mat_force(i_0, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+    for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
+        func_mass_mat_force(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels and not rigid_config.use_hibernation):
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
         BLOCK_DIM = qd.static(32)
-        n_entities = dyn_info.entities.n_links.shape[0]
+        n_trees = rigid_info.trees_root_idx.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
-        for i_flat in range(n_entities * dyn_state.links.pos.shape[1] * BLOCK_DIM):
+        for i_flat in range(n_trees * dyn_state.links.pos.shape[1] * BLOCK_DIM):
             tid = i_flat % BLOCK_DIM
-            i_eb = i_flat // BLOCK_DIM
-            i_e = i_eb % n_entities
-            i_b = i_eb // n_entities
-            func_mass_mat_assemble_cooperative(tid, i_e, i_b, dyn_state, dyn_info, rigid_info, BLOCK_DIM)
+            i_tb = i_flat // BLOCK_DIM
+            i_t = i_tb % n_trees
+            i_b = i_tb // n_trees
+            if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
+                func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_0, i_b in (
-            qd.ndrange(1, dyn_state.links.pos.shape[1])
-            if qd.static(rigid_config.use_hibernation)
-            else qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.links.pos.shape[1])
-        ):
-            func_mass_mat_assemble(i_0, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+        for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
+            func_mass_mat_assemble_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="armature", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(dyn_state.dofs.f_ang.shape[0], dyn_state.dofs.f_ang.shape[1]):
-        func_mass_mat_armature(i_d, i_b, dyn_info, rigid_info, rigid_config, is_backward)
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        func_add_safe_backward((i_d, i_d, i_b), dyn_info.dofs.armature[I_d], rigid_info.mass_mat, is_backward)
 
     if qd.static(implicit_damping):
         qd.loop_config(name="impint_order_1_corr", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_d, i_b in qd.ndrange(dyn_state.dofs.f_ang.shape[0], dyn_state.dofs.f_ang.shape[1]):
-            func_mass_mat_implicit_damping(i_d, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            h = rigid_info.substep_dt[None]
+            rigid_info.mass_mat[i_d, i_d, i_b] = rigid_info.mass_mat[i_d, i_d, i_b] + dyn_info.dofs.damping[I_d] * h
+            if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                # qM += d qfrc_actuator / d qvel = -act_bias[2] * dt
+                rigid_info.mass_mat[i_d, i_d, i_b] = (
+                    rigid_info.mass_mat[i_d, i_d, i_b] - dyn_info.dofs.act_bias[I_d][2] * h
+                )
 
 
 @qd.func
@@ -426,83 +359,89 @@ def func_compute_mass_matrix_masked(
 ):
     """Assemble the mass matrix of the given environments. See func_compute_mass_matrix."""
     qd.loop_config(name="crb_initialize", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b_ in (
-        qd.ndrange(1, envs_idx.shape[0])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0])
-    ):
-        func_crb_initialize(i_0, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
+    for i_l, i_b_ in qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0]):
+        func_crb_initialize(i_l, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b_ in (
-        qd.ndrange(1, envs_idx.shape[0])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0])
-    ):
-        func_crb_fold(i_0, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+        func_crb_fold(i_r, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
     qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b_ in (
-        qd.ndrange(1, envs_idx.shape[0])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0])
-    ):
-        func_mass_mat_force(i_0, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
+    for i_l, i_b_ in qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0]):
+        func_mass_mat_force(i_l, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
 
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels and not rigid_config.use_hibernation):
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
         BLOCK_DIM = qd.static(32)
-        n_entities = dyn_info.entities.n_links.shape[0]
+        n_trees = rigid_info.trees_root_idx.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
-        for i_flat in range(n_entities * envs_idx.shape[0] * BLOCK_DIM):
+        for i_flat in range(n_trees * envs_idx.shape[0] * BLOCK_DIM):
             tid = i_flat % BLOCK_DIM
-            i_eb = i_flat // BLOCK_DIM
-            i_e = i_eb % n_entities
-            i_b = envs_idx[i_eb // n_entities]
-            func_mass_mat_assemble_cooperative(tid, i_e, i_b, dyn_state, dyn_info, rigid_info, BLOCK_DIM)
+            i_tb = i_flat // BLOCK_DIM
+            i_t = i_tb % n_trees
+            i_b = envs_idx[i_tb // n_trees]
+            if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
+                func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_0, i_b_ in (
-            qd.ndrange(1, envs_idx.shape[0])
-            if qd.static(rigid_config.use_hibernation)
-            else qd.ndrange(dyn_info.entities.n_links.shape[0], envs_idx.shape[0])
-        ):
-            func_mass_mat_assemble(i_0, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
+        for i_t, i_b_ in qd.ndrange(rigid_info.trees_root_idx.shape[0], envs_idx.shape[0]):
+            func_mass_mat_assemble_tree(i_t, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="armature", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b_ in qd.ndrange(dyn_state.dofs.f_ang.shape[0], envs_idx.shape[0]):
-        func_mass_mat_armature(i_d, envs_idx[i_b_], dyn_info, rigid_info, rigid_config, is_backward)
+        i_b = envs_idx[i_b_]
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        func_add_safe_backward((i_d, i_d, i_b), dyn_info.dofs.armature[I_d], rigid_info.mass_mat, is_backward)
 
     if qd.static(implicit_damping):
         qd.loop_config(name="impint_order_1_corr", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_d, i_b_ in qd.ndrange(dyn_state.dofs.f_ang.shape[0], envs_idx.shape[0]):
-            func_mass_mat_implicit_damping(i_d, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
+            i_b = envs_idx[i_b_]
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            h = rigid_info.substep_dt[None]
+            rigid_info.mass_mat[i_d, i_d, i_b] = rigid_info.mass_mat[i_d, i_d, i_b] + dyn_info.dofs.damping[I_d] * h
+            if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                # qM += d qfrc_actuator / d qvel = -act_bias[2] * dt
+                rigid_info.mass_mat[i_d, i_d, i_b] = (
+                    rigid_info.mass_mat[i_d, i_d, i_b] - dyn_info.dofs.act_bias[I_d][2] * h
+                )
 
 
 @qd.func
-def func_awake_entity(
-    i_slot,
+def func_has_implicit_damping_tree(
+    i_t,
     i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Entity a loop slot stands for, or -1 when hibernation leaves that slot with nothing to do.
+    """Whether the mass factor of kinematic tree i_t of env i_b takes an implicit damping term.
 
-    A hibernated entity keeps the mass matrix it had when it fell asleep, so the factor computed on its last awake
-    step stays valid and the entity is skipped. Slots address the awake entities of the environment, which is what
-    makes the work scale with how many of them are awake rather than with how many exist.
+    A dof with joint damping adds one, and so does, under the implicitfast integrator, a velocity-controlled dof whose
+    actuator bias damps it. The tree factors as a whole (its blocks partition its dofs), so a damped dof anywhere in it,
+    in an attached child entity included, gives the whole tree its damped factor. A tree without any keeps its smooth
+    factor through the implicit damping pass.
     """
-    i_e = i_slot
-    if qd.static(rigid_config.use_hibernation):
-        i_e = -1
-        if i_slot < rigid_info.n_awake_entities[i_b]:
-            i_e = rigid_info.awake_entities[i_slot, i_b]
-    return i_e
+    EPS = rigid_info.EPS[None]
+    has_damping = False
+    dof_start = rigid_info.trees_dof_start[i_t]
+    for i_d in range(dof_start, dof_start + rigid_info.trees_n_dofs[i_t]):
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        if dyn_info.dofs.damping[I_d] > EPS:
+            has_damping = True
+        if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+            if (
+                dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY
+                and qd.abs(dyn_info.dofs.act_bias[I_d][2]) > EPS
+            ):
+                has_damping = True
+    return has_damping
 
 
 @qd.func
-def func_factor_mass_entity_tiled(
+def func_factor_mass_tree_tiled(
     tid,
-    i_slot,
+    i_t,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -511,7 +450,7 @@ def func_factor_mass_entity_tiled(
     implicit_damping: qd.template(),
     TileCls: qd.template(),
 ):
-    """Factor the mass blocks of one entity by streaming tiles through registers, one warp lane's share of it.
+    """Factor the mass blocks of one kinematic tree by streaming tiles through registers, one warp lane's share of it.
 
     See func_factor_mass_tiled for how the factor the tile primitive produces maps to the one the mass solve
     consumes.
@@ -519,49 +458,55 @@ def func_factor_mass_entity_tiled(
     T = qd.static(rigid_config.cholesky_tile_size)
     EPS = rigid_info.EPS[None]
 
-    i_e = func_awake_entity(i_slot, i_b, rigid_info, rigid_config)
-    if i_e != -1 and rigid_info.mass_mat_mask[i_e, i_b]:
-        # Factor each mass block whose root DOF lies in this entity over its full range: a merged child owns no root
-        # and factors nothing, while the parent factors the whole coupled block. Each block owns its own scratch
-        # region [block_start, block_end), disjoint across entities too, so the scatter stays race-free.
-        entity_dof_start = dyn_info.entities.dof_start[i_e]
-        entity_dof_end = dyn_info.entities.dof_end[i_e]
-        block_start = entity_dof_start
-        while block_start < entity_dof_end:
-            block_end = rigid_info.dofs_mass_block_end[block_start]
+    # Under implicit damping only the trees carrying a damping term take a new factor, the others keep the smooth one.
+    # One lane reads the dofs of the tree, the whole block takes its answer.
+    is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+    if qd.static(implicit_damping):
+        has_damping = 0
+        if tid == 0 and is_factored:
+            if func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
+                has_damping = 1
+        is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
+    if is_factored:
+        # Each block owns its own scratch region [block_start, block_end), disjoint across trees too, so the scatter
+        # stays race-free.
+        tree_dof_start = rigid_info.trees_dof_start[i_t]
+        tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
+        for block_start in range(tree_dof_start, tree_dof_end):
             if rigid_info.dofs_mass_block_start[block_start] == block_start:
+                block_end = rigid_info.dofs_mass_block_end[block_start]
                 n_block_dofs = block_end - block_start
                 n_blocks = (n_block_dofs + T - 1) // T
 
                 # Phase 1: copy the reverse-indexed symmetric M block (+ implicit damping) into the scratch workspace.
-                # mass_mat stores M's lower triangle, so M[ri_, rj_] with ri_ <= rj_ is read from the stored M[rj_, ri_].
-                i_d_ = tid
-                while i_d_ < n_block_dofs:
-                    ri_ = n_block_dofs - 1 - i_d_
-                    for j_d_ in range(i_d_ + 1):
-                        rj_ = n_block_dofs - 1 - j_d_  # i_d_ >= j_d_  =>  ri_ <= rj_
-                        m = rigid_info.mass_mat[block_start + rj_, block_start + ri_, i_b]
-                        rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + j_d_] = m
-                        rigid_info.mass_mat_tiled_scratch[i_b, block_start + j_d_, block_start + i_d_] = m
-                    if qd.static(implicit_damping):
-                        # Reverse-diagonal slot i_d_ holds M[ri_, ri_]; damping/act_bias index the original DOF.
-                        i_d = block_start + ri_
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                        rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_] = (
-                            rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_]
-                            + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
-                        )
-                        if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
-                            if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
-                                rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_] = (
-                                    rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_]
-                                    - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
-                                )
-                    i_d_ = i_d_ + T
+                # mass_mat stores the lower triangle of M, so M[ri_, rj_] with ri_ <= rj_ is read from M[rj_, ri_].
+                for i_chunk_ in range((n_block_dofs + T - 1) // T):
+                    i_d_ = i_chunk_ * T + tid
+                    if i_d_ < n_block_dofs:
+                        ri_ = n_block_dofs - 1 - i_d_
+                        for j_d_ in range(i_d_ + 1):
+                            rj_ = n_block_dofs - 1 - j_d_  # i_d_ >= j_d_  =>  ri_ <= rj_
+                            m = rigid_info.mass_mat[block_start + rj_, block_start + ri_, i_b]
+                            rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + j_d_] = m
+                            rigid_info.mass_mat_tiled_scratch[i_b, block_start + j_d_, block_start + i_d_] = m
+                        if qd.static(implicit_damping):
+                            # Reverse-diagonal slot i_d_ holds M[ri_, ri_]; damping/act_bias index the original DOF.
+                            i_d = block_start + ri_
+                            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                            rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_] = (
+                                rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_]
+                                + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
+                            )
+                            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+                                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                                    rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_] = (
+                                        rigid_info.mass_mat_tiled_scratch[i_b, block_start + i_d_, block_start + i_d_]
+                                        - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
+                                    )
                 qd.simt.block.sync()
 
-                # Phase 2: blocked Cholesky G_rev G_rev^T = M_rev in the scratch workspace (mirrors the constraint
-                # Hessian's func_cholesky_factor_direct_tiled; the tile ops are warp-synchronous, so no sync in loop).
+                # Phase 2: blocked Cholesky G_rev G_rev^T = M_rev in the scratch workspace, as the constraint Hessian's
+                # func_cholesky_factor_direct_tiled does. The tile ops are warp-synchronous, so the loop needs no sync.
                 for kb in range(n_blocks):
                     k0 = block_start + kb * T
                     k1 = qd.min(k0 + T, block_end)
@@ -604,27 +549,26 @@ def func_factor_mass_entity_tiled(
 
                 # Phase 3: scatter the LTDL factor of M from G_rev (scratch) into canonical mass_mat_L / mass_mat_D_inv.
                 # Reads the scratch, writes the distinct mass_mat_L (no in-place hazard). Only the strict-lower triangle
-                # and unit diagonal are meaningful to the solve; the upper triangle is left untouched.
+                # and unit diagonal are meaningful to the solve, the upper triangle is left untouched.
                 n_strict_lower = n_block_dofs * (n_block_dofs - 1) // 2
-                i_pair = tid
-                while i_pair < n_strict_lower:
-                    i_d_, j_d_ = linear_to_lower_tri(i_pair, strict=True)
-                    ri_ = n_block_dofs - 1 - i_d_
-                    rj_ = n_block_dofs - 1 - j_d_  # i_d_ > j_d_  =>  rj_ > ri_  (a lower G_rev entry)
-                    g_num = rigid_info.mass_mat_tiled_scratch[i_b, block_start + rj_, block_start + ri_]
-                    g_den = rigid_info.mass_mat_tiled_scratch[i_b, block_start + ri_, block_start + ri_]
-                    rigid_info.mass_mat_L[block_start + i_d_, block_start + j_d_, i_b] = g_num / g_den
-                    i_pair = i_pair + T
+                for i_chunk_ in range((n_strict_lower + T - 1) // T):
+                    i_pair = i_chunk_ * T + tid
+                    if i_pair < n_strict_lower:
+                        i_d_, j_d_ = linear_to_lower_tri(i_pair, strict=True)
+                        ri_ = n_block_dofs - 1 - i_d_
+                        rj_ = n_block_dofs - 1 - j_d_  # i_d_ > j_d_  =>  rj_ > ri_  (a lower G_rev entry)
+                        g_num = rigid_info.mass_mat_tiled_scratch[i_b, block_start + rj_, block_start + ri_]
+                        g_den = rigid_info.mass_mat_tiled_scratch[i_b, block_start + ri_, block_start + ri_]
+                        rigid_info.mass_mat_L[block_start + i_d_, block_start + j_d_, i_b] = g_num / g_den
 
-                i_d_ = tid
-                while i_d_ < n_block_dofs:
-                    ri_ = n_block_dofs - 1 - i_d_
-                    g_den = rigid_info.mass_mat_tiled_scratch[i_b, block_start + ri_, block_start + ri_]
-                    rigid_info.mass_mat_D_inv[block_start + i_d_, i_b] = 1.0 / (g_den * g_den)
-                    rigid_info.mass_mat_L[block_start + i_d_, block_start + i_d_, i_b] = 1.0
-                    i_d_ = i_d_ + T
+                for i_chunk_ in range((n_block_dofs + T - 1) // T):
+                    i_d_ = i_chunk_ * T + tid
+                    if i_d_ < n_block_dofs:
+                        ri_ = n_block_dofs - 1 - i_d_
+                        g_den = rigid_info.mass_mat_tiled_scratch[i_b, block_start + ri_, block_start + ri_]
+                        rigid_info.mass_mat_D_inv[block_start + i_d_, i_b] = 1.0 / (g_den * g_den)
+                        rigid_info.mass_mat_L[block_start + i_d_, block_start + i_d_, i_b] = 1.0
                 qd.simt.block.sync()
-            block_start = block_end
 
 
 @qd.func
@@ -638,12 +582,12 @@ def func_factor_mass_tiled(
 ):
     """Factor the mass matrix of every environment by streaming tiles through registers (GPU forward only).
 
-    Runs when the mass submatrix of an entity is too large for the shared memory the cooperative factor needs. M is
+    Runs when the mass submatrix of a tree is too large for the shared memory the cooperative factor needs. M is
     block-diagonal per mass block (see dofs_mass_block_start in array_class.py), so one warp of T lanes factors each
-    of the entity's blocks independently, an entity of a single block having just one block spanning it, through the
-    same qd.simt.TileNxN blocked Cholesky as the constraint Hessian.
+    block of the tree independently through the same qd.simt.TileNxN blocked Cholesky as the constraint Hessian.
 
-    func_solve_mass consumes the LTDL form M = L^T D L (L unit-lower), which comes of eliminating DOFs last-to-first,
+    func_solve_mass_block consumes the LTDL form M = L^T D L (L unit-lower), which comes of eliminating DOFs
+    last-to-first,
     whereas the tile primitive produces the forward Cholesky M = G G^T. So what gets factored is the reverse-indexed
     matrix of each block, M_rev[a, b] = M[n-1-a, n-1-b] with n the block's DOF count, and its factor maps back to the
     LTDL factor of the block as:
@@ -662,16 +606,16 @@ def func_factor_mass_tiled(
     # n_dofs > 48), where the rule lands on 32.
     T = qd.static(rigid_config.cholesky_tile_size)
 
-    n_entities = dyn_info.entities.n_links.shape[0]
-    _B = rigid_info.mass_mat_mask.shape[1]
+    n_trees = rigid_info.trees_root_idx.shape[0]
+    _B = rigid_info.mass_mat.shape[2]
 
     qd.loop_config(name="factor_mass", block_dim=T)
-    for i in range(n_entities * _B * T):
+    for i in range(n_trees * _B * T):
         tid = i % T
-        i_slot = (i // T) % n_entities
-        i_b = i // (T * n_entities)
-        func_factor_mass_entity_tiled(
-            tid, i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, TileCls
+        i_t = (i // T) % n_trees
+        i_b = i // (T * n_trees)
+        func_factor_mass_tree_tiled(
+            tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, TileCls
         )
 
 
@@ -688,23 +632,23 @@ def func_factor_mass_tiled_masked(
     """Factor the mass matrix of the given environments by streaming tiles. See func_factor_mass_tiled."""
     T = qd.static(rigid_config.cholesky_tile_size)
 
-    n_entities = dyn_info.entities.n_links.shape[0]
+    n_trees = rigid_info.trees_root_idx.shape[0]
     _B = envs_idx.shape[0]
 
     qd.loop_config(name="factor_mass", block_dim=T)
-    for i in range(n_entities * _B * T):
+    for i in range(n_trees * _B * T):
         tid = i % T
-        i_slot = (i // T) % n_entities
-        i_b = envs_idx[i // (T * n_entities)]
-        func_factor_mass_entity_tiled(
-            tid, i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, TileCls
+        i_t = (i // T) % n_trees
+        i_b = envs_idx[i // (T * n_trees)]
+        func_factor_mass_tree_tiled(
+            tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, TileCls
         )
 
 
 @qd.func
-def func_factor_mass_entity_global(
+def func_factor_mass_tree_global(
     tid,
-    i_slot,
+    i_t,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -713,54 +657,59 @@ def func_factor_mass_entity_global(
     implicit_damping: qd.template(),
     BLOCK_DIM: qd.template(),
 ):
-    """Factor the mass blocks of one entity in place in global memory, one thread's share of it.
+    """Factor the mass blocks of one kinematic tree in place in global memory, one thread's share of it.
 
     Each elimination step snapshots the pivot row into a small shared vector, O(n_dofs) rather than O(n_dofs^2),
     before the trailing submatrix is updated, so the parallel per-row updates only ever read the pivot row and the
-    result holds whatever the scheduling. Gives the same numbers as func_factor_mass_entity, which runs the same
+    result holds whatever the scheduling. Gives the same numbers as func_factor_mass_tree, which runs the same
     elimination on a single thread.
     """
     MAX_DOFS_PER_BLOCK = qd.static(rigid_config.tiled_n_dofs_per_block)
 
-    i_e = func_awake_entity(i_slot, i_b, rigid_info, rigid_config)
-    if i_e != -1 and rigid_info.mass_mat_mask[i_e, i_b]:
-        entity_dof_start = dyn_info.entities.dof_start[i_e]
-        entity_dof_end = dyn_info.entities.dof_end[i_e]
-
+    # Under implicit damping only the trees carrying a damping term take a new factor, the others keep the smooth one.
+    # One lane reads the dofs of the tree, the whole block takes its answer.
+    is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+    if qd.static(implicit_damping):
+        has_damping = 0
+        if tid == 0 and is_factored:
+            if func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
+                has_damping = 1
+        is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
+    if is_factored:
         pivot_row = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK,), gs.qd_float)
 
-        # Factor each mass block rooted in this entity in-place in global memory over its full range,
-        # block-relative so shared indices stay >= 0; a merged child owns no root and factors nothing.
-        block_start = entity_dof_start
-        while block_start < entity_dof_end:
-            block_end = rigid_info.dofs_mass_block_end[block_start]
+        # Factor each mass block of the tree in place in global memory, block-relative so shared indices stay >= 0
+        tree_dof_start = rigid_info.trees_dof_start[i_t]
+        tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
+        for block_start in range(tree_dof_start, tree_dof_end):
             if rigid_info.dofs_mass_block_start[block_start] == block_start:
+                block_end = rigid_info.dofs_mass_block_end[block_start]
                 n_block_dofs = block_end - block_start
 
-                # Copy the block's lower triangle into mass_mat_L (+ implicit damping on the diagonal),
-                # cooperatively. Restricting to the block makes the factorization cost the sum of per-block
-                # cubes instead of the whole (possibly multi-block) entity cube.
-                i_d_ = tid
-                while i_d_ < n_block_dofs:
-                    i_d = block_start + i_d_
-                    for j_d in range(block_start, i_d + 1):
-                        rigid_info.mass_mat_L[i_d, j_d, i_b] = rigid_info.mass_mat[i_d, j_d, i_b]
-                    if qd.static(implicit_damping):
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                        rigid_info.mass_mat_L[i_d, i_d, i_b] = (
-                            rigid_info.mass_mat_L[i_d, i_d, i_b]
-                            + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
-                        )
-                        if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
-                            if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
-                                rigid_info.mass_mat_L[i_d, i_d, i_b] = (
-                                    rigid_info.mass_mat_L[i_d, i_d, i_b]
-                                    - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
-                                )
-                    i_d_ = i_d_ + BLOCK_DIM
+                # Copy the block's lower triangle into mass_mat_L (+ implicit damping on the diagonal), cooperatively.
+                # Restricting to the block makes the factorization cost the sum of per-block cubes instead of the cube
+                # of the whole tree.
+                for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                    i_d_ = i_chunk_ * BLOCK_DIM + tid
+                    if i_d_ < n_block_dofs:
+                        i_d = block_start + i_d_
+                        for j_d in range(block_start, i_d + 1):
+                            rigid_info.mass_mat_L[i_d, j_d, i_b] = rigid_info.mass_mat[i_d, j_d, i_b]
+                        if qd.static(implicit_damping):
+                            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                            rigid_info.mass_mat_L[i_d, i_d, i_b] = (
+                                rigid_info.mass_mat_L[i_d, i_d, i_b]
+                                + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
+                            )
+                            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+                                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                                    rigid_info.mass_mat_L[i_d, i_d, i_b] = (
+                                        rigid_info.mass_mat_L[i_d, i_d, i_b]
+                                        - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
+                                    )
                 qd.simt.block.sync()
 
-                # In-place LDL^T, eliminating dofs from last to first (matches func_factor_mass_entity).
+                # In-place LDL^T, eliminating dofs from last to first (matches func_factor_mass_tree).
                 for j in range(n_block_dofs):
                     i_d = block_end - j - 1
                     i_d_local = i_d - block_start
@@ -769,36 +718,35 @@ def func_factor_mass_entity_global(
                         rigid_info.mass_mat_D_inv[i_d, i_b] = D_inv
 
                     # Phase A: snapshot the (Schur-updated) pivot-row entries below the diagonal into shared.
-                    j_d_ = tid
-                    while j_d_ < i_d_local:
-                        pivot_row[j_d_] = rigid_info.mass_mat_L[i_d, block_start + j_d_, i_b]
-                        j_d_ = j_d_ + BLOCK_DIM
+                    for i_chunk_ in range((i_d_local + BLOCK_DIM - 1) // BLOCK_DIM):
+                        j_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if j_d_ < i_d_local:
+                            pivot_row[j_d_] = rigid_info.mass_mat_L[i_d, block_start + j_d_, i_b]
                     qd.simt.block.sync()
 
-                    # Phase B: each lane eliminates one column j_d, updating its own row j_d of the trailing
-                    # submatrix from the read-only snapshot. Distinct rows per lane => no write conflicts,
-                    # and the pivot row is only read (from shared) => no read/write race on row i_d.
-                    j_d_ = tid
-                    while j_d_ < i_d_local:
-                        a = pivot_row[j_d_] * D_inv
-                        j_d = block_start + j_d_
-                        for k_d_ in range(j_d_ + 1):
-                            rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b] = (
-                                rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b] - a * pivot_row[k_d_]
-                            )
-                        rigid_info.mass_mat_L[i_d, j_d, i_b] = a
-                        j_d_ = j_d_ + BLOCK_DIM
+                    # Phase B: each lane eliminates one column j_d, updating its own row j_d of the trailing submatrix
+                    # from the read-only snapshot. Distinct rows per lane => no write conflicts, and the pivot row is
+                    # only read (from shared) => no read/write race on row i_d.
+                    for i_chunk_ in range((i_d_local + BLOCK_DIM - 1) // BLOCK_DIM):
+                        j_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if j_d_ < i_d_local:
+                            a = pivot_row[j_d_] * D_inv
+                            j_d = block_start + j_d_
+                            for k_d_ in range(j_d_ + 1):
+                                rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b] = (
+                                    rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b] - a * pivot_row[k_d_]
+                                )
+                            rigid_info.mass_mat_L[i_d, j_d, i_b] = a
                     qd.simt.block.sync()
 
                     # Diagonal coeffs of L are ignored downstream, and set to 1.0 to match the other paths.
                     if tid == 0:
                         rigid_info.mass_mat_L[i_d, i_d, i_b] = 1.0
-            block_start = block_end
 
 
 @qd.func
-def func_factor_mass_entity(
-    i_slot,
+def func_factor_mass_tree(
+    i_t,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -806,14 +754,18 @@ def func_factor_mass_entity(
     rigid_config: qd.template(),
     implicit_damping: qd.template(),
 ):
-    """Factor the mass blocks of one entity on a single thread."""
-    i_e = func_awake_entity(i_slot, i_b, rigid_info, rigid_config)
-    if i_e != -1 and rigid_info.mass_mat_mask[i_e, i_b]:
-        # Factor each mass block rooted in this entity, iterated flat over the rooted range with per-DOF
-        # block bounds (see entities_mass_block_dof_start in array_class.py): elimination never leaves a
-        # block, so interleaving independent blocks in one descending scan is exact.
-        blocks_dof_start = rigid_info.entities_mass_block_dof_start[i_e]
-        blocks_dof_end = rigid_info.entities_mass_block_dof_end[i_e]
+    """Factor the mass blocks of one kinematic tree on a single thread."""
+    # Under implicit damping only the trees carrying a damping term take a new factor, the others keep the smooth one
+    is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+    if qd.static(implicit_damping):
+        if is_factored:
+            is_factored = func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+    if is_factored:
+        # The blocks partition the dof range of the tree (see dofs_mass_block_start in array_class.py), iterated flat
+        # with per-DOF block bounds: elimination never leaves a block, so one descending scan over the independent
+        # blocks stays exact.
+        blocks_dof_start = rigid_info.trees_dof_start[i_t]
+        blocks_dof_end = blocks_dof_start + rigid_info.trees_n_dofs[i_t]
         for i_d in range(blocks_dof_start, blocks_dof_end):
             for j_d in range(rigid_info.dofs_mass_block_start[i_d], i_d + 1):
                 rigid_info.mass_mat_L[i_d, j_d, i_b] = rigid_info.mass_mat[i_d, j_d, i_b]
@@ -848,9 +800,9 @@ def func_factor_mass_entity(
 
 
 @qd.func
-def func_factor_mass_entity_shared(
+def func_factor_mass_tree_shared(
     tid,
-    i_slot,
+    i_t,
     i_b,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -859,48 +811,53 @@ def func_factor_mass_entity_shared(
     implicit_damping: qd.template(),
     BLOCK_DIM: qd.template(),
 ):
-    """Factor the mass blocks of one entity in shared memory, one thread's share of it."""
+    """Factor the mass blocks of one kinematic tree in shared memory, one thread's share of it."""
     MAX_DOFS_PER_BLOCK = qd.static(rigid_config.tiled_n_dofs_per_block)
     WARP_SIZE = qd.static(32)
 
-    i_e = func_awake_entity(i_slot, i_b, rigid_info, rigid_config)
-    if i_e != -1 and rigid_info.mass_mat_mask[i_e, i_b]:
-        entity_dof_start = dyn_info.entities.dof_start[i_e]
-        entity_dof_end = dyn_info.entities.dof_end[i_e]
-
+    # Under implicit damping only the trees carrying a damping term take a new factor, the others keep the smooth one.
+    # One lane reads the dofs of the tree, the whole block takes its answer.
+    is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+    if qd.static(implicit_damping):
+        has_damping = 0
+        if tid == 0 and is_factored:
+            if func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
+                has_damping = 1
+        is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
+    if is_factored:
         mass_mat = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, MAX_DOFS_PER_BLOCK + 1), gs.qd_float)
 
-        # Factor each mass block rooted in this entity in shared memory, indexed block-relative so
-        # shared indices stay >= 0 (a merged child's block starts before its entity); the child owns no
-        # root and factors nothing, while the parent factors the whole coupled block.
-        block_start = entity_dof_start
-        while block_start < entity_dof_end:
-            block_end = rigid_info.dofs_mass_block_end[block_start]
+        # Factor each mass block of the tree in shared memory, indexed block-relative so shared indices stay >= 0
+        tree_dof_start = rigid_info.trees_dof_start[i_t]
+        tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
+        for block_start in range(tree_dof_start, tree_dof_end):
             if rigid_info.dofs_mass_block_start[block_start] == block_start:
+                block_end = rigid_info.dofs_mass_block_end[block_start]
                 n_block_dofs = block_end - block_start
                 n_lower_tri = n_block_dofs * (n_block_dofs + 1) // 2
 
-                i_pair = tid
-                while i_pair < n_lower_tri:
-                    i_d_, j_d_ = linear_to_lower_tri(i_pair)
-                    mass_mat[i_d_, j_d_] = rigid_info.mass_mat[block_start + i_d_, block_start + j_d_, i_b]
-                    i_pair = i_pair + BLOCK_DIM
+                for i_chunk_ in range((n_lower_tri + BLOCK_DIM - 1) // BLOCK_DIM):
+                    i_pair = i_chunk_ * BLOCK_DIM + tid
+                    if i_pair < n_lower_tri:
+                        i_d_, j_d_ = linear_to_lower_tri(i_pair)
+                        mass_mat[i_d_, j_d_] = rigid_info.mass_mat[block_start + i_d_, block_start + j_d_, i_b]
                 qd.simt.block.sync()
 
                 if qd.static(implicit_damping):
-                    i_d_ = tid
-                    while i_d_ < n_block_dofs:
-                        i_d = block_start + i_d_
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                        mass_mat[i_d_, i_d_] = (
-                            mass_mat[i_d_, i_d_] + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
-                        )
-                        if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
-                            if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
-                                mass_mat[i_d_, i_d_] = (
-                                    mass_mat[i_d_, i_d_] - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
-                                )
-                        i_d_ = i_d_ + BLOCK_DIM
+                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                        i_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if i_d_ < n_block_dofs:
+                            i_d = block_start + i_d_
+                            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                            mass_mat[i_d_, i_d_] = (
+                                mass_mat[i_d_, i_d_] + dyn_info.dofs.damping[I_d] * rigid_info.substep_dt[None]
+                            )
+                            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+                                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                                    mass_mat[i_d_, i_d_] = (
+                                        mass_mat[i_d_, i_d_]
+                                        - dyn_info.dofs.act_bias[I_d][2] * rigid_info.substep_dt[None]
+                                    )
                     qd.simt.block.sync()
 
                 for j in range(n_block_dofs):
@@ -913,13 +870,13 @@ def func_factor_mass_entity_shared(
                         # FIXME: Diagonal coeffs of L are ignored in computations, so no need to update them.
                         rigid_info.mass_mat_L[i_d, i_d, i_b] = 1.0
 
-                    j_d_ = i_d_ - 1 - tid
-                    while j_d_ >= 0:
-                        a = mass_mat[i_d_, j_d_] * D_inv
-                        for k_d in range(j_d_ + 1):
-                            mass_mat[j_d_, k_d] = mass_mat[j_d_, k_d] - a * mass_mat[i_d_, k_d]
-                        mass_mat[i_d_, j_d_] = a
-                        j_d_ = j_d_ - BLOCK_DIM
+                    for i_chunk_ in range((i_d_ + BLOCK_DIM - 1) // BLOCK_DIM):
+                        j_d_ = i_d_ - 1 - (i_chunk_ * BLOCK_DIM + tid)
+                        if j_d_ >= 0:
+                            a = mass_mat[i_d_, j_d_] * D_inv
+                            for k_d in range(j_d_ + 1):
+                                mass_mat[j_d_, k_d] = mass_mat[j_d_, k_d] - a * mass_mat[i_d_, k_d]
+                            mass_mat[i_d_, j_d_] = a
                     if qd.static(rigid_config.backend == gs.cuda):
                         if i_d_ <= WARP_SIZE:
                             qd.simt.warp.sync(qd.u32(0xFFFFFFFF))
@@ -928,14 +885,13 @@ def func_factor_mass_entity_shared(
                     else:
                         qd.simt.block.sync()
 
-                i_pair = tid
                 n_strict_lower_tri = n_block_dofs * (n_block_dofs - 1) // 2
-                while i_pair < n_strict_lower_tri:
-                    i_d_, j_d_ = linear_to_lower_tri(i_pair, strict=True)
-                    rigid_info.mass_mat_L[block_start + i_d_, block_start + j_d_, i_b] = mass_mat[i_d_, j_d_]
-                    i_pair = i_pair + BLOCK_DIM
+                for i_chunk_ in range((n_strict_lower_tri + BLOCK_DIM - 1) // BLOCK_DIM):
+                    i_pair = i_chunk_ * BLOCK_DIM + tid
+                    if i_pair < n_strict_lower_tri:
+                        i_d_, j_d_ = linear_to_lower_tri(i_pair, strict=True)
+                        rigid_info.mass_mat_L[block_start + i_d_, block_start + j_d_, i_b] = mass_mat[i_d_, j_d_]
                 qd.simt.block.sync()
-            block_start = block_end
 
 
 @qd.func
@@ -948,16 +904,16 @@ def func_factor_mass(
 ):
     """Factor the mass matrix of every environment.
 
-    func_factor_mass_masked factors a subset of them instead, out of the same per-entity functions. See
+    func_factor_mass_masked factors a subset of them instead, out of the same per-tree functions. See
     func_compute_mass_matrix for why both passes come in two implementations.
     """
-    n_entities = dyn_info.entities.n_links.shape[0]
-    _B = rigid_info.mass_mat_mask.shape[1]
+    n_trees = rigid_info.trees_root_idx.shape[0]
+    _B = rigid_info.mass_mat.shape[2]
 
     if qd.static(rigid_config.enable_register_tiled_mass):
-        # Register-streaming tiled per-entity factor for the >shared-cap path (same primitive as the constraint
-        # Hessian). Implies enable_tiled_cholesky_mass_matrix and not mass_matrix_fits_shared; see
-        # func_factor_mass_tiled. Replaces the cooperative LDL^T in the elif below.
+        # Register-streaming tiled per-tree factor for the >shared-cap path (same primitive as the constraint Hessian).
+        # Implies enable_tiled_cholesky_mass_matrix and not mass_matrix_fits_shared; see func_factor_mass_tiled.
+        # Replaces the cooperative LDL^T in the elif below.
         func_factor_mass_tiled(
             dyn_state,
             dyn_info,
@@ -967,29 +923,29 @@ def func_factor_mass(
             qd.simt.Tile32x32 if qd.static(rigid_config.cholesky_tile_size == 32) else qd.simt.Tile16x16,
         )
     elif qd.static(rigid_config.enable_tiled_cholesky_mass_matrix and not rigid_config.mass_matrix_fits_shared):
-        # Uncapped cooperative per-entity LDL^T, for an entity submatrix that does not fit in shared memory.
+        # Uncapped cooperative per-tree LDL^T, for a tree submatrix that does not fit in shared memory.
         BLOCK_DIM = qd.static(32)
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
-        for i in range(n_entities * _B * BLOCK_DIM):
+        for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
-            i_slot = (i // BLOCK_DIM) % n_entities
-            i_b = i // (BLOCK_DIM * n_entities)
-            func_factor_mass_entity_global(
-                tid, i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
+            i_t = (i // BLOCK_DIM) % n_trees
+            i_b = i // (BLOCK_DIM * n_trees)
+            func_factor_mass_tree_global(
+                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
             )
     elif qd.static(not rigid_config.enable_tiled_cholesky_mass_matrix or rigid_config.backend == gs.cpu):
         qd.loop_config(name="factor_mass", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_slot, i_b in qd.ndrange(n_entities, _B):
-            func_factor_mass_entity(i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping)
+        for i_t, i_b in qd.ndrange(n_trees, _B):
+            func_factor_mass_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping)
     else:
         BLOCK_DIM = qd.static(32)
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
-        for i in range(n_entities * _B * BLOCK_DIM):
+        for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
-            i_slot = (i // BLOCK_DIM) % n_entities
-            i_b = i // (BLOCK_DIM * n_entities)
-            func_factor_mass_entity_shared(
-                tid, i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
+            i_t = (i // BLOCK_DIM) % n_trees
+            i_b = i // (BLOCK_DIM * n_trees)
+            func_factor_mass_tree_shared(
+                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
             )
 
 
@@ -1003,7 +959,7 @@ def func_factor_mass_masked(
     implicit_damping: qd.template(),
 ):
     """Factor the mass matrix of the given environments. See func_factor_mass."""
-    n_entities = dyn_info.entities.n_links.shape[0]
+    n_trees = rigid_info.trees_root_idx.shape[0]
     _B = envs_idx.shape[0]
 
     if qd.static(rigid_config.enable_register_tiled_mass):
@@ -1019,34 +975,31 @@ def func_factor_mass_masked(
     elif qd.static(rigid_config.enable_tiled_cholesky_mass_matrix and not rigid_config.mass_matrix_fits_shared):
         BLOCK_DIM = qd.static(32)
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
-        for i in range(n_entities * _B * BLOCK_DIM):
+        for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
-            i_slot = (i // BLOCK_DIM) % n_entities
-            i_b = envs_idx[i // (BLOCK_DIM * n_entities)]
-            func_factor_mass_entity_global(
-                tid, i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
+            i_t = (i // BLOCK_DIM) % n_trees
+            i_b = envs_idx[i // (BLOCK_DIM * n_trees)]
+            func_factor_mass_tree_global(
+                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
             )
     elif qd.static(not rigid_config.enable_tiled_cholesky_mass_matrix or rigid_config.backend == gs.cpu):
         qd.loop_config(name="factor_mass", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_slot, i_b_ in qd.ndrange(n_entities, _B):
-            func_factor_mass_entity(
-                i_slot, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping
-            )
+        for i_t, i_b_ in qd.ndrange(n_trees, _B):
+            func_factor_mass_tree(i_t, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping)
     else:
         BLOCK_DIM = qd.static(32)
         qd.loop_config(name="factor_mass", block_dim=BLOCK_DIM)
-        for i in range(n_entities * _B * BLOCK_DIM):
+        for i in range(n_trees * _B * BLOCK_DIM):
             tid = i % BLOCK_DIM
-            i_slot = (i // BLOCK_DIM) % n_entities
-            i_b = envs_idx[i // (BLOCK_DIM * n_entities)]
-            func_factor_mass_entity_shared(
-                tid, i_slot, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
+            i_t = (i // BLOCK_DIM) % n_trees
+            i_b = envs_idx[i // (BLOCK_DIM * n_trees)]
+            func_factor_mass_tree_shared(
+                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
             )
 
 
 @qd.func
 def func_solve_mass_block(
-    i_e: qd.int32,
     i_b: qd.int32,
     blocks_dof_start: qd.int32,
     blocks_dof_end: qd.int32,
@@ -1062,30 +1015,28 @@ def func_solve_mass_block(
     range is what lets several chains share one pair of buffers: writing a row outside it would race with the chain
     that owns it.
     """
-    if rigid_info.mass_mat_mask[i_e, i_b]:
-        # Step 1: Solve w st. L^T @ w = y. Reading out[j_d] (j_d > i_d) from the buffer being written is safe: those
-        # entries were finalized in earlier (larger i_d) iterations. This func is never auto-reversed; the backward
-        # pass seeds mass_mat.grad directly via the implicit function theorem (see kernel_manual_compute_qacc_bw in
-        # manual_bw.py).
-        for i_d_ in range(blocks_dof_end - blocks_dof_start):
-            i_d = blocks_dof_end - i_d_ - 1
-            block_end = rigid_info.dofs_mass_block_end[i_d]
-            curr_out = vec[i_d, i_b]
-            for j_d in range(i_d + 1, block_end):
-                curr_out = curr_out - rigid_info.mass_mat_L[j_d, i_d, i_b] * out[j_d, i_b]
-            out[i_d, i_b] = curr_out
+    # Step 1: Solve w st. L^T @ w = y. Reading out[j_d] (j_d > i_d) from the buffer being written is safe: those entries
+    # were finalized in earlier (larger i_d) iterations. This func is never auto-reversed: the backward pass seeds
+    # mass_mat.grad directly via the implicit function theorem (see kernel_manual_compute_qacc_bw in manual_bw.py).
+    for i_d_ in range(blocks_dof_end - blocks_dof_start):
+        i_d = blocks_dof_end - i_d_ - 1
+        block_end = rigid_info.dofs_mass_block_end[i_d]
+        curr_out = vec[i_d, i_b]
+        for j_d in range(i_d + 1, block_end):
+            curr_out = curr_out - rigid_info.mass_mat_L[j_d, i_d, i_b] * out[j_d, i_b]
+        out[i_d, i_b] = curr_out
 
-        # Step 2: z = D^{-1} w
-        for i_d in range(blocks_dof_start, blocks_dof_end):
-            out[i_d, i_b] = out[i_d, i_b] * rigid_info.mass_mat_D_inv[i_d, i_b]
+    # Step 2: z = D^{-1} w
+    for i_d in range(blocks_dof_start, blocks_dof_end):
+        out[i_d, i_b] = out[i_d, i_b] * rigid_info.mass_mat_D_inv[i_d, i_b]
 
-        # Step 3: Solve x st. L @ x = z
-        for i_d in range(blocks_dof_start, blocks_dof_end):
-            block_start = rigid_info.dofs_mass_block_start[i_d]
-            curr_out = out[i_d, i_b]
-            for j_d in range(block_start, i_d):
-                curr_out = curr_out - rigid_info.mass_mat_L[i_d, j_d, i_b] * out[j_d, i_b]
-            out[i_d, i_b] = curr_out
+    # Step 3: Solve x st. L @ x = z
+    for i_d in range(blocks_dof_start, blocks_dof_end):
+        block_start = rigid_info.dofs_mass_block_start[i_d]
+        curr_out = out[i_d, i_b]
+        for j_d in range(block_start, i_d):
+            curr_out = curr_out - rigid_info.mass_mat_L[i_d, j_d, i_b] * out[j_d, i_b]
+        out[i_d, i_b] = curr_out
 
 
 @qd.func
@@ -1094,42 +1045,18 @@ def func_solve_mass_batch(
     vec: qd.Tensor,
     out: qd.Tensor,
     dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    # A block is the smallest set of coupled degrees of freedom, and one worker's whole share of the work. The degree
-    # of freedom starting a block is its root, and answers for the block on the two counts that decide whether there is
-    # anything to solve: whether its kinematic tree is hibernated, which is per tree and not per entity, and whether
-    # the entity rooting the block was factorized (see mass_mat_mask in array_class.py).
+    # A block is the smallest set of coupled degrees of freedom, and one worker's whole share of the work. The degree of
+    # freedom starting a block is its root, and tells whether the block's kinematic tree is hibernated, in which case
+    # there is nothing to solve.
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_d in range(rigid_info.mass_mat.shape[0]):
         is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
         if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
-            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-            i_e = dyn_info.dofs.entity_idx[I_d]
             block_end = rigid_info.dofs_mass_block_end[i_d]
-            func_solve_mass_block(i_e, i_b, i_d, block_end, vec, out, rigid_info, rigid_config)
-
-
-@qd.func
-def func_solve_mass(
-    vec: qd.Tensor,
-    out: qd.Tensor,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    # Parallel over the blocks of every environment at once. See func_solve_mass_batch for what a block is.
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(rigid_info.mass_mat.shape[0], out.shape[1]):
-        is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
-        if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
-            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-            i_e = dyn_info.dofs.entity_idx[I_d]
-            block_end = rigid_info.dofs_mass_block_end[i_d]
-            func_solve_mass_block(i_e, i_b, i_d, block_end, vec, out, rigid_info, rigid_config)
+            func_solve_mass_block(i_b, i_d, block_end, vec, out, rigid_info, rigid_config)
 
 
 @qd.func
@@ -1148,16 +1075,18 @@ def func_enter_neutral_configuration(
     Only the environments in `envs_idx` are assembled and factorized, hence the masked implementation of those passes.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_update_cartesian_space_batch(
+        i_l_root = rigid_info.roots_link_idx[i_r]
+        func_update_cartesian_space_root(
+            i_l_root,
             i_b,
             rigid_info.qpos0,
             dyn_state,
             dyn_info,
             rigid_info,
             rigid_config,
-            force_update_fixed_geoms=False,
+            force_update_all_geoms=False,
             is_backward=False,
         )
 
@@ -1177,30 +1106,26 @@ def func_exit_neutral_configuration(
 ):
     """Evaluate forward kinematics again at the configuration the scene is in, which the neutral pass overwrote."""
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_ in range(envs_idx.shape[0]):
+    for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        func_update_cartesian_space_batch(
+        i_l_root = rigid_info.roots_link_idx[i_r]
+        func_update_cartesian_space_root(
+            i_l_root,
             i_b,
             rigid_info.qpos,
             dyn_state,
             dyn_info,
             rigid_info,
             rigid_config,
-            force_update_fixed_geoms=True,
+            force_update_all_geoms=True,
             is_backward=False,
         )
 
 
 @qd.func
-def func_init_meaninertia(
-    envs_idx: qd.types.ndarray(),
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
+def func_init_meaninertia(envs_idx: qd.types.ndarray(), rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
     """Compute the mean diagonal entry of the joint-space mass matrix, which scales the solver tolerances."""
     n_dofs = rigid_info.mass_mat.shape[0]
-    n_entities = dyn_info.entities.n_links.shape[0]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_b_ in range(envs_idx.shape[0]):
@@ -1209,11 +1134,8 @@ def func_init_meaninertia(
             # Accumulated through the field rather than a local: a register would carry more precision than the
             # working one, and every consumer of the mean inertia is quoted on the value the field holds.
             rigid_info.meaninertia[i_b] = 0.0
-            for i_e in range(n_entities):
-                for i_d in range(dyn_info.entities.dof_start[i_e], dyn_info.entities.dof_end[i_e]):
-                    rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] + rigid_info.mass_mat[i_d, i_d, i_b]
-            # Divided once the whole diagonal is in: the mean is over every degree of freedom of the scene, so a
-            # division per entity would scale it down by however many entities there are.
+            for i_d in range(n_dofs):
+                rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] + rigid_info.mass_mat[i_d, i_d, i_b]
             rigid_info.meaninertia[i_b] = rigid_info.meaninertia[i_b] / n_dofs
         else:
             rigid_info.meaninertia[i_b] = 1.0
@@ -1241,12 +1163,6 @@ def func_init_link_invweight(
     """
     EPS = rigid_info.EPS[None]
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    i_rl = dyn_info.links.root_idx[I_l]
-    I_rl = [i_rl, i_b] if qd.static(rigid_config.batch_links_info) else i_rl
-
-    # Blocks are rooted in the earliest of the entities they span, which for a tree is the entity of its root link.
-    i_e = dyn_info.links.entity_idx[I_rl]
-
     n_dofs = rigid_info.mass_mat.shape[0]
     dof_min = n_dofs
     dof_max = -1
@@ -1284,7 +1200,7 @@ def func_init_link_invweight(
                         else:
                             jac_row[i_d, i_b] = dyn_state.dofs.cdof_ang[i_d, i_b][i_r]
                     j_l = dyn_info.links.parent_idx[J_l]
-                func_solve_mass_block(i_e, i_b, dof_start, dof_end, jac_row, solve_out, rigid_info, rigid_config)
+                func_solve_mass_block(i_b, dof_start, dof_end, jac_row, solve_out, rigid_info, rigid_config)
                 for i_d in range(dof_start, dof_end):
                     weight = weight + jac_row[i_d, i_b] * solve_out[i_d, i_b]
 
@@ -1314,12 +1230,6 @@ def func_init_dofs_invweight(
     """
     EPS = rigid_info.EPS[None]
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    i_rl = dyn_info.links.root_idx[I_l]
-    I_rl = [i_rl, i_b] if qd.static(rigid_config.batch_links_info) else i_rl
-
-    # Blocks are rooted in the earliest of the entities they span, which for a tree is the entity of its root link.
-    i_e = dyn_info.links.entity_idx[I_rl]
-
     for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
         I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
         joint_type = dyn_info.joints.type[I_j]
@@ -1351,9 +1261,7 @@ def func_init_dofs_invweight(
                         for j_d in range(block_start, block_end):
                             jac_row[j_d, i_b] = 0.0
                         jac_row[i_d, i_b] = 1.0
-                        func_solve_mass_block(
-                            i_e, i_b, block_start, block_end, jac_row, solve_out, rigid_info, rigid_config
-                        )
+                        func_solve_mass_block(i_b, block_start, block_end, jac_row, solve_out, rigid_info, rigid_config)
                         weight = weight + solve_out[i_d, i_b]
                     weight = weight / group_n_dofs
 
@@ -1409,7 +1317,7 @@ def func_refresh_links_invweight_and_meaninertia(
 
         if is_tree_pending:
             # The span of a tree may interleave links of other trees, which their own root excludes here.
-            for i_l in range(i_rl, rigid_info.links_tree_end[i_rl]):
+            for i_l in range(i_rl, rigid_info.links_root_end[i_rl]):
                 I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
                 if dyn_info.links.root_idx[I_l] == i_rl:
                     if is_link_pending:
@@ -1421,7 +1329,7 @@ def func_refresh_links_invweight_and_meaninertia(
                             i_l, i_b, jac_row, solve_out, dyn_state, dyn_info, rigid_info, rigid_config, force_update
                         )
 
-    func_init_meaninertia(envs_idx, dyn_info, rigid_info, rigid_config)
+    func_init_meaninertia(envs_idx, rigid_info, rigid_config)
 
     # Weighing moved the poses to the neutral configuration, so bring them back to the live one when the caller had
     # them up to date, and whenever a velocity is recomputed below, since that reads the live poses. The factored mass
@@ -1433,9 +1341,10 @@ def func_refresh_links_invweight_and_meaninertia(
     # from here. Both readings are brought back where the caller held them current, since this is what moved them.
     if qd.static(refresh_velocity):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_b_ in range(envs_idx.shape[0]):
-            func_forward_velocity_batch(
-                envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+        for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+            i_l_root = rigid_info.roots_link_idx[i_r]
+            func_forward_velocity_root(
+                i_l_root, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
             )
 
 
@@ -1468,21 +1377,18 @@ def kernel_refresh_invweight_and_meaninertia(
 
     func_enter_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    n_links = dyn_info.links.parent_idx.shape[0]
     # Weighed as in func_refresh_links_invweight_and_meaninertia, over every tree instead of the listed ones.
     n_envs_pending = (
         envs_idx.shape[0] if qd.static(rigid_config.batch_links_info or rigid_config.batch_dofs_info) else 1
     )
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b_, i_rl in qd.ndrange(n_envs_pending, n_links):
+    for i_b_, i_r in qd.ndrange(n_envs_pending, rigid_info.roots_link_idx.shape[0]):
         i_b = envs_idx[i_b_]
         is_link_pending = True if qd.static(rigid_config.batch_links_info) else i_b_ == 0
         is_dofs_pending = True if qd.static(rigid_config.batch_dofs_info) else i_b_ == 0
-        I_rl = [i_rl, i_b] if qd.static(rigid_config.batch_links_info) else i_rl
-        # One worker per tree, taken by its root: the links of a tree follow each other inside it.
-        if dyn_info.links.root_idx[I_rl] != i_rl:
-            continue
-        for i_l in range(i_rl, rigid_info.links_tree_end[i_rl]):
+        # One worker per tree, whose span may interleave links of other trees, which their own root excludes here
+        i_rl = rigid_info.roots_link_idx[i_r]
+        for i_l in range(i_rl, rigid_info.links_root_end[i_rl]):
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             if dyn_info.links.root_idx[I_l] != i_rl:
                 continue
@@ -1495,7 +1401,7 @@ def kernel_refresh_invweight_and_meaninertia(
                     i_l, i_b, jac_row, solve_out, dyn_state, dyn_info, rigid_info, rigid_config, force_update
                 )
 
-    func_init_meaninertia(envs_idx, dyn_info, rigid_info, rigid_config)
+    func_init_meaninertia(envs_idx, rigid_info, rigid_config)
 
     # Both passes are the ones func_refresh_links_invweight_and_meaninertia ends on, and are owed for the same
     # reasons, which are given there.
@@ -1504,9 +1410,10 @@ def kernel_refresh_invweight_and_meaninertia(
 
     if qd.static(refresh_velocity):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-        for i_b_ in range(envs_idx.shape[0]):
-            func_forward_velocity_batch(
-                envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+        for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
+            i_l_root = rigid_info.roots_link_idx[i_r]
+            func_forward_velocity_root(
+                i_l_root, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
             )
 
 
@@ -1521,42 +1428,88 @@ def func_torque_and_passive_force(
 ):
     BW = qd.static(is_backward)
 
-    # compute force based on each dof's ctrl mode
+    # Actuation forces per dof from its ctrl mode, one thread per link, so a scene of many free bodies spreads over as
+    # many threads as it holds links. Every link is visited, asleep or awake: an actuated sleeping link wakes below.
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_e, i_b in qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+    for i_l, i_b in qd.ndrange(dyn_info.links.parent_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         EPS = rigid_info.EPS[None]
 
-        wakeup = False
-        for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.n_dofs[I_l] > 0:
-                i_j = dyn_info.links.joint_start[I_l]
-                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                joint_type = dyn_info.joints.type[I_j]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        if dyn_info.links.n_dofs[I_l] > 0:
+            wakeup = False
+            i_j = dyn_info.links.joint_start[I_l]
+            I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+            joint_type = dyn_info.joints.type[I_j]
 
-                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+                force = gs.qd_float(0.0)
+                if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
+                    force = dyn_state.dofs.ctrl_force[i_d, i_b]
+                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
+                    force = -dyn_info.dofs.act_bias[I_d][2] * (
+                        dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
+                    )
+                elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION and not (
+                    joint_type == gs.JOINT_TYPE.FREE and i_d >= dyn_info.links.dof_start[I_l] + 3
+                ):
+                    # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
+                    # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
+                    force = (
+                        dyn_info.dofs.act_gain[I_d] * (dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b])
+                        + dyn_info.dofs.act_bias[I_d][0]
+                        + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
+                        + dyn_info.dofs.act_bias[I_d][2]
+                        * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
+                    )
+
+                dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
+                    force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
+                )
+
+                if qd.abs(force) > EPS:
+                    wakeup = True
+
+            dof_start = dyn_info.links.dof_start[I_l]
+            if joint_type == gs.JOINT_TYPE.FREE and (
+                dyn_state.dofs.ctrl_mode[dof_start + 3, i_b] == gs.CTRL_MODE.POSITION
+                or dyn_state.dofs.ctrl_mode[dof_start + 4, i_b] == gs.CTRL_MODE.POSITION
+                or dyn_state.dofs.ctrl_mode[dof_start + 5, i_b] == gs.CTRL_MODE.POSITION
+            ):
+                xyz = qd.Vector(
+                    [
+                        dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
+                        dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
+                        dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
+                    ],
+                    dt=gs.qd_float,
+                )
+
+                ctrl_xyz = qd.Vector(
+                    [
+                        dyn_state.dofs.ctrl_pos[0 + 3 + dof_start, i_b],
+                        dyn_state.dofs.ctrl_pos[1 + 3 + dof_start, i_b],
+                        dyn_state.dofs.ctrl_pos[2 + 3 + dof_start, i_b],
+                    ],
+                    dt=gs.qd_float,
+                )
+
+                quat = gu.qd_xyz_to_quat(xyz)
+                ctrl_quat = gu.qd_xyz_to_quat(ctrl_xyz)
+
+                q_diff = gu.qd_transform_quat_by_quat(ctrl_quat, gu.qd_inv_quat(quat))
+                rotvec = gu.qd_quat_to_rotvec(q_diff, EPS)
+
+                for j in qd.static(range(3)):
+                    i_d = dof_start + 3 + j
                     I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                    force = gs.qd_float(0.0)
-                    if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
-                        force = dyn_state.dofs.ctrl_force[i_d, i_b]
-                    elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
-                        force = -dyn_info.dofs.act_bias[I_d][2] * (
-                            dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
-                        )
-                    elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION and not (
-                        joint_type == gs.JOINT_TYPE.FREE and i_d >= dyn_info.links.dof_start[I_l] + 3
-                    ):
-                        # Unified formula for GENERAL and POSITION modes, factored for float32 stability.
-                        # For PD (act_gain == -act_bias[1], act_bias[0] == 0), the residual terms vanish.
-                        force = (
-                            dyn_info.dofs.act_gain[I_d]
-                            * (dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b])
-                            + dyn_info.dofs.act_bias[I_d][0]
-                            + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1])
-                            * dyn_state.dofs.pos[i_d, i_b]
-                            + dyn_info.dofs.act_bias[I_d][2]
-                            * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
-                        )
+                    force = (
+                        dyn_info.dofs.act_gain[I_d] * rotvec[j]
+                        + dyn_info.dofs.act_bias[I_d][0]
+                        + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
+                        + dyn_info.dofs.act_bias[I_d][2]
+                        * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
+                    )
 
                     dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
                         force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
@@ -1565,111 +1518,106 @@ def func_torque_and_passive_force(
                     if qd.abs(force) > EPS:
                         wakeup = True
 
-                dof_start = dyn_info.links.dof_start[I_l]
-                if joint_type == gs.JOINT_TYPE.FREE and (
-                    dyn_state.dofs.ctrl_mode[dof_start + 3, i_b] == gs.CTRL_MODE.POSITION
-                    or dyn_state.dofs.ctrl_mode[dof_start + 4, i_b] == gs.CTRL_MODE.POSITION
-                    or dyn_state.dofs.ctrl_mode[dof_start + 5, i_b] == gs.CTRL_MODE.POSITION
-                ):
-                    xyz = qd.Vector(
-                        [
-                            dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
-                            dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
-                            dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
-                        ],
-                        dt=gs.qd_float,
-                    )
+            if qd.static(rigid_config.use_hibernation):
+                # Actuation on a sleeping link wakes its island, the unit that sleeps and wakes together (see
+                # func_wakeup_island, whose atomic claim serves the links of one island waking it at once)
+                if wakeup and dyn_state.links.is_hibernated[i_l, i_b]:
+                    i_is = constraint_state.island.links_island_idx[i_l, i_b]
+                    func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
-                    ctrl_xyz = qd.Vector(
-                        [
-                            dyn_state.dofs.ctrl_pos[0 + 3 + dof_start, i_b],
-                            dyn_state.dofs.ctrl_pos[1 + 3 + dof_start, i_b],
-                            dyn_state.dofs.ctrl_pos[2 + 3 + dof_start, i_b],
-                        ],
-                        dt=gs.qd_float,
-                    )
-
-                    quat = gu.qd_xyz_to_quat(xyz)
-                    ctrl_quat = gu.qd_xyz_to_quat(ctrl_xyz)
-
-                    q_diff = gu.qd_transform_quat_by_quat(ctrl_quat, gu.qd_inv_quat(quat))
-                    rotvec = gu.qd_quat_to_rotvec(q_diff, EPS)
-
-                    for j in qd.static(range(3)):
-                        i_d = dof_start + 3 + j
-                        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                        force = (
-                            dyn_info.dofs.act_gain[I_d] * rotvec[j]
-                            + dyn_info.dofs.act_bias[I_d][0]
-                            + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1])
-                            * dyn_state.dofs.pos[i_d, i_b]
-                            + dyn_info.dofs.act_bias[I_d][2]
-                            * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
-                        )
-
-                        dyn_state.dofs.qf_applied[i_d, i_b] = qd.math.clamp(
-                            force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1]
-                        )
-
-                        if qd.abs(force) > EPS:
-                            wakeup = True
-
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_d, i_b in qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        is_awake = True
         if qd.static(rigid_config.use_hibernation):
-            if wakeup:
-                # Actuation may target any sleeping component of this entity; wake each one's island (a single call
-                # revives the whole island, so already-awake links are skipped).
-                for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-                    if dyn_state.links.is_hibernated[i_l, i_b]:
-                        i_is = constraint_state.island.links_island_idx[i_l, i_b]
-                        func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+        if is_awake:
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            dyn_state.dofs.qf_passive[i_d, i_b] = -dyn_info.dofs.damping[I_d] * dyn_state.dofs.vel[i_d, i_b]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1])
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_dofs[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_dofs[i_b], rigid_config.use_hibernation):
-                i_d = rigid_info.awake_dofs[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+        if is_awake:
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                dyn_state.dofs.qf_passive[i_d, i_b] = -dyn_info.dofs.damping[I_d] * dyn_state.dofs.vel[i_d, i_b]
+            if dyn_info.links.n_dofs[I_l] > 0:
+                i_j = dyn_info.links.joint_start[I_l]
+                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                joint_type = dyn_info.joints.type[I_j]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1])
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                if joint_type != gs.JOINT_TYPE.FREE and joint_type != gs.JOINT_TYPE.FIXED:
+                    dof_start = dyn_info.links.dof_start[I_l]
+                    dof_end = dyn_info.links.dof_end[I_l]
 
-                if dyn_info.links.n_dofs[I_l] > 0:
-                    i_j = dyn_info.links.joint_start[I_l]
-                    I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                    joint_type = dyn_info.joints.type[I_j]
+                    for j_d in range(dof_end - dof_start):
+                        I_d = [dof_start + j_d, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start + j_d
+                        # Note that using dofs_state instead of qpos here allows qpos to be pulled into qpos0
+                        # instead 0: dofs_state.pos = qpos - qpos0
+                        func_add_safe_backward(
+                            [dof_start + j_d, i_b],
+                            -dyn_state.dofs.pos[dof_start + j_d, i_b] * dyn_info.dofs.stiffness[I_d],
+                            dyn_state.dofs.qf_passive,
+                            BW,
+                        )
 
-                    if joint_type != gs.JOINT_TYPE.FREE and joint_type != gs.JOINT_TYPE.FIXED:
-                        dof_start = dyn_info.links.dof_start[I_l]
-                        dof_end = dyn_info.links.dof_end[I_l]
 
-                        for j_d in range(dof_end - dof_start):
-                            I_d = [dof_start + j_d, i_b] if qd.static(rigid_config.batch_dofs_info) else dof_start + j_d
-                            # Note that using dofs_state instead of qpos here allows qpos to be pulled into qpos0
-                            # instead 0: dofs_state.pos = qpos - qpos0
-                            func_add_safe_backward(
-                                [dof_start + j_d, i_b],
-                                -dyn_state.dofs.pos[dof_start + j_d, i_b] * dyn_info.dofs.stiffness[I_d],
-                                dyn_state.dofs.qf_passive,
-                                BW,
-                            )
+@qd.func
+def func_update_acc_link(
+    i_l,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    update_cacc: qd.template(),
+    is_backward: qd.template(),
+):
+    """Compute the Cartesian acceleration of link i_l of env i_b.
+
+    It follows from the parent's acceleration and the velocities and accelerations of the link's dofs.
+
+    The parent's acceleration must be current. A root link starts from the gravity left uncompensated by its entity.
+    """
+    BW = qd.static(is_backward)
+    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    i_p = dyn_info.links.parent_idx[I_l]
+
+    if i_p == -1:
+        i_e = dyn_info.links.entity_idx[I_l]
+        dyn_state.links.cdd_vel[i_l, i_b] = -rigid_info.gravity[i_b] * (1 - dyn_info.entities.gravity_compensation[i_e])
+        dyn_state.links.cdd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(update_cacc):
+            dyn_state.links.cacc_lin[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dyn_state.links.cacc_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    else:
+        dyn_state.links.cdd_vel[i_l, i_b] = dyn_state.links.cdd_vel[i_p, i_b]
+        dyn_state.links.cdd_ang[i_l, i_b] = dyn_state.links.cdd_ang[i_p, i_b]
+        if qd.static(update_cacc):
+            dyn_state.links.cacc_lin[i_l, i_b] = dyn_state.links.cacc_lin[i_p, i_b]
+            dyn_state.links.cacc_ang[i_l, i_b] = dyn_state.links.cacc_ang[i_p, i_b]
+
+    for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+        # cacc = cacc_parent + cdofdot * qvel + cdof * qacc
+        local_cdd_vel = dyn_state.dofs.cdofd_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+        local_cdd_ang = dyn_state.dofs.cdofd_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+
+        func_add_safe_backward([i_l, i_b], local_cdd_vel, dyn_state.links.cdd_vel, BW)
+        func_add_safe_backward([i_l, i_b], local_cdd_ang, dyn_state.links.cdd_ang, BW)
+        if qd.static(update_cacc):
+            func_add_safe_backward(
+                [i_l, i_b],
+                local_cdd_vel + dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
+                dyn_state.links.cacc_lin,
+                BW,
+            )
+            func_add_safe_backward(
+                [i_l, i_b],
+                local_cdd_ang + dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
+                dyn_state.links.cacc_ang,
+                BW,
+            )
 
 
 @qd.func
@@ -1681,60 +1629,20 @@ def func_update_acc(
     update_cacc: qd.template(),
     is_backward: qd.template(),
 ):
-    BW = qd.static(is_backward)
+    """Compute the Cartesian accelerations of every awake link of every env, one thread per kinematic root.
 
-    # Assume this is the outermost loop
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.dofs.ctrl_mode.shape[1])
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_entities[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_entities[i_b], rigid_config.use_hibernation):
-                i_e = rigid_info.awake_entities[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-
-                for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-                    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                    i_p = dyn_info.links.parent_idx[I_l]
-
-                    if i_p == -1:
-                        dyn_state.links.cdd_vel[i_l, i_b] = -rigid_info.gravity[i_b] * (
-                            1 - dyn_info.entities.gravity_compensation[i_e]
-                        )
-                        dyn_state.links.cdd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-                        if qd.static(update_cacc):
-                            dyn_state.links.cacc_lin[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-                            dyn_state.links.cacc_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-                    else:
-                        dyn_state.links.cdd_vel[i_l, i_b] = dyn_state.links.cdd_vel[i_p, i_b]
-                        dyn_state.links.cdd_ang[i_l, i_b] = dyn_state.links.cdd_ang[i_p, i_b]
-                        if qd.static(update_cacc):
-                            dyn_state.links.cacc_lin[i_l, i_b] = dyn_state.links.cacc_lin[i_p, i_b]
-                            dyn_state.links.cacc_ang[i_l, i_b] = dyn_state.links.cacc_ang[i_p, i_b]
-
-                    for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                        # cacc = cacc_parent + cdofdot * qvel + cdof * qacc
-                        local_cdd_vel = dyn_state.dofs.cdofd_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-                        local_cdd_ang = dyn_state.dofs.cdofd_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-
-                        func_add_safe_backward([i_l, i_b], local_cdd_vel, dyn_state.links.cdd_vel, BW)
-                        func_add_safe_backward([i_l, i_b], local_cdd_ang, dyn_state.links.cdd_ang, BW)
-                        if qd.static(update_cacc):
-                            func_add_safe_backward(
-                                [i_l, i_b],
-                                local_cdd_vel + dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
-                                dyn_state.links.cacc_lin,
-                                BW,
-                            )
-                            func_add_safe_backward(
-                                [i_l, i_b],
-                                local_cdd_ang + dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
-                                dyn_state.links.cacc_ang,
-                                BW,
-                            )
+    A tree root reads the acceleration of its static parent, the gravity term alone, so the walk covers the static
+    links of the root ahead of its trees: one walk keeps the link body inlined once in the kernel, where a static pass
+    and a tree pass would inline it twice. Differentiability wants the loop outermost in its kernel, which it is.
+    """
+    qd.loop_config(name="update_acc", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        i_l_root = rigid_info.roots_link_idx[i_r]
+        i_l_end = rigid_info.links_root_end[i_l_root]
+        for i_l in range(i_l_root, i_l_end):
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
+                func_update_acc_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, update_cacc, is_backward)
 
 
 @qd.func
@@ -1748,77 +1656,61 @@ def func_update_force(
     BW = qd.static(is_backward)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.links.pos.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.links.pos.shape[1])
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.links.pos.shape[1]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+        if is_awake:
+            f1_ang, f1_vel = gu.inertial_mul(
+                dyn_state.links.cinr_pos[i_l, i_b],
+                dyn_state.links.cinr_inertial[i_l, i_b],
+                dyn_state.links.cinr_mass[i_l, i_b],
+                dyn_state.links.cdd_vel[i_l, i_b],
+                dyn_state.links.cdd_ang[i_l, i_b],
+            )
+            f2_ang, f2_vel = gu.inertial_mul(
+                dyn_state.links.cinr_pos[i_l, i_b],
+                dyn_state.links.cinr_inertial[i_l, i_b],
+                dyn_state.links.cinr_mass[i_l, i_b],
+                dyn_state.links.cd_vel[i_l, i_b],
+                dyn_state.links.cd_ang[i_l, i_b],
+            )
+            f3_ang, f3_vel = gu.motion_cross_force(
+                dyn_state.links.cd_ang[i_l, i_b], dyn_state.links.cd_vel[i_l, i_b], f2_ang, f2_vel
+            )
 
-                f1_ang, f1_vel = gu.inertial_mul(
-                    dyn_state.links.cinr_pos[i_l, i_b],
-                    dyn_state.links.cinr_inertial[i_l, i_b],
-                    dyn_state.links.cinr_mass[i_l, i_b],
-                    dyn_state.links.cdd_vel[i_l, i_b],
-                    dyn_state.links.cdd_ang[i_l, i_b],
-                )
-                f2_ang, f2_vel = gu.inertial_mul(
-                    dyn_state.links.cinr_pos[i_l, i_b],
-                    dyn_state.links.cinr_inertial[i_l, i_b],
-                    dyn_state.links.cinr_mass[i_l, i_b],
-                    dyn_state.links.cd_vel[i_l, i_b],
-                    dyn_state.links.cd_ang[i_l, i_b],
-                )
-                f3_ang, f3_vel = gu.motion_cross_force(
-                    dyn_state.links.cd_ang[i_l, i_b], dyn_state.links.cd_vel[i_l, i_b], f2_ang, f2_vel
-                )
-
-                dyn_state.links.cfrc_vel[i_l, i_b] = (
-                    f1_vel
-                    + f3_vel
-                    + dyn_state.links.cfrc_applied_vel[i_l, i_b]
-                    + dyn_state.links.cfrc_coupling_vel[i_l, i_b]
-                )
-                dyn_state.links.cfrc_ang[i_l, i_b] = (
-                    f1_ang
-                    + f3_ang
-                    + dyn_state.links.cfrc_applied_ang[i_l, i_b]
-                    + dyn_state.links.cfrc_coupling_ang[i_l, i_b]
-                )
+            dyn_state.links.cfrc_vel[i_l, i_b] = (
+                f1_vel
+                + f3_vel
+                + dyn_state.links.cfrc_applied_vel[i_l, i_b]
+                + dyn_state.links.cfrc_coupling_vel[i_l, i_b]
+            )
+            dyn_state.links.cfrc_ang[i_l, i_b] = (
+                f1_ang
+                + f3_ang
+                + dyn_state.links.cfrc_applied_ang[i_l, i_b]
+                + dyn_state.links.cfrc_coupling_ang[i_l, i_b]
+            )
 
     # One thread folds the forces of a whole kinematic tree from its leaves up to its root, gating each link of the
     # span on that root, like func_crb_fold: a tree spans several entities once one is attached beneath another, and a
     # child must fold into its parent before the parent folds further up.
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_l_, i_b in (
-        qd.ndrange(1, dyn_state.links.pos.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.links.pos.shape[1])
-    ):
-        for i_l_awake in (
-            range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_l_awake, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                i_l_root = rigid_info.awake_links[i_l_awake, i_b] if qd.static(rigid_config.use_hibernation) else i_l_
-                I_l_root = [i_l_root, i_b] if qd.static(rigid_config.batch_links_info) else i_l_root
-                if dyn_info.links.root_idx[I_l_root] == i_l_root:
-                    tree_end = rigid_info.links_tree_end[i_l_root]
-                    for k in range(tree_end - i_l_root):
-                        i_l = tree_end - 1 - k
-                        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                        i_p = dyn_info.links.parent_idx[I_l]
-                        I_p = [i_p, i_b]
-                        if dyn_info.links.root_idx[I_l] == i_l_root and i_p != -1:
-                            func_add_safe_backward(
-                                I_p, dyn_state.links.cfrc_vel[i_l, i_b], dyn_state.links.cfrc_vel, BW
-                            )
-                            func_add_safe_backward(
-                                I_p, dyn_state.links.cfrc_ang[i_l, i_b], dyn_state.links.cfrc_ang, BW
-                            )
+    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
+        i_l_root = rigid_info.roots_link_idx[i_r]
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l_root, i_b]
+        if is_awake:
+            i_l_end = rigid_info.links_root_end[i_l_root]
+            for k in range(i_l_end - i_l_root):
+                i_l = i_l_end - 1 - k
+                I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                i_p = dyn_info.links.parent_idx[I_l]
+                I_p = [i_p, i_b]
+                if dyn_info.links.root_idx[I_l] == i_l_root and i_p != -1:
+                    func_add_safe_backward(I_p, dyn_state.links.cfrc_vel[i_l, i_b], dyn_state.links.cfrc_vel, BW)
+                    func_add_safe_backward(I_p, dyn_state.links.cfrc_ang[i_l, i_b], dyn_state.links.cfrc_ang, BW)
 
 
 @qd.func
@@ -1856,31 +1748,26 @@ def func_bias_force(
     BW = qd.static(is_backward)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1])
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+        if is_awake:
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
-                for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-                    dyn_state.dofs.qf_bias[i_d, i_b] = dyn_state.dofs.cdof_ang[i_d, i_b].dot(
-                        dyn_state.links.cfrc_ang[i_l, i_b]
-                    ) + dyn_state.dofs.cdof_vel[i_d, i_b].dot(dyn_state.links.cfrc_vel[i_l, i_b])
+            for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                dyn_state.dofs.qf_bias[i_d, i_b] = dyn_state.dofs.cdof_ang[i_d, i_b].dot(
+                    dyn_state.links.cfrc_ang[i_l, i_b]
+                ) + dyn_state.dofs.cdof_vel[i_d, i_b].dot(dyn_state.links.cfrc_vel[i_l, i_b])
 
-                    dyn_state.dofs.force[i_d, i_b] = (
-                        dyn_state.dofs.qf_passive[i_d, i_b]
-                        - dyn_state.dofs.qf_bias[i_d, i_b]
-                        + dyn_state.dofs.qf_applied[i_d, i_b]
-                        # + self.dyn_state.dofs.qf_actuator[i_d, i_b]
-                    )
+                dyn_state.dofs.force[i_d, i_b] = (
+                    dyn_state.dofs.qf_passive[i_d, i_b]
+                    - dyn_state.dofs.qf_bias[i_d, i_b]
+                    + dyn_state.dofs.qf_applied[i_d, i_b]
+                    # + self.dyn_state.dofs.qf_actuator[i_d, i_b]
+                )
 
-                    dyn_state.dofs.qf_smooth[i_d, i_b] = dyn_state.dofs.force[i_d, i_b]
+                dyn_state.dofs.qf_smooth[i_d, i_b] = dyn_state.dofs.force[i_d, i_b]
 
 
 @qd.func
@@ -1890,24 +1777,24 @@ def func_compute_qacc(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    func_solve_mass(dyn_state.dofs.force, dyn_state.dofs.acc_smooth, dyn_state, dyn_info, rigid_info, rigid_config)
+    # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
+    # for what a block is), the blocks of the sleeping dofs left as they are
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_d, i_b in qd.ndrange(rigid_info.mass_mat.shape[0], dyn_state.dofs.acc_smooth.shape[1]):
+        is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
+        if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
+            block_end = rigid_info.dofs_mass_block_end[i_d]
+            func_solve_mass_block(
+                i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc_smooth, rigid_info, rigid_config
+            )
 
-    # Assume this is the outermost loop
+    # A hibernated tree keeps the acceleration it was put to sleep with
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_0, i_b in (
-        qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1])
-        if qd.static(rigid_config.use_hibernation)
-        else qd.ndrange(dyn_info.entities.n_links.shape[0], dyn_state.dofs.ctrl_mode.shape[1])
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_entities[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_entities[i_b], rigid_config.use_hibernation):
-                i_e = rigid_info.awake_entities[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-
-                for i_d1_ in range(dyn_info.entities.n_dofs[i_e]):
-                    i_d1 = dyn_info.entities.dof_start[i_e] + i_d1_
-                    dyn_state.dofs.acc[i_d1, i_b] = dyn_state.dofs.acc_smooth[i_d1, i_b]
+    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
+            dof_start = rigid_info.trees_dof_start[i_t]
+            for i_d in range(dof_start, dof_start + rigid_info.trees_n_dofs[i_t]):
+                dyn_state.dofs.acc[i_d, i_b] = dyn_state.dofs.acc_smooth[i_d, i_b]
 
 
 @qd.func
@@ -1941,7 +1828,7 @@ def func_midpoint_eligible(
         )
         if is_eligible:
             # The assembly marks the link a constraint acts on, a fixed child included, so the whole body is scanned.
-            for j_l in range(i_l, rigid_info.links_tree_end[i_l]):
+            for j_l in range(i_l, rigid_info.links_root_end[i_l]):
                 J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
                 if dyn_info.links.root_idx[J_l] == i_l and dyn_state.links.is_constrained[j_l, i_b]:
                     is_eligible = False
@@ -1962,7 +1849,7 @@ def func_midpoint_has_fixed_children(
 ):
     """Whether the body of the free root holds links other than the root itself."""
     has_fixed_children = False
-    for j_l in range(i_l + 1, rigid_info.links_tree_end[i_l]):
+    for j_l in range(i_l + 1, rigid_info.links_root_end[i_l]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
             has_fixed_children = True
@@ -2047,9 +1934,9 @@ def func_midpoint_free_body(
     rot_x2i = gu.qd_quat_mul(inv_iquat, gu.qd_inv_quat(xquat))
 
     # Each DOF adds to the joint-space mass its armature and the first-order damping and servo terms of the implicit
-    # update (see func_mass_mat_implicit_damping). The angular ones sit along the link axes and add to the inertia in
-    # the inertial frame, where both are constant. The linear ones sit along the world axes. MuJoCo integrates the
-    # inertia of the links alone here, so its compatibility mode leaves them out.
+    # update (see func_compute_mass_matrix). The angular ones sit along the link axes and add to the inertia in the
+    # inertial frame, where both are constant. The linear ones sit along the world axes. MuJoCo integrates the inertia
+    # of the links alone here, so its compatibility mode leaves them out.
     aug_ang = qd.Matrix.zero(gs.qd_float, 3, 3)
     aug_vel = qd.Vector.zero(gs.qd_float, 3)
     if qd.static(not rigid_config.enable_mujoco_compatibility):
@@ -2073,7 +1960,7 @@ def func_midpoint_free_body(
     # accelerating-frame gravity term regenerate only the velocity products and gravity.
     ext_ang = qd.Vector.zero(gs.qd_float, 3)
     ext_vel = qd.Vector.zero(gs.qd_float, 3)
-    for j_l in range(i_l, rigid_info.links_tree_end[i_l]):
+    for j_l in range(i_l, rigid_info.links_root_end[i_l]):
         J_l = [j_l, i_b] if qd.static(rigid_config.batch_links_info) else j_l
         if dyn_info.links.root_idx[J_l] == i_l:
             ext_ang += dyn_state.links.cfrc_applied_ang[j_l, i_b] + dyn_state.links.cfrc_coupling_ang[j_l, i_b]
@@ -2221,20 +2108,14 @@ def func_integrate(
     BW = qd.static(is_backward)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        (qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1]))
-        if qd.static(rigid_config.use_hibernation)
-        else (qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1]))
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_dofs[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_dofs[i_b], rigid_config.use_hibernation):
-                i_d = rigid_info.awake_dofs[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-
-                dyn_state.dofs.vel_next[i_d, i_b] = (
-                    dyn_state.dofs.vel[i_d, i_b] + dyn_state.dofs.acc[i_d, i_b] * rigid_info.substep_dt[None]
-                )
+    for i_d, i_b in qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+        if is_awake:
+            dyn_state.dofs.vel_next[i_d, i_b] = (
+                dyn_state.dofs.vel[i_d, i_b] + dyn_state.dofs.acc[i_d, i_b] * rigid_info.substep_dt[None]
+            )
 
     # Standalone free bodies advance with the implicit midpoint rule under the velocity-implicit integrators: their
     # acc / vel_next are overwritten here so the position loop below integrates with the midpoint velocity, and the
@@ -2242,126 +2123,148 @@ def func_integrate(
     # carries no adjoint.
     if qd.static(not is_backward and not rigid_config.requires_grad and rigid_config.integrator != gs.integrator.Euler):
         qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-        for i_0, i_b in (
-            (qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1]))
-            if qd.static(rigid_config.use_hibernation)
-            else (qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]))
-        ):
-            for i_1 in (
-                range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-            ):
-                if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                    i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                    if func_midpoint_eligible(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
-                        func_midpoint_free_body(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+        for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+            is_awake = True
+            if qd.static(rigid_config.use_hibernation):
+                is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+            if is_awake:
+                if func_midpoint_eligible(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
+                    func_midpoint_free_body(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_0, i_b in (
-        (qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1]))
-        if qd.static(rigid_config.use_hibernation)
-        else (qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]))
-    ):
-        for i_1 in (
-            range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-        ):
-            if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                if dyn_info.links.n_dofs[I_l] > 0:
-                    EPS = rigid_info.EPS[None]
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        is_awake = True
+        if qd.static(rigid_config.use_hibernation):
+            is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+        if is_awake:
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            if dyn_info.links.n_dofs[I_l] > 0:
+                EPS = rigid_info.EPS[None]
 
-                    dof_start = dyn_info.links.dof_start[I_l]
-                    q_start = dyn_info.links.q_start[I_l]
-                    q_end = dyn_info.links.q_end[I_l]
+                dof_start = dyn_info.links.dof_start[I_l]
+                q_start = dyn_info.links.q_start[I_l]
+                q_end = dyn_info.links.q_end[I_l]
 
-                    i_j = dyn_info.links.joint_start[I_l]
-                    I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-                    joint_type = dyn_info.joints.type[I_j]
+                i_j = dyn_info.links.joint_start[I_l]
+                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                joint_type = dyn_info.joints.type[I_j]
 
-                    if joint_type == gs.JOINT_TYPE.FREE:
-                        pos = qd.Vector(
+                if joint_type == gs.JOINT_TYPE.FREE:
+                    pos = qd.Vector(
+                        [
+                            rigid_info.qpos[q_start, i_b],
+                            rigid_info.qpos[q_start + 1, i_b],
+                            rigid_info.qpos[q_start + 2, i_b],
+                        ]
+                    )
+                    vel = qd.Vector(
+                        [
+                            dyn_state.dofs.vel_next[dof_start, i_b],
+                            dyn_state.dofs.vel_next[dof_start + 1, i_b],
+                            dyn_state.dofs.vel_next[dof_start + 2, i_b],
+                        ]
+                    )
+                    pos = pos + vel * rigid_info.substep_dt[None]
+                    for j in qd.static(range(3)):
+                        rigid_info.qpos_next[q_start + j, i_b] = pos[j]
+                if joint_type == gs.JOINT_TYPE.SPHERICAL or joint_type == gs.JOINT_TYPE.FREE:
+                    rot_offset = 3 if joint_type == gs.JOINT_TYPE.FREE else 0
+                    rot0 = qd.Vector(
+                        [
+                            rigid_info.qpos[q_start + rot_offset + 0, i_b],
+                            rigid_info.qpos[q_start + rot_offset + 1, i_b],
+                            rigid_info.qpos[q_start + rot_offset + 2, i_b],
+                            rigid_info.qpos[q_start + rot_offset + 3, i_b],
+                        ]
+                    )
+                    ang = (
+                        qd.Vector(
                             [
-                                rigid_info.qpos[q_start, i_b],
-                                rigid_info.qpos[q_start + 1, i_b],
-                                rigid_info.qpos[q_start + 2, i_b],
+                                dyn_state.dofs.vel_next[dof_start + rot_offset + 0, i_b],
+                                dyn_state.dofs.vel_next[dof_start + rot_offset + 1, i_b],
+                                dyn_state.dofs.vel_next[dof_start + rot_offset + 2, i_b],
                             ]
                         )
-                        vel = qd.Vector(
-                            [
-                                dyn_state.dofs.vel_next[dof_start, i_b],
-                                dyn_state.dofs.vel_next[dof_start + 1, i_b],
-                                dyn_state.dofs.vel_next[dof_start + 2, i_b],
-                            ]
-                        )
-                        pos = pos + vel * rigid_info.substep_dt[None]
-                        for j in qd.static(range(3)):
-                            rigid_info.qpos_next[q_start + j, i_b] = pos[j]
-                    if joint_type == gs.JOINT_TYPE.SPHERICAL or joint_type == gs.JOINT_TYPE.FREE:
-                        rot_offset = 3 if joint_type == gs.JOINT_TYPE.FREE else 0
-                        rot0 = qd.Vector(
-                            [
-                                rigid_info.qpos[q_start + rot_offset + 0, i_b],
-                                rigid_info.qpos[q_start + rot_offset + 1, i_b],
-                                rigid_info.qpos[q_start + rot_offset + 2, i_b],
-                                rigid_info.qpos[q_start + rot_offset + 3, i_b],
-                            ]
-                        )
-                        ang = (
-                            qd.Vector(
-                                [
-                                    dyn_state.dofs.vel_next[dof_start + rot_offset + 0, i_b],
-                                    dyn_state.dofs.vel_next[dof_start + rot_offset + 1, i_b],
-                                    dyn_state.dofs.vel_next[dof_start + rot_offset + 2, i_b],
-                                ]
+                        * rigid_info.substep_dt[None]
+                    )
+                    qrot = gu.qd_rotvec_to_quat(ang, EPS)
+                    rot = gu.qd_transform_quat_by_quat(qrot, rot0)
+                    for j in qd.static(range(4)):
+                        rigid_info.qpos_next[q_start + j + rot_offset, i_b] = rot[j]
+                else:
+                    for j_ in range(q_end - q_start):
+                        j = q_start + j_
+                        if j < q_end:
+                            rigid_info.qpos_next[j, i_b] = (
+                                rigid_info.qpos[j, i_b]
+                                + dyn_state.dofs.vel_next[dof_start + j_, i_b] * rigid_info.substep_dt[None]
                             )
-                            * rigid_info.substep_dt[None]
-                        )
-                        qrot = gu.qd_rotvec_to_quat(ang, EPS)
-                        rot = gu.qd_transform_quat_by_quat(qrot, rot0)
-                        for j in qd.static(range(4)):
-                            rigid_info.qpos_next[q_start + j + rot_offset, i_b] = rot[j]
-                    else:
-                        for j_ in range(q_end - q_start):
-                            j = q_start + j_
-                            if j < q_end:
-                                rigid_info.qpos_next[j, i_b] = (
-                                    rigid_info.qpos[j, i_b]
-                                    + dyn_state.dofs.vel_next[dof_start + j_, i_b] * rigid_info.substep_dt[None]
-                                )
 
     # Recover the true next velocity of the midpoint-integrated free bodies, whose vel_next held the midpoint
     # velocity for the position update above.
     if qd.static(not is_backward and not rigid_config.requires_grad and rigid_config.integrator != gs.integrator.Euler):
         qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-        for i_0, i_b in (
-            (qd.ndrange(1, dyn_state.dofs.ctrl_mode.shape[1]))
-            if qd.static(rigid_config.use_hibernation)
-            else (qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]))
-        ):
-            for i_1 in (
-                range(rigid_info.n_awake_links[i_b]) if qd.static(rigid_config.use_hibernation) else qd.static(range(1))
-            ):
-                if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
-                    i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
-                    if func_midpoint_eligible(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
-                        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                        # Linear DOFs are midpoint-integrated only when the center of mass is off the joint origin
-                        # (see func_midpoint_free_body)
-                        j_start = 3
-                        if not func_midpoint_is_aligned(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
-                            j_start = 0
-                        for j in range(j_start, 6):
-                            i_d = dyn_info.links.dof_start[I_l] + j
-                            dyn_state.dofs.vel_next[i_d, i_b] = (
-                                2.0 * dyn_state.dofs.vel_next[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
-                            )
+        for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+            is_awake = True
+            if qd.static(rigid_config.use_hibernation):
+                is_awake = not dyn_state.links.is_hibernated[i_l, i_b]
+            if is_awake:
+                if func_midpoint_eligible(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
+                    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                    # Linear DOFs are midpoint-integrated only when the center of mass is off the joint origin
+                    # (see func_midpoint_free_body)
+                    j_start = 3
+                    if not func_midpoint_is_aligned(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
+                        j_start = 0
+                    for j in range(j_start, 6):
+                        i_d = dyn_info.links.dof_start[I_l] + j
+                        dyn_state.dofs.vel_next[i_d, i_b] = (
+                            2.0 * dyn_state.dofs.vel_next[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b]
+                        )
 
     # The coupling wrench of this substep is consumed: the bias force read it during forward dynamics and the midpoint
     # pass above read it last. The coupler accumulates the next one after the substep.
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.links.cfrc_coupling_ang.shape)):
-        dyn_state.links.cfrc_coupling_ang[I] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_coupling_vel[I] = qd.Vector.zero(gs.qd_float, 3)
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(rigid_config.use_hibernation and not is_backward):
+            if not dyn_state.links.is_hibernated[i_l, i_b]:
+                func_count_settled_step(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.func
+def func_count_settled_step(
+    i_l,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Count this substep in the settled-step counter of awake link i_l of env i_b.
+
+    The counter (see awake_steps in array_class.py) grows, up to hibernation_min_steps, while the largest dof speed of
+    the link stays below the hibernation tolerance, and drops to zero the step it exceeds it. The speed of a dof is its
+    next velocity scaled by dof_length (1 for translation, the swept radius for rotation), so the tolerance is one
+    linear speed for every kind of dof: the rotational jitter of a small body is a tiny surface speed and counts as
+    rest. An actuated link stays awake, since the actuation pass wakes any sleeping link it actuates (see
+    func_torque_and_passive_force).
+    """
+    link_I = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    EPS = rigid_info.EPS[None]
+    max_vel = gs.qd_float(0.0)
+    is_driven = False
+    for i_d in range(dyn_info.links.dof_start[link_I], dyn_info.links.dof_end[link_I]):
+        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+        max_vel = qd.max(max_vel, dyn_info.dofs.dof_length[I_d] * qd.abs(dyn_state.dofs.vel_next[i_d, i_b]))
+        if qd.abs(dyn_state.dofs.qf_applied[i_d, i_b]) > EPS:
+            is_driven = True
+    if max_vel < rigid_info.hibernation_thresh_vel[None] and not is_driven:
+        if dyn_state.links.awake_steps[i_l, i_b] < rigid_config.hibernation_min_steps:
+            dyn_state.links.awake_steps[i_l, i_b] = dyn_state.links.awake_steps[i_l, i_b] + 1
+    else:
+        dyn_state.links.awake_steps[i_l, i_b] = 0
 
 
 @qd.kernel(fastcache=True)
@@ -2398,43 +2301,68 @@ def func_implicit_damping(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    EPS = rigid_info.EPS[None]
+    """Make the damping of the integration implicit, from the acceleration the constraint solver left in dofs.acc.
 
-    n_entities = dyn_info.entities.dof_start.shape[0]
-    _B = rigid_info.mass_mat_mask.shape[1]
-
-    # Determine whether the mass matrix must be re-computed to take into account first-order correction terms.
-    # Note that avoiding inverting the mass matrix twice would not only speed up simulation but also improving
-    # numerical stability as computing post-damping accelerations from forces is not necessary anymore.
-    if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
-        for i_e, i_b in qd.ndrange(n_entities, _B):
-            rigid_info.mass_mat_mask[i_e, i_b] = False
-
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_e, i_b in qd.ndrange(n_entities, _B):
-            # Set the mask over the mass blocks ROOTED in this entity (see entities_mass_block_dof_start in
-            # array_class.py): the block-root entity factors the whole coupled block, so damping/act_bias anywhere in
-            # it - including a merged child - must trigger the refactor.
-            blocks_dof_start = rigid_info.entities_mass_block_dof_start[i_e]
-            blocks_dof_end = rigid_info.entities_mass_block_dof_end[i_e]
-            for i_d in range(blocks_dof_start, blocks_dof_end):
-                I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-                if dyn_info.dofs.damping[I_d] > EPS:
-                    rigid_info.mass_mat_mask[i_e, i_b] = True
-                if qd.static(rigid_config.integrator != gs.integrator.Euler):
-                    if (
-                        dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY
-                        and qd.abs(dyn_info.dofs.act_bias[I_d][2]) > EPS
-                    ):
-                        rigid_info.mass_mat_mask[i_e, i_b] = True
+    The damped acceleration solves (M + hD) a' = M a, applied as the correction a' = a - (M + hD)^-1 (hD a) on the
+    trees carrying a damping term, whose factor takes hD (see func_has_implicit_damping_tree). In MuJoCo compatibility
+    mode those trees re-solve their acceleration from the forces instead, (M + hD) a' = f, and under the implicitfast
+    integrator every awake tree does, as MuJoCo does.
+    """
+    _B = rigid_info.mass_mat.shape[2]
+    n_dofs = dyn_state.dofs.acc.shape[0]
 
     func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True)
-    func_solve_mass(dyn_state.dofs.force, dyn_state.dofs.acc, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    # Disable pre-computed factorization mask right away
-    if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
-        for i_e, i_b in qd.ndrange(n_entities, _B):
-            rigid_info.mass_mat_mask[i_e, i_b] = True
+    # The correction moves the damped DOFs alone, and a constraint solve short of its fixed point integrates as the
+    # bounded step it took. Re-solving from the force balance integrates its residual as M^-1 r, a spurious impulse on
+    # a light body, which the compatibility mode reproduces.
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+        for i_d, i_b in qd.ndrange(n_dofs, _B):
+            I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
+            damping = dyn_info.dofs.damping[I_d]
+            if qd.static(rigid_config.integrator == gs.integrator.implicitfast):
+                if dyn_state.dofs.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
+                    damping = damping - dyn_info.dofs.act_bias[I_d][2]
+            dyn_state.dofs.qf_damping_implicit[i_d, i_b] = (
+                damping * rigid_info.substep_dt[None] * dyn_state.dofs.acc[i_d, i_b]
+            )
+
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], _B):
+        # A tree without a damping term has a zero correction and keeps its smooth factor, so the pass takes the awake
+        # trees whose factor carries hD alone: re-solving such a tree would only reproduce the acceleration the
+        # constraint solver holds, up to rounding
+        is_solved = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+        if qd.static(not rigid_config.enable_mujoco_compatibility or rigid_config.integrator == gs.integrator.Euler):
+            if is_solved:
+                is_solved = func_has_implicit_damping_tree(i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
+        if is_solved:
+            # One solve per mass block of the tree (see func_solve_mass_batch), in a form autodiff accepts
+            tree_dof_start = rigid_info.trees_dof_start[i_t]
+            tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
+            for i_d in range(tree_dof_start, tree_dof_end):
+                if rigid_info.dofs_mass_block_start[i_d] == i_d:
+                    block_end = rigid_info.dofs_mass_block_end[i_d]
+                    if qd.static(not rigid_config.enable_mujoco_compatibility):
+                        func_solve_mass_block(
+                            i_b,
+                            i_d,
+                            block_end,
+                            dyn_state.dofs.qf_damping_implicit,
+                            dyn_state.dofs.qacc_damping_implicit,
+                            rigid_info,
+                            rigid_config,
+                        )
+                    else:
+                        func_solve_mass_block(
+                            i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc, rigid_info, rigid_config
+                        )
+            if qd.static(not rigid_config.enable_mujoco_compatibility):
+                for i_d in range(tree_dof_start, tree_dof_end):
+                    dyn_state.dofs.acc[i_d, i_b] = (
+                        dyn_state.dofs.acc[i_d, i_b] - dyn_state.dofs.qacc_damping_implicit[i_d, i_b]
+                    )
 
 
 from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module

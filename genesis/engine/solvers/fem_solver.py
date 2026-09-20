@@ -356,10 +356,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             # batch fields
             self.init_batch_fields()
 
-            # rendering
-            self.envs_offset = qd.Vector.field(3, dtype=qd.f32, shape=self._B)
-            self.envs_offset.from_numpy(self._scene.envs_offset.astype(np.float32))
-
             self.init_element_fields()
             self.init_surface_fields()
             self.init_vvert_fields()
@@ -1403,8 +1399,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_vv, i_b in qd.ndrange(self._n_vverts, self._B):
             i_v = self.vverts_info[i_vv].vert_idx
             for j in qd.static(range(3)):
-                pos_j = qd.cast(self.elements_v[f, i_v, i_b].pos[j], qd.f32)
-                self.vverts_render[i_vv, i_b].pos[j] = pos_j + self.envs_offset[i_b][j]
+                self.vverts_render[i_vv, i_b].pos[j] = qd.cast(self.elements_v[f, i_v, i_b].pos[j], qd.f32)
 
     @qd.kernel
     def _kernel_add_vverts(

@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 import genesis.utils.array_class as array_class
-from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_entity
+from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
 
 
 @qd.func
@@ -772,17 +772,14 @@ def kernel_forward_kinematics_query(
         qpos_cache[qs_idx[i_q_], envs_idx[i_b_]] = rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]]
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
 
+    i_l_base = dyn_info.entities.link_start[entity_idx]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
-        func_forward_kinematics_entity(
-            entity_idx,
-            envs_idx[i_b_],
-            rigid_info.qpos,
-            dyn_state,
-            dyn_info,
-            rigid_info,
-            rigid_config,
-            is_backward=False,
+        i_b = envs_idx[i_b_]
+        I_l_base = [i_l_base, i_b] if qd.static(rigid_config.batch_links_info) else i_l_base
+        i_l_root = dyn_info.links.root_idx[I_l_base]
+        func_forward_kinematics_root(
+            i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
         )
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
@@ -798,13 +795,9 @@ def kernel_forward_kinematics_query(
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
-        func_forward_kinematics_entity(
-            entity_idx,
-            envs_idx[i_b_],
-            rigid_info.qpos,
-            dyn_state,
-            dyn_info,
-            rigid_info,
-            rigid_config,
-            is_backward=False,
+        i_b = envs_idx[i_b_]
+        I_l_base = [i_l_base, i_b] if qd.static(rigid_config.batch_links_info) else i_l_base
+        i_l_root = dyn_info.links.root_idx[I_l_base]
+        func_forward_kinematics_root(
+            i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
         )

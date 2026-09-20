@@ -105,7 +105,7 @@ class RigidEquality(RBC):
     @property
     def eq_obj2id(self):
         """
-        Returns the index of the second object (joint for EQUALITY_TYPE.JOINT, link otherwise)
+        Returns the index of the second object, or -1 for a JOINT equality that fixes one joint to a constant.
         """
         return self._eq_obj2id
 
