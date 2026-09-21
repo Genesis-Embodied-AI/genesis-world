@@ -608,6 +608,125 @@ def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
     assert_allclose(entity.get_total_energy(), 0.0, atol=2e-2 * energy_init)
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer):
+    G = 9.81
+    DT = 0.002
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0, 0, -G),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            # The velocity update is explicit and no DOF is damped, so the velocity difference over a step is the
+            # acceleration the constraint solve returned.
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.12, -0.16, 0.07),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.8, 0.8),
+            smooth=False,
+        ),
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=resting_light_stick,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.9),
+            smooth=False,
+        ),
+    )
+    scene.build()
+
+    for _ in range(50):
+        scene.step()
+
+    # A slow spin of the resting stick puts its rolling friction at its bound, where the solve must still balance.
+    entity.set_dofs_velocity([0.0, 0.0, 0.0, 3.5e-3, -1.75e-3, 0.0])
+
+    weight = entity.get_mass() * G
+    vel = entity.get_dofs_velocity()
+
+    for _ in range(30):
+        scene.step()
+        vel_next = entity.get_dofs_velocity()
+        acc = (vel_next - vel) / DT
+        inertial_force = entity.get_mass_mat() @ acc
+        assert_allclose(
+            inertial_force / weight, entity.get_dofs_force() / weight, atol=2e-6 if gs.np_float == np.float32 else 1e-9
+        )
+        vel = vel_next
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_static_equilibrium(damped_pendulum_and_tilted_light_capsule, contact_resolution, show_viewer):
+    N_STEPS = 100
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.002,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.12, -0.16, 0.07),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.8, 0.8),
+            smooth=False,
+        ),
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_pendulum_and_tilted_light_capsule,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.9),
+            smooth=False,
+        ),
+    )
+    scene.build()
+    capsule = entity.get_link("capsule")
+    capsule_dofs_idx = capsule.joints[0].dofs_idx_local
+
+    entity.set_dofs_velocity(2.0, entity.get_joint("shoulder").dofs_idx_local)
+    for _ in range(50):
+        scene.step()
+
+    # The capsule has rocked onto its length and lies still, and a light link at rest must stay at rest
+    for _ in range(N_STEPS):
+        scene.step()
+        vel = entity.get_dofs_velocity(capsule_dofs_idx)
+        assert_allclose(vel[:3], 0.0, atol=2e-5)
+        assert_allclose(vel[3:], 0.0, atol=1e-3)
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["long_chain"])
