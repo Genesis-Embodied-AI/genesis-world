@@ -789,6 +789,10 @@ class ConstraintState:
     # Previous-iteration cone-row residuals, kept only for the elliptic cone so the incremental factor can downdate the
     # prior coupled cone block (Jaref is overwritten by the linesearch apply). Empty for the pyramidal cone.
     cone_prev_jaref: qd.Tensor
+    # Per contact under 'signorini': the latched normal force scaling its friction discs (negative until seeded, see
+    # func_relatch_cone in solver.py), and the gap between the iterate's normal force and the latch at the last update.
+    cone_latch: qd.Tensor
+    cone_latch_gap: qd.Tensor
     efc_D: qd.Tensor
     # Frictionloss rows store their friction loss; elliptic-cone head (normal) rows reuse the field to carry the
     # contact sliding friction coefficient read by the cone solver, and with torsional friction the spin row carries
@@ -889,6 +893,8 @@ def get_constraint_state(constraint_solver, solver, collider):
     # The CPU incremental factor maintains the elliptic cone by a per-iteration rank-3 update reading the previous cone
     # residuals, so the residual cache is allocated for the CPU elliptic case.
     is_cone_incremental = solver.rigid_config.enable_elliptic_friction and solver.rigid_config.backend == gs.cpu
+    is_signorini = solver.rigid_config.enable_signorini_contact
+    n_cones_ = max(1, constraint_solver.n_cone_constraints_ // solver.rigid_config.rows_per_contact)
     # The 3D Jacobian and its sparse-column-index sibling extend the flip: canonical (len_constraints_, n_dofs_, _B) ->
     # physical (_B, n_dofs_, len_constraints_) via layout=(2, 1, 0). This makes cooperative-warp-per-env access (lanes
     # stride i_c) coalesced for the hot p0 J@search, hessian_direct_tiled, and patch_hessian_delta kernels.
@@ -944,6 +950,8 @@ def get_constraint_state(constraint_solver, solver, collider):
             shape=maybe_shape((constraint_solver.n_cone_constraints_, _B), is_cone_incremental),
             layout=serial_layout if is_cone_incremental else None,
         ),
+        cone_latch=V(dtype=gs.qd_float, shape=maybe_shape((n_cones_, _B), is_signorini)),
+        cone_latch_gap=V(dtype=gs.qd_float, shape=maybe_shape((n_cones_, _B), is_signorini)),
         search=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
         qfrc_constraint=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
         qacc=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),

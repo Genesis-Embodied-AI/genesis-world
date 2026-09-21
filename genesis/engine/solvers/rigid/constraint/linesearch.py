@@ -182,7 +182,7 @@ def func_row_alpha_terms(
         if qd.static(row_kind == 0):
             is_cone_head = nef <= i_c and i_c < ncone and (i_c - nef) % n_rows == 0
         if is_cone_head:
-            rows_efc_D, rows_friction, con_mu, rows_jaref = constraint_solver._func_cone_head_load(
+            rows_efc_D, rows_friction, con_mu, rows_jaref, latch = constraint_solver._func_cone_head_load(
                 i_c, i_b, constraint_state, rigid_config
             )
             rows_jv = qd.Vector.zero(gs.qd_float, n_rows)
@@ -192,7 +192,7 @@ def func_row_alpha_terms(
                 if k < n_alphas:
                     alpha_k = alphas[k]
                     cost_diff_c, grad_c, hess_c = constraint_solver._func_cone_cost_diff_along_alpha(
-                        rows_jaref, rows_jv, alpha_k, rows_efc_D, con_mu, rows_friction, rigid_config
+                        rows_jaref, rows_jv, alpha_k, rows_efc_D, con_mu, rows_friction, latch, rigid_config
                     )
                     terms[3 * k] = cost_diff_c - grad_c * alpha_k + 0.5 * hess_c * alpha_k * alpha_k
                     terms[3 * k + 1] = grad_c - hess_c * alpha_k
