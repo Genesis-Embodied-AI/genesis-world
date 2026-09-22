@@ -23,6 +23,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+import genesis.utils.simt as su
 
 from . import solver as constraint_solver
 
@@ -563,15 +564,6 @@ def func_mv_jv_islands(i_b, constraint_state: array_class.ConstraintState, rigid
 
 
 @qd.func
-def func_block_sum(value):
-    """Sum value over the _K lanes of a block, every lane receiving the bits lane 0 holds."""
-    # The butterfly adds the same operands on the two lanes of every pair, but the compiler contracts the multiply that
-    # produced a lane's own operand into that add, so the two lanes round differently, and a decision every lane takes
-    # on the sum (the search rounds, the exit test) then diverges.
-    return qd.simt.subgroup.broadcast(qd.simt.subgroup.reduce_all_add_tiled(value, 5), qd.u32(0))
-
-
-@qd.func
 def func_row_p0_sums_by_class(
     i_b,
     i_first,
@@ -692,8 +684,8 @@ def func_search_single_island(
         sums_rows = func_row_p0_sums_by_class(i_b, tid, stride, ne, nef, ncone, n_con, constraint_state, rigid_config)
         if qd.static(is_coop):
             for k in qd.static(range(4)):
-                sums_dofs[k] = func_block_sum(sums_dofs[k])
-                sums_rows[k] = func_block_sum(sums_rows[k])
+                sums_dofs[k] = su.qd_block_sum(sums_dofs[k])
+                sums_rows[k] = su.qd_block_sum(sums_rows[k])
         phase, ls_result, gtol, base_1, base_2, p0_deriv_0, p0_deriv_1, alpha_0 = func_ls_state_init(
             sums_dofs, sums_rows, constraint_state.island.inertia[0, i_b], rigid_info, rigid_config
         )
@@ -716,7 +708,7 @@ def func_search_single_island(
             if qd.static(is_coop):
                 for k in qd.static(range(9)):
                     if k < 3 * n_alphas:
-                        acc[k] = func_block_sum(acc[k])
+                        acc[k] = su.qd_block_sum(acc[k])
             (
                 phase,
                 n_alphas,
@@ -811,7 +803,7 @@ def func_exit_single_island(
         if qd.static(is_coop):
             # The Hager-Zhang terms stay zero under Newton, see func_dof_exit_terms
             for k in qd.static(range(7 if rigid_config.solver_type == gs.constraint_solver.CG else 2)):
-                terms[k] = func_block_sum(terms[k])
+                terms[k] = su.qd_block_sum(terms[k])
         inertia = constraint_state.island.inertia[0, i_b]
         cg_beta = gs.qd_float(0.0)
         if qd.static(certify):
@@ -1044,22 +1036,6 @@ def func_exit_islands_serial(
 
 
 @qd.func
-def func_segment_add(tid, i_slot, n_valid, value, i_slot_prev, i_slot_next, sh_acc, k):
-    """Segmented sum of ``value`` over the lanes of a chunk sharing an island slot, the tail lane of each segment adding
-    the segment's total into row ``k`` of the shared accumulator.
-
-    ``i_slot_prev`` / ``i_slot_next`` are the slots of the neighboring lanes, -1 past the chunk's valid lanes.
-    """
-    _K = qd.static(32)
-    is_head = 1
-    if tid > 0 and i_slot_prev == i_slot:
-        is_head = 0
-    total = qd.simt.subgroup.segmented_reduce_add_tiled(value, is_head, 5)
-    if tid < n_valid and i_slot >= 0 and i_slot_next != i_slot:
-        sh_acc[k * _K + i_slot] = sh_acc[k * _K + i_slot] + total
-
-
-@qd.func
 def func_mv_jv_coop(i_b, tid, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
     """Form mv = M @ search over the dofs and jv = J @ search over the rows of one env, by the _K lanes of its block."""
     _K = qd.static(32)
@@ -1105,8 +1081,8 @@ def func_linesearch_islands_coop(
     lists. A group of few islands sums each island in turn, every lane striding over the island's own items and one
     plain subgroup reduction closing each sum. A group of many islands sweeps the group's range in chunks of _K items,
     every chunk reduced by island with a segmented subgroup sum whose segment tail is the single writer of the island's
-    slot in the shared accumulator (func_segment_add), so the accumulation order is the chunk order. The rows read each
-    island's pending flag and candidates from shared memory, the owner lane reads its sums back from it.
+    slot in the shared accumulator (qd_segment_add in utils/simt.py), so the accumulation order is the chunk order. The
+    rows read each island's pending flag and candidates from shared memory, the owner lane reads its sums back from it.
 
     Returns whether any island moved.
     """
@@ -1135,16 +1111,15 @@ def func_linesearch_islands_coop(
             + constraint_state.island.constraint_slices.n[i_last, i_b]
         )
         dof_base = func_group_dof_range_start(i_b, tid, base, n_group, dof_lo, dof_hi, constraint_state)
-        # The rows of several islands interleave in constraint order, so a sweep in that order would spread one
-        # island's rows over several segments of a chunk, whose tails would all add into its slot at once (see
-        # func_segment_add). A group of several islands sweeps its rows in list order, one segment per island per
-        # chunk.
+        # The rows of several islands interleave in constraint order, so a sweep in that order would spread one island's
+        # rows over several segments of a chunk, whose tails would all add into its slot at once (see qd_segment_add in
+        # utils/simt.py). A group of several islands sweeps its rows in list order, one segment per island per chunk.
         row_base = -1
         if n_group == 1:
             row_base = func_list_range_start(constraint_state.island.constraint_id, row_lo, row_hi, i_b)
         # A group of few islands sums each island by every lane over the island's own items and one plain subgroup
         # reduction per sum, whose count follows the islands; a group of many small islands takes the segmented sums
-        # per chunk of the group's lists (func_segment_add), whose count follows the rows swept.
+        # per chunk of the group's lists (qd_segment_add in utils/simt.py), whose count follows the rows swept.
         is_per_island = n_group <= 2 * ((row_hi - row_lo + _K - 1) // _K)
         i_island = base + tid
         is_owner = tid < n_group
@@ -1183,8 +1158,8 @@ def func_linesearch_islands_coop(
                         )
                         i_pos = i_pos + _K
                     for k in qd.static(range(4)):
-                        total_dofs = qd.simt.subgroup.reduce_all_add_tiled(sums_dofs_i[k], 5)
-                        total_rows = qd.simt.subgroup.reduce_all_add_tiled(sums_rows_i[k], 5)
+                        total_dofs = su.qd_block_sum(sums_dofs_i[k])
+                        total_rows = su.qd_block_sum(sums_rows_i[k])
                         if tid == i_g:
                             sh_acc[k * _K + tid] = total_dofs
                             sh_acc[(4 + k) * _K + tid] = total_rows
@@ -1192,7 +1167,6 @@ def func_linesearch_islands_coop(
         else:
             for i_chunk in range((dof_hi - dof_lo + _K - 1) // _K):
                 i_pos = dof_lo + i_chunk * _K + tid
-                n_valid = qd.min(dof_hi - dof_lo - i_chunk * _K, _K)
                 i_slot = -1
                 terms_dofs = qd.Vector.zero(gs.qd_float, 4)
                 if i_pos < dof_hi:
@@ -1202,16 +1176,12 @@ def func_linesearch_islands_coop(
                         i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
                     if constraint_state.island.improved[base + i_slot, i_b]:
                         terms_dofs = func_dof_p0_terms(i_d, i_b, dyn_state, constraint_state)
-                i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
-                i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
-                if tid == _K - 1:
-                    i_slot_next = -1
+                i_slot_prev, i_slot_next = su.qd_slot_neighbors(tid, i_slot)
                 for k in qd.static(range(4)):
-                    func_segment_add(tid, i_slot, n_valid, terms_dofs[k], i_slot_prev, i_slot_next, sh_acc, k)
+                    su.qd_segment_add(tid, i_slot, i_slot_prev, i_slot_next, k * _K, terms_dofs[k], sh_acc)
                 qd.simt.block.sync()
             for i_chunk in range((row_hi - row_lo + _K - 1) // _K):
                 i_pos = row_lo + i_chunk * _K + tid
-                n_valid = qd.min(row_hi - row_lo - i_chunk * _K, _K)
                 i_slot = -1
                 terms_rows = qd.Vector.zero(gs.qd_float, 4)
                 if i_pos < row_hi:
@@ -1223,12 +1193,9 @@ def func_linesearch_islands_coop(
                         terms_rows = func_row_p0_terms(
                             i_c, i_b, ne, nef, ncone, constraint_state, rigid_config, row_kind=0
                         )
-                i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
-                i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
-                if tid == _K - 1:
-                    i_slot_next = -1
+                i_slot_prev, i_slot_next = su.qd_slot_neighbors(tid, i_slot)
                 for k in qd.static(range(4)):
-                    func_segment_add(tid, i_slot, n_valid, terms_rows[k], i_slot_prev, i_slot_next, sh_acc, 4 + k)
+                    su.qd_segment_add(tid, i_slot, i_slot_prev, i_slot_next, (4 + k) * _K, terms_rows[k], sh_acc)
                 qd.simt.block.sync()
 
         # The owner lane closes the initialization of its island and keeps the search state in registers
@@ -1302,14 +1269,13 @@ def func_linesearch_islands_coop(
                             )
                             i_pos = i_pos + _K
                         for k in qd.static(range(9)):
-                            total = qd.simt.subgroup.reduce_all_add_tiled(acc_i[k], 5)
+                            total = su.qd_block_sum(acc_i[k])
                             if tid == i_g:
                                 sh_acc[k * _K + tid] = total
                 qd.simt.block.sync()
             else:
                 for i_chunk in range((row_hi - row_lo + _K - 1) // _K):
                     i_pos = row_lo + i_chunk * _K + tid
-                    n_valid = qd.min(row_hi - row_lo - i_chunk * _K, _K)
                     i_slot = -1
                     terms = qd.Vector.zero(gs.qd_float, 9)
                     if i_pos < row_hi:
@@ -1333,12 +1299,9 @@ def func_linesearch_islands_coop(
                                 rigid_config,
                                 row_kind=0,
                             )
-                    i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
-                    i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
-                    if tid == _K - 1:
-                        i_slot_next = -1
+                    i_slot_prev, i_slot_next = su.qd_slot_neighbors(tid, i_slot)
                     for k in qd.static(range(9)):
-                        func_segment_add(tid, i_slot, n_valid, terms[k], i_slot_prev, i_slot_next, sh_acc, k)
+                        su.qd_segment_add(tid, i_slot, i_slot_prev, i_slot_next, k * _K, terms[k], sh_acc)
                     qd.simt.block.sync()
             if is_pending:
                 acc = qd.Vector.zero(gs.qd_float, 9)
@@ -1464,7 +1427,6 @@ def func_exit_islands_coop(
         qd.simt.block.sync()
         for i_chunk in range((dof_hi - dof_lo + _K - 1) // _K):
             i_pos = dof_lo + i_chunk * _K + tid
-            n_valid = qd.min(dof_hi - dof_lo - i_chunk * _K, _K)
             i_slot = -1
             terms = qd.Vector.zero(gs.qd_float, 7)
             if i_pos < dof_hi:
@@ -1474,12 +1436,9 @@ def func_exit_islands_coop(
                     i_slot = constraint_state.island.dofs_island_idx[i_d, i_b] - base
                 if constraint_state.island.improved[base + i_slot, i_b]:
                     terms = func_dof_exit_terms(i_d, i_b, constraint_state, rigid_config)
-            i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))
-            i_slot_next = qd.simt.subgroup.shuffle_down(i_slot, qd.u32(1))
-            if tid == _K - 1:
-                i_slot_next = -1
+            i_slot_prev, i_slot_next = su.qd_slot_neighbors(tid, i_slot)
             for k in qd.static(range(7)):
-                func_segment_add(tid, i_slot, n_valid, terms[k], i_slot_prev, i_slot_next, sh_acc, k)
+                su.qd_segment_add(tid, i_slot, i_slot_prev, i_slot_next, k * _K, terms[k], sh_acc)
             qd.simt.block.sync()
         improved = False
         cg_beta = gs.qd_float(0.0)

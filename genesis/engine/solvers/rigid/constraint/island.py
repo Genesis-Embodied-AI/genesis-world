@@ -3,6 +3,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+import genesis.utils.simt as su
 
 from ..abd.misc import func_wakeup_link
 from ..collider.contact import func_contact_order_key, func_promote_woken_contacts
@@ -241,11 +242,11 @@ def func_group_constraints_by_island_coop(
             count = 0
             if i_island < n_islands:
                 count = constraint_state.island.constraint_slices.n[i_island, i_b]
-            count_incl = qd.simt.subgroup.inclusive_add(count)
+            count_incl, count_total = su.qd_block_scan(count)
             if i_island < n_islands:
                 constraint_state.island.constraint_slices.start[i_island, i_b] = carry + count_incl - count
                 constraint_state.island.constraint_slices.curr[i_island, i_b] = carry + count_incl - count
-            carry = carry + qd.simt.subgroup.broadcast(count_incl, qd.u32(_K - 1))
+            carry = carry + count_total
         qd.simt.block.sync()
         for i_chunk in range((n_con + _K - 1) // _K):
             i_c = i_chunk * _K + tid
@@ -490,7 +491,7 @@ def func_build_single_island_coop(
         constraint_state.island.dofs_island_idx[i_d, i_b] = 0
         inertia = inertia + rigid_info.mass_mat[i_d, i_d, i_b]
         i_d = i_d + _K
-    inertia = qd.simt.subgroup.reduce_all_add_tiled(inertia, 5)
+    inertia = su.qd_block_sum(inertia)
     if tid == 0:
         constraint_state.island.inertia[0, i_b] = inertia
 
@@ -604,10 +605,10 @@ def func_build_islands_coop(
             # The padding slot of a tree-less scene labels no island, see func_build_islands
             if constraint_state.island.trees_parent_idx[i_t, i_b] == i_t and rigid_info.trees_n_dofs[i_t] > 0:
                 is_root = 1
-        roots_incl = qd.simt.subgroup.inclusive_add(is_root)
+        roots_incl, roots_total = su.qd_block_scan(is_root)
         if is_root == 1:
             constraint_state.island.trees_island_idx[i_t, i_b] = n_islands + roots_incl - 1
-        n_islands = n_islands + qd.simt.subgroup.broadcast(roots_incl, qd.u32(_K - 1))
+        n_islands = n_islands + roots_total
     qd.simt.block.sync()
     i_t = tid
     while i_t < n_trees:
@@ -642,8 +643,8 @@ def func_build_islands_coop(
             n_dofs_island = constraint_state.island.dof_slices.n[i_island, i_b]
             if qd.static(rigid_config.use_hibernation):
                 n_links_island = constraint_state.island.link_slices.n[i_island, i_b]
-        links_incl = qd.simt.subgroup.inclusive_add(n_links_island)
-        dofs_incl = qd.simt.subgroup.inclusive_add(n_dofs_island)
+        links_incl, links_total = su.qd_block_scan(n_links_island)
+        dofs_incl, dofs_total = su.qd_block_scan(n_dofs_island)
         if i_island < n_islands:
             link_list_start = links_carry + links_incl - n_links_island
             dof_list_start = dofs_carry + dofs_incl - n_dofs_island
@@ -655,8 +656,8 @@ def func_build_islands_coop(
             constraint_state.island.inertia[i_island, i_b] = 0.0
             if qd.static(rigid_config.use_hibernation):
                 constraint_state.island.is_hibernated[i_island, i_b] = 1
-        links_carry = links_carry + qd.simt.subgroup.broadcast(links_incl, qd.u32(_K - 1))
-        dofs_carry = dofs_carry + qd.simt.subgroup.broadcast(dofs_incl, qd.u32(_K - 1))
+        links_carry = links_carry + links_total
+        dofs_carry = dofs_carry + dofs_total
     qd.simt.block.sync()
 
     # The fill, per chunk of _K trees: a tree's items follow those of the earlier trees of its island, the ones of this
@@ -742,13 +743,9 @@ def func_build_islands_coop(
             i_d = constraint_state.island.dof_id[i_pos, i_b]
             i_island = constraint_state.island.dofs_island_idx[i_d, i_b]
             mass = rigid_info.mass_mat[i_d, i_d, i_b]
-        i_island_prev = qd.simt.subgroup.shuffle_up(i_island, qd.u32(1))
-        i_island_next = qd.simt.subgroup.shuffle_down(i_island, qd.u32(1))
-        is_head = 1
-        if tid > 0 and i_island_prev == i_island:
-            is_head = 0
-        total = qd.simt.subgroup.segmented_reduce_add_tiled(mass, is_head, 5)
-        if i_island >= 0 and (tid == _K - 1 or i_island_next != i_island):
+        i_island_prev, i_island_next = su.qd_slot_neighbors(tid, i_island)
+        total, is_tail = su.qd_segmented_sum(tid, i_island, i_island_prev, i_island_next, mass)
+        if is_tail:
             constraint_state.island.inertia[i_island, i_b] = constraint_state.island.inertia[i_island, i_b] + total
         qd.simt.block.sync()
 
