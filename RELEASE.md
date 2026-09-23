@@ -1,5 +1,23 @@
 # Genesis Release Note
 
+## 1.4.2
+
+This release focuses on significantly improving performance on large scale scenes via hibernation. Hibernated islands should do not incure any runtime anymore. Besides, the Signorini contact resolution is in better shape but should still be consider experimental due to convergence issue.
+
+### Bug Fixes
+
+* Fix damped joints injecting energy when the constraint solve exits with a force residual. (@duburcqa) (#3375)
+* More robust convergence of the Signorini contact resolution. (@duburcqa) (#3381, #3382)
+
+### Miscellaneous
+
+* Speed up rigid simulation with hibernation enabled. (@duburcqa) (#3363, #3366, #3367, #3369)
+* Speed up the GPU rigid solver for large contact islands. (@duburcqa) (#3368)
+* Speed up the constraint solver under the elliptic friction cone on GPU. (@duburcqa) (#3380)
+* Make the kinematic tree, rather than the entity, the unit of every rigid solver pass. (@duburcqa) (#3376)
+* Avoid spurious precision-loss warning when building a rigid scene in single precision. (@duburcqa) (#3362)
+* Expose the wall time of each phase of a scene step. (@duburcqa) (#3370)
+
 ## 1.4.1
 
 This release focuses on significantly improving performance on large scale scenes for both CPU and GPU. The speed is now slowing down sub-linearly wrt the number of islands on both CPU and GPU, and Jacobi equilibration for imbalanced scenes is much cheaper, and contact-rich scenes are much faster on CPU.
