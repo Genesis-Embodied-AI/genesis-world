@@ -890,7 +890,6 @@ class Collider:
             self._solver._errno,
         )
         if self._use_split_narrowphase:
-            narrowphase._func_reset_narrowphase_work_queues(self.collider_state)
             narrowphase._func_narrowphase_contact0(
                 self._solver.geoms_init_AABB,
                 self._solver.dyn_state,
@@ -902,7 +901,6 @@ class Collider:
                 self.collider_info,
                 self._solver.rigid_config,
                 self.collider_config,
-                self._solver._B,
                 self._contact0_n_chunks,
                 self._solver._errno,
             )
