@@ -93,7 +93,7 @@ dev = [
     "nvidia-ml-py; platform_system != 'Darwin'",
     "setproctitle", # allows renaming the test processes on the cluster
     "syrupy",
-    "huggingface_hub[hf_xet]",
+    "huggingface_hub[hf_xet]<2",
     "wandb",
     "ipython",
     # * Mujoco 3.3.6 made contact islands an opt-out option instead of opt-in,
