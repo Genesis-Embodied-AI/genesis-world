@@ -291,7 +291,7 @@ def parse_xml(morph, surface, rigid_options=None):
             if not name.startswith("_")
             and name != "cone"
             and not callable(value)
-            and not np.array_equal(value, value_default)
+            and not np.allclose(value, value_default, atol=gs.EPS)
         ]
         if opt_names_ignored:
             gs.logger.warning(

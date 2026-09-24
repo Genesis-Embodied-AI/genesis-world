@@ -136,11 +136,9 @@ def test_warn_ignored_mjcf_solver_options(caplog):
                 )
             )
         messages = [record.getMessage() for record in caplog.records if "<option>" in record.getMessage()]
-        if opt_names_ignored is None:
-            assert not messages
-        else:
-            (message,) = messages
-            assert f"ignores: {opt_names_ignored}." in message
+        assert_equal(len(messages), 0 if opt_names_ignored is None else 1)
+        if opt_names_ignored is not None:
+            assert f"ignores: {opt_names_ignored}." in messages[0]
 
 
 @pytest.mark.slow  # ~200s
