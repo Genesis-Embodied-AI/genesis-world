@@ -2,368 +2,596 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-
-import genesis.engine.solvers.rigid.rigid_solver as rigid_solver
-
-
-@qd.kernel(fastcache=gs.use_fastcache)
-def kernel_build_efc_AR_b(
-    dofs_state: array_class.DofsState,
-    entities_info: array_class.EntitiesInfo,
-    rigid_global_info: array_class.RigidGlobalInfo,
-    constraint_state: array_class.ConstraintState,
-    static_rigid_sim_config: qd.template(),
-):
-    _B = constraint_state.jac.shape[2]
-    n_dofs = constraint_state.jac.shape[1]
-
-    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
-    for i_b in range(_B):
-        nefc = constraint_state.n_constraints[i_b]
-        # zero AR
-        for i_row in range(nefc):
-            for i_col in range(nefc):
-                constraint_state.efc_AR[i_row, i_col, i_b] = gs.qd_float(0.0)
-
-        # build AR = J * inv(M) * J^T
-        # do it row-by-row: for each row r, tmp = inv(M) * J[r]^T, then AR[r,:] = J * tmp
-        for i_row in range(nefc):
-            # tmp = M^{-1} * Jr^T
-            for i_d in range(n_dofs):
-                constraint_state.Mgrad[i_d, i_b] = constraint_state.jac[i_row, i_d, i_b]
-
-            rigid_solver.func_solve_mass_batch(
-                i_b,
-                constraint_state.Mgrad,
-                constraint_state.Mgrad,
-                array_class.PLACEHOLDER,
-                entities_info=entities_info,
-                rigid_global_info=rigid_global_info,
-                static_rigid_sim_config=static_rigid_sim_config,
-                is_backward=False,
-            )
-
-            # AR[r, c] = J[c, :] * tmp
-            for i_col in range(nefc):
-                s = gs.qd_float(0.0)
-                for i_d in range(n_dofs):
-                    s += constraint_state.jac[i_col, i_d, i_b] * constraint_state.Mgrad[i_d, i_b]
-                constraint_state.efc_AR[i_row, i_col, i_b] = s
-
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            v = -constraint_state.aref[i_c, i_b]
-            for i_d in range(n_dofs):
-                v += constraint_state.jac[i_c, i_d, i_b] * dofs_state.acc_smooth[i_d, i_b]
-            constraint_state.efc_b[i_c, i_b] = v
+import genesis.utils.simt as su
 
 
 @qd.func
-def func_solve_mass_entity_row(
-    i_row: qd.int32,
-    i_e: qd.int32,
-    i_b: qd.int32,
-    buf: array_class.V_ANNOTATION,
-    entities_info: array_class.EntitiesInfo,
-    rigid_global_info: array_class.RigidGlobalInfo,
-):
-    """LDL^T forward-backward substitution on buf[i_row, :, i_b].
+def func_solve_mass_block(i_d0, i_b, i_col, vec: qd.Tensor, rigid_info: array_class.RigidInfo):
+    """LDL^T forward-backward substitution on column i_col of vec, restricted to the mass block containing dof i_d0.
 
-    Same algorithm as func_solve_mass_entity (forward-only path), but operates
-    on a 3D buffer indexed by (constraint_row, dof, batch). This allows
-    different constraint rows to be solved in parallel since each row uses
-    a separate memory slice.
+    The factor is block-diagonal per mass block (see dofs_mass_block_start in array_class.py), with constant block
+    bounds shared by every member dof, so a block is solvable independently from any member dof. The column is the env
+    for a dof vector, the lane slot for the per-lane scratch of the cooperative noslip sweep (see kernel_noslip).
     """
-    if rigid_global_info.mass_mat_mask[i_e, i_b]:
-        entity_dof_start = entities_info.dof_start[i_e]
-        entity_dof_end = entities_info.dof_end[i_e]
-        n_dofs = entities_info.n_dofs[i_e]
+    block_start = rigid_info.dofs_mass_block_start[i_d0]
+    block_end = rigid_info.dofs_mass_block_end[i_d0]
 
-        # Step 1: Solve w s.t. L^T @ w = y (backward substitution)
-        for i_d_ in range(n_dofs):
-            i_d = entity_dof_end - i_d_ - 1
-            curr_out = buf[i_row, i_d, i_b]
-            for j_d in range(i_d + 1, entity_dof_end):
-                curr_out = curr_out - rigid_global_info.mass_mat_L[j_d, i_d, i_b] * buf[i_row, j_d, i_b]
-            buf[i_row, i_d, i_b] = curr_out
+    # Step 1: Solve w s.t. L^T @ w = y (backward substitution)
+    for i_d_ in range(block_end - block_start):
+        i_d = block_end - i_d_ - 1
+        curr = vec[i_d, i_col]
+        for j_d in range(i_d + 1, block_end):
+            curr = curr - rigid_info.mass_mat_L[j_d, i_d, i_b] * vec[j_d, i_col]
+        vec[i_d, i_col] = curr
 
-        # Step 2: z = D^{-1} @ w
-        for i_d in range(entity_dof_start, entity_dof_end):
-            buf[i_row, i_d, i_b] = buf[i_row, i_d, i_b] * rigid_global_info.mass_mat_D_inv[i_d, i_b]
+    # Step 2: z = D^{-1} @ w
+    for i_d in range(block_start, block_end):
+        vec[i_d, i_col] = vec[i_d, i_col] * rigid_info.mass_mat_D_inv[i_d, i_b]
 
-        # Step 3: Solve x s.t. L @ x = z (forward substitution)
-        for i_d in range(entity_dof_start, entity_dof_end):
-            curr_out = buf[i_row, i_d, i_b]
-            for j_d in range(entity_dof_start, i_d):
-                curr_out = curr_out - rigid_global_info.mass_mat_L[i_d, j_d, i_b] * buf[i_row, j_d, i_b]
-            buf[i_row, i_d, i_b] = curr_out
+    # Step 3: Solve x s.t. L @ x = z (forward substitution)
+    for i_d in range(block_start, block_end):
+        curr = vec[i_d, i_col]
+        for j_d in range(block_start, i_d):
+            curr = curr - rigid_info.mass_mat_L[i_d, j_d, i_b] * vec[j_d, i_col]
+        vec[i_d, i_col] = curr
 
 
-@qd.kernel(fastcache=gs.use_fastcache)
-def kernel_compute_MinvJT(
-    entities_info: array_class.EntitiesInfo,
-    rigid_global_info: array_class.RigidGlobalInfo,
+@qd.func
+def func_apply_Minv_rows(
+    i_row_0,
+    i_row_1,
+    i_b,
+    i_col,
+    jac_dofs_idx: qd.Tensor,
+    coef_0,
+    coef_1,
+    vec: qd.Tensor,
+    jac: qd.Tensor,
+    jac_n_dofs: qd.Tensor,
+    rigid_info: array_class.RigidInfo,
+):
+    """Compute vec[:, i_col] = M^{-1} (coef_0 * J[i_row_0]^T + coef_1 * J[i_row_1]^T) over the touched mass blocks.
+
+    Both rows must share the same dof support (e.g. the two edges of a friction-pyramid pair); the walk is driven by
+    i_row_0. The mass matrix is block-diagonal per kinematic tree, so scattering into fully-zeroed blocks and solving
+    only those blocks is exact. Row dofs are sorted, so same-block dofs are contiguous and each block is visited once
+    per pass. Working at block granularity (not entity granularity) keeps the touched dof range within the row's own
+    island, which makes concurrent per-island sweeps of the same env race-free.
+    """
+    tree_start_prev = gs.qd_int(-1)
+    for i_d_ in range(jac_n_dofs[i_row_0, i_b]):
+        i_d = jac_dofs_idx[i_row_0, i_d_, i_b]
+        block_start = rigid_info.dofs_mass_block_start[i_d]
+        if block_start != tree_start_prev:
+            for j_d in range(block_start, rigid_info.dofs_mass_block_end[i_d]):
+                vec[j_d, i_col] = gs.qd_float(0.0)
+            tree_start_prev = block_start
+        vec[i_d, i_col] = coef_0 * jac[i_row_0, i_d, i_b] + coef_1 * jac[i_row_1, i_d, i_b]
+
+    tree_start_prev = gs.qd_int(-1)
+    for i_d_ in range(jac_n_dofs[i_row_0, i_b]):
+        i_d = jac_dofs_idx[i_row_0, i_d_, i_b]
+        block_start = rigid_info.dofs_mass_block_start[i_d]
+        if block_start != tree_start_prev:
+            func_solve_mass_block(i_d, i_b, i_col, vec, rigid_info)
+            tree_start_prev = block_start
+
+
+@qd.func
+def func_accumulate_row_blocks(
+    i_row,
+    i_b,
+    i_col,
+    jac_dofs_idx: qd.Tensor,
+    vec_src: qd.Tensor,
+    vec_dst: qd.Tensor,
+    jac_n_dofs: qd.Tensor,
+    rigid_info: array_class.RigidInfo,
+):
+    """Add vec_src[:, i_col] to vec_dst[:, i_b] over the mass blocks touched by constraint row i_row."""
+    tree_start_prev = gs.qd_int(-1)
+    for i_d_ in range(jac_n_dofs[i_row, i_b]):
+        i_d = jac_dofs_idx[i_row, i_d_, i_b]
+        block_start = rigid_info.dofs_mass_block_start[i_d]
+        if block_start != tree_start_prev:
+            for j_d in range(block_start, rigid_info.dofs_mass_block_end[i_d]):
+                vec_dst[j_d, i_b] = vec_dst[j_d, i_b] + vec_src[j_d, i_col]
+            tree_start_prev = block_start
+
+
+@qd.func
+def func_dot_row(i_row, i_b, i_col, jac_dofs_idx: qd.Tensor, vec: qd.Tensor, jac: qd.Tensor, jac_n_dofs: qd.Tensor):
+    """Sparse dot product J[i_row] * vec[:, i_col] over the row dof support."""
+    s = gs.qd_float(0.0)
+    for i_d_ in range(jac_n_dofs[i_row, i_b]):
+        i_d = jac_dofs_idx[i_row, i_d_, i_b]
+        s += jac[i_row, i_d, i_b] * vec[i_d, i_col]
+    return s
+
+
+@qd.func
+def func_color_rows_batch(
+    i_b, i_island, tid, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
+):
+    """Color the constraint rows of one island so that the rows of a color touch disjoint mass blocks.
+
+    A color is a set of rows that a Gauss-Seidel sweep may update in any order, in parallel included, for the same
+    result: two rows interact only through the mass blocks their dof supports share, so rows touching disjoint blocks
+    read and write disjoint entries of qacc and of the force vector. The sweep visits the colors in order and the rows
+    of a color all at once, which is a graph coloring of the rows with a conflict between any two sharing a block.
+
+    Lane 0 walks the island's rows in index order and gives each row the smallest color past those already taken on
+    its mass blocks: a per-block counter holds the next free color of the block, a row takes the largest counter over
+    its blocks and moves every one of them past it. Rows sharing a block thus get distinct colors, and an island
+    never needs more colors than it has rows, whatever the contact pattern. The lanes reset the counters over the
+    island's dofs beforehand, and the color count is readable by every lane on return.
+    """
+    _K = qd.static(32)
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
+    dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
+
+    for i_chunk in range((n_dofs + _K - 1) // _K):
+        i_d_ = i_chunk * _K + tid
+        if i_d_ < n_dofs:
+            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+            constraint_state.noslip_blocks_n_colors[i_d, i_b] = 0
+    qd.simt.block.sync()
+
+    if tid == 0:
+        n_colors = 0
+        for i_c_ in range(n_rows):
+            i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+            color = 0
+            for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                i_d0 = rigid_info.dofs_mass_block_start[i_d]
+                color = qd.max(color, constraint_state.noslip_blocks_n_colors[i_d0, i_b])
+            for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                i_d0 = rigid_info.dofs_mass_block_start[i_d]
+                constraint_state.noslip_blocks_n_colors[i_d0, i_b] = color + 1
+            constraint_state.noslip_rows_color[i_c, i_b] = color
+            n_colors = qd.max(n_colors, color + 1)
+        constraint_state.noslip_islands_n_colors[i_island, i_b] = n_colors
+    qd.simt.block.sync()
+
+
+@qd.func
+def func_refresh_qacc_batch(
+    i_b,
+    i_island,
+    tid,
+    n_colors,
+    dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    static_rigid_sim_config: qd.template(),
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
 ):
-    """Compute MinvJT[row, :, i_b] = M^{-1} @ J[row, :, i_b] for each constraint row.
+    """Recompute qacc = acc_smooth + M^{-1} J^T f from the current constraint forces, over one island.
 
-    Parallelized over (row, batch) via ndrange — each thread independently
-    copies J[row] into MinvJT[row] and solves M^{-1} in-place using the
-    row-indexed LDL^T substitution. No shared buffers between rows.
+    The force-update sweep maintains qacc incrementally; recomputing it exactly at the start of every iteration keeps
+    the accumulated floating-point drift bounded to a single sweep. Only the island's own dofs and constraint rows are
+    visited (mass blocks never straddle islands, and each block's first dof appears exactly once in the island's dof
+    list regardless of the skyline dof reorder). The lanes of a cooperative block stride the dofs and scatter J^T f one
+    color of rows at a time, the rows of a color touching disjoint dofs (see func_color_rows_batch).
     """
-    len_c = constraint_state.MinvJT.shape[0]
-    _B = constraint_state.jac.shape[2]
-    n_dofs = constraint_state.jac.shape[1]
+    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
+    dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
 
-    for i_row, i_b in qd.ndrange(len_c, _B):
-        if i_row < constraint_state.n_constraints[i_b]:
-            # Copy J[row] into MinvJT[row] (per-row buffer)
-            for i_d in range(n_dofs):
-                constraint_state.MinvJT[i_row, i_d, i_b] = constraint_state.jac[i_row, i_d, i_b]
+    for i_chunk in range((n_dofs + _K - 1) // _K):
+        i_d_ = i_chunk * _K + tid
+        if i_d_ < n_dofs:
+            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+            constraint_state.qfrc_constraint[i_d, i_b] = gs.qd_float(0.0)
+            constraint_state.qacc[i_d, i_b] = gs.qd_float(0.0)
+    if qd.static(rigid_config.enable_cooperative_noslip):
+        qd.simt.block.sync()
 
-            # In-place solve: MinvJT[row] = M^{-1} @ J[row]
-            for i_0 in (
-                range(rigid_global_info.n_awake_entities[i_b])
-                if qd.static(static_rigid_sim_config.use_hibernation)
-                else range(entities_info.n_links.shape[0])
-            ):
-                i_e = (
-                    rigid_global_info.awake_entities[i_0, i_b]
-                    if qd.static(static_rigid_sim_config.use_hibernation)
-                    else i_0
+    for i_color in range(n_colors):
+        for i_chunk in range((n_rows + _K - 1) // _K):
+            i_c_ = i_chunk * _K + tid
+            if i_c_ < n_rows:
+                i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+                is_own_row = True
+                if qd.static(rigid_config.enable_cooperative_noslip):
+                    is_own_row = constraint_state.noslip_rows_color[i_c, i_b] == i_color
+                if is_own_row:
+                    force = constraint_state.efc_force[i_c, i_b]
+                    for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                        i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
+                        constraint_state.qfrc_constraint[i_d, i_b] = (
+                            constraint_state.qfrc_constraint[i_d, i_b] + constraint_state.jac[i_c, i_d, i_b] * force
+                        )
+        if qd.static(rigid_config.enable_cooperative_noslip):
+            qd.simt.block.sync()
+
+    for i_chunk in range((n_dofs + _K - 1) // _K):
+        i_d_ = i_chunk * _K + tid
+        if i_d_ < n_dofs:
+            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+            # Solve each mass block once, when visiting its first dof (order-robust, unlike previous-block tracking,
+            # since the island dof list may be permuted by the fill-reducing reorder).
+            if i_d == rigid_info.dofs_mass_block_start[i_d]:
+                constraint_state.qacc[i_d, i_b] = constraint_state.qfrc_constraint[i_d, i_b]
+                for j_d in range(i_d + 1, rigid_info.dofs_mass_block_end[i_d]):
+                    constraint_state.qacc[j_d, i_b] = constraint_state.qfrc_constraint[j_d, i_b]
+                func_solve_mass_block(i_d, i_b, i_b, constraint_state.qacc, rigid_info)
+    if qd.static(rigid_config.enable_cooperative_noslip):
+        qd.simt.block.sync()
+
+    for i_chunk in range((n_dofs + _K - 1) // _K):
+        i_d_ = i_chunk * _K + tid
+        if i_d_ < n_dofs:
+            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+            constraint_state.qacc[i_d, i_b] = constraint_state.qacc[i_d, i_b] + dyn_state.dofs.acc_smooth[i_d, i_b]
+    if qd.static(rigid_config.enable_cooperative_noslip):
+        qd.simt.block.sync()
+
+
+@qd.func
+def func_noslip_update_row(
+    i_c,
+    i_b,
+    i_col,
+    ne,
+    nf,
+    const_start,
+    const_end,
+    EPS,
+    constraint_state: array_class.ConstraintState,
+    rigid_info: array_class.RigidInfo,
+):
+    """Project the force of one constraint row and propagate the change to qacc, returning the change of the cost.
+
+    A dry-friction (dof frictionloss) row gets a 1-dof update and a collision row that is the base of an opposing
+    pyramid-edge pair (i_c, i_c + 1) the 2-dof update of the pair with the normal force fixed. Every other row keeps
+    its force, with a zero cost change. M^{-1} J^T of the row is computed in column i_col of noslip_MinvJT.
+    """
+    # temp variables
+    res = qd.Vector.zero(gs.qd_float, 2)
+    old_force = qd.Vector.zero(gs.qd_float, 2)
+    bc = qd.Vector.zero(gs.qd_float, 2)
+    Ac = qd.Vector.zero(gs.qd_float, 4)
+
+    cost_change = gs.qd_float(0.0)
+
+    if i_c >= ne and i_c < ne + nf:
+        # Each row runs two phases through the single func_apply_Minv_rows call site: phase 0 computes the diagonal
+        # entry A[i_c, i_c] = J M^{-1} J^T and updates the force, phase 1 propagates the force change to qacc (skipped
+        # when the force did not move).
+        delta = gs.qd_float(0.0)
+        for i_phase in range(2):
+            coef = gs.qd_float(1.0)
+            if i_phase == 1:
+                coef = delta
+            if i_phase == 0 or delta != 0.0:
+                func_apply_Minv_rows(
+                    i_c,
+                    i_c,
+                    i_b,
+                    i_col,
+                    constraint_state.jac_dofs_idx,
+                    coef,
+                    0.0,
+                    constraint_state.noslip_MinvJT,
+                    constraint_state.jac,
+                    constraint_state.jac_n_dofs,
+                    rigid_info,
                 )
-                func_solve_mass_entity_row(i_row, i_e, i_b, constraint_state.MinvJT, entities_info, rigid_global_info)
+                if i_phase == 0:
+                    A_diag = func_dot_row(
+                        i_c,
+                        i_b,
+                        i_col,
+                        constraint_state.jac_dofs_idx,
+                        constraint_state.noslip_MinvJT,
+                        constraint_state.jac,
+                        constraint_state.jac_n_dofs,
+                    )
+                    res[0] = (
+                        func_dot_row(
+                            i_c,
+                            i_b,
+                            i_b,
+                            constraint_state.jac_dofs_idx,
+                            constraint_state.qacc,
+                            constraint_state.jac,
+                            constraint_state.jac_n_dofs,
+                        )
+                        - constraint_state.aref[i_c, i_b]
+                    )
+
+                    old_force[0] = constraint_state.efc_force[i_c, i_b]
+                    constraint_state.efc_force[i_c, i_b] -= res[0] / A_diag
+                    if constraint_state.efc_force[i_c, i_b] < -constraint_state.efc_frictionloss[i_c, i_b]:
+                        constraint_state.efc_force[i_c, i_b] = -constraint_state.efc_frictionloss[i_c, i_b]
+                    elif constraint_state.efc_force[i_c, i_b] > constraint_state.efc_frictionloss[i_c, i_b]:
+                        constraint_state.efc_force[i_c, i_b] = constraint_state.efc_frictionloss[i_c, i_b]
+                    delta = constraint_state.efc_force[i_c, i_b] - old_force[0]
+                    cost_change = 0.5 * delta**2 * A_diag + delta * res[0]
+                else:
+                    func_accumulate_row_blocks(
+                        i_c,
+                        i_b,
+                        i_col,
+                        constraint_state.jac_dofs_idx,
+                        constraint_state.noslip_MinvJT,
+                        constraint_state.qacc,
+                        constraint_state.jac_n_dofs,
+                        rigid_info,
+                    )
+    elif i_c >= const_start and i_c < const_end and (i_c - const_start) % 2 == 0:
+        j_efc = i_c
+
+        # Three phases through the single func_apply_Minv_rows call site: phases 0 and 1 compute the symmetric 2x2
+        # block of A (both rows share the same dof support, so two block solves and three sparse dots suffice), then
+        # the force update runs at the end of phase 1, and phase 2 propagates the force change to qacc (skipped when
+        # the forces did not move).
+        delta_0 = gs.qd_float(0.0)
+        delta_1 = gs.qd_float(0.0)
+        for i_phase in range(3):
+            coef_0 = gs.qd_float(0.0)
+            coef_1 = gs.qd_float(0.0)
+            if i_phase == 0:
+                coef_0 = 1.0
+            elif i_phase == 1:
+                coef_1 = 1.0
+            else:
+                coef_0 = delta_0
+                coef_1 = delta_1
+            if i_phase < 2 or delta_0 != 0.0 or delta_1 != 0.0:
+                func_apply_Minv_rows(
+                    j_efc,
+                    j_efc + 1,
+                    i_b,
+                    i_col,
+                    constraint_state.jac_dofs_idx,
+                    coef_0,
+                    coef_1,
+                    constraint_state.noslip_MinvJT,
+                    constraint_state.jac,
+                    constraint_state.jac_n_dofs,
+                    rigid_info,
+                )
+                if i_phase == 2:
+                    func_accumulate_row_blocks(
+                        j_efc,
+                        i_b,
+                        i_col,
+                        constraint_state.jac_dofs_idx,
+                        constraint_state.noslip_MinvJT,
+                        constraint_state.qacc,
+                        constraint_state.jac_n_dofs,
+                        rigid_info,
+                    )
+                else:
+                    for i2 in qd.static(range(2)):
+                        if i_phase == 0 or i2 == 1:
+                            s = func_dot_row(
+                                j_efc + i2,
+                                i_b,
+                                i_col,
+                                constraint_state.jac_dofs_idx,
+                                constraint_state.noslip_MinvJT,
+                                constraint_state.jac,
+                                constraint_state.jac_n_dofs,
+                            )
+                            if i_phase == 0:
+                                Ac[i2] = s
+                            else:
+                                Ac[3] = s
+
+            if i_phase == 1:
+                Ac[2] = Ac[1]
+                for i2 in qd.static(range(2)):
+                    res[i2] = (
+                        func_dot_row(
+                            j_efc + i2,
+                            i_b,
+                            i_b,
+                            constraint_state.jac_dofs_idx,
+                            constraint_state.qacc,
+                            constraint_state.jac,
+                            constraint_state.jac_n_dofs,
+                        )
+                        - constraint_state.aref[j_efc + i2, i_b]
+                    )
+                    old_force[i2] = constraint_state.efc_force[j_efc + i2, i_b]
+
+                for j in qd.static(range(2)):
+                    bc[j] = res[j]
+                    for k in qd.static(range(2)):
+                        bc[j] -= Ac[j * 2 + k] * old_force[k]
+                mid = 0.5 * (constraint_state.efc_force[j_efc, i_b] + constraint_state.efc_force[j_efc + 1, i_b])
+                y = 0.5 * (constraint_state.efc_force[j_efc, i_b] - constraint_state.efc_force[j_efc + 1, i_b])
+                K1 = Ac[0] + Ac[3] - Ac[1] - Ac[2]
+                K0 = mid * (Ac[0] - Ac[3]) + bc[0] - bc[1]
+                if K1 < EPS:
+                    constraint_state.efc_force[j_efc, i_b] = constraint_state.efc_force[j_efc + 1, i_b] = mid
+                else:
+                    y = -K0 / K1
+                    if y < -mid:
+                        constraint_state.efc_force[j_efc, i_b] = 0
+                        constraint_state.efc_force[j_efc + 1, i_b] = 2 * mid
+                    elif y > mid:
+                        constraint_state.efc_force[j_efc, i_b] = 2 * mid
+                        constraint_state.efc_force[j_efc + 1, i_b] = 0
+                    else:
+                        constraint_state.efc_force[j_efc, i_b] = mid + y
+                        constraint_state.efc_force[j_efc + 1, i_b] = mid - y
+                cost_change = func_cost_change(i_b, j_efc, Ac, old_force, res, EPS, constraint_state.efc_force, 2)
+
+                delta_0 = constraint_state.efc_force[j_efc, i_b] - old_force[0]
+                delta_1 = constraint_state.efc_force[j_efc + 1, i_b] - old_force[1]
+
+    return cost_change
 
 
-@qd.kernel(fastcache=gs.use_fastcache)
-def kernel_compute_AR_and_b(
-    dofs_state: array_class.DofsState,
-    constraint_state: array_class.ConstraintState,
-    static_rigid_sim_config: qd.template(),
-):
-    """Phase 2: Compute AR = J @ MinvJT and efc_b (GPU multi-env only).
-
-    AR[row, col, i_b] = sum_d J[col, d, i_b] * MinvJT[row, d, i_b]
-
-    Uses ndrange for full GPU parallelism across (row, col, batch) — gives
-    nefc^2 * n_envs independent threads (~490K for typical scenes).
-
-    This kernel is only called when para_level >= PARA_LEVEL.ALL (GPU multi-env).
-    For CPU and GPU single-env, the fused kernel_build_efc_AR_b is used instead.
-    """
-    len_c = constraint_state.efc_AR.shape[0]
-    _B = constraint_state.jac.shape[2]
-    n_dofs = constraint_state.jac.shape[1]
-
-    for i_row, i_col, i_b in qd.ndrange(len_c, len_c, _B):
-        nefc = constraint_state.n_constraints[i_b]
-        if i_row < nefc and i_col < nefc:
-            s = gs.qd_float(0.0)
-            for i_d in range(n_dofs):
-                s += constraint_state.jac[i_col, i_d, i_b] * constraint_state.MinvJT[i_row, i_d, i_b]
-            constraint_state.efc_AR[i_row, i_col, i_b] = s
-        else:
-            constraint_state.efc_AR[i_row, i_col, i_b] = gs.qd_float(0.0)
-
-    for i_c, i_b in qd.ndrange(len_c, _B):
-        if i_c < constraint_state.n_constraints[i_b]:
-            v = -constraint_state.aref[i_c, i_b]
-            for i_d in range(n_dofs):
-                v += constraint_state.jac[i_c, i_d, i_b] * dofs_state.acc_smooth[i_d, i_b]
-            constraint_state.efc_b[i_c, i_b] = v
-
-
-@qd.kernel(fastcache=gs.use_fastcache)
-def kernel_noslip(
+@qd.func
+def func_noslip_batch(
+    i_b,
+    i_island,
+    tid,
+    n_colors,
+    dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
-    rigid_global_info: array_class.RigidGlobalInfo,
-    static_rigid_sim_config: qd.template(),
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
 ):
-    EPS = rigid_global_info.EPS[None]
+    """Matrix-free noslip force-update sweep over one island.
+
+    The dual residual of row r is res_r = A f + b = J_r * qacc - aref_r with qacc = acc_smooth + M^{-1} J^T f, so
+    the sweep maintains qacc instead of materializing the dense dual matrix AR = J M^{-1} J^T: each force update
+    propagates to qacc through an M^{-1} solve restricted to the mass blocks the row touches, and the 1x1/2x2
+    diagonal blocks of A needed by the updates are recomputed on the fly the same way. This keeps the pass linear in
+    the number of constraints (times the row support size) per iteration, instead of quadratic. A is block-diagonal
+    by island and the updates touch only the row's own mass blocks, so concurrent sweeps of different islands of the
+    same env are race-free and equivalent to the env-wide sweep.
+
+    One thread sweeps the island's rows in index order (the per-island grouping is index-ordered). A cooperative
+    block sweeps them one color at a time, its lanes updating the rows of the color in parallel: the rows of a color
+    touch disjoint mass blocks (see func_color_rows_batch), so their updates read and write disjoint entries of qacc
+    and the sweep stays a Gauss-Seidel process, every color seeing the updates of the colors before it.
+    """
+    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    EPS = rigid_info.EPS[None]
+
+    ne = constraint_state.n_constraints_equality[i_b]
+    nf = constraint_state.n_constraints_frictionloss[i_b]
+    const_start = ne + nf
+    const_end = const_start + qd.static(rigid_config.rows_per_contact) * (
+        collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]
+    )
+
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
+    row_start = constraint_state.island.constraint_slices.start[i_island, i_b]
+
+    scale = 1.0 / (rigid_info.meaninertia[i_b] * qd.max(1.0, n_dofs))
+
+    for i_iter in range(rigid_info.noslip_iterations[None]):
+        func_refresh_qacc_batch(i_b, i_island, tid, n_colors, dyn_state, constraint_state, rigid_info, rigid_config)
+
+        improvement = gs.qd_float(0.0)
+
+        # Equality and joint limit rows only contribute to the iter-0 improvement correction.
+        for i_color in range(n_colors):
+            for i_chunk in range((n_rows + _K - 1) // _K):
+                i_c_ = i_chunk * _K + tid
+                if i_c_ < n_rows:
+                    i_c = constraint_state.island.constraint_id[row_start + i_c_, i_b]
+                    is_own_row = True
+                    if qd.static(rigid_config.enable_cooperative_noslip):
+                        is_own_row = constraint_state.noslip_rows_color[i_c, i_b] == i_color
+                    if is_own_row:
+                        if i_iter == 0:
+                            improvement += (
+                                0.5 * constraint_state.efc_force[i_c, i_b] ** 2 * constraint_state.diag[i_c, i_b]
+                            )
+                        improvement -= func_noslip_update_row(
+                            i_c, i_b, i_b * _K + tid, ne, nf, const_start, const_end, EPS, constraint_state, rigid_info
+                        )
+            if qd.static(rigid_config.enable_cooperative_noslip):
+                qd.simt.block.sync()
+
+        if qd.static(rigid_config.enable_cooperative_noslip):
+            # The exit test below must be lane-uniform (see qd_block_sum in utils/simt.py)
+            improvement = su.qd_block_sum(improvement)
+
+        improvement *= scale
+
+        if improvement < rigid_info.noslip_tolerance[None]:
+            break
+
+
+@qd.func
+def func_dual_finish_batch(
+    i_b,
+    i_island,
+    tid,
+    n_colors,
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Map the final constraint forces back to joint space over one island.
+
+    The refresh recomputes qfrc_constraint = J^T f and qacc = acc_smooth + M^{-1} J^T f exactly from the swept
+    forces; the remaining work is copying them into the per-dof state.
+    """
+    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
+    func_refresh_qacc_batch(i_b, i_island, tid, n_colors, dyn_state, constraint_state, rigid_info, rigid_config)
+
+    n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
+    dof_start = constraint_state.island.dof_slices.start[i_island, i_b]
+
+    for i_chunk in range((n_dofs + _K - 1) // _K):
+        i_d_ = i_chunk * _K + tid
+        if i_d_ < n_dofs:
+            i_d = constraint_state.island.dof_id[dof_start + i_d_, i_b]
+            dyn_state.dofs.acc[i_d, i_b] = constraint_state.qacc[i_d, i_b]
+            dyn_state.dofs.qf_constraint[i_d, i_b] = constraint_state.qfrc_constraint[i_d, i_b]
+            dyn_state.dofs.force[i_d, i_b] = (
+                dyn_state.dofs.qf_smooth[i_d, i_b] + constraint_state.qfrc_constraint[i_d, i_b]
+            )
+
+
+@qd.kernel(fastcache=True)
+def kernel_noslip(
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    constraint_state: array_class.ConstraintState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Noslip pass: matrix-free force-update sweep followed by the dual finish, fused per island.
+
+    Islands are independent (A is block-diagonal by island and both phases touch only the island's own rows and dofs),
+    so each (island, env) pair runs sweep and finish end-to-end, in one thread, or under enable_cooperative_noslip in
+    one block of 32 lanes sharing the island's rows by color (see func_color_rows_batch).
+    """
     _B = constraint_state.jac.shape[2]
-    n_dofs = constraint_state.jac.shape[1]
+    _K = qd.static(32 if rigid_config.enable_cooperative_noslip else 1)
 
-    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        # temp variables
-        res = qd.Vector.zero(gs.qd_float, 5)
-        old_force = qd.Vector.zero(gs.qd_float, 5)
-        bc = qd.Vector.zero(gs.qd_float, 5)
-        Ac = qd.Vector.zero(gs.qd_float, 9)
-
-        n_con = collider_state.n_contacts[i_b]
-        ne = constraint_state.n_constraints_equality[i_b]
-        nf = constraint_state.n_constraints_frictionloss[i_b]
-        const_start = ne + nf
-
-        scale = 1.0 / (rigid_global_info.meaninertia[i_b] * qd.max(1.0, n_dofs))
-
-        for i_iter in range(rigid_global_info.noslip_iterations[None]):
-            improvement = gs.qd_float(0.0)
-            if i_iter == 0:
-                for i_c in range(constraint_state.n_constraints[i_b]):
-                    improvement += 0.5 * constraint_state.efc_force[i_c, i_b] ** 2 * constraint_state.diag[i_c, i_b]
-
-            for i_c in range(ne, ne + nf):
-                res = func_residual_constraint_force(
-                    res=res,
-                    i_b=i_b,
-                    i_efc=i_c,
-                    dim=1,
-                    constraint_state=constraint_state,
+    # max_islands bounds the per-env island count (at most one island per tree); the guard skips the unused tail.
+    # Iterate islands-major so that consecutive GPU lanes sweep the same island index across consecutive envs: envs
+    # are replicas of one scene, so lanes execute identical control flow (island sizes match) and the batch-contiguous
+    # field reads coalesce, instead of adjacent lanes diverging on different islands of one env.
+    max_islands = constraint_state.island.dof_slices.start.shape[0]
+    if qd.static(rigid_config.enable_cooperative_noslip):
+        qd.loop_config(name="noslip", block_dim=_K)
+    else:
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_flat in range(max_islands * _B * _K):
+        tid = i_flat % _K
+        i_b = (i_flat // _K) % _B
+        i_island = i_flat // (_K * _B)
+        if i_island < constraint_state.island.n_islands[i_b]:
+            run_island = True
+            if qd.static(rigid_config.use_hibernation):
+                run_island = not constraint_state.island.is_hibernated[i_island, i_b]
+            if run_island:
+                n_colors = 1
+                if qd.static(rigid_config.enable_cooperative_noslip):
+                    func_color_rows_batch(i_b, i_island, tid, constraint_state, rigid_info)
+                    n_colors = constraint_state.noslip_islands_n_colors[i_island, i_b]
+                func_noslip_batch(
+                    i_b, i_island, tid, n_colors, dyn_state, collider_state, constraint_state, rigid_info, rigid_config
                 )
-                old_force[0] = constraint_state.efc_force[i_c, i_b]
-                constraint_state.efc_force[i_c, i_b] -= res[0] / constraint_state.efc_AR[i_c, i_c, i_b]
-                if constraint_state.efc_force[i_c, i_b] < -constraint_state.efc_frictionloss[i_c, i_b]:
-                    constraint_state.efc_force[i_c, i_b] = -constraint_state.efc_frictionloss[i_c, i_b]
-                elif constraint_state.efc_force[i_c, i_b] > constraint_state.efc_frictionloss[i_c, i_b]:
-                    constraint_state.efc_force[i_c, i_b] = constraint_state.efc_frictionloss[i_c, i_b]
-                delta = constraint_state.efc_force[i_c, i_b] - old_force[0]
-                improvement -= 0.5 * delta**2 / constraint_state.efc_AR[i_c, i_c, i_b] + delta * res[0]
-
-            # Project contact friction (pyramidal 4-edge) with normal fixed
-            for i_col in range(n_con):
-                base = const_start + i_col * 4
-                for j2 in qd.static(range(2)):
-                    j_efc = base + j2 * 2
-                    res = func_residual_constraint_force(
-                        res=res,
-                        i_b=i_b,
-                        i_efc=j_efc,
-                        dim=2,
-                        constraint_state=constraint_state,
-                    )
-                    for i2 in qd.static(range(2)):
-                        old_force[i2] = constraint_state.efc_force[j_efc + i2, i_b]
-                    Ac = func_extract_block_matrix_from_AR(
-                        Ac=Ac,
-                        i_b=i_b,
-                        start=j_efc,
-                        n=2,
-                        constraint_state=constraint_state,
-                    )
-                    for j in qd.static(range(2)):
-                        bc[j] = res[j]
-                        for k in qd.static(range(2)):
-                            bc[j] -= Ac[j * 2 + k] * old_force[k]
-                    mid = 0.5 * (constraint_state.efc_force[j_efc, i_b] + constraint_state.efc_force[j_efc + 1, i_b])
-                    y = 0.5 * (constraint_state.efc_force[j_efc, i_b] - constraint_state.efc_force[j_efc + 1, i_b])
-                    K1 = Ac[0] + Ac[3] - Ac[1] - Ac[2]
-                    K0 = mid * (Ac[0] - Ac[3]) + bc[0] - bc[1]
-                    if K1 < EPS:
-                        constraint_state.efc_force[j_efc, i_b] = constraint_state.efc_force[j_efc + 1, i_b] = mid
-                    else:
-                        y = -K0 / K1
-                        if y < -mid:
-                            constraint_state.efc_force[j_efc, i_b] = 0
-                            constraint_state.efc_force[j_efc + 1, i_b] = 2 * mid
-                        elif y > mid:
-                            constraint_state.efc_force[j_efc, i_b] = 2 * mid
-                            constraint_state.efc_force[j_efc + 1, i_b] = 0
-                        else:
-                            constraint_state.efc_force[j_efc, i_b] = mid + y
-                            constraint_state.efc_force[j_efc + 1, i_b] = mid - y
-                    cost_change = func_cost_change(
-                        i_b=i_b,
-                        Ac=Ac,
-                        force=constraint_state.efc_force,
-                        force_start=j_efc,
-                        old_force=old_force,
-                        res=res,
-                        dim=2,
-                        eps=EPS,
-                    )
-
-                    improvement -= cost_change
-            improvement *= scale
-
-            if improvement < rigid_global_info.noslip_tolerance[None]:
-                break
-
-
-@qd.kernel(fastcache=gs.use_fastcache)
-def kernel_dual_finish(
-    dofs_state: array_class.DofsState,
-    entities_info: array_class.EntitiesInfo,
-    rigid_global_info: array_class.RigidGlobalInfo,
-    constraint_state: array_class.ConstraintState,
-    static_rigid_sim_config: qd.template(),
-):
-    n_dofs = constraint_state.qfrc_constraint.shape[0]
-    _B = constraint_state.qfrc_constraint.shape[1]
-
-    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        # zero
-        for i_d in range(n_dofs):
-            constraint_state.qfrc_constraint[i_d, i_b] = gs.qd_float(0.0)
-
-            for i_c in range(constraint_state.n_constraints[i_b]):
-                constraint_state.qfrc_constraint[i_d, i_b] = (
-                    constraint_state.qfrc_constraint[i_d, i_b]
-                    + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
+                func_dual_finish_batch(
+                    i_b, i_island, tid, n_colors, dyn_state, constraint_state, rigid_info, rigid_config
                 )
 
-        rigid_solver.func_solve_mass_batch(
-            i_b=i_b,
-            vec=constraint_state.qfrc_constraint,
-            out=constraint_state.qacc,
-            out_bw=array_class.PLACEHOLDER,
-            entities_info=entities_info,
-            rigid_global_info=rigid_global_info,
-            static_rigid_sim_config=static_rigid_sim_config,
-            is_backward=False,
-        )
-
-        for i_d in range(n_dofs):
-            constraint_state.qacc[i_d, i_b] = constraint_state.qacc[i_d, i_b] + dofs_state.acc_smooth[i_d, i_b]
-            dofs_state.acc[i_d, i_b] = constraint_state.qacc[i_d, i_b]
-
-            dofs_state.qf_constraint[i_d, i_b] = constraint_state.qfrc_constraint[i_d, i_b]
-            dofs_state.force[i_d, i_b] = dofs_state.qf_smooth[i_d, i_b] + constraint_state.qfrc_constraint[i_d, i_b]
-
 
 @qd.func
-def func_extract_block_matrix_from_AR(
-    Ac,
-    i_b: int,
-    start: int,
-    n: int,
-    constraint_state: array_class.ConstraintState,
-):
-    for j in range(n):
-        for k in range(n):
-            Ac[j * n + k] = constraint_state.efc_AR[start + j, start + k, i_b]
-    return Ac
-
-
-@qd.func
-def func_residual_constraint_force(
-    res,
-    i_b: int,
-    i_efc: int,
-    dim: int,
-    constraint_state: array_class.ConstraintState,
-):
-    for j in range(dim):
-        res[j] = constraint_state.efc_b[i_efc + j, i_b]
-        for k in range(constraint_state.n_constraints[i_b]):
-            res[j] += constraint_state.efc_AR[i_efc + j, k, i_b] * constraint_state.efc_force[k, i_b]
-    return res
-
-
-@qd.func
-def func_cost_change(
-    i_b: int,
-    Ac,
-    force: array_class.V_ANNOTATION,
-    force_start: int,
-    old_force,
-    res,
-    dim: int,
-    eps,
-):
+def func_cost_change(i_b: int, force_start: int, Ac, old_force, res, eps, force: qd.Tensor, dim: int):
     change = gs.qd_float(0.0)
     if dim == 1:
         delta = force[force_start, i_b] - old_force[0]
@@ -381,43 +609,3 @@ def func_cost_change(
             force[force_start + i, i_b] = old_force[i]
         change = 0.0
     return change
-
-
-@qd.kernel(fastcache=gs.use_fastcache)
-def compute_A_diag(
-    entities_info: array_class.EntitiesInfo,
-    rigid_global_info: array_class.RigidGlobalInfo,
-    constraint_state: array_class.ConstraintState,
-    static_rigid_sim_config: qd.template(),
-):
-    _B = constraint_state.jac.shape[2]
-    n_dofs = constraint_state.jac.shape[1]
-    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        # For each constraint row i: Ai = Ji * M^{-1} * Ji^T
-        for i_c in range(constraint_state.n_constraints[i_b]):
-            # tmp = M^{-1} * Ji^T
-            for i_d in range(n_dofs):
-                constraint_state.Mgrad[i_d, i_b] = constraint_state.jac[i_c, i_d, i_b]
-
-            rigid_solver.func_solve_mass_batch(
-                i_b,
-                constraint_state.Mgrad,
-                constraint_state.Mgrad,
-                array_class.PLACEHOLDER,
-                entities_info=entities_info,
-                rigid_global_info=rigid_global_info,
-                static_rigid_sim_config=static_rigid_sim_config,
-                is_backward=False,
-            )
-
-            # Ai = Ji * tmp
-            aii = gs.qd_float(0.0)
-            if qd.static(static_rigid_sim_config.sparse_solve):
-                for i_d_ in range(constraint_state.jac_n_relevant_dofs[i_c, i_b]):
-                    i_d = constraint_state.jac_relevant_dofs[i_c, i_d_, i_b]
-                    aii += constraint_state.jac[i_c, i_d, i_b] * constraint_state.Mgrad[i_d, i_b]
-            else:
-                for i_d in range(n_dofs):
-                    aii += constraint_state.jac[i_c, i_d, i_b] * constraint_state.Mgrad[i_d, i_b]
-            constraint_state.efc_A_diag[i_c, i_b] = aii

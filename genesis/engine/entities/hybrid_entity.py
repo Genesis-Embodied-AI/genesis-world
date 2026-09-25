@@ -51,15 +51,7 @@ class HybridEntity(Entity):
         The surface properties applied to the soft part of the entity.
     """
 
-    def __init__(
-        self,
-        idx,
-        scene,
-        material,
-        morph,
-        surface,
-        name: str | None = None,
-    ):
+    def __init__(self, idx, scene, material, morph, surface, name: str | None = None):
         super().__init__(idx, scene, morph, None, material, surface, name=name)
 
         material_rigid = material.material_rigid
@@ -78,11 +70,7 @@ class HybridEntity(Entity):
                 gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to False")
                 material_rigid.needs_coup = False
 
-            part_rigid = scene.add_entity(
-                material=material_rigid,
-                morph=morph,
-                surface=surface_rigid,
-            )
+            part_rigid = scene.add_entity(material=material_rigid, morph=morph, surface=surface_rigid)
 
             # get rigid part in world coords
             augment_link_world_coords(part_rigid)
@@ -101,11 +89,7 @@ class HybridEntity(Entity):
 
         elif isinstance(morph, gs.morphs.Mesh):
             # instantiate soft part
-            part_soft = scene.add_entity(
-                material=material_soft,
-                morph=morph,
-                surface=surface,
-            )
+            part_soft = scene.add_entity(material=material_soft, morph=morph, surface=surface)
 
             # load mesh in the same way as the soft entity
             mesh = load_mesh(morph.file)
@@ -137,10 +121,7 @@ class HybridEntity(Entity):
             else:
                 func_instantiate_rigid_soft_association = material.func_instantiate_rigid_soft_association
             muscle_group, link_idcs, geom_idcs, trans_local_to_global, quat_local_to_global = (
-                func_instantiate_rigid_soft_association(
-                    part_rigid=part_rigid,
-                    part_soft=part_soft,
-                )
+                func_instantiate_rigid_soft_association(part_rigid=part_rigid, part_soft=part_soft)
             )
             if muscle_group is not None:
                 muscle_group = muscle_group.astype(gs.np_int, copy=False)
@@ -390,7 +371,7 @@ class HybridEntity(Entity):
         # can only be called here (at sim build)
         if not self.material.use_default_coupling and self._muscle_group_cache is not None:
             self._part_soft.set_muscle(
-                muscle_group=gs.tensor(self._muscle_group_cache),
+                muscle_group=gs.tensor(self._muscle_group_cache)
                 # no muscle direction as the soft body is actuated by rigid parts
             )
 
@@ -405,17 +386,14 @@ class HybridEntity(Entity):
         """
         if isinstance(self._part_soft, MPMEntity):
             self._kernel_update_soft_part_mpm(
-                f=f, geoms_info=self._solver_rigid.geoms_info, links_state=self._solver_rigid.links_state
+                f=f, geoms_info=self._solver_rigid.dyn_info.geoms, links_state=self._solver_rigid.dyn_state.links
             )
         else:
             raise NotImplementedError
 
     @qd.kernel
     def _kernel_update_soft_part_mpm(
-        self,
-        f: qd.i32,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
+        self, f: qd.i32, geoms_info: array_class.GeomsInfo, links_state: array_class.LinksState
     ):
         for i_p_, i_b in qd.ndrange(self._part_soft.n_particles, self._part_soft._sim._B):
             if self._solver_soft.particles_ng[f, i_p_, i_b].active:
@@ -440,21 +418,11 @@ class HybridEntity(Entity):
                 x_init_local = gu.qd_inv_transform_by_trans_quat(
                     x_init_pos, trans_local_to_global, quat_local_to_global
                 )
-                scaled_pos = gu.qd_transform_by_quat(
-                    gu.qd_inv_transform_by_quat(g_pos_0, g_quat_0),
-                    g_quat_0,
-                )
+                scaled_pos = gu.qd_transform_by_quat(gu.qd_inv_transform_by_quat(g_pos_0, g_quat_0), g_quat_0)
                 tx_pos, tx_quat = gu.qd_transform_pos_quat_by_trans_quat(
-                    scaled_pos,
-                    g_quat_0,
-                    links_state.pos[link_idx, i_b],
-                    links_state.quat[link_idx, i_b],
+                    scaled_pos, g_quat_0, links_state.pos[link_idx, i_b], links_state.quat[link_idx, i_b]
                 )
-                new_x_pos = gu.qd_transform_by_trans_quat(
-                    x_init_local,
-                    trans=tx_pos,
-                    quat=tx_quat,
-                )
+                new_x_pos = gu.qd_transform_by_trans_quat(x_init_local, trans=tx_pos, quat=tx_quat)
 
                 # compute velocity in closed-loop setting
                 dt = self._solver_soft.substep_dt
@@ -540,11 +508,11 @@ def augment_link_world_coords(part_rigid):
         if (link.joints and link.joints[0].type == gs.JOINT_TYPE.FREE) or (
             i_p == -1 and (not link.joints or link.joints[0].type == gs.JOINT_TYPE.FIXED)
         ):
-            link.init_x_pos = link.pos
-            link.init_x_quat = link.quat
+            link.init_x_pos = link.desc.pos
+            link.init_x_quat = link.desc.quat
         else:
             link.init_x_pos, link.init_x_quat = gu.transform_pos_quat_by_trans_quat(
-                link.pos, link.quat, parent_pos, parent_quat
+                link.desc.pos, link.desc.quat, parent_pos, parent_quat
             )
             for joint in link.joints:
                 link.init_x_pos, link.init_x_quat = gu.transform_pos_quat_by_trans_quat(
@@ -569,13 +537,7 @@ def _visualize_muscle_group(positions, muscle_group):
 # ------------------------------------------------------------------------------------
 
 
-def default_func_instantiate_soft_from_rigid(
-    scene,
-    part_rigid,
-    material_soft,
-    material_hybrid,
-    surface,
-):
+def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, material_hybrid, surface):
     meshes = []
     trans_local_to_global = []
     euler_local_to_global = []
@@ -598,10 +560,7 @@ def default_func_instantiate_soft_from_rigid(
             vertex_normals=geom.init_normals,
         )
         outer_verts = verts + inner_mesh.vertex_normals * material_hybrid.thickness
-        outer_mesh = trimesh.Trimesh(
-            vertices=outer_verts,
-            faces=geom.init_faces,
-        )
+        outer_mesh = trimesh.Trimesh(vertices=outer_verts, faces=geom.init_faces)
         # mesh = trimesh.boolean.difference([outer_mesh, inner_mesh]) # wrap around the rigid link
         mesh = outer_mesh  # FIXME: hack to avoid `ValueError: No backends available for boolean operations!`
 
@@ -628,14 +587,7 @@ def default_func_instantiate_soft_from_rigid(
     return part_soft
 
 
-def default_func_instantiate_rigid_from_soft(
-    scene,
-    mesh,
-    morph,
-    material_rigid,
-    material_hybrid,
-    surface,
-):
+def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid, material_hybrid, surface):
     # skeletonization
     gelmesh = trimesh_to_gelmesh(mesh)
     graph_gel = skeletonization(gelmesh)
@@ -663,26 +615,13 @@ def default_func_instantiate_rigid_from_soft(
     pos_rigid = morph.pos + offset.astype(gs.np_float, copy=False)
     quat_rigid = morph.quat
     scale_rigid = morph.scale
-    morph_rigid = gs.morphs.URDF(
-        file=urdf,
-        pos=pos_rigid,
-        quat=quat_rigid,
-        scale=scale_rigid,
-        fixed=morph.fixed,
-    )
-    part_rigid = scene.add_entity(
-        material=material_rigid,
-        morph=morph_rigid,
-        surface=surface,
-    )
+    morph_rigid = gs.morphs.URDF(file=urdf, pos=pos_rigid, quat=quat_rigid, scale=scale_rigid, fixed=morph.fixed)
+    part_rigid = scene.add_entity(material=material_rigid, morph=morph_rigid, surface=surface)
 
     return part_rigid
 
 
-def default_func_instantiate_rigid_soft_association_from_rigid(
-    part_rigid,
-    part_soft,
-):
+def default_func_instantiate_rigid_soft_association_from_rigid(part_rigid, part_soft):
     muscle_group = None  # instantiate soft from rigid already set muscle group using MeshSet
 
     link_idcs = []
@@ -706,10 +645,7 @@ def default_func_instantiate_rigid_soft_association_from_rigid(
     return muscle_group, link_idcs, geom_idcs, trans_local_to_global, quat_local_to_global
 
 
-def default_func_instantiate_rigid_soft_association_from_soft(
-    part_rigid,
-    part_soft,
-):
+def default_func_instantiate_rigid_soft_association_from_soft(part_rigid, part_soft):
     # compute distance between particle position and line segment of each link
     augment_link_world_coords(part_rigid)
     positions = part_soft.init_particles
@@ -721,12 +657,7 @@ def default_func_instantiate_rigid_soft_association_from_soft(
     for i, link in enumerate(part_rigid.links):
         geom = link.geoms[0]
         link_end_x_pos = (
-            gu.transform_by_trans_quat(
-                np.zeros((3,)),
-                trans=geom.init_pos * 2,
-                quat=geom.init_quat,
-            )
-            + link.init_x_pos
+            gu.transform_by_trans_quat(np.zeros((3,)), trans=geom.init_pos * 2, quat=geom.init_quat) + link.init_x_pos
         )  # TODO: check if this is correct
 
         p0 = link.init_x_pos

@@ -6,6 +6,8 @@ rigid object / MPM object / FEM object.
 """
 
 import os
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 from typing_extensions import Self
 
@@ -13,32 +15,36 @@ import numpy as np
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
+import genesis.ext.urdfpy as urdfpy
 import genesis.utils.geom as gu
+import genesis.utils.mjcf as mju
 import genesis.utils.misc as mu
 import genesis.utils.urdf as uu
-import genesis.ext.urdfpy as urdfpy
+from genesis.constants import (
+    GLTF_FORMATS,
+    MJCF_FORMAT,
+    URDF_FORMAT,
+    USD_FORMATS,
+    XACRO_FORMAT,
+    XML_ROOT_TAG_TO_FORMAT,
+)
 from genesis.typing import (
+    FGridArrayType,
     FrozenDictType,
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
+    PositiveVec2FType,
     StrArrayType,
     UnitVec3FType,
     UnitVec4FType,
     Vec2IType,
-    PositiveVec2FType,
     Vec3FType,
 )
+from genesis.utils import serialization
 
 from .misc import CoacdOptions
 from .options import Options
-
-URDF_FORMAT = ".urdf"
-XACRO_FORMAT = ".xacro"
-MJCF_FORMAT = ".xml"
-GLTF_FORMATS = (".glb", ".gltf")
-MESH_FORMATS = (".obj", ".stl", *GLTF_FORMATS)
-USD_FORMATS = (".usd", ".usda", ".usdc", ".usdz")
 
 
 class TetGenMixin(Options):
@@ -81,6 +87,21 @@ class Morph(Options):
     quat : tuple, shape (4,), optional
         The initial quaternion (w-x-y-z convention) of the entity at creation time.
         If specified, `euler` will be ignored. Defaults to None.
+    offset_pos : tuple, shape (3,), optional
+        A fixed pose offset applied in the entity's own body frame on top of the `pos`/`euler` (or `pos`/`quat`) pose.
+        It shifts the world pose used internally by the solver but is stripped back out by the relative getters, so
+        `get_pos`/`get_quat` (which are relative by default) still report `pos`/`quat`. The morph pose and the offset
+        compound exactly like a parent and a child frame: the world pose is
+        `transform_pos_quat_by_trans_quat(offset_pos, offset_quat, pos, quat)`, i.e. the offset is expressed in the body
+        frame defined by `pos`/`quat`. So `offset_pos` rotates together with the orientation rather than being a
+        world-frame shift, and when the orientation is identity it simply adds to `pos`. Defaults to (0.0, 0.0, 0.0).
+    offset_euler : tuple, shape (3,), optional
+        The orientation offset `offset_quat` given as an euler angle in degrees (scipy extrinsic x-y-z convention).
+        Mutually exclusive with `offset_quat`. Defaults to None.
+    offset_quat : tuple, shape (4,), optional
+        A fixed orientation offset (w-x-y-z convention); see `offset_pos` for how it compounds with `pos`/`quat` to
+        form the world pose. Up-axis conversions (e.g. loading a Z-up asset) are stored here.
+        Mutually exclusive with `offset_euler`. Defaults to None.
     visualization : bool, optional
         Whether the entity needs to be visualized. Set it to False if you need a invisible object only for collision
         purposes. Defaults to True. `visualization` and `collision` cannot both be False.
@@ -89,8 +110,7 @@ class Morph(Options):
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
     requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
+        This parameter is deprecated.
     is_free : bool, optional
         This parameter is deprecated.
     """
@@ -99,9 +119,12 @@ class Morph(Options):
     pos: Vec3FType = (0.0, 0.0, 0.0)
     euler: Vec3FType | None = Field(default=None, exclude=True, repr=False)
     quat: UnitVec4FType | None = None
+    offset_pos: Vec3FType = (0.0, 0.0, 0.0)
+    offset_euler: Vec3FType | None = Field(default=None, exclude=True, repr=False)
+    offset_quat: UnitVec4FType | None = None
     visualization: StrictBool = True
     collision: StrictBool = True
-    requires_jac_and_IK: StrictBool = False
+    enable_custom_vverts: StrictBool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -109,6 +132,8 @@ class Morph(Options):
         is_free = data.pop("is_free", None)
         if is_free is not None:
             gs.logger.warning("'is_free' is deprecated and will be removed in the future.")
+        if data.pop("requires_jac_and_IK", None) is not None:
+            gs.logger.warning("'requires_jac_and_IK' is deprecated and has no effect.")
         euler = data.get("euler")
         quat = data.get("quat")
         if euler is not None and quat is not None:
@@ -117,11 +142,27 @@ class Morph(Options):
             data["quat"] = tuple(gu.xyz_to_quat(np.array(euler), rpy=True, degrees=True))
         elif quat is None:
             data["quat"] = (1.0, 0.0, 0.0, 0.0)
+        offset_euler = data.get("offset_euler")
+        offset_quat = data.get("offset_quat")
+        if offset_euler is not None:
+            euler_quat = gu.xyz_to_quat(np.array(offset_euler), rpy=True, degrees=True)
+            # A quaternion and its negation encode the same rotation, so accept either sign.
+            if offset_quat is not None and not (
+                np.allclose(offset_quat, euler_quat, atol=gs.EPS) or np.allclose(offset_quat, -euler_quat, atol=gs.EPS)
+            ):
+                gs.raise_exception("'offset_euler' and 'offset_quat' cannot both be set.")
+            data["offset_quat"] = tuple(euler_quat)
+        elif offset_quat is None:
+            data["offset_quat"] = (1.0, 0.0, 0.0, 0.0)
         return data
 
     def model_post_init(self, context: Any) -> None:
         if not self.visualization and not self.collision:
             gs.raise_exception("`visualization` and `collision` cannot both be False.")
+
+    def _identifier(self) -> str:
+        # Short identifier used for entity naming and brief repr; defaults to the morph type name.
+        return type(self).__name__.lower()
 
 
 ############################ Nowhere ############################
@@ -160,9 +201,6 @@ class Primitive(Morph):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics.
-        Defaults to False. **This is only used for RigidEntity.**
     fixed : bool, optional
         Whether the primitive should be fixed. Defaults to False. **This is only used for RigidEntity.**
     batch_fixed_verts : bool, optional
@@ -213,9 +251,6 @@ class Box(Primitive, TetGenMixin):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
     fixed : bool, optional
         Whether the primitive should be fixed. Defaults to False. **This is only used for RigidEntity.**
     batch_fixed_verts : bool, optional
@@ -305,9 +340,6 @@ class Cylinder(Primitive, TetGenMixin):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
     fixed : bool, optional
         Whether the primitive should be fixed. Defaults to False. **This is only used for RigidEntity.**
     batch_fixed_verts : bool, optional
@@ -370,9 +402,6 @@ class Sphere(Primitive, TetGenMixin):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
     fixed : bool, optional
         Whether the primitive should be fixed. Defaults to False. **This is only used for RigidEntity.**
     batch_fixed_verts : bool, optional
@@ -467,8 +496,8 @@ class Plane(Primitive):
             gs.raise_exception("Plane `fixed` must be True.")
         super().__init__(fixed=True, **data)
 
-        if self.requires_jac_and_IK:
-            gs.raise_exception("`requires_jac_and_IK` must be False for `Plane`.")
+        if self.enable_custom_vverts:
+            gs.raise_exception("`enable_custom_vverts` must be False for `Plane`.")
 
 
 ############################ Mesh ############################
@@ -480,8 +509,9 @@ class FileMorph(Morph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the file. An MJCF or URDF description built in memory is accepted as XML content in place of
+        the path, either as a string or as an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -494,7 +524,9 @@ class FileMorph(Morph):
     quat : tuple, shape (4,), optional
         The quaternion (w-x-y-z convention) of the entity. If specified, `euler` will be ignored. Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the mesh. Default to True. **This is only used for RigidEntity.**
+        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
+        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
+        RigidEntity.**
     decimate_face_num : int, optional
         The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
     decimate_aggressiveness : int
@@ -502,6 +534,14 @@ class FileMorph(Morph):
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
         geometry if necessary. 8 does what needs to be done at all costs. Defaults to 2.
         **This is only used for RigidEntity.**
+    watertighten : int, optional
+        Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
+        integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or
+        self-intersecting mesh into the single watertight surface a grid signed distance field requires, decimating
+        it under a feature-preserving cost cutoff. 0 bypasses the wrap (mesh kept as-is), higher values collapse more
+        of it, and 8 is the strongest decimation the cutoff still allows (every level stays watertight and preserves
+        the closed shape rather than collapsing thin cross-sections). ``None`` skips watertightening altogether.
+        Defaults to 5. **This is only used for RigidEntity.**
     convexify : bool, optional
         Whether to convexify the entity. When convexify is True, all the meshes in the entity will each be converted
         to a set of convex hulls. The mesh will be decomposed into multiple convex components if the convex hull is not
@@ -526,9 +566,11 @@ class FileMorph(Morph):
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
-        stability. Only applies to root (floating-base) links. Uses file-specified inertia if valid (and
-        ``recompute_inertia=False``), otherwise computes from geometry. Defaults to None, which resolves to True
-        for basic rigid objects (entities with only a root free joint and no articulated descendants), False otherwise.
+        stability. The frame is then the solver's to keep, so the center of mass and the inertia of such a link cannot
+        be written once the scene is built; set it to False to keep the authored frame and write them at runtime. Only
+        applies to root (floating-base) links. Uses file-specified inertia if valid (and ``recompute_inertia=False``),
+        otherwise computes from geometry. Defaults to None, which resolves to True for basic rigid objects (entities
+        with only a root free joint and no articulated descendants), False otherwise.
         **This is only used for RigidEntity.**
     file_meshes_are_zup : bool, optional
         Defines if the mesh files are expressed in a Z-up or Y-up coordinate system. If set to true, meshes are loaded
@@ -544,16 +586,16 @@ class FileMorph(Morph):
     batch_fixed_verts : bool, optional
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
     """
 
-    file: Any = ""
+    # Shown in the repr header via __repr_name__ (a bounded identifier for in-memory descriptions), so it is kept out
+    # of the field listing to avoid both duplicating it and dumping a whole inline document.
+    file: Any = Field(default="", repr=False)
     scale: Annotated[tuple[PositiveFloat, PositiveFloat, PositiveFloat], Field(strict=False)] | PositiveFloat = 1.0
-    decimate: StrictBool = True
+    decimate: StrictBool | None = None
     decimate_face_num: PositiveInt = 500
     decimate_aggressiveness: StrictInt = Field(default=2, ge=0, le=8)
+    watertighten: StrictInt | None = Field(default=5, ge=0, le=8)
     convexify: StrictBool | None = None
     decompose_object_error_threshold: float = Field(default=0.15, ge=0, allow_inf_nan=True)
     decompose_robot_error_threshold: float = Field(default=float("inf"), ge=0, allow_inf_nan=True)
@@ -576,13 +618,26 @@ class FileMorph(Morph):
             data["coacd_options"] = CoacdOptions()
 
         file = data.get("file", "")
+        if isinstance(file, os.PathLike):
+            file = data["file"] = str(file)
         if isinstance(file, str) and file:
-            abs_file = os.path.abspath(file)
-            if not os.path.exists(abs_file):
-                abs_file = os.path.join(gs.utils.get_assets_dir(), file)
-            if not os.path.exists(abs_file):
-                gs.raise_exception(f"File not found in either current directory or assets directory: '{file}'.")
-            data["file"] = abs_file
+            # Inline XML content (a description built in-memory) parses directly and is passed through untouched to the
+            # loader. A path string does not parse as XML and is resolved against the working and assets directories.
+            try:
+                ET.fromstring(file)
+            except ET.ParseError:
+                abs_file = os.path.abspath(file)
+                if not os.path.exists(abs_file):
+                    abs_file = os.path.join(gs.utils.get_assets_dir(), file)
+                if not os.path.exists(abs_file):
+                    gs.raise_exception(f"File not found in either current directory or assets directory: '{file}'.")
+                data["file"] = abs_file
+        elif isinstance(file, (ET.Element, ET.ElementTree)):
+            # An element tree is XML content by construction, so it is serialized to the inline string form the loaders
+            # read without the parse round-trip above.
+            if isinstance(file, ET.ElementTree):
+                file = file.getroot()
+            data["file"] = ET.tostring(file, encoding="unicode")
 
         return data
 
@@ -616,13 +671,33 @@ class FileMorph(Morph):
         if scale.ndim > 1 or scale.size not in (1, 3):
             gs.raise_exception("`scale` should be a scalar sequence of length 1 or 3.")
 
+    def _identifier(self) -> str:
+        file = self.file
+        if not isinstance(file, str):
+            return file.name
+        if os.path.exists(file):
+            return Path(file).stem
+        # An in-memory description has no filename to fall back on; subclasses that embed a name (MJCF model,
+        # URDF robot) override this, otherwise the morph type name stands in for the document.
+        return super()._identifier()
+
     def __repr_name__(self):
-        return f"{super().__repr_name__()[:-1]}(file='{self.file}')>"
+        # A real file path is shown verbatim; an MJCF/URDF built in memory has no path on disk, so a bounded
+        # identifier stands in for the document rather than dumping it.
+        file = self.file
+        if isinstance(file, str) and not os.path.exists(file):
+            file = f"<inline {self._identifier()}>"
+        return f"{super().__repr_name__()[:-1]}(file='{file}')>"
 
     def is_format(self, format):
         if not isinstance(self.file, (str, os.PathLike)):
             return False
-        return str(self.file).lower().endswith(format)
+        # Inline XML content is identified by its root tag rather than a file extension.
+        try:
+            root_tag = ET.fromstring(self.file).tag
+        except (ET.ParseError, TypeError):
+            return str(self.file).lower().endswith(format)
+        return XML_ROOT_TAG_TO_FORMAT.get(root_tag) == format
 
 
 class Mesh(FileMorph, TetGenMixin):
@@ -651,7 +726,9 @@ class Mesh(FileMorph, TetGenMixin):
     quat : tuple, shape (4,), optional
         The quaternion (w-x-y-z convention) of the entity. If specified, `euler` will be ignored. Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the mesh. Defaults to True. **This is only used for RigidEntity.**
+        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
+        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
+        RigidEntity.**
     decimate_face_num : int, optional
         The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
     decimate_aggressiveness : int
@@ -659,6 +736,14 @@ class Mesh(FileMorph, TetGenMixin):
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
         geometry if necessary. 8 does what needs to be done at all costs. Defaults to 5.
         **This is only used for RigidEntity.**
+    watertighten : int, optional
+        Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
+        integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or
+        self-intersecting mesh into the single watertight surface a grid signed distance field requires, decimating
+        it under a feature-preserving cost cutoff. 0 bypasses the wrap (mesh kept as-is), higher values collapse more
+        of it, and 8 is the strongest decimation the cutoff still allows (every level stays watertight and preserves
+        the closed shape rather than collapsing thin cross-sections). ``None`` skips watertightening altogether.
+        Defaults to 5. **This is only used for RigidEntity.**
     convexify : bool, optional
         Whether to convexify the entity. When convexify is True, all the meshes in the entity will each be converted
         to a set of convex hulls. The mesh with be decomposed into multiple convex components if a single one is not
@@ -689,9 +774,6 @@ class Mesh(FileMorph, TetGenMixin):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -759,19 +841,19 @@ class Mesh(FileMorph, TetGenMixin):
 
         if is_gltf:
             if self.file_meshes_are_zup:
-                gs.logger.warning(
-                    "Specifying 'file_meshes_are_zup' for GLTF/GLB files is not supported. A rotation will be applied "
-                    "explicitly on the morph instead. Please consider fixing your asset to use Y-UP convention."
+                # GLTF/GLB is Y-up by standard, so a Z-up claim is honored by recording the compensating rotation in
+                # 'offset_quat'. It is post-multiplied on the user orientation to form the world pose, while 'quat'
+                # stays clean and is what relative getters report.
+                gs.logger.info(
+                    "Honoring 'file_meshes_are_zup' for a GLTF/GLB file by recording a compensating rotation in "
+                    "'offset_quat'. Consider fixing your asset to use the standard Y-up convention instead."
                 )
                 y_up_quat = (1.0, -1.0, 0.0, 0.0)
-                if self.quat is None:
-                    self.quat = y_up_quat
-                else:
-                    self.quat = tuple(
-                        gu.transform_quat_by_quat(
-                            np.array(y_up_quat, dtype=gs.np_float), np.array(self.quat, dtype=gs.np_float)
-                        )
+                self.offset_quat = tuple(
+                    gu.transform_quat_by_quat(
+                        np.array(y_up_quat, dtype=gs.np_float), np.array(self.offset_quat, dtype=gs.np_float)
                     )
+                )
                 if self.scale is not None:
                     scale_arr = np.atleast_1d(np.array(self.scale))
                     if scale_arr.size == 3:
@@ -820,8 +902,8 @@ class MJCF(FileMorph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the MJCF file, or the MJCF content itself as a string or an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -837,7 +919,9 @@ class MJCF(FileMorph):
         The quaternion (w-x-y-z convention) of the entity's baselink. If specified, `euler` will be ignored.
         Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the mesh. Defaults to True. **This is only used for RigidEntity.**
+        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
+        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
+        RigidEntity.**
     decimate_face_num : int, optional
         The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
     decimate_aggressiveness : int
@@ -845,6 +929,14 @@ class MJCF(FileMorph):
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
         geometry if necessary. 8 does what needs to be done at all costs. Defaults to 5.
         **This is only used for RigidEntity.**
+    watertighten : int, optional
+        Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
+        integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or
+        self-intersecting mesh into the single watertight surface a grid signed distance field requires, decimating
+        it under a feature-preserving cost cutoff. 0 bypasses the wrap (mesh kept as-is), higher values collapse more
+        of it, and 8 is the strongest decimation the cutoff still allows (every level stays watertight and preserves
+        the closed shape rather than collapsing thin cross-sections). ``None`` skips watertightening altogether.
+        Defaults to 5. **This is only used for RigidEntity.**
     convexify : bool, optional
         Whether to convexify the entity. When convexify is True, all the meshes in the entity will each be converted
         to a set of convex hulls. The mesh with be decomposed into multiple convex components if a single one is not
@@ -878,8 +970,6 @@ class MJCF(FileMorph):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False.
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to True.
     batch_fixed_verts : bool, optional
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
@@ -888,14 +978,19 @@ class MJCF(FileMorph):
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
         **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators. In practice it is applied to all joints regardless of whether they are
-        actuated. None to disable. Default to 0.1.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
+    exclude_ground_plane : bool, optional
+        Whether to exclude plane geometries authored directly under the MJCF worldbody if any. Defaults to False.
     """
 
     pos: Vec3FType | None = None
     quat: UnitVec4FType | None = None
-    requires_jac_and_IK: StrictBool = True
     default_armature: float | None = Field(default=0.1, ge=0)
+    exclude_ground_plane: StrictBool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -911,6 +1006,17 @@ class MJCF(FileMorph):
     def model_post_init(self, context: Any) -> None:
         if not self.is_format(MJCF_FORMAT):
             gs.raise_exception(f"Expected `{MJCF_FORMAT}` extension for MJCF file: {self.file}")
+
+    def _identifier(self) -> str:
+        # A morph outlives the file it came from, because the entity builds only once. An unreadable file falls back
+        # to the identifier of the morph type.
+        if isinstance(self.file, str):
+            try:
+                if name := mju.get_model_name(self.file):
+                    return name
+            except (ET.ParseError, OSError):
+                pass
+        return super()._identifier()
 
 
 class URDF(FileMorph):
@@ -934,8 +1040,8 @@ class URDF(FileMorph):
 
     Parameters
     ----------
-    file : str
-        The path to the file.
+    file : str or xml.etree.ElementTree.Element
+        The path to the URDF file, or the URDF content itself as a string or an element tree.
     scale : float or tuple, optional
         The scaling factor for the size of the entity. If a float, it scales uniformly.
         If a 3-tuple, it scales along each axis. Defaults to 1.0.
@@ -950,7 +1056,9 @@ class URDF(FileMorph):
     quat : tuple, shape (4,), optional
         The quaternion (w-x-y-z convention) of the entity. If specified, `euler` will be ignored. Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the mesh. Defaults to True. **This is only used for RigidEntity.**
+        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
+        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
+        RigidEntity.**
     decimate_face_num : int, optional
         The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
     decimate_aggressiveness : int
@@ -958,6 +1066,14 @@ class URDF(FileMorph):
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
         geometry if necessary. 8 does what needs to be done at all costs. Defaults to 5.
         **This is only used for RigidEntity.**
+    watertighten : int, optional
+        Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
+        integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or
+        self-intersecting mesh into the single watertight surface a grid signed distance field requires, decimating
+        it under a feature-preserving cost cutoff. 0 bypasses the wrap (mesh kept as-is), higher values collapse more
+        of it, and 8 is the strongest decimation the cutoff still allows (every level stays watertight and preserves
+        the closed shape rather than collapsing thin cross-sections). ``None`` skips watertightening altogether.
+        Defaults to 5. **This is only used for RigidEntity.**
     convexify : bool, optional
         Whether to convexify the entity. When convexify is True, all the meshes in the entity will each be converted
         to a set of convex hulls. The mesh with be decomposed into multiple convex components if a single one is not
@@ -991,17 +1107,15 @@ class URDF(FileMorph):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False.
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to True.
     fixed : bool, optional
         Whether the baselink of the entity should be fixed. Defaults to False.
     batch_fixed_verts : bool, optional
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
     prioritize_urdf_material : bool, optional
-        Sometimes a geom in a urdf file will be assigned a color, and the geom asset file also contains its own visual
-        material. This parameter controls whether to prioritize the URDF-defined material over the asset's own material.
-        Defaults to False.
+        Sometimes a geom in a urdf file will be assigned a color or a texture, and the geom asset file also contains its
+        own visual material. This parameter controls whether to prioritize the URDF-defined material over the asset's
+        own material. Defaults to False.
     merge_fixed_links : bool, optional
         Whether to merge links connected via a fixed joint. Defaults to True.
     links_to_keep : list of str, optional
@@ -1011,8 +1125,11 @@ class URDF(FileMorph):
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
         **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators. In practice it is applied to all joints regardless of whether they are
-        actuated. None to disable. Default to 0.1.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     xacro_args : dict, optional
         Key-value pairs to override ``xacro:arg`` declarations in the xacro file
         (e.g. ``{"use_sim": "true", "arm_length": "0.5"}``). Only used for ``.xacro`` files. Defaults to ``{}``.
@@ -1020,7 +1137,6 @@ class URDF(FileMorph):
 
     fixed: StrictBool = False
     prioritize_urdf_material: StrictBool = False
-    requires_jac_and_IK: StrictBool = True
     merge_fixed_links: StrictBool = True
     links_to_keep: StrArrayType = ()
     default_armature: float | None = Field(default=0.1, ge=0)
@@ -1037,15 +1153,21 @@ class URDF(FileMorph):
         return data
 
     def model_post_init(self, context: Any) -> None:
-        if self.is_format(XACRO_FORMAT):
-            self.file = uu.load_xacro(self.file, self.xacro_args)
-        elif not self.is_format(URDF_FORMAT):
+        if not (self.is_format(URDF_FORMAT) or self.is_format(XACRO_FORMAT)):
             gs.raise_exception(f"Expected `{URDF_FORMAT}` or `{XACRO_FORMAT}` extension for URDF file: {self.file}")
 
     def is_format(self, format):
         if isinstance(self.file, urdfpy.URDF):
             return format == URDF_FORMAT
         return super().is_format(format)
+
+    def _identifier(self) -> str:
+        if isinstance(self.file, str):
+            try:
+                return uu.get_robot_name(self.file)
+            except (ValueError, ET.ParseError, FileNotFoundError, OSError):
+                pass
+        return super()._identifier()
 
 
 class Drone(FileMorph):
@@ -1073,7 +1195,9 @@ class Drone(FileMorph):
     quat : tuple, shape (4,), optional
         The quaternion (w-x-y-z convention) of the entity. If specified, `euler` will be ignored. Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the mesh. Defaults to True. **This is only used for RigidEntity.**
+        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
+        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
+        RigidEntity.**
     decimate_face_num : int, optional
         The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
     decimate_aggressiveness : int
@@ -1081,6 +1205,14 @@ class Drone(FileMorph):
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
         geometry if necessary. 8 does what needs to be done at all costs. Defaults to 5.
         **This is only used for RigidEntity.**
+    watertighten : int, optional
+        Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
+        integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or
+        self-intersecting mesh into the single watertight surface a grid signed distance field requires, decimating
+        it under a feature-preserving cost cutoff. 0 bypasses the wrap (mesh kept as-is), higher values collapse more
+        of it, and 8 is the strongest decimation the cutoff still allows (every level stays watertight and preserves
+        the closed shape rather than collapsing thin cross-sections). ``None`` skips watertightening altogether.
+        Defaults to 5. **This is only used for RigidEntity.**
     convexify : bool, optional
         Whether to convexify the entity. When convexify is True, all the meshes in the entity will each be converted
         to a set of convex hulls. The mesh with be decomposed into multiple convex components if a single one is not
@@ -1114,9 +1246,9 @@ class Drone(FileMorph):
     collision : bool, optional
         **NB**: Drone doesn't support collision checking for now.
     prioritize_urdf_material : bool, optional
-        Sometimes a geom in a urdf file will be assigned a color, and the geom asset file also contains its own visual
-        material. This parameter controls whether to prioritize the URDF-defined material over the asset's own material.
-        Defaults to False.
+        Sometimes a geom in a urdf file will be assigned a color or a texture, and the geom asset file also contains its
+        own visual material. This parameter controls whether to prioritize the URDF-defined material over the asset's
+        own material. Defaults to False.
     model : str, optional
         The model of the drone. Defaults to 'CF2X'. Supported models are 'CF2X', 'CF2P', and 'RACE'.
     COM_link_name : str, optional
@@ -1134,8 +1266,11 @@ class Drone(FileMorph):
     links_to_keep : list of str, optional
         A list of link names that should not be skipped during link merging. Defaults to ().
     default_armature : float, optional
-        Default rotor inertia of the actuators. In practice it is applied to all joints regardless of whether they are
-        actuated. None to disable. Default to 0.1.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1 if
+        MuJoCo compatibility is disabled on the rigid solver, None otherwise.
     default_base_ang_damping_scale : float, optional
         Default angular damping applied on the floating base that will be rescaled by the total mass.
         None to disable. Default to 1e-5.
@@ -1237,7 +1372,7 @@ class Terrain(Morph):
     subterrain_types : str or 2D list of str, optional
         The types of subterrains to generate. If a string, it will be repeated for all subterrains.
         If a 2D list, it should have the same shape as `n_subterrains`.
-    height_field : array-like, optional
+    height_field : array-like or torch.Tensor, optional
         The height field to generate the terrain. If specified, all other configurations will be ignored.
         Defaults to None.
     name : str, optional
@@ -1265,7 +1400,7 @@ class Terrain(Morph):
         ["pyramid_sloped_terrain", "discrete_obstacles_terrain", "wave_terrain"],
         ["random_uniform_terrain", "pyramid_stairs_terrain", "sloped_terrain"],
     ]
-    height_field: Any = None
+    height_field: FGridArrayType | None = None
     name: str | None = None
     subterrain_parameters: dict[str, dict] | None = None
 
@@ -1310,11 +1445,6 @@ class Terrain(Morph):
 
     def model_post_init(self, context: Any) -> None:
         if self.height_field is not None:
-            try:
-                if np.array(self.height_field).ndim != 2:
-                    gs.raise_exception("`height_field` should be a 2D array.")
-            except Exception:
-                gs.raise_exception("`height_field` should be array-like to be converted to np.ndarray.")
             return
 
         if not isinstance(self.subterrain_types, str):
@@ -1334,6 +1464,9 @@ class Terrain(Morph):
             self.subterrain_size[1], self.horizontal_scale
         ):
             gs.raise_exception("`subterrain_size` should be divisible by `horizontal_scale`.")
+
+    def _identifier(self) -> str:
+        return self.name if self.name else super()._identifier()
 
     @property
     def default_params(self):
@@ -1410,7 +1543,9 @@ class USD(FileMorph):
     quat : tuple, shape (4,), optional
         The quaternion (w-x-y-z convention) of the entity. If specified, `euler` will be ignored. Defaults to None.
     decimate : bool, optional
-        Whether to decimate (simplify) the mesh. Default to True. **This is only used for RigidEntity.**
+        Whether to decimate (simplify) the collision mesh. Defaults to True when convexify is True and False otherwise,
+        since decimation removes the surface detail a non-convex collision mesh is kept for. **This is only used for
+        RigidEntity.**
     decimate_face_num : int, optional
         The number of faces to decimate to. Defaults to 500. **This is only used for RigidEntity.**
     decimate_aggressiveness : int
@@ -1418,6 +1553,14 @@ class USD(FileMorph):
         0 is losseless. 2 preserves all features of the original geometry. 5 may significantly alters the original
         geometry if necessary. 8 does what needs to be done at all costs. Defaults to 2.
         **This is only used for RigidEntity.**
+    watertighten : int, optional
+        Aggressiveness of the watertight wrap built for a non-convex (``convexify=False``) collision mesh, as an
+        integer from 0 to 8 on the same scale as ``decimate_aggressiveness``. The wrap closes an open or
+        self-intersecting mesh into the single watertight surface a grid signed distance field requires, decimating
+        it under a feature-preserving cost cutoff. 0 bypasses the wrap (mesh kept as-is), higher values collapse more
+        of it, and 8 is the strongest decimation the cutoff still allows (every level stays watertight and preserves
+        the closed shape rather than collapsing thin cross-sections). ``None`` skips watertightening altogether.
+        Defaults to 5. **This is only used for RigidEntity.**
     convexify : bool, optional
         Whether to convexify the entity. When convexify is True, all the meshes in the entity will each be converted
         to a set of convex hulls. The mesh will be decomposed into multiple convex components if the convex hull is not
@@ -1457,12 +1600,11 @@ class USD(FileMorph):
     batch_fixed_verts : bool, optional
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
-    requires_jac_and_IK : bool, optional
-        Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to False.
-        **This is only used for RigidEntity.**
     default_armature : float, optional
-        Default rotor inertia of the actuators. In practice it is applied to all joints regardless of whether they are
-        actuated. None to disable. Default to 0.1.
+        Default rotor inertia of the actuators. It applies to every revolute or prismatic joint moving a link on its own
+        whose armature the model file leaves at zero, regardless of whether it is actuated, and an authored armature is
+        kept as it is. The rotor inertia stabilises the constraint solve and damps the joint response, at the cost of
+        inertia the real actuator may lack, which slows every such joint down. None to disable. Defaults to 0.1.
 
     Joint Dynamics Options
     ----------------------
@@ -1520,8 +1662,6 @@ class USD(FileMorph):
     ----------------
     prim_path : str, optional
         The parsing target prim path. Defaults to None.
-    usd_ctx : Any, optional
-        The parser context. Defaults to None.
     """
 
     # Mesh Options
@@ -1573,7 +1713,6 @@ class USD(FileMorph):
     visual_mesh_prim_patterns: StrArrayType = (r"^([vV]isual).*",)
 
     # USD specific Options
-    usd_ctx: Any = None
     prim_path: str | None = None
 
     def __init__(self, **data):
@@ -1585,13 +1724,31 @@ class USD(FileMorph):
                 "USD file has independent metadata `up_axis` for up axis specification."
             )
 
-        if self.usd_ctx is None:
-            from genesis.utils.usd import UsdContext
+        if not self.is_format(USD_FORMATS):
+            gs.raise_exception(f"Expected `{USD_FORMATS}` extension for USD file: {self.file}")
 
-            if not self.is_format(USD_FORMATS):
-                gs.raise_exception(f"Expected `{USD_FORMATS}` extension for USD file: {self.file}")
-
-            self.usd_ctx = UsdContext(self.file)
+    def _identifier(self) -> str:
+        if self.prim_path:
+            return self.prim_path.rstrip("/").split("/")[-1]
+        return super()._identifier()
 
     def __repr_name__(self):
-        return f"{super().__repr_name__()[:-1]}(file='{self.file}', prim_path='{self.prim_path}')>"
+        return f"{super().__repr_name__()[:-1]}, prim_path='{self.prim_path}')>"
+
+
+def _exported_urdf(robot: urdfpy.URDF, exporting: serialization.Exporting) -> str:
+    """Export a URDF model built in memory as the document it stands for.
+
+    Relative asset paths stay as written: an in-memory model resolves them against the working directory when it is
+    read (see '_loaded_urdf').
+    """
+    return ET.tostring(robot.to_xml(), encoding="unicode")
+
+
+def _loaded_urdf(raw: str, loading: serialization.Loading) -> urdfpy.URDF:
+    """Recreate the URDF model from its document, as an inline document is read."""
+    node = ET.fromstring(raw)
+    return urdfpy.URDF._from_xml(node, node, os.getcwd())
+
+
+serialization.register(urdfpy.URDF, _exported_urdf, _loaded_urdf)

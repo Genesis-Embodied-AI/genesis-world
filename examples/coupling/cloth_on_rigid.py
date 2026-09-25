@@ -6,12 +6,11 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="32", logging_level="info")
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="32", logging_level="info")
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -21,18 +20,17 @@ def main():
         pbd_options=gs.options.PBDOptions(
             particle_size=1e-2,
         ),
+        vis_options=gs.options.VisOptions(
+            rendered_envs_idx=[0],
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, 0.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.0),
             camera_fov=40,
         ),
-        vis_options=gs.options.VisOptions(
-            rendered_envs_idx=[0],
-        ),
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     frictionless_rigid = gs.materials.Rigid(
         needs_coup=True,
         coup_friction=0.0,
@@ -65,7 +63,6 @@ def main():
         ),
     )
 
-    ########################## build ##########################
     scene.build(n_envs=0)
 
     horizon = 500 if "PYTEST_VERSION" not in os.environ else 5

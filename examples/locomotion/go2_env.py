@@ -1,6 +1,7 @@
 import math
 
 import torch
+from tensordict import TensorDict
 
 import genesis as gs
 from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
@@ -13,10 +14,9 @@ def gs_rand(lower, upper, batch_shape):
 
 class Go2Env:
     def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False):
-        self.num_envs = num_envs
-        self.num_obs = obs_cfg["num_obs"]
-        self.num_privileged_obs = None
+        self.num_envs: int = num_envs
         self.num_actions = env_cfg["num_actions"]
+        self.cfg = env_cfg
         self.num_commands = command_cfg["num_commands"]
         self.device = gs.device
 
@@ -29,10 +29,9 @@ class Go2Env:
         self.reward_cfg = reward_cfg
         self.command_cfg = command_cfg
 
-        self.obs_scales = obs_cfg["obs_scales"]
-        self.reward_scales = reward_cfg["reward_scales"]
+        self.obs_scales: dict[str, float] = obs_cfg["obs_scales"]
+        self.reward_scales: dict[str, float] = reward_cfg["reward_scales"]
 
-        # create scene
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=self.dt,
@@ -40,18 +39,19 @@ class Go2Env:
             ),
             rigid_options=gs.options.RigidOptions(
                 enable_self_collision=False,
-                tolerance=1e-5,
                 # For this locomotion policy, there are usually no more than 20 collision pairs. Setting a low value
                 # can save memory. Violating this condition will raise an exception.
                 max_collision_pairs=20,
+                tolerance=1e-5,
+            ),
+            vis_options=gs.options.VisOptions(
+                rendered_envs_idx=[0],
             ),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(2.0, 0.0, 2.5),
                 camera_lookat=(0.0, 0.0, 0.5),
                 camera_fov=40,
-                max_FPS=int(1.0 / self.dt),
             ),
-            vis_options=gs.options.VisOptions(rendered_envs_idx=[0]),
             show_viewer=show_viewer,
         )
 
@@ -63,7 +63,6 @@ class Go2Env:
             )
         )
 
-        # add robot
         self.robot = self.scene.add_entity(
             gs.morphs.URDF(
                 file="urdf/go2/urdf/go2.urdf",
@@ -72,7 +71,6 @@ class Go2Env:
             ),
         )
 
-        # build
         self.scene.build(n_envs=num_envs)
 
         # names to indices
@@ -106,7 +104,6 @@ class Go2Env:
         self.base_lin_vel = torch.empty((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
         self.base_ang_vel = torch.empty((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
         self.projected_gravity = torch.empty((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
-        self.obs_buf = torch.empty((self.num_envs, self.num_obs), dtype=gs.tc_float, device=gs.device)
         self.rew_buf = torch.empty((self.num_envs,), dtype=gs.tc_float, device=gs.device)
         self.reset_buf = torch.ones((self.num_envs,), dtype=gs.tc_bool, device=gs.device)
         self.episode_length_buf = torch.empty((self.num_envs,), dtype=gs.tc_int, device=gs.device)
@@ -116,14 +113,14 @@ class Go2Env:
             device=gs.device,
             dtype=gs.tc_float,
         )
-        self.commands_limits = [
+        self.commands_limits: tuple[torch.Tensor, torch.Tensor] = tuple(
             torch.tensor(values, dtype=gs.tc_float, device=gs.device)
             for values in zip(
                 self.command_cfg["lin_vel_x_range"],
                 self.command_cfg["lin_vel_y_range"],
                 self.command_cfg["ang_vel_range"],
             )
-        ]
+        )
         self.actions = torch.zeros((self.num_envs, self.num_actions), dtype=gs.tc_float, device=gs.device)
         self.last_actions = torch.zeros_like(self.actions)
         self.dof_pos = torch.empty_like(self.actions)
@@ -131,13 +128,13 @@ class Go2Env:
         self.last_dof_vel = torch.zeros_like(self.actions)
         self.base_pos = torch.empty((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
         self.base_quat = torch.empty((self.num_envs, 4), dtype=gs.tc_float, device=gs.device)
+        self.base_euler = torch.empty((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
         self.default_dof_pos = torch.tensor(
             [self.env_cfg["default_joint_angles"][name] for name in self.env_cfg["joint_names"]],
             dtype=gs.tc_float,
             device=gs.device,
         )
         self.extras = dict()  # extra information for logging
-        self.extras["observations"] = dict()
 
         # prepare reward functions and multiply reward scales by dt
         self.reward_functions, self.episode_sums = dict(), dict()
@@ -145,6 +142,8 @@ class Go2Env:
             self.reward_scales[name] *= self.dt
             self.reward_functions[name] = getattr(self, "_reward_" + name)
             self.episode_sums[name] = torch.zeros((self.num_envs,), dtype=gs.tc_float, device=gs.device)
+
+        self.reset()
 
     def _resample_commands(self, envs_idx):
         commands = gs_rand(*self.commands_limits, (self.num_envs,))
@@ -181,13 +180,13 @@ class Go2Env:
             self.rew_buf += rew
             self.episode_sums[name] += rew
 
-        # resample commands
         self._resample_commands(self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt) == 0)
 
         # check termination and reset
         self.reset_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf |= torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]
         self.reset_buf |= torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"]
+        self.reset_buf |= self.scene.rigid_solver.get_error_envs_mask()
 
         # Compute timeout
         self.extras["time_outs"] = (self.episode_length_buf > self.max_episode_length).to(dtype=gs.tc_float)
@@ -201,16 +200,10 @@ class Go2Env:
         self.last_actions.copy_(self.actions)
         self.last_dof_vel.copy_(self.dof_vel)
 
-        self.extras["observations"]["critic"] = self.obs_buf
-
-        return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
+        return self.get_observations(), self.rew_buf, self.reset_buf, self.extras
 
     def get_observations(self):
-        self.extras["observations"]["critic"] = self.obs_buf
-        return self.obs_buf, self.extras
-
-    def get_privileged_observations(self):
-        return None
+        return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
 
     def _reset_idx(self, envs_idx=None):
         # reset state
@@ -222,7 +215,6 @@ class Go2Env:
             self.base_quat.copy_(self.init_base_quat)
             self.projected_gravity.copy_(self.init_projected_gravity)
             self.dof_pos.copy_(self.init_dof_pos)
-            self.base_pos.copy_(self.init_base_pos)
             self.base_lin_vel.zero_()
             self.base_ang_vel.zero_()
             self.dof_vel.zero_()
@@ -238,7 +230,6 @@ class Go2Env:
                 envs_idx[:, None], self.init_projected_gravity, self.projected_gravity, out=self.projected_gravity
             )
             torch.where(envs_idx[:, None], self.init_dof_pos, self.dof_pos, out=self.dof_pos)
-            torch.where(envs_idx[:, None], self.init_base_pos, self.base_pos, out=self.base_pos)
             self.base_lin_vel.masked_fill_(envs_idx[:, None], 0.0)
             self.base_ang_vel.masked_fill_(envs_idx[:, None], 0.0)
             self.dof_vel.masked_fill_(envs_idx[:, None], 0.0)
@@ -257,7 +248,10 @@ class Go2Env:
             else:
                 mean = torch.where(n_envs > 0, value[envs_idx].sum() / n_envs, 0.0)
             self.extras["episode"]["rew_" + key] = mean / self.env_cfg["episode_length_s"]
-            value.masked_fill_(envs_idx, 0.0)
+            if envs_idx is None:
+                value.zero_()
+            else:
+                value.masked_fill_(envs_idx, 0.0)
 
         # random sample command upon reset
         self._resample_commands(envs_idx)
@@ -278,9 +272,9 @@ class Go2Env:
     def reset(self):
         self._reset_idx()
         self._update_observation()
-        return self.obs_buf, None
+        return self.get_observations()
 
-    # ------------ reward functions----------------
+    # Reward functions.
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
         lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)

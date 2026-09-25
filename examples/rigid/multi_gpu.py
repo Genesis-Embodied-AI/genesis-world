@@ -9,16 +9,14 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    # get current gpu
     gpu_id = torch.cuda.current_device()
     print("gpu_id:", gpu_id)
+    # Selecting the CUDA device to simulate on is the whole point of this example.
     gs.init(backend=gs.gpu, logger_verbose_time=True)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.5, 0.0, 2.5),
@@ -29,16 +27,16 @@ def main():
         show_FPS=False,
     )
 
-    ########################## entities ##########################
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
         visualize_contact=True,
     )
 
-    ########################## build ##########################
     scene.build()
     for i in range(1000):
         scene.step()

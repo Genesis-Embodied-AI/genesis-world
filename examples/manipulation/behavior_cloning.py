@@ -84,8 +84,8 @@ class BehaviorCloning:
                 # Backward pass
                 self._optimizer.zero_grad()
                 total_loss.backward()
-                self._optimizer.step()
                 torch.nn.utils.clip_grad_norm_(self._policy.parameters(), self._cfg["max_grad_norm"])
+                self._optimizer.step()
 
                 total_action_loss += action_loss
                 total_pose_loss += pose_loss
@@ -101,7 +101,8 @@ class BehaviorCloning:
                 avg_action_loss = total_action_loss / num_batches
                 avg_pose_loss = total_pose_loss / num_batches
 
-            fps = (self._num_steps_per_env * self._env.num_envs) / (forward_time)
+            self._current_iter = it
+            fps = (self._num_steps_per_env * self._env.num_envs) / forward_time
             # Logging
             if (it + 1) % self._cfg["log_freq"] == 0:
                 current_lr = self._optimizer.param_groups[0]["lr"]
@@ -115,7 +116,6 @@ class BehaviorCloning:
                 tf_writer.add_scalar("speed/backward", backward_time, it)
                 tf_writer.add_scalar("speed/fps", int(fps), it)
 
-                #
                 print("--------------------------------")
                 info_str = f" | Iteration:     {it + 1:04d}\n"
                 info_str += f" | Action Loss:   {avg_action_loss:.6f}\n"
@@ -164,20 +164,16 @@ class BehaviorCloning:
     def _collect_with_rl_teacher(self) -> None:
         """Collect experience from environment using stereo rgb images and object poses."""
         # Get state observation
-        obs, _ = self._env.get_observations()
+        obs_dict = self._env.get_observations()
         with torch.inference_mode():
             for _ in range(self._num_steps_per_env):
-                # Get stereo rgb images
                 rgb_obs = self._env.get_stereo_rgb_images(normalize=True)
 
-                # Get teacher action
-                teacher_action = self._teacher(obs).detach()
+                teacher_action = self._teacher(obs_dict).detach()
 
                 # Get end-effector position
                 ee_pose = self._env.robot.ee_pose
 
-                # Get object pose in camera frame
-                # object_pose_camera = self._get_object_pose_in_camera_frame()
                 object_pose = torch.cat(
                     [
                         self._env.object.get_pos(),
@@ -192,15 +188,13 @@ class BehaviorCloning:
                 # Step environment with student action
                 student_action = self._policy(rgb_obs.float(), ee_pose.float())
 
-                # Simple Dagger: use student action if its difference with teacher action is less than 0.5
+                # DAgger: use student action when close to teacher, otherwise fall back to teacher
                 action_diff = torch.norm(student_action - teacher_action, dim=-1)
                 condition = (action_diff < 1.0).unsqueeze(-1).expand_as(student_action)
                 action = torch.where(condition, student_action, teacher_action)
 
-                next_obs, reward, done, _ = self._env.step(action)
+                obs_dict, reward, done, _ = self._env.step(action)
                 self._cur_reward_sum += reward
-
-                obs = next_obs
                 new_ids = (done > 0).nonzero(as_tuple=False)
                 self._rewbuffer.extend(self._cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
                 self._cur_reward_sum[new_ids] = 0
@@ -221,16 +215,8 @@ class BehaviorCloning:
         checkpoint = torch.load(path, map_location=self._device, weights_only=False)
         self._policy.load_state_dict(checkpoint["model_state_dict"])
         self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.current_iter = checkpoint["current_iter"]
-        print(f"Model loaded from {path}")
-
-    def load_finetuned_model(self, path: str) -> None:
-        """Load a fine-tuned model checkpoint."""
-        checkpoint = torch.load(path, map_location=self._device, weights_only=False)
-        self._policy.load_state_dict(checkpoint["model_state_dict"])
-        self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self._current_iter = checkpoint["current_iter"]
-        print(f"Fine-tuned model loaded from {path}")
+        print(f"Model loaded from {path}")
 
 
 class ExperienceBuffer:
@@ -269,11 +255,11 @@ class ExperienceBuffer:
         actions: torch.Tensor,
     ) -> None:
         """Add experience to buffer."""
-        self._ptr = (self._ptr + 1) % self._max_size
         self._rgb_obs[self._ptr] = rgb_obs
         self._robot_pose[self._ptr] = robot_pose
         self._object_poses[self._ptr] = object_poses
         self._actions[self._ptr] = actions
+        self._ptr = (self._ptr + 1) % self._max_size
         self._size = min(self._size + 1, self._max_size)
 
     def get_batches(self, num_mini_batches: int, num_epochs: int) -> Iterator[dict[str, torch.Tensor]]:
@@ -295,16 +281,8 @@ class ExperienceBuffer:
 
     def clear(self) -> None:
         """Clear the buffer."""
-        self._rgb_obs.zero_()
-        self._robot_pose.zero_()
-        self._object_poses.zero_()
-        self._actions.zero_()
         self._ptr = 0
         self._size = 0
-
-    def is_full(self) -> bool:
-        """Check if buffer is full."""
-        return self._size == self._max_size
 
     @property
     def size(self) -> int:
@@ -399,14 +377,12 @@ class Policy(nn.Module):
         right_features = self.shared_encoder(right_rgb).flatten(start_dim=1)
         return left_features, right_features
 
-    def forward(self, rgb_obs: torch.Tensor, state_obs: torch.Tensor | None = None) -> dict:
+    def forward(self, rgb_obs: torch.Tensor, state_obs: torch.Tensor | None = None) -> torch.Tensor:
         """Forward pass with shared stereo encoder for rgb images."""
-        # Get features
         left_features, right_features = self.get_features(rgb_obs)
 
         # Concatenate features (much more efficient than concatenating raw images)
         combined_features = torch.cat([left_features, right_features], dim=-1)
-        # Feature fusion
         fused_features = self.feature_fusion(combined_features)
 
         # Add state information if available

@@ -20,15 +20,15 @@ BOX_RING_RADIUS = 5.0
 
 def main():
     parser = argparse.ArgumentParser(description="Genesis LiDAR/Depth Camera Visualization with Keyboard Teleop")
-    parser.add_argument("-B", "--n_envs", type=int, default=0, help="Number of environments to replicate")
-    parser.add_argument("--cpu", action="store_true", help="Run on CPU instead of GPU")
+    parser.add_argument("-b", "--num-envs", type=int, default=0, help="Number of environments to replicate")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     parser.add_argument("--use-box", action="store_true", help="Use Box as robot instead of Go2")
     parser.add_argument(
         "--pattern", type=str, default="spherical", choices=("spherical", "depth", "grid"), help="Sensor pattern type"
     )
     args = parser.parse_args()
 
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="32", logging_level="info")
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="32", logging_level="info")
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -37,7 +37,6 @@ def main():
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(-6.0, 0.0, 4.0),
             camera_lookat=(0.0, 0.0, 0.5),
-            max_FPS=60,
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
@@ -106,8 +105,8 @@ def main():
 
     if args.pattern == "depth":
         sensor = scene.add_sensor(gs.sensors.DepthCamera(pattern=gs.sensors.DepthCameraPattern(), **sensor_kwargs))
-        scene.start_recording(
-            data_func=(lambda: sensor.read_image()[0]) if args.n_envs > 0 else sensor.read_image,
+        scene.add_recorder(
+            data_func=(lambda: sensor.read_image()[0]) if args.num_envs > 0 else sensor.read_image,
             rec_options=gs.recorders.MPLImagePlot(),
         )
     else:
@@ -120,7 +119,7 @@ def main():
 
         sensor = scene.add_sensor(gs.sensors.Lidar(pattern=pattern_cfg, **sensor_kwargs))
 
-    scene.build(n_envs=args.n_envs)
+    scene.build(n_envs=args.num_envs)
 
     # Initialize pose state
     init_pos = np.array([0.0, 0.0, 0.35], dtype=np.float32)
@@ -130,9 +129,9 @@ def main():
     target_euler = init_euler.copy()
 
     def apply_pose_to_all_envs(pos_np: np.ndarray, quat_np: np.ndarray):
-        if args.n_envs > 0:
-            pos_np = np.expand_dims(pos_np, axis=0).repeat(args.n_envs, axis=0)
-            quat_np = np.expand_dims(quat_np, axis=0).repeat(args.n_envs, axis=0)
+        if args.num_envs > 0:
+            pos_np = np.expand_dims(pos_np, axis=0).repeat(args.num_envs, axis=0)
+            quat_np = np.expand_dims(quat_np, axis=0).repeat(args.num_envs, axis=0)
         robot.set_pos(pos_np)
         robot.set_quat(quat_np)
 
@@ -165,9 +164,8 @@ def main():
         overwrite=True,
     )
 
-    # Print controls
     print("Keyboard Controls:")
-    print("[↑/↓/←/→]: Move XY")
+    print("[Up/Down/Left/Right]: Move XY")
     print("[j/k]: Down/Up")
     print("[n/m]: Roll CCW/CW")
     print("[,/.]: Pitch Up/Down")

@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
 - name: "💬 Support & Questions - Github Community Support"
-  url: https://github.com/Genesis-Embodied-AI/Genesis/discussions
+  url: https://github.com/Genesis-Embodied-AI/genesis-world/discussions
   about: Please ask and answer questions here.
-- name: "⚠️ Documentation Issues"
-  url: https://github.com/Genesis-Embodied-AI/genesis-doc/issues
-  about: Please report issues in our documentation here.

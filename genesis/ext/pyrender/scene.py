@@ -58,6 +58,12 @@ class Scene(object):
         if nodes is None:
             nodes = set()
         self._nodes = set()  # Will be added at the end of this function
+        # Rank of each node in the order it was added, breaking ties when sorting nodes for rendering. Sets iterate in
+        # an order that follows object addresses, so without it two nodes at the same distance from the camera get
+        # blended in an order that changes from one process to the next.
+        self._node_ranks = {}
+        self._node_rank_next = 0
+        self._revision = 0
 
         self.bg_color = bg_color
         self.ambient_light = ambient_light
@@ -144,6 +150,21 @@ class Scene(object):
         return self._meshes_updated
 
     @property
+    def revision(self):
+        """int : Counter of the changes to what the scene draws.
+
+        It advances when a node is added or removed, when a mesh, a light or a node carrying them is moved, and when
+        a GPU buffer update is queued. A consumer keeps the revision it last synced to and repeats its preparation
+        (context bookkeeping, pose upload, shadow maps) only once the scene moved past it, so the renderers sharing
+        a scene do that work once per change.
+        """
+        return self._revision
+
+    def bump_revision(self):
+        """Advance the revision for a change made outside the scene API, such as a GPU buffer update."""
+        self._revision += 1
+
+    @property
     def meshes(self):
         """set of :class:`Mesh` : The meshes in the scene."""
         return set([n.mesh for n in self.mesh_nodes])
@@ -225,6 +246,8 @@ class Scene(object):
             corners = []
             for mesh_node in self.mesh_nodes:
                 mesh = mesh_node.mesh
+                if mesh.is_marker:
+                    continue
                 if any(primitive.is_floor for primitive in mesh.primitives):
                     # Only take into account the centroid for floor plane
                     corners_local = mesh.centroid[np.newaxis]
@@ -240,6 +263,12 @@ class Scene(object):
             else:
                 self._bounds = np.zeros((2, 3))
         return self._bounds
+
+    @bounds.setter
+    def bounds(self, value):
+        """A renderer holding every mesh and pose stacked computes the bounds in one pass and stores them here, which
+        spares recomputing them node by node."""
+        self._bounds = value
 
     @property
     def centroid(self):
@@ -362,6 +391,8 @@ class Scene(object):
         if node in self.nodes:
             raise ValueError("Node already in scene")
         self.nodes.add(node)
+        self._node_ranks[node] = self._node_rank_next
+        self._node_rank_next += 1
 
         # Add node to sets
         if node.name is not None:
@@ -409,6 +440,7 @@ class Scene(object):
 
         self._path_cache = {}
         self._bounds = None
+        self._revision += 1
 
     def has_node(self, node):
         """Check if a node is already in the scene.
@@ -440,6 +472,7 @@ class Scene(object):
             parent.children.remove(node)
         self._path_cache = {}
         self._bounds = None
+        self._revision += 1
 
     def get_pose(self, node):
         """Get the world-frame pose of a node in the scene.
@@ -483,6 +516,9 @@ class Scene(object):
         node._matrix = pose
         if node.mesh is not None:
             self._bounds = None
+        # Moving a camera changes the viewpoint only. Moving a mesh or a light changes what every renderer draws.
+        if node.mesh is not None or node.light is not None:
+            self._revision += 1
 
     def reorder_vertices(self, node, vertices):
         if node.mesh is None or len(node.mesh.primitives) != 1:
@@ -490,15 +526,11 @@ class Scene(object):
         primitive = node.mesh.primitives[0]
         return vertices[primitive.vertex_mapping] if primitive.vertex_mapping is not None else vertices
 
-    def get_buffer_id(self, node, buffer_name):
-        if node.mesh is None or len(node.mesh.primitives) != 1:
-            raise ValueError("Node must have one primitive")
-        primitive = node.mesh.primitives[0]
-        return primitive.get_buffer_id(buffer_name)
-
     def clear(self):
         """Clear out all nodes to form an empty scene."""
         self._nodes = set()
+        self._node_ranks = {}
+        self._node_rank_next = 0
 
         self._name_to_nodes = {}
         self._obj_to_nodes = {}
@@ -515,6 +547,7 @@ class Scene(object):
         self._digraph = nx.DiGraph()
         self._digraph.add_node("world")
         self._path_cache = {}
+        self._revision += 1
 
     def _remove_node(self, node):
         """Remove a node and all its children from the scene.
@@ -527,6 +560,7 @@ class Scene(object):
 
         # Remove self from nodes
         self.nodes.remove(node)
+        del self._node_ranks[node]
 
         # Remove children
         for child in node.children:
@@ -599,26 +633,35 @@ class Scene(object):
 
         return scene_pr
 
-    def sorted_mesh_nodes(self):
-        cam_pos = self.get_pose(self.main_camera_node)
-        cam_loc = cam_pos[..., :3, 3]
-        batched_pos = len(cam_pos.shape) == 3
-        solid_nodes = []
-        trans_nodes = []
-        for node in self.mesh_nodes:
-            mesh = node.mesh
-            if mesh.is_transparent:
-                trans_nodes.append(node)
-            else:
-                solid_nodes.append(node)
+    def sorted_mesh_nodes(self, env_idx=-1):
+        """
+        Nodes to render, in the order they must be drawn from the point of view of the given environment.
 
-        # TODO BETTER SORTING METHOD
-        if batched_pos:
-            # FIXME normally sorting should be done PER scene when having a batched rasterizer render
-            trans_nodes.sort(key=lambda n: -np.linalg.norm(self.get_pose(n)[:3, 3] - cam_loc[0]))
-            solid_nodes.sort(key=lambda n: -np.linalg.norm(self.get_pose(n)[:3, 3] - cam_loc[0]))
-        else:
-            trans_nodes.sort(key=lambda n: -np.linalg.norm(self.get_pose(n)[:3, 3] - cam_loc))
-            solid_nodes.sort(key=lambda n: -np.linalg.norm(self.get_pose(n)[:3, 3] - cam_loc))
+        Opaque nodes come first, nearest to farthest so that the depth test rejects what they hide as early as
+        possible. Transparent ones follow, farthest to nearest, which is the order their blending is only correct in.
+        Both are keyed on the depth of the mesh's centre along the view axis rather than on the distance of the node's
+        origin to the camera, since that is what decides which of two nodes lies behind the other. Nodes at equal depth
+        - debug arrows sharing an origin, for one - keep the order they were added in, so that rendering the same scene
+        twice yields the same image.
+        """
+        nodes = list(self.mesh_nodes)
+        if not nodes:
+            return nodes
 
-        return solid_nodes + trans_nodes
+        cam_pose = self.get_pose(self.main_camera_node)
+        if cam_pose.ndim == 3:
+            cam_pose = cam_pose[max(env_idx, 0)]
+
+        # A camera looks down its own -Z axis, so depth along the view axis grows away from it
+        view_axis = -cam_pose[:3, 2]
+
+        poses = np.stack([self.get_pose(node) for node in nodes])
+        centres = np.einsum("nij,nj->ni", poses[:, :3, :3], [node.mesh.centroid for node in nodes]) + poses[:, :3, 3]
+        depths = (centres - cam_pose[:3, 3]) @ view_axis
+        is_transparent = np.fromiter((node.mesh.is_transparent for node in nodes), bool, len(nodes))
+        ranks = np.fromiter((self._node_ranks[node] for node in nodes), int, len(nodes))
+
+        # Sorting the two groups at once keeps the keys computed a single time, the last one being the primary
+        order = np.lexsort((ranks, np.where(is_transparent, -depths, depths), is_transparent))
+
+        return [nodes[i] for i in order]

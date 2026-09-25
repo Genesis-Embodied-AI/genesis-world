@@ -6,13 +6,10 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(precision="32", logging_level="info")
-
-    ########################## create a scene ##########################
+    gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -31,18 +28,19 @@ def main():
             camera_pos=(3.5, -3.15, 2.42),
             camera_lookat=(0.5, 0.0, 0.5),
             camera_fov=40,
-            max_FPS=60,
         ),
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     frictionless_rigid = gs.materials.Rigid(needs_coup=True, coup_friction=0.0)
     plane = scene.add_entity(
         morph=gs.morphs.Plane(),
     )
     water = scene.add_entity(
-        material=gs.materials.SPH.Liquid(mu=0.01, sampler="regular"),
+        material=gs.materials.SPH.Liquid(
+            sampler="regular",
+            mu=0.01,
+        ),
         morph=gs.morphs.Box(
             pos=(0.5, 0.0, 0.6),
             size=(0.9, 1.6, 1.2),
@@ -62,7 +60,6 @@ def main():
         ),
     )
 
-    ########################## build ##########################
     scene.build()
 
     horizon = 500 if "PYTEST_VERSION" not in os.environ else 5

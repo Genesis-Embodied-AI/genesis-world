@@ -35,8 +35,12 @@ class Elastic(Base):
         self.update_F_S_Jp = self._update_F_S_Jp_elastic
         if self.model == "corotation":
             self.update_stress = self._update_stress_corotation
+            # corotation stress uses U @ V.T from SVD(F_tmp).
+            self.needs_svd = True
         elif self.model == "neohooken":
             self.update_stress = self._update_stress_neohooken
+            # neohooken stress only reads F_tmp and J=det(F_tmp); SVD can be skipped.
+            self.needs_svd = False
 
     @qd.func
     def _update_F_S_Jp_elastic(self, J, F_tmp, U, S, V, Jp):

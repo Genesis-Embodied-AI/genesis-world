@@ -1,0 +1,284 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: sans-serif; }
+  #app { width: 100vw; height: 100vh; }
+  #ui {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(255, 255, 255, 0.85);
+    padding: 8px 10px;
+    border-radius: 5px;
+  }
+  #pairsel { font-size: 14px; max-width: 420px; }
+  #readout { margin-top: 6px; font-size: 14px; }
+</style>
+<script src="https://unpkg.com/three@0.134.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.134.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+<div id="app"></div>
+<div id="ui">
+  <select id="pairsel"></select>
+  <div id="readout">hover a point, click to measure</div>
+</div>
+<script id="pairs-data" type="application/json">__DATA__</script>
+<script>
+const PAIRS = JSON.parse(document.getElementById("pairs-data").textContent);
+const COLORS = ["#4169e1", "#dc143c"];
+const app = document.getElementById("app");
+const readout = document.getElementById("readout");
+const sel = document.getElementById("pairsel");
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xffffff);
+const camera = new THREE.PerspectiveCamera(45, app.clientWidth / app.clientHeight, 1e-4, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(app.clientWidth, app.clientHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+app.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+const light = new THREE.DirectionalLight(0xffffff, 0.6);
+light.position.set(1, 1, 2);
+scene.add(light);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+// One group of two transparent meshes per pair; only the selected pair is visible. DoubleSide so the
+// raycaster reports back faces and interior walls, not just the frontmost surface.
+const groups = PAIRS.map((pair, idx) => {
+  const group = new THREE.Group();
+  ["a", "b"].forEach((key, ki) => {
+    const mesh = pair[key];
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mesh.v.flat()), 3));
+    geometry.setIndex(mesh.f.flat());
+    geometry.computeVertexNormals();
+    const material = new THREE.MeshPhongMaterial({
+      color: COLORS[ki], transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false,
+    });
+    group.add(new THREE.Mesh(geometry, material));
+  });
+  group.visible = idx === 0;
+  scene.add(group);
+  return group;
+});
+PAIRS.forEach((pair, idx) => {
+  const option = document.createElement("option");
+  option.value = idx;
+  option.textContent = pair.label;
+  sel.appendChild(option);
+});
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let hoverPoint = null, diag = 1, current = 0, lastHits = [], depthIndex = 0;
+let hoverColor = 0xffffff, hoverIsBack = false;
+let pins = [], extra = [], downXY = null;
+
+// A 3D cross (three unit segments), drawn on top (depthTest off) to flag a back-facing wall.
+function crossLines(color) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([
+    -1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1,
+  ]), 3));
+  return new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: color, depthTest: false }));
+}
+
+// A sphere drawn on top of the transparent meshes (depthTest off), so markers on enclosed/back surfaces
+// stay visible instead of being buried under the front walls.
+function markerOnTop(color, radius, opacity) {
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 16, 16),
+    new THREE.MeshBasicMaterial({ color: color, depthTest: false, transparent: true, opacity: opacity }),
+  );
+  marker.renderOrder = 999;
+  return marker;
+}
+
+// Hover overlay (ray path + per-surface beads + selection) is rebuilt every mousemove into its own group.
+const hoverGroup = new THREE.Group();
+scene.add(hoverGroup);
+function clearGroup(group) {
+  while (group.children.length) group.remove(group.children[0]);
+}
+
+function clearExtra() {
+  extra.forEach((obj) => scene.remove(obj));
+  extra = [];
+}
+
+function fit(idx) {
+  const bbox = new THREE.Box3().setFromObject(groups[idx]);
+  const center = bbox.getCenter(new THREE.Vector3());
+  diag = bbox.getSize(new THREE.Vector3()).length() || 1;
+  camera.position.copy(center).add(new THREE.Vector3(diag * 0.9, diag * 0.9, diag * 0.9));
+  camera.near = diag * 1e-3;
+  camera.far = diag * 100;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+  controls.update();
+}
+
+function show(idx) {
+  groups[current].visible = false;
+  groups[idx].visible = true;
+  current = idx;
+  clearExtra();
+  pins = [];
+  lastHits = [];
+  depthIndex = 0;
+  hoverPoint = null;
+  clearGroup(hoverGroup);
+  window.__pins = 0;
+  readout.textContent = "hover a point, click to measure";
+  fit(idx);
+}
+sel.addEventListener("change", (e) => show(+e.target.value));
+
+function ndc(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+// Rebuild the ray-path overlay: a bead on every surface the cursor ray crosses, coloured by its object and
+// drawn on top of the transparent meshes so enclosed and back surfaces stay visible. The selected surface is
+// enlarged and, if it is a back-facing wall, marked with a cross. shift+scroll steps the selection deeper.
+function placeHover() {
+  clearGroup(hoverGroup);
+  if (!lastHits.length) {
+    hoverPoint = null;
+    window.__hover = false;
+    return;
+  }
+  depthIndex = Math.max(0, Math.min(depthIndex, lastHits.length - 1));
+  const rail = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([lastHits[0].point, lastHits[lastHits.length - 1].point]),
+    new THREE.LineBasicMaterial({ color: 0x999999, depthTest: false }),
+  );
+  rail.renderOrder = 998;
+  hoverGroup.add(rail);
+  lastHits.forEach((hit, i) => {
+    const selected = i === depthIndex;
+    const color = hit.object.material.color.getHex();
+    const bead = markerOnTop(color, diag * (selected ? 0.016 : 0.008), selected ? 1.0 : 0.5);
+    bead.position.copy(hit.point);
+    hoverGroup.add(bead);
+    if (!selected) return;
+    hoverPoint = hit.point.clone();
+    hoverColor = color;
+    hoverIsBack = false;
+    if (hit.face) {
+      const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
+      hoverIsBack = normal.dot(raycaster.ray.direction) > 0;
+    }
+    if (hoverIsBack) {
+      const cross = crossLines(color);
+      cross.scale.setScalar(diag * 0.04);
+      cross.position.copy(hit.point);
+      cross.renderOrder = 1000;
+      hoverGroup.add(cross);
+    }
+  });
+  const which = lastHits[depthIndex].object === groups[current].children[0] ? "blue" : "red";
+  window.__hover = true;
+  window.__nHits = lastHits.length;
+  window.__hoverDepth = depthIndex;
+  window.__isBack = hoverIsBack;
+  if (pins.length < 2) {
+    readout.textContent = "surface " + (depthIndex + 1) + " of " + lastHits.length + " (" + which + ", "
+      + (hoverIsBack ? "back" : "front") + " wall) - digit 1-9 to pick, shift+scroll to step, click to pin";
+  }
+}
+
+renderer.domElement.addEventListener("mousemove", (e) => {
+  ndc(e);
+  raycaster.setFromCamera(pointer, camera);
+  lastHits = raycaster.intersectObjects(groups[current].children, false);
+  depthIndex = 0;
+  placeHover();
+});
+
+renderer.domElement.addEventListener("wheel", (e) => {
+  if (!e.shiftKey) return;  // plain scroll stays orbit-zoom
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  // macOS remaps shift+wheel to horizontal scroll, so the value lands in deltaX, not deltaY.
+  const delta = e.deltaY || e.deltaX;
+  depthIndex += delta > 0 ? 1 : -1;
+  placeHover();
+}, { capture: true, passive: false });
+
+// Digit keys (numpad or top row) select the N-th surface along the ray directly - stepping with
+// shift+scroll is imprecise on a trackpad.
+window.addEventListener("keydown", (e) => {
+  if (document.activeElement === sel) return;  // typing in the pair dropdown must not move the selection
+  const match = e.code.match(/^(?:Digit|Numpad)([1-9])$/);
+  if (!match || !lastHits.length) return;
+  depthIndex = +match[1] - 1;
+  placeHover();
+});
+
+function pin(p, color, isBack) {
+  if (pins.length === 2) {
+    pins = [];
+    clearExtra();
+  }
+  pins.push(p.clone());
+  const dot = markerOnTop(color, diag * 0.012, 1.0);
+  dot.position.copy(p);
+  scene.add(dot);
+  extra.push(dot);
+  if (isBack) {
+    const cross = crossLines(color);
+    cross.scale.setScalar(diag * 0.04);
+    cross.position.copy(p);
+    cross.renderOrder = 1000;
+    scene.add(cross);
+    extra.push(cross);
+  }
+  if (pins.length === 2) {
+    const dist = pins[0].distanceTo(pins[1]);
+    window.__dist = dist * 1000;
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([pins[0], pins[1]]),
+      new THREE.LineBasicMaterial({ color: 0x000000, depthTest: false }),
+    );
+    line.renderOrder = 1000;
+    scene.add(line);
+    extra.push(line);
+    readout.textContent = "distance = " + (dist * 1000).toFixed(2) + " mm  (click to re-measure)";
+  } else {
+    readout.textContent = "point 1 set - click a second point";
+  }
+  window.__pins = pins.length;
+}
+
+renderer.domElement.addEventListener("mousedown", (e) => { downXY = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener("mouseup", (e) => {
+  if (!downXY) return;
+  const moved = Math.hypot(e.clientX - downXY[0], e.clientY - downXY[1]);
+  downXY = null;
+  if (moved > 5) return;  // drag orbits instead of pinning
+  if (hoverPoint) pin(hoverPoint, hoverColor, hoverIsBack);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = app.clientWidth / app.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(app.clientWidth, app.clientHeight);
+});
+
+show(0);
+(function loop() {
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+window.__ready = true;
+</script>
+</body>
+</html>

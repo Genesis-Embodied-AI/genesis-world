@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from pydantic import StrictBool
+
 from genesis.options.options import Options
 
 if TYPE_CHECKING:
@@ -16,3 +18,5 @@ class Material(Options, Generic[EntityT]):
     ----
     This class should *not* be instantiated directly.
     """
+
+    use_visual_raycasting: StrictBool = False

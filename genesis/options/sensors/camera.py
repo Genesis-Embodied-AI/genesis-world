@@ -17,17 +17,13 @@ from genesis.typing import (
     Vec3FType,
 )
 
-from .options import RigidSensorOptionsMixin, SensorT
+from .options import KinematicSensorOptionsMixin, SensorT
 
 if TYPE_CHECKING:
-    from genesis.engine.sensors.camera import (
-        BatchRendererCameraSensor,
-        RasterizerCameraSensor,
-        RaytracerCameraSensor,
-    )
+    from genesis.engine.sensors.camera import BatchRendererCameraSensor, RasterizerCameraSensor, RaytracerCameraSensor
 
 
-class BaseCameraOptions(RigidSensorOptionsMixin[SensorT]):
+class BaseCameraOptions(KinematicSensorOptionsMixin[SensorT]):
     """
     Base class for camera sensor options containing common properties.
 
@@ -64,6 +60,13 @@ class BaseCameraOptions(RigidSensorOptionsMixin[SensorT]):
     lights: list[dict[str, Any]] = []
     offset_T: Matrix4x4Type | None = None
 
+    def model_post_init(self, context: Any) -> None:
+        if self.history_length > 0:
+            gs.raise_exception(
+                "Camera sensors do not support `history_length`. The camera read path renders lazily on read() "
+                "and bypasses the shared sensor cache that backs the history buffer."
+            )
+
 
 class RasterizerCameraOptions(BaseCameraOptions["RasterizerCameraSensor"]):
     """
@@ -79,8 +82,6 @@ class RasterizerCameraOptions(BaseCameraOptions["RasterizerCameraSensor"]):
 
     near: PositiveFloat = 0.01
     far: PositiveFloat = 100.0
-    # Camera images are updated lazily on read(), so skip per-step measured-cache updates
-    update_ground_truth_only: StrictBool = True
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -126,7 +127,6 @@ class RaytracerCameraOptions(BaseCameraOptions["RaytracerCameraSensor"]):
     env_radius: PositiveFloat = 15.0
     env_pos: Vec3FType = (0.0, 0.0, 0.0)
     env_quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
-    update_ground_truth_only: StrictBool = True
 
 
 class BatchRendererCameraOptions(BaseCameraOptions["BatchRendererCameraSensor"]):
@@ -145,7 +145,6 @@ class BatchRendererCameraOptions(BaseCameraOptions["BatchRendererCameraSensor"])
     near: PositiveFloat = 0.01
     far: PositiveFloat = 100.0
     use_rasterizer: StrictBool = True
-    update_ground_truth_only: StrictBool = True
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)

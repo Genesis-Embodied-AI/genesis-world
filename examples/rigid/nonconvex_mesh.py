@@ -5,14 +5,12 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu)
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.5, 0.0, 2.5),
@@ -22,7 +20,6 @@ def main():
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     tank = scene.add_entity(
         gs.morphs.Mesh(
             file="meshes/tank.obj",
@@ -30,17 +27,14 @@ def main():
             fixed=True,
             euler=(90, 0, 0),
         ),
-        # vis_mode="collision",
     )
     ball = scene.add_entity(
         gs.morphs.Sphere(
             radius=0.1,
             pos=(0.0, 0.0, 1.0),
         ),
-        # vis_mode="collision",
     )
 
-    ########################## build ##########################
     scene.build()
     for i in range(1000):
         scene.step()

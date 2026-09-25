@@ -73,6 +73,25 @@ class ShaderProgramCache(object):
         self._program_cache.clear()
 
 
+class NormalShaderCache(ShaderProgramCache):
+    """A program cache that draws every primitive with the surface-normal shader.
+
+    Swapped in place of the regular program cache for normal-channel render passes. Double-sided primitives are
+    drawn through a geometry shader emitting both faces. Programs are keyed on the primitive-specific defines
+    (buffer attribute locations, double-sidedness), so primitives with different buffer layouts each get a program
+    compiled with the correct attribute bindings.
+    """
+
+    def get_program(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
+        is_double_sided = defines is not None and "DOUBLE_SIDED" in defines
+        return super().get_program(
+            vertex_shader="mesh_normal.vert",
+            fragment_shader="mesh_normal.frag",
+            geometry_shader="mesh_normal_double_sided.geom" if is_double_sided else None,
+            defines=defines,
+        )
+
+
 class ShaderProgram(object):
     """A thin wrapper about OpenGL shader programs that supports easy creation,
     binding, and uniform-setting.

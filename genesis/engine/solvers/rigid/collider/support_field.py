@@ -1,12 +1,14 @@
 import math
 from typing import TYPE_CHECKING
 
-import quadrants as qd
 import numpy as np
 
+import quadrants as qd
+
 import genesis as gs
-import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
+
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
@@ -20,6 +22,14 @@ class SupportField:
         self._is_active = False
 
     def _get_direction_grid(self):
+        """
+        Unit direction of every cell of the two spherical charts, as [chart, azimuth, polar].
+
+        A spherical chart cannot resolve the azimuth of a direction along its own polar axis, and which of the tied
+        support vertices of such a direction wins then depends on the signs of zeros, hence on how the whole scene is
+        oriented. The second chart carries its poles a quarter turn away, so every direction is at least 45 degrees
+        off the poles of whichever chart answers for it, and no lookup is ever resolved by a chart degenerate there.
+        """
         support_res = self._support_res
         theta = np.arange(support_res) / support_res * 2 * math.pi - math.pi
         phi = np.arange(support_res) / support_res * math.pi
@@ -32,7 +42,18 @@ class SupportField:
         y = np.sin(spherical_coords[:, :, 1]) * np.sin(spherical_coords[:, :, 0])
         z = np.cos(spherical_coords[:, :, 1])
         v = np.stack((x, y, z), axis=-1)
-        return v
+
+        # The second chart is the first one turned a quarter turn about x, which carries its poles onto +/- y. A chart
+        # answers only for the directions it is at least 45 degrees off its own poles for, so only that equatorial
+        # band of rows is ever read and only it is stored, one guard row either side for the neighbours the lookup
+        # reads. The two bands together hold about as many cells as the single full chart they replace.
+        band_start, band_rows = self._polar_band()
+        band = slice(band_start, band_start + band_rows)
+        return np.stack((v[:, band], np.stack((x, z, -y), axis=-1)[:, band]))
+
+    def _polar_band(self):
+        """First stored polar row of a chart, and how many rows it stores."""
+        return self._support_res // 4 - 1, self._support_res // 2 + 3
 
     def activate(self) -> None:
         if self.is_active:
@@ -47,9 +68,9 @@ class SupportField:
         support_cell_start = []
         n_support_cells = 0
         if self.solver.n_geoms > 0:
-            init_pos = self.solver.verts_info.init_pos.to_numpy()
-            geoms_vert_start = self.solver.geoms_info.vert_start.to_numpy()
-            geoms_vert_end = self.solver.geoms_info.vert_end.to_numpy()
+            init_pos = self.solver.dyn_info.verts.init_pos.to_numpy()
+            geoms_vert_start = self.solver.dyn_info.geoms.vert_start.to_numpy()
+            geoms_vert_end = self.solver.dyn_info.geoms.vert_end.to_numpy()
             for i_g in range(self.solver.n_geoms):
                 this_pos = init_pos[geoms_vert_start[i_g] : geoms_vert_end[i_g]]
 
@@ -81,11 +102,7 @@ class SupportField:
         )
 
         _kernel_init_support(
-            self.solver._static_rigid_sim_config,
-            self._support_field_info,
-            support_cell_start,
-            support_v,
-            support_vid,
+            support_cell_start, support_v, support_vid, self._support_field_info, self.solver.rigid_config
         )
 
         self._is_active = True
@@ -97,20 +114,20 @@ class SupportField:
 
 @qd.kernel
 def _kernel_init_support(
-    static_rigid_sim_config: qd.template(),
-    support_field_info: array_class.SupportFieldInfo,
     support_cell_start: qd.types.ndarray(),
     support_v: qd.types.ndarray(),
     support_vid: qd.types.ndarray(),
+    support_field_info: array_class.SupportFieldInfo,
+    rigid_config: qd.template(),
 ):
     n_geoms = support_field_info.support_cell_start.shape[0]
     n_support_cells = support_field_info.support_v.shape[0]
 
-    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i in range(n_geoms):
         support_field_info.support_cell_start[i] = support_cell_start[i]
 
-    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i in range(n_support_cells):
         support_field_info.support_vid[i] = support_vid[i]
         for j in qd.static(range(3)):
@@ -119,57 +136,88 @@ def _kernel_init_support(
 
 @qd.func
 def _func_support_world(
-    support_field_info: array_class.SupportFieldInfo,
-    d,
     i_g,
-    pos: qd.types.vector(3, dtype=gs.qd_float),
-    quat: qd.types.vector(4, dtype=gs.qd_float),
+    d,
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
+    exhaustive: qd.template() = False,
 ):
-    """
-    support position for a world direction
-    """
+    """Support position for a world direction.
 
-    d_mesh = gu.qd_transform_by_quat(d, gu.qd_inv_quat(quat))
-    v_, vid = _func_support_mesh(support_field_info, d_mesh, i_g)
-    v = gu.qd_transform_by_trans_quat(v_, pos, quat)
+    The vertex comes from the precomputed support table, or from an exhaustive scan of the mesh vertices when
+    'exhaustive' is set: the sampled table is approximate and may return a different vertex of a tied flat face,
+    while the scan is exact at a cost linear in the vertex count.
+    """
+    v = qd.Vector.zero(gs.qd_float, 3)
+    v_ = qd.Vector.zero(gs.qd_float, 3)
+    vid = 0
+    if qd.static(exhaustive):
+        d_mesh = gu.qd_transform_by_quat(d, gu.qd_inv_quat(quat))
+        v_, vid = _func_support_mesh_exhaustive(i_g, d_mesh, dyn_info)
+        v = gu.qd_transform_by_trans_quat(v_, pos, quat)
+    else:
+        d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
+        v_, vid = _func_support_mesh(i_g, d_mesh, collider_info)
+        v = gu.qd_transform_by_trans_quat_fast(v_, pos, quat)
     return v, v_, vid
 
 
 @qd.func
-def _func_support_mesh(support_field_info: array_class.SupportFieldInfo, d_mesh, i_g):
+def _func_direction_grid_coords(d_mesh, support_res):
+    """
+    Chart of a mesh-frame direction and its continuous cell coordinates within that chart.
+
+    The chart whose polar axis the direction is least aligned with answers, which leaves it at least 45 degrees off
+    that chart's poles since the smaller of the two alignments never exceeds one over root two. The azimuth is then
+    always well conditioned, so a direction along one of the geom's own axes - the normal of a face resting flat,
+    whose support vertices tie - is resolved by a chart that has no degeneracy there, and a geom and any rotated copy
+    of it pick the same vertex.
+    """
+    i_chart = gs.qd_int(0)
+    d_chart = d_mesh
+    if qd.abs(d_mesh[2]) > qd.abs(d_mesh[1]):
+        # The first chart's poles sit on +/- z, so a direction closer to them is handed to the second chart, whose
+        # own coordinates see it a quarter turn away.
+        i_chart = 1
+        d_chart = qd.Vector([d_mesh[0], -d_mesh[2], d_mesh[1]], dt=gs.qd_float)
+
+    theta = qd.atan2(d_chart[1], d_chart[0])  # [-pi, pi]
+    phi = qd.acos(d_chart[2])  # [0, pi]
+
+    return i_chart, (theta + math.pi) / math.pi / 2 * support_res, phi / math.pi * support_res
+
+
+@qd.func
+def _func_support_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
     """
     support point at mesh frame coordinate.
     """
-    theta = qd.atan2(d_mesh[1], d_mesh[0])  # [-pi, pi]
-    phi = qd.acos(d_mesh[2])  # [0, pi]
-
-    support_res = support_field_info.support_res[None]
+    support_res = collider_info.support_field.support_res[None]
     dot_max = gs.qd_float(-1e20)
     v = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
     vid = 0
 
-    ii = (theta + math.pi) / math.pi / 2 * support_res
-    jj = phi / math.pi * support_res
+    band_start, band_rows = support_res // 4 - 1, support_res // 2 + 3
+    i_chart, ii, jj = _func_direction_grid_coords(d_mesh, support_res)
+    chart_start = gs.qd_int(collider_info.support_field.support_cell_start[i_g] + i_chart * support_res * band_rows)
 
     for i4 in range(4):
         i, j = gs.qd_int(0), gs.qd_int(0)
         if i4 % 2:
-            i = gs.qd_int(qd.math.ceil(ii) % support_res)
+            i = gs.qd_int(qd.math.ceil(ii)) % support_res
         else:
-            i = gs.qd_int(qd.math.floor(ii) % support_res)
+            i = gs.qd_int(qd.math.floor(ii)) % support_res
 
         if i4 // 2 > 0:
-            j = gs.qd_int(qd.math.clamp(qd.math.ceil(jj), 0, support_res - 1))
-            if j == support_res - 1:
-                j = support_res - 2
+            j = gs.qd_int(qd.math.clamp(qd.math.ceil(jj) - band_start, 0, band_rows - 1))
         else:
-            j = gs.qd_int(qd.math.clamp(qd.math.floor(jj), 0, support_res - 1))
-            if j == 0:
-                j = 1
+            j = gs.qd_int(qd.math.clamp(qd.math.floor(jj) - band_start, 0, band_rows - 1))
 
-        support_idx = gs.qd_int(support_field_info.support_cell_start[i_g] + i * support_res + j)
-        _vid = support_field_info.support_vid[support_idx]
-        pos = support_field_info.support_v[support_idx]
+        support_idx = gs.qd_int(chart_start + i * band_rows + j)
+        _vid = collider_info.support_field.support_vid[support_idx]
+        pos = collider_info.support_field.support_v[support_idx]
         dot = pos.dot(d_mesh)
 
         if dot > dot_max:
@@ -181,16 +229,25 @@ def _func_support_mesh(support_field_info: array_class.SupportFieldInfo, d_mesh,
 
 
 @qd.func
+def _func_support_mesh_exhaustive(i_g, d_mesh, dyn_info: array_class.DynInfo):
+    """Support vertex by exhaustive scan in the mesh frame, the first maximum winning, like the scan the reference
+    engine's fallback collision pipeline runs below its hill-climb threshold."""
+    dot_max = gs.qd_float(-1e20)
+    i_max = dyn_info.geoms.vert_start[i_g]
+    for i_v in range(dyn_info.geoms.vert_start[i_g], dyn_info.geoms.vert_end[i_g]):
+        vdot = d_mesh.dot(dyn_info.verts.init_pos[i_v])
+        if vdot > dot_max:
+            dot_max = vdot
+            i_max = i_v
+    return dyn_info.verts.init_pos[i_max], i_max
+
+
+@qd.func
 def _func_support_sphere(
-    geoms_info: array_class.GeomsInfo,
-    d,
-    i_g,
-    pos: qd.types.vector(3, dtype=gs.qd_float),
-    quat: qd.types.vector(4, dtype=gs.qd_float),
-    shrink,
+    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), shrink, dyn_info: array_class.DynInfo
 ):
     sphere_center = pos
-    sphere_radius = geoms_info.data[i_g][0]
+    sphere_radius = dyn_info.geoms.data[i_g][0]
 
     # Shrink the sphere to a point
     v = sphere_center
@@ -207,16 +264,10 @@ def _func_support_sphere(
 
 
 @qd.func
-def _func_support_ellipsoid(
-    geoms_info: array_class.GeomsInfo,
-    d,
-    i_g,
-    pos: qd.types.vector(3, dtype=gs.qd_float),
-    quat: qd.types.vector(4, dtype=gs.qd_float),
-):
-    a = geoms_info.data[i_g][0]
-    b = geoms_info.data[i_g][1]
-    c = geoms_info.data[i_g][2]
+def _func_support_ellipsoid(i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo):
+    a = dyn_info.geoms.data[i_g][0]
+    b = dyn_info.geoms.data[i_g][1]
+    c = dyn_info.geoms.data[i_g][2]
 
     # Transform direction to ellipsoid local frame
     d_local = gu.qd_inv_transform_by_quat(d, quat)
@@ -233,12 +284,7 @@ def _func_support_ellipsoid(
 
 @qd.func
 def _func_support_capsule(
-    geoms_info: array_class.GeomsInfo,
-    d,
-    i_g,
-    pos: qd.types.vector(3, dtype=gs.qd_float),
-    quat: qd.types.vector(4, dtype=gs.qd_float),
-    shrink,
+    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), shrink, dyn_info: array_class.DynInfo
 ):
     """
     Support function for capsule geometry.
@@ -249,8 +295,8 @@ def _func_support_capsule(
     """
     res = gs.qd_vec3(0, 0, 0)
     capsule_center = pos
-    capsule_radius = geoms_info.data[i_g][0]
-    capsule_halflength = 0.5 * geoms_info.data[i_g][1]
+    capsule_radius = dyn_info.geoms.data[i_g][0]
+    capsule_halflength = 0.5 * dyn_info.geoms.data[i_g][1]
 
     if shrink:
         local_dir = gu.qd_transform_by_quat(d, gu.qd_inv_quat(quat))
@@ -265,11 +311,31 @@ def _func_support_capsule(
 
 
 @qd.func
-def _func_support_prism(
-    collider_state: array_class.ColliderState,
-    d,
-    i_b,
+def _func_support_cylinder(
+    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), shrink, dyn_info: array_class.DynInfo
 ):
+    """
+    Support function for cylinder geometry.
+
+    Like the capsule, but with flat caps: the support point is on the rim of the cap selected by the sign of d along
+    the axis, displaced radially by the radius along d projected onto the cap plane (a sphere/hemisphere cap would
+    instead displace along d itself). When d is axial the radial part vanishes and the support is the cap centre.
+    """
+    radius = dyn_info.geoms.data[i_g][0]
+    halflength = 0.5 * dyn_info.geoms.data[i_g][1]
+    axis = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), quat)
+    endpoint_side = -1.0 if d.dot(axis) < 0.0 else 1.0
+    res = pos + halflength * endpoint_side * axis
+    if not shrink:
+        d_radial = d - d.dot(axis) * axis
+        d_radial_norm = d_radial.norm()
+        if d_radial_norm > 1e-9:
+            res = res + (radius / d_radial_norm) * d_radial
+    return res
+
+
+@qd.func
+def _func_support_prism(i_b, d, collider_state: array_class.ColliderState):
     istart = 3
     if d[2] < 0:
         istart = 0
@@ -286,97 +352,97 @@ def _func_support_prism(
 
 
 @qd.func
-def _func_support_box(
-    geoms_info: array_class.GeomsInfo,
-    d,
-    i_g,
-    pos: qd.types.vector(3, dtype=gs.qd_float),
-    quat: qd.types.vector(4, dtype=gs.qd_float),
-):
+def _func_support_box(i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo):
     d_box = gu.qd_inv_transform_by_quat(d, quat)
 
     v_ = qd.Vector(
         [
-            (-1.0 if d_box[0] < 0.0 else 1.0) * geoms_info.data[i_g][0] * 0.5,
-            (-1.0 if d_box[1] < 0.0 else 1.0) * geoms_info.data[i_g][1] * 0.5,
-            (-1.0 if d_box[2] < 0.0 else 1.0) * geoms_info.data[i_g][2] * 0.5,
+            (-1.0 if d_box[0] < 0.0 else 1.0) * dyn_info.geoms.data[i_g][0] * 0.5,
+            (-1.0 if d_box[1] < 0.0 else 1.0) * dyn_info.geoms.data[i_g][1] * 0.5,
+            (-1.0 if d_box[2] < 0.0 else 1.0) * dyn_info.geoms.data[i_g][2] * 0.5,
         ],
         dt=gs.qd_float,
     )
     vid = (v_[0] > 0.0) * 1 + (v_[1] > 0.0) * 2 + (v_[2] > 0.0) * 4
-    vid += geoms_info.vert_start[i_g]
-    v = gu.qd_transform_by_trans_quat(v_, pos, quat)
+    vid += dyn_info.geoms.vert_start[i_g]
+    v = gu.qd_transform_by_trans_quat_fast(v_, pos, quat)
     return v, v_, vid
 
 
 @qd.func
-def _func_count_supports_world(
-    support_field_info: array_class.SupportFieldInfo,
-    d,
-    i_g,
-    quat: qd.types.vector(4, dtype=gs.qd_float),
-):
+def _func_count_supports_world(i_g, d, quat: qd.types.vector(4), collider_info: array_class.ColliderInfo):
     """
     Count the number of valid support points for the given world direction.
     Only needs quat since counting doesn't depend on position.
     """
-    d_mesh = gu.qd_transform_by_quat(d, gu.qd_inv_quat(quat))
-    return _func_count_supports_mesh(support_field_info, d_mesh, i_g)
+    d_mesh = gu.qd_transform_by_quat_fast(d, gu.qd_inv_quat(quat))
+    return _func_count_supports_mesh(i_g, d_mesh, collider_info)
 
 
 @qd.func
-def _func_count_supports_mesh(
-    support_field_info: array_class.SupportFieldInfo,
-    d_mesh,
-    i_g,
-):
+def _func_count_supports_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
     """
-    Count the number of valid support points for a mesh in the given direction.
-    """
-    theta = qd.atan2(d_mesh[1], d_mesh[0])  # [-pi, pi]
-    phi = qd.acos(d_mesh[2])  # [0, pi]
+    Count the number of distinct support vertices tied for the maximum dot product in the given direction.
 
-    support_res = support_field_info.support_res[None]
+    The support field is a spherical grid indexed by (theta, phi). We look up 4 neighboring cells using
+    floor/ceil of the continuous grid coordinates (ii, jj). When ii or jj is an integer (common for
+    axis-aligned directions), floor == ceil and multiple iterations map to the same cell. Without
+    deduplication the same vertex is counted multiple times, inflating the count and triggering
+    unnecessary perturbation in safe_gjk_support.
+    """
+    support_res = collider_info.support_field.support_res[None]
     dot_max = gs.qd_float(-1e20)
 
-    ii = (theta + math.pi) / math.pi / 2 * support_res
-    jj = phi / math.pi * support_res
+    band_start, band_rows = support_res // 4 - 1, support_res // 2 + 3
+    i_chart, ii, jj = _func_direction_grid_coords(d_mesh, support_res)
+    chart_start = gs.qd_int(collider_info.support_field.support_cell_start[i_g] + i_chart * support_res * band_rows)
 
-    count = gs.qd_int(0)
+    # Collect unique cells, deduplicating floor == ceil collisions
+    cell_idx = qd.Vector([-1, -1, -1, -1], dt=gs.qd_int)
+    cell_dot = qd.Vector([0.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+    n_unique = gs.qd_int(0)
+
     for i4 in range(4):
         i, j = gs.qd_int(0), gs.qd_int(0)
         if i4 % 2:
-            i = gs.qd_int(qd.math.ceil(ii) % support_res)
+            i = gs.qd_int(qd.math.ceil(ii)) % support_res
         else:
-            i = gs.qd_int(qd.math.floor(ii) % support_res)
+            i = gs.qd_int(qd.math.floor(ii)) % support_res
 
         if i4 // 2 > 0:
-            j = gs.qd_int(qd.math.clamp(qd.math.ceil(jj), 0, support_res - 1))
-            if j == support_res - 1:
-                j = support_res - 2
+            j = gs.qd_int(qd.math.clamp(qd.math.ceil(jj) - band_start, 0, band_rows - 1))
         else:
-            j = gs.qd_int(qd.math.clamp(qd.math.floor(jj), 0, support_res - 1))
-            if j == 0:
-                j = 1
+            j = gs.qd_int(qd.math.clamp(qd.math.floor(jj) - band_start, 0, band_rows - 1))
 
-        support_idx = gs.qd_int(support_field_info.support_cell_start[i_g] + i * support_res + j)
-        _vid = support_field_info.support_vid[support_idx]
-        pos = support_field_info.support_v[support_idx]
-        dot = pos.dot(d_mesh)
+        support_idx = gs.qd_int(chart_start + i * band_rows + j)
 
-        if dot > dot_max:
+        # Skip duplicate cells (from floor == ceil on integer indices).
+        is_dup = False
+        for k in range(n_unique):
+            if cell_idx[k] == support_idx:
+                is_dup = True
+        if is_dup:
+            continue
+
+        pos = collider_info.support_field.support_v[support_idx]
+        cell_dot[n_unique] = pos.dot(d_mesh)
+        cell_idx[n_unique] = support_idx
+        n_unique += 1
+
+    dot_max = gs.qd_float(-1e20)
+    count = gs.qd_int(0)
+    for k in range(n_unique):
+        if cell_dot[k] > dot_max:
             count = 1
-        elif dot == dot_max:
+            dot_max = cell_dot[k]
+        elif cell_dot[k] == dot_max:
             count += 1
 
     return count
 
 
 @qd.func
-def _func_count_supports_box(
-    d,
-    quat: qd.types.vector(4, dtype=gs.qd_float),
-):
+def _func_count_supports_box(d, quat: qd.types.vector(4)):
     """
     Count the number of valid support points for a box in the given direction.
 

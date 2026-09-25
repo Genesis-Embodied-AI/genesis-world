@@ -1,9 +1,28 @@
-import genesis as gs
+"""Closed-loop linkages built from MJCF equality constraints.
+
+A four-bar linkage cannot be expressed as a tree of joints, so the loop is closed by an equality constraint.
+Both spellings MuJoCo offers are available here: `connect` pins two bodies at a point, `weld` also locks their
+relative orientation.
+"""
+
 import argparse
-import time
+
+import genesis as gs
 
 
-def main_equality_connect(args):
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-s", "--steps", type=int, default=1000, help="Number of simulation steps")
+    parser.add_argument(
+        "--constraint",
+        type=str,
+        default="weld",
+        choices=("connect", "weld"),
+        help="Equality constraint closing the loop",
+    )
+    args = parser.parse_args()
+
     gs.init(backend=gs.cpu)
 
     scene = gs.Scene(
@@ -14,43 +33,22 @@ def main_equality_connect(args):
         ),
         show_viewer=args.vis,
     )
-    franka = scene.add_entity(
+    linkage = scene.add_entity(
         gs.morphs.MJCF(
-            file="xml/four_bar_linkage.xml",
+            file="xml/four_bar_linkage.xml" if args.constraint == "connect" else "xml/four_bar_linkage_weld.xml",
         ),
     )
-    scene.build()
-    for i in range(1000):
-        scene.step()
 
-
-def main_equality_weld(args):
-    ########################## init ##########################
-    gs.init(backend=gs.cpu)
-    scene = gs.Scene(
-        show_viewer=args.vis,
-    )
-    ########################## entities ##########################
-    robot1 = scene.add_entity(
-        gs.morphs.MJCF(file="xml/four_bar_linkage_weld.xml"),
-    )
-
-    ########################## build ##########################
     scene.build()
 
-    rigid = scene.sim.rigid_solver
-    qpos = rigid.qpos.to_numpy()[:, 0]
-    qpos[0], qpos[1], qpos[2] = 0.2, 0.2, 0.2
-    rigid.qpos.from_numpy(qpos[:, None])
+    # Start away from the rest pose so the loop visibly swings instead of sitting in equilibrium.
+    qpos = linkage.get_qpos()
+    qpos[:3] = 0.2
+    linkage.set_qpos(qpos)
 
-    for i in range(20):
-        time.sleep(1.0)
+    for _ in range(args.steps):
         scene.step()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    args = parser.parse_args()
-    main_equality_weld(args)
-    # main_equality_connect(args)
+    main()

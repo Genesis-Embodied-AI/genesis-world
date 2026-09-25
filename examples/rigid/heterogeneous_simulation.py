@@ -25,9 +25,9 @@ Variant Assignment Rules:
        - Variants 2 and 3 are unused
 
 Usage:
-    python heterogeneous_simulation.py -v -n 4  # 4 environments (matches 4 variants)
-    python heterogeneous_simulation.py -v -n 8  # 8 environments (2 per variant)
-    python heterogeneous_simulation.py -v -n 2  # 2 environments (only first 2 variants used)
+    python heterogeneous_simulation.py -v -b 4  # 4 environments (matches 4 variants)
+    python heterogeneous_simulation.py -v -b 8  # 8 environments (2 per variant)
+    python heterogeneous_simulation.py -v -b 2  # 2 environments (only first 2 variants used)
 """
 
 import argparse
@@ -38,13 +38,11 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-n", "--n_envs", type=int, default=4)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-b", "--num-envs", type=int, default=4, help="Number of parallel environments")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.gpu, precision="32")
-    ########################## create a scene ##########################
+    gs.init(backend=gs.cpu, precision="32")
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3, -1, 1.5),
@@ -53,7 +51,6 @@ def main():
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
@@ -71,18 +68,17 @@ def main():
     grasping_object = scene.add_entity(
         morph=morphs_heterogeneous,
     )
-    ########################## build ##########################
-    scene.build(n_envs=args.n_envs, env_spacing=(1, 1))
+    scene.build(n_envs=args.num_envs, env_spacing=(1, 1))
 
     motors_dof = np.arange(7)
     fingers_dof = np.arange(7, 9)
     franka.set_dofs_kp([100.0, 100.0], fingers_dof)
     franka.set_dofs_kv([10.0, 10.0], fingers_dof)
     l_qpos = [-1.0124, 1.5559, 1.3662, -1.6878, -1.5799, 1.7757, 1.4602, 0.04, 0.04]
-    if args.n_envs == 0:
+    if args.num_envs == 0:
         franka.set_qpos(np.array(l_qpos))
     else:
-        franka.set_qpos(np.array([l_qpos] * args.n_envs))
+        franka.set_qpos(np.array([l_qpos] * args.num_envs))
     scene.step()
 
     AABB = grasping_object.get_AABB()
@@ -93,8 +89,8 @@ def main():
     end_effector = franka.get_link("hand")
     qpos = franka.inverse_kinematics(
         link=end_effector,
-        pos=np.array([[0.65, 0.0, 0.135]] * args.n_envs),
-        quat=np.array([[0, 1, 0, 0]] * args.n_envs),
+        pos=np.array([[0.65, 0.0, 0.135]] * args.num_envs),
+        quat=np.array([[0, 1, 0, 0]] * args.num_envs),
     )
     franka.control_dofs_position(qpos[..., :-2], motors_dof)
 
@@ -108,19 +104,19 @@ def main():
     for i in range(100):
         print("grasp", i)
         franka.control_dofs_position(qpos[..., :-2], motors_dof)
-        franka.control_dofs_position(np.array([[finder_pos, finder_pos]] * args.n_envs), fingers_dof)
+        franka.control_dofs_position(np.array([[finder_pos, finder_pos]] * args.num_envs), fingers_dof)
         scene.step()
 
     # lift
     qpos = franka.inverse_kinematics(
         link=end_effector,
-        pos=np.array([[0.65, 0.0, 0.3]] * args.n_envs),
-        quat=np.array([[0, 1, 0, 0]] * args.n_envs),
+        pos=np.array([[0.65, 0.0, 0.3]] * args.num_envs),
+        quat=np.array([[0, 1, 0, 0]] * args.num_envs),
     )
     for i in range(200):
         print("lift", i)
         franka.control_dofs_position(qpos[..., :-2], motors_dof)
-        franka.control_dofs_position(np.array([[finder_pos, finder_pos]] * args.n_envs), fingers_dof)
+        franka.control_dofs_position(np.array([[finder_pos, finder_pos]] * args.num_envs), fingers_dof)
         scene.step()
 
 

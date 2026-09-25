@@ -21,14 +21,6 @@ class ToolEntityState:
         self.vel = gs.zeros((self.entity.sim._B, 3), **args)
         self.ang = gs.zeros((self.entity.sim._B, 3), **args)
 
-    def serializable(self):
-        self.entity = None
-
-        self.pos = self.pos.detach()
-        self.quat = self.quat.detach()
-        self.vel = self.vel.detach()
-        self.ang = self.ang.detach()
-
     # def __repr__(self):
     #     return f'{self.__repr_name__()}\n' \
     #            f'entity : {_repr(self.entity)}\n' \
@@ -61,16 +53,6 @@ class MPMEntityState(RBC):
         args["dtype"] = int
         args["requires_grad"] = False
         self._active = gs.zeros(base_shape, **args)
-
-    def serializable(self):
-        self._entity = None
-
-        self._pos = self._pos.detach()
-        self._vel = self._vel.detach()
-        self._C = self._C.detach()
-        self._F = self._F.detach()
-        self._Jp = self._Jp.detach()
-        self._active = self._active.detach()
 
     @property
     def entity(self):
@@ -162,13 +144,6 @@ class FEMEntityState:
         args["requires_grad"] = False
         self._active = gs.zeros((self.entity.sim._B, self.entity.n_elements), **args)
 
-    def serializable(self):
-        self._entity = None
-
-        self._pos = self._pos.detach()
-        self._vel = self._vel.detach()
-        self._active = self._active.detach()
-
     @property
     def entity(self):
         return self._entity
@@ -204,12 +179,6 @@ class RigidEntityState(RBC):
         scene = self._entity.scene
         self._pos = gs.zeros((num_batch, 3), dtype=float, requires_grad=requires_grad, scene=scene)
         self._quat = gs.zeros((num_batch, 4), dtype=float, requires_grad=requires_grad, scene=scene)
-
-    def serializable(self):
-        self._entity = None
-
-        self._pos = self._pos.detach()
-        self._quat = self._quat.detach()
 
     @property
     def entity(self):

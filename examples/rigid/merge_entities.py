@@ -13,14 +13,12 @@ COMB = {
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--comb", type=str, default="urdf2urdf", choices=COMB)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("--comb", type=str, default="urdf2urdf", choices=COMB, help="Entities to merge")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init()
+    gs.init(backend=gs.cpu)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -29,12 +27,10 @@ def main():
             camera_pos=(0, -3.5, 2.5),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=40,
-            max_FPS=60,
         ),
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     scene.add_entity(
         gs.morphs.Plane(),
     )
@@ -47,7 +43,6 @@ def main():
                 merge_fixed_links=False,
                 fixed=True,
             ),
-            # vis_mode="collision",
         )
     else:
         gs.logger.info("loading MJCF panda arm")
@@ -64,7 +59,6 @@ def main():
                 file="urdf/panda_bullet/hand.urdf",
                 merge_fixed_links=False,
             ),
-            # vis_mode="collision",
         )
     else:
         gs.logger.info("loading MJCF panda hand")
@@ -78,7 +72,6 @@ def main():
     print([link.name for link in hand.links])
     hand.attach(franka, "attachment")
 
-    ########################## build ##########################
     scene.build()
 
     arm_joints_name = (
@@ -92,7 +85,6 @@ def main():
     )
     arm_dofs_idx = [franka.get_joint(name).dofs_idx_local[0] for name in arm_joints_name]
 
-    # Optional: set control gains
     franka.set_dofs_kp(
         np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000]),
         arm_dofs_idx,
@@ -113,7 +105,6 @@ def main():
     )
     gripper_dofs_idx = [hand.get_joint(name).dofs_idx_local[0] for name in gripper_joints_name]
 
-    # Optional: set control gains
     hand.set_dofs_kp(
         np.array([100, 100]),
         gripper_dofs_idx,

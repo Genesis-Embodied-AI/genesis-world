@@ -4,17 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-world"
-version = "0.4.4"
+version = "1.4.2"
 description = "A universal and generative physics engine"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
     "psutil",
-    "quadrants==0.5.2",
-    "pydantic>=2.11.0",
+    "quadrants==1.3.0",
+    # * 2.13.0 sets the private state of a model built by 'model_construct', which pickling reads.
+    "pydantic>=2.13.0",
     "numpy>=1.26.4",
     "frozendict",
-    "trimesh",
+    # * 4.8.2 fixed linear/sRGB color conversion in `to_color()`.
+    "trimesh>=4.8.2",
     # Used for preprocessing .urdf.xacro files into plain URDF
     "xacro",
     # * No pre-compiled wheels are distributed for LibIGL v2.6.2 on Windows OS
@@ -23,6 +25,8 @@ dependencies = [
     "py-cpuinfo",
     "mujoco>=3.2.5",
     "moviepy>=2.0.0",
+    # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
+    "av",
     # Used by `pyrender` to manage onscreen graphical windows
     # * 2.1.8 breaks headless windowing, which is used in unit tests of the interactive viewer.
     # * 2.0.15 <= 2.1.8 breaks old-style option overwrite for string literal.
@@ -40,6 +44,8 @@ dependencies = [
     "pycollada",
     # Used for parsing `.glb` mesh files
     "pygltflib==1.16.0",
+    # Used for decoding Draco-compressed `.glb` mesh files
+    "DracoPy",
     # Use by `PBD3DEntity.sample` to tetrahedralize a mesh
     "tetgen==0.8.2",
     # Used for some advanced mesh processing such as `skeletonization`
@@ -64,7 +70,7 @@ dependencies = [
     # Used for loading raytracing special texture images used by LuisaRender
     "OpenEXR",
     # Native batch renderer specifically designed for Genesis
-    "gs-madrona==0.0.7.post2; platform_system=='Linux' and (platform_machine=='x86_64' or platform_machine=='AMD64')",
+    "gs-madrona==0.0.10; platform_system=='Linux' and (platform_machine=='x86_64' or platform_machine=='AMD64')",
     # Used for mesh simplification
     "fast_simplification>=0.1.12",
     # Surface reconstruction library for particle data from SPH simulations
@@ -77,25 +83,29 @@ dev = [
     "pytest",
     "pytest-xdist",
     "pytest-forked",
+    "pytest-timeout",
     "pytest-print",
     # Note that 'pytest-rerunfailures' is incompatible with 'pytest-forked'
     # - 16.0 is causing pytest-xdist to crash in case of failure or skipped tests
     # "pytest-rerunfailures!=16.0",
+    # GPU queries for the test infrastructure (tests/gpu_info.py); non-macOS so the CUDA device check runs on
+    # Linux and Windows. AMD's 'amdsmi' ships with ROCm, not PyPI, so the AMD backend is import-gated instead.
+    "nvidia-ml-py; platform_system != 'Darwin'",
     "setproctitle", # allows renaming the test processes on the cluster
     "syrupy",
-    "huggingface_hub[hf_xet]",
+    "huggingface_hub[hf_xet]<2",
     "wandb",
     "ipython",
     # * Mujoco 3.3.6 made contact islands an opt-out option instead of opt-in,
     #   which requires setting the disableflags 'mjDSBL_ISLAND'.
     # * Mujoco 3.5.0 fixed computation of link invweight when degenerated.
-    "mujoco>=3.5.0,<3.7.0",
+    # * Mujoco 3.10.0 aligned the primal solvers with Genesis (Hager-Zhang CG update, shifted linesearch costs);
+    #   the step-by-step solver consistency tests only hold when both engines run the same algorithm.
+    "mujoco>=3.10.0,<3.11.0",
     # Used internally by 'MPLPlotter'
     # * 3.7.0: introduces Button blitting and 'outside' keyword legend location
     "matplotlib>=3.7.0",
-    # Used internally by 'VideoFileWriter'
-    "av",
-    # Used for validating polar decomposition in unit tests
+    # Used for ground truth validation in unit tests
     "scipy",
     # Used for code formatting during commits
     "pre_commit",
@@ -121,11 +131,16 @@ docs = [
 ]
 render = [
     "pybind11[global]",
-    "open3d",
+    # Pre-compiled wheels are only published for cp38-cp312 on macOS (universal2), Linux x86_64, and Windows.
+    "open3d; python_version < '3.13' and platform_machine != 'aarch64'",
+    # No pre-compiled wheels are published for Python 3.10, and the source build needs CMake.
+    "imgui-bundle; python_version >= '3.11'",
 ]
 usd = [
     # Used for parsing `.usd` mesh files
     "usd-core==25.11",
+    # Used to serialize concurrent omni-kit bake operations (concurrent bootstrapping causes segfaults)
+    "filelock",
 ]
 
 [project.scripts]
@@ -166,10 +181,15 @@ ignore = [
     "E712", # true-false-comparison
 ]
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.pytest.ini_options]
 addopts = [
     "--verbose",
-    "-r", "a",
+    # Exclude 'f' (failed) from short test summary because it duplicates the FAILURES section in verbose mode.
+    # A plain list of failed test IDs is printed instead by 'pytest_terminal_summary' hook in tests/conftest.py.
+    "-r", "EsxXw",
     "--color=yes",
     "--import-mode=importlib",
     "--pdbcls=IPython.terminal.debugger:TerminalPdb",
@@ -179,6 +199,7 @@ addopts = [
     # "--max-worker-restart=0",
     "--durations=0",
     "--durations-min=100.0",
+    "--timeout=1200",  # Very large timeout, just in case of deadlock
     # Note that the retry mechanism is not compatible with "--forked".
     "-m not (benchmarks or examples)",
 ]
@@ -190,7 +211,12 @@ markers = [
     "examples: example scripts.",
     "benchmarks: benchmarks for profiling and monitoring.",
     "required: minimal test set that must pass systematically on any environment before merging.",
-    "slow: tests that are slow to run (> 100s).",
+    # A test is flagged 'slow' when its baseline run time is >= 150s. The baseline is the worst case over the standard
+    # parallel CI runs (field and ndarray backends) of the per-test average across its parametrizations.
+    # '@pytest.mark.slow' with no argument means slow on every backend; passing one or more backend names, e.g.
+    # '@pytest.mark.slow("gpu")' or '@pytest.mark.slow("cpu", "gpu")', restricts the flag to those backends only
+    # (resolved per item in tests/conftest.py against the parametrized or session backend).
+    "slow: tests that are slow to run (>= 150s); optional args restrict it to specific backends.",
 ]
 log_cli_level = "WARNING"
 

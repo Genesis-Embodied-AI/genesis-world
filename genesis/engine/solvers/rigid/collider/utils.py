@@ -6,13 +6,7 @@ from genesis.constants import GEOM_TYPE
 
 
 @qd.func
-def func_closest_points_on_segments(
-    seg_a_p1,
-    seg_a_p2,
-    seg_b_p1,
-    seg_b_p2,
-    EPS,
-):
+def func_closest_points_on_segments(seg_a_p1, seg_a_p2, seg_b_p1, seg_b_p2, EPS):
     """
     Compute closest points on two line segments using analytical solution.
 
@@ -66,11 +60,7 @@ def func_closest_points_on_segments(
 
 
 @qd.func
-def func_det3(
-    v1,
-    v2,
-    v3,
-):
+def func_det3(v1, v2, v3):
     """
     Compute the determinant of a 3x3 matrix M = [v1 | v2 | v3].
     """
@@ -83,47 +73,36 @@ def func_det3(
 
 @qd.func
 def func_point_in_geom_aabb(
-    geoms_state: array_class.GeomsState,
-    i_g: qd.i32,
-    i_b: qd.i32,
-    point: qd.types.vector(3, qd.f32),
-    expansion: qd.f32 = 0.0,
+    i_g: int, i_b: int, point: qd.types.vector(3), expansion: float, dyn_state: array_class.DynState
 ):
-    aabb_min = geoms_state.aabb_min[i_g, i_b] - expansion
-    aabb_max = geoms_state.aabb_max[i_g, i_b] + expansion
+    aabb_min = dyn_state.geoms.aabb_min[i_g, i_b] - expansion
+    aabb_max = dyn_state.geoms.aabb_max[i_g, i_b] + expansion
     return (point > aabb_min).all() and (point < aabb_max).all()
 
 
 @qd.func
-def func_is_geom_aabbs_overlap(geoms_state: array_class.GeomsState, i_ga, i_gb, i_b):
+def func_is_geom_aabbs_overlap(i_ga, i_gb, i_b, dyn_state: array_class.DynState):
     return not (
-        (geoms_state.aabb_max[i_ga, i_b] <= geoms_state.aabb_min[i_gb, i_b]).any()
-        or (geoms_state.aabb_min[i_ga, i_b] >= geoms_state.aabb_max[i_gb, i_b]).any()
+        (dyn_state.geoms.aabb_max[i_ga, i_b] <= dyn_state.geoms.aabb_min[i_gb, i_b]).any()
+        or (dyn_state.geoms.aabb_min[i_ga, i_b] >= dyn_state.geoms.aabb_max[i_gb, i_b]).any()
     )
 
 
 @qd.func
-def func_is_discrete_geom(
-    geoms_info: array_class.GeomsInfo,
-    i_g,
-):
+def func_is_discrete_geom(i_g, dyn_info: array_class.DynInfo):
     """
     Check if the given geom is a discrete geometry.
     """
-    geom_type = geoms_info.type[i_g]
+    geom_type = dyn_info.geoms.type[i_g]
     return geom_type == GEOM_TYPE.MESH or geom_type == GEOM_TYPE.BOX
 
 
 @qd.func
-def func_is_discrete_geoms(
-    geoms_info: array_class.GeomsInfo,
-    i_ga,
-    i_gb,
-):
+def func_is_discrete_geoms(i_ga, i_gb, dyn_info: array_class.DynInfo):
     """
     Check if the given geoms are discrete geometries.
     """
-    return func_is_discrete_geom(geoms_info, i_ga) and func_is_discrete_geom(geoms_info, i_gb)
+    return func_is_discrete_geom(i_ga, dyn_info) and func_is_discrete_geom(i_gb, dyn_info)
 
 
 @qd.func

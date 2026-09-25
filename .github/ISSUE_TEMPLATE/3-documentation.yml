@@ -1,0 +1,35 @@
+name: "📚 Documentation Issue"
+description: Report something wrong, unclear, or missing in the documentation
+title: "[Docs]: "
+labels: ["documentation", "triage-needed"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Documentation issues are tracked here, even though the pages themselves live in [genesis-doc](https://github.com/Genesis-Embodied-AI/genesis-doc). Please make sure to [search for existing issues](https://github.com/Genesis-Embodied-AI/genesis-world/issues) before filing a new one!
+  - type: input
+    id: page
+    attributes:
+      label: Affected Page
+      placeholder: "Link to the page on https://genesis-world.readthedocs.io, or the path of the source file in genesis-doc."
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing?
+      placeholder: |
+        A clear and concise description of the problem, e.g. an example that no longer runs, an API signature that does not
+        match the code, a step that is impossible to follow, or a topic that is not covered at all.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested Improvement
+      placeholder: "If you already know what the page should say instead, describe it here."
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      placeholder: "Add any other context, screenshots, or log output here."

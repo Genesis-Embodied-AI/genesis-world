@@ -1,20 +1,19 @@
 import os
 import genesis as gs
 
-gs.init()
+gs.init(backend=gs.cpu)
 
 scene = gs.Scene(
-    show_viewer=True,
+    vis_options=gs.options.VisOptions(
+        rendered_envs_idx=list(range(10, 15)),  # render the 11th to 15th environments
+    ),
     viewer_options=gs.options.ViewerOptions(
         res=(1280, 960),
         camera_pos=(3.5, 0.0, 2.5),
         camera_lookat=(0.0, 0.0, 0.5),
         camera_fov=50,
     ),
-    vis_options=gs.options.VisOptions(
-        rendered_envs_idx=list(range(10, 15)),  # render the 11th to 15th environments
-        # rendered_envs_idx=list(range(5)), # render the first 5 environments
-    ),
+    show_viewer=True,
 )
 
 plane = scene.add_entity(

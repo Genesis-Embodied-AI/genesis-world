@@ -8,22 +8,24 @@ from genesis.utils.image_exporter import FrameImageExporter
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
-    parser.add_argument("-b", "--n_envs", type=int, default=3)
-    parser.add_argument("-s", "--n_steps", type=int, default=2)
-    parser.add_argument("-r", "--render_all_cameras", action="store_true", default=False)
-    parser.add_argument("-o", "--output_dir", type=str, default="data/test")
-    parser.add_argument("-u", "--use_rasterizer", action="store_true", default=False)
-    parser.add_argument("-f", "--use_fisheye", action="store_true", default=False)
-    parser.add_argument("-d", "--debug", action="store_true", default=False)
-    parser.add_argument("-l", "--seg_level", type=str, default="link")
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-b", "--num-envs", type=int, default=3, help="Number of parallel environments")
+    parser.add_argument("-s", "--steps", type=int, default=2, help="Number of simulation steps")
+    parser.add_argument("--render-all-cameras", action="store_true", help="Render every camera each step")
+    parser.add_argument(
+        "-o", "--output-dir", type=str, default="out/batch_render", help="Directory for rendered frames"
+    )
+    parser.add_argument(
+        "--use-rasterizer", action="store_true", help="Use the rasterizer instead of the batch renderer"
+    )
+    parser.add_argument("--use-fisheye", action="store_true", help="Use a fisheye camera model")
+    parser.add_argument("-d", "--debug", action="store_true", help="Dump per-camera debug images")
+    parser.add_argument("--seg-level", type=str, default="link", help="Granularity of the segmentation mask")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu)
+    # The batch renderer only runs on CUDA, so there is no CPU backend to offer here.
+    gs.init(backend=gs.gpu)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         vis_options=gs.options.VisOptions(
             segmentation_level=args.seg_level,
@@ -33,7 +35,6 @@ def main():
         ),
     )
 
-    ########################## entities ##########################
     plane = scene.add_entity(
         gs.morphs.Plane(),
         surface=gs.surfaces.Default(
@@ -41,11 +42,12 @@ def main():
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
         visualize_contact=True,
     )
 
-    ########################## cameras ##########################
     debug_cam = scene.add_camera(
         res=(720, 1280),
         pos=(1.5, -0.5, 1.0),
@@ -97,18 +99,15 @@ def main():
         attenuation=0.1,
     )
 
-    ########################## build ##########################
-    scene.build(n_envs=args.n_envs)
+    scene.build(n_envs=args.num_envs)
 
     # Create an image exporter
     exporter = FrameImageExporter(args.output_dir)
 
     if args.debug:
-        debug_cam.start_recording()
-    for i in range(args.n_steps):
+        debug_cam.start_recording(save_to_filename="out/batch_render_debug.mp4")
+    for i in range(args.steps):
         scene.step()
-        if args.debug:
-            debug_cam.render()
         if args.render_all_cameras:
             color, depth, seg, normal = scene.render_all_cameras(
                 rgb=True, depth=i % 2 == 1, segmentation=i % 2 == 1, normal=True
@@ -124,7 +123,7 @@ def main():
             )
             exporter.export_frame_single_camera(i, cam_1.idx, rgb=seg, depth=depth, segmentation=None, normal=normal)
     if args.debug:
-        debug_cam.stop_recording("debug_cam.mp4")
+        debug_cam.stop_recording()
 
 
 if __name__ == "__main__":

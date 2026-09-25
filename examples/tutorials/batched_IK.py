@@ -2,23 +2,19 @@ import os
 import numpy as np
 import genesis as gs
 
-########################## init ##########################
-gs.init()
+gs.init(backend=gs.cpu)
 
-########################## create a scene ##########################
 scene = gs.Scene(
+    rigid_options=gs.options.RigidOptions(
+        enable_joint_limit=False,
+    ),
     viewer_options=gs.options.ViewerOptions(
         camera_pos=(0.0, -2, 1.5),
         camera_lookat=(0.0, 0.0, 0.5),
         camera_fov=40,
-        max_FPS=200,
-    ),
-    rigid_options=gs.options.RigidOptions(
-        enable_joint_limit=False,
     ),
 )
 
-########################## entities ##########################
 plane = scene.add_entity(
     gs.morphs.Plane(),
 )
@@ -26,7 +22,6 @@ robot = scene.add_entity(
     gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
 )
 
-########################## build ##########################
 n_envs = 16
 scene.build(n_envs=n_envs, env_spacing=(1.0, 1.0))
 

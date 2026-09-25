@@ -5,14 +5,10 @@ from importlib import metadata
 from pathlib import Path
 
 try:
-    try:
-        if metadata.version("rsl-rl"):
-            raise ImportError
-    except metadata.PackageNotFoundError:
-        if metadata.version("rsl-rl-lib") != "2.2.4":
-            raise ImportError
+    if int(metadata.version("rsl-rl-lib").split(".")[0]) < 5:
+        raise ImportError
 except (metadata.PackageNotFoundError, ImportError) as e:
-    raise ImportError("Please uninstall 'rsl_rl' and install 'rsl-rl-lib==2.2.4'.") from e
+    raise ImportError("Please install 'rsl-rl-lib>=5.0.0'.") from e
 
 from rsl_rl.runners import OnPolicyRunner
 from behavior_cloning import BehaviorCloning
@@ -22,7 +18,7 @@ import genesis as gs
 from grasp_env import GraspEnv
 
 
-def get_train_cfg(exp_name, max_iterations):
+def get_train_cfg(exp_name):
     # stage 1: privileged reinforcement learning
     rl_cfg_dict = {
         "algorithm": {
@@ -40,30 +36,29 @@ def get_train_cfg(exp_name, max_iterations):
             "use_clipped_value_loss": True,
             "value_loss_coef": 1.0,
         },
-        "init_member_classes": {},
-        "policy": {
+        "actor": {
+            "class_name": "MLPModel",
+            "hidden_dims": [256, 256, 128],
             "activation": "relu",
-            "actor_hidden_dims": [256, 256, 128],
-            "critic_hidden_dims": [256, 256, 128],
-            "init_noise_std": 1.0,
-            "class_name": "ActorCritic",
+            "distribution_cfg": {
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
         },
-        "runner": {
-            "checkpoint": -1,
-            "experiment_name": exp_name,
-            "load_run": -1,
-            "log_interval": 1,
-            "max_iterations": max_iterations,
-            "record_interval": -1,
-            "resume": False,
-            "resume_path": None,
-            "run_name": "",
+        "critic": {
+            "class_name": "MLPModel",
+            "hidden_dims": [256, 256, 128],
+            "activation": "relu",
         },
-        "runner_class_name": "OnPolicyRunner",
+        "obs_groups": {
+            "actor": ["policy"],
+            "critic": ["policy"],
+        },
         "num_steps_per_env": 24,
         "save_interval": 100,
-        "empirical_normalization": None,
-        "seed": 1,
+        "run_name": exp_name,
+        "logger": "tensorboard",
     }
 
     # stage 2: vision-based behavior cloning
@@ -123,16 +118,12 @@ def get_train_cfg(exp_name, max_iterations):
 def get_task_cfgs():
     env_cfg = {
         "num_envs": 10,
-        "num_obs": 14,
         "num_actions": 6,
         "action_scales": [0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
         "episode_length_s": 3.0,
         "ctrl_dt": 0.01,
         "box_size": [0.08, 0.03, 0.06],
-        "box_collision": False,
-        "box_fixed": True,
         "image_resolution": (64, 64),
-        "use_rasterizer": True,
         "visualize_camera": False,
     }
     reward_scales = {
@@ -154,11 +145,9 @@ def load_teacher_policy(env, rl_train_cfg, exp_name):
     log_dir = Path("logs") / f"{exp_name + '_' + 'rl'}"
     assert log_dir.exists(), f"Log directory {log_dir} does not exist"
     checkpoint_files = [f for f in log_dir.iterdir() if re.match(r"model_\d+\.pt", f.name)]
-    try:
-        *_, last_ckpt = sorted(checkpoint_files)
-    except ValueError as e:
-        raise FileNotFoundError(f"No checkpoint files found in {log_dir}") from e
-    assert last_ckpt is not None, f"No checkpoint found in {log_dir}"
+    if not checkpoint_files:
+        raise FileNotFoundError(f"No checkpoint files found in {log_dir}")
+    last_ckpt = max(checkpoint_files, key=lambda f: int(re.search(r"\d+", f.stem).group()))
     runner = OnPolicyRunner(env, rl_train_cfg, log_dir, device=gs.device)
     runner.load(last_ckpt)
     print(f"Loaded teacher policy from checkpoint {last_ckpt} from {log_dir}")
@@ -168,30 +157,36 @@ def load_teacher_policy(env, rl_train_cfg, exp_name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp_name", type=str, default="grasp")
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-B", "--num_envs", type=int, default=2048)
-    parser.add_argument("--max_iterations", type=int, default=300)
-    parser.add_argument("--stage", type=str, default="rl")
+    parser.add_argument(
+        "-e", "--exp-name", type=str, default="grasp", help="Experiment name; also the log directory under logs/"
+    )
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-b", "--num-envs", type=int, default=2048, help="Number of parallel environments")
+    parser.add_argument("--max-iterations", type=int, default=300, help="Number of learning iterations")
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default="rl",
+        choices=("rl", "bc"),
+        help="Training stage: 'rl' for reinforcement learning, 'bc' for behavior cloning",
+    )
+    parser.add_argument("--seed", type=int, default=1, help="Random seed")
     args = parser.parse_args()
 
-    # === init ===
-    gs.init(backend=gs.gpu, precision="32", logging_level="warning", performance_mode=True)
+    # Training throughput comes from the 2048 parallel environments, which need a GPU.
+    gs.init(backend=gs.gpu, precision="32", logging_level="warning", seed=args.seed, performance_mode=True)
 
-    # === task cfgs and trainning algos cfgs ===
     env_cfg, reward_scales, robot_cfg = get_task_cfgs()
-    rl_train_cfg, bc_train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
+    rl_train_cfg, bc_train_cfg = get_train_cfg(args.exp_name)
 
-    # === log dir ===
     log_dir = Path("logs") / f"{args.exp_name + '_' + args.stage}"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(log_dir / "cfgs.pkl", "wb") as f:
-        pickle.dump((env_cfg, reward_scales, robot_cfg, rl_train_cfg, bc_train_cfg), f)
-
-    # === env ===
     # BC only needs a small number of envs, e.g., 10
     env_cfg["num_envs"] = args.num_envs if args.stage == "rl" else 10
+
+    with open(log_dir / "cfgs.pkl", "wb") as f:
+        pickle.dump((env_cfg, reward_scales, robot_cfg, rl_train_cfg, bc_train_cfg), f)
     env = GraspEnv(
         env_cfg=env_cfg,
         reward_cfg=reward_scales,
@@ -199,10 +194,8 @@ def main():
         show_viewer=args.vis,
     )
 
-    # === runner ===
     if args.stage == "bc":
         teacher_policy = load_teacher_policy(env, rl_train_cfg, args.exp_name)
-        bc_train_cfg["teacher_policy"] = teacher_policy
         runner = BehaviorCloning(env, bc_train_cfg, teacher_policy, device=gs.device)
         runner.learn(num_learning_iterations=args.max_iterations, log_dir=log_dir)
     else:

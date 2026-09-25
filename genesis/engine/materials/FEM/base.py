@@ -89,9 +89,12 @@ class Base(Material["FEMEntity"]):
     def _pre_compute_noop(self, J, F, i_e, i_b):
         pass
 
+    # A material without a constitutive model (Cloth, whose physics the IPC coupler owns) dispatches stress here.
+    # The explicit solver compiles this into its static per-material loop even when no element ever executes it, so
+    # it must return a zero response rather than raise, which quadrants cannot compile.
     @qd.func
     def _update_stress_noop(self, mu, lam, J, F, actu, m_dir):
-        raise NotImplementedError
+        return qd.Matrix.zero(gs.qd_float, 3, 3)
 
     @qd.func
     def _compute_energy_gradient_hessian_noop(self, mu, lam, J, F, actu, m_dir, i_e, i_b, hessian_field):

@@ -48,6 +48,8 @@ def torch_op_wrapper(torch_op):
 
         if torch_op is torch.from_numpy:
             torch_tensor = torch_op(*args)
+        elif torch_op is torch.tensor:
+            torch_tensor = torch_op(*args, dtype=dtype, requires_grad=requires_grad)
         else:
             torch_tensor = torch_op(*args, **kwargs)
 

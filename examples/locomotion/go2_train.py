@@ -5,14 +5,10 @@ import shutil
 from importlib import metadata
 
 try:
-    try:
-        if metadata.version("rsl-rl"):
-            raise ImportError
-    except metadata.PackageNotFoundError:
-        if metadata.version("rsl-rl-lib") != "2.2.4":
-            raise ImportError
+    if int(metadata.version("rsl-rl-lib").split(".")[0]) < 5:
+        raise ImportError
 except (metadata.PackageNotFoundError, ImportError) as e:
-    raise ImportError("Please uninstall 'rsl_rl' and install 'rsl-rl-lib==2.2.4'.") from e
+    raise ImportError("Please install 'rsl-rl-lib>=5.0.0'.") from e
 from rsl_rl.runners import OnPolicyRunner
 
 import genesis as gs
@@ -20,7 +16,7 @@ import genesis as gs
 from go2_env import Go2Env
 
 
-def get_train_cfg(exp_name, max_iterations):
+def get_train_cfg(exp_name):
     train_cfg_dict = {
         "algorithm": {
             "class_name": "PPO",
@@ -37,30 +33,29 @@ def get_train_cfg(exp_name, max_iterations):
             "use_clipped_value_loss": True,
             "value_loss_coef": 1.0,
         },
-        "init_member_classes": {},
-        "policy": {
+        "actor": {
+            "class_name": "MLPModel",
+            "hidden_dims": [512, 256, 128],
             "activation": "elu",
-            "actor_hidden_dims": [512, 256, 128],
-            "critic_hidden_dims": [512, 256, 128],
-            "init_noise_std": 1.0,
-            "class_name": "ActorCritic",
+            "distribution_cfg": {
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
         },
-        "runner": {
-            "checkpoint": -1,
-            "experiment_name": exp_name,
-            "load_run": -1,
-            "log_interval": 1,
-            "max_iterations": max_iterations,
-            "record_interval": -1,
-            "resume": False,
-            "resume_path": None,
-            "run_name": "",
+        "critic": {
+            "class_name": "MLPModel",
+            "hidden_dims": [512, 256, 128],
+            "activation": "elu",
         },
-        "runner_class_name": "OnPolicyRunner",
+        "obs_groups": {
+            "actor": ["policy"],
+            "critic": ["policy"],
+        },
         "num_steps_per_env": 24,
         "save_interval": 100,
-        "empirical_normalization": None,
-        "seed": 1,
+        "run_name": exp_name,
+        "logger": "tensorboard",
     }
 
     return train_cfg_dict
@@ -114,7 +109,6 @@ def get_cfgs():
         "clip_actions": 100.0,
     }
     obs_cfg = {
-        "num_obs": 45,
         "obs_scales": {
             "lin_vel": 2.0,
             "ang_vel": 0.25,
@@ -147,25 +141,27 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp_name", type=str, default="go2-walking")
-    parser.add_argument("-B", "--num_envs", type=int, default=4096)
-    parser.add_argument("--max_iterations", type=int, default=101)
+    parser.add_argument(
+        "-e", "--exp-name", type=str, default="go2-walking", help="Experiment name; also the log directory under logs/"
+    )
+    parser.add_argument("-b", "--num-envs", type=int, default=4096, help="Number of parallel environments")
+    parser.add_argument("--max-iterations", type=int, default=101, help="Number of learning iterations")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed")
     args = parser.parse_args()
 
     log_dir = f"logs/{args.exp_name}"
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
-    train_cfg = get_train_cfg(args.exp_name, args.max_iterations)
+    train_cfg = get_train_cfg(args.exp_name)
 
     if os.path.exists(log_dir):
         shutil.rmtree(log_dir)
     os.makedirs(log_dir, exist_ok=True)
 
-    pickle.dump(
-        [env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg],
-        open(f"{log_dir}/cfgs.pkl", "wb"),
-    )
+    with open(f"{log_dir}/cfgs.pkl", "wb") as f:
+        pickle.dump([env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg], f)
 
-    gs.init(backend=gs.gpu, precision="32", logging_level="warning", seed=train_cfg["seed"], performance_mode=True)
+    # Training throughput comes from the 4096 parallel environments, which need a GPU.
+    gs.init(backend=gs.gpu, precision="32", logging_level="warning", seed=args.seed, performance_mode=True)
 
     env = Go2Env(
         num_envs=args.num_envs, env_cfg=env_cfg, obs_cfg=obs_cfg, reward_cfg=reward_cfg, command_cfg=command_cfg

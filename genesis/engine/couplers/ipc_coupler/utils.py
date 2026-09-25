@@ -4,6 +4,8 @@ Utility functions for IPC coupler.
 Stateless helper functions extracted from IPCCoupler for clarity.
 """
 
+from typing import TYPE_CHECKING
+
 import numba as nb
 import numpy as np
 
@@ -11,6 +13,28 @@ import genesis as gs
 import genesis.utils.geom as gu
 
 from uipc.core import Scene
+
+if TYPE_CHECKING:
+    from genesis.engine.entities import RigidEntity
+    from genesis.engine.materials.rigid import CoupType
+
+
+def has_articulation_dofs(entity: "RigidEntity") -> bool:
+    """True if the entity has dynamic DOFs for IPC articulation coupling.
+
+    Primitive morphs always keep a FIXED base joint (n_joints == 1, n_dofs == 0).
+    Use n_dofs, not n_joints, so fixed Planes/Boxes are not treated as articulated.
+    """
+    return entity.n_dofs > 0
+
+
+def default_coup_type(entity: "RigidEntity") -> "CoupType":
+    """Auto-select coup_type when material.coup_type is None. See has_articulation_dofs."""
+    if has_articulation_dofs(entity):
+        if entity.base_link.is_fixed:
+            return "external_articulation"
+        return "two_way_soft_constraint"
+    return "ipc_only"
 
 
 def find_target_link_for_fixed_merge(link):
@@ -65,13 +89,13 @@ def compute_link_to_link_transform(from_link, to_link):
     while link is not to_link:
         if link.parent_idx < 0:
             gs.raise_exception(f"Cannot compute transform from link {from_link} to {to_link}")
-        pos, quat = gu.transform_pos_quat_by_trans_quat(pos, quat, link.pos, link.quat)
+        pos, quat = gu.transform_pos_quat_by_trans_quat(pos, quat, link.desc.pos, link.desc.quat)
         link = entity.links[link.parent_idx - entity.link_start]
 
     return pos, quat
 
 
-def build_ipc_scene_config(options, sim_options):
+def build_ipc_scene_config(options, sim_options, dt):
     """
     Build IPC Scene config dict from IPCCouplerOptions and SimOptions.
 
@@ -80,7 +104,9 @@ def build_ipc_scene_config(options, sim_options):
     options : IPCCouplerOptions
         The coupler options
     sim_options : SimOptions
-        The simulation options (provides dt, gravity, requires_grad)
+        The simulation options (provides gravity, requires_grad)
+    dt : float
+        The interval a single advance of the IPC world covers, which is the substep the coupler is called at.
 
     Returns
     -------
@@ -89,8 +115,7 @@ def build_ipc_scene_config(options, sim_options):
     """
     config = Scene.default_config()
 
-    # Basic simulation parameters (derived from SimOptions)
-    config["dt"] = sim_options.dt
+    config["dt"] = dt
     gravity = sim_options.gravity
     config["gravity"] = [[float(e)] for e in gravity]
 

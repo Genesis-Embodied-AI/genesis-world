@@ -3,10 +3,8 @@ import os
 import genesis as gs
 
 
-########################## init ##########################
-gs.init()
+gs.init(backend=gs.cpu)
 
-########################## create a scene ##########################
 
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
@@ -14,9 +12,9 @@ scene = gs.Scene(
         substeps=10,
     ),
     sph_options=gs.options.SPHOptions(
+        particle_size=0.01,
         lower_bound=(-0.5, -0.5, 0.0),
         upper_bound=(0.5, 0.5, 1),
-        particle_size=0.01,
     ),
     vis_options=gs.options.VisOptions(
         visualize_sph_boundary=True,
@@ -24,14 +22,12 @@ scene = gs.Scene(
     show_viewer=True,
 )
 
-########################## entities ##########################
 plane = scene.add_entity(
     morph=gs.morphs.Plane(),
 )
 
 liquid = scene.add_entity(
     # viscous liquid
-    # material=gs.materials.SPH.Liquid(mu=0.02, gamma=0.02),
     material=gs.materials.SPH.Liquid(),
     morph=gs.morphs.Box(
         pos=(0.0, 0.0, 0.65),
@@ -43,7 +39,6 @@ liquid = scene.add_entity(
     ),
 )
 
-########################## build ##########################
 scene.build()
 
 horizon = 1000 if "PYTEST_VERSION" not in os.environ else 5

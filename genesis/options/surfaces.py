@@ -1,5 +1,5 @@
 import math
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 from typing_extensions import Self
 
 import numpy as np
@@ -8,6 +8,7 @@ from pydantic import Field, StrictBool, model_validator
 import genesis as gs
 from genesis.typing import FArrayType, UnitInterval, ValidFloat
 from genesis.utils import mesh as mu
+from genesis.utils.misc import SizeCappedCache
 
 from .misc import FoamOptions
 from .options import Options
@@ -95,37 +96,37 @@ class Surface(Options):
     generate_foam: StrictBool = False
     foam_options: FoamOptions = Field(default_factory=FoamOptions)
 
-    @model_validator(mode="after")
-    def _resolve_shortcuts(self) -> Self:
-        color_target = type(self)._color_target
-        if self.color is not None:
-            if getattr(self, color_target) is not None:
-                gs.raise_exception(f"'color' and '{color_target}' cannot both be set.")
-            setattr(self, color_target, ColorTexture(color=tuple(self.color)))
-
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_shortcuts(cls, data: Any) -> Any:
+        # Route each shortcut into its texture counterpart. Subclasses that don't expose a given texture (e.g. Glass has
+        # no opacity_texture) are skipped via the model_fields guard, and class defaults like `Rough.roughness = 1.0`
+        # are honored.
         for shortcut, texture_field in (
+            ("color", cls._color_target),
             ("opacity", "opacity_texture"),
             ("roughness", "roughness_texture"),
             ("metallic", "metallic_texture"),
+            ("thickness", "thickness_texture"),
+            ("emissive", "emissive_texture"),
         ):
-            value = getattr(self, shortcut, None)
-            if value is not None:
-                if texture_field in self.model_fields:
-                    if getattr(self, texture_field) is not None:
-                        gs.raise_exception(f"'{shortcut}' and '{texture_field}' cannot both be set.")
-                    setattr(self, texture_field, ColorTexture(color=(float(value),)))
+            if texture_field not in cls.model_fields:
+                continue
+            field = cls.model_fields.get(shortcut)
+            value = data.get(shortcut, field.default if field is not None else None)
+            if value is None:
+                continue
+            if data.get(texture_field) is not None:
+                gs.raise_exception(f"'{shortcut}' and '{texture_field}' cannot both be set.")
+            data[texture_field] = ColorTexture(color=value)
 
-        if self.emissive is not None:
-            if "emissive_texture" in self.model_fields:
-                if self.emissive_texture is not None:
-                    gs.raise_exception("'emissive' and 'emissive_texture' cannot both be set.")
-                self.emissive_texture = ColorTexture(color=tuple(self.emissive))
+        # Mirror the roughness shortcut into default_roughness unless the user passed an explicit value.
+        if "default_roughness" not in data and "roughness" in cls.model_fields:
+            roughness = data.get("roughness", cls.model_fields["roughness"].default)
+            if roughness is not None:
+                data["default_roughness"] = float(roughness)
 
-        # Sync default_roughness with roughness shortcut unless explicitly set
-        if self.roughness is not None and "default_roughness" not in self.model_fields_set:
-            self.default_roughness = float(self.roughness)
-
-        return self
+        return data
 
     @property
     def texture(self) -> Texture | None:
@@ -144,7 +145,7 @@ class Surface(Options):
         return False
 
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        return self._make_rgba(self.texture, None, batch)
+        return _make_rgba(_resolve_albedo(self.texture, self.emission), None, batch)
 
     def update_texture(
         self,
@@ -205,66 +206,112 @@ class Surface(Options):
                 opacity = tex
         return opacity
 
-    @staticmethod
-    def _make_rgba(
-        color_texture: Texture | None, opacity_texture: Texture | None, batch: bool
-    ) -> BatchTexture | Texture:
-        all_textures = []
-        for texture in (color_texture, opacity_texture):
-            textures = texture.textures if isinstance(texture, BatchTexture) else [texture]
-            all_textures.append(textures if batch else textures[:1])
-        color_textures, opacity_textures = all_textures
 
-        rgba_textures = []
-        num_colors = len(color_textures)
-        num_opacities = len(opacity_textures)
-        num_rgba = num_colors * num_opacities // math.gcd(num_colors, num_opacities)
+# 512 MiB of merged RGBA textures, bounded by the byte size of the image arrays they hold (full-resolution textures
+# dominate the footprint; a count-based bound would not reflect it). The entry count is also capped so that flat-color
+# surfaces (no image array, e.g. per-geom randomized collision colors) cannot accumulate unbounded. Dropped on genesis
+# teardown like the other caches.
+_RGBA_CACHE = SizeCappedCache(max_bytes=512 * 1024 * 1024, max_entries=8192)
 
-        for i in range(num_rgba):
-            color_texture = color_textures[i % num_colors]
-            opacity_texture = opacity_textures[i % num_opacities]
 
-            if isinstance(color_texture, ColorTexture):
-                if isinstance(opacity_texture, ColorTexture):
-                    rgba_texture = ColorTexture(color=(*color_texture.color, *opacity_texture.color))
-                elif isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
-                    rgb_color = mu.color_f32_to_u8(color_texture.color)
-                    rgb_array = np.full((*opacity_texture.image_array.shape[:2], 3), rgb_color, dtype=np.uint8)
-                    rgba_array = np.dstack((rgb_array, opacity_texture.image_array))
-                    rgba_scale = (1.0, 1.0, 1.0, *opacity_texture.image_color)
-                    rgba_texture = ImageTexture(image_array=rgba_array, image_color=rgba_scale)
-                else:
-                    rgba_texture = ColorTexture(color=(*color_texture.color, 1.0))
+def _resolve_albedo(base_texture: Texture | None, emissive_texture: Texture | None) -> Texture | None:
+    # Packed RGBA feeds renderers that read it as base color, so prefer the base-color texture. Fall back to emissive
+    # only when the base is absent or fully black, which keeps zero-base-factor assets (visible imagery authored into
+    # emissive) renderable without letting an emissive map override an ordinary authored base color. Batched textures
+    # decide the fallback per entry: a mixed batch resolves each environment on its own base color rather than on
+    # whether any environment is black.
+    is_base_batched = isinstance(base_texture, BatchTexture)
+    is_emissive_batched = isinstance(emissive_texture, BatchTexture)
+    if is_base_batched or is_emissive_batched:
+        base_batch = base_texture.textures if is_base_batched else [base_texture]
+        emissive_batch = emissive_texture.textures if is_emissive_batched else [emissive_texture]
+        # Least common multiple keeps every base/emissive pairing, matching how _make_rgba combines batch dimensions.
+        count = math.lcm(len(base_batch), len(emissive_batch))
+        resolved = [
+            _resolve_albedo(base_batch[i % len(base_batch)], emissive_batch[i % len(emissive_batch)])
+            for i in range(count)
+        ]
+        # Return the original batch object when no entry fell back, so its identity stays stable and _make_rgba's
+        # per-instance cache keeps hitting for shared batched textures instead of rebuilding a wrapper each call.
+        if is_base_batched and len(resolved) == len(base_batch) and all(r is b for r, b in zip(resolved, base_batch)):
+            return base_texture
+        return BatchTexture(textures=resolved)
+    if base_texture is not None and not base_texture.is_black:
+        return base_texture
+    return emissive_texture if emissive_texture is not None else base_texture
 
-            elif isinstance(color_texture, ImageTexture) and color_texture.image_array is not None:
-                if isinstance(opacity_texture, ColorTexture):
-                    a_color = mu.color_f32_to_u8(opacity_texture.color)
-                    a_array = np.full((*color_texture.image_array.shape[:2],), a_color, dtype=np.uint8)
-                    rgba_array = np.dstack((color_texture.image_array, a_array))
-                    rgba_scale = (*color_texture.image_color, 1.0)
-                elif (
-                    isinstance(opacity_texture, ImageTexture)
-                    and opacity_texture.image_array is not None
-                    and opacity_texture.image_array.shape[:2] == color_texture.image_array.shape[:2]
-                ):
-                    rgba_array = np.dstack((color_texture.image_array, opacity_texture.image_array))
-                    rgba_scale = (*color_texture.image_color, *opacity_texture.image_color)
-                else:
-                    if isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
-                        gs.logger.warning(
-                            "Color and opacity image shapes do not match. Fall back to fully opaque texture."
-                        )
-                    a_array = np.full(color_texture.image_array.shape[:2], 255, dtype=np.uint8)
-                    rgba_array = np.dstack((color_texture.image_array, a_array))
-                    rgba_scale = (*color_texture.image_color, 1.0)
+
+def _make_rgba(color_texture: Texture | None, opacity_texture: Texture | None, batch: bool) -> "BatchTexture | Texture":
+    # Resolve a surface's color and opacity textures into a single RGBA texture. The result is memoized on the input
+    # texture instances: surfaces sharing the same textures (e.g. all textured submeshes of a GLB) then reuse a single
+    # merged array instead of allocating one full-resolution copy each. A texture update swaps in a new instance, which
+    # is a natural cache miss, so no explicit invalidation is needed.
+    cache_key = (color_texture, opacity_texture, batch)
+    cached = _RGBA_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    all_textures = []
+    for texture in (color_texture, opacity_texture):
+        textures = texture.textures if isinstance(texture, BatchTexture) else [texture]
+        all_textures.append(textures if batch else textures[:1])
+    color_textures, opacity_textures = all_textures
+
+    rgba_textures = []
+    num_colors = len(color_textures)
+    num_opacities = len(opacity_textures)
+    num_rgba = num_colors * num_opacities // math.gcd(num_colors, num_opacities)
+
+    for i in range(num_rgba):
+        color_texture = color_textures[i % num_colors]
+        opacity_texture = opacity_textures[i % num_opacities]
+
+        if isinstance(color_texture, ColorTexture):
+            if isinstance(opacity_texture, ColorTexture):
+                rgba_texture = ColorTexture(color=(*color_texture.color, *opacity_texture.color))
+            elif isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
+                rgb_color = mu.color_f32_to_u8(color_texture.color)
+                rgb_array = np.full((*opacity_texture.image_array.shape[:2], 3), rgb_color, dtype=np.uint8)
+                rgba_array = np.dstack((rgb_array, opacity_texture.image_array))
+                rgba_scale = (1.0, 1.0, 1.0, *opacity_texture.image_color)
                 rgba_texture = ImageTexture(image_array=rgba_array, image_color=rgba_scale)
-
             else:
-                rgba_texture = ColorTexture(color=(1.0, 1.0, 1.0, 1.0))
+                rgba_texture = ColorTexture(color=(*color_texture.color, 1.0))
 
-            rgba_textures.append(rgba_texture)
+        elif isinstance(color_texture, ImageTexture) and color_texture.image_array is not None:
+            if isinstance(opacity_texture, ColorTexture):
+                a_color = mu.color_f32_to_u8(opacity_texture.color)
+                a_array = np.full((*color_texture.image_array.shape[:2],), a_color, dtype=np.uint8)
+                rgba_array = np.dstack((color_texture.image_array, a_array))
+                rgba_scale = (*color_texture.image_color, 1.0)
+            elif (
+                isinstance(opacity_texture, ImageTexture)
+                and opacity_texture.image_array is not None
+                and opacity_texture.image_array.shape[:2] == color_texture.image_array.shape[:2]
+            ):
+                rgba_array = np.dstack((color_texture.image_array, opacity_texture.image_array))
+                rgba_scale = (*color_texture.image_color, *opacity_texture.image_color)
+            else:
+                if isinstance(opacity_texture, ImageTexture) and opacity_texture.image_array is not None:
+                    gs.logger.warning("Color and opacity image shapes do not match. Fall back to fully opaque texture.")
+                a_array = np.full(color_texture.image_array.shape[:2], 255, dtype=np.uint8)
+                rgba_array = np.dstack((color_texture.image_array, a_array))
+                rgba_scale = (*color_texture.image_color, 1.0)
+            rgba_texture = ImageTexture(image_array=rgba_array, image_color=rgba_scale)
 
-        return BatchTexture(textures=rgba_textures) if batch else rgba_textures[0]
+        else:
+            rgba_texture = ColorTexture(color=(1.0, 1.0, 1.0, 1.0))
+
+        rgba_textures.append(rgba_texture)
+
+    result = BatchTexture(textures=rgba_textures) if batch else rgba_textures[0]
+    n_bytes = sum(
+        t.image_array.nbytes
+        for t in (result.textures if isinstance(result, BatchTexture) else [result])
+        if isinstance(t, ImageTexture) and t.image_array is not None
+    )
+    _RGBA_CACHE.put(cache_key, result, n_bytes)
+    return result
 
 
 ############################ Surface types ############################
@@ -317,12 +364,6 @@ class Glass(Surface):
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:
-        # Handle thickness shortcut
-        if self.thickness is not None:
-            if self.thickness_texture is not None:
-                gs.raise_exception("'thickness' and 'thickness_texture' cannot both be set.")
-            self.thickness_texture = ColorTexture(color=(float(self.thickness),))
-
         # Truncate specular/emissive textures to 3 channels (discard alpha for Glass which has no opacity_texture)
         if self.specular_texture is not None:
             self.specular_texture.check_dim(3)
@@ -359,10 +400,6 @@ class Glass(Surface):
                 self.emissive_texture,
             )
         )
-
-    def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        color = self.emissive_texture if self.emissive_texture is not None else self.specular_texture
-        return self._make_rgba(color, None, batch)
 
     def update_texture(
         self,
@@ -439,8 +476,7 @@ class Metal(Surface):
         )
 
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        color = self.emissive_texture if self.emissive_texture is not None else self.diffuse_texture
-        return self._make_rgba(color, self.opacity_texture, batch)
+        return _make_rgba(_resolve_albedo(self.texture, self.emission), self.opacity_texture, batch)
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:
@@ -530,8 +566,7 @@ class Plastic(Surface):
         )
 
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        color = self.emissive_texture if self.emissive_texture is not None else self.diffuse_texture
-        return self._make_rgba(color, self.opacity_texture, batch)
+        return _make_rgba(_resolve_albedo(self.texture, self.emission), self.opacity_texture, batch)
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:
@@ -627,8 +662,7 @@ class BSDF(Surface):
         )
 
     def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        color = self.emissive_texture if self.emissive_texture is not None else self.diffuse_texture
-        return self._make_rgba(color, self.opacity_texture, batch)
+        return _make_rgba(_resolve_albedo(self.texture, self.emission), self.opacity_texture, batch)
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:
@@ -694,9 +728,6 @@ class Emission(Surface):
     @property
     def requires_uv(self) -> bool:
         return self.emissive_texture is not None and self.emissive_texture.requires_uv
-
-    def get_rgba(self, batch: bool = False) -> BatchTexture | Texture:
-        return self._make_rgba(self.emissive_texture, None, batch)
 
     @model_validator(mode="after")
     def _post_init(self) -> Self:

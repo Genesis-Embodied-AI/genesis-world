@@ -10,6 +10,8 @@ import genesis as gs
 import genesis.utils.mesh as mu
 from genesis.typing import LaxUnitIntervalArrayType, LaxFArrayType, UnitIntervalArrayType, NDArrayType
 
+from genesis.utils.serialization import Exporting, Loading, SerializationMixin
+
 from .options import Options
 
 
@@ -25,6 +27,12 @@ class Texture(Options):
     ----
     This class should *not* be instantiated directly.
     """
+
+    # Pydantic disables hashing for models with a field-based __eq__; its only opt-in (model_config frozen=True) also
+    # forbids the in-place edits done during setup (apply_cutoff, check_dim reassign image_array/color). Restore
+    # identity hashing instead: textures are shared by reference and stable once a surface is built, so their identity
+    # is a valid key for caches such as the get_rgba cache.
+    __hash__ = object.__hash__
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -86,7 +94,7 @@ class ColorTexture(Texture):
         return False
 
 
-class ImageTexture(Texture):
+class ImageTexture(Texture, SerializationMixin):
     """
     A texture with a texture map (image).
 
@@ -154,7 +162,7 @@ class ImageTexture(Texture):
                 if image_path.endswith((".exr")):
                     image_path = mu.check_exr_compression(image_path)
             else:
-                image_array = np.array(Image.open(image_path))
+                image_array = mu.PIL_to_array(Image.open(image_path))
         else:
             # Normalize image array
             if not isinstance(image_array, np.ndarray):
@@ -198,12 +206,13 @@ class ImageTexture(Texture):
     def is_black(self) -> bool:
         assert gs.EPS is not None
         assert self.image_color is not None
-        if all(c < gs.EPS for c in self.image_color):
-            return True
         assert self.image_array is not None
-        if np.max(self.image_array) == 0:
-            return True
-        return False
+        # Black when every channel's effective value (texel x factor) is zero. Testing the factor and the array
+        # independently would miss a per-channel factor that masks the only nonzero channels (e.g. a green texture
+        # scaled by a red-only factor).
+        channels = self.image_array.shape[-1] if self.image_array.ndim == 3 else 1
+        channel_peaks = self.image_array.reshape(-1, channels).max(axis=0)
+        return all(factor < gs.EPS or peak == 0 for factor, peak in zip(self.image_color, channel_peaks))
 
     @computed_field
     @cached_property
@@ -245,6 +254,30 @@ class ImageTexture(Texture):
         if cutoff is None or self.image_array is None:  # Cutoff does not apply on image file.
             return
         self.image_array = np.where(self.image_array >= 255.0 * cutoff, 255, 0).astype(np.uint8)
+
+    def export(self, exporting: Exporting) -> dict | None:
+        """Return the pixels of the image and how they are read, or None where a file can hold none of it.
+
+        A texture read from an HDR or EXR file keeps its path rather than its pixels, so nothing of it travels.
+        """
+        if self.image_array is None:
+            return None
+        return {
+            "image_path": self.image_path,
+            "image_array": exporting.array(self.image_array),
+            "image_color": exporting.value(self.image_color, UnitIntervalArrayType),
+            "encoding": self.encoding,
+        }
+
+    @classmethod
+    def load(cls, raw: dict, loading: Loading) -> "ImageTexture":
+        """Recreate the texture from the pixels a file holds, which the constructor would read from a file instead."""
+        return cls.model_construct(
+            image_path=raw["image_path"],
+            image_array=loading.array(raw["image_array"]),
+            image_color=loading.value(raw["image_color"], UnitIntervalArrayType),
+            encoding=raw["encoding"],
+        )
 
 
 class BatchTexture(Texture):

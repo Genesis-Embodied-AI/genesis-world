@@ -1,3 +1,6 @@
+import ctypes
+
+import numpy as np
 from numba import *
 from numba import types
 from numba.extending import (
@@ -10,10 +13,21 @@ from numba.extending import (
     NativeValue,
 )
 from numba.core import cgutils
-from contextlib import ExitStack
+
 import OpenGL.GL as GL
 from OpenGL._bytes import as_8_bit
-from OpenGL.GL import GLint, GLuint, GLvoidp, GLvoid, GLfloat, GLsizei, GLboolean, GLenum, GLsizeiptr, GLintptr
+from OpenGL.GL import (
+    GLboolean,
+    GLenum,
+    GLfloat,
+    GLint,
+    GLintptr,
+    GLsizei,
+    GLsizeiptr,
+    GLuint,
+    GLvoid,
+    GLvoidp,
+)
 
 import genesis as gs
 
@@ -95,6 +109,12 @@ class GLWrapper:
             def __init__(self):
                 for func_name in funcs:
                     setattr(self, func_name, funcs[func_name])
+                # Unboxing this object into a kernel argument reads the function addresses from this array in one go.
+                # Reading them from the ctypes attributes above costs the kernel call a Python attribute lookup and
+                # a pointer extraction per function, which adds up to more than a small kernel does.
+                self.addresses = np.fromiter(
+                    (ctypes.cast(funcs[func_name], ctypes.c_void_p).value for func_name in funcs), np.uint64, len(funcs)
+                )
 
         class GLFuncType(types.Type):
             def __init__(self):
@@ -120,24 +140,22 @@ class GLWrapper:
                 members = list(func_types.items())
                 super().__init__(dmm, fe_type, members)
 
+        addresses_type = types.Array(types.uint64, 1, "C")
+
         @unbox(GLFuncType)
-        def unbox_interval(typ, obj, c):
-            is_error_ptr = cgutils.alloca_once_value(c.builder, cgutils.false_bit)
+        def unbox_glfunc(typ, obj, c):
+            addresses_obj = c.pyapi.object_getattr_string(obj, "addresses")
+            addresses = c.unbox(addresses_type, addresses_obj)
+            c.pyapi.decref(addresses_obj)
+            data = c.context.make_array(addresses_type)(c.context, c.builder, addresses.value).data
+
             gl_func = cgutils.create_struct_proxy(typ)(c.context, c.builder)
+            for i, func_name in enumerate(funcs):
+                address = c.builder.load(cgutils.gep(c.builder, data, i))
+                func_ptr_type = c.context.get_value_type(func_types[func_name])
+                setattr(gl_func, func_name, c.builder.inttoptr(address, func_ptr_type))
 
-            with ExitStack() as stack:
-                for func_name in funcs:
-                    func_obj = c.pyapi.object_getattr_string(obj, func_name)
-                    with cgutils.early_exit_if_null(c.builder, stack, func_obj):
-                        c.builder.store(cgutils.true_bit, is_error_ptr)
-                    func_native = c.unbox(func_types[func_name], func_obj)
-                    c.pyapi.decref(func_obj)
-                    with cgutils.early_exit_if(c.builder, stack, func_native.is_error):
-                        c.builder.store(cgutils.true_bit, is_error_ptr)
-
-                    setattr(gl_func, func_name, func_native.value)
-
-            return NativeValue(gl_func._getvalue(), is_error=c.builder.load(is_error_ptr))
+            return NativeValue(gl_func._getvalue(), is_error=addresses.is_error)
 
         for func_name in funcs:
             make_attribute_wrapper(GLFuncType, func_name, func_name)

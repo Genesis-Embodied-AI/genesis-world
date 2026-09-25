@@ -6,14 +6,10 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-
-    gs.init(precision="32", logging_level="info")
-
-    ########################## create a scene ##########################
+    gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -29,20 +25,17 @@ def main():
             upper_bound=(1.03, 1.03, 1.0),
         ),
         vis_options=gs.options.VisOptions(
-            visualize_sph_boundary=True,
             visualize_mpm_boundary=True,
+            visualize_sph_boundary=True,
             rendered_envs_idx=[0],
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.8, -3, 1.42),
             camera_lookat=(0.5, 0.5, 0.4),
             camera_fov=30,
-            max_FPS=60,
         ),
         show_viewer=args.vis,
     )
-
-    ########################## entities ##########################
 
     water = scene.add_entity(
         morph=gs.morphs.Box(
@@ -62,14 +55,14 @@ def main():
             scale=0.07,
             euler=(90.0, 0.0, 90.0),
         ),
-        material=gs.materials.MPM.Elastic(rho=200),
+        material=gs.materials.MPM.Elastic(
+            rho=200,
+        ),
         surface=gs.surfaces.Default(
             color=(0.9, 0.8, 0.2, 1.0),
             vis_mode="particle",
         ),
     )
-
-    ########################## build ##########################
 
     scene.build(n_envs=0)
 

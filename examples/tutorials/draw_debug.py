@@ -12,7 +12,6 @@ def main():
         camera_pos=(5.0, -5.0, 2.5),
         camera_lookat=(0.0, 0.0, 0.0),
         camera_fov=40,
-        max_FPS=200,
     )
 
     scene = gs.Scene(
@@ -25,7 +24,6 @@ def main():
     scene.build()
 
     # Create debug objects
-    # Debug box
     debug_box = scene.draw_debug_box(
         bounds=[[-0.25, -0.25, 0], [0.25, 0.25, 0.5]],
         color=(1, 0, 1, 1),
@@ -33,15 +31,12 @@ def main():
         wireframe_radius=0.005,  # Magenta
     )
 
-    # Debug line
     debug_line = scene.draw_debug_line(
         start=(0.5, -0.25, 0.5), end=(0.5, 0.25, 0.5), radius=0.01, color=(1, 0, 0, 1)
     )  # Red
 
-    # Debug arrow
     debug_arrow = scene.draw_debug_arrow(pos=(1, 0, 0), vec=(0, 0, 1), radius=0.02, color=(1, 0, 0, 0.5))  # Green
 
-    # Debug sphere
     debug_sphere = scene.draw_debug_sphere(pos=(1.5, 0, 0.5), radius=0.1, color=(0, 0, 1, 0.5))  # Blue with alpha
 
     # Debug multiple spheres

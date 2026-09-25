@@ -33,6 +33,15 @@ def qd_k_cross_vec(vec):
 @qd.func
 def qd_transform_by_quat_fast(v, quat):
     """
+    Rotate a vector by a quaternion that is already normalized.
+
+    Prefer this over the general form whenever the quaternion is known to be a unit one, for exactness rather than for
+    speed: the general form divides by the squared norm, which is a no-op for a unit quaternion in exact arithmetic
+    yet leaves a component that should be untouched a few units in the last place off, by an amount that depends on
+    the rotation. A body resting flat on a plane then reports a height that varies with its orientation about the
+    plane's normal, and the sign of that variation decides whether it is in contact at all. The two cross products
+    here contribute exactly zero to a component the rotation preserves, so it comes back bit for bit.
+
     Assumptions:
     - quat must be normalized
     """
@@ -40,6 +49,14 @@ def qd_transform_by_quat_fast(v, quat):
     u = qd.Vector([q_x, q_y, q_z])
     t = 2.0 * u.cross(v)
     return v + q_w * t + u.cross(t)
+
+
+@qd.func
+def qd_transform_by_trans_quat_fast(pos, trans, quat):
+    """
+    Place a point by a translation and a quaternion that is already normalized. See qd_transform_by_quat_fast.
+    """
+    return qd_transform_by_quat_fast(pos, quat) + trans
 
 
 @qd.func
@@ -134,6 +151,31 @@ def qd_rotvec_to_quat(rotvec, eps):
 
 
 @qd.func
+def qd_rotvec_to_quat_grad_rotvec(rotvec, eps, out_grad):
+    """Adjoint of qd_rotvec_to_quat(rotvec, eps) with respect to rotvec, given the upstream quaternion gradient.
+
+    Differentiates the eps-regularized surrogate quat = (c, sinc * rotvec) with theta_reg = sqrt(|rotvec|^2 + eps^2),
+    c = cos(theta_reg / 2) and sinc = sin(theta_reg / 2) / theta_reg. The surrogate deviates from the exact forward
+    (which branches at |rotvec| = eps and applies a first-order renormalization) by O(eps^2) in the main branch and
+    smooths over the constant-identity branch, trading exactness at the branch point for a gradient that stays
+    finite and continuous through rotvec = 0. Chain rule through theta_reg gives, per component i:
+        d(quat[0])/d(rotvec[i])   = -0.5 * sin(theta_reg / 2) * rotvec[i] / theta_reg
+        d(quat[1+j])/d(rotvec[i]) = delta(i, j) * sinc + rotvec[j] * (0.5 * c - sinc) / theta_reg^2 * rotvec[i]
+    """
+    thetasq = rotvec.dot(rotvec)
+    theta_reg = qd.sqrt(thetasq + eps * eps)
+    theta_half = 0.5 * theta_reg
+    sin_half = qd.sin(theta_half)
+    cos_half = qd.cos(theta_half)
+    sinc = sin_half / theta_reg
+    d_sinc_d_theta = (0.5 * cos_half - sinc) / theta_reg
+
+    out_grad_vec = gs.qd_vec3(out_grad[1], out_grad[2], out_grad[3])
+    coeff = -0.5 * sin_half / theta_reg * out_grad[0] + d_sinc_d_theta / theta_reg * out_grad_vec.dot(rotvec)
+    return coeff * rotvec + sinc * out_grad_vec
+
+
+@qd.func
 def qd_quat_to_R(quat, eps):
     """
     Converts quaternion to 3x3 rotation matrix.
@@ -194,6 +236,93 @@ def qd_quat_to_xyz(quat, eps):
 
 
 @qd.func
+def qd_quat_to_xyz_grad_quat(quat, eps, out_grad):
+    """Adjoint of qd_quat_to_xyz(quat, eps) with respect to quat, given the upstream Euler-angle gradient.
+
+    Mirrors the forward branch structure: each angle is an atan2 of quadratic forms u = s * P(quat) with
+    s = 2 / |quat|^2, so du/dq = s * (dP/dq - 2 P q / |quat|^2) and datan2(y, x) = (x dy - y dx) / (x^2 + y^2).
+    The gradient is zero in the degenerate |quat|^2 <= eps branch (constant forward), and the roll / yaw terms
+    switch to the gimbal-lock forms when cosp <= eps, matching the forward exactly.
+    """
+    g_quat = qd.Vector.zero(gs.qd_float, 4)
+    quat_norm_sqr = quat.norm_sqr()
+    if quat_norm_sqr > eps:
+        s = 2.0 / quat_norm_sqr
+        q_w, q_x, q_y, q_z = quat
+
+        # u = s * P with dP/dq per quadratic form; du/dq folds the ds/dq = -2 s q / |quat|^2 term
+        p_siny = q_w * q_z - q_x * q_y
+        p_cosy = q_y * q_y + q_z * q_z
+        p_pitch = q_x * q_z + q_w * q_y
+        p_roll_num = q_w * q_x - q_y * q_z
+        p_roll_den = q_x * q_x + q_y * q_y
+        p_gimbal_num = q_w * q_z + q_x * q_y
+        p_gimbal_den = q_x * q_x + q_z * q_z
+        u_siny = s * p_siny
+        u_cosy = 1.0 - s * p_cosy
+        u_pitch = s * p_pitch
+        u_roll_num = s * p_roll_num
+        u_roll_den = 1.0 - s * p_roll_den
+        cosp = qd.sqrt(u_cosy * u_cosy + u_siny * u_siny)
+
+        g_roll = out_grad[0]
+        g_pitch = out_grad[1]
+        g_yaw = out_grad[2]
+
+        # pitch = atan2(u_pitch, cosp) with cosp = |(u_siny, u_cosy)|
+        denom_pitch = u_pitch * u_pitch + cosp * cosp
+        g_u_pitch = g_pitch * cosp / denom_pitch
+        g_cosp = -g_pitch * u_pitch / denom_pitch
+        g_u_siny = gs.qd_float(0.0)
+        g_u_cosy = gs.qd_float(0.0)
+        if cosp > eps:
+            g_u_siny = g_cosp * u_siny / cosp
+            g_u_cosy = g_cosp * u_cosy / cosp
+
+        g_u_roll_num = gs.qd_float(0.0)
+        g_u_roll_den = gs.qd_float(0.0)
+        g_u_gimbal_num = gs.qd_float(0.0)
+        g_u_gimbal_den = gs.qd_float(0.0)
+        if cosp > eps:
+            # roll = atan2(u_roll_num, u_roll_den); yaw = atan2(u_siny, u_cosy)
+            denom_roll = u_roll_num * u_roll_num + u_roll_den * u_roll_den
+            g_u_roll_num = g_roll * u_roll_den / denom_roll
+            g_u_roll_den = -g_roll * u_roll_num / denom_roll
+            denom_yaw = u_siny * u_siny + u_cosy * u_cosy
+            g_u_siny = g_u_siny + g_yaw * u_cosy / denom_yaw
+            g_u_cosy = g_u_cosy - g_yaw * u_siny / denom_yaw
+        else:
+            # Gimbal lock: roll = 0 and yaw = atan2(s * (wz + xy), 1 - s * (xx + zz))
+            u_gimbal_num = s * p_gimbal_num
+            u_gimbal_den = 1.0 - s * p_gimbal_den
+            denom_gimbal = u_gimbal_num * u_gimbal_num + u_gimbal_den * u_gimbal_den
+            g_u_gimbal_num = g_yaw * u_gimbal_den / denom_gimbal
+            g_u_gimbal_den = -g_yaw * u_gimbal_num / denom_gimbal
+
+        # Fold each u = s * P (or 1 - s * P) back to quat: du/dq_k = +-s * (dP/dq_k - 2 P q_k / |quat|^2)
+        two_over_n = 2.0 / quat_norm_sqr
+        d_p_siny = qd.Vector([q_z, -q_y, -q_x, q_w], dt=gs.qd_float)
+        d_p_cosy = qd.Vector([0.0, 0.0, 2.0 * q_y, 2.0 * q_z], dt=gs.qd_float)
+        d_p_pitch = qd.Vector([q_y, q_z, q_w, q_x], dt=gs.qd_float)
+        d_p_roll_num = qd.Vector([q_x, q_w, -q_z, -q_y], dt=gs.qd_float)
+        d_p_roll_den = qd.Vector([0.0, 2.0 * q_x, 2.0 * q_y, 0.0], dt=gs.qd_float)
+        d_p_gimbal_num = qd.Vector([q_z, q_y, q_x, q_w], dt=gs.qd_float)
+        d_p_gimbal_den = qd.Vector([0.0, 2.0 * q_x, 0.0, 2.0 * q_z], dt=gs.qd_float)
+        for j in qd.static(range(4)):
+            q_j = quat[j]
+            g_quat[j] = (
+                g_u_siny * s * (d_p_siny[j] - p_siny * two_over_n * q_j)
+                - g_u_cosy * s * (d_p_cosy[j] - p_cosy * two_over_n * q_j)
+                + g_u_pitch * s * (d_p_pitch[j] - p_pitch * two_over_n * q_j)
+                + g_u_roll_num * s * (d_p_roll_num[j] - p_roll_num * two_over_n * q_j)
+                - g_u_roll_den * s * (d_p_roll_den[j] - p_roll_den * two_over_n * q_j)
+                + g_u_gimbal_num * s * (d_p_gimbal_num[j] - p_gimbal_num * two_over_n * q_j)
+                - g_u_gimbal_den * s * (d_p_gimbal_den[j] - p_gimbal_den * two_over_n * q_j)
+            )
+    return g_quat
+
+
+@qd.func
 def qd_quat_to_rotvec(quat, eps):
     q_w, q_x, q_y, q_z = quat
     rotvec = qd.Vector([q_x, q_y, q_z], dt=gs.qd_float)
@@ -243,6 +372,34 @@ def qd_quat_mul(u, v):
 
 
 @qd.func
+def qd_quat_mul_grad_lhs(u, v, out_grad):
+    """Adjoint of qd_quat_mul(u, v) with respect to u, given the upstream gradient of its output."""
+    return qd.Vector(
+        [
+            out_grad[0] * v[0] + out_grad[1] * v[1] + out_grad[2] * v[2] + out_grad[3] * v[3],
+            -out_grad[0] * v[1] + out_grad[1] * v[0] - out_grad[2] * v[3] + out_grad[3] * v[2],
+            -out_grad[0] * v[2] + out_grad[1] * v[3] + out_grad[2] * v[0] - out_grad[3] * v[1],
+            -out_grad[0] * v[3] - out_grad[1] * v[2] + out_grad[2] * v[1] + out_grad[3] * v[0],
+        ],
+        dt=gs.qd_float,
+    )
+
+
+@qd.func
+def qd_quat_mul_grad_rhs(u, v, out_grad):
+    """Adjoint of qd_quat_mul(u, v) with respect to v, given the upstream gradient of its output."""
+    return qd.Vector(
+        [
+            out_grad[0] * u[0] + out_grad[1] * u[1] + out_grad[2] * u[2] + out_grad[3] * u[3],
+            -out_grad[0] * u[1] + out_grad[1] * u[0] + out_grad[2] * u[3] - out_grad[3] * u[2],
+            -out_grad[0] * u[2] - out_grad[1] * u[3] + out_grad[2] * u[0] + out_grad[3] * u[1],
+            -out_grad[0] * u[3] + out_grad[1] * u[2] - out_grad[2] * u[1] + out_grad[3] * u[0],
+        ],
+        dt=gs.qd_float,
+    )
+
+
+@qd.func
 def qd_transform_quat_by_quat(v, u):
     """Transforms quat_v by quat_u.
 
@@ -268,6 +425,53 @@ def qd_transform_by_quat(v, quat):
         ],
         dt=gs.qd_float,
     ) / (q_ww + q_xx + q_yy + q_zz)
+
+
+@qd.func
+def qd_transform_by_quat_grad_quat(v, quat, out_grad):
+    """Adjoint of qd_transform_by_quat(v, quat) with respect to quat, with v held constant.
+
+    The forward is num(q) / |q|^2 where num is the quaternion sandwich q v q*. The full derivative applies the
+    quotient rule: d(num/D) = dnum/D - num * dD/D^2 with D = |q|^2 and dD/dq = 2 q. Keeping only the numerator term
+    (dnum) is correct only when q is a fixed unit quaternion; it is wrong whenever q is an optimization variable,
+    even at unit length (the radial dD term is nonzero), so the denominator term must be included.
+    """
+    q_w, q_x, q_y, q_z = quat
+    v_x, v_y, v_z = v
+
+    d_out0_d_quat = 2.0 * qd.Vector(
+        [
+            q_w * v_x - q_z * v_y + q_y * v_z,
+            q_x * v_x + q_y * v_y + q_z * v_z,
+            -q_y * v_x + q_x * v_y + q_w * v_z,
+            -q_z * v_x - q_w * v_y + q_x * v_z,
+        ],
+        dt=gs.qd_float,
+    )
+    d_out1_d_quat = 2.0 * qd.Vector(
+        [
+            q_z * v_x + q_w * v_y - q_x * v_z,
+            q_y * v_x - q_x * v_y - q_w * v_z,
+            q_x * v_x + q_y * v_y + q_z * v_z,
+            q_w * v_x - q_z * v_y + q_y * v_z,
+        ],
+        dt=gs.qd_float,
+    )
+    d_out2_d_quat = 2.0 * qd.Vector(
+        [
+            -q_y * v_x + q_x * v_y + q_w * v_z,
+            q_z * v_x + q_w * v_y - q_x * v_z,
+            -q_w * v_x + q_z * v_y - q_y * v_z,
+            q_x * v_x + q_y * v_y + q_z * v_z,
+        ],
+        dt=gs.qd_float,
+    )
+    d_num_d_quat = out_grad[0] * d_out0_d_quat + out_grad[1] * d_out1_d_quat + out_grad[2] * d_out2_d_quat
+
+    # Quotient-rule denominator term: out = num / D with D = |q|^2, so d(out)/dq = dnum/dq / D - out * (2 q) / D.
+    D = q_w * q_w + q_x * q_x + q_y * q_y + q_z * q_z
+    out = qd_transform_by_quat(v, quat)
+    return d_num_d_quat / D - (2.0 / D) * out_grad.dot(out) * quat
 
 
 @qd.func
@@ -338,7 +542,10 @@ def qd_transform_inertia_by_trans_quat(i_inertial, i_mass, trans, quat, eps):
 
 @qd.func
 def qd_normalize(v, eps):
-    return v / (v.norm(eps))
+    # The guard floors the norm, not the radicand: under the square root it would compare against a squared length and
+    # bias every vector shorter than its own square root. Flooring the norm leaves any vector longer than 'eps' exactly
+    # unit and still keeps a vanishing one finite.
+    return v / qd.max(v.norm(), eps)
 
 
 @qd.func
@@ -384,6 +591,20 @@ def motion_cross_motion(s_ang, s_vel, m_ang, m_vel):
 
 
 @qd.func
+def motion_cross_motion_grad(s_ang, s_vel, m_ang, m_vel, ang_grad, vel_grad):
+    """Adjoint of motion_cross_motion, returning the additive gradient deltas (s_ang, s_vel, m_ang, m_vel).
+
+    Uses the cross-product adjoint of f = a x b: a.grad += b x f.grad, b.grad += f.grad x a.
+    """
+    return (
+        m_ang.cross(ang_grad) + m_vel.cross(vel_grad),
+        m_ang.cross(vel_grad),
+        ang_grad.cross(s_ang) + vel_grad.cross(s_vel),
+        vel_grad.cross(s_ang),
+    )
+
+
+@qd.func
 def qd_orthogonals(a):
     """
     Returns orthogonal vectors `b` and `c`, given a normal vector `a`.
@@ -422,6 +643,39 @@ def imp_aref(params, neg_penetration, vel, pos):
     aref = -b * vel - k * imp * pos
 
     return imp, aref
+
+
+@qd.func
+def imp_aref_grad(params, neg_penetration):
+    """Replay of imp_aref's impedance together with its derivative w.r.t. the impedance driver.
+
+    Returns (imp, b, k, d_imp_d_x) with x = |neg_penetration| / width: the shared factors every manual constraint
+    reverse needs to chain gradients through imp_aref, whose outputs are aref = -b * vel - k * imp * pos and the
+    impedance imp feeding diag / efc_D. d_imp_d_x is zero outside the smooth band (imp_raw clamped at dmin / dmax or
+    x > 1), matching the piecewise-flat regions of the forward.
+    """
+    timeconst, dampratio, dmin, dmax, width, mid, power = params
+
+    imp_x = qd.abs(neg_penetration) / width
+    imp_a_coef = 1.0 / mid ** (power - 1.0)
+    imp_b_coef = 1.0 / (1.0 - mid) ** (power - 1.0)
+    imp_a = imp_a_coef * imp_x**power
+    imp_b = 1.0 - imp_b_coef * (1.0 - imp_x) ** power
+    imp_y = imp_a if imp_x < mid else imp_b
+    imp_raw = dmin + imp_y * (dmax - dmin)
+    imp = qd.math.clamp(imp_raw, dmin, dmax)
+    imp = dmax if imp_x > 1.0 else imp
+
+    b = 2.0 / (dmax * timeconst)
+    k = 1.0 / (dmax * dmax * timeconst * timeconst * dampratio * dampratio)
+
+    d_imp_y_d_x = power * imp_a_coef * imp_x ** (power - 1.0)
+    if imp_x >= mid:
+        d_imp_y_d_x = power * imp_b_coef * (1.0 - imp_x) ** (power - 1.0)
+    d_imp_d_x = gs.qd_float(0.0)
+    if imp_raw > dmin and imp_raw < dmax and imp_x <= 1.0:
+        d_imp_d_x = (dmax - dmin) * d_imp_y_d_x
+    return imp, b, k, d_imp_d_x
 
 
 # ------------------------------------------------------------------------------------
@@ -979,7 +1233,9 @@ def _np_quat_mul(u, v, out=None):
     qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
 
     if out is None:
-        out_ = np.empty(u_2d.shape, dtype=qq.dtype)
+        # Use the dtype obtained by promoting the inputs (e.g. 'ww', a pure u/v product), not 'qq', whose float64
+        # literal would otherwise upcast a float32 result.
+        out_ = np.empty(u_2d.shape, dtype=ww.dtype)
     else:
         assert out.shape == u.shape
         out_ = out
@@ -1546,7 +1802,7 @@ def slerp(q0, q1, t):
     if isinstance(q0, np.ndarray):
         return _np_slerp(q0, q1, t)
     if isinstance(q0, torch.Tensor):
-        return _tc_slerp(q0, q1, torch.as_tensor(t, dtype=gs.tc_float, device=gs.device), gs.EPS)
+        return _tc_slerp(q0, q1, torch.as_tensor(t, dtype=gs.tc_float, device=q0.device), gs.EPS)
     gs.raise_exception(f"the input must be either torch.Tensor or np.ndarray. got: {type(q0)=}")
 
 
@@ -2062,6 +2318,76 @@ def generate_grid_points_on_plane(lo: Vec3FType, hi: Vec3FType, normal: Vec3FTyp
     return grid
 
 
+def generate_ring_points_on_sphere(
+    radius: float,
+    cap_axis: tuple[float, float, float],
+    n_rings: int,
+    arc_spacing: float,
+    return_normals: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """
+    Build ``n_rings`` concentric latitude rings on the upper spherical cap (pole at ``cap_axis``).
+
+    Ring index 0 is the pole; ring ``n_rings - 1`` is the equatorial plane of the cap. The number of
+    samples on each ring is chosen from the ring circumference and ``arc_spacing``.
+
+    Parameters
+    ----------
+    radius : float
+        Radius of points on the sphere, used to determine the number of points on each ring.
+    cap_axis : (float, float, float)
+        Unit-ish axis from sphere center toward the dome pole (probes lie on the cap around this axis).
+    n_rings : int
+        Number of latitude rings, including the pole as a degenerate ring.
+    arc_spacing : float
+        Target arc length between neighboring probes along each ring.
+    return_normals : bool
+        Whether to return the normal vectors of the points.
+
+    Returns
+    -------
+    points : np.ndarray, shape (N, 3)
+        Points on the sphere surface.
+    normals : np.ndarray, shape (N, 3), optional
+        Normal vectors of the points. Only returned if ``return_normals`` is True.
+    """
+    if radius <= 0.0:
+        raise ValueError(f"radius must be positive, got {radius}")
+    if n_rings < 1:
+        raise ValueError(f"n_rings must be >= 1, got {n_rings}")
+    if arc_spacing <= 0.0:
+        raise ValueError(f"probe_arc_spacing must be positive, got {arc_spacing}")
+
+    pole = np.asarray(cap_axis, dtype=gs.np_float)
+    p_norm = float(np.linalg.norm(pole))
+    if p_norm < gs.EPS:
+        raise ValueError("cap_axis must be non-zero")
+    pole = pole / p_norm
+    t0, t1 = orthogonals(pole)
+
+    pts: list[np.ndarray] = []
+    denom = max(n_rings - 1, 1)
+    for i in range(n_rings):
+        theta = (i / denom) * (0.5 * np.pi)
+        sin_t, cos_t = np.sin(theta), np.cos(theta)
+        ring_r = radius * sin_t
+        circ = 2.0 * np.pi * ring_r
+        if ring_r <= radius * gs.EPS:
+            n_pts = 1
+        else:
+            n_pts = max(3, int(np.ceil(circ / arc_spacing)))
+        for j in range(n_pts):
+            psi = (j / n_pts) * (2.0 * np.pi)
+            direction = sin_t * (np.cos(psi) * t0 + np.sin(psi) * t1) + cos_t * pole
+            pts.append(radius * direction)
+
+    points = np.stack(pts, axis=0)
+    if not return_normals:
+        return points
+    normals = points / radius
+    return points, normals
+
+
 # ------------------------------------------------------------------------------------
 # ------------------------------------- misc ----------------------------------------
 # ------------------------------------------------------------------------------------
@@ -2111,6 +2437,14 @@ def default_solver_params():
 
 def default_friction():
     return 1.0
+
+
+def default_friction_torsional():
+    return 0.005
+
+
+def default_friction_rolling():
+    return 0.0001
 
 
 def default_dofs_kp(n=6):
@@ -2323,3 +2657,17 @@ def orthogonals(a) -> tuple[np.ndarray, np.ndarray]:
     b_1d /= np.sqrt(np.sum(np.square(b_1d), -1)).reshape((-1, 1))
 
     return np.cross(b_1d, a_1d).reshape((*B, 3)), b_1d.reshape((*B, 3))
+
+
+@qd.func
+def qd_hash01(k0, k1, k2, k3):
+    """Counter-based hash to [0, 1): value depends only on the four keys, never on thread scheduling, so kernels
+    drawing from it stay bitwise deterministic under any parallel execution."""
+    h = qd.cast(k0, qd.u32) * qd.u32(0x9E3779B1)
+    h = (h ^ qd.cast(k1, qd.u32)) * qd.u32(0x85EBCA77)
+    h = (h ^ qd.cast(k2, qd.u32)) * qd.u32(0xC2B2AE3D)
+    h = (h ^ qd.cast(k3, qd.u32)) * qd.u32(0x27D4EB2F)
+    h = h ^ (h >> qd.u32(15))
+    h = h * qd.u32(0x2C1B3C6D)
+    h = h ^ (h >> qd.u32(12))
+    return qd.cast(h >> qd.u32(8), gs.qd_float) * (1.0 / 16777216.0)

@@ -1,0 +1,207 @@
+name: Nyx Plugin
+
+# Checking out the internal plugin repository needs a token, and a pull request coming from a fork is never given
+# one. 'workflow_run' runs in the context of the base repository, where secrets are available, hence the only trigger
+# able to validate such a pull request. In exchange, this file is always taken from the default branch, and the
+# outcome has to be published as a check on the commit under test to show up on it at all.
+on:
+  workflow_run:
+    workflows: ["Precommit Checks (Lint and Format)"]
+    types: [completed]
+
+# Pull requests come from forks, whose branch names collide across contributors, so the repository they live in is
+# part of what tells two runs apart.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}
+    ${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+  PY_COLORS: "1"
+  # The plugin only supports dynamic arrays, and its own CI covers the other backends and precisions.
+  GS_ENABLE_NDARRAY: "1"
+  GS_BACKEND: "gpu"
+  GS_PRECISION: "32"
+
+jobs:
+  unit-tests:
+    name: nyx_plugin-unit_tests
+
+    # The renderer bridges to Genesis through CUDA device pointers, so a GPU runner is required even though the
+    # simulation itself could run on CPU. This is the runner the plugin's own CI uses, which additionally makes its
+    # reference images comparable.
+    runs-on: gpu-t4-4-core
+
+    # Only a pull request is worth checking, the plugin being validated before a change lands rather than after.
+    if: github.event.workflow_run.event == 'pull_request'
+
+    permissions:
+      contents: read
+      # To be able to resolve the log of this very job.
+      actions: read
+      checks: write
+
+    steps:
+      - name: Install Git LFS
+        run: sudo apt-get update && sudo apt-get install -y git-lfs
+
+      - name: Checkout the revision of Genesis under test
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+          # The tests execute code from the revision under test, so no credential must outlive the checkout.
+          persist-credentials: false
+          # Testing a pull request means running its code, and most of them come from a fork, which this trigger
+          # refuses to check out unless told otherwise. What makes it acceptable here is the order of the steps: the
+          # token below is consumed before anything from the revision under test runs, and never reaches the disk.
+          # This job also keeps no cache to poison, and its runner is discarded afterwards.
+          allow-unsafe-pr-checkout: true
+
+      # The pin lives in the tree rather than in this file, which is always taken from the default branch, so that a
+      # pull request bumping it has its own run pick it up. Coming from the revision under test, it must be a full
+      # commit hash: anything else could smuggle something into the step output, or silently move.
+      - name: Resolve the pinned Nyx plugin revision
+        id: plugin
+        shell: bash
+        run: |
+          # The pin has to come from the revision under test, so a revision branched before it was introduced is
+          # rejected rather than tested against something it never chose.
+          if [[ ! -f .github/nyx_plugin_commit ]] ; then
+            echo "::error::'.github/nyx_plugin_commit' is missing. Rebase onto the default branch."
+            exit 1
+          fi
+          COMMIT=$(tr -d '[:space:]' < .github/nyx_plugin_commit)
+          if [[ ! "${COMMIT}" =~ ^[0-9a-f]{40}$ ]] ; then
+            echo "::error::'.github/nyx_plugin_commit' must hold a full 40-character commit hash."
+            exit 1
+          fi
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+      # Git LFS carries every test asset and reference image of the plugin.
+      - name: Checkout the Nyx plugin
+        uses: actions/checkout@v5
+        with:
+          repository: Genesis-Embodied-AI/nyx-genesis-plugin
+          ref: ${{ steps.plugin.outputs.commit }}
+          token: ${{ secrets.GENESIS_REPO_CONTENTS_READ_ONLY_ACCESS_TOKEN }}
+          path: nyx_plugin
+          lfs: true
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "${HOME}/.local/bin" >> $GITHUB_PATH
+      # Remeshing goes through 'pymeshlab', which loads it from a plugin linked against GLU, and drops the filter
+      # without a word when that library is missing, leaving it to fail much later as a missing attribute.
+      - name: Install the GLU library
+        run: sudo apt-get install -y libglu1-mesa
+
+      - name: Install Genesis and the Nyx plugin
+        # Process substitution feeds the overrides without writing a file, so bash is required.
+        shell: bash
+        run: |
+          uv pip install --system torch --index-url https://download.pytorch.org/whl/cu128
+
+          # The plugin requires a released 'genesis-world', which resolution would install over the revision under
+          # test, leaving the tests exercising something else entirely. Overriding that single requirement with the
+          # checkout keeps every other dependency of the plugin resolved from its own metadata. The plugin pins the
+          # renderer to an internal index that this repository has no credentials for, so that source alone is
+          # ignored in favour of the public one. The override has to carry the extra providing the test runner, since
+          # it replaces the requirement it overrides in full, extras included.
+          uv pip install --system \
+              --no-sources-package gs-nyx \
+              --overrides <(printf 'genesis-world[dev] @ file://%s\n' "$GITHUB_WORKSPACE") \
+              ".[dev]" ./nyx_plugin
+      - name: Run Nyx plugin unit tests
+        # Running from the plugin root keeps its own pytest configuration in charge, and makes the paths the tests
+        # derive from the working directory match those of the plugin's own CI.
+        working-directory: nyx_plugin
+        shell: bash
+        run: |
+          set +e
+          pytest -sv -ra -n auto --backend "${GS_BACKEND}" --precision "${GS_PRECISION}" ./tests \
+              2>&1 | tee "${RUNNER_TEMP}/pytest.log"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # '-ra' closes the report with one line per non-passing test, which is what the published check shows.
+          # Colours are forced on for the live log, so the escape sequences are dropped from that excerpt.
+          sed -n '/short test summary info/,$p' "${RUNNER_TEMP}/pytest.log" \
+              | sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g' > "${RUNNER_TEMP}/pytest_summary.txt"
+          exit $EXIT_CODE
+
+      - name: Upload test data as artifacts
+        id: upload
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyx-plugin-test-results
+          path: "nyx_plugin/tests/results"
+
+      # A 'workflow_run' job is not attached to the pull request that started it, so its outcome is published as a
+      # check on the commit under test. This is what makes it appear among the checks of that pull request, and
+      # therefore what allows requiring it before merging.
+      - name: Publish PR check
+        if: always()
+        uses: actions/github-script@v8
+        env:
+          CHECK_NAME: Nyx Plugin Unit Tests
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          PLUGIN_COMMIT: ${{ steps.plugin.outputs.commit }}
+        with:
+          script: |
+            const fs = require('fs');
+            const isSuccess = process.env.JOB_STATUS === 'success';
+            const commit = (process.env.PLUGIN_COMMIT || 'unknown').slice(0, 7);
+
+            // Point at the job itself rather than the run, so the check opens on the scrollable live log. The
+            // verdict must not be lost if that lookup fails, hence the fallback to the run.
+            let logUrl = process.env.RUN_URL;
+            try {
+              const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId
+              });
+              logUrl = data.jobs[0]?.html_url || logUrl;
+            } catch (error) {
+              core.warning(`Could not resolve the job log: ${error.message}`);
+            }
+
+            // The report of a run that never reached the tests is empty, hence the fallback to the log.
+            const summaryPath = `${process.env.RUNNER_TEMP}/pytest_summary.txt`;
+            let report = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8').trim() : '';
+            const body = [`**[Full log](${logUrl})**`];
+            if (process.env.ARTIFACT_URL) {
+              body.push(`**[Rendered images of the failing tests](${process.env.ARTIFACT_URL})**`);
+            }
+            // The checks API rejects an output text longer than 65535 characters.
+            body.push(report ? '```\n' + report.slice(-60000) + '\n```' : '_The run failed before the tests._');
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: context.payload.workflow_run.head_sha,
+              name: process.env.CHECK_NAME,
+              status: 'completed',
+              conclusion: isSuccess ? 'success' : 'failure',
+              details_url: logUrl,
+              output: {
+                title: process.env.CHECK_NAME,
+                summary: isSuccess
+                  ? `The plugin unit tests pass at ${commit}.`
+                  : `The plugin unit tests fail at ${commit}.`,
+                text: body.join('\n\n')
+              }
+            });

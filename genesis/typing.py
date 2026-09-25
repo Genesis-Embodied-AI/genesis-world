@@ -3,6 +3,7 @@ from pathlib import PurePath
 from typing import TYPE_CHECKING, Annotated, Any, Mapping, Sequence, TypeVar, get_args
 
 import numpy as np
+import torch
 from frozendict import frozendict
 from pydantic import BeforeValidator, Field, GetCoreSchemaHandler, GetPydanticSchema
 from pydantic_core import PydanticCustomError, core_schema
@@ -18,11 +19,11 @@ def _coerce_int(v):
 
 
 def _normalize(vec):
-    if not _is_sequence(vec):
+    if not is_sequence(vec):
         raise PydanticCustomError("invalid_type", "Input should be a valid sequence of scalars", {"value": vec})
     sq_norm = 0.0
     for e in vec:
-        if _is_sequence(e):
+        if is_sequence(e):
             raise PydanticCustomError("invalid_type", "Input should be a valid sequence of scalars", {"value": vec})
         sq_norm += e**2
     if sq_norm > 0:
@@ -32,7 +33,17 @@ def _normalize(vec):
     raise PydanticCustomError("zero_division", "Cannot be normalized", {"value": vec})
 
 
-def _is_sequence(v):
+def _to_float_grid(v):
+    """Coerce a nested sequence, an array or a tensor to a two-dimensional float64 array."""
+    if isinstance(v, torch.Tensor):
+        v = v.detach().cpu()
+    grid = np.asarray(v, dtype=np.float64)
+    if grid.ndim != 2:
+        raise PydanticCustomError("invalid_type", "Input should be a two-dimensional grid", {"value": v})
+    return grid
+
+
+def is_sequence(v):
     if isinstance(v, (str, bytes, Mapping)):
         return False
     if not (hasattr(v, "__len__") and hasattr(v, "__getitem__")):
@@ -80,10 +91,12 @@ if TYPE_CHECKING:
     NumericType = int | float | bool | np.number
     NumArrayType = Sequence[NumericType] | np.ndarray
     IArrayType = Sequence[StrictInt] | np.ndarray
+    OptionalIArrayType = Sequence[StrictInt] | np.ndarray
     FArrayType = Sequence[ValidFloat] | np.ndarray
     PositiveFArrayType = FArrayType
     Vec2IType = IArrayType
     PositiveVec2IType = IArrayType
+    PositiveVec3IType = IArrayType
     Vec2FType = FArrayType
     PositiveVec2FType = FArrayType
     Vec3FType = FArrayType
@@ -102,6 +115,11 @@ if TYPE_CHECKING:
     UnitVec3FArrayType = Vec3FArrayType
     Vec3FLaxArrayType = Vec3FArrayType | Vec3FType
     UnitVec3FLaxArrayType = Vec3FLaxArrayType
+    FGridType = Sequence[Sequence[NumericType]] | np.ndarray
+    FGridArrayType = Sequence[Sequence[NumericType]] | np.ndarray
+    PositiveFGridType = FGridType
+    Vec3FGridType = Sequence[Sequence[Sequence[NumericType]]] | np.ndarray
+    UnitVec3FGridType = Vec3FGridType
     RotationMatrixType = Vec3FArrayType
     Matrix3x3Type = Sequence[Sequence[NumericType]] | np.ndarray
     Matrix4x4Type = Sequence[Sequence[NumericType]] | np.ndarray
@@ -120,16 +138,18 @@ else:
     NumericType = int | float | bool
     NumArrayType = Annotated[tuple[NumericType, ...], Field(min_length=1, strict=False)]
     IArrayType = Annotated[tuple[StrictInt, ...], Field(min_length=1, strict=False)]
+    OptionalIArrayType = Annotated[tuple[StrictInt, ...], Field(min_length=0, strict=False)]
     FArrayType = Annotated[tuple[ValidFloat, ...], Field(min_length=1, strict=False)]
     PositiveFArrayType = Annotated[tuple[PositiveFloat, ...], Field(min_length=1, strict=False)]
     Vec2IType = Annotated[tuple[StrictInt, StrictInt], Field(strict=False)]
     PositiveVec2IType = Annotated[tuple[PositiveInt, PositiveInt], Field(strict=False)]
+    PositiveVec3IType = Annotated[tuple[PositiveInt, PositiveInt, PositiveInt], Field(strict=False)]
     Vec2FType = Annotated[tuple[ValidFloat, ValidFloat], Field(strict=False)]
     PositiveVec2FType = Annotated[tuple[PositiveFloat, PositiveFloat], Field(strict=False)]
     Vec3FType = Annotated[tuple[ValidFloat, ValidFloat, ValidFloat], Field(strict=False)]
     LaxVec3FType = Annotated[
         tuple[ValidFloat, ValidFloat, ValidFloat],
-        BeforeValidator(lambda v: v if _is_sequence(v) else (v,) * 3),
+        BeforeValidator(lambda v: v if is_sequence(v) else (v,) * 3),
         Field(strict=False),
     ]
     UnitVec3FType = Annotated[
@@ -142,17 +162,17 @@ else:
     UnitIntervalArrayType = Annotated[tuple[UnitInterval, ...], Field(min_length=1, strict=False)]
     LaxUnitIntervalArrayType = Annotated[
         tuple[UnitInterval, ...],
-        BeforeValidator(lambda v: v if _is_sequence(v) else (v,)),
+        BeforeValidator(lambda v: v if is_sequence(v) else (v,)),
         Field(min_length=1, strict=False),
     ]
     LaxFArrayType = Annotated[
         tuple[ValidFloat, ...],
-        BeforeValidator(lambda v: v if _is_sequence(v) else (v,)),
+        BeforeValidator(lambda v: v if is_sequence(v) else (v,)),
         Field(min_length=1, strict=False),
     ]
     LaxPositiveFArrayType = Annotated[
         tuple[PositiveFloat, ...],
-        BeforeValidator(lambda v: v if _is_sequence(v) else (v,)),
+        BeforeValidator(lambda v: v if is_sequence(v) else (v,)),
         Field(min_length=1, strict=False),
     ]
     UnitIntervalVec3Type = Annotated[tuple[UnitInterval, UnitInterval, UnitInterval], Field(strict=False)]
@@ -161,14 +181,18 @@ else:
     StrArrayType = Annotated[tuple[str, ...], Field(strict=False)]
     Vec3FArrayType = Annotated[tuple[Vec3FType, ...], Field(min_length=1, strict=False)]
     UnitVec3FArrayType = Annotated[tuple[UnitVec3FType, ...], Field(min_length=1, strict=False)]
+    FGridType = Annotated[tuple[FArrayType, ...], Field(min_length=1, strict=False)]
+    PositiveFGridType = Annotated[tuple[PositiveFArrayType, ...], Field(min_length=1, strict=False)]
+    Vec3FGridType = Annotated[tuple[Vec3FArrayType, ...], Field(min_length=1, strict=False)]
+    UnitVec3FGridType = Annotated[tuple[UnitVec3FArrayType, ...], Field(min_length=1, strict=False)]
     Vec3FLaxArrayType = Annotated[
         tuple[Vec3FType, ...],
-        BeforeValidator(lambda v: v if _is_sequence(v) and len(v) > 0 and _is_sequence(v[0]) else (v,)),
+        BeforeValidator(lambda v: v if is_sequence(v) and len(v) > 0 and is_sequence(v[0]) else (v,)),
         Field(min_length=1, strict=False),
     ]
     UnitVec3FLaxArrayType = Annotated[
         tuple[UnitVec3FType, ...],
-        BeforeValidator(lambda v: v if _is_sequence(v) and len(v) > 0 and _is_sequence(v[0]) else (v,)),
+        BeforeValidator(lambda v: v if is_sequence(v) and len(v) > 0 and is_sequence(v[0]) else (v,)),
         Field(min_length=1, strict=False),
     ]
     RotationMatrixType = Annotated[
@@ -191,5 +215,6 @@ else:
     NDArrayType = Annotated[
         np.ndarray, GetPydanticSchema(lambda tp, handler: core_schema.no_info_plain_validator_function(lambda v: v))
     ]
+    FGridArrayType = Annotated[NDArrayType, BeforeValidator(_to_float_grid)]
     PathType = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, PurePath) else v)]
     FrozenDictType = Annotated[frozendict[_K, _V], _FrozenDictValidator]

@@ -64,14 +64,17 @@ class Base(Material["MPMEntity"]):
     mu: ValidFloat | None = None
     sampler: SamplerType = DEFAULT_SAMPLER
 
-    # Dispatch fields — set by subclass model_post_init, not user-specified.
+    # Dispatch fields - set by subclass model_post_init, not user-specified. needs_svd flips the solver's forward-mode
+    # SVD kernel off when no material in the scene reads U/V/S from SVD(F_tmp) (e.g. non-viscous liquid, neohooken
+    # elastic).
     update_F_S_Jp: Any = Field(default=None, exclude=True, repr=False)
     update_stress: Any = Field(default=None, exclude=True, repr=False)
+    needs_svd: bool = Field(default=True, exclude=True, repr=False)
 
     # Auto-generated fields.
     idx: StrictInt | None = Field(default=None, exclude=True)
 
-    # Internal solver state — does not belong in an options class, kept pending larger refactor.
+    # Internal solver state - does not belong in an options class, kept pending larger refactor.
     _default_Jp: float = PrivateAttr(default=1.0)
 
     def model_post_init(self, context: Any) -> None:

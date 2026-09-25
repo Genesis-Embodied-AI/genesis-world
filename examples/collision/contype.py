@@ -15,17 +15,16 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    gs.init()
+    gs.init(backend=gs.cpu)
 
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -2, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=40,
-            max_FPS=200,
         ),
         show_viewer=args.vis,
     )

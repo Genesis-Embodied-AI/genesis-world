@@ -8,32 +8,29 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(precision="32", logging_level="info")
+    gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=3e-3,
             substeps=10,
         ),
         mpm_options=gs.options.MPMOptions(
+            grid_density=64,
             lower_bound=(0.0, -1.0, -0.1),
             upper_bound=(0.57, 1.0, 2.4),
-            grid_density=64,
+        ),
+        vis_options=gs.options.VisOptions(
+            visualize_mpm_boundary=True,
+            rendered_envs_idx=[0],
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(4.5, 0.0, 1.42),
             camera_lookat=(1.0, 0.0, 1.0),
             camera_fov=30,
-            max_FPS=120,
-        ),
-        vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
-            rendered_envs_idx=[0],
         ),
         show_viewer=args.vis,
     )
@@ -43,7 +40,10 @@ def main():
             needs_coup=True,
             coup_friction=0.2,
         ),
-        morph=gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True),
+        morph=gs.morphs.URDF(
+            file="urdf/plane/plane.urdf",
+            fixed=True,
+        ),
     )
     mat_wheel = gs.materials.Rigid(
         needs_coup=True,

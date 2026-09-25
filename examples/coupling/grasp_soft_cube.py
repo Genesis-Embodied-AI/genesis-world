@@ -7,13 +7,10 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.gpu)
-
-    ########################## create a scene ##########################
+    gs.init(backend=gs.cpu)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -21,23 +18,21 @@ def main():
             substeps=15,
         ),
         mpm_options=gs.options.MPMOptions(
+            grid_density=128,
             lower_bound=(0.55, -0.1, -0.05),
             upper_bound=(0.75, 0.1, 0.3),
-            grid_density=128,
+        ),
+        vis_options=gs.options.VisOptions(
+            visualize_mpm_boundary=True,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3, -1, 1.5),
             camera_lookat=(0.0, 0.0, 0.0),
             camera_fov=30,
-            max_FPS=60,
-        ),
-        vis_options=gs.options.VisOptions(
-            visualize_mpm_boundary=True,
         ),
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
@@ -53,17 +48,19 @@ def main():
         ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-        material=gs.materials.Rigid(coup_friction=1.0),
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=1.0,
+        ),
     )
 
-    ########################## build ##########################
     scene.build()
 
     motors_dof = np.arange(7)
     fingers_dof = np.arange(7, 9)
 
-    # Optional: set control gains
     franka.set_dofs_kp(
         np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]),
     )
@@ -89,7 +86,6 @@ def main():
     # grasp with 1N force
     franka.control_dofs_position(qpos[:-2], motors_dof)
     franka.control_dofs_force(np.array([-1, -1]), fingers_dof)
-    # franka.control_dofs_position(np.array([0, 0]), fingers_dof) # you can also use position control
 
     for i in range(100):
         scene.step()

@@ -91,12 +91,10 @@ class ParticleEntity(Entity):
             self._surface = self._vmesh[0].surface
 
         elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
-            self._vmesh = gs.Mesh.from_morph_surface(self.morph, self.surface)
-            if isinstance(self._vmesh, list):
-                if len(self._vmesh) > 1:
-                    gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
-                else:
-                    self._vmesh = self._vmesh[0]
+            meshes = gs.Mesh.from_morph_surface(self.morph, self.surface)
+            if len(meshes) > 1:
+                gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
+            self._vmesh = meshes[0]
             self._surface = self._vmesh.surface
 
         else:
@@ -244,30 +242,13 @@ class ParticleEntity(Entity):
 
         if isinstance(self._morph, gs.options.morphs.MeshSet):
             particles = []
-            mesh_data = self._morph.model_dump()
-            del mesh_data["files"], mesh_data["poss"], mesh_data["eulers"], mesh_data["quat"]
-            for i, file in enumerate(self._morph.files):
-                mesh_data.update(file=file, pos=self._morph.poss[i], euler=self._morph.eulers[i])
-                morph_i = gs.morphs.Mesh(**mesh_data)
-                mesh_i = morph_i.file.copy()
-                mesh_i.vertices = mesh_i.vertices * morph_i.scale
-
-                sampler = self.sampler
-                if "pbs" in sampler:
-                    particles_i = pu.trimesh_to_particles_pbs(
-                        mesh=mesh_i,
-                        p_size=self._particle_size,
-                        sampler=sampler,
-                    )
-                else:
-                    particles_i = pu.trimesh_to_particles_simple(
-                        mesh=mesh_i,
-                        p_size=self._particle_size,
-                        sampler=sampler,
-                    )
-
-                particles_i += np.asarray(morph_i.pos, dtype=gs.np_float)
-                particles.append(particles_i)
+            for vmesh_i, pos_i, euler_i in zip(self._vmesh, self._morph.poss, self._morph.eulers, strict=True):
+                trans_i = np.array(pos_i, dtype=gs.np_float)
+                quat_i = gu.xyz_to_quat(np.array(euler_i, dtype=gs.np_float), rpy=True, degrees=True)
+                # Sample before posing the mesh, so the lattice and the sampling cache depend on the member shape alone
+                particles_i = vmesh_i.particlize(self._particle_size, self.sampler)
+                particles.append(gu.transform_by_trans_quat(particles_i, trans_i, quat_i))
+                vmesh_i.apply_transform(gu.trans_quat_to_T(trans_i, quat_i))
         elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
             particles = self._vmesh.particlize(self._particle_size, self.sampler)
             particles = particles.astype(gs.np_float, order="C", copy=False)
@@ -284,13 +265,6 @@ class ParticleEntity(Entity):
             self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
             origin = gu.nowhere()
         elif isinstance(self._morph, gs.options.morphs.MeshSet):
-            for i in range(len(self._morph.files)):
-                # Note that particles are already transformed at this point
-                pos_i = np.asarray(self._morph.poss[i], dtype=gs.np_float)
-                euler_i = np.asarray(self._morph.eulers[i], dtype=gs.np_float)
-                quat_i = gs.utils.geom.xyz_to_quat(euler_i, rpy=True, degrees=True)
-                self._vmesh[i].apply_transform(gu.trans_quat_to_T(pos_i, quat_i))
-
             self.mesh_set_group_ids = np.concatenate(
                 [np.full((len(v),), fill_value=i, dtype=gs.np_int) for i, v in enumerate(particles)]
             )
@@ -320,18 +294,18 @@ class ParticleEntity(Entity):
             else:
                 self._vverts = np.zeros((0, 3), dtype=gs.np_float)
                 self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
-            origin = np.mean(self._morph.poss, dtype=gs.np_float)
+            origin = np.mean(self._morph.poss, axis=0, dtype=gs.np_float)
         else:
-            # transform vmesh
-            pos = np.asarray(self._morph.pos, dtype=gs.np_float)
-            quat = np.asarray(self._morph.quat, dtype=gs.np_float)
+            # transform vmesh (the morph pose offset, e.g. an up-axis conversion, is composed onto the morph pose)
+            pos, quat = gu.transform_pos_quat_by_trans_quat(
+                np.array(self._morph.offset_pos, dtype=gs.np_float),
+                np.array(self._morph.offset_quat, dtype=gs.np_float),
+                np.array(self._morph.pos, dtype=gs.np_float),
+                np.array(self._morph.quat, dtype=gs.np_float),
+            )
             self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
             # transform particles
-            particles = gu.transform_by_trans_quat(
-                particles,
-                np.asarray(self._morph.pos, dtype=gs.np_float),
-                np.asarray(self._morph.quat, dtype=gs.np_float),
-            )
+            particles = gu.transform_by_trans_quat(particles, pos, quat)
 
             if not self._solver.boundary.is_inside(particles):
                 gs.raise_exception(
@@ -347,7 +321,7 @@ class ParticleEntity(Entity):
             else:
                 self._vverts = np.zeros((0, 3), dtype=gs.np_float)
                 self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
-            origin = np.asarray(self._morph.pos, dtype=gs.np_float)
+            origin = pos
 
         self._particles = np.asarray(particles, dtype=gs.np_float, order="C")
         self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(origin)

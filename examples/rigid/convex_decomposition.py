@@ -8,29 +8,25 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="32", seed=0)
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="32", seed=0)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
+        sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
         show_viewer=args.vis,
         show_FPS=False,
     )
 
-    ########################## entities ##########################
     scene.add_entity(
         gs.morphs.Mesh(
             file="meshes/tank.obj",
             scale=5.0,
             fixed=True,
-            # euler=(90, 0, 90),
             euler=(80, 10, 90),
             pos=(0.05, -0.1, 0.0),
         ),
@@ -50,10 +46,8 @@ def main():
                 pos=(0.0, 0.15 * (i - 1.5), 0.7),
             ),
             vis_mode="collision",
-            # visualize_contact=True,
         )
 
-    ########################## build ##########################
     scene.build()
     horizon = 2000 if "PYTEST_VERSION" not in os.environ else 5
     for i in range(horizon):

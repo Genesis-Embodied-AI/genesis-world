@@ -135,13 +135,17 @@ jobs:
       - name: Install Genesis
         shell: bash
         run: |
-          PYTHON_DEPS="dev"
+          PYTHON_DEPS="dev,render"
           # Install USD for all platforms except ARM (usd-core doesn't support ARM)
           # This is required for test_mesh.py which tests USD parsing functionality
           if [[ "${{ matrix.OS }}" != 'ubuntu-24.04-arm' ]] ; then
             PYTHON_DEPS="${PYTHON_DEPS},usd"
           fi
           pip install ".[${PYTHON_DEPS}]"
+
+          # FIXME: matplotlib 3.11.0 changed text rasterization, breaking the MPLPlotter PNG snapshot
+          # (test_recorders.py::test_plotter). Pin below 3.11 until the snapshot is regenerated.
+          pip install "matplotlib<3.11"
 
       - name: Get artifact prefix name
         id: artifact_prefix

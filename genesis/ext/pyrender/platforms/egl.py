@@ -1,4 +1,5 @@
 import ctypes
+import functools
 import os
 
 import OpenGL.platform
@@ -11,6 +12,8 @@ from .base import Platform
 EGL_PLATFORM_DEVICE_EXT = 0x313F
 EGL_DRM_DEVICE_FILE_EXT = 0x3233
 
+_EGL_LOAD_ERROR = "EGL is required to create an offscreen OpenGL context, and it is unavailable on this system."
+
 
 def _ensure_egl_loaded():
     plugin = OpenGL.platform.PlatformPlugin.by_name("egl")
@@ -21,6 +24,16 @@ def _ensure_egl_loaded():
     plugin.loaded = True
     # create instance of this platform implementation
     plugin = plugin_class()
+
+    # Probing the library here names EGL as the missing piece. A failed dlopen appears either as an ImportError or
+    # as a None library, the shape `install` below tolerates, and either one otherwise reaches the user from deep
+    # inside PyOpenGL, where the message mentions neither EGL nor Genesis.
+    try:
+        egl_library = plugin.EGL
+    except ImportError as e:
+        gs.raise_exception_from(_EGL_LOAD_ERROR, e)
+    if egl_library is None:
+        gs.raise_exception(_EGL_LOAD_ERROR)
 
     plugin.install(vars(OpenGL.platform))
 
@@ -116,8 +129,7 @@ class EGLDevice:
 class EGLPlatform(Platform):
     """Renders using EGL."""
 
-    def __init__(self, viewport_width, viewport_height, device_id: int | None = None):
-        super().__init__(viewport_width, viewport_height)
+    def __init__(self, device_id: int | None = None):
         if _eglQueryDevicesEXT is None and device_id not in (0, None):
             raise RuntimeError("EGL platform plugin is not available. Enforcing specific EGL device not supported.")
         self._egl_device_id = device_id
@@ -259,20 +271,43 @@ class EGLPlatform(Platform):
 
     def make_uncurrent(self):
         """Make the OpenGL context uncurrent."""
-        pass
+        from OpenGL.EGL import eglMakeCurrent, EGL_NO_SURFACE, EGL_NO_CONTEXT
+
+        if self._egl_display is not None:
+            eglMakeCurrent(self._egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)
+
+    def save_current_context(self):
+        # Capture the current context as a restore callable, returning None when nothing is current. EGL's
+        # 'make_uncurrent' releases the context, so our own context is never current here - only an external context
+        # (e.g. another renderer mid-render) or none. Use the module-level 'egl' alias rather than a local import so
+        # the returned callable stays valid during teardown, including at interpreter shutdown. Genesis EGL contexts
+        # are surfaceless, so only the display and context are needed to restore (matching 'make_current').
+        egl_display = egl.eglGetCurrentDisplay()
+        egl_context = egl.eglGetCurrentContext()
+        if not egl_context:
+            return None
+        return functools.partial(egl.eglMakeCurrent, egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl_context)
 
     def delete_context(self):
-        from OpenGL.EGL import eglDestroyContext, eglTerminate
+        from OpenGL.EGL import eglDestroyContext, eglGetCurrentContext
 
         if self._egl_display is not None:
             if self._egl_context is not None:
+                # The EGL current context is per-thread and shared across renderers. Only release it if it is
+                # ours; otherwise another renderer (possibly mid-render) is current and tearing down this context
+                # must not strand it with no current context. eglGetCurrentContext returns a fresh pointer object
+                # each call that never compares equal to the stored handle by identity, so compare the underlying
+                # addresses instead of the pointer objects.
+                current_addr = ctypes.cast(eglGetCurrentContext(), ctypes.c_void_p).value
+                own_addr = ctypes.cast(self._egl_context, ctypes.c_void_p).value
+                if current_addr == own_addr:
+                    self.make_uncurrent()
                 eglDestroyContext(self._egl_display, self._egl_context)
                 self._egl_context = None
-            eglTerminate(self._egl_display)
+            # NOTE: intentionally not calling eglTerminate here. The NVIDIA EGL
+            # driver does not support terminate/re-initialize cycles on the same
+            # device (returns EGL_BAD_ACCESS), which breaks multi-scene workflows.
             self._egl_display = None
-
-    def supports_framebuffers(self):
-        return True
 
 
 __all__ = ["EGLPlatform"]

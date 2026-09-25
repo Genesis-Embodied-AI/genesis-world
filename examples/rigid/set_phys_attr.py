@@ -7,43 +7,38 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.gpu)
+    gs.init(backend=gs.cpu)
 
-    ########################## create a scene ##########################
     viewer_options = gs.options.ViewerOptions(
         camera_pos=(0, -3.5, 2.5),
         camera_lookat=(0.0, 0.0, 0.5),
         camera_fov=40,
-        max_FPS=60,
     )
 
     scene = gs.Scene(
-        viewer_options=viewer_options,
         sim_options=gs.options.SimOptions(
             dt=0.01,
         ),
         rigid_options=gs.options.RigidOptions(
             # NOTE: Batching dofs/links info to set different physical attributes across environments (in parallel)
             #       By default, both are False as it's faster and thus only turn this on if necessary
-            batch_dofs_info=True,
-            batch_joints_info=True,
             batch_links_info=True,
+            batch_joints_info=True,
+            batch_dofs_info=True,
         ),
+        viewer_options=viewer_options,
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     plane = scene.add_entity(
         gs.morphs.Plane(),
     )
     franka = scene.add_entity(
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
     )
-    ########################## build ##########################
     scene.build(n_envs=2)  # test with 2 different environments
 
     joints_name = (
@@ -74,7 +69,6 @@ def main():
     )
     links_idx = [franka.get_link(name).idx_local for name in links_name]
 
-    # Optional: set control gains
     franka.set_dofs_kp(
         np.array(
             [
@@ -146,13 +140,7 @@ def main():
     franka.set_mass(new_mass)
 
     print("=== invweight ===\n", franka.get_dofs_invweight())
-    links_inertial_mass = np.array(
-        [
-            [0.6298, 4.9707, 0.6469, 3.2286, 3.5879, 1.2259, 1.6666, 0.7355, 0.7300, 0.0150, 0.0150],
-            [0.015, 0.015, 0.73, 0.7355, 1.6666, 1.2259, 3.5879, 3.2286, 0.6469, 4.9707, 0.6298],
-        ]
-    )
-    franka.set_links_inertial_mass(
+    franka.set_links_mass(
         np.array(
             [
                 [0.6298, 4.9707, 0.6469, 3.2286, 3.5879, 1.2259, 1.6666, 0.7355, 0.7300, 0.0150, 0.0150],

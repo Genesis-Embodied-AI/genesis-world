@@ -1,17 +1,23 @@
+import contextvars
 import io
 import logging
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator, NamedTuple
 
+import filelock
 import numpy as np
 import torch
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 import genesis as gs
 import genesis.utils.mesh as mu
+from genesis.constants import USD_FORMATS
 
 from .usd_material import parse_material_preview_surface
 from .usd_utils import extract_scale
@@ -34,7 +40,7 @@ def decompress_usdz(usdz_path: str):
     zip_files = Sdf.ZipFile.Open(usdz_path)
     zip_filelist = zip_files.GetFileNames()
     root_file = zip_filelist[0]
-    if not root_file.lower().endswith(gs.options.morphs.USD_FORMATS[:-1]):
+    if not root_file.lower().endswith(USD_FORMATS[:-1]):
         gs.raise_exception(f"Invalid usdz root file: {root_file}")
     root_path = os.path.join(usdz_folder, root_file)
 
@@ -50,6 +56,40 @@ def decompress_usdz(usdz_path: str):
     else:
         gs.logger.info(f"Decompressed assets detected and used: {root_path}.")
     return root_path
+
+
+class PhysicsMaterial(NamedTuple):
+    """Authored properties of a bound UsdPhysicsMaterialAPI material. A None field means the attribute
+    is unauthored, letting callers fall back to Genesis defaults."""
+
+    static_friction: float | None = None
+    dynamic_friction: float | None = None
+    restitution: float | None = None
+    density: float | None = None
+
+
+# The context every USD parse made inside a 'usd_context' block reads from (see 'get_current_usd_context').
+_ACTIVE_CONTEXT: contextvars.ContextVar["UsdContext | None"] = contextvars.ContextVar("usd_context", default=None)
+
+
+@contextmanager
+def usd_context(stage_file: str) -> Iterator["UsdContext"]:
+    """Open a stage once for every parse made inside the block.
+
+    A stage split into several entities is parsed once per entity, and each parse composes the stage and walks its
+    materials anew. Inside this block they all read the one context opened here (see 'get_current_usd_context').
+    """
+    context = UsdContext(stage_file)
+    token = _ACTIVE_CONTEXT.set(context)
+    try:
+        yield context
+    finally:
+        _ACTIVE_CONTEXT.reset(token)
+
+
+def get_current_usd_context() -> "UsdContext | None":
+    """The context of the enclosing 'usd_context' block, or None outside of one."""
+    return _ACTIVE_CONTEXT.get()
 
 
 class UsdContext:
@@ -79,7 +119,7 @@ class UsdContext:
 
     def __init__(self, stage_file: str, use_bake_cache: bool = True):
         # decompress usdz
-        if stage_file.lower().endswith(gs.options.morphs.USD_FORMATS[-1]):
+        if stage_file.lower().endswith(USD_FORMATS[-1]):
             stage_file = decompress_usdz(stage_file)
 
         # detect if baking is needed
@@ -119,6 +159,9 @@ class UsdContext:
                 f"Failed to open USD stage: {self._stage_file}. Ensure the file exists and is a valid USD file.", e
             )
         self._material_properties: dict[str, tuple[dict, str]] = {}  # material_id -> (material_dict, uv_name)
+        self._physics_material_cache: dict[str, PhysicsMaterial | None] = {}  # prim_path -> physics material
+        self._is_restitution_warned = False
+        self._is_cross_entity_filtering_warned = False
         self._material_parsed = False
         self._bake_material_paths: dict[str, str] = {}  # material_id -> bake_material_path
         self._prim_material_bindings: dict[str, str] = {}  # prim_path -> material_path
@@ -162,12 +205,79 @@ class UsdContext:
             return UsdShade.Material(self._stage.GetPrimAtPath(self._prim_material_bindings[prim_path]))
         return None
 
+    def get_physics_material(self, prim: Usd.Prim) -> PhysicsMaterial | None:
+        """
+        Resolve and parse the physics material (UsdPhysicsMaterialAPI) bound to a prim.
+
+        USD binds physics materials on the dedicated ``"physics"`` material purpose, which may be
+        authored on the prim itself or inherited from an ancestor. Returns the authored properties
+        (see ``PhysicsMaterial``), or ``None`` if no physics material is bound.
+        """
+        prim_path = str(prim.GetPath())
+        if prim_path in self._physics_material_cache:
+            return self._physics_material_cache[prim_path]
+
+        material_props = None
+        material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial("physics")
+        material_prim = material.GetPrim() if material else None
+        if material_prim is not None and material_prim.IsValid() and material_prim.HasAPI(UsdPhysics.MaterialAPI):
+            material_api = UsdPhysics.MaterialAPI(material_prim)
+            values = []
+            # Ordered as the PhysicsMaterial fields.
+            for attr in (
+                material_api.GetStaticFrictionAttr(),
+                material_api.GetDynamicFrictionAttr(),
+                material_api.GetRestitutionAttr(),
+                material_api.GetDensityAttr(),
+            ):
+                value = attr.Get() if attr and attr.HasAuthoredValue() else None
+                values.append(float(value) if value is not None else None)
+            material_props = PhysicsMaterial(*values)
+
+        self._physics_material_cache[prim_path] = material_props
+        return material_props
+
+    def note_unsupported_restitution(self):
+        """
+        Emit a one-time warning that USD physics-material restitution is not applied.
+
+        The Genesis rigid solver has no rigid-rigid restitution coefficient; contact elasticity
+        is governed by ``sol_params`` instead. Restitution authored on a UsdPhysicsMaterialAPI is
+        therefore parsed but dropped.
+        """
+        if not self._is_restitution_warned:
+            self._is_restitution_warned = True
+            gs.logger.warning(
+                "USD physics material 'restitution' is not supported by the rigid solver "
+                "(no rigid-rigid restitution coefficient); ignoring it. Tune contact elasticity "
+                "via solver 'sol_params' instead."
+            )
+
+    def note_unsupported_cross_entity_filtering(self):
+        """
+        Emit a one-time warning that cross-entity USD collision filtering is not applied.
+
+        ``scene.add_stage`` splits a stage into separate entities, and collision filtering is solved
+        per entity. A CollisionGroup / FilteredPairsAPI relationship that spans two prims which end up
+        in different entities cannot be expressed as per-entity contype/conaffinity, so those pairs
+        keep colliding. Within-entity (self-collision) filtering is unaffected.
+        """
+        if not self._is_cross_entity_filtering_warned:
+            self._is_cross_entity_filtering_warned = True
+            gs.logger.warning(
+                "USD collision filtering references colliders in different entities (scene.add_stage "
+                "splits the stage into separate entities); cross-entity filtering is not applied, so "
+                "those geometry pairs will still collide. Within-entity self-collision filtering is applied."
+            )
+
     def compute_transform(self, prim: Usd.Prim) -> np.ndarray:
         """
         Compute the local-to-world transformation matrix for a prim.
         """
         transform = self._xform_cache.GetLocalToWorldTransform(prim)
-        T_usd = np.asarray(transform, dtype=np.float32)  # translation on the bottom row
+        # USD composes transforms in double precision, so the matrix is kept as authored and only narrowed to the
+        # simulation precision once the pose reaches the entity: rounding it here costs the pose its last digits.
+        T_usd = np.asarray(transform)  # translation on the bottom row
         if self._is_yup:
             T_usd @= mu.Y_UP_TRANSFORM
         T_usd[:, :3] *= self._meter_scale
@@ -271,8 +381,11 @@ class UsdContext:
         # Note that it is necessary to call 'bake_usd_material' as a subprocess to ensure proper isolation of omniverse
         # kit, otherwise the global conversion registry of some Python bindings will be conflicting with each other,
         # ultimately leading to segfault...
+        # The fault handler dumps the Python stack of the child on a native crash, which is otherwise silent
         commands = [
             sys.executable,
+            "-X",
+            "faulthandler",
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "usd_bake.py"),
             "--input_file",
             self._stage_file,
@@ -290,22 +403,31 @@ class UsdContext:
         env = dict(os.environ)
         env["OMNI_KIT_ALLOW_ROOT"] = "1"
 
-        try:
-            result = subprocess.run(commands, capture_output=True, check=True, text=True, env=env)
-            if result.stdout:
-                gs.logger.debug(result.stdout)
-            if result.stderr:
-                gs.logger.warning(result.stderr)
-        except (subprocess.CalledProcessError, OSError) as e:
-            gs.logger.warning(
-                f"Baking process failed: {e} A few possible reasons:"
-                "\n\t1. The first launch may require accepting the Omniverse EULA. "
-                "Set `OMNI_KIT_ACCEPT_EULA=yes` to accept it automatically."
-                "\n\t2. The first launch may install additional dependencies, which can cause a timeout."
-                "\n\t3. If you have multiple Python environments (especially with different Python versions), "
-                "Omniverse Kit extensions may conflict across environments. Try to remove the shared omniverse "
-                "extension folder (e.g. `~/.local/share/ov/data/ext` in Linux) and try again."
-            )
+        # Bootstrapping omni-kit by multiple processes concurrently causes segfaults. Use a file lock to serialize
+        # bake operations across parallel processes (e.g. pytest-xdist workers).
+        lock_path = os.path.join(tempfile.gettempdir(), "genesis_usd_bake.lock")
+        with filelock.FileLock(lock_path, timeout=600):
+            # The output is logged before the exit status is examined: Kit's own log and the crash stack live in it,
+            # and raising on a bad exit would skip past them.
+            try:
+                result = subprocess.run(commands, capture_output=True, text=True, env=env)
+            except OSError as e:
+                gs.logger.warning(f"Baking process could not be started: {e}")
+            else:
+                if result.stdout:
+                    gs.logger.debug(result.stdout)
+                if result.stderr:
+                    gs.logger.warning(result.stderr)
+                if result.returncode != 0:
+                    gs.logger.warning(
+                        f"Baking process failed with exit status {result.returncode}. A few possible reasons:"
+                        "\n\t1. The first launch may require accepting the Omniverse EULA. "
+                        "Set `OMNI_KIT_ACCEPT_EULA=yes` to accept it automatically."
+                        "\n\t2. The first launch may install additional dependencies, which can cause a timeout."
+                        "\n\t3. If you have multiple Python environments (especially with different Python versions), "
+                        "Omniverse Kit extensions may conflict across environments. Try to remove the shared omniverse "
+                        "extension folder (e.g. `~/.local/share/ov/data/ext` in Linux) and try again."
+                    )
 
         if os.path.exists(self._bake_stage_file):
             gs.logger.warning(f"USD materials baked to file {self._bake_stage_file}")
@@ -398,6 +520,39 @@ def find_rigid_bodies_in_range(prim_range: Usd.PrimRange) -> set[str]:
     return rigid_bodies
 
 
+def resolve_rigid_body_link_path(stage: Usd.Stage, path: str) -> str | None:
+    """
+    Resolve a joint body target path to the canonical rigid-body link path.
+
+    USD assets may place RigidBodyAPI on a parent xform and CollisionAPI on a child
+    mesh, with joints referencing either prim. This helper maps both conventions to the
+    same link path used by `find_rigid_bodies_in_range`.
+    """
+    prim = stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        return None
+
+    if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        return path
+
+    if prim.HasAPI(UsdPhysics.CollisionAPI):
+        canonical = path
+        parent = prim.GetParent()
+        while parent.IsValid():
+            if parent.HasAPI(UsdPhysics.RigidBodyAPI):
+                return str(parent.GetPath())
+            if parent.HasAPI(UsdPhysics.CollisionAPI):
+                canonical = str(parent.GetPath())
+            parent = parent.GetParent()
+        return canonical
+
+    # Wrapper xform without physics API: resolve to the rigid body in its subtree.
+    rigid_bodies = find_rigid_bodies_in_range(Usd.PrimRange(prim))
+    if len(rigid_bodies) == 1:
+        return next(iter(rigid_bodies))
+    return None
+
+
 def extract_links_referenced_by_joints(
     stage: Usd.Stage, joints: list[Usd.Prim], check_rigid_body: bool = True
 ) -> set[str]:
@@ -411,8 +566,8 @@ def extract_links_referenced_by_joints(
     joints : list[Usd.Prim]
         List of joint prims to analyze.
     check_rigid_body : bool, optional
-        If True, only include links that are rigid bodies (have RigidBodyAPI or CollisionAPI).
-        If False, include all links referenced by joints. Default is True.
+        If True, only include targets that resolve to a canonical rigid-body link. If False, also
+        include the raw target path of unresolvable targets. Default is True.
 
     Returns
     -------
@@ -422,29 +577,16 @@ def extract_links_referenced_by_joints(
     links_referenced: set[str] = set()
     for joint_prim in joints:
         joint = UsdPhysics.Joint(joint_prim)
-        body0_targets = joint.GetBody0Rel().GetTargets()
-        body1_targets = joint.GetBody1Rel().GetTargets()
-
-        if body0_targets:
-            body0_path = str(body0_targets[0])
-            if check_rigid_body:
-                body0_prim = stage.GetPrimAtPath(body0_path)
-                if body0_prim.IsValid() and (
-                    body0_prim.HasAPI(UsdPhysics.RigidBodyAPI) or body0_prim.HasAPI(UsdPhysics.CollisionAPI)
-                ):
-                    links_referenced.add(body0_path)
-            else:
-                links_referenced.add(body0_path)
-
-        if body1_targets:
-            body1_path = str(body1_targets[0])
-            if check_rigid_body:
-                body1_prim = stage.GetPrimAtPath(body1_path)
-                if body1_prim.IsValid() and (
-                    body1_prim.HasAPI(UsdPhysics.RigidBodyAPI) or body1_prim.HasAPI(UsdPhysics.CollisionAPI)
-                ):
-                    links_referenced.add(body1_path)
-            else:
-                links_referenced.add(body1_path)
+        for body_rel in (joint.GetBody0Rel(), joint.GetBody1Rel()):
+            targets = body_rel.GetTargets()
+            if not targets:
+                continue
+            body_path = str(targets[0])
+            # A resolved path is guaranteed to carry RigidBodyAPI or CollisionAPI.
+            resolved_path = resolve_rigid_body_link_path(stage, body_path)
+            if resolved_path is not None:
+                links_referenced.add(resolved_path)
+            elif not check_rigid_body:
+                links_referenced.add(body_path)
 
     return links_referenced

@@ -7,23 +7,16 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(precision="32", logging_level="info")
+    gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.5, 0.0, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=40,
-        ),
-        rigid_options=gs.options.RigidOptions(
-            gravity=(0, 0, 0),
-            enable_collision=False,
-            enable_joint_limit=False,
         ),
         show_viewer=args.vis,
     )
@@ -33,7 +26,10 @@ def main():
             file="meshes/axis.obj",
             scale=0.05,
         ),
-        surface=gs.surfaces.Default(color=(1, 0.5, 0.5, 1)),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Default(
+            color=(1, 0.5, 0.5, 1),
+        ),
     )
 
     target_2 = scene.add_entity(
@@ -41,25 +37,32 @@ def main():
             file="meshes/axis.obj",
             scale=0.05,
         ),
-        surface=gs.surfaces.Default(color=(0.5, 1.0, 0.5, 1)),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Default(
+            color=(0.5, 1.0, 0.5, 1),
+        ),
     )
     target_3 = scene.add_entity(
         gs.morphs.Mesh(
             file="meshes/axis.obj",
             scale=0.05,
         ),
-        surface=gs.surfaces.Default(color=(0.5, 0.5, 1.0, 1)),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Default(
+            color=(0.5, 0.5, 1.0, 1),
+        ),
     )
-    ########################## entities ##########################
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             scale=1.0,
             file="urdf/shadow_hand/shadow_hand.urdf",
         ),
-        surface=gs.surfaces.Reflective(color=(0.4, 0.4, 0.4)),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Reflective(
+            color=(0.4, 0.4, 0.4),
+        ),
     )
 
-    ########################## build ##########################
     scene.build()
     scene.reset()
 
@@ -87,7 +90,7 @@ def main():
         )
 
         robot.set_qpos(qpos)
-        scene.step()
+        scene.visualizer.update(force=True)
 
 
 if __name__ == "__main__":

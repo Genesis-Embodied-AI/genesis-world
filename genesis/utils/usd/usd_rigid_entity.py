@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, NamedTuple, Tuple
 
 import numpy as np
 from pxr import Usd, UsdPhysics
@@ -12,12 +12,16 @@ from .usd_context import (
     extract_links_referenced_by_joints,
     find_joints_in_range,
     find_rigid_bodies_in_range,
+    get_current_usd_context,
+    resolve_rigid_body_link_path,
 )
+from .usd_collision import apply_collision_filtering
 from .usd_geometry import parse_prim_geoms
 from .usd_utils import (
     AXES_VECTOR,
     get_attr_value_by_candidates,
     usd_center_of_mass_to_numpy,
+    usd_density_to_float,
     usd_inertia_to_numpy,
     usd_mass_to_float,
     usd_pos_to_numpy,
@@ -49,6 +53,32 @@ DRIVE_NAMES = {
 _DOF_NAMES = ("transX", "transY", "transZ", "rotX", "rotY", "rotZ")
 _ROT_DOFS = {"rotX", "rotY", "rotZ"}
 _DOF_AXIS = {"transX": "X", "transY": "Y", "transZ": "Z", "rotX": "X", "rotY": "Y", "rotZ": "Z"}
+
+
+class _LinkJoint(NamedTuple):
+    """A single joint incident on a link, as consumed by ``_parse_link``.
+
+    Attributes
+    ----------
+    joint_prim : Usd.Prim | None
+        The joint prim connecting this link to its parent, or ``None`` for a link with no joint
+        (a floating/fixed root that gets an implicit free/fixed joint).
+    parent_idx : int
+        Index of the parent link in the entity's link list, or ``-1`` for a root link.
+    is_body1 : bool
+        Whether this link is the joint's ``body1`` (child) rather than ``body0`` (parent). Selects
+        which ``localPos``/``localRot`` of the joint describes this link's anchor.
+    frame_path : str | None
+        Path of the prim that the joint's ``body0``/``body1`` relationship for this link literally
+        targets. USD authors ``localPos``/``localRot`` in this prim's frame, which may be a
+        collision child or wrapper xform rather than the canonical RigidBodyAPI link. ``None`` when
+        the relationship has no target (e.g. jointed to the world).
+    """
+
+    joint_prim: Usd.Prim | None
+    parent_idx: int
+    is_body1: bool
+    frame_path: str | None
 
 
 def _detect_generic_joint_type(joint_prim: Usd.Prim) -> Tuple[int, int, int, str | None]:
@@ -92,11 +122,18 @@ def _detect_generic_joint_type(joint_prim: Usd.Prim) -> Tuple[int, int, int, str
 
 
 def _parse_joint_axis_pos(
-    context: UsdContext, joint: UsdPhysics.Joint, child_link: Usd.Prim, is_body1: bool, axis_override: str | None = None
+    context: UsdContext,
+    joint: UsdPhysics.Joint,
+    child_link: Usd.Prim,
+    joint_frame: Usd.Prim,
+    is_body1: bool,
+    axis_override: str | None = None,
 ) -> Tuple[str, np.ndarray, np.ndarray]:
+    # localPos/localRot are expressed in the frame of 'joint_frame', the joint body-relationship target,
+    # which may be a collision child prim rather than the canonical RigidBodyAPI link prim.
     joint_pos_attr = joint.GetLocalPos1Attr() if is_body1 else joint.GetLocalPos0Attr()
     joint_pos = usd_pos_to_numpy(joint_pos_attr.Get()) if joint_pos_attr.HasValue() else gu.zero_pos()
-    T = context.compute_transform(child_link)
+    T = context.compute_transform(joint_frame)
     joint_pos = gu.transform_by_T(joint_pos, T)
     Q, S = context.compute_gs_transform(child_link)
     Q_inv = np.linalg.inv(Q)
@@ -129,7 +166,7 @@ def _parse_joint_axis_pos(
 def _parse_link(
     context: UsdContext,
     link: Usd.Prim,
-    joints: List[Tuple[Usd.Prim, int, bool]],
+    joints: List[_LinkJoint],
     links: List[Usd.Prim],
     morph: gs.morphs.USD,
 ):
@@ -149,7 +186,7 @@ def _parse_link(
         link_fixed = True
 
     # Apply morph.fixed override for root links
-    is_root = any(parent_idx == -1 for _, parent_idx, _ in joints)
+    is_root = any(joint.parent_idx == -1 for joint in joints)
     if morph.fixed is not None and is_root:
         link_fixed = morph.fixed
 
@@ -174,7 +211,7 @@ def _parse_link(
         l_info["quat"] = gu.R_to_quat(Q[:3, :3])
 
     j_infos = []
-    for joint_prim, parent_idx, is_body1 in joints:
+    for joint_prim, parent_idx, is_body1, frame_path in joints:
         if "parent_idx" not in l_info:
             parent_link = None if parent_idx == -1 else links[parent_idx]
             Q, S = context.compute_gs_transform(link, parent_link)
@@ -212,8 +249,13 @@ def _parse_link(
                     )
             if joint_type == gs.JOINT_TYPE.FIXED:
                 joint = UsdPhysics.Joint(joint_prim)
+            # localPos/localRot are authored in the body-relationship target's frame (frame_path),
+            # which may differ from the canonical link prim; fall back to the link if unresolved.
+            joint_frame = context.stage.GetPrimAtPath(frame_path) if frame_path else link
+            if not joint_frame.IsValid():
+                joint_frame = link
             joint_axis_str, joint_axis, joint_pos = _parse_joint_axis_pos(
-                context, joint, link, is_body1, detected_axis_str
+                context, joint, link, joint_frame, is_body1, detected_axis_str
             )
             joint_name = str(joint_prim.GetPath())
         else:
@@ -380,7 +422,7 @@ def _parse_link(
                     joint_prim,
                     candidates=morph.joint_armature_attr_candidates,
                     attr_name="dofs_armature",
-                    default_value=morph.default_armature or 0.0,
+                    default_value=0.0,
                 ),
                 dtype=gs.np_float,
             )
@@ -464,36 +506,29 @@ def _parse_articulation_structure(stage: Usd.Stage, entity_prim: Usd.Prim, joint
         # No joints provided - this is a pure rigid body case
         joint_prim_objs = []
 
-    # Process joints to build link/joint structure
-    # Only include paths that are actually rigid bodies (have RigidBodyAPI or CollisionAPI)
-    def is_rigid_body(path: str) -> bool:
-        """Check if a prim path is a rigid body."""
-        prim = stage.GetPrimAtPath(path)
-        if not prim.IsValid():
-            return False
-        return prim.HasAPI(UsdPhysics.RigidBodyAPI) or prim.HasAPI(UsdPhysics.CollisionAPI)
-
     for prim in joint_prim_objs:
         joint = UsdPhysics.Joint(prim)
         body0_targets = joint.GetBody0Rel().GetTargets()  # parent
         body1_targets = joint.GetBody1Rel().GetTargets()  # child
-        body0_target_path = str(body0_targets[0]) if body0_targets else None
-        body1_target_path = str(body1_targets[0]) if body1_targets else None
+        body0_original_path = str(body0_targets[0]) if body0_targets else None
+        body1_original_path = str(body1_targets[0]) if body1_targets else None
+        body0_target_path = resolve_rigid_body_link_path(stage, body0_original_path) if body0_original_path else None
+        body1_target_path = resolve_rigid_body_link_path(stage, body1_original_path) if body1_original_path else None
 
         # Only process if at least one body is a rigid body
-        body0_is_rigid = body0_target_path and is_rigid_body(body0_target_path)
-        body1_is_rigid = body1_target_path and is_rigid_body(body1_target_path)
+        body0_is_rigid = body0_target_path is not None
+        body1_is_rigid = body1_target_path is not None
 
+        # Intermediate tuples carry the parent *path* (resolved to a link index in the pass below);
+        # frame_path is this link's own original relationship target (body1 for a child, body0 else).
         if body1_is_rigid:
-            # body1 is a rigid body - add it as a link
             parent_path = body0_target_path if body0_is_rigid else None
-            link_path_joints.setdefault(body1_target_path, []).append((prim, parent_path, True))
+            link_path_joints.setdefault(body1_target_path, []).append((prim, parent_path, True, body1_original_path))
             # If body0 is also a rigid body, add it as a link (may be parent)
             if body0_is_rigid:
                 link_path_joints.setdefault(body0_target_path, [])
         elif body0_is_rigid:
-            # body0 is a rigid body - add it as a link
-            link_path_joints.setdefault(body0_target_path, []).append((prim, None, False))
+            link_path_joints.setdefault(body0_target_path, []).append((prim, None, False, body0_original_path))
         # If neither is a rigid body, skip this joint (it doesn't connect rigid bodies)
 
     links, link_joints = [], []
@@ -505,7 +540,10 @@ def _parse_articulation_structure(stage: Usd.Stage, entity_prim: Usd.Prim, joint
                 gs.raise_exception(f"Link {link_path} not found in stage.")
             links.append(stage.GetPrimAtPath(link_path))
             link_joints.append(
-                [(joint, link_path_to_idx[parent_path], is_body1) for joint, parent_path, is_body1 in joints]
+                [
+                    _LinkJoint(joint, link_path_to_idx[parent_path], is_body1, frame_path)
+                    for joint, parent_path, is_body1, frame_path in joints
+                ]
             )
     else:
         # Pure rigid body case - no joints, no placeholder needed
@@ -514,7 +552,7 @@ def _parse_articulation_structure(stage: Usd.Stage, entity_prim: Usd.Prim, joint
         link_path_to_idx = {None: -1, str(entity_prim.GetPath()): 0}
     for joints in link_joints:
         if not joints:
-            joints.append((None, -1, False))
+            joints.append(_LinkJoint(None, -1, False, None))
 
     return links, link_joints, link_path_to_idx
 
@@ -534,7 +572,7 @@ def _parse_geoms(
 def _parse_links(
     context: UsdContext,
     links: List[Usd.Prim],
-    link_joints: List[List[Tuple[Usd.Prim, int, bool]]],
+    link_joints: List[List[_LinkJoint]],
     morph: gs.morphs.USD,
 ) -> Tuple[List[Dict], List[List[Dict]]]:
     l_infos = []
@@ -576,8 +614,10 @@ def _compute_joint_prim_paths(stage: Usd.Stage, entity_prim: Usd.Prim) -> List[s
         body1_targets = joint.GetBody1Rel().GetTargets()
         body0_path = str(body0_targets[0]) if body0_targets else None
         body1_path = str(body1_targets[0]) if body1_targets else None
-        if (body0_path and body0_path in rigid_bodies_in_subtree) or (
-            body1_path and body1_path in rigid_bodies_in_subtree
+        body0_resolved = resolve_rigid_body_link_path(stage, body0_path) if body0_path else None
+        body1_resolved = resolve_rigid_body_link_path(stage, body1_path) if body1_path else None
+        if (body0_resolved and body0_resolved in rigid_bodies_in_subtree) or (
+            body1_resolved and body1_resolved in rigid_bodies_in_subtree
         ):
             joints_for_entity.append(joint_prim)
 
@@ -631,7 +671,7 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
     eqs_info : list
         List of equality constraint info dictionaries.
     """
-    context: UsdContext = morph.usd_ctx
+    context = get_current_usd_context() or UsdContext(morph.file)
     context.find_all_materials()
     stage: Usd.Stage = context.stage
 
@@ -675,8 +715,32 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
             g_info = {**g_info, "vmesh": mesh, "contype": 0, "conaffinity": 0}
             link_g_infos.append(g_info)
 
+    # Apply USD collision filtering (CollisionGroup / FilteredPairsAPI) to this entity's collision geoms.
+    cg_infos = [g for link_g_infos in links_g_infos for g in link_g_infos if g.get("contype") or g.get("conaffinity")]
+    apply_collision_filtering(context, cg_infos)
+
     l_infos, links_j_infos = _parse_links(context, links, link_joints, morph)
-    l_infos, links_j_infos, links_g_infos, _ = urdf_utils._order_links(l_infos, links_j_infos, links_g_infos)
+
+    # A density authored on the link's MassAPI overrides any per-geom physics-material density (USD
+    # precedence); the per-geom densities then drive the rigid build's link inertial estimate wherever
+    # no explicit mass is authored.
+    for link, link_g_infos in zip(links, links_g_infos):
+        if not link.HasAPI(UsdPhysics.MassAPI):
+            continue
+        link_density = usd_density_to_float(UsdPhysics.MassAPI(link).GetDensityAttr().Get())
+        if link_density is None:
+            continue
+        for g_info in link_g_infos:
+            if g_info.get("contype") or g_info.get("conaffinity"):
+                g_info["density"] = link_density
+
+    # The prim paths are fully consumed at this point; strip them so they do not leak into the generic
+    # entity-building pipeline (including the visual copies of collision geoms).
+    for link_g_infos in links_g_infos:
+        for g_info in link_g_infos:
+            g_info.pop("prim_path", None)
+
+    l_infos, links_j_infos, links_g_infos, _ = urdf_utils.order_links_depth_first(l_infos, links_j_infos, links_g_infos)
     eqs_info = []  # USD doesn't support equality constraints
 
     return l_infos, links_j_infos, links_g_infos, eqs_info

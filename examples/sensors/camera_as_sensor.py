@@ -13,30 +13,28 @@ import genesis as gs
 from genesis.utils.misc import tensor_to_array
 from genesis.options.sensors import RasterizerCameraOptions, RaytracerCameraOptions, BatchRendererCameraOptions
 
-########################## init ##########################
+# The batch renderer compared here requires CUDA, so this example has no CPU backend to offer.
 gs.init(seed=0, precision="32", backend=gs.gpu, logging_level="info")
 
-########################## check dependencies ##########################
 # Try to import LuisaRenderPy to determine if raytracer is available
 try:
     import LuisaRenderPy
 
     ENABLE_RAYTRACER = True
-    print("✓ LuisaRenderPy available - Raytracer will be enabled")
+    print("[ok] LuisaRenderPy available - Raytracer will be enabled")
 except ImportError:
     ENABLE_RAYTRACER = False
-    print("⊘ LuisaRenderPy not available - Raytracer will be disabled")
+    print("[--] LuisaRenderPy not available - Raytracer will be disabled")
 
 try:
     import gs_madrona
 
     ENABLE_MADRONA = True
-    print("✓ gs_madrona available - BatchRenderer will be enabled")
+    print("[ok] gs_madrona available - BatchRenderer will be enabled")
 except ImportError:
     ENABLE_MADRONA = False
-    print("⊘ gs_madrona not available - BatchRenderer will be disabled")
+    print("[--] gs_madrona not available - BatchRenderer will be disabled")
 ENABLE_MADRONA = ENABLE_MADRONA and (gs.backend == gs.cuda)
-########################## create a scene ##########################
 # Choose renderer based on raytracer availability
 if ENABLE_RAYTRACER:
     renderer = gs.renderers.RayTracer(
@@ -56,7 +54,6 @@ scene = gs.Scene(
     show_viewer=False,
 )
 
-########################## entities ##########################
 plane = scene.add_entity(
     morph=gs.morphs.Plane(),
     surface=gs.surfaces.Rough(
@@ -84,7 +81,6 @@ box = scene.add_entity(
     ),
 )
 
-########################## Camera Configurations ##########################
 # Define common camera parameters
 CAMERA_COMMON_KWARGS = dict(
     {
@@ -222,7 +218,6 @@ for backend_name, options_class, enabled in backends:
     backend_configs[backend_name] = configs
 
 
-########################## Create Cameras ##########################
 cameras = {}
 
 for group_name, configs in backend_configs.items():
@@ -231,14 +226,12 @@ for group_name, configs in backend_configs.items():
         camera = scene.add_sensor(config["options"])
         cameras[config["name"]] = camera
 
-    print(f"✓ Created {len(configs)} {group_name.lower()} cameras")
+    print(f"[ok] Created {len(configs)} {group_name.lower()} cameras")
 
 
-########################## build ##########################
 n_envs = 1
 scene.build(n_envs=n_envs)
 
-########################## identify attached cameras ##########################
 print("\n=== Identifying Attached Cameras ===")
 
 # Identify cameras that are configured to be attached
@@ -248,12 +241,11 @@ for group_name, configs in backend_configs.items():
         if config["attachment"] is not None:
             camera = cameras[config["name"]]
             attached_cameras.append(camera)
-            print(f"✓ {config['name']} is attached to sphere")
+            print(f"[ok] {config['name']} is attached to sphere")
 
-print(f"✓ Identified {len(attached_cameras)} attached cameras")
+print(f"[ok] Identified {len(attached_cameras)} attached cameras")
 
-########################## simulate and render ##########################
-os.makedirs("camera_sensor_output", exist_ok=True)
+os.makedirs("out/camera_as_sensor", exist_ok=True)
 
 for i in range(100):
     scene.step()
@@ -270,5 +262,5 @@ for i in range(100):
         for cam_name, data in camera_data.items():
             rgb_data = data.rgb[0] if data.rgb.ndim > 3 else data.rgb
             suffix = "_env0" if n_envs > 1 else ""
-            filename = f"camera_sensor_output/{cam_name}{suffix}_step{i:03d}.png"
+            filename = f"out/camera_as_sensor/{cam_name}{suffix}_step{i:03d}.png"
             plt.imsave(filename, tensor_to_array(rgb_data))

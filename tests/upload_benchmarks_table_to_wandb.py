@@ -21,7 +21,8 @@ import os
 import sys
 from pathlib import Path
 
-from utils import get_git_commit_info, pprint_oneline
+from utils.assets import get_git_commit_info
+from utils.misc import pprint_oneline
 
 
 def upload_results_to_wandb(

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to fill out this bug report, please make sure to [search for existing issues](https://github.com/Genesis-Embodied-AI/Genesis/issues) before filing a new one!
+        Thanks for taking the time to fill out this bug report, please make sure to [search for existing issues](https://github.com/Genesis-Embodied-AI/genesis-world/issues) before filing a new one!
   - type: textarea
     id: bug-description
     attributes:
@@ -20,19 +20,6 @@ body:
     id: steps-to-reproduce
     attributes:
       label: Steps to Reproduce
-      placeholder: |
-        If possible, provide a script triggering the bug, e.g.
-        ```python
-        # code snippet triggering the bug
-        import genesis as gs
-        gs.init()
-        scene = gs.Scene(show_viewer=False)
-        broken = scene.add_entity(
-            gs.morphs.MJCF(file='attachement.xml'),
-        )
-        scene.build()
-        ```
-        Make sure to attached any needed assets (here `attachement.xml`)!
       value: |
         If possible, provide a script triggering the bug, e.g.
         ```python
@@ -41,11 +28,11 @@ body:
         gs.init()
         scene = gs.Scene(show_viewer=False)
         broken = scene.add_entity(
-            gs.morphs.MJCF(file='attachement.xml'),
+            gs.morphs.MJCF(file='attachment.xml'),
         )
         scene.build()
         ```
-        Make sure to attached any needed assets (here `attachement.xml`)!
+        Make sure to attach any needed assets (here `attachment.xml`)!
     validations:
       required: true
   - type: textarea
@@ -72,11 +59,6 @@ body:
     id: desktop-device
     attributes:
       label: Environment
-      placeholder: |
-        - OS: [e.g. Ubuntu 24.04, Windows 11 24H2]
-        - GPU/CPU [e.g. A100, RTX 4090, M3pr, Intel I9-9900k, Ryzen 5900x] (N/A if no GPU/CPU)
-        - GPU-driver version (N/A if no GPU)
-        - CUDA / CUDA-toolkit version (N/A if non-Nvidia)
       value: |
         - OS: [e.g. Ubuntu 24.04, Windows 11 24H2]
         - GPU/CPU [e.g. A100, RTX 4090, M3pr, Intel I9-9900k, Ryzen 5900x] (N/A if no GPU/CPU)
@@ -90,7 +72,7 @@ body:
       label: Release version or Commit ID
       placeholder: |
         Please provide:
-         - a) **version numer** of the release causing the issue, OR
+         - a) **version number** of the release causing the issue, OR
          - b) **SHA/hash** of the latest commit if working from git. You can get this by running the `git rev-parse HEAD` command on your current branch.
     validations:
       required: true

@@ -12,44 +12,36 @@ config = {
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
-    parser.add_argument(
-        "-r", "--robot", choices=["panda", "ur5e"], default="ur5e", help="Select robot model (panda or ur5e)"
-    )
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
+    parser.add_argument("--robot", choices=["panda", "ur5e"], default="ur5e", help="Select robot model (panda or ur5e)")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    backend = gs.cpu if args.cpu else gs.gpu
+    backend = gs.gpu if args.gpu else gs.cpu
     gs.init(backend=backend)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -2, 1.5),
             camera_lookat=(0.0, 0.0, 0.5),
             camera_fov=40,
-            max_FPS=200,
-        ),
-        rigid_options=gs.options.RigidOptions(
-            enable_joint_limit=False,
-            enable_collision=False,
-            gravity=(0, 0, -0),
         ),
         show_viewer=args.vis,
         show_FPS=False,
     )
 
-    ########################## entities ##########################
-
     plane = scene.add_entity(
         gs.morphs.Plane(),
+        material=gs.materials.Kinematic(),
     )
 
     robot_config = config[args.robot]
     mjcf_file = robot_config["mjcf_file"]
     robot = scene.add_entity(
-        gs.morphs.MJCF(file=mjcf_file),
+        gs.morphs.MJCF(
+            file=mjcf_file,
+        ),
+        material=gs.materials.Kinematic(),
     )
 
     print("links=", robot.links)
@@ -59,9 +51,11 @@ def main():
             file="meshes/axis.obj",
             scale=0.10,
         ),
-        surface=gs.surfaces.Default(color=(1, 0.5, 0.5, 1)),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Default(
+            color=(1, 0.5, 0.5, 1),
+        ),
     )
-    ########################## build ##########################
     scene.build()
 
     target_quat = np.array([0, 1, 0, 0])
@@ -88,14 +82,12 @@ def main():
 
         error = np.concatenate([error_pos, error_rotvec])
 
-        # jacobian
         jac = robot.get_jacobian(link=ee_link).cpu().numpy()
         dq = jac.T @ np.linalg.solve(jac @ jac.T + diag, error)
         q = robot.get_qpos().cpu().numpy() + dq
 
-        # control
-        robot.control_dofs_position(q)
-        scene.step()
+        robot.set_qpos(q)
+        scene.visualizer.update(force=True)
 
 
 if __name__ == "__main__":

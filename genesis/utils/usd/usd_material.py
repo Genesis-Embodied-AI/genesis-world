@@ -1,6 +1,8 @@
+import io
+
 import numpy as np
 from PIL import Image
-from pxr import Usd, UsdShade
+from pxr import Ar, Usd, UsdShade
 
 import genesis as gs
 from genesis.utils import mesh as mu
@@ -117,7 +119,12 @@ def parse_preview_surface(prim: Usd.Prim, output_name):
     elif shader_id == "UsdUVTexture":
         texture = get_input_attribute_value(shader, "file", "value")[0]
         if texture is not None:
-            texture_image = np.asarray(Image.open(texture.resolvedPath))
+            # The resolved path may point inside a .usdz package (e.g. 'mesh.usdz[texture.png]'), so the texture
+            # is read through the USD asset resolver, which handles package and plain filesystem paths alike.
+            texture_asset = Ar.GetResolver().OpenAsset(Ar.ResolvedPath(texture.resolvedPath))
+            if texture_asset is None:
+                gs.raise_exception(f"Unable to open UsdUVTexture asset: {texture.resolvedPath}")
+            texture_image = mu.PIL_to_array(Image.open(io.BytesIO(texture_asset.GetBuffer())))
             if texture_image.ndim == 3:
                 if output_name == "r":
                     texture_image = texture_image[:, :, 0]

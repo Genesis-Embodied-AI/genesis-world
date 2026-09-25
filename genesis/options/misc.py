@@ -1,6 +1,9 @@
 from typing import Literal
 
-from pydantic import Field, StrictBool, StrictInt
+from pydantic import Field, StrictBool, StrictInt, model_validator
+from typing_extensions import Self
+
+import genesis as gs
 
 from genesis.typing import NonNegativeInt, PositiveInt, Vec4FType
 
@@ -37,6 +40,9 @@ class CoacdOptions(Options):
     mcts_nodes: PositiveInt = 20
     mcts_iterations: PositiveInt = 100
     mcts_max_depth: PositiveInt = 3
+    # pca=True is rejected because it triggers an upstream CoACD bug where the PCA transform applied to the input
+    # mesh is not undone on the decomposed convex hulls (https://github.com/SarahWeiii/CoACD/issues/100).
+    # FIXME: re-allow once CoACD 1.0.12 lands with the fix.
     pca: StrictBool = False
     merge: StrictBool = True
     decimate: StrictBool = False
@@ -45,3 +51,9 @@ class CoacdOptions(Options):
     extrude_margin: float = 0.1
     apx_mode: Literal["ch", "box"] = "ch"
     seed: NonNegativeInt = 0
+
+    @model_validator(mode="after")
+    def _reject_pca(self) -> Self:
+        if self.pca:
+            gs.raise_exception("'CoacdOptions.pca=True' is not supported due to an upstream bug in CoACD.")
+        return self

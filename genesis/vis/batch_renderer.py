@@ -68,11 +68,11 @@ class GenesisGeomRetriever:
         vgeoms = self.rigid_solver.vgeoms
 
         # Retrieve geom data
-        mesh_vertices = self.rigid_solver.vverts_info.init_pos.to_numpy()
-        mesh_faces = self.rigid_solver.vfaces_info.vverts_idx.to_numpy()
-        mesh_vertex_offsets = self.rigid_solver.vgeoms_info.vvert_start.to_numpy()
-        mesh_face_starts = self.rigid_solver.vgeoms_info.vface_start.to_numpy()
-        mesh_face_ends = self.rigid_solver.vgeoms_info.vface_end.to_numpy()
+        mesh_vertices = self.rigid_solver.dyn_info.vverts.init_pos.to_numpy()
+        mesh_faces = self.rigid_solver.dyn_info.vfaces.vverts_idx.to_numpy()
+        mesh_vertex_offsets = self.rigid_solver.dyn_info.vgeoms.vvert_start.to_numpy()
+        mesh_face_starts = self.rigid_solver.dyn_info.vgeoms.vface_start.to_numpy()
+        mesh_face_ends = self.rigid_solver.dyn_info.vgeoms.vface_end.to_numpy()
         total_uv_size = 0
         mesh_uvs = []
         mesh_uv_offsets = []
@@ -103,6 +103,18 @@ class GenesisGeomRetriever:
         args["geom_sizes"] = np.ones((self.n_vgeoms, 3), dtype=np.float32)
         args["enabled_geom_groups"] = self.default_enabled_geom_groups
 
+        # Heterogeneous entities: a vgeom variant may exist in only a subset of envs
+        # (vgeom.active_envs_mask). Emit an optional [num_worlds, num_geoms] visibility
+        # mask (1 = visible, 0 = hidden) so each variant renders only where it is active;
+        # omitted for homogeneous scenes (legacy + back-compat with older Madrona).
+        if any(vgeom.active_envs_mask is not None for vgeom in vgeoms):
+            num_worlds = max(self.rigid_solver.n_envs, 1)
+            geom_env_mask = np.ones((num_worlds, self.n_vgeoms), dtype=np.int32)
+            for vgeom in vgeoms:
+                if vgeom.active_envs_mask is not None:
+                    geom_env_mask[:, vgeom.idx] = vgeom.active_envs_mask.detach().cpu().numpy()
+            args["geom_env_mask"] = geom_env_mask
+
         # Retrieve material data
         geom_mat_ids = []
         num_materials = 0
@@ -128,11 +140,14 @@ class GenesisGeomRetriever:
             geom_texture_indices = []
             for geom_texture in geom_textures:
                 if isinstance(geom_texture, gs.textures.ImageTexture) and geom_texture.image_array is not None:
-                    texture_id = geom_texture.image_path
+                    texture_id = (
+                        ("path", geom_texture.image_path)
+                        if geom_texture.image_path is not None
+                        else ("image_array", id(geom_texture.image_array))
+                    )
                     if texture_id not in texture_indices:
                         texture_idx = num_textures
-                        if texture_id is not None:
-                            texture_indices[texture_id] = texture_idx
+                        texture_indices[texture_id] = texture_idx
                         texture_widths.append(geom_texture.image_array.shape[1])
                         texture_heights.append(geom_texture.image_array.shape[0])
                         assert geom_texture.channel == 4
@@ -195,8 +210,8 @@ class GenesisGeomRetriever:
 
     # FIXME: Use a kernel to do it efficiently
     def retrieve_rigid_state_torch(self):
-        geom_pos = qd_to_torch(self.rigid_solver.vgeoms_state.pos)
-        geom_rot = qd_to_torch(self.rigid_solver.vgeoms_state.quat)
+        geom_pos = qd_to_torch(self.rigid_solver.dyn_state.vgeoms.pos)
+        geom_rot = qd_to_torch(self.rigid_solver.dyn_state.vgeoms.quat)
         geom_pos = geom_pos.transpose(0, 1).contiguous()
         geom_rot = geom_rot.transpose(0, 1).contiguous()
         return geom_pos, geom_rot
@@ -360,7 +375,7 @@ class BatchRenderer(RBC):
         """
 
         # Clear cache if requested or necessary
-        if force_render or self._t < self._visualizer.scene.t:
+        if force_render or self._t < self._visualizer.scene.sim.cur_step_global:
             self._data_cache.clear()
 
         # Fetch available cached data
@@ -420,7 +435,7 @@ class BatchRenderer(RBC):
             )
 
         # Update cache
-        self._t = self._visualizer.scene.t
+        self._t = self._visualizer.scene.sim.cur_step_global
         for img_type, data in enumerate(rendered):
             if needed[img_type]:
                 self._data_cache[(img_type, cache_key)] = rendered[img_type]

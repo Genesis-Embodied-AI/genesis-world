@@ -34,22 +34,12 @@ class RBC:
         return f"<gs.{'.'.join((*submodule, class_name))}>"
 
     def _repr_briefer(self):
-        repr_str = self.__repr_name__()
-        if hasattr(self, "id"):
-            repr_str += f"(id={self.id})"
-        return repr_str
+        return self.__repr_name__()
 
     def _repr_brief(self):
-        repr_str = self.__repr_name__()
-        if hasattr(self, "id"):
-            repr_str += f": {self.id}"
-        if hasattr(self, "idx"):
-            repr_str += f", idx: {self.idx}"
-        if hasattr(self, "morph"):
-            repr_str += f", morph: {self.morph}"
-        if hasattr(self, "material"):
-            repr_str += f", material: {self.material}"
-        return repr_str
+        # Subclasses carrying brief-worthy state (entities, indexed sub-objects) override this to append their own
+        # fields. The base rendering is just the class name.
+        return self.__repr_name__()
 
     def __repr__(self) -> str:
         # Detect if running under a debugger (VSCode or PyCharm)

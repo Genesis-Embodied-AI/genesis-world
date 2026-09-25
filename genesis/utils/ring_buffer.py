@@ -37,14 +37,18 @@ class TensorRingBuffer:
             self.buffer = buffer
         self.N = N
         if idx is None:
-            self._idx = torch.tensor(-1, dtype=torch.int64, device=gs.device)
+            # Host memory is critical for performance and must be preserved: this index only ever selects a slot, and
+            # reading a device-resident one back on the host would block on the device queue at every access
+            self._idx = torch.tensor(-1, dtype=gs.tc_int, device="cpu")
         else:  # torch.Tensor
-            assert idx.ndim == 0 and idx.dtype in (torch.int32, torch.int64)
-            self._idx = idx.to(device=gs.device)
-            assert self._idx is idx
+            self._idx = idx
 
     def at(
-        self, idx: int | torch.Tensor, *others_idx: int | slice | torch.Tensor, copy: bool | None = None
+        self,
+        idx: int | torch.Tensor,
+        *others_idx: int | slice | torch.Tensor,
+        copy: bool | None = None,
+        per_row: bool = False,
     ) -> torch.Tensor:
         """
         Get the value of the tensor at the given index.
@@ -62,8 +66,19 @@ class TensorRingBuffer:
             If `None`, then memory will be allocated only if necessary. If `True`, then memory will be allocated
             systematically instead of returning a view. If `False`, then allocating memory is forbidden and will raise
             an exception if returning a view is impossible.
+        per_row : bool, optional
+            If True, `idx` must be a 1D tensor of length self.buffer.shape[1] selecting one ring slot per row of
+            the second buffer dimension. `others_idx` applies to the remaining dimensions. Result shape:
+            (self.buffer.shape[1], *trailing_slice_shape). Always allocates memory.
         """
+        # 'idx' is free to be a device tensor: a 0-dim host tensor is a valid scalar operand of a device tensor, so the
+        # result follows the device of 'idx' and the selection below stays where the buffer lives
         rel_idx = (self._idx - idx) % self.N
+        if per_row:
+            sub = self.buffer[(slice(None), slice(None), *others_idx)] if others_idx else self.buffer
+            idx_expanded = rel_idx.view(1, -1, *([1] * (sub.ndim - 2))).expand(1, *sub.shape[1:])
+            return sub.gather(0, idx_expanded).squeeze(0)
+
         assert len(others_idx) < self.buffer.ndim
         tensor = self.buffer[(rel_idx, *others_idx)]
         if tensor.untyped_storage().data_ptr() == self.buffer.untyped_storage().data_ptr():

@@ -4,9 +4,12 @@ from . import (
     contact_force,
     depth_camera,
     imu,
+    joint_torque,
     kinematic_tactile,
-    proximity,
+    point_cloud_tactile,
+    probe,
     raycaster,
+    surface_distance_probe,
     temperature,
 )
 from .sensor_manager import SensorManager

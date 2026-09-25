@@ -35,10 +35,10 @@ OBJ_SIZE = 0.1
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive TemperatureGrid sensor visualization")
-    parser.add_argument("--vis", "-v", action="store_true", default=False, help="Show visualization GUI")
-    parser.add_argument("--gpu", action="store_true", help="Run on GPU instead of CPU")
-    parser.add_argument("--seconds", "-t", type=float, default=3.0, help="Seconds to simulate (headless mode)")
-    parser.add_argument("--simulate-all-links", "-l", action="store_true", help="Simulate all link temperatures")
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
+    parser.add_argument("-t", "--seconds", type=float, default=3.0, help="Seconds to simulate (headless mode)")
+    parser.add_argument("--simulate-all-links", action="store_true", help="Simulate all link temperatures")
     args = parser.parse_args()
 
     gs.init(
@@ -51,7 +51,6 @@ def main():
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(-SANDBOX_SIZE * 2, 0.0, PLATFORM_HEIGHT + 2.5),
             camera_lookat=(0.0, 0.0, PLATFORM_HEIGHT),
-            max_FPS=60,
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
@@ -73,7 +72,9 @@ def main():
                 euler=(0, 0, 90 * (i >= 2)),
                 fixed=True,
             ),
-            surface=gs.surfaces.Default(color=(0.5, 0.45, 0.4, 1.0)),
+            surface=gs.surfaces.Default(
+                color=(0.5, 0.45, 0.4, 1.0),
+            ),
         )
 
     platform = scene.add_entity(
@@ -209,11 +210,11 @@ def main():
         )
 
     print("\n=== Interactive TemperatureGrid ===")
-    print(f"Platform {SANDBOX_SIZE}m × {SANDBOX_SIZE}m with grid {GRID_SIZE}")
+    print(f"Platform {SANDBOX_SIZE}m x {SANDBOX_SIZE}m with grid {GRID_SIZE}")
     if args.vis:
         print()
         print("Keyboard Controls:")
-        print("  [↑/↓/←/→]  Move pusher (hot) in XY")
+        print("  [Up/Down/Left/Right]  Move pusher (hot) in XY")
         print("  [j / k]     Lower / raise pusher")
         print("  [SPACE]     Drop an object at pusher location")
         print("  [\\]         Reset pusher position")
@@ -235,13 +236,13 @@ def main():
 
             data = temperature_sensor.read()
             t_min, t_max = float(data.min()), float(data.max())
-            print(f"time={scene.t:.2f}s: Temperature range [{t_min:.1f}, {t_max:.1f}] °C")
+            print(f"time={scene.get_time():.2f}s: Temperature range [{t_min:.1f}, {t_max:.1f}] degC")
             if args.simulate_all_links:
                 print(f"Link temperatures: {temperature_sensor.link_temperatures}")
 
             if "PYTEST_VERSION" in os.environ:
                 break
-            if not args.vis and scene.t > args.seconds:
+            if not args.vis and scene.get_time() > args.seconds:
                 break
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted.")

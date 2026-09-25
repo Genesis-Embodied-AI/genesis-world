@@ -4,7 +4,7 @@ import genesis as gs
 
 
 @qd.func
-def mat_mul(A, B, res, n, m, l, i_b):
+def mat_mul(A: qd.Tensor, B: qd.Tensor, res: qd.Tensor, n, m, l, i_b):
     """
     Performs matrix multiplication between matrices A and B and stores the result in res.
 
@@ -25,7 +25,7 @@ def mat_mul(A, B, res, n, m, l, i_b):
 
 
 @qd.func
-def mat_mul_vec(mat, vec, res, n, m, i_b):
+def mat_mul_vec(mat: qd.Tensor, vec: qd.Tensor, res: qd.Tensor, n, m, i_b):
     for i in range(n):
         res[i, i_b] = 0
         for j in range(m):
@@ -34,7 +34,7 @@ def mat_mul_vec(mat, vec, res, n, m, i_b):
 
 
 @qd.func
-def mat_inverse(mat, L, U, y, res, n, i_b):
+def mat_inverse(mat: qd.Tensor, L: qd.Tensor, U: qd.Tensor, y: qd.Tensor, res: qd.Tensor, n, i_b):
     """
     Inverse via LU decomposition
     """
@@ -82,14 +82,14 @@ def mat_add(A, B, n, m, i_b):
 
 
 @qd.func
-def mat_transpose(A, B, n, m, i_b):
+def mat_transpose(A: qd.Tensor, B: qd.Tensor, n, m, i_b):
     for i in range(n):
         for k in range(m):
             B[k, i, i_b] = A[i, k, i_b]
 
 
 @qd.func
-def mat_add_eye(A, x, n, i_b):
+def mat_add_eye(A: qd.Tensor, x, n, i_b):
     for i in range(n):
         A[i, i, i_b] += x
 

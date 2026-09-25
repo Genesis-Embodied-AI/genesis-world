@@ -10,6 +10,7 @@ from genesis.engine.states.entities import ToolEntityState
 from genesis.utils.geom import (
     qd_rotvec_to_quat,
     qd_transform_quat_by_quat,
+    transform_pos_quat_by_trans_quat,
 )
 from genesis.utils.misc import to_gs_tensor
 
@@ -32,8 +33,13 @@ class ToolEntity(Entity):
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
 
-        self._init_pos = np.array(morph.pos, dtype=gs.np_float)
-        self._init_quat = np.array(morph.quat, dtype=gs.np_float)
+        # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
+        self._init_pos, self._init_quat = transform_pos_quat_by_trans_quat(
+            np.array(morph.offset_pos, dtype=gs.np_float),
+            np.array(morph.offset_quat, dtype=gs.np_float),
+            np.array(morph.pos, dtype=gs.np_float),
+            np.array(morph.quat, dtype=gs.np_float),
+        )
 
         self.mesh = Mesh(
             entity=self,

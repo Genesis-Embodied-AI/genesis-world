@@ -188,7 +188,7 @@ def unparse_origin(matrix):
     return node
 
 
-def get_filename(base_path, file_path, makedirs=False):
+def get_filename(base_path, file_path):
     """Formats a file path correctly for URDF loading.
 
     Parameters
@@ -197,9 +197,6 @@ def get_filename(base_path, file_path, makedirs=False):
         The base path to the URDF's folder.
     file_path : str
         The path to the file.
-    makedirs : bool, optional
-        If ``True``, the directories leading to the file will be created
-        if needed.
 
     Returns
     -------
@@ -225,10 +222,6 @@ def get_filename(base_path, file_path, makedirs=False):
     if not os.path.isfile(fn):
         gs.raise_exception(f"Asset file not found: {fn}")
 
-    if makedirs:
-        d, _ = os.path.split(fn)
-        if not os.path.exists(d):
-            os.makedirs(d)
     return fn
 
 

@@ -5,6 +5,7 @@ import igl
 import numpy as np
 import quadrants as qd
 import torch
+import trimesh
 
 import genesis as gs
 import genesis.utils.element as eu
@@ -14,9 +15,96 @@ from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.couplers import SAPCoupler
 from genesis.engine.states.cache import QueriedStates
 from genesis.engine.states.entities import FEMEntityState
+from genesis.repr_base import RBC
 from genesis.utils.misc import to_gs_tensor, tensor_to_array, broadcast_tensor
 
 from .base_entity import Entity
+
+
+class FEMVisGeom(RBC):
+    """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
+
+    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
+    the map from each render-mesh vertex to the simulated vertex standing for it (vertices co-located across visual
+    geoms or duplicated by texture seams share a single simulated vertex).
+    """
+
+    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
+        self._uid = gs.UID()
+        self._entity = entity
+        self._vvert_start = vvert_start
+        self._vface_start = vface_start
+        self._vmesh = vmesh
+        self._sim_verts_idx = sim_verts_idx
+
+    def get_trimesh(self):
+        """The underlying `trimesh.Trimesh` of the render mesh."""
+        return self._vmesh.trimesh
+
+    @property
+    def uid(self):
+        """Unique ID of the vgeom."""
+        return self._uid
+
+    @property
+    def entity(self):
+        """The FEM entity the vgeom belongs to."""
+        return self._entity
+
+    @property
+    def vmesh(self):
+        """The render mesh."""
+        return self._vmesh
+
+    @property
+    def sim_verts_idx(self):
+        """Map from render-mesh vertex index to the entity's simulated vertex index."""
+        return self._sim_verts_idx
+
+    @property
+    def surface(self):
+        """Surface object of the vgeom."""
+        return self._vmesh.surface
+
+    @property
+    def uvs(self):
+        """UV coordinates of the vgeom."""
+        return self._vmesh.uvs
+
+    @property
+    def metadata(self):
+        """Metadata of the render mesh."""
+        return self._vmesh.metadata
+
+    @property
+    def n_vverts(self):
+        """Number of render vertices of the vgeom."""
+        return len(self._vmesh.verts)
+
+    @property
+    def n_vfaces(self):
+        """Number of render faces of the vgeom."""
+        return len(self._vmesh.faces)
+
+    @property
+    def vvert_start(self):
+        """Starting index of the vgeom's render vertices in the FEM solver."""
+        return self._vvert_start
+
+    @property
+    def vface_start(self):
+        """Starting index of the vgeom's render faces in the FEM solver."""
+        return self._vface_start
+
+    @property
+    def vvert_end(self):
+        """Ending index of the vgeom's render vertices in the FEM solver."""
+        return self._vvert_start + self.n_vverts
+
+    @property
+    def vface_end(self):
+        """Ending index of the vgeom's render faces in the FEM solver."""
+        return self._vface_start + self.n_vfaces
 
 
 def assert_muscle(method):
@@ -58,28 +146,38 @@ class FEMEntity(Entity):
         Starting index of this entity's elements in the global element array (default is 0).
     s_start : int, optional
         Starting index of this entity's surface triangles in the global surface array (default is 0).
+    vvert_start : int, optional
+        Starting index of this entity's render vertices in the global render vertex array (default is 0).
+    vface_start : int, optional
+        Starting index of this entity's render faces in the global render face array (default is 0).
     """
 
     def __init__(
-        self, scene, solver, material, morph, surface, idx, v_start=0, el_start=0, s_start=0, name: str | None = None
+        self,
+        scene,
+        solver,
+        material,
+        morph,
+        surface,
+        idx,
+        v_start=0,
+        el_start=0,
+        s_start=0,
+        vvert_start=0,
+        vface_start=0,
+        name: str | None = None,
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
         self._s_start = s_start  # offset for surface triangles
+        self._vvert_start = vvert_start  # offset for render vertices
+        self._vface_start = vface_start  # offset for render faces
         self._step_global_added = None
-
-        self._surface.update_texture()
-
         self.sample()
 
-        # Check if this is cloth (elements are already triangles)
-        from genesis.engine.materials.FEM.cloth import Cloth as ClothMaterial
-
-        is_cloth = isinstance(self.material, ClothMaterial)
-
-        if is_cloth:
+        if isinstance(self.material, gs.materials.FEM.Cloth):
             # For cloth, elements are already surface triangles
             self._surface_tri_np = self.elems
             self._n_surfaces = len(self._surface_tri_np)
@@ -359,7 +457,8 @@ class FEMEntity(Entity):
             Array of vertex positions with shape (n_vertices, 3).
 
         elems : np.ndarray
-            Array of tetrahedral elements with shape (n_elements, 4), indexing into verts.
+            Array of elements indexing into verts: tetrahedra with shape (n_elements, 4), or surface triangles with
+            shape (n_elements, 3) for Cloth material.
 
         Raises
         ------
@@ -369,93 +468,74 @@ class FEMEntity(Entity):
         verts = verts.astype(gs.np_float, copy=False)
         elems = elems.astype(gs.np_int, copy=False)
 
-        # rotate
-        R = gu.quat_to_R(np.array(self.morph.quat, dtype=gs.np_float))
+        # Compose the morph pose offset (e.g. an up-axis conversion) onto the morph orientation, rotating the verts
+        # about their COM (the pre-existing morph.quat convention), then translate by the body-frame offset position
+        # R(morph.quat) @ offset_pos. NB: pivoting the orientation about the vertex COM differs from the rigid
+        # parent-child composition when the mesh COM is not at the morph origin.
+        morph_quat = np.array(self._morph.quat, dtype=gs.np_float)
+        init_quat = gu.transform_quat_by_quat(np.array(self._morph.offset_quat, dtype=gs.np_float), morph_quat)
+        R = gu.quat_to_R(init_quat)
         verts_COM = verts.mean(axis=0)
         init_positions = (verts - verts_COM) @ R.T + verts_COM
+        offset_shift = gu.transform_by_quat(np.array(self._morph.offset_pos, dtype=gs.np_float), morph_quat)
+        init_positions = init_positions + offset_shift
 
         if not init_positions.shape[0] > 0:
             gs.raise_exception("Entity has zero vertices.")
 
         self.init_positions = gs.tensor(init_positions)
-        self.init_positions_COM_offset = self.init_positions - gs.tensor(verts_COM)
+        self.init_positions_COM_offset = self.init_positions - gs.tensor(verts_COM + offset_shift)
 
         self.elems = elems
 
     def sample(self):
         """
-        Sample mesh and elements based on the entity's morph type.
+        Build the entity's visual geoms and simulation mesh from its morph.
 
-        For Cloth material, loads surface mesh directly without tetrahedralization.
-        For regular FEM materials, tetrahedralizes the mesh.
-
-        Raises
-        ------
-        Exception
-            If the morph type is unsupported.
+        Each morph sub-mesh becomes a visual geom with its own surface and UVs, while the simulation operates on a
+        single welded copy of their vertices, tracked through 'FEMVisGeom.sim_verts_idx': welding and
+        tetrahedralization both keep the input vertices first and in order, so these maps remain valid indices into
+        the simulated vertices.
         """
-        from genesis.engine.materials.FEM.cloth import Cloth as ClothMaterial
+        meshes = gs.Mesh.from_morph_surface(self._morph, self._surface)
+        surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
+            [mesh.verts for mesh in meshes], [mesh.faces for mesh in meshes]
+        )
+        self._vgeoms = gs.List()
+        vvert_start, vface_start = self._vvert_start, self._vface_start
+        for mesh, verts_idx in zip(meshes, verts_maps):
+            self._vgeoms.append(
+                FEMVisGeom(
+                    entity=self,
+                    vvert_start=vvert_start,
+                    vface_start=vface_start,
+                    vmesh=mesh,
+                    sim_verts_idx=verts_idx,
+                )
+            )
+            vvert_start += len(mesh.verts)
+            vface_start += len(mesh.faces)
 
-        is_cloth = isinstance(self.material, ClothMaterial)
-        self._uvs = None
-
-        if is_cloth:
-            # Cloth: load surface mesh directly (no tetrahedralization)
-            if isinstance(self.morph, gs.options.morphs.Mesh):
-                import trimesh
-
-                mesh = trimesh.load_mesh(self._morph.file)
-                verts = mesh.vertices * self._morph.scale + np.array(self._morph.pos)
-                faces = mesh.faces
-                # For cloth, we store faces as "elements" (treating them as surface elements)
-                self.instantiate(verts, faces)
-
-                # Load UVs from mesh (1:1 mapping for cloth).
-                # UVs are not always available in 3D file, in case they are missing we set the entity UVs to None when UVs are None,
-                # the solver will use 0 UVs for rendering. A mesh with 0 UVs means that no tangent directions can be recomputed,
-                # thus texture mapping and anisotropic surfaces will not work properly.
-                self._uvs = None
-                if isinstance(mesh.visual, trimesh.visual.texture.TextureVisuals) and mesh.visual.uv is not None:
-                    self._uvs = mesh.visual.uv.astype(gs.np_float, copy=False)
-            else:
-                gs.raise_exception(f"Cloth material only supports Mesh morph. Got: {self.morph}.")
+        if isinstance(self.material, gs.materials.FEM.Cloth):
+            # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
+            verts = surface_verts + self._morph.pos
+            elems = surface_faces
         else:
-            # Regular FEM: tetrahedralize mesh
-            if isinstance(self.morph, gs.options.morphs.Sphere):
-                verts, elems = eu.sphere_to_elements(
-                    pos=self._morph.pos,
-                    radius=self._morph.radius,
-                    tet_cfg=self.tet_cfg,
-                )
-            elif isinstance(self.morph, gs.options.morphs.Box):
-                verts, elems = eu.box_to_elements(
-                    pos=self._morph.pos,
-                    size=self._morph.size,
-                    tet_cfg=self.tet_cfg,
-                )
-            elif isinstance(self.morph, gs.options.morphs.Cylinder):
-                verts, elems = eu.cylinder_to_elements()
-            elif isinstance(self.morph, gs.options.morphs.Mesh):
-                # We don't need to proces UVs here because the tetrahedralization process append new vertices
-                # and faces at the end of the vertex list, thus the original UVs are preserved at the beginning.
-                # We can't generate UVs for newly created internal vertices as it doesn't make sense but they're
-                # not used for rendering so it's fine.
-                verts, elems, self._uvs = eu.mesh_to_elements(
-                    file=self._morph.file,
-                    pos=self._morph.pos,
-                    scale=self._morph.scale,
-                    tet_cfg=self.tet_cfg,
-                )
-            else:
-                gs.raise_exception(f"Unsupported morph: {self.morph}.")
+            # Tetgen refinement depends on the absolute coordinates of its input. File meshes are tetrahedralized
+            # untranslated so the result, and its on-disk cache, are shared across all placements of the same asset;
+            # primitives keep the position baked in, as the simulated rest state is sensitive to the exact refinement.
+            is_mesh_morph = isinstance(self._morph, gs.options.morphs.Mesh)
+            if not is_mesh_morph:
+                surface_verts = surface_verts + self._morph.pos
+            surface_trimesh = trimesh.Trimesh(vertices=surface_verts, faces=surface_faces, process=False)
+            verts, elems = eu.mesh_to_elements(surface_trimesh, tet_cfg=self.tet_cfg)
+            if is_mesh_morph:
+                verts = verts + self._morph.pos
+            verts, elems = eu.split_all_surface_tets(verts, elems)
 
-            self.instantiate(*eu.split_all_surface_tets(verts, elems))
+        self.instantiate(verts, elems)
 
     def _add_to_solver(self, in_backward=False):
-        from genesis.engine.materials.FEM.cloth import Cloth as ClothMaterial
-
-        is_cloth = isinstance(self.material, ClothMaterial)
-
         if not in_backward:
             self._step_global_added = self._sim.cur_step_global
             gs.logger.info(
@@ -464,24 +544,16 @@ class FEMEntity(Entity):
 
         # Convert to appropriate numpy array types
         verts_numpy = tensor_to_array(self.init_positions, dtype=gs.np_float)
-        uvs_np = self._uvs if self._uvs is not None else np.zeros((0, 2), dtype=gs.np_float)
 
-        if is_cloth:
-            # Cloth: add only vertices and surfaces for rendering (no physics computation)
-            gs.logger.info(
-                f"Entity {self.uid} is cloth - adding to FEM solver for rendering only (physics managed by IPC)"
-            )
-            self._solver._kernel_add_cloth_for_rendering(
+        if isinstance(self.material, gs.materials.FEM.Cloth):
+            self._solver._kernel_add_cloth(
                 f=self._sim.cur_substep_local,
-                n_surfaces=self._n_surfaces,
                 v_start=self._v_start,
                 s_start=self._s_start,
                 verts=verts_numpy,
                 tri2v=self._surface_tri_np,
-                uvs=uvs_np,
             )
         else:
-            # Regular FEM: add vertices, elements, and surfaces for physics and rendering
             elems_np = self.elems.astype(gs.np_int, copy=False)
             self._solver._kernel_add_elements(
                 f=self._sim.cur_substep_local,
@@ -490,7 +562,6 @@ class FEMEntity(Entity):
                 mat_lam=self._material.lam,
                 mat_rho=self._material.rho,
                 mat_friction_mu=self._material.friction_mu,
-                n_surfaces=self._n_surfaces,
                 v_start=self._v_start,
                 el_start=self._el_start,
                 s_start=self._s_start,
@@ -498,7 +569,20 @@ class FEMEntity(Entity):
                 elems=elems_np,
                 tri2v=self._surface_tri_np,
                 tri2el=self._surface_el_np,
-                uvs=uvs_np,
+            )
+
+        for vgeom in self._vgeoms:
+            # A vgeom without a texture carries no UVs; an empty array leaves its slice of the solver buffer zeroed.
+            uvs = vgeom.uvs
+            if uvs is None:
+                uvs = np.zeros((0, 2), dtype=gs.np_float)
+            self._solver._kernel_add_vverts(
+                vvert_start=vgeom.vvert_start,
+                vface_start=vgeom.vface_start,
+                v_start=self._v_start,
+                verts_idx=vgeom.sim_verts_idx,
+                uvs=uvs,
+                vfaces=vgeom.vmesh.faces.astype(gs.np_int, copy=False),
             )
 
         self.active = True
@@ -898,7 +982,7 @@ class FEMEntity(Entity):
             )
 
         if isinstance(self.sim.coupler, IPCCoupler):
-            gs.raise_exception("This method is only supported by IPC coupler.")
+            gs.raise_exception("Vertex constraints are not supported by the IPC coupler.")
 
         if not self._solver._constraints_initialized:
             self._solver.init_constraints()
@@ -910,31 +994,32 @@ class FEMEntity(Entity):
         target_poss = self._sanitize_verts_tensor(target_poss, gs.tc_float, verts_idx, envs_idx, (3,))
 
         if use_current_poss:
-            self._kernel_get_verts_pos(self._sim.cur_substep_local, target_poss, verts_idx)
+            self._kernel_get_verts_pos(self._sim.cur_substep_local, verts_idx, envs_idx, target_poss)
 
         if link is None:
             link_idx = -1
-            link_init_pos = torch.zeros((self._sim._B, 3), dtype=gs.tc_float, device=gs.device)
-            link_init_quat = torch.zeros((self._sim._B, 4), dtype=gs.tc_float, device=gs.device)
+            link_init_pos = torch.zeros((len(envs_idx), 3), dtype=gs.tc_float, device=gs.device)
+            link_init_quat = torch.zeros((len(envs_idx), 4), dtype=gs.tc_float, device=gs.device)
         else:
             assert isinstance(link, RigidLink), "Only RigidLink is supported for vertex constraints."
             link_idx = link.idx
-            link_init_pos = link.get_pos()
-            link_init_quat = link.get_quat()
             if self._scene.n_envs == 0:
-                link_init_pos = link_init_pos[None]
-                link_init_quat = link_init_quat[None]
+                link_init_pos = link.get_pos(relative=False)[None]
+                link_init_quat = link.get_quat(relative=False)[None]
+            else:
+                link_init_pos = link.get_pos(envs_idx=envs_idx, relative=False)
+                link_init_quat = link.get_quat(envs_idx=envs_idx, relative=False)
 
         self._solver._kernel_set_vertex_constraints(
             self._sim.cur_substep_local,
             verts_idx,
-            target_poss,
+            envs_idx,
+            link_idx,
             is_soft_constraint,
             stiffness,
-            link_idx,
+            target_poss,
             link_init_pos,
             link_init_quat,
-            envs_idx,
         )
 
     def update_constraint_targets(self, verts_idx_local, target_poss, envs_idx=None):
@@ -949,16 +1034,16 @@ class FEMEntity(Entity):
         verts_idx = verts_idx_local + self._v_start
         target_poss = self._sanitize_verts_tensor(target_poss, gs.tc_float, verts_idx, envs_idx, (3,))
 
-        self._solver._kernel_update_constraint_targets(verts_idx, target_poss, envs_idx)
+        self._solver._kernel_update_constraint_targets(verts_idx, envs_idx, target_poss)
 
     def remove_vertex_constraints(self, verts_idx_local=None, envs_idx=None):
-        """Remove constraints from specified vertices, or all if None."""
+        """Remove constraints from the specified vertices and environments, or from all of them if None."""
         if not self._solver._constraints_initialized:
             gs.logger.warning("Ignoring remove_vertex_constraints; constraints have not been initialized.")
             return
 
         # FIXME: Quadrants 'fill' method is very inefficient. Try using zero-copy if possible.
-        if verts_idx_local is None:
+        if verts_idx_local is None and envs_idx is None:
             self._solver.vertex_constraints.is_constrained.fill(0)
             return
 
@@ -969,12 +1054,14 @@ class FEMEntity(Entity):
         self._solver._kernel_remove_specific_constraints(verts_idx, envs_idx)
 
     @qd.kernel
-    def _kernel_get_verts_pos(self, f: qd.i32, pos: qd.types.ndarray(), verts_idx: qd.types.ndarray()):
-        # get current position of vertices
-        for i_b, i_v_ in qd.ndrange(verts_idx.shape[0], verts_idx.shape[1]):
-            i_v = verts_idx[i_b, i_v_] + self.v_start
+    def _kernel_get_verts_pos(
+        self, f: qd.i32, verts_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), pos: qd.types.ndarray()
+    ):
+        for i_b_, i_v_ in qd.ndrange(verts_idx.shape[0], verts_idx.shape[1]):
+            i_b = envs_idx[i_b_]
+            i_v = verts_idx[i_b_, i_v_]
             for j in qd.static(range(3)):
-                pos[i_b, i_v_, j] = self._solver.elements_v[f, i_v, i_b].pos[j]
+                pos[i_b_, i_v_, j] = self._solver.elements_v[f, i_v, i_b].pos[j]
 
     def get_el2v(self):
         """
@@ -983,10 +1070,12 @@ class FEMEntity(Entity):
         Returns
         -------
         el2v : gs.Tensor
-            Tensor of shape (n_elements, 4) mapping each element to its vertex indices.
+            Tensor of shape (n_elements, 4) mapping each element to its local vertex indices.
         """
         el2v = gs.zeros((self.n_elements, 4), dtype=int, requires_grad=False, scene=self.scene)
-        self._solver._kernel_get_el2v(element_el_start=self._el_start, n_elements=self.n_elements, el2v=el2v)
+        self._solver._kernel_get_el2v(
+            element_el_start=self._el_start, element_v_start=self._v_start, el2v=el2v, n_elements=self.n_elements
+        )
         return el2v
 
     @qd.kernel
@@ -1071,8 +1160,13 @@ class FEMEntity(Entity):
         return len(self.init_positions)
 
     @property
+    def vgeoms(self):
+        """The list of visual geoms (`FEMVisGeom`) in the entity, one per morph sub-mesh."""
+        return self._vgeoms
+
+    @property
     def n_elements(self):
-        """Number of tetrahedral elements in the FEM entity."""
+        """Number of simulation elements: surface triangles for Cloth material, tetrahedra otherwise."""
         return len(self.elems)
 
     @property
@@ -1096,19 +1190,34 @@ class FEMEntity(Entity):
         return self._s_start
 
     @property
-    def morph(self):
-        """Morph specification used to generate the FEM mesh."""
-        return self._morph
+    def n_vverts(self):
+        """Number of render vertices in the FEM entity, summed over its visual geoms."""
+        return sum(vgeom.n_vverts for vgeom in self._vgeoms)
 
     @property
-    def material(self):
-        """Material properties of the FEM entity."""
-        return self._material
+    def n_vfaces(self):
+        """Number of render faces in the FEM entity, summed over its visual geoms."""
+        return sum(vgeom.n_vfaces for vgeom in self._vgeoms)
 
     @property
-    def surface(self):
-        """Surface for rendering."""
-        return self._surface
+    def vvert_start(self):
+        """Global render vertex index offset for this entity."""
+        return self._vvert_start
+
+    @property
+    def vface_start(self):
+        """Global render face index offset for this entity."""
+        return self._vface_start
+
+    @property
+    def vvert_end(self):
+        """Global render vertex index past this entity's last one."""
+        return self._vvert_start + self.n_vverts
+
+    @property
+    def vface_end(self):
+        """Global render face index past this entity's last one."""
+        return self._vface_start + self.n_vfaces
 
     @property
     def n_surface_vertices(self):
@@ -1119,11 +1228,6 @@ class FEMEntity(Entity):
     def surface_triangles(self):
         """Surface triangles of the FEM mesh."""
         return self._surface_tri_np
-
-    @property
-    def uvs(self):
-        """UV coordinates for this entity's vertices, or None if not available."""
-        return self._uvs
 
     @property
     def tet_cfg(self):

@@ -13,13 +13,7 @@ from .utils import func_det3
 
 
 @qd.func
-def func_ray_triangle_intersection(
-    ray_v1,
-    ray_v2,
-    tri_v1,
-    tri_v2,
-    tri_v3,
-):
+def func_ray_triangle_intersection(ray_v1, ray_v2, tri_v1, tri_v2, tri_v3):
     """
     Check if the ray intersects the triangle.
 
@@ -46,12 +40,7 @@ def func_ray_triangle_intersection(
 
 
 @qd.func
-def func_triangle_affine_coords(
-    point,
-    tri_v1,
-    tri_v2,
-    tri_v3,
-):
+def func_triangle_affine_coords(point, tri_v1, tri_v2, tri_v3):
     """
     Compute the affine coordinates of the point with respect to the triangle.
     """
@@ -71,21 +60,28 @@ def func_triangle_affine_coords(
             - tri_v1[i2] * tri_v2[i1]
         )
 
-    # Exclude one of the axes with the largest projection using the minors of the above linear system.
+    # Exclude one of the axes with the largest projection using the minors of the above linear system. The scan is
+    # unrolled so that every read of [ms] carries a compile-time index.
+    # FIXME: On the Metal backend, reading a fixed-size vector at a run-time index inside a dynamic loop returns 0.0
+    # while the comparisons in that same iteration see the correct values. Here that zero became the divisor of the
+    # affine coordinates, so a well-conditioned face yielded an infinite contact position. Restore the dynamic loop
+    # (with a 'break') once the backend indexes such a vector correctly.
     m_max = gs.qd_float(0.0)
     i_x, i_y = gs.qd_int(0), gs.qd_int(0)
     absms = qd.abs(ms)
-    for i in range(3):
-        if absms[i] >= absms[(i + 1) % 3] and absms[i] >= absms[(i + 2) % 3]:
+    is_found = False
+    for i in qd.static(range(3)):
+        i_x_i, i_y_i = (i + 1) % 3, (i + 2) % 3
+        if i == 1:
+            i_x_i, i_y_i = i_y_i, i_x_i
+        if not is_found and absms[i] >= absms[(i + 1) % 3] and absms[i] >= absms[(i + 2) % 3]:
             # Remove the i-th row
+            is_found = True
             m_max = ms[i]
-            i_x, i_y = (i + 1) % 3, (i + 2) % 3
-            if i == 1:
-                i_x, i_y = i_y, i_x
-            break
+            i_x, i_y = i_x_i, i_y_i
 
     cs = gs.qd_vec3(0.0, 0.0, 0.0)
-    for i in range(3):
+    for i in qd.static(range(3)):
         tv1, tv2 = tri_v2, tri_v3
         if i == 1:
             tv1, tv2 = tri_v3, tri_v1
@@ -107,13 +103,7 @@ def func_triangle_affine_coords(
 
 
 @qd.func
-def func_point_triangle_intersection(
-    gjk_info: array_class.GJKInfo,
-    point,
-    tri_v1,
-    tri_v2,
-    tri_v3,
-):
+def func_point_triangle_intersection(point, tri_v1, tri_v2, tri_v3, collider_info: array_class.ColliderInfo):
     """
     Check if the point is inside the triangle.
     """
@@ -126,18 +116,13 @@ def func_point_triangle_intersection(
         # Check if the point predicted by the affine coordinates is equal to the point itself
         pred = tri_v1 * _lambda[0] + tri_v2 * _lambda[1] + tri_v3 * _lambda[2]
         diff = pred - point
-        is_inside = diff.norm_sqr() < gjk_info.FLOAT_MIN_SQ[None]
+        is_inside = diff.norm_sqr() < collider_info.gjk.FLOAT_MIN_SQ[None]
 
     return is_inside
 
 
 @qd.func
-def func_point_plane_same_side(
-    point,
-    plane_v1,
-    plane_v2,
-    plane_v3,
-):
+def func_point_plane_same_side(point, plane_v1, plane_v2, plane_v3):
     """
     Check if the point is on the same side of the plane as the origin.
     """
@@ -157,12 +142,7 @@ def func_point_plane_same_side(
 
 
 @qd.func
-def func_origin_tetra_intersection(
-    tet_v1,
-    tet_v2,
-    tet_v3,
-    tet_v4,
-):
+def func_origin_tetra_intersection(tet_v1, tet_v2, tet_v3, tet_v4):
     """
     Check if the origin is inside the tetrahedron.
     """
@@ -182,12 +162,7 @@ def func_origin_tetra_intersection(
 
 
 @qd.func
-def func_project_origin_to_plane(
-    gjk_info: array_class.GJKInfo,
-    v1,
-    v2,
-    v3,
-):
+def func_project_origin_to_plane(v1, v2, v3, collider_info: array_class.ColliderInfo):
     """
     Project the origin onto the plane defined by the simplex vertices.
     """
@@ -218,7 +193,7 @@ def func_project_origin_to_plane(
             # Zero normal, cannot project.
             flag = RETURN_CODE.FAIL
             break
-        elif nn > gjk_info.FLOAT_MIN[None]:
+        elif nn > collider_info.gjk.FLOAT_MIN[None]:
             point = n * (nv / nn)
             flag = RETURN_CODE.SUCCESS
             break
@@ -226,7 +201,7 @@ def func_project_origin_to_plane(
         # Last fallback if no valid normal was found
         if i == 2:
             # If the normal is still unreliable, cannot project.
-            if nn < gjk_info.FLOAT_MIN[None]:
+            if nn < collider_info.gjk.FLOAT_MIN[None]:
                 flag = RETURN_CODE.FAIL
             else:
                 point = n * (nv / nn)

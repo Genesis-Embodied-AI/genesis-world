@@ -1,4 +1,3 @@
-import inspect
 import os
 import time
 from functools import cached_property
@@ -10,8 +9,11 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.constants import IMAGE_TYPE
 from genesis.repr_base import RBC
-from genesis.utils.misc import tensor_to_array
 from genesis.utils.image_exporter import as_grayscale_image
+from genesis.utils.misc import get_entry_point_name, tensor_to_array
+from genesis.utils.video_encoder import VideoEncoder
+
+RECORDING_DEFAULT_FPS = 60
 
 
 class Camera(RBC):
@@ -119,9 +121,11 @@ class Camera(RBC):
         self._env_idx = int(env_idx) if env_idx is not None else None
         self._envs_offset = None
 
-        self._in_recording = False
-        self._recorded_t_prev = -1
-        self._recorded_imgs = []
+        self._is_recording = False
+        self._recorded_fps = 0.0
+        self._recorded_steps_per_frame = 1
+        self._recorded_t_next = 0
+        self._recorded_encoders = []
 
         self._attached_link = None
         self._attached_offset_T = None
@@ -154,7 +158,7 @@ class Camera(RBC):
                 self._is_batched = False
                 self._raytracer.add_camera(self)
             else:
-                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.env_separate_rigid
+                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs
             if self._visualizer.scene.n_envs > 0:
                 if self._env_idx is None:
                     if not self._is_batched:
@@ -194,6 +198,17 @@ class Camera(RBC):
         # FIXME: For some reason, it is necessary to update the camera twice...
         if self._raytracer is not None:
             self._raytracer.update_camera(self)
+
+    def destroy(self):
+        # Finalizing here is what makes stopping a recording explicitly optional: a camera going away still leaves a
+        # playable video behind rather than a truncated file and a thread nobody joins.
+        if self._recorded_encoders:
+            try:
+                self.stop_recording()
+            except gs.GenesisException as e:
+                # Tearing down carries on regardless, so that a video failing to encode takes neither the other
+                # cameras nor the renderers down with it. The encoding error itself was reported when it happened.
+                gs.logger.warning(f"{e}")
 
     def attach(self, rigid_link, offset_T):
         """
@@ -242,11 +257,11 @@ class Camera(RBC):
             gs.raise_exception("Camera not attached to any rigid link.")
 
         if self._is_batched and self._env_idx is None:
-            link_pos = self._attached_link.get_pos(self._visualizer._context.rendered_envs_idx)
-            link_quat = self._attached_link.get_quat(self._visualizer._context.rendered_envs_idx)
+            link_pos = self._attached_link.get_pos(self._visualizer._context.rendered_envs_idx, relative=False)
+            link_quat = self._attached_link.get_quat(self._visualizer._context.rendered_envs_idx, relative=False)
         else:
-            link_pos = self._attached_link.get_pos(self._env_idx).reshape((-1,))
-            link_quat = self._attached_link.get_quat(self._env_idx).reshape((-1,))
+            link_pos = self._attached_link.get_pos(self._env_idx, relative=False).reshape((-1,))
+            link_quat = self._attached_link.get_quat(self._env_idx, relative=False).reshape((-1,))
         link_T = gu.trans_quat_to_T(link_pos, link_quat)
         transform = torch.matmul(link_T, self._attached_offset_T)
         self.set_pose(transform=transform)
@@ -274,12 +289,12 @@ class Camera(RBC):
 
         if self._is_built:
             if self._is_batched and self._env_idx is None:
-                entity_pos = entity.get_pos(self._visualizer._context.rendered_envs_idx)
+                entity_pos = entity.get_pos(self._visualizer._context.rendered_envs_idx, relative=False)
             else:
-                entity_pos = entity.get_pos(self._env_idx).reshape((-1,))
+                entity_pos = entity.get_pos(self._env_idx, relative=False).reshape((-1,))
             pos_rel = self._pos - entity_pos
         else:
-            pos_rel = self._initial_pos - torch.tensor(entity.base_link.pos, dtype=gs.tc_float, device=gs.device)
+            pos_rel = self._initial_pos - torch.tensor(entity.base_link.desc.pos, dtype=gs.tc_float, device=gs.device)
 
         if (pos_rel.abs() < gs.EPS).all():
             gs.raise_exception("Camera must not be co-located with base link of entity to which it is attached.")
@@ -322,9 +337,9 @@ class Camera(RBC):
 
         # Query entity and relative camera positions
         if self._is_batched and self._env_idx is None:
-            entity_pos = self._followed_entity.get_pos(self._visualizer._context.rendered_envs_idx)
+            entity_pos = self._followed_entity.get_pos(self._visualizer._context.rendered_envs_idx, relative=False)
         else:
-            entity_pos = self._followed_entity.get_pos(self._env_idx).reshape((-1,))
+            entity_pos = self._followed_entity.get_pos(self._env_idx, relative=False).reshape((-1,))
         follow_pos_rel = self._follow_pos_rel
 
         # Smooth camera movement with a low-pass filter, in particular Exponential Moving Average (EMA) if requested
@@ -398,7 +413,7 @@ class Camera(RBC):
 
         Note
         ----
-        If `env_separate_rigid` in `VisOptions` is set to True, each component will return a stack of images, with the
+        If `split_envs` in `VisOptions` is set to True, each component will return a stack of images, with the
         number of images equal to `len(rendered_envs_idx)`.
 
         Parameters
@@ -429,30 +444,26 @@ class Camera(RBC):
         normal_arr : np.ndarray
             The rendered surface normal(s).
         """
-        # Enforce RGB rendering if recording is enabled and the current frame is missing
-        is_recording = self._in_recording and self._recorded_t_prev != self._visualizer.scene._t
-        rgb_ = rgb or is_recording
-
         # Render the current frame
         rgb_arr, depth_arr, seg_arr, seg_color_arr, seg_idxc_arr, normal_arr = None, None, None, None, None, None
         if self._batch_renderer is not None:
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._batch_render(
-                rgb_, depth, segmentation, normal, antialiasing, force_render
+                rgb, depth, segmentation, normal, antialiasing, force_render
             )
         elif self._raytracer is not None:
-            if rgb_:
+            if rgb:
                 self._raytracer.update_scene(force_render)
                 rgb_arr = self._raytracer.render_camera(self)
 
             if depth or segmentation or normal:
                 self._rasterizer.update_scene(force_render)
                 _, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                    self, False, depth, segmentation, normal=normal
+                    self, False, depth, segmentation, normal=normal, split_envs=self._is_batched
                 )
         else:
             self._rasterizer.update_scene(force_render)
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                self, rgb_, depth, segmentation, normal=normal
+                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched
             )
 
         # Colorize the segmentation map is necessary
@@ -485,16 +496,6 @@ class Camera(RBC):
                         buffer = np.concatenate(list(buffer), axis=1)
                     cv2.imshow(f"{title} [{IMAGE_TYPE(img_type)}]", buffer)
             cv2.waitKey(1)
-
-        # Store the current frame for video recording
-        if is_recording:
-            if not (self._recorded_t_prev < 0 or self._recorded_t_prev == self._visualizer.scene._t - 1):
-                gs.raise_exception(
-                    "Missing frames in recording. Please call 'camera.render()' after 'every scene.step()'."
-                )
-            self._recorded_t_prev == self._visualizer.scene._t
-            rgb_frame = tensor_to_array(rgb_arr)
-            self._recorded_imgs.append(rgb_frame)
 
         return rgb_arr if rgb else None, depth_arr, seg_arr, normal_arr
 
@@ -546,7 +547,7 @@ class Camera(RBC):
         else:
             self._rasterizer.update_scene(force_render=False)
             _, depth_arr, _, _ = self._rasterizer.render_camera(
-                self, rgb=False, depth=True, segmentation=False, normal=False
+                self, rgb=False, depth=True, segmentation=False, normal=False, split_envs=self._is_batched
             )
 
         # Convert OpenGL projection matrix to camera intrinsics
@@ -678,71 +679,157 @@ class Camera(RBC):
         if self._batch_renderer is None:
             self._rasterizer.update_camera(self)
 
-    @gs.assert_built
-    def start_recording(self):
+    def update_recording(self):
         """
-        Start recording on the camera. After recording is started, all the rgb images rendered by `camera.render()`
-        will be stored, and saved to a video file when `camera.stop_recording()` is called.
+        Render and encode one frame if a recording is active and due, as part of refreshing the visualization.
+
+        Only a step that advanced the simulation reaches this, so a frame holds the state that step produced, the
+        final one included, and a step vetoed by a pre-step callback contributes nothing.
         """
-        self._in_recording = True
+        if not self._is_recording:
+            return
+
+        # The pace can be changed from the viewer while a recording is running, and one second of video stands for one
+        # second of it, so how much simulated time a frame covers follows it rather than what it was when the recording
+        # started. The framerate the video is encoded at was settled when its stream was opened.
+        viewer = self._visualizer.viewer
+        realtime_factor = (
+            viewer.realtime_factor if viewer is not None else self._visualizer.scene.options.viewer.realtime_factor
+        ) or 1.0
+        self._recorded_steps_per_frame = max(
+            1, round(realtime_factor / (self._recorded_fps * self._visualizer.scene.dt))
+        )
+
+        t_scene = self._visualizer.scene.sim.cur_step_global
+        # A deadline further ahead than one interval is left over from a clock that has since been rewound, by a reset
+        # of the scene for instance, and would otherwise hold back every frame until the clock caught up with it
+        if t_scene + self._recorded_steps_per_frame < self._recorded_t_next:
+            self._recorded_t_next = t_scene + self._recorded_steps_per_frame
+        if t_scene < self._recorded_t_next:
+            return
+
+        # Counted from where the span started rather than from an absolute step count, so that recording the same
+        # number of steps yields the same number of frames wherever it starts and however long it was paused for.
+        self._recorded_t_next = t_scene + self._recorded_steps_per_frame
+
+        rgb_arr, *_ = self.render(rgb=True, depth=False, segmentation=False, normal=False)
+        # The device transfer happens here, on the thread owning the rendering context, so that the encoders only ever
+        # receive CPU frames they are free to consume asynchronously.
+        rgb_frame = tensor_to_array(rgb_arr)
+        if self._is_batched and self._env_idx is None:
+            for env_frame, encoder in zip(rgb_frame, self._recorded_encoders):
+                encoder.write(env_frame)
+        else:
+            self._recorded_encoders[0].write(rgb_frame)
 
     @gs.assert_built
-    def pause_recording(self):
+    def start_recording(self, save_to_filename=None, fps=None):
         """
-        Pause recording on the camera. After recording is paused, the rgb images rendered by `camera.render()` will
-        not be stored. Recording can be resumed by calling `camera.start_recording()` again.
-        """
-        if not self._in_recording:
-            gs.raise_exception("Recording not started.")
-        self._in_recording = False
+        Start recording on the camera. The camera renders itself as the scene is stepped, and every frame is encoded
+        and streamed to the video file straight away, so the recording length is never limited by memory.
 
-    @gs.assert_built
-    def stop_recording(self, save_to_filename=None, fps=60):
-        """
-        Stop recording on the camera. Once this is called, all the rgb images stored so far will be saved to a video
-        file. If `save_to_filename` is None, the video file will be saved with the name
-        '{caller_file_name}_cam_{camera.idx}.mp4'.
+        Called again after `camera.pause_recording()`, it resumes the very same video, in which case neither the
+        filename nor the framerate may be given since they are fixed for the whole of a video.
 
-        If `env_separate_rigid` in `VisOptions` is set to True, each environment will record and save a video
-        separately. The filenames will be identified by the indices of the environments.
+        If `split_envs` in `VisOptions` is set to True, each environment records to its own video file,
+        identified by the index of the environment.
 
         Parameters
         ----------
         save_to_filename : str, optional
-            Name of the output video file. If not provided, the name will be default to the name of the caller file,
-            with camera idx, a timestamp and '.mp4' extension.
-        fps : int, optional
-            The frames per second of the video file.
+            Name of the output video file, ending in '.mp4'. Defaults to the name of the script the process was
+            launched from, with camera idx, a timestamp and '.mp4' extension.
+        fps : float, optional
+            Framerate of the recorded video. A low framerate keeps the file small and spares the renderer, at the
+            cost of temporal resolution; a high one resolves fast motion. One second of video always covers one
+            second of `ViewerOptions.realtime_factor`-paced time whatever the framerate. Frames are one whole number
+            of simulation steps apart, so the closest achievable framerate is used and never exceeds one frame per
+            step. Defaults to 60.
         """
+        if self._is_recording:
+            gs.raise_exception("Recording already started.")
 
-        if not self._in_recording:
+        if self._recorded_encoders:
+            if save_to_filename is not None or fps is not None:
+                gs.raise_exception("Resuming a paused recording cannot change 'save_to_filename' nor 'fps'.")
+            self._recorded_t_next = self._visualizer.scene.sim.cur_step_global + self._recorded_steps_per_frame
+            self._is_recording = True
+            return
+
+        if fps is None:
+            fps = RECORDING_DEFAULT_FPS
+        if fps <= 0.0:
+            gs.raise_exception("Framerate of a recording must be positive.")
+        if save_to_filename is None:
+            save_to_filename = f"{get_entry_point_name()}_cam_{self.idx}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+
+        # A realtime factor left unset means running as fast as possible, which carries no time scale to honor.
+        viewer = self._visualizer.viewer
+        realtime_factor = (
+            viewer.realtime_factor if viewer is not None else self._visualizer.scene.options.viewer.realtime_factor
+        ) or 1.0
+        dt = self._visualizer.scene.dt
+        steps_per_frame = realtime_factor / (fps * dt)
+        self._recorded_fps = fps
+        self._recorded_steps_per_frame = max(1, round(steps_per_frame))
+        # A whole number of steps must elapse between two frames, so the achievable framerate is the requested one
+        # rounded to that grid. Encoding at it rather than at the requested one is what keeps playback on pace.
+        fps_recorded = realtime_factor / (self._recorded_steps_per_frame * dt)
+        if abs(steps_per_frame - self._recorded_steps_per_frame) > gs.EPS:
+            gs.logger.warning(f"fps={fps} is not reachable with dt={dt}. Recording at fps={fps_recorded} instead.")
+
+        if self._is_batched and self._env_idx is None:
+            name, ext = os.path.splitext(save_to_filename)
+            filenames = [f"{name}_{env_idx}{ext}" for env_idx in self._visualizer._context.rendered_envs_idx]
+        else:
+            filenames = [save_to_filename]
+        for filename in filenames:
+            self._recorded_encoders.append(VideoEncoder(filename, fps_recorded, is_threaded=True))
+
+        self._recorded_t_next = self._visualizer.scene.sim.cur_step_global + self._recorded_steps_per_frame
+        self._is_recording = True
+
+    @gs.assert_built
+    def pause_recording(self):
+        """
+        Pause recording on the camera. No frame is added to the video until recording is resumed by calling
+        `camera.start_recording()` again, and the frames recorded so far are kept. The paused span leaves no gap in
+        the video.
+        """
+        if not self._is_recording:
+            gs.raise_exception("Recording not started.")
+        self._is_recording = False
+
+    @gs.assert_built
+    def stop_recording(self):
+        """
+        Stop recording on the camera and finalize the video file(s) named by `camera.start_recording`.
+
+        Frames are encoded as they are recorded, so this only flushes the ones the encoder still holds and closes
+        the file(s). Recording may be started again afterwards, with a different filename and framerate.
+        """
+        if not self._recorded_encoders:
             gs.raise_exception("Recording not started.")
 
-        if save_to_filename is None:
-            caller_file = inspect.stack()[-1].filename
-            save_to_filename = (
-                os.path.splitext(os.path.basename(caller_file))[0]
-                + f"_cam_{self.idx}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
-            )
-
-        if self._is_batched:
-            for env_idx in self._visualizer._context.rendered_envs_idx:
-                env_imgs = [imgs[env_idx] for imgs in self._recorded_imgs]
-                env_name, env_ext = os.path.splitext(save_to_filename)
-                gs.tools.animate(env_imgs, f"{env_name}_{env_idx}{env_ext}", fps)
-        else:
-            gs.tools.animate(self._recorded_imgs, save_to_filename, fps)
-
-        self._recorded_t_prev = -1
-        self._recorded_imgs.clear()
-        self._in_recording = False
+        # Every file is finalized before the first failure is reported, so that one environment failing to encode
+        # neither leaves the others open nor holds the camera in a state where recording cannot be started again.
+        error = None
+        for encoder in self._recorded_encoders:
+            try:
+                encoder.close()
+            except gs.GenesisException as e:
+                error = e
+        self._recorded_encoders.clear()
+        self._is_recording = False
+        if error is not None:
+            raise error
 
     def get_pos(self, envs_idx=None):
         """The current position of the camera."""
         assert self._env_idx is None or envs_idx is None
         envs_idx = () if envs_idx is None else envs_idx
         pos = self._pos[envs_idx]
-        if self._batch_renderer is None and not self._visualizer._context.env_separate_rigid:
+        if self._batch_renderer is None and not self._visualizer._context.split_envs:
             pos = pos + self._envs_offset[envs_idx]
         return pos
 
@@ -751,7 +838,7 @@ class Camera(RBC):
         assert self._env_idx is None or envs_idx is None
         envs_idx = () if envs_idx is None else envs_idx
         lookat = self._lookat[envs_idx]
-        if self._batch_renderer is None and not self._visualizer._context.env_separate_rigid:
+        if self._batch_renderer is None and not self._visualizer._context.split_envs:
             lookat = lookat + self._envs_offset[envs_idx]
         return lookat
 
@@ -774,7 +861,7 @@ class Camera(RBC):
         assert self._env_idx is None or envs_idx is None
         envs_idx = () if envs_idx is None else envs_idx
         transform = self._transform[envs_idx]
-        if self._batch_renderer is None and not self._visualizer._context.env_separate_rigid:
+        if self._batch_renderer is None and not self._visualizer._context.split_envs:
             transform = transform.clone()
             transform[..., :3, 3] += self._envs_offset[envs_idx]
         return transform

@@ -2,24 +2,28 @@ from typing import TYPE_CHECKING
 
 import quadrants as qd
 
+import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
-from genesis.engine.states.solvers import ToolSolverState
 from genesis.engine.entities.tool_entity.tool_entity import ToolEntity
+from genesis.engine.materials import Tool
+from genesis.engine.states.solvers import ToolSolverState
 from genesis.utils.misc import *
 
-from .base_solver import Solver
+from .base_solver import Solver, TimeBasedMixin
 
 if TYPE_CHECKING:
     from genesis.engine.entities import ToolEntity
 
 
 @qd.data_oriented
-class ToolSolver(Solver):
+class ToolSolver(TimeBasedMixin, Solver):
     """
     Note
     ----
     !! This class will be removed once we added differntiability to the RigidSolver. This is just a temporary solution to obtain rigid->soft one-way differeitable coupling.
     """
+
+    material_cls = Tool
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -46,7 +50,9 @@ class ToolSolver(Solver):
     def setup_boundary(self):
         self.boundary = FloorBoundary(height=self.floor_height)
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "ToolEntity":
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+    ) -> "ToolEntity":
         entity = ToolEntity(
             scene=self._scene,
             idx=idx,

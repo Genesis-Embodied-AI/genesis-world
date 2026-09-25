@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 from collections import defaultdict, deque
 
 import numpy as np
@@ -23,6 +24,15 @@ from trimesh.visual.material import SimpleMaterial
 from trimesh.visual.texture import TextureVisuals, unmerge_faces
 
 import genesis as gs
+
+
+# Silence trimesh mass_properties divide-by-zero on degenerate meshes.
+warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    message=r"(divide by zero|invalid value) encountered in (divide|scalar multiply)",
+    module=r"trimesh\..*",
+)
 
 
 def load_obj(

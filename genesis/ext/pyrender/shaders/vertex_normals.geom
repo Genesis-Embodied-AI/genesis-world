@@ -20,6 +20,7 @@ in VS_OUT {
     vec3 position;
     vec3 normal;
     mat4 mvp;
+    vec4 env_offset_clip;
 } gs_in[];
 
 uniform float normal_magnitude;
@@ -27,8 +28,9 @@ uniform float normal_magnitude;
 void GenerateVertNormal(int index)
 {
 
-    vec4 p0 = gs_in[index].mvp * vec4(gs_in[index].position, 1.0);
-    vec4 p1 = gs_in[index].mvp * vec4(normal_magnitude * normalize(gs_in[index].normal) + gs_in[index].position, 1.0);
+    vec4 p0 = gs_in[index].mvp * vec4(gs_in[index].position, 1.0) + gs_in[index].env_offset_clip;
+    vec4 p1 = gs_in[index].mvp * vec4(normal_magnitude * normalize(gs_in[index].normal) + gs_in[index].position, 1.0)
+        + gs_in[index].env_offset_clip;
     gl_Position = p0;
     EmitVertex();
     gl_Position = p1;
@@ -48,8 +50,8 @@ void GenerateFaceNormal()
     vec3 N = normalize(cross(v1, v0));
     vec3 P = (p0 + p1 + p2) / 3.0;
 
-    vec4 np0 = gs_in[0].mvp * vec4(P, 1.0);
-    vec4 np1 = gs_in[0].mvp * vec4(normal_magnitude * N + P, 1.0);
+    vec4 np0 = gs_in[0].mvp * vec4(P, 1.0) + gs_in[0].env_offset_clip;
+    vec4 np1 = gs_in[0].mvp * vec4(normal_magnitude * N + P, 1.0) + gs_in[0].env_offset_clip;
 
     gl_Position = np0;
     EmitVertex();

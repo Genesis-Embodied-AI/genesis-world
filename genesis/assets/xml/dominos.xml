@@ -1,0 +1,92 @@
+<!-- Copyright 2025 DeepMind Technologies Limited
+
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+
+         http://www.apache.org/licenses/LICENSE-2.0
+
+     Unless required by applicable law or agreed to in writing, software
+     distributed under the License is distributed on an "AS IS" BASIS,
+     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     See the License for the specific language governing permissions and
+     limitations under the License.
+-->
+
+<mujoco model="sleeping dominos">
+  <option cone="elliptic" impratio="10" sleep_tolerance="3e-4">
+    <flag sleep="enable"/>
+  </option>
+
+  <default>
+    <default class="domino">
+      <geom type="box" size=".008 .044 .089" rgba=".9 .9 .9 1" mass="0.09"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos=".5 0 3" diffuse="1 1 1"/>
+    <geom type="plane" size="2 2 .01" pos=".5 0 1e-6"/>
+
+    <!-- one domino atilt kicks off the chain reaction -->
+    <body pos="-.1 0 .089" euler="0 7 0">
+      <freejoint/>
+      <geom type="box" class="domino"/>
+    </body>
+
+    <!-- 5 rows of 15 dominoes, arranged in toppling order for consistent ids and colors -->
+
+    <!-- 3 rows of 15 dominoes, left to right -->
+    <replicate count="3" offset="0 1 0">
+      <frame pos="0 -1 0">
+        <replicate count="15" offset=".1 0 0">
+          <body pos="0 0 .089">
+            <freejoint/>
+            <geom type="box" class="domino"/>
+          </body>
+        </replicate>
+      </frame>
+    </replicate>
+
+    <!-- 2 rows of 15 dominoes, right to left -->
+    <replicate count="2" offset="0 1 0">
+      <frame pos="0 -.5 0">
+        <replicate count="15" offset="-.1 0 0">
+          <body pos="1.4 0 .089">
+            <freejoint/>
+            <geom type="box" class="domino"/>
+          </body>
+        </replicate>
+      </frame>
+    </replicate>
+
+    <!-- two "U turns", place blocks not too close in order to break the island chain -->
+    <replicate offset="0 -.55 0" count="2">
+      <frame pos="1.5 .26 0">
+        <replicate count="5" euler="0 0 45">
+          <body pos="0 -.23 .089">
+            <freejoint/>
+            <geom type="box" class="domino"/>
+          </body>
+        </replicate>
+      </frame>
+    </replicate>
+
+    <!-- two more U turns for the outside rows -->
+    <replicate offset="0 1.5 0" count="2">
+      <frame pos="-.1 -.75 0" euler="0 0 180">
+        <replicate count="5" euler="0 0 45">
+          <body pos="0 -.23 .089">
+            <freejoint/>
+            <geom type="box" class="domino"/>
+          </body>
+        </replicate>
+      </frame>
+    </replicate>
+  </worldbody>
+
+  <visual>
+    <global elevation="-25" azimuth="60"/>
+  </visual>
+  <statistic center="1.2 0 0"/>
+</mujoco>

@@ -10,11 +10,12 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
-from genesis.utils.misc import DeprecationError
+from genesis.utils.misc import DeprecationError, qd_to_torch
 
-from .base_solver import Solver
+from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 if TYPE_CHECKING:
     from genesis.engine.entities import MPMEntity
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
 
 
 @qd.data_oriented
-class MPMSolver(Solver):
+class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
+    material_cls = MPM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -40,7 +42,7 @@ class MPMSolver(Solver):
         self._enable_CPIC = options.enable_CPIC
         self._constraints_initialized = False
 
-        self._n_vvert_supports = self.scene.vis_options.n_support_neighbors
+        self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
         # `_particle_volume_scale` is used to avoid potential numerical instability, as the actual `_particle_volume` may be very small.
         # Note that the magnitude of `_particle_volume` doesn't affect MPM simulation itself, but it is used to compute particle
@@ -75,8 +77,7 @@ class MPMSolver(Solver):
         # safety padding
         self.boundary_padding = 3 * self._dx
         self.boundary = CubeBoundary(
-            lower=self._lower_bound + self.boundary_padding,
-            upper=self._upper_bound - self.boundary_padding,
+            lower=self._lower_bound + self.boundary_padding, upper=self._upper_bound - self.boundary_padding
         )
 
     def init_particle_fields(self):
@@ -95,9 +96,7 @@ class MPMSolver(Solver):
         )
 
         # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(
-            active=gs.qd_bool,
-        )
+        struct_particle_state_ng = qd.types.struct(active=gs.qd_bool)
 
         # static particle info
         struct_particle_info = qd.types.struct(
@@ -111,22 +110,14 @@ class MPMSolver(Solver):
         )
 
         # single frame particle state for rendering
-        struct_particle_state_render = qd.types.struct(
-            pos=gs.qd_vec3,
-            vel=gs.qd_vec3,
-            active=gs.qd_bool,
-        )
+        struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
 
         # construct fields
         self.particles = struct_particle_state.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B),
-            needs_grad=True,
-            layout=qd.Layout.SOA,
+            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
         )
         self.particles_ng = struct_particle_state_ng.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B),
-            needs_grad=False,
-            layout=qd.Layout.SOA,
+            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
         self.particles_info = struct_particle_info.field(
             shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
@@ -141,11 +132,26 @@ class MPMSolver(Solver):
             vel_in=gs.qd_vec3,  # input momentum/velocity
             vel_out=gs.qd_vec3,  # output momentum/velocity
         )
+        # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so substeps_local frames are enough.
+        # Particles still need substeps_local + 1 because g2p writes the next-frame state at [f+1].
         self.grid = grid_cell_state.field(
-            shape=(self._sim.substeps_local + 1, *self._grid_res, self._B),
-            needs_grad=True,
-            layout=qd.Layout.SOA,
+            shape=(self._sim.substeps_local, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
         )
+
+        # Sparse-reset bookkeeping for forward-only mode. A single global dirty list captures unique cells touched by
+        # p2g across all envs in the current substep; reset_dirty_cells zeroes those cells across all envs immediately
+        # after g2p, so the grid is always zero at the start of each substep and no per-substep state has to outlive a
+        # substep. grid_dirty_flag is a per-cell tristate (env-shared) that deduplicates appends: only the first env to
+        # touch a cell records it. List size is bounded by the total grid cell count because dedup ensures no more than
+        # that many unique entries.
+        # TODO: support sparse reset under requires_grad. Quadrants' differentiable framework needs the grid state at
+        # every intermediate substep for the backward pass, so we cannot eagerly wipe cells; revisit if checkpointing
+        # or selective grad masking becomes available.
+        if not self._sim.requires_grad:
+            self._grid_total = int(np.prod(self._grid_res))
+            self.grid_dirty_flag = qd.field(gs.qd_int, shape=self._grid_res)
+            self.grid_dirty_list = qd.field(gs.qd_int, shape=(self._grid_total,))
+            self.grid_dirty_count = qd.field(gs.qd_int, shape=(1,))
 
     def init_vvert_fields(self):
         struct_vvert_info = qd.types.struct(
@@ -154,10 +160,7 @@ class MPMSolver(Solver):
         )
         self.vverts_info = struct_vvert_info.field(shape=(max(1, self._n_vverts),), layout=qd.Layout.SOA)
 
-        struct_vvert_state_render = qd.types.struct(
-            pos=gs.qd_vec3,
-            active=gs.qd_bool,
-        )
+        struct_vvert_state_render = qd.types.struct(pos=gs.qd_vec3, active=gs.qd_bool)
         self.vverts_render = struct_vvert_state_render.field(
             shape=(max(1, self._n_vverts), self._B), layout=qd.Layout.SOA
         )
@@ -184,6 +187,7 @@ class MPMSolver(Solver):
             link_local_pos=gs.qd_vec3,  # offset from link origin in link's local frame
         )
 
+        # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
         self.particle_constraints = particle_constraint_info.field(
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.AOS
         )
@@ -208,6 +212,12 @@ class MPMSolver(Solver):
         self._n_vfaces = self.n_vfaces
 
         self._coupler = self.sim._coupler
+
+        # Aggregate SVD requirement across registered materials. If no material reads U/V/S, the solver can skip the SVD
+        # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
+        # p2g via qd.static. Forced True under requires_grad so the backward path stays exactly as upstream.
+        # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
+        self.needs_svd = self._sim.requires_grad or any(m.needs_svd for m in self._materials)
 
         if self.is_active:
             if self._enable_CPIC and self._sim.requires_grad:
@@ -234,11 +244,8 @@ class MPMSolver(Solver):
                     "calculated based on `grid_density`). Simulation might be unstable."
                 )
 
-        # Overwrite gravity because only field is supported for now
-        if self._gravity is not None:
-            gravity = self._gravity.to_numpy()
-            self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
-            self._gravity.from_numpy(gravity)
+        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
+        self._build_gravity(as_field=True)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -248,7 +255,9 @@ class MPMSolver(Solver):
     def is_active(self):
         return self.n_particles > 0
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "MPMEntity":
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+    ) -> "MPMEntity":
         self.add_material(material)
 
         # create entity
@@ -307,6 +316,31 @@ class MPMSolver(Solver):
                 )
 
     @qd.kernel
+    def compute_F_tmp_and_svd(self, f: qd.i32):
+        # Fused F_tmp + SVD: keeps F_tmp in register/local-memory for the SVD instead of round-tripping through global
+        # memory. Only used on the forward pass; the backward path continues to call compute_F_tmp / svd separately so
+        # their autodiff remains composed unchanged.
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles_ng[f, i_p, i_b].active:
+                F_tmp = (
+                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
+                ) @ self.particles[f, i_p, i_b].F
+                self.particles[f, i_p, i_b].F_tmp = F_tmp
+                self.particles[f, i_p, i_b].U, self.particles[f, i_p, i_b].S, self.particles[f, i_p, i_b].V = qd.svd(
+                    F_tmp, gs.qd_float
+                )
+
+    @qd.kernel
+    def compute_F_tmp_only(self, f: qd.i32):
+        # Fast path when no registered material needs U/V/S: compute F_tmp without SVD. p2g then derives J from
+        # det(F_tmp) directly. Only used on the forward pass.
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles_ng[f, i_p, i_b].active:
+                self.particles[f, i_p, i_b].F_tmp = (
+                    qd.Matrix.identity(gs.qd_float, 3) + self.substep_dt * self.particles[f, i_p, i_b].C
+                ) @ self.particles[f, i_p, i_b].F
+
+    @qd.kernel
     def svd_grad(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
@@ -326,15 +360,22 @@ class MPMSolver(Solver):
         geoms_state: array_class.GeomsState,
         geoms_info: array_class.GeomsInfo,
         links_state: array_class.LinksState,
-        rigid_global_info: array_class.RigidGlobalInfo,
+        rigid_info: array_class.RigidInfo,
         sdf_info: array_class.SDFInfo,
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
                 # A. update F (deformation gradient), S (Sigma from SVD(F), essentially represents volume) and Jp
-                # (volume compression ratio) based on material type
-                J = self.particles[f, i_p, i_b].S.determinant()
+                # (volume compression ratio) based on material type.
+                # det(F_tmp) == det(U S V^T) == det(S) for qd.svd (U, V are proper rotations), so when no material
+                # needs U/V/S we can read J directly from F_tmp and skip the SVD kernel. Predeclared outside the
+                # qd.static branch because quadrants scopes qd.static branches locally.
+                J = gs.qd_float(0.0)
+                if qd.static(self.needs_svd):
+                    J = self.particles[f, i_p, i_b].S.determinant()
+                else:
+                    J = self.particles[f, i_p, i_b].F_tmp.determinant()
                 F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 Jp_new = gs.qd_float(1.0)
@@ -395,14 +436,14 @@ class MPMSolver(Solver):
                             if geoms_info.needs_coup[i_g]:
                                 sdf_normal_particle = self._coupler.mpm_rigid_normal[i_p, i_g, i_b]
                                 sdf_normal_cell = sdf.sdf_func_normal_world(
-                                    geoms_state=geoms_state,
-                                    geoms_info=geoms_info,
-                                    rigid_global_info=rigid_global_info,
-                                    collider_static_config=collider_static_config,
-                                    sdf_info=sdf_info,
-                                    pos_world=cell_pos,
-                                    geom_idx=i_g,
-                                    batch_idx=i_b,
+                                    i_g,
+                                    i_b,
+                                    cell_pos,
+                                    geoms_state,
+                                    geoms_info,
+                                    rigid_info,
+                                    sdf_info,
+                                    collider_static_config,
                                 )
 
                                 if sdf_normal_particle.dot(sdf_normal_cell) < 0:  # separated by geom i_g
@@ -410,12 +451,26 @@ class MPMSolver(Solver):
                                     break
                         self._coupler.cpic_flag[i_p, offset[0], offset[1], offset[2], i_b] = sep_geom_idx
                     if sep_geom_idx == -1:
-                        self.grid[f, base - self._grid_offset + offset, i_b].vel_in += weight * (
+                        cell_ijk = base - self._grid_offset + offset
+                        self.grid[f, cell_ijk, i_b].vel_in += weight * (
                             self.particles_info[i_p].mass * self.particles[f, i_p, i_b].vel + affine @ dpos
                         )
-                        self.grid[f, base - self._grid_offset + offset, i_b].mass += (
-                            weight * self.particles_info[i_p].mass
-                        )
+                        mass_contrib = weight * self.particles_info[i_p].mass
+                        prev_mass = qd.atomic_add(self.grid[f, cell_ijk, i_b].mass, mass_contrib)
+                        # Sparse-reset bookkeeping runs forward-only: backward mode composes p2g through autodiff where
+                        # these atomics are meaningless. Per-env first-writer (prev_mass == 0) tries to claim the cell
+                        # in the env-shared dirty flag via atomic_or; only the very first env to touch this cell across
+                        # the whole batch then appends to the global list. List size is bounded by grid_total because
+                        # dedup ensures uniqueness.
+                        if qd.static(not self._sim.requires_grad):
+                            if prev_mass == gs.qd_float(0.0) and mass_contrib > gs.qd_float(0.0):
+                                was_dirty = qd.atomic_or(self.grid_dirty_flag[cell_ijk], gs.qd_int(1))
+                                if was_dirty == gs.qd_int(0):
+                                    slot_idx = qd.atomic_add(self.grid_dirty_count[0], 1)
+                                    flat = (cell_ijk[0] * self._grid_res[1] + cell_ijk[1]) * self._grid_res[2] + (
+                                        cell_ijk[2]
+                                    )
+                                    self.grid_dirty_list[slot_idx] = flat
 
                     if not self.particles_info[i_p].free:  # non-free particles behave as boundary conditions
                         self.grid[f, base - self._grid_offset + offset, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
@@ -426,7 +481,7 @@ class MPMSolver(Solver):
         f: qd.i32,
         geoms_info: array_class.GeomsInfo,
         links_state: array_class.LinksState,
-        rigid_global_info: array_class.RigidGlobalInfo,
+        rigid_info: array_class.RigidInfo,
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
@@ -455,7 +510,7 @@ class MPMSolver(Solver):
                                 i_b,
                                 geoms_info=geoms_info,
                                 links_state=links_state,
-                                rigid_global_info=rigid_global_info,
+                                rigid_info=rigid_info,
                             )
 
                     new_vel += weight * grid_vel
@@ -501,28 +556,40 @@ class MPMSolver(Solver):
             entity.process_input_grad()
 
     def substep_pre_coupling(self, f):
-        self.reset_grid_and_grad(f)
-        self.compute_F_tmp(f)
-        self.svd(f)
+        if self._sim.requires_grad:
+            self.reset_grid_and_grad(f)
+            # Keep F_tmp and svd as separate kernels so their backward passes (compute_F_tmp.grad and svd_grad) remain
+            # correct.
+            self.compute_F_tmp(f)
+            self.svd(f)
+        else:
+            # Forward-only path: the grid is left zeroed by reset_dirty_cells at the end of the previous substep (and
+            # is zero-init on the first call), so no reset kernel is needed here.
+            if self.needs_svd:
+                self.compute_F_tmp_and_svd(f)
+            else:
+                # All registered materials ignore U/V/S; skip SVD entirely (e.g. scenes of only non-viscous Liquid
+                # and/or neohooken Elastic).
+                self.compute_F_tmp_only(f)
         self.p2g(
             f,
-            self.sim.coupler.rigid_solver.geoms_state,
-            self.sim.coupler.rigid_solver.geoms_info,
-            self.sim.coupler.rigid_solver.links_state,
-            self.sim.coupler.rigid_solver._rigid_global_info,
+            self.sim.coupler.rigid_solver.dyn_state.geoms,
+            self.sim.coupler.rigid_solver.dyn_info.geoms,
+            self.sim.coupler.rigid_solver.dyn_state.links,
+            self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
-            self.sim.coupler.rigid_solver.collider._collider_static_config,
+            self.sim.coupler.rigid_solver.collider.collider_config,
         )
 
     def substep_pre_coupling_grad(self, f):
         self.p2g.grad(
             f,
-            self.sim.coupler.rigid_solver.geoms_state,
-            self.sim.coupler.rigid_solver.geoms_info,
-            self.sim.coupler.rigid_solver.links_state,
-            self.sim.coupler.rigid_solver._rigid_global_info,
+            self.sim.coupler.rigid_solver.dyn_state.geoms,
+            self.sim.coupler.rigid_solver.dyn_info.geoms,
+            self.sim.coupler.rigid_solver.dyn_state.links,
+            self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
-            self.sim.coupler.rigid_solver.collider._collider_static_config,
+            self.sim.coupler.rigid_solver.collider.collider_config,
         )
         self.svd_grad(f)
         self.compute_F_tmp.grad(f)
@@ -530,27 +597,42 @@ class MPMSolver(Solver):
     def substep_post_coupling(self, f):
         self.g2p(
             f,
-            self.sim.coupler.rigid_solver.geoms_info,
-            self.sim.coupler.rigid_solver.links_state,
-            self.sim.coupler.rigid_solver._rigid_global_info,
+            self.sim.coupler.rigid_solver.dyn_info.geoms,
+            self.sim.coupler.rigid_solver.dyn_state.links,
+            self.sim.coupler.rigid_solver.rigid_info,
         )
 
         # Apply particle constraints after g2p
         if self._constraints_initialized:
-            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.links_state)
+            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
+
+        # Eager sparse reset: zero only the cells p2g touched this substep, across all envs, then clear the global
+        # dirty count so the next substep starts fresh. The grid is no longer read after g2p / constraints, so it is
+        # safe to wipe here. Forward-only; backward composes p2g/g2p through autodiff and uses reset_grid_and_grad.
+        if not self._sim.requires_grad:
+            self.reset_dirty_cells(f)
+            if gs.use_zerocopy:
+                grid_dirty_count = qd_to_torch(self.grid_dirty_count, copy=False)
+                grid_dirty_count.zero_()
+            else:
+                self.grid_dirty_count[0] = 0
 
         # FIXME: Use existing errno mechanism for this.
-        if not self._is_state_valid(f):
-            gs.raise_exception(
-                "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
-            )
+        # Rate-limit the NaN check. _is_state_valid triggers a GPU->CPU sync on its return value, so calling it every
+        # substep forces a sync every substep. Matching the cadence used by the rigid solver keeps the safety net while
+        # letting the GPU stay ahead of the host queue.
+        if self._sim._cur_substep_global % gs.engine.simulator.RATE_CHECK_ERRNO == 0:
+            if not self._is_state_valid(f):
+                gs.raise_exception(
+                    "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
+                )
 
     def substep_post_coupling_grad(self, f):
         self.g2p.grad(
             f,
-            self.sim.coupler.rigid_solver.geoms_info,
-            self.sim.coupler.rigid_solver.links_state,
-            self.sim.coupler.rigid_solver._rigid_global_info,
+            self.sim.coupler.rigid_solver.dyn_info.geoms,
+            self.sim.coupler.rigid_solver.dyn_state.links,
+            self.sim.coupler.rigid_solver.rigid_info,
         )
 
     @qd.kernel
@@ -585,6 +667,24 @@ class MPMSolver(Solver):
             self.grid.grad[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
             self.grid.grad[f, i, j, k, i_b].mass = gs.qd_float(0.0)
             self.grid.grad[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
+
+    @qd.kernel
+    def reset_dirty_cells(self, f: qd.i32):
+        # Zero the cells p2g touched this substep, across all envs, plus their dirty flags. The dirty list is shared
+        # across envs (deduplicated via grid_dirty_flag), so threads with slot >= grid_dirty_count idle. Only one thread
+        # per slot (i_b == 0) writes the flag back to zero so it can be reused next substep.
+        for slot, i_b in qd.ndrange(self._grid_total, self._B):
+            if slot < self.grid_dirty_count[0]:
+                flat = self.grid_dirty_list[slot]
+                k = flat % self._grid_res[2]
+                rem = flat // self._grid_res[2]
+                j = rem % self._grid_res[1]
+                i = rem // self._grid_res[1]
+                self.grid[f, i, j, k, i_b].mass = gs.qd_float(0.0)
+                self.grid[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
+                self.grid[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
+                if i_b == 0:
+                    self.grid_dirty_flag[i, j, k] = gs.qd_int(0)
 
     @qd.kernel
     def reset_grad_till_frame(self, f: qd.i32):
@@ -839,11 +939,7 @@ class MPMSolver(Solver):
 
     @qd.kernel
     def _kernel_set_particles_pos(
-        self,
-        f: qd.i32,
-        particles_idx: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        poss: qd.types.ndarray(),
+        self, f: qd.i32, particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), poss: qd.types.ndarray()
     ):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
@@ -1096,11 +1192,7 @@ class MPMSolver(Solver):
                 self.particle_constraints[i_p, i_b].link_idx = -1
 
     @qd.kernel
-    def apply_particle_constraints(
-        self,
-        f: qd.i32,
-        links_state: array_class.LinksState,
-    ):
+    def apply_particle_constraints(self, f: qd.i32, links_state: array_class.LinksState):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particle_constraints[i_p, i_b].is_constrained:
                 # Update target position from link pose

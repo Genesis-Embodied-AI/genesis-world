@@ -1,6 +1,5 @@
 import ctypes
 import os
-import pickle as pkl
 import platform
 import subprocess
 import sys
@@ -52,32 +51,24 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
     assert sampler in ("random", "regular")
 
     # compute file name via hashing for caching
-    ptc_file_path = msu.get_ptc_path(mesh.vertices, mesh.faces, p_size, sampler)
+    cache = msu.get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler)
 
     # loading pre-computed cache if available
-    is_cached_loaded = False
-    if os.path.exists(ptc_file_path):
+    positions = cache.load()
+    if positions is not None:
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
-        try:
-            with open(ptc_file_path, "rb") as file:
-                positions = pkl.load(file)
-            is_cached_loaded = True
-        except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
-            gs.logger.info("Ignoring corrupted cache.")
+        return positions
 
-    if not is_cached_loaded:
-        with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
-            # sample a cube first
-            box_size = mesh.bounds[1] - mesh.bounds[0]
-            box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
-            positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
-            # reject out-of-boundary particles
-            sd, *_ = igl.signed_distance(positions, mesh.vertices, mesh.faces)
-            positions = positions[sd < 0.0]
+    with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
+        # sample a cube first
+        box_size = mesh.bounds[1] - mesh.bounds[0]
+        box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
+        positions = _box_to_particles(p_size=p_size, pos=box_center, size=box_size, sampler=sampler)
+        # reject out-of-boundary particles
+        sd, *_ = igl.signed_distance(positions, mesh.vertices, mesh.faces)
+        positions = positions[sd < 0.0]
 
-            os.makedirs(os.path.dirname(ptc_file_path), exist_ok=True)
-            with open(ptc_file_path, "wb") as file:
-                pkl.dump(positions, file)
+        cache.save(positions)
 
     return positions
 
@@ -94,20 +85,13 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
         gs.raise_exception(f"Physics-based particle sampler '{sampler}' is only supported on Linux x86.")
 
     # compute file name via hashing for caching
-    ptc_file_path = msu.get_ptc_path(mesh.vertices, mesh.faces, p_size, sampler)
+    cache = msu.get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler)
 
     # loading pre-computed cache if available
-    is_cached_loaded = False
-    if os.path.exists(ptc_file_path):
+    positions = cache.load()
+    if positions is not None:
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
-        try:
-            with open(ptc_file_path, "rb") as file:
-                positions = pkl.load(file)
-            is_cached_loaded = True
-        except (EOFError, ModuleNotFoundError, pkl.UnpicklingError, TypeError, MemoryError):
-            gs.logger.info("Ignoring corrupted cache.")
-
-    if not is_cached_loaded:
+    else:
         with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
             sdf_res = int(sampler.split("-")[-1])
 
@@ -168,9 +152,7 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
                 shutil.rmtree(output_dir, ignore_errors=True)
 
             # Cache the generated positions
-            os.makedirs(os.path.dirname(ptc_file_path), exist_ok=True)
-            with open(ptc_file_path, "wb") as file:
-                pkl.dump(positions, file)
+            cache.save(positions)
 
     positions += np.asarray(pos)
 

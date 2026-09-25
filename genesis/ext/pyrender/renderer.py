@@ -23,11 +23,16 @@ from .constants import (
     TextAlign,
 )
 from .font import FontCache
+from .jit_render import is_env_pass
 from .light import DirectionalLight, PointLight, SpotLight
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
-from .shader_program import ShaderProgramCache
+from .shader_program import NormalShaderCache, ShaderProgramCache
 from .utils import format_color_vector
 from .texture import Texture
+
+
+MARKER_XRAY_DIM_FACTOR = 0.3
+MARKER_XRAY_ALPHA = 0.4
 
 
 class Renderer(object):
@@ -74,10 +79,8 @@ class Renderer(object):
 
         # Shader Program Cache
         self._program_cache = ShaderProgramCache()
+        self._normal_program_cache = NormalShaderCache()
         self._font_cache = FontCache()
-        self._meshes = set()
-        self._mesh_textures = set()
-        self._shadow_textures = set()
         self._texture_alloc_idx = 0
 
         self._floor_texture_color = None
@@ -136,10 +139,22 @@ class Renderer(object):
             If :attr:`RenderFlags.OFFSCREEN` is set, the depth buffer
             in linear units.
         """
+        # A pass with the environments drawn side by side moves every environment-instanced primitive by its
+        # environment offset (see 'JITRenderer.env_offset_buffer'). A pass rendering the environments one at a time
+        # draws them where they are, so their lighting and shadows are the same in every environment.
+        is_grid = not is_env_pass(flags)
+
         # Update context with meshes and textures
         if is_first_pass:
-            self._update_context(scene, flags)
-            all_ready = self.jit.update(scene)
+            self.jit.update_context(scene, flags)
+            self.jit.update(scene)
+            all_ready = self.jit.set_lighting(scene, is_grid)
+
+            # Flush queued buffer updates AFTER jit.update(scene) so that new
+            # nodes created by set_primitive -> _add_to_context already have
+            # their GPU buffers allocated and can receive the data.
+            self.jit.flush_buffer()
+
             if not all_ready:
                 # Shadow textures not yet initialized - skip this frame to avoid
                 # flickering. The caller should display the previous frame.
@@ -169,12 +184,17 @@ class Renderer(object):
                         take_pass = True
                     elif isinstance(ln.light, PointLight) and flags & RenderFlags.SHADOWS_POINT:
                         take_pass = True
-                    if take_pass:
+                    # The shadow texture lives on the light, so one map serves every renderer of the scene (the
+                    # viewer window and each camera): it is rendered again once the scene changed or another
+                    # environment is drawn. The pass draws every opaque mesh in fill mode whatever the flags, so the
+                    # key is the scene revision and the environment alone.
+                    if take_pass and ln.light.shadow_map_revision != (scene.revision, env_idx):
                         if isinstance(ln.light, PointLight):
                             self._point_shadow_mapping_pass(scene, ln, flags, env_idx=env_idx)
                         else:
                             self._shadow_mapping_pass(scene, ln, flags, env_idx=env_idx)
                         glBindFramebuffer(GL_FRAMEBUFFER, 0)
+                        ln.light.shadow_map_revision = (scene.revision, env_idx)
 
             if flags & RenderFlags.REFLECTIVE_FLOOR:
                 self._floor_pass(scene, flags, env_idx=env_idx)
@@ -309,33 +329,10 @@ class Renderer(object):
         """Free all allocated OpenGL resources."""
         # Free shaders
         self._program_cache.clear()
+        self._normal_program_cache.clear()
 
         # Free fonts
         self._font_cache.clear()
-
-        # Free meshes
-        for mesh in self._meshes:
-            for p in mesh.primitives:
-                try:
-                    p.delete()
-                except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
-                    pass
-        self._meshes.clear()
-
-        # Free textures
-        for mesh_texture in self._mesh_textures:
-            try:
-                mesh_texture.delete()
-            except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
-                pass
-        self._mesh_textures.clear()
-
-        for shadow_texture in self._shadow_textures:
-            try:
-                shadow_texture.delete()
-            except (OpenGL.error.GLError, OpenGL.error.NullFunctionError):
-                pass
-        self._shadow_textures.clear()
 
         self._texture_alloc_idx = 0
 
@@ -395,6 +392,7 @@ class Renderer(object):
         floor_tex = self._floor_texture_color._texid if flags & RenderFlags.REFLECTIVE_FLOOR else 0
         screen_size = np.array([self.viewport_width, self.viewport_height], np.float32)
 
+        common_kwargs = dict(env_idx=env_idx)
         if flags & RenderFlags.SEG:
             color_list = np.zeros((len(self.jit.node_list), 3), np.float32)
             for i, node in enumerate(self.jit.node_list):
@@ -402,6 +400,37 @@ class Renderer(object):
                     color_list[i, :] = -2.0
                 else:
                     color_list[i] = seg_node_map[node] / 255.0
+            common_kwargs["color_list"] = color_list
+        else:
+            common_kwargs["floor_tex"] = floor_tex
+
+        if flags & (RenderFlags.SEG | RenderFlags.DEPTH_ONLY | RenderFlags.SKIP_MARKERS):
+            # No markers contribute to the output in these modes — single pass.
+            self.jit.forward_pass(self, V, P, cam_pos, flags, ProgramFlags.USE_MATERIAL, screen_size, **common_kwargs)
+        else:
+            # Draw non-marker geometry first so the depth buffer only contains
+            # real geometry when the x-ray pass runs. This way the GL_GREATER
+            # depth test in _marker_xray_pass cannot see marker-on-marker
+            # occlusion (e.g. dark rings at joints of chained debug cylinders)
+            # — it only ghosts markers occluded by real objects.
+            self.jit.forward_pass(
+                self,
+                V,
+                P,
+                cam_pos,
+                flags | RenderFlags.SKIP_MARKERS,
+                ProgramFlags.USE_MATERIAL,
+                screen_size,
+                **common_kwargs,
+            )
+
+            # Render occluded markers as darkened ghosts for depth cues — must
+            # happen before markers themselves are drawn so the depth buffer
+            # used for the GL_GREATER test is free of marker depths.
+            if flags & RenderFlags.MARKER_XRAY:
+                self._marker_xray_pass(V, P, cam_pos, flags, screen_size, env_idx)
+
+            # Now draw opaque markers on top
             self.jit.forward_pass(
                 self,
                 V,
@@ -410,17 +439,41 @@ class Renderer(object):
                 flags,
                 ProgramFlags.USE_MATERIAL,
                 screen_size,
-                color_list=color_list,
-                env_idx=env_idx,
-            )
-        else:
-            self.jit.forward_pass(
-                self, V, P, cam_pos, flags, ProgramFlags.USE_MATERIAL, screen_size, floor_tex=floor_tex, env_idx=env_idx
+                markers_only=True,
+                **common_kwargs,
             )
 
         # If doing offscreen render, copy result from framebuffer and return
         if flags & RenderFlags.OFFSCREEN:
             return self._read_main_framebuffer(scene, flags)
+
+    def _marker_xray_pass(self, V, P, cam_pos, flags, screen_size, env_idx):
+        """Render markers behind geometry with darkened transparency (X-ray effect)."""
+        marker_mask = self.jit.render_flags[:, 6].astype(bool)
+        if not np.any(marker_mask):
+            return
+
+        # Save and dim marker colors, force alpha blending
+        saved_pbr_mat = self.jit.pbr_mat[marker_mask].copy()
+        saved_blend_flags = self.jit.render_flags[marker_mask, 0].copy()
+        self.jit.pbr_mat[marker_mask, 0:3] *= MARKER_XRAY_DIM_FACTOR
+        self.jit.pbr_mat[marker_mask, 3] = MARKER_XRAY_ALPHA
+        self.jit.render_flags[marker_mask, 0] = 1
+
+        # Draw only occluded fragments, without touching the depth buffer.
+        glDepthFunc(GL_GREATER)
+        glDepthMask(GL_FALSE)
+
+        xray_flags = flags & ~(RenderFlags.SHADOWS_DIRECTIONAL | RenderFlags.SHADOWS_SPOT | RenderFlags.SHADOWS_POINT)
+        self.jit.forward_pass(
+            self, V, P, cam_pos, xray_flags, ProgramFlags.USE_MATERIAL, screen_size, env_idx=env_idx, markers_only=True
+        )
+
+        # Restore GL state and marker data
+        glDepthFunc(GL_LESS)
+        glDepthMask(GL_TRUE)
+        self.jit.pbr_mat[marker_mask] = saved_pbr_mat
+        self.jit.render_flags[marker_mask, 0] = saved_blend_flags
 
     def _point_shadow_mapping_pass(self, scene, light_node, flags, env_idx=-1):
         light = light_node.light
@@ -456,7 +509,7 @@ class Renderer(object):
         V, P = self._get_camera_matrices(scene, env_idx)
 
         # Now, render each object in sorted order
-        for node in scene.sorted_mesh_nodes():
+        for node in scene.sorted_mesh_nodes(env_idx):
             mesh = node.mesh
 
             # Skip the mesh if it's not visible
@@ -480,6 +533,7 @@ class Renderer(object):
                 # Set the camera uniforms
                 program.set_uniform("V", V)
                 program.set_uniform("P", P)
+                program.set_uniform("env_offset_scale", 0.0 if is_env_pass(flags) else 1.0)
                 program.set_uniform("normal_magnitude", 0.05 * primitive.scale)
                 program.set_uniform("normal_color", np.array((0.1, 0.1, 1.0, 1.0)))
 
@@ -581,7 +635,7 @@ class Renderer(object):
         if primitive.poses is not None:
             n_instances = len(primitive.poses)
 
-        if primitive.env_shared or env_idx == -1:
+        if not primitive.is_env_instanced or env_idx == -1:
             if primitive.indices is not None:
                 glDrawElementsInstanced(
                     primitive.mode, primitive.indices.size, GL_UNSIGNED_INT, ctypes.c_void_p(0), n_instances
@@ -602,66 +656,6 @@ class Renderer(object):
     ###########################################################################
     # Context Management
     ###########################################################################
-
-    def _update_context(self, scene, flags):
-        # Get existing and new meshes
-        scene_meshes_new = scene.meshes.copy()
-        scene_meshes_old = self._meshes
-
-        # Remove from context old meshes that are now irrelevant
-        for mesh in scene_meshes_old - scene_meshes_new:
-            for p in mesh.primitives:
-                p.delete()
-
-        # Update set of meshes right away, so that the context can be cleaned up correctly in case of failure
-        self._meshes = scene_meshes_new
-
-        # Add new meshes to context
-        for mesh in scene_meshes_new - scene_meshes_old:
-            for p in mesh.primitives:
-                p._add_to_context()
-
-        # Update mesh textures
-        mesh_textures = set()
-        for m in scene_meshes_new:
-            for p in m.primitives:
-                mesh_textures |= p.material.textures
-
-        # Add new textures to context
-        for texture in mesh_textures - self._mesh_textures:
-            texture._add_to_context()
-
-        # Remove old textures from context
-        for texture in self._mesh_textures - mesh_textures:
-            texture.delete()
-
-        self._mesh_textures = mesh_textures.copy()
-
-        shadow_textures = set()
-        for l in scene.lights:
-            # Create if needed
-            active = False
-            if isinstance(l, DirectionalLight) and flags & RenderFlags.SHADOWS_DIRECTIONAL:
-                active = True
-            elif isinstance(l, PointLight) and flags & RenderFlags.SHADOWS_POINT:
-                active = True
-            elif isinstance(l, SpotLight) and flags & RenderFlags.SHADOWS_SPOT:
-                active = True
-
-            if active and l.shadow_texture is None:
-                l._generate_shadow_texture()
-            if l.shadow_texture is not None:
-                shadow_textures.add(l.shadow_texture)
-
-        # Add new textures to context
-        for texture in shadow_textures - self._shadow_textures:
-            texture._add_to_context()
-
-        # Remove old textures from context
-        for texture in self._shadow_textures - shadow_textures:
-            texture.delete()
-
-        self._shadow_textures = shadow_textures.copy()
 
     ###########################################################################
     # Texture Management
@@ -783,6 +777,8 @@ class Renderer(object):
         elif flags & RenderFlags.FLAT:
             vertex_shader = "flat.vert"
             fragment_shader = "flat.frag"
+            if primitive.double_sided:
+                defines["DOUBLE_SIDED"] = 1
         elif flags & RenderFlags.SEG:
             vertex_shader = "segmentation.vert"
             fragment_shader = "segmentation.frag"
@@ -818,6 +814,7 @@ class Renderer(object):
             defines["WEIGHTS_0_LOC"] = buf_idx
             buf_idx += 1
         defines["INST_M_LOC"] = buf_idx
+        defines["INST_ENV_OFFSET_LOC"] = buf_idx + 4
 
         # Set up shadow mapping defines
         if flags & RenderFlags.SHADOWS_DIRECTIONAL:
@@ -1084,4 +1081,5 @@ class Renderer(object):
 
     def reload_program(self):
         self._program_cache.clear()
+        self._normal_program_cache.clear()
         self.jit.program_id.clear()

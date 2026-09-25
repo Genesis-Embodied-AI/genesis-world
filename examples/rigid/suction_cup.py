@@ -5,14 +5,12 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu)
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -30,17 +28,23 @@ def main():
             size=(0.04, 0.04, 0.04),
             pos=(0.65, 0.0, 0.02),
         ),
-        surface=gs.surfaces.Plastic(color=(1, 0, 0)),
+        surface=gs.surfaces.Plastic(
+            color=(1, 0, 0),
+        ),
     )
     cube_2 = scene.add_entity(
         gs.morphs.Box(
             size=(0.04, 0.04, 0.04),
             pos=(0.4, 0.2, 0.02),
         ),
-        surface=gs.surfaces.Plastic(color=(0, 1, 0)),
+        surface=gs.surfaces.Plastic(
+            color=(0, 1, 0),
+        ),
     )
     franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
         vis_mode="collision",
     )
     scene.build()

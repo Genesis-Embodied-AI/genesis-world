@@ -14,6 +14,21 @@ $$
 
 where $Q$ is used for the Genesis `link` transform, and $S$ is **baked into the mesh geometry** to preserve the visual appearance.
 
+### Reflections (negative scale)
+
+USD assets frequently use a negative `xformOp:scale` (e.g. `(-1, -1, -1)` or a single flipped
+axis) to express a reflection. A reflection has determinant $-1$, so the rotation part $R$ of the
+polar decomposition would not be a proper rotation. Genesis `link` transforms must be proper
+rotations ($\det Q = +1$), so `extract_scale` **absorbs the reflection into the scale matrix**:
+it flips the first column of $R$ and the first row of $S$, leaving $R \cdot S$ unchanged while
+restoring $\det R = +1$. The reflection therefore lives entirely in $S$ (baked into mesh
+vertices via `geom_ST`), and rendered/collision geometry keeps the intended handedness.
+
+Consequences for primitive collision shapes: because $S$ may now be negative, primitive
+dimensions (sphere radius, box extents, ...) are taken from `np.abs(np.diag(S))` so collision
+sizes stay positive; the sign (reflection) is still applied to the baked mesh via the full
+scale matrix. A truly singular transform ($\det R = 0$) still raises.
+
 ## Tree Structure and Transform Notation
 
 Both USD and Genesis use hierarchical tree structures where each node has a local transform relative to its parent.
@@ -107,3 +122,21 @@ $$
 $$
 P' = P^{l_1'} = (Q^w_{l_1'})^{-1} \cdot P^w
 $$
+
+### Body-Relationship Target Frames
+
+A joint's `localPos0/localPos1` and `localRot0/localRot1` are expressed in the frame of the prim
+named by its `body0`/`body1` **relationship target**, which is *not necessarily the canonical
+rigid-body link*. USD assets (especially Isaac-Sim exports) commonly place `RigidBodyAPI` on a
+parent xform while pointing the joint relationship at a child collision mesh, or at a wrapper
+xform. `resolve_rigid_body_link_path` maps that target to the canonical link (nearest
+`RigidBodyAPI` ancestor; otherwise the topmost `CollisionAPI` ancestor; otherwise the single
+rigid body in the wrapper's subtree) so that the kinematic tree and connected-component grouping
+use consistent link identities.
+
+However, the joint anchor math above must still interpret `localPos`/`localRot` in the **original
+target frame** $T^w_{\text{target}}$, then convert into the canonical child link's Genesis frame
+$Q^w_{l_1'}$. Using the canonical link frame for both the value and the interpretation would place
+the anchor incorrectly whenever the target prim differs from the link prim. Concretely: the joint
+value is transformed to world space through the target prim's world transform, and only the final
+conversion to Genesis-local uses $(Q^w_{l_1'})^{-1}$.

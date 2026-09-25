@@ -8,26 +8,31 @@ import pytest
 EXAMPLES_DIR = Path(__file__).parents[1] / "examples"
 
 ALLOW_PATTERNS = {
-    "*.py",
     "collision/**/*.py",
     "coupling/**/*.py",
+    "deformable/**/*.py",
     "drone/interactive_drone.py",
     "drone/fly_route.py",
-    "IPC_Solver/**/*.py",
+    "fluid/**/*.py",
+    "ipc/**/*.py",
     "kinematic/**/*.py",
+    "rendering/**/*.py",
     "rigid/**/*.py",
-    "render_async/**/*.py",
     "sap_coupling/**/*.py",
     "sensors/**/*.py",
     "tutorials/**/*.py",
     "usd/**/*.py",
-    "viewer_plugins/**/*.py",
+    "viewer_plugin/**/*.py",
+    "gui/**/*.py",
 }
 IGNORE_SCRIPT_NAMES = {
     "ddp_multi_gpu.py",
     "multi_gpu.py",
     "single_franka_batch_render.py",  # FIXME: segfault on exit
     "fem_cube_linked_with_arm.py",  # FIXME: segfault on exit (corrupted double-linked list)
+    "differentiable_push.py",
+    # Raytraced showcase: needs the optional LuisaRender backend and opens a GUI window to be watched
+    "demo.py",
 }
 if sys.platform != "linux":
     IGNORE_SCRIPT_NAMES |= {
@@ -37,8 +42,8 @@ if sys.platform != "linux":
 # Map example scripts or directories to their required optional dependencies.
 # Directory keys apply recursively to all scripts within that directory.
 EXAMPLE_DEPENDENCIES = {
-    "import_stage.py": ["pxr"],  # Requires usd-core package (provides pxr module)
-    "IPC_Solver": ["uipc"],  # Requires pyuipc package (provides uipc module)
+    "usd": ["pxr"],  # USD examples require the usd-core package (provides pxr module)
+    "ipc": ["uipc"],  # Requires pyuipc package (provides uipc module)
 }
 
 TIMEOUT = 600

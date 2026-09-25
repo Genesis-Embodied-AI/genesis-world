@@ -28,11 +28,7 @@ class PathPlanner(ABC):
                 gs.raise_exception("planning for the gs.JOINT_TYPE.SPHERICAL is not supported (yet)")
 
     @abstractmethod
-    def plan(
-        self,
-        qpos_goal,
-        qpos_start=None,
-    ): ...
+    def plan(self, qpos_goal, qpos_start=None): ...
 
     def get_link_pose(self, robot_g_link_idx, obj_g_link_idx, envs_idx):
         """
@@ -97,6 +93,23 @@ class PathPlanner(ABC):
             qpos_start = qpos_start[None]
 
         return qpos_cur, qpos_goal, qpos_start, envs_idx
+
+    def _get_dofs_limit(self, qpos_goal, envs_idx):
+        """Limits to sample within, one row per environment being planned for, and which goals they rule out.
+
+        Planning is refused for the joints whose coordinates are not their degrees of freedom, which are the free and
+        the ball joint, so the limits of the degrees of freedom are the limits of the coordinates sampled here.
+        """
+        is_batched = self._solver._options.batch_dofs_info
+        lower, upper = self._entity.get_dofs_limit(envs_idx=envs_idx if is_batched else None)
+        is_goal_out_of_limit = ((qpos_goal < lower) | (qpos_goal > upper)).any(dim=-1)
+        # One row per environment, laid out rather than broadcast: the limits come as a strided view of the pair they
+        # are stored in, and limits shared by every environment come without an environment dimension at all, while a
+        # kernel argument can be neither.
+        shape = (len(envs_idx), self._entity.n_dofs)
+        lower = torch.broadcast_to(lower, shape).contiguous()
+        upper = torch.broadcast_to(upper, shape).contiguous()
+        return lower, upper, is_goal_out_of_limit
 
     def get_exclude_geom_pairs(self, qposs, envs_idx):
         """
@@ -186,49 +199,44 @@ class PathPlanner(ABC):
                 self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
             self._solver._kernel_detect_collision()
             self._kernel_check_collision(
-                ignore_geom_pairs,
                 envs_idx,
-                is_plan_with_obj=is_plan_with_obj,
-                obj_geom_start=obj_geom_start,
-                obj_geom_end=obj_geom_end,
-                out=out,
-                collider_state=self._solver.collider._collider_state,
+                obj_geom_start,
+                obj_geom_end,
+                ignore_geom_pairs,
+                out,
+                self._solver.collider.collider_state,
+                is_plan_with_obj,
             )
         return out
 
     @qd.kernel
     def _kernel_check_collision(
         self,
-        ignore_geom_pairs: qd.types.ndarray(),
         envs_idx: qd.types.ndarray(),
-        is_plan_with_obj: qd.i32,
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
+        ignore_geom_pairs: qd.types.ndarray(),
         out: qd.types.ndarray(),
         collider_state: array_class.ColliderState,
+        is_plan_with_obj: qd.i32,
     ):
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
 
             collision_detected = self._func_check_collision(
-                collider_state,
-                ignore_geom_pairs,
-                i_b,
-                is_plan_with_obj=is_plan_with_obj,
-                obj_geom_start=obj_geom_start,
-                obj_geom_end=obj_geom_end,
+                i_b, obj_geom_start, obj_geom_end, ignore_geom_pairs, collider_state, is_plan_with_obj
             )
             out[i_b_] = out[i_b_] or qd.cast(collision_detected, gs.qd_bool)
 
     @qd.func
     def _func_check_collision(
         self,
-        collider_state: array_class.ColliderState,
-        ignore_geom_pairs: qd.types.ndarray(),
         i_b: qd.i32,
-        is_plan_with_obj: qd.i32 = False,
-        obj_geom_start: qd.i32 = -1,
-        obj_geom_end: qd.i32 = -1,
+        obj_geom_start: qd.i32,
+        obj_geom_end: qd.i32,
+        ignore_geom_pairs: qd.types.ndarray(),
+        collider_state: array_class.ColliderState,
+        is_plan_with_obj: qd.i32,
     ) -> qd.i32:
         is_collision_detected = qd.cast(False, gs.qd_int)
         for i_c in range(collider_state.n_contacts[i_b]):
@@ -300,7 +308,10 @@ class PathPlanner(ABC):
                 _pos=_pos,
                 _quat=_quat,
             )  # B
-            path[:, ~collision_mask] = result_path[:, ~collision_mask]
+            # Compared against zero rather than negated: the mask is integer-typed on the backends without a boolean
+            # one, where a bitwise negation would turn it into an index instead of the selection it reads as.
+            is_shortcut_free = collision_mask == 0
+            path[:, is_shortcut_free] = result_path[:, is_shortcut_free]
         return path
 
 
@@ -319,9 +330,9 @@ class RRT(PathPlanner):
             self._rrt_start_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
             self._rrt_goal_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
             self.struct_rrt_node_info = qd.types.struct(
-                configuration=qd.types.vector(self._entity.n_qs, gs.qd_float),
-                parent_idx=gs.qd_int,
+                configuration=qd.types.vector(self._entity.n_qs, gs.qd_float), parent_idx=gs.qd_int
             )
+            # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
             self._rrt_node_info = self.struct_rrt_node_info.field(shape=(self._rrt_max_nodes, self._solver._B))
             self._rrt_tree_size = qd.field(dtype=gs.qd_int, shape=(self._solver._B,))
             self._rrt_is_active = qd.field(dtype=gs.qd_bool, shape=(self._solver._B,))
@@ -339,36 +350,39 @@ class RRT(PathPlanner):
 
     @qd.kernel
     def _kernel_rrt_init(
-        self, qpos_start: qd.types.ndarray(), qpos_goal: qd.types.ndarray(), envs_idx: qd.types.ndarray()
+        self,
+        qpos_start: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+        qpos_goal: qd.types.ndarray(),
+        q_limit_lower: qd.types.ndarray(),
+        q_limit_upper: qd.types.ndarray(),
     ):
         qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
+            # Every sample lies within the limits, so a goal outside them cannot be reached. Such an environment
+            # is left out of the search, and the plan reports it through the valid mask it returns.
+            is_goal_within_limit = True
             for i_q in range(self._entity.n_qs):
                 # save original qpos
                 self._rrt_start_configuration[i_q, i_b] = qpos_start[i_b_, i_q]
                 self._rrt_goal_configuration[i_q, i_b] = qpos_goal[i_b_, i_q]
                 self._rrt_node_info[0, i_b].configuration[i_q] = qpos_start[i_b_, i_q]
+                if qpos_goal[i_b_, i_q] < q_limit_lower[i_b_, i_q] or qpos_goal[i_b_, i_q] > q_limit_upper[i_b_, i_q]:
+                    is_goal_within_limit = False
             self._rrt_node_info[0, i_b].parent_idx = 0
             self._rrt_tree_size[i_b] = 1
-            self._rrt_is_active[i_b] = True
+            self._rrt_is_active[i_b] = is_goal_within_limit
 
     @qd.kernel
     def _kernel_rrt_step1(
         self,
+        envs_idx: qd.types.ndarray(),
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        links_state: array_class.LinksState,
-        links_info: array_class.LinksInfo,
-        joints_state: array_class.JointsState,
-        joints_info: array_class.JointsInfo,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        dofs_state: array_class.DofsState,
-        dofs_info: array_class.DofsInfo,
-        entities_info: array_class.EntitiesInfo,
-        rigid_global_info: array_class.RigidGlobalInfo,
+        dyn_state: array_class.DynState,
+        dyn_info: array_class.DynInfo,
+        rigid_info: array_class.RigidInfo,
     ):
         """
         Step 1 includes:
@@ -384,7 +398,8 @@ class RRT(PathPlanner):
             if self._rrt_is_active[i_b]:
                 random_sample = qd.Vector(
                     [
-                        q_limit_lower[i_q] + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_q] - q_limit_lower[i_q])
+                        q_limit_lower[i_b_, i_q]
+                        + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_b_, i_q] - q_limit_lower[i_b_, i_q])
                         for i_q in range(self._entity.n_qs)
                     ]
                 )
@@ -421,42 +436,42 @@ class RRT(PathPlanner):
                     # set the steer result and collision check for i_b
                     for i_q in range(self._entity.n_qs):
                         self._solver.qpos[i_q + self._entity._q_start, i_b] = steer_result[i_q]
-                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_entity(
-                        self._entity._idx_in_solver,
+                    i_l_base = dyn_info.entities.link_start[self._entity._idx_in_solver]
+                    I_l_base = [i_l_base, i_b] if qd.static(self._solver.rigid_config.batch_links_info) else i_l_base
+                    i_l_root = dyn_info.links.root_idx[I_l_base]
+                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_root(
+                        i_l_root,
                         i_b,
-                        links_state,
-                        links_info,
-                        joints_state,
-                        joints_info,
-                        dofs_state,
-                        dofs_info,
-                        entities_info,
-                        rigid_global_info,
-                        self._solver._static_rigid_sim_config,
+                        rigid_info.qpos,
+                        dyn_state,
+                        dyn_info,
+                        rigid_info,
+                        self._solver.rigid_config,
                         is_backward=False,
                     )
-                    gs.engine.solvers.rigid.rigid_solver.func_update_geoms_batch(
-                        i_b,
-                        entities_info,
-                        geoms_info,
-                        geoms_state,
-                        links_state,
-                        rigid_global_info,
-                        self._solver._static_rigid_sim_config,
-                        force_update_fixed_geoms=False,
-                        is_backward=False,
-                    )
+                    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+                        i_l_root = rigid_info.roots_link_idx[i_r]
+                        gs.engine.solvers.rigid.rigid_solver.func_update_geoms_root(
+                            i_l_root,
+                            i_b,
+                            dyn_state,
+                            dyn_info,
+                            rigid_info,
+                            self._solver.rigid_config,
+                            force_update_all_geoms=False,
+                            is_backward=False,
+                        )
 
     @qd.kernel
     def _kernel_rrt_step2(
         self,
-        ignore_geom_pairs: qd.types.ndarray(),
-        ignore_collision: qd.i32,
         envs_idx: qd.types.ndarray(),
-        is_plan_with_obj: qd.i32,
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
+        ignore_geom_pairs: qd.types.ndarray(),
         collider_state: array_class.ColliderState,
+        ignore_collision: qd.i32,
+        is_plan_with_obj: qd.i32,
     ):
         """
         Step 2 includes:
@@ -471,7 +486,7 @@ class RRT(PathPlanner):
                 is_collision_detected = qd.cast(False, gs.qd_int)
                 if not ignore_collision:
                     is_collision_detected = self._func_check_collision(
-                        collider_state, ignore_geom_pairs, i_b, is_plan_with_obj, obj_geom_start, obj_geom_end
+                        i_b, obj_geom_start, obj_geom_end, ignore_geom_pairs, collider_state, is_plan_with_obj
                     )
                 if is_collision_detected:
                     self._rrt_tree_size[i_b] -= 1
@@ -512,6 +527,14 @@ class RRT(PathPlanner):
 
         qpos_cur, qpos_goal, qpos_start, envs_idx = self._sanitize_qposs(qpos_goal, qpos_start, envs_idx)
         ignore_geom_pairs = self.get_exclude_geom_pairs((qpos_goal, qpos_start), envs_idx)
+        q_limit_lower, q_limit_upper, is_goal_out_of_limit = self._get_dofs_limit(qpos_goal, envs_idx)
+        if is_goal_out_of_limit.all():
+            # No sample leaves the limits, so no tree would reach any of these goals. Growing one, and retrying
+            # afterwards, would give the same answer at the price of the whole search.
+            gs.logger.debug("Every goal lies outside the joint limits, so there is nothing to plan.")
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
+            sol = torch.zeros((num_waypoints, len(envs_idx), self._entity.n_qs), dtype=gs.tc_float, device=gs.device)
+            return sol, is_goal_out_of_limit
 
         is_plan_with_obj = False
         _pos, _quat = None, None
@@ -525,38 +548,31 @@ class RRT(PathPlanner):
 
         self._init_rrt_fields(max_nodes=max_nodes, max_step_size=resolution)
         self._reset_rrt_fields()
-        self._kernel_rrt_init(qpos_start, qpos_goal, envs_idx)
+        self._kernel_rrt_init(qpos_start, envs_idx, qpos_goal, q_limit_lower, q_limit_upper)
 
         gs.logger.debug("Start RRT planning...")
         time_start = time.time()
         for i_n in range(self._rrt_max_nodes):
             if self._rrt_is_active.to_torch().any():
                 self._kernel_rrt_step1(
-                    q_limit_lower=self._entity.q_limit[0],
-                    q_limit_upper=self._entity.q_limit[1],
-                    envs_idx=envs_idx,
-                    links_state=self._solver.links_state,
-                    links_info=self._solver.links_info,
-                    joints_state=self._solver.joints_state,
-                    joints_info=self._solver.joints_info,
-                    geoms_state=self._solver.geoms_state,
-                    geoms_info=self._solver.geoms_info,
-                    dofs_state=self._solver.dofs_state,
-                    dofs_info=self._solver.dofs_info,
-                    entities_info=self._solver.entities_info,
-                    rigid_global_info=self._solver._rigid_global_info,
+                    envs_idx,
+                    q_limit_lower,
+                    q_limit_upper,
+                    self._solver.dyn_state,
+                    self._solver.dyn_info,
+                    self._solver.rigid_info,
                 )
                 if is_plan_with_obj:
                     self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
                 self._solver._kernel_detect_collision()
                 self._kernel_rrt_step2(
-                    collider_state=self._solver.collider._collider_state,
-                    ignore_geom_pairs=ignore_geom_pairs,
-                    ignore_collision=ignore_collision,
-                    envs_idx=envs_idx,
-                    is_plan_with_obj=is_plan_with_obj,
-                    obj_geom_start=obj_geom_start,
-                    obj_geom_end=obj_geom_end,
+                    envs_idx,
+                    obj_geom_start,
+                    obj_geom_end,
+                    ignore_geom_pairs,
+                    self._solver.collider.collider_state,
+                    ignore_collision,
+                    is_plan_with_obj,
                 )
             else:
                 break
@@ -567,7 +583,7 @@ class RRT(PathPlanner):
 
         gs.logger.debug(f"RRT planning time: {time.time() - time_start}")
 
-        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx]
+        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx] | is_goal_out_of_limit
         ts = self._rrt_tree_size.to_torch(device=gs.device)
         g_n = self._rrt_goal_reached_node_idx.to_torch(device=gs.device)[envs_idx]  # B
 
@@ -585,10 +601,7 @@ class RRT(PathPlanner):
         sol = configurations[res_idx, envs_idx]  # N, B, DoF
 
         if is_invalid.all():
-            if self._solver.n_envs > 0:
-                self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-            else:
-                self._entity.set_qpos(qpos_cur, zero_velocity=False)
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
             sol = torch.zeros((num_waypoints, len(envs_idx), sol.shape[-1]), dtype=gs.tc_float, device=gs.device)
             return sol, is_invalid
 
@@ -638,10 +651,7 @@ class RRT(PathPlanner):
             else:
                 is_invalid |= self.check_collision(sol, ignore_geom_pairs, envs_idx).bool()
 
-        if self._solver.n_envs > 0:
-            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-        else:
-            self._entity.set_qpos(qpos_cur, zero_velocity=False)
+        self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
 
         if is_plan_with_obj:
             self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
@@ -665,10 +675,9 @@ class RRTConnect(PathPlanner):
             self._rrt_start_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
             self._rrt_goal_configuration = qd.field(dtype=gs.qd_float, shape=(self._entity.n_qs, self._solver._B))
             self.struct_rrt_node_info = qd.types.struct(
-                configuration=qd.types.vector(self._entity.n_qs, gs.qd_float),
-                parent_idx=gs.qd_int,
-                child_idx=gs.qd_int,
+                configuration=qd.types.vector(self._entity.n_qs, gs.qd_float), parent_idx=gs.qd_int, child_idx=gs.qd_int
             )
+            # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
             self._rrt_node_info = self.struct_rrt_node_info.field(shape=(self._rrt_max_nodes, self._solver._B))
             self._rrt_tree_size = qd.field(dtype=gs.qd_int, shape=(self._solver._B,))
             self._rrt_is_active = qd.field(dtype=gs.qd_bool, shape=(self._solver._B,))
@@ -687,41 +696,43 @@ class RRTConnect(PathPlanner):
 
     @qd.kernel
     def _kernel_rrt_connect_init(
-        self, qpos_start: qd.types.ndarray(), qpos_goal: qd.types.ndarray(), envs_idx: qd.types.ndarray()
+        self,
+        qpos_start: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+        qpos_goal: qd.types.ndarray(),
+        q_limit_lower: qd.types.ndarray(),
+        q_limit_upper: qd.types.ndarray(),
     ):
         # NOTE: run IK before this
         qd.loop_config(serialize=self._solver._para_level < gs.PARA_LEVEL.ALL)
         for i_b_ in range(envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
+            # See the note in RRT: a goal outside the limits cannot be reached, which the valid mask reports.
+            is_goal_within_limit = True
             for i_q in range(self._entity.n_qs):
                 # save original qpos
                 self._rrt_start_configuration[i_q, i_b] = qpos_start[i_b_, i_q]
                 self._rrt_goal_configuration[i_q, i_b] = qpos_goal[i_b_, i_q]
                 self._rrt_node_info[0, i_b].configuration[i_q] = qpos_start[i_b_, i_q]
                 self._rrt_node_info[1, i_b].configuration[i_q] = qpos_goal[i_b_, i_q]
+                if qpos_goal[i_b_, i_q] < q_limit_lower[i_b_, i_q] or qpos_goal[i_b_, i_q] > q_limit_upper[i_b_, i_q]:
+                    is_goal_within_limit = False
             self._rrt_node_info[0, i_b].parent_idx = 0
             self._rrt_node_info[1, i_b].child_idx = 1
             self._rrt_tree_size[i_b] = 2
-            self._rrt_is_active[i_b] = True
+            self._rrt_is_active[i_b] = is_goal_within_limit
 
     @qd.kernel
     def _kernel_rrt_connect_step1(
         self,
-        qpos: array_class.V_ANNOTATION,
-        forward_pass: qd.i32,
+        envs_idx: qd.types.ndarray(),
+        qpos: qd.Tensor,
         q_limit_lower: qd.types.ndarray(),
         q_limit_upper: qd.types.ndarray(),
-        envs_idx: qd.types.ndarray(),
-        links_state: array_class.LinksState,
-        links_info: array_class.LinksInfo,
-        joints_state: array_class.JointsState,
-        joints_info: array_class.JointsInfo,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        dofs_state: array_class.DofsState,
-        dofs_info: array_class.DofsInfo,
-        entities_info: array_class.EntitiesInfo,
-        rigid_global_info: array_class.RigidGlobalInfo,
+        dyn_state: array_class.DynState,
+        dyn_info: array_class.DynInfo,
+        rigid_info: array_class.RigidInfo,
+        forward_pass: qd.i32,
     ):
         """
         Step 1 includes:
@@ -737,7 +748,8 @@ class RRTConnect(PathPlanner):
             if self._rrt_is_active[i_b]:
                 random_sample = qd.Vector(
                     [
-                        q_limit_lower[i_q] + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_q] - q_limit_lower[i_q])
+                        q_limit_lower[i_b_, i_q]
+                        + qd.random(dtype=gs.qd_float) * (q_limit_upper[i_b_, i_q] - q_limit_lower[i_b_, i_q])
                         for i_q in range(self._entity.n_qs)
                     ]
                 )
@@ -790,44 +802,44 @@ class RRTConnect(PathPlanner):
                     # set the steer result and collision check for i_b
                     for i_q in range(self._entity.n_qs):
                         qpos[i_q + self._entity._q_start, i_b] = steer_result[i_q]
-                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_entity(
-                        self._entity._idx_in_solver,
+                    i_l_base = dyn_info.entities.link_start[self._entity._idx_in_solver]
+                    I_l_base = [i_l_base, i_b] if qd.static(self._solver.rigid_config.batch_links_info) else i_l_base
+                    i_l_root = dyn_info.links.root_idx[I_l_base]
+                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_root(
+                        i_l_root,
                         i_b,
-                        links_state,
-                        links_info,
-                        joints_state,
-                        joints_info,
-                        dofs_state,
-                        dofs_info,
-                        entities_info,
-                        rigid_global_info,
-                        self._solver._static_rigid_sim_config,
+                        rigid_info.qpos,
+                        dyn_state,
+                        dyn_info,
+                        rigid_info,
+                        self._solver.rigid_config,
                         is_backward=False,
                     )
-                    gs.engine.solvers.rigid.rigid_solver.func_update_geoms_batch(
-                        i_b,
-                        entities_info,
-                        geoms_info,
-                        geoms_state,
-                        links_state,
-                        rigid_global_info,
-                        self._solver._static_rigid_sim_config,
-                        force_update_fixed_geoms=False,
-                        is_backward=False,
-                    )
+                    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+                        i_l_root = rigid_info.roots_link_idx[i_r]
+                        gs.engine.solvers.rigid.rigid_solver.func_update_geoms_root(
+                            i_l_root,
+                            i_b,
+                            dyn_state,
+                            dyn_info,
+                            rigid_info,
+                            self._solver.rigid_config,
+                            force_update_all_geoms=False,
+                            is_backward=False,
+                        )
 
     @qd.kernel
     def _kernel_rrt_connect_step2(
         self,
-        forward_pass: qd.i32,
-        ignore_geom_pairs: qd.types.ndarray(),
-        ignore_collision: qd.i32,
         envs_idx: qd.types.ndarray(),
-        is_plan_with_obj: qd.i32,
         obj_geom_start: qd.i32,
         obj_geom_end: qd.i32,
+        ignore_geom_pairs: qd.types.ndarray(),
         collider_state: array_class.ColliderState,
-        rigid_global_info: array_class.RigidGlobalInfo,
+        rigid_info: array_class.RigidInfo,
+        forward_pass: qd.i32,
+        ignore_collision: qd.i32,
+        is_plan_with_obj: qd.i32,
     ):
         """
         Step 2 includes:
@@ -842,7 +854,7 @@ class RRTConnect(PathPlanner):
                 is_collision_detected = qd.cast(False, gs.qd_int)
                 if not ignore_collision:
                     is_collision_detected = self._func_check_collision(
-                        collider_state, ignore_geom_pairs, i_b, is_plan_with_obj, obj_geom_start, obj_geom_end
+                        i_b, obj_geom_start, obj_geom_end, ignore_geom_pairs, collider_state, is_plan_with_obj
                     )
                 if is_collision_detected:
                     self._rrt_tree_size[i_b] -= 1
@@ -864,7 +876,7 @@ class RRTConnect(PathPlanner):
                         for i_q in range(self._entity.n_qs):
                             if (
                                 qd.abs(
-                                    rigid_global_info.qpos[i_q + self._entity._q_start, i_b]
+                                    rigid_info.qpos[i_q + self._entity._q_start, i_b]
                                     - self._rrt_node_info.configuration[i_n, i_b][i_q]
                                 )
                                 > self._rrt_max_step_size
@@ -898,6 +910,14 @@ class RRTConnect(PathPlanner):
 
         qpos_cur, qpos_goal, qpos_start, envs_idx = self._sanitize_qposs(qpos_goal, qpos_start, envs_idx)
         ignore_geom_pairs = self.get_exclude_geom_pairs([qpos_goal, qpos_start], envs_idx)
+        q_limit_lower, q_limit_upper, is_goal_out_of_limit = self._get_dofs_limit(qpos_goal, envs_idx)
+        if is_goal_out_of_limit.all():
+            # No sample leaves the limits, so no tree would reach any of these goals. Growing one, and retrying
+            # afterwards, would give the same answer at the price of the whole search.
+            gs.logger.debug("Every goal lies outside the joint limits, so there is nothing to plan.")
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
+            sol = torch.zeros((num_waypoints, len(envs_idx), self._entity.n_qs), dtype=gs.tc_float, device=gs.device)
+            return sol, is_goal_out_of_limit
 
         is_plan_with_obj = False
         _pos, _quat = None, None
@@ -911,42 +931,35 @@ class RRTConnect(PathPlanner):
 
         self._init_rrt_connect_fields(max_nodes=max_nodes, max_step_size=resolution)
         self._reset_rrt_connect_fields()
-        self._kernel_rrt_connect_init(qpos_start, qpos_goal, envs_idx)
+        self._kernel_rrt_connect_init(qpos_start, envs_idx, qpos_goal, q_limit_lower, q_limit_upper)
 
         gs.logger.debug("Start RRTConnect planning...")
         time_start = time.time()
         forward_pass = True
         for _ in range(self._rrt_max_nodes):
             self._kernel_rrt_connect_step1(
-                qpos=self._solver.qpos,
-                forward_pass=forward_pass,
-                q_limit_lower=self._entity.q_limit[0],
-                q_limit_upper=self._entity.q_limit[1],
-                envs_idx=envs_idx,
-                links_state=self._solver.links_state,
-                links_info=self._solver.links_info,
-                joints_state=self._solver.joints_state,
-                joints_info=self._solver.joints_info,
-                geoms_state=self._solver.geoms_state,
-                geoms_info=self._solver.geoms_info,
-                dofs_state=self._solver.dofs_state,
-                dofs_info=self._solver.dofs_info,
-                entities_info=self._solver.entities_info,
-                rigid_global_info=self._solver._rigid_global_info,
+                envs_idx,
+                self._solver.qpos,
+                q_limit_lower,
+                q_limit_upper,
+                self._solver.dyn_state,
+                self._solver.dyn_info,
+                self._solver.rigid_info,
+                forward_pass,
             )
             if is_plan_with_obj:
                 self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)
             self._solver._kernel_detect_collision()
             self._kernel_rrt_connect_step2(
-                forward_pass=forward_pass,
-                ignore_geom_pairs=ignore_geom_pairs,
-                ignore_collision=ignore_collision,
-                envs_idx=envs_idx,
-                is_plan_with_obj=is_plan_with_obj,
-                obj_geom_start=obj_geom_start,
-                obj_geom_end=obj_geom_end,
-                collider_state=self._solver.collider._collider_state,
-                rigid_global_info=self._solver._rigid_global_info,
+                envs_idx,
+                obj_geom_start,
+                obj_geom_end,
+                ignore_geom_pairs,
+                self._solver.collider.collider_state,
+                self._solver.rigid_info,
+                forward_pass,
+                ignore_collision,
+                is_plan_with_obj,
             )
             forward_pass = not forward_pass
 
@@ -960,7 +973,7 @@ class RRTConnect(PathPlanner):
             gs.logger.info(f"RRTConnect planning exceeded maximum number of nodes ({self._rrt_max_nodes}).")
 
         gs.logger.debug(f"RRTConnect planning time: {time.time() - time_start}")
-        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx]
+        is_invalid = self._rrt_is_active.to_torch(device=gs.device).bool()[envs_idx] | is_goal_out_of_limit
         ts = self._rrt_tree_size.to_torch(device=gs.device)
         g_n = self._rrt_goal_reached_node_idx.to_torch(device=gs.device)[envs_idx]  # B
 
@@ -988,10 +1001,7 @@ class RRTConnect(PathPlanner):
         sol = configurations[res_idx, envs_idx]  # N, B, DoF
 
         if is_invalid.all():
-            if self._solver.n_envs > 0:
-                self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-            else:
-                self._entity.set_qpos(qpos_cur, zero_velocity=False)
+            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
             return torch.zeros(num_waypoints, len(envs_idx), sol.shape[-1], device=gs.device), is_invalid
 
         mask = rrt_connect_valid_mask(res_idx)
@@ -1040,10 +1050,7 @@ class RRTConnect(PathPlanner):
             else:
                 is_invalid |= self.check_collision(sol, ignore_geom_pairs, envs_idx).bool()
 
-        if self._solver.n_envs > 0:
-            self._entity.set_qpos(qpos_cur, envs_idx=envs_idx, zero_velocity=False)
-        else:
-            self._entity.set_qpos(qpos_cur, zero_velocity=False)
+        self._entity.set_qpos(qpos_cur, envs_idx=envs_idx if self._solver.n_envs else None, zero_velocity=False)
 
         if is_plan_with_obj:
             self.update_object(ee_link_idx, obj_link_idx, _pos, _quat, envs_idx)

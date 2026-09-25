@@ -1,6 +1,5 @@
 import os
 import xml.etree.ElementTree as ET
-from itertools import chain
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +9,11 @@ import xacro
 
 import genesis as gs
 import genesis.utils.gltf as gltf_utils
+from genesis.constants import GLTF_FORMATS, XACRO_FORMAT
 from genesis.ext import urdfpy
 
 from . import geom as gu
+from . import mesh as mu
 from .misc import get_assets_dir
 
 
@@ -28,7 +29,7 @@ def get_robot_name(file_path):
     Parameters
     ----------
     file_path : str or Path
-        Path to the URDF file.
+        Path to the URDF file, or inline URDF XML content.
 
     Returns
     -------
@@ -40,9 +41,11 @@ def get_robot_name(file_path):
     ValueError
         If the robot name attribute is missing or empty.
     """
-    path = os.path.join(get_assets_dir(), file_path)
-    tree = ET.parse(path)
-    root = tree.getroot()
+    try:
+        # Inline XML content parses directly; a file path does not and falls back to reading from disk.
+        root = ET.fromstring(file_path)
+    except ET.ParseError:
+        root = ET.parse(os.path.join(get_assets_dir(), file_path)).getroot()
     if root.tag == "robot":
         name = root.attrib.get("name")
         if name:
@@ -87,8 +90,8 @@ def load_xacro(path, mappings):
     return robot
 
 
-def _order_links(l_infos, j_infos, links_g_infos=None):
-    # re-order links based on depth in the kinematic tree, so that parent links are always before child links
+def order_links_depth_first(l_infos, j_infos, links_g_infos=None):
+    # Re-order links depth-first so that each subtree occupies a contiguous range and parents precede their children.
     n_links = len(l_infos)
     dict_child = {k: [] for k in range(n_links)}
     for lc in range(n_links):
@@ -98,18 +101,17 @@ def _order_links(l_infos, j_infos, links_g_infos=None):
         if lp != -1:
             dict_child[lp].append(lc)
 
+    # Depth-first pre-order: a parent always precedes its children (required downstream), and each subtree occupies a
+    # contiguous index range, so a free body and all of its descendants get contiguous links and DOFs. Siblings keep
+    # their original relative order, and the result matches MuJoCo's body ordering. Contiguity lets the per-tree
+    # mass-matrix factorization stay block-local instead of spanning the whole (possibly multi-body) entity.
     ordered_links_idx = []
-    n_level = 0
-    stack_topology = [lc for lc in range(n_links) if l_infos[lc]["parent_idx"] == -1]
-    while len(stack_topology) > 0:
-        next_stack = []
-        ordered_links_idx.append([])
-        for link in stack_topology:
-            ordered_links_idx[n_level].append(link)
-            next_stack += dict_child[link]
-        n_level += 1
-        stack_topology = next_stack
-    ordered_links_idx = tuple(chain.from_iterable(ordered_links_idx))
+    stack_topology = [lc for lc in reversed(range(n_links)) if l_infos[lc]["parent_idx"] == -1]
+    while stack_topology:
+        link = stack_topology.pop()
+        ordered_links_idx.append(link)
+        stack_topology.extend(reversed(dict_child[link]))
+    ordered_links_idx = tuple(ordered_links_idx)
 
     if not ordered_links_idx:
         # avoid case with worldbody without any body (geom directly assigned to worldbody)
@@ -118,6 +120,8 @@ def _order_links(l_infos, j_infos, links_g_infos=None):
     for l_info in l_infos:
         if l_info["parent_idx"] >= 0:  # non-base link
             l_info["parent_idx"] = ordered_links_idx.index(l_info["parent_idx"])
+        if "root_idx" in l_info:
+            l_info["root_idx"] = ordered_links_idx.index(l_info["root_idx"])
 
     new_l_infos = [l_infos[i] for i in ordered_links_idx]
     new_j_infos = [j_infos[i] for i in ordered_links_idx]
@@ -129,13 +133,25 @@ def _order_links(l_infos, j_infos, links_g_infos=None):
 
 
 def parse_urdf(morph, surface):
-    if isinstance(morph.file, (str, Path)):
-        path = os.path.join(get_assets_dir(), morph.file)
-        parent_dir = os.path.dirname(path)
-        robot = urdfpy.URDF.load(path)
+    if morph.is_format(XACRO_FORMAT):
+        # Expanded by the parser reading it, so the morph keeps the file provided by the user (see 'parse_xml' in mjcf.py)
+        parent_dir = os.getcwd()
+        robot = load_xacro(morph.file, morph.xacro_args)
+    elif isinstance(morph.file, (str, Path)):
+        # Inline XML content parses directly; a file path does not and falls back to reading from disk.
+        try:
+            node = ET.fromstring(morph.file)
+            parent_dir = os.getcwd()
+            robot = urdfpy.URDF._from_xml(node, node, parent_dir)
+        except (ET.ParseError, TypeError):
+            path = os.path.join(get_assets_dir(), morph.file)
+            parent_dir = os.path.dirname(path)
+            robot = urdfpy.URDF.load(path)
     else:
         parent_dir = os.getcwd()
-        robot = morph.file
+        # The caller's model is parsed on a copy: the scaling and fixed-link merging below write into it, and the MuJoCo
+        # pass parses the same object again (see parse_xml in mjcf.py).
+        robot = morph.file.copy()
 
     # Merge links connected by fixed joints
     if morph.merge_fixed_links:
@@ -191,7 +207,7 @@ def parse_urdf(morph, surface):
                 mesh_path = urdfpy.utils.get_filename(parent_dir, geometry.filename)
                 tmeshes = geometry.meshes
                 metadatas = [{"mesh_path": mesh_path} for _ in tmeshes]
-                if mesh_path.lower().endswith(gs.options.morphs.GLTF_FORMATS):
+                if mesh_path.lower().endswith(GLTF_FORMATS):
                     meshes = gltf_utils.parse_mesh_glb(
                         mesh_path, group_by_material=False, scale=None, is_mesh_zup=True, surface=surface
                     )
@@ -236,16 +252,31 @@ def parse_urdf(morph, surface):
             for tmesh, metadata in zip(tmeshes, metadatas, strict=True):
                 # Overwrite surface color by original color specified in URDF file only if necessary
                 is_urdf_material = False
+                # trimesh gives a mesh holding texture coordinates and no material its placeholder material, which
+                # states nothing about the appearance the asset authored
+                has_asset_material = tmesh.visual.defined and not (
+                    isinstance(tmesh.visual, trimesh.visual.texture.TextureVisuals)
+                    and hash(tmesh.visual.material) == hash(trimesh.visual.material.empty_material())
+                )
                 if geom_is_col:
                     geom_surface = gs.surfaces.Collision()
                 elif (
                     surface.texture is None
-                    and getattr(geom_prop, "material") is not None
-                    and geom_prop.material.color is not None
-                    and (morph.prioritize_urdf_material or not tmesh.visual.defined)
+                    and geom_prop.material is not None
+                    and (geom_prop.material.texture is not None or geom_prop.material.color is not None)
+                    and (morph.prioritize_urdf_material or not has_asset_material)
                 ):
                     is_urdf_material = True
-                    geom_surface = gs.surfaces.Default(color=geom_prop.material.color)
+                    if geom_prop.material.texture is not None:
+                        # The image stands in for the color, as it does for the material of a mesh asset (see
+                        # from_trimesh in engine/mesh.py)
+                        geom_surface = gs.surfaces.Default(
+                            diffuse_texture=gs.textures.ImageTexture(
+                                image_array=mu.PIL_to_array(geom_prop.material.texture.image)
+                            )
+                        )
+                    else:
+                        geom_surface = gs.surfaces.Default(color=geom_prop.material.color)
                 else:
                     geom_surface = surface
 
@@ -365,12 +396,13 @@ def parse_urdf(morph, surface):
 
         joint_friction, joint_damping = 0.0, 0.0
         if joint.dynamics is not None:
-            joint_friction, joint_damping = joint.dynamics.friction, joint.dynamics.damping
+            if joint.dynamics.friction is not None:
+                joint_friction = joint.dynamics.friction
+            if joint.dynamics.damping is not None:
+                joint_damping = joint.dynamics.damping
         j_info["dofs_frictionloss"] = np.full(j_info["n_dofs"], joint_friction)
         j_info["dofs_damping"] = np.full(j_info["n_dofs"], joint_damping)
         j_info["dofs_armature"] = np.zeros(j_info["n_dofs"])
-        if joint.joint_type not in ("floating", "fixed") and morph.default_armature is not None:
-            j_info["dofs_armature"] = np.full((j_info["n_dofs"],), morph.default_armature)
 
         kp = gu.default_dofs_kp(j_info["n_dofs"])
         kv = gu.default_dofs_kv(j_info["n_dofs"])
@@ -401,7 +433,7 @@ def parse_urdf(morph, surface):
             g_info["pos"] *= morph.scale
 
     # Re-order kinematic tree info
-    l_infos, links_j_infos, links_g_infos, _ = _order_links(l_infos, links_j_infos, links_g_infos)
+    l_infos, links_j_infos, links_g_infos, _ = order_links_depth_first(l_infos, links_j_infos, links_g_infos)
 
     eqs_info = parse_equalities(robot, morph)
 
@@ -417,16 +449,22 @@ def parse_equalities(robot, morph):
                 f"Joint '{joint.name}' mimics '{joint.mimic.joint}' with multiplier {joint.mimic.multiplier} and offset {joint.mimic.offset}"
             )
 
+            mimic_joint = robot.joint_map[joint.mimic.joint]
+            follower_scale = morph.scale if joint.joint_type == "prismatic" else 1.0
+            driver_scale = morph.scale if mimic_joint.joint_type == "prismatic" else 1.0
+
             eq_info = dict()
             eq_info["type"] = gs.EQUALITY_TYPE.JOINT
             eq_info["name"] = f"mimic_{joint.name}_to_{joint.mimic.joint}"
             eq_info["objs_name"] = (joint.name, joint.mimic.joint)
             eq_info["sol_params"] = gu.default_solver_params()
 
+            # eq_data[0:5] stores a0..a4 in q_follower - q_follower0 = sum(a_k * (q_driver - q_driver0)^k).
+            # A model scale transforms a_k to s_f * a_k / s_d**k, where s_f and s_d are morph.scale for
+            # prismatic coordinates and 1.0 for revolute coordinates.
             eq_info["data"] = np.zeros([11])
-            eq_info["data"][0] = joint.mimic.offset
-            eq_info["data"][1] = joint.mimic.multiplier
-            eq_info["data"][:6] *= morph.scale
+            eq_info["data"][0] = follower_scale * joint.mimic.offset
+            eq_info["data"][1] = follower_scale / driver_scale * joint.mimic.multiplier
 
             eqs_info.append(eq_info)
 
@@ -561,8 +599,8 @@ def compose_inertial_properties(mass1, com1, inertia1, mass2, com2, inertia2):
         combined_inertia: Combined inertia tensor (3,3) array
     """
     combined_mass = mass1 + mass2
-    if combined_mass < gs.EPS:
-        gs.raise_exception("Combined mass is less than EPS")
+    if combined_mass <= 0.0:
+        gs.raise_exception("Combined mass is zero")
     combined_com = (mass1 * com1 + mass2 * com2) / combined_mass
     inertia1_new = translate_inertia(inertia1, mass1, combined_com - com1)
     inertia2_new = translate_inertia(inertia2, mass2, combined_com - com2)
@@ -590,7 +628,7 @@ def merge_inertia(link1, link2):
     com2, R2 = link2.inertial.origin[:3, 3], link2.inertial.origin[:3, :3]
 
     combined_mass = m1 + m2
-    if combined_mass > gs.EPS:
+    if combined_mass > 0.0:
         combined_com = (m1 * com1 + m2 * com2) / combined_mass
     else:
         combined_com = com1

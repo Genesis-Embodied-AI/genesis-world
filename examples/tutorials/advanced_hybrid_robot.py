@@ -4,10 +4,8 @@ import numpy as np
 import genesis as gs
 
 
-########################## init ##########################
-gs.init(precision="32", logging_level="info")
+gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
-######################## create a scene ##########################
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
         dt=3e-3,
@@ -23,26 +21,27 @@ scene = gs.Scene(
         constraint_timeconst=0.02,
     ),
     mpm_options=gs.options.MPMOptions(
-        lower_bound=(0.0, 0.0, -0.2),
-        upper_bound=(1.0, 1.0, 1.0),
         gravity=(0, 0, 0),  # mimic gravity compensation
         enable_CPIC=True,
+        lower_bound=(0.0, 0.0, -0.2),
+        upper_bound=(1.0, 1.0, 1.0),
+    ),
+    vis_options=gs.options.VisOptions(
+        show_world_frame=True,
+        visualize_mpm_boundary=False,
     ),
     viewer_options=gs.options.ViewerOptions(
         camera_pos=(1.5, 1.3, 0.5),
         camera_lookat=(0.0, 0.0, 0.0),
         camera_fov=40,
     ),
-    vis_options=gs.options.VisOptions(
-        show_world_frame=True,
-        visualize_mpm_boundary=False,
-    ),
     show_viewer=True,
     show_FPS=False,
 )
 
-########################## entities ##########################
-scene.add_entity(morph=gs.morphs.Plane())
+scene.add_entity(
+    morph=gs.morphs.Plane(),
+)
 
 robot = scene.add_entity(
     morph=gs.morphs.URDF(
@@ -62,8 +61,8 @@ robot = scene.add_entity(
             rho=1000.0,
             model="neohooken",
         ),
-        thickness=0.05,
         damping=1000.0,
+        thickness=0.05,
     ),
 )
 
@@ -72,13 +71,14 @@ ball = scene.add_entity(
         pos=(0.8, 0.6, 0.1),
         radius=0.1,
     ),
-    material=gs.materials.Rigid(rho=1000, friction=0.5),
+    material=gs.materials.Rigid(
+        rho=1000,
+        friction=0.5,
+    ),
 )
 
-########################## build ##########################
 scene.build()
 
-########################## run ##########################
 horizon = 1000 if "PYTEST_VERSION" not in os.environ else 5
 scene.reset()
 for i in range(horizon):

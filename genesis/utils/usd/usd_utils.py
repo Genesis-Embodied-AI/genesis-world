@@ -195,6 +195,31 @@ def usd_mass_to_float(usd_mass: float) -> float | None:
     return float(usd_mass)
 
 
+def usd_density_to_float(usd_density: float) -> float | None:
+    """
+    Convert USD density to float, handling default and invalid values.
+
+    The USD Physics MassAPI (and UsdPhysicsMaterialAPI) define density with default value 0, which
+    means "ignored / not specified". This function returns None for the default ignored value or for
+    invalid values (negative, inf, or nan), mirroring `usd_mass_to_float`.
+
+    Parameters
+    ----------
+    usd_density : float
+        USD density attribute value.
+
+    Returns
+    -------
+    float | None
+        Valid positive density value, or None if default ignored or invalid.
+    """
+    if usd_density is None or usd_density <= 0:
+        return None
+    if not math.isfinite(usd_density):
+        return None
+    return float(usd_density)
+
+
 def usd_attr_array_to_numpy(attr: Usd.Attribute, dtype: np.dtype, return_none: bool = False) -> np.ndarray | None:
     if attr.HasValue():
         return np.array(attr.Get(), dtype=dtype)
@@ -211,8 +236,13 @@ def usd_primvar_array_to_numpy(
 
 def extract_scale(T: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     R, S = gu.polar(T[:3, :3], pure_rotation=True, side="right")
-    if np.linalg.det(R) <= 0:
-        gs.raise_exception(f"Negative determinant of rotation matrix detected. Got {np.linalg.det(R)}.")
+    det_R = np.linalg.det(R)
+    if det_R < 0:
+        # Absorb reflection into scale so R remains a proper rotation (det=+1).
+        R[:, 0] = -R[:, 0]
+        S[0, :] = -S[0, :]
+    elif det_R == 0:
+        gs.raise_exception(f"Singular rotation matrix detected. Got {det_R}.")
     Q = np.eye(4, dtype=T.dtype)
     Q[:3, :3] = R
     Q[:3, 3] = T[:3, 3]

@@ -1,13 +1,25 @@
-import torch
 import math
+from functools import partial
 from typing import Literal
 
+import torch
+from tensordict import TensorDict
+
 import genesis as gs
+from genesis.options.sensors import BatchRendererCameraOptions, RasterizerCameraOptions
+from genesis.vis.camera import Camera
 from genesis.utils.geom import (
     xyz_to_quat,
     transform_quat_by_quat,
-    transform_by_quat,
+    transform_by_trans_quat,
 )
+
+try:
+    import gs_madrona
+
+    _ENABLE_MADRONA = True
+except ImportError:
+    _ENABLE_MADRONA = False
 
 
 class GraspEnv:
@@ -19,12 +31,8 @@ class GraspEnv:
         show_viewer: bool = False,
     ) -> None:
         self.num_envs = env_cfg["num_envs"]
-        self.num_obs = env_cfg["num_obs"]
-        self.num_privileged_obs = None
         self.num_actions = env_cfg["num_actions"]
-        self.image_width = env_cfg["image_resolution"][0]
-        self.image_height = env_cfg["image_resolution"][1]
-        self.rgb_image_shape = (3, self.image_height, self.image_width)
+        self.cfg = env_cfg
         self.device = gs.device
 
         self.ctrl_dt = env_cfg["ctrl_dt"]
@@ -35,33 +43,40 @@ class GraspEnv:
         self.reward_scales = reward_cfg
         self.action_scales = torch.tensor(env_cfg["action_scales"], device=self.device)
 
-        # == setup scene ==
+        self.image_width = env_cfg["image_resolution"][0]
+        self.image_height = env_cfg["image_resolution"][1]
+        self.rgb_image_shape = (3, self.image_height, self.image_width)
+
         self.scene = gs.Scene(
-            sim_options=gs.options.SimOptions(dt=self.ctrl_dt, substeps=2),
-            rigid_options=gs.options.RigidOptions(
+            sim_options=gs.options.SimOptions(
                 dt=self.ctrl_dt,
-                constraint_solver=gs.constraint_solver.Newton,
+            ),
+            rigid_options=gs.options.RigidOptions(
+                dt=self.ctrl_dt / 2,
                 enable_collision=True,
                 enable_joint_limit=True,
+                constraint_solver=gs.constraint_solver.Newton,
             ),
-            vis_options=gs.options.VisOptions(rendered_envs_idx=list(range(10))),
+            vis_options=gs.options.VisOptions(
+                split_envs=True,
+                rendered_envs_idx=list(range(min(10, self.num_envs))),
+            ),
             viewer_options=gs.options.ViewerOptions(
-                max_FPS=int(0.5 / self.ctrl_dt),
-                camera_pos=(2.0, 0.0, 2.5),
-                camera_lookat=(0.0, 0.0, 0.5),
-                camera_fov=40,
+                res=(1280, 960),
+                camera_pos=(2.5, -1.0, 2.5),
+                camera_lookat=(0.5, -0.3, 0.1),
+                camera_fov=55,
             ),
-            profiling_options=gs.options.ProfilingOptions(show_FPS=False),
-            renderer=gs.options.renderers.BatchRenderer(
-                use_rasterizer=env_cfg["use_rasterizer"],
+            profiling_options=gs.options.ProfilingOptions(
+                show_FPS=False,
             ),
             show_viewer=show_viewer,
         )
 
-        # == add ground ==
-        self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
+        self.scene.add_entity(
+            gs.morphs.Plane(),
+        )
 
-        # == add robot ==
         self.robot = Manipulator(
             num_envs=self.num_envs,
             scene=self.scene,
@@ -69,49 +84,88 @@ class GraspEnv:
             device=gs.device,
         )
 
-        # == add object ==
         self.object = self.scene.add_entity(
             gs.morphs.Box(
                 size=env_cfg["box_size"],
-                fixed=env_cfg["box_fixed"],
-                collision=env_cfg["box_collision"],
+                fixed=env_cfg.get("box_fixed", True),
                 batch_fixed_verts=True,
             ),
-            # material=gs.materials.Rigid(gravity_compensation=1),
             surface=gs.surfaces.Rough(
                 diffuse_texture=gs.textures.ColorTexture(
                     color=(1.0, 0.0, 0.0),
                 ),
             ),
         )
-        if self.env_cfg["visualize_camera"]:
+
+        # Debug-only visualization camera, on the scene camera API.
+        if self.env_cfg.get("visualize_camera", False):
             self.vis_cam = self.scene.add_camera(
-                res=(1280, 720),
-                pos=(1.5, 0.0, 0.2),
-                lookat=(0.0, 0.0, 0.2),
-                fov=60,
-                GUI=self.env_cfg["visualize_camera"],
+                res=(1280, 960),
+                pos=(3.5, 0.0, 2.5),
+                lookat=(1.2, 1.0, 0.0),
+                fov=52,
+                GUI=False,
                 debug=True,
             )
 
-        # == add stero camera ==
-        self.left_cam = self.scene.add_camera(
-            res=(self.image_width, self.image_height),
-            pos=(1.25, 0.3, 0.3),
-            lookat=(0.0, 0.0, 0.0),
-            fov=60,
-            GUI=self.env_cfg["visualize_camera"],
+        # Stereo camera sensors render lazily: they cost nothing until read().
+        if _ENABLE_MADRONA and gs.backend == gs.cuda:
+            CameraOptions = BatchRendererCameraOptions
+            cam_kwargs = dict(use_rasterizer=True)
+        else:
+            CameraOptions = RasterizerCameraOptions
+            cam_kwargs = {}
+
+        self.left_cam = self.scene.add_sensor(
+            CameraOptions(
+                res=(self.image_width, self.image_height),
+                pos=(1.25, 0.3, 0.3),
+                lookat=(0.0, 0.0, 0.0),
+                fov=60,
+                **cam_kwargs,
+            )
         )
-        self.right_cam = self.scene.add_camera(
-            res=(self.image_width, self.image_height),
-            pos=(1.25, -0.3, 0.3),
-            lookat=(0.0, 0.0, 0.0),
-            fov=60,
-            GUI=self.env_cfg["visualize_camera"],
+        self.right_cam = self.scene.add_sensor(
+            CameraOptions(
+                res=(self.image_width, self.image_height),
+                pos=(1.25, -0.3, 0.3),
+                lookat=(0.0, 0.0, 0.0),
+                fov=60,
+                **cam_kwargs,
+            )
         )
 
-        # build
-        self.scene.build(n_envs=env_cfg["num_envs"])
+        def _read_scene_cam(cam):
+            rgb = cam.render(rgb=True)[0]
+            if rgb.ndim == 4:
+                rgb = rgb[0]
+            return rgb[..., :3]
+
+        def _read_sensor_cam(cam):
+            return cam.read(envs_idx=0).rgb
+
+        # Debug live preview of sensor cameras
+        if self.env_cfg.get("visualize_camera", False):
+            self.scene.add_recorder(
+                data_func=partial(_read_sensor_cam, self.left_cam),
+                rec_options=gs.recorders.MPLImagePlot(title="Left Camera"),
+            )
+            self.scene.add_recorder(
+                data_func=partial(_read_sensor_cam, self.right_cam),
+                rec_options=gs.recorders.MPLImagePlot(title="Right Camera"),
+            )
+
+        # Video recording must be set up before the scene is built.
+        record_video = env_cfg.get("record_video", {})
+        for cam_name, filename in record_video.items():
+            cam = getattr(self, cam_name)
+            reader = _read_scene_cam if isinstance(cam, Camera) else _read_sensor_cam
+            self.scene.add_recorder(
+                data_func=partial(reader, cam),
+                rec_options=gs.recorders.VideoFile(filename=filename),
+            )
+
+        self.scene.build(n_envs=env_cfg["num_envs"], env_spacing=(1.0, 1.0))
         # set pd gains (must be called after scene.build)
         self.robot.set_pd_gains()
 
@@ -123,149 +177,144 @@ class GraspEnv:
             self.episode_sums[name] = torch.zeros((self.num_envs,), device=gs.device, dtype=gs.tc_float)
 
         self.keypoints_offset = self.get_keypoint_offsets(batch_size=self.num_envs, device=self.device, unit_length=0.5)
-        # == init buffers ==
         self._init_buffers()
         self.reset()
 
     def _init_buffers(self) -> None:
         self.episode_length_buf = torch.zeros((self.num_envs,), device=gs.device, dtype=gs.tc_int)
-        self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=gs.device)
-        self.goal_pose = torch.zeros(self.num_envs, 7, device=gs.device)
+        self.reset_buf = torch.ones(self.num_envs, dtype=gs.tc_bool, device=gs.device)
+        self.goal_pose = torch.zeros(self.num_envs, 7, device=gs.device, dtype=gs.tc_float)
         self.extras = dict()
-        self.extras["observations"] = dict()
 
-    def reset_idx(self, envs_idx: torch.Tensor) -> None:
-        if len(envs_idx) == 0:
-            return
-        self.episode_length_buf[envs_idx] = 0
+    def _reset_idx(self, envs_idx=None) -> None:
+        """Reset specified environments.
 
-        # reset robot
+        Parameters
+        ----------
+        envs_idx : torch.Tensor or None
+            Boolean mask of shape (num_envs,) for selective reset, or None for full reset.
+        """
         self.robot.reset(envs_idx)
 
-        # reset object
-        num_reset = len(envs_idx)
-        random_x = torch.rand(num_reset, device=self.device) * 0.4 + 0.2  # 0.2 ~ 0.6
-        random_y = (torch.rand(num_reset, device=self.device) - 0.5) * 0.5  # -0.25 ~ 0.25
-        random_z = torch.ones(num_reset, device=self.device) * 0.025  # 0.15 ~ 0.15
+        # Generate random object state for all envs
+        random_x = torch.rand(self.num_envs, device=self.device) * 0.4 + 0.2
+        random_y = (torch.rand(self.num_envs, device=self.device) - 0.5) * 0.5
+        random_z = torch.full((self.num_envs,), 0.025, device=self.device)
         random_pos = torch.stack([random_x, random_y, random_z], dim=-1)
 
-        # downward facing quaternion to align with the hand
-        q_downward = torch.tensor([0.0, 1.0, 0.0, 0.0], device=self.device).repeat(num_reset, 1)
-        # randomly yaw the object
-        random_yaw = (torch.rand(num_reset, device=self.device) * 2 * math.pi - math.pi) * 0.25
+        q_downward = torch.tensor([0.0, 1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, -1)
+        random_yaw = (torch.rand(self.num_envs, device=self.device) * 2 * math.pi - math.pi) * 0.25
         q_yaw = torch.stack(
             [
                 torch.cos(random_yaw / 2),
-                torch.zeros(num_reset, device=self.device),
-                torch.zeros(num_reset, device=self.device),
+                torch.zeros(self.num_envs, device=self.device),
+                torch.zeros(self.num_envs, device=self.device),
                 torch.sin(random_yaw / 2),
             ],
             dim=-1,
         )
         goal_yaw = transform_quat_by_quat(q_yaw, q_downward)
+        goal_pose = torch.cat([random_pos, goal_yaw], dim=-1)
 
-        self.goal_pose[envs_idx] = torch.cat([random_pos, goal_yaw], dim=-1)
-        self.object.set_pos(random_pos, envs_idx=envs_idx)
-        self.object.set_quat(goal_yaw, envs_idx=envs_idx)
+        # Reset object - set_pos/set_quat with skip_forward, then FK runs once for everything
+        if envs_idx is None:
+            self.goal_pose.copy_(goal_pose)
+            self.object.set_pos(random_pos, skip_forward=True)
+            self.object.set_quat(goal_yaw, skip_forward=False)
+            self.episode_length_buf.zero_()
+            self.reset_buf.fill_(True)
+        else:
+            torch.where(envs_idx[:, None], goal_pose, self.goal_pose, out=self.goal_pose)
+            self.object.set_pos(random_pos, envs_idx=envs_idx, skip_forward=True)
+            self.object.set_quat(goal_yaw, envs_idx=envs_idx, skip_forward=False)
+            self.episode_length_buf.masked_fill_(envs_idx, 0)
+            self.reset_buf.masked_fill_(envs_idx, True)
 
-        # fill extras
+        # Invalidate camera caches after state change
+        self.left_cam._stale = True
+        self.right_cam._stale = True
+
+        # Fill extras
+        n_envs = envs_idx.sum() if envs_idx is not None else self.num_envs
         self.extras["episode"] = {}
-        for key in self.episode_sums.keys():
-            self.extras["episode"]["rew_" + key] = (
-                torch.mean(self.episode_sums[key][envs_idx]).item() / self.env_cfg["episode_length_s"]
-            )
-            self.episode_sums[key][envs_idx] = 0.0
+        for key, value in self.episode_sums.items():
+            if envs_idx is None:
+                mean = value.mean()
+            else:
+                mean = torch.where(n_envs > 0, value[envs_idx].sum() / n_envs, 0.0)
+            self.extras["episode"]["rew_" + key] = mean / self.env_cfg["episode_length_s"]
+            if envs_idx is None:
+                value.zero_()
+            else:
+                value.masked_fill_(envs_idx, 0.0)
 
-    def reset(self) -> tuple[torch.Tensor, dict]:
-        self.reset_buf[:] = True
-        self.reset_idx(torch.arange(self.num_envs, device=gs.device))
+    def reset(self) -> TensorDict:
+        self._reset_idx()
+        return self.get_observations()
 
-        obs, self.extras = self.get_observations()
-        return obs, self.extras
-
-    def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
-        # update time
-        self.episode_length_buf += 1
-
-        # apply action based on task
+    def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        # apply action
         actions = self.rescale_action(actions)
-
         self.robot.apply_action(actions, open_gripper=True)
         self.scene.step()
 
-        # check termination
-        env_reset_idx = self.is_episode_complete()
-        if len(env_reset_idx) > 0:
-            self.reset_idx(env_reset_idx)
+        # update time
+        self.episode_length_buf += 1
 
-        # compute reward based on task
-        reward = torch.zeros_like(self.reset_buf, device=gs.device, dtype=gs.tc_float)
+        # check termination (bool mask)
+        self.reset_buf = self.episode_length_buf > self.max_episode_length
+        self.reset_buf |= self.scene.rigid_solver.get_error_envs_mask()
+
+        # timeout for value bootstrapping (only true timeouts, not NaN errors)
+        self.extras["time_outs"] = (self.episode_length_buf > self.max_episode_length).to(dtype=gs.tc_float)
+
+        # compute reward before reset (reflects terminal state)
+        reward = torch.zeros(self.num_envs, device=gs.device, dtype=gs.tc_float)
         for name, reward_func in self.reward_functions.items():
             rew = reward_func() * self.reward_scales[name]
             reward += rew
             self.episode_sums[name] += rew
 
-        # get observations and fill extras
-        obs, self.extras = self.get_observations()
+        # soft-reset envs that need it
+        self._reset_idx(self.reset_buf)
 
-        return obs, reward, self.reset_buf, self.extras
+        return self.get_observations(), reward, self.reset_buf, self.extras
 
-    def get_privileged_observations(self) -> None:
-        return None
-
-    def is_episode_complete(self) -> torch.Tensor:
-        time_out_buf = self.episode_length_buf > self.max_episode_length
-
-        # check if the ee is in the valid position
-        self.reset_buf = time_out_buf
-
-        # fill time out buffer for reward/value bootstrapping
-        time_out_idx = (time_out_buf).nonzero(as_tuple=False).reshape((-1,))
-        self.extras["time_outs"] = torch.zeros_like(self.reset_buf, device=gs.device, dtype=gs.tc_float)
-        self.extras["time_outs"][time_out_idx] = 1.0
-        return self.reset_buf.nonzero(as_tuple=True)[0]
-
-    def get_observations(self) -> tuple[torch.Tensor, dict]:
+    def get_observations(self) -> TensorDict:
         # Current end-effector pose
         finger_pos, finger_quat = (
             self.robot.center_finger_pose[:, :3],
             self.robot.center_finger_pose[:, 3:7],
         )
         obj_pos, obj_quat = self.object.get_pos(), self.object.get_quat()
-        #
         obs_components = [
             finger_pos - obj_pos,  # 3D position difference
             finger_quat,  # current orientation (w, x, y, z)
             obj_pos,  # goal position
             obj_quat,  # goal orientation (w, x, y, z)
         ]
-        obs_tensor = torch.cat(obs_components, dim=-1)
-        self.extras["observations"]["critic"] = obs_tensor
-        return obs_tensor, self.extras
+        self.obs_buf = torch.cat(obs_components, dim=-1)
+        return TensorDict({"policy": self.obs_buf}, batch_size=[self.num_envs])
 
     def rescale_action(self, action: torch.Tensor) -> torch.Tensor:
-        rescaled_action = action * self.action_scales
-        return rescaled_action
+        return action * self.action_scales
 
     def get_stereo_rgb_images(self, normalize: bool = True) -> torch.Tensor:
-        rgb_left, _, _, _ = self.left_cam.render(rgb=True, depth=False, segmentation=False, normal=False)
-        rgb_right, _, _, _ = self.right_cam.render(rgb=True, depth=False, segmentation=False, normal=False)
+        rgb_left = self.left_cam.read().rgb  # (B, H, W, 3)
+        rgb_right = self.right_cam.read().rgb  # (B, H, W, 3)
 
-        # Convert to proper format
-        rgb_left = rgb_left.permute(0, 3, 1, 2)[:, :3]  # shape (B, 3, H, W)
-        rgb_right = rgb_right.permute(0, 3, 1, 2)[:, :3]  # shape (B, 3, H, W)
+        # Convert to (B, 3, H, W) float
+        rgb_left = rgb_left.permute(0, 3, 1, 2).float()
+        rgb_right = rgb_right.permute(0, 3, 1, 2).float()
 
-        # Normalize if requested
         if normalize:
-            rgb_left = torch.clamp(rgb_left, min=0.0, max=255.0) / 255.0
-            rgb_right = torch.clamp(rgb_right, min=0.0, max=255.0) / 255.0
+            rgb_left = rgb_left / 255.0
+            rgb_right = rgb_right / 255.0
 
-        # Concatenate left and right rgb images along channel dimension
-        # Result: [B, 6, H, W] where channel 0 is left rgb, channel 1 is right rgb
-        stereo_rgb = torch.cat([rgb_left, rgb_right], dim=1)
-        return stereo_rgb
+        # Concatenate left and right rgb images along channel dimension: [B, 6, H, W]
+        return torch.cat([rgb_left, rgb_right], dim=1)
 
-    # ------------ begin reward functions----------------
+    # Reward functions.
     def _reward_keypoints(self) -> torch.Tensor:
         keypoints_offset = self.keypoints_offset
         # there is a offset between the finger tip and the finger base frame
@@ -283,18 +332,13 @@ class GraspEnv:
         dist = torch.norm(finger_pos_keypoints - object_pos_keypoints, p=2, dim=-1).sum(-1)
         return torch.exp(-dist)
 
-    # ------------ end reward functions----------------
-
+    @staticmethod
     def _to_world_frame(
-        self,
         position: torch.Tensor,  # [B, 3]
         quaternion: torch.Tensor,  # [B, 4]
-        keypoints_offset: torch.Tensor,  # [B, 7, 3]
+        keypoints_offset: torch.Tensor,  # [B, K, 3]
     ) -> torch.Tensor:
-        world = torch.zeros_like(keypoints_offset)
-        for k in range(keypoints_offset.shape[1]):
-            world[:, k] = position + transform_by_quat(keypoints_offset[:, k], quaternion)
-        return world
+        return transform_by_trans_quat(keypoints_offset, position.unsqueeze(1), quaternion.unsqueeze(1))
 
     @staticmethod
     def get_keypoint_offsets(batch_size: int, device: str, unit_length: float = 0.5) -> torch.Tensor:
@@ -345,30 +389,29 @@ class GraspEnv:
             self.scene.step()
 
 
-## ------------ robot ----------------
 class Manipulator:
     def __init__(self, num_envs: int, scene: gs.Scene, args: dict, device: str = "cpu"):
-        # == set members ==
         self._device = device
         self._scene = scene
         self._num_envs = num_envs
         self._args = args
 
-        # == Genesis configurations ==
         material: gs.materials.Rigid = gs.materials.Rigid()
-        morph: gs.morphs.URDF = gs.morphs.MJCF(
+        morph: gs.morphs.MJCF = gs.morphs.MJCF(
             file="xml/franka_emika_panda/panda.xml",
             pos=(0.0, 0.0, 0.0),
             quat=(1.0, 0.0, 0.0, 0.0),
         )
-        self._robot_entity: gs.Entity = scene.add_entity(material=material, morph=morph)
+        self._robot_entity: gs.Entity = scene.add_entity(
+            morph=morph,
+            material=material,
+        )
 
         self._gripper_open_dof = 0.04
         self._gripper_close_dof = 0.00
 
-        self._ik_method: Literal["rel_pose", "dls"] = args["ik_method"]
+        self._ik_method: Literal["gs_ik", "dls_ik"] = args["ik_method"]
 
-        # == some buffer initialization ==
         self._init()
 
     def set_pd_gains(self):
@@ -388,7 +431,7 @@ class Manipulator:
         )
 
     def _init(self):
-        self._arm_dof_dim = self._robot_entity.n_dofs - 2  # total number of arm: joints
+        self._arm_dof_dim = self._robot_entity.n_dofs - 2  # total number of arm joints
         self._gripper_dim = 2  # number of gripper joints
 
         self._arm_dof_idx = torch.arange(self._arm_dof_dim, device=self._device)
@@ -405,32 +448,29 @@ class Manipulator:
         self._default_joint_angles = self._args["default_arm_dof"]
         if self._args["default_gripper_dof"] is not None:
             self._default_joint_angles += self._args["default_gripper_dof"]
+        self._init_qpos = torch.tensor(self._default_joint_angles, dtype=torch.float32, device=self._device)
+        # On MPS/Metal, batched linear algebra is extremely slow due to per-element kernel dispatch.
+        # Running the DLS solve on CPU is ~300x faster in that case.
+        self._dls_solve_on_cpu = self._device == "mps" or str(self._device).startswith("mps")
+        dls_lam_device = "cpu" if self._dls_solve_on_cpu else self._device
+        self._dls_lambda_matrix = (0.01**2) * torch.eye(6, device=dls_lam_device)
 
-    def reset(self, envs_idx: torch.IntTensor):
-        if len(envs_idx) == 0:
-            return
-        self.reset_home(envs_idx)
-
-    def reset_home(self, envs_idx: torch.IntTensor | None = None):
-        if envs_idx is None:
-            envs_idx = torch.arange(self._num_envs, device=self._device)
-        default_joint_angles = torch.tensor(
-            self._default_joint_angles, dtype=torch.float32, device=self._device
-        ).repeat(len(envs_idx), 1)
-        self._robot_entity.set_qpos(default_joint_angles, envs_idx=envs_idx)
+    def reset(self, envs_idx=None, skip_forward=True):
+        self._robot_entity.set_qpos(
+            self._init_qpos,
+            envs_idx=envs_idx,
+            zero_velocity=True,
+            skip_forward=skip_forward,
+        )
 
     def apply_action(self, action: torch.Tensor, open_gripper: bool) -> None:
-        """
-        Apply the action to the robot.
-        """
-        q_pos = self._robot_entity.get_qpos()
+        """Apply the action to the robot."""
         if self._ik_method == "gs_ik":
             q_pos = self._gs_ik(action)
         elif self._ik_method == "dls_ik":
             q_pos = self._dls_ik(action)
         else:
             raise ValueError(f"Invalid control mode: {self._ik_method}")
-        # set gripper to open
         if open_gripper:
             q_pos[:, self._fingers_dof] = self._gripper_open_dof
         else:
@@ -458,16 +498,20 @@ class Manipulator:
 
     def _dls_ik(self, action: torch.Tensor) -> torch.Tensor:
         """
-        Damped least squares inverse kinematics
+        Damped least squares inverse kinematics.
+
+        Solves (J @ J^T + lambda^2 * I) @ y = dx, then dq = J^T @ y.
         """
         delta_pose = action[:, :6]
-        lambda_val = 0.01
         jacobian = self._robot_entity.get_jacobian(link=self._ee_link)
-        jacobian_T = jacobian.transpose(1, 2)
-        lambda_matrix = (lambda_val**2) * torch.eye(n=jacobian.shape[1], device=self._device)
-        delta_joint_pos = (
-            jacobian_T @ torch.inverse(jacobian @ jacobian_T + lambda_matrix) @ delta_pose.unsqueeze(-1)
-        ).squeeze(-1)
+        if self._dls_solve_on_cpu:
+            jacobian = jacobian.cpu()
+            delta_pose = delta_pose.cpu()
+        A = torch.baddbmm(self._dls_lambda_matrix, jacobian, jacobian.mT)
+        y = torch.linalg.solve(A, delta_pose)
+        delta_joint_pos = (jacobian.mT @ y.unsqueeze(-1)).squeeze(-1)
+        if self._dls_solve_on_cpu:
+            delta_joint_pos = delta_joint_pos.to(self._device)
         return self._robot_entity.get_qpos() + delta_joint_pos
 
     def go_to_goal(self, goal_pose: torch.Tensor, open_gripper: bool = True):

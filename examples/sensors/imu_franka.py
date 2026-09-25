@@ -10,20 +10,17 @@ from genesis.recorders.plotters import IS_MATPLOTLIB_AVAILABLE, IS_PYQTGRAPH_AVA
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-dt", "--timestep", type=float, default=1e-2, help="Simulation time step")
-    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI", default=True)
-    parser.add_argument("-nv", "--no-vis", action="store_false", dest="vis", help="Disable visualization GUI")
-    parser.add_argument("-c", "--cpu", action="store_true", help="Use CPU instead of GPU")
+    parser.add_argument("--dt", type=float, default=1e-2, help="Simulation time step")
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     parser.add_argument("-t", "--seconds", type=float, default=3, help="Number of seconds to simulate")
     args = parser.parse_args()
 
-    ########################## init ##########################
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu)
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
-    ########################## create a scene ##########################
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=args.timestep,
+            dt=args.dt,
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=False,
@@ -39,7 +36,6 @@ def main():
         show_viewer=args.vis,
     )
 
-    ########################## entities ##########################
     scene.add_entity(gs.morphs.Plane())
     franka = scene.add_entity(
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
@@ -47,7 +43,6 @@ def main():
     end_effector = franka.get_link("hand")
     motors_dof = (0, 1, 2, 3, 4, 5, 6)
 
-    ########################## record sensor data ##########################
     imu = scene.add_sensor(
         gs.sensors.IMU(
             entity_idx=franka.idx,
@@ -62,8 +57,6 @@ def main():
             gyro_random_walk=(0.001, 0.001, 0.001),
             delay=0.01,
             jitter=0.01,
-            interpolate=True,
-            # visualize
             draw_debug=True,
         )
     )
@@ -82,25 +75,24 @@ def main():
             }
 
         if IS_PYQTGRAPH_AVAILABLE:
-            scene.start_recording(
+            scene.add_recorder(
                 data_func,
-                gs.recorders.PyQtLinePlot(title="IMU Ground Truth Data", labels=labels),
+                gs.recorders.PyQtLinePlot(labels=labels, title="IMU Ground Truth Data"),
             )
         elif IS_MATPLOTLIB_AVAILABLE:
             gs.logger.info("pyqtgraph not found, falling back to matplotlib.")
-            scene.start_recording(
+            scene.add_recorder(
                 data_func,
-                gs.recorders.MPLLinePlot(title="IMU Ground Truth Data", labels=labels),
+                gs.recorders.MPLLinePlot(labels=labels, title="IMU Ground Truth Data"),
             )
         else:
             print("matplotlib or pyqtgraph not found, skipping real-time plotting.")
 
-    scene.start_recording(
+    scene.add_recorder(
         data_func=lambda: imu.read()._asdict(),
-        rec_options=gs.recorders.NPZFile(filename="imu_data.npz"),
+        rec_options=gs.recorders.NPZFile(filename="out/imu_data.npz"),
     )
 
-    ########################## build ##########################
     scene.build()
 
     franka.set_dofs_kp(
@@ -119,7 +111,7 @@ def main():
     rate = np.deg2rad(2.0)
 
     try:
-        steps = int(args.seconds / args.timestep) if "PYTEST_VERSION" not in os.environ else 5
+        steps = int(args.seconds / args.dt) if "PYTEST_VERSION" not in os.environ else 5
         for i in tqdm(range(steps)):
             scene.step()
 

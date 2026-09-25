@@ -1,10 +1,12 @@
-import quadrants as qd
-import torch
+import numpy as np
 
 import genesis as gs
-from genesis.utils import array_class
-from genesis.utils.misc import DeprecationError
+import genesis.utils.geom as gu
+from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
 from genesis.repr_base import RBC
+from genesis.utils.misc import DeprecationError, tensor_to_array
+
+from .description import RigidJointDescription
 
 
 class RigidJoint(RBC):
@@ -12,34 +14,8 @@ class RigidJoint(RBC):
     Joint class for rigid body entities. Each RigidLink is connected to its parent link via a RigidJoint.
     """
 
-    def __init__(
-        self,
-        entity,
-        name,
-        idx,
-        link_idx,
-        q_start,
-        dof_start,
-        n_qs,
-        n_dofs,
-        type,
-        pos,
-        quat,
-        init_qpos,
-        sol_params,
-        dofs_motion_ang,
-        dofs_motion_vel,
-        dofs_limit,
-        dofs_invweight,
-        dofs_frictionloss,
-        dofs_stiffness,
-        dofs_damping,
-        dofs_armature,
-        dofs_act_gain,
-        dofs_act_bias,
-        dofs_force_range,
-    ):
-        self._name = name
+    def __init__(self, entity, idx, link_idx, q_start, dof_start, desc: RigidJointDescription):
+        self.desc: RigidJointDescription = desc
         self._entity = entity
         self._solver = entity.solver
 
@@ -48,25 +24,6 @@ class RigidJoint(RBC):
         self._link_idx = link_idx
         self._q_start = q_start
         self._dof_start = dof_start
-        self._n_qs = n_qs
-        self._n_dofs = n_dofs
-        self._type = type
-        self._pos = pos
-        self._quat = quat
-        self._init_qpos = init_qpos
-        self._sol_params = sol_params
-
-        self._dofs_motion_ang = dofs_motion_ang
-        self._dofs_motion_vel = dofs_motion_vel
-        self._dofs_limit = dofs_limit
-        self._dofs_invweight = dofs_invweight
-        self._dofs_frictionloss = dofs_frictionloss
-        self._dofs_stiffness = dofs_stiffness
-        self._dofs_damping = dofs_damping
-        self._dofs_armature = dofs_armature
-        self._dofs_act_gain = dofs_act_gain
-        self._dofs_act_bias = dofs_act_bias
-        self._dofs_force_range = dofs_force_range
 
     def __getattr__(self, name):
         # Must be implemented to throw deprecation warnings when accessing old properties, ignoring introspection
@@ -116,11 +73,7 @@ class RigidJoint(RBC):
         generalized coordinates corresponding to this joint (and all its ancestors in the kinematic tree). Physically,
         the anchor point is the "output" of the joint transmission, on which the child body is welded.
         """
-        tensor = torch.empty((self._solver._B, 3), dtype=gs.tc_float, device=gs.device)
-        _kernel_get_anchor_pos(self._idx, tensor, self._solver.joints_state)
-        if self._solver.n_envs == 0:
-            tensor = tensor[0]
-        return tensor
+        return self._solver.get_joints_anchor_pos(self._idx)[..., 0, :]
 
     @gs.assert_built
     def get_anchor_axis(self):
@@ -129,11 +82,7 @@ class RigidJoint(RBC):
 
         See `RigidJoint.get_anchor_pos` documentation for details about the notion on anchor point.
         """
-        tensor = torch.empty((self._solver._B, 3), dtype=gs.tc_float, device=gs.device)
-        _kernel_get_anchor_axis(self._idx, tensor, self._solver.joints_state)
-        if self._solver.n_envs == 0:
-            tensor = tensor[0]
-        return tensor
+        return self._solver.get_joints_anchor_axis(self._idx)[..., 0, :]
 
     def set_sol_params(self, sol_params):
         """
@@ -142,16 +91,14 @@ class RigidJoint(RBC):
         if self._solver.is_built:
             self._solver.set_sol_params(sol_params, joints_idx=self._idx, envs_idx=None)
         else:
-            self._sol_params = sol_params
+            self.desc.sol_params = sol_params
 
-    @property
-    def sol_params(self):
+    @gs.assert_built
+    def get_sol_params(self):
         """
-        Returns the solver parameters of the joint.
+        Get the solver parameters the simulation is currently using for this joint.
         """
-        if self._solver.is_built:
-            return self._solver.get_sol_params(joints_idx=self._idx, envs_idx=None)[..., 0, :]
-        return self._sol_params
+        return self._solver.get_sol_params(joints_idx=self._idx, envs_idx=None)[..., 0, :]
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -169,7 +116,7 @@ class RigidJoint(RBC):
         """
         Returns the name of the joint.
         """
-        return self._name
+        return self.desc.name
 
     @property
     def entity(self):
@@ -211,42 +158,42 @@ class RigidJoint(RBC):
         """
         Returns the initial joint position.
         """
-        return self._init_qpos
+        return self.desc.init_qpos
 
     @property
     def n_qs(self):
         """
         Returns the number of `q` (generalized coordinate) variables that the joint has.
         """
-        return self._n_qs
+        return self.desc.n_qs
 
     @property
     def n_dofs(self):
         """
         Returns the number of dofs that the joint has.
         """
-        return self._n_dofs
+        return self.desc.n_dofs
 
     @property
     def type(self):
         """
         Returns the type of the joint.
         """
-        return self._type
+        return self.desc.type
 
     @property
     def pos(self):
         """
         Returns the initial position of the joint in the world frame.
         """
-        return self._pos
+        return self.desc.pos
 
     @property
     def quat(self):
         """
         Returns the initial quaternion of the joint in the world frame.
         """
-        return self._quat
+        return self.desc.quat
 
     @property
     def q_start(self):
@@ -267,14 +214,14 @@ class RigidJoint(RBC):
         """
         Returns the ending index of the `q` variables of the joint in the rigid solver.
         """
-        return self._n_qs + self.q_start
+        return self.desc.n_qs + self.q_start
 
     @property
     def dof_end(self):
         """
         Returns the ending index of the dofs of the joint in the rigid solver.
         """
-        return self._n_dofs + self.dof_start
+        return self.desc.n_dofs + self.dof_start
 
     def _dof_idx(self):
         """
@@ -356,75 +303,78 @@ class RigidJoint(RBC):
         return list(range(self.q_start - self._entity.q_start, self.q_end - self._entity.q_start))
 
     @property
-    def dofs_motion_ang(self):
-        return self._dofs_motion_ang
+    def dofs_length(self):
+        """
+        Returns the characteristic length of each dof, used to put dof velocities on a common linear (m/s) scale.
+        Shape is (n_dofs,), or (n_dofs, n_envs) for a heterogeneous entity whose variants differ per environment.
 
-    @property
-    def dofs_motion_vel(self):
-        return self._dofs_motion_vel
+        A translational dof has length 1, so its velocity is already a linear speed. A rotational dof has the swept
+        radius of the body as its length, so that multiplying it by an angular velocity gives the linear surface speed
+        that rotation produces; this makes a single velocity tolerance meaningful across mixed dofs (e.g. for
+        hibernation). By default the radius is per-axis: the largest perpendicular distance from that dof's own
+        rotation axis (through the joint anchor) to the geometry. With MuJoCo compatibility it is instead MuJoCo's
+        dof_length: a single bounding-sphere radius about the body COM, shared by every rotational dof. For a
+        heterogeneous entity each variant's geoms are active in their own environments, so the radius is per env.
+        """
+        n_dofs = self.n_dofs
+        enable_heterogeneous = self._solver._enable_heterogeneous
+        n_envs = self._solver._B
+        shape = (n_dofs, n_envs) if enable_heterogeneous else (n_dofs,)
+        lengths = np.ones(shape, dtype=gs.np_float)
+        if n_dofs == 0:
+            return lengths
 
-    @property
-    def dofs_limit(self):
-        """
-        Returns the range limit of the dofs of the joint.
-        """
-        return self._dofs_limit
+        # A kinematic/avatar link has no collision geometry to size against.
+        if not isinstance(self.link, RigidLink):
+            return lengths
 
-    @property
-    def dofs_invweight(self):
-        """
-        Returns the invweight of the dofs of the joint.
-        """
-        return self._dofs_invweight
+        geoms = self.link.geoms
+        if not geoms:
+            return lengths
 
-    @property
-    def dofs_frictionloss(self):
-        """
-        Returns the frictionloss of the dofs of the joint.
-        """
-        return self._dofs_frictionloss
+        # Reduce a per-geom radius to the body radius: one value, or one per env (maxing over the geoms active in each
+        # env, which for a heterogeneous entity are only its own variant's).
+        masks = [None if geom.active_envs_mask is None else tensor_to_array(geom.active_envs_mask) for geom in geoms]
 
-    @property
-    def dofs_stiffness(self):
-        """
-        Returns the stiffness of the dofs of the joint.
-        """
-        return self._dofs_stiffness
+        def body_radius(per_geom_radius):
+            if not enable_heterogeneous:
+                return max(per_geom_radius)
+            radius = np.zeros(n_envs, dtype=gs.np_float)
+            for value, mask in zip(per_geom_radius, masks):
+                if mask is None:
+                    radius = np.maximum(radius, value)
+                else:
+                    radius[mask] = np.maximum(radius[mask], value)
+            return radius
 
-    @property
-    def dofs_damping(self):
-        """
-        Returns the damping of the dofs of the joint.
-        """
-        return self._dofs_damping
-
-    @property
-    def dofs_armature(self):
-        """
-        Returns the armature of the dofs of the joint.
-        """
-        return self._dofs_armature
-
-    @property
-    def dofs_act_gain(self):
-        """
-        Returns the actuator gain of the dofs of the joint.
-        """
-        return self._dofs_act_gain
-
-    @property
-    def dofs_act_bias(self):
-        """
-        Returns the actuator bias [constant, pos_coeff, vel_coeff] of the dofs of the joint.
-        """
-        return self._dofs_act_bias
-
-    @property
-    def dofs_force_range(self):
-        """
-        Returns the force range of the dofs of the joint.
-        """
-        return self._dofs_force_range
+        if self._solver._enable_mujoco_compatibility:
+            # MuJoCo's dof_length: one body radius shared by every rotational dof, the largest geom bounding radius
+            # plus its COM-to-geom-origin distance.
+            com = self.link.desc.inertial_pos
+            radii = [
+                np.linalg.norm(geom.init_verts, axis=1).max() + np.linalg.norm(com - geom.init_pos) for geom in geoms
+            ]
+            radius = body_radius(radii)
+            for i_d in range(n_dofs):
+                if np.linalg.norm(self.desc.dofs_motion_ang[i_d]) >= gs.EPS:  # rotational dof
+                    lengths[i_d] = radius
+        else:
+            # Per rotational dof, the largest perpendicular distance from its rotation axis (through the joint anchor)
+            # to the geometry. Tighter than one shared sphere, and correct for an offset hinge (where the body rotates
+            # about one end rather than its COM).
+            anchor = self.pos
+            verts = [
+                gu.transform_by_trans_quat(geom.init_verts, geom.init_pos, geom.init_quat) - anchor for geom in geoms
+            ]
+            for i_d in range(n_dofs):
+                axis = self.desc.dofs_motion_ang[i_d]
+                axis_norm = np.linalg.norm(axis)
+                if axis_norm < gs.EPS:
+                    continue  # translational dof, length stays 1
+                axis = axis / axis_norm
+                perp = [np.linalg.norm(v - np.outer(v @ axis, axis), axis=1).max() for v in verts]
+                lengths[i_d] = body_radius(perp)
+        return lengths
 
     @property
     def is_built(self):
@@ -438,22 +388,4 @@ class RigidJoint(RBC):
     # ------------------------------------------------------------------------------------
 
     def _repr_brief(self):
-        return f"{(self.__repr_name__())}: {self._uid}, name: '{self._name}', idx: {self._idx}, type: {self._type}"
-
-
-@qd.kernel
-def _kernel_get_anchor_pos(joint_idx: qd.i32, tensor: qd.types.ndarray(), joints_state: array_class.JointsState):
-    _B = joints_state.xanchor.shape[1]
-    for i_b in range(_B):
-        xpos = joints_state.xanchor[joint_idx, i_b]
-        for i in qd.static(range(3)):
-            tensor[i_b, i] = xpos[i]
-
-
-@qd.kernel
-def _kernel_get_anchor_axis(joint_idx: qd.i32, tensor: qd.types.ndarray(), joints_state: array_class.JointsState):
-    _B = joints_state.xaxis.shape[1]
-    for i_b in range(_B):
-        xaxis = joints_state.xaxis[joint_idx, i_b]
-        for i in qd.static(range(3)):
-            tensor[i_b, i] = xaxis[i]
+        return f"{(self.__repr_name__())}: {self._uid}, name: '{self.name}', idx: {self._idx}, type: {self.type}"

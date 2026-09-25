@@ -8,6 +8,27 @@ on:
   pull_request:
     branches:
       - main
+  # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
+  # completion of a pull request's workflow. A called workflow sees the event, runners and secrets of its caller, so
+  # 'workflow_run' below always means a call, which the image version job vets. Calls queue on the one runner labelled
+  # 'external' so that the other stays with this repository, and the benchmark upload stays gated on the default branch
+  # of this repository, which keeps the results of a caller out of the history compared against.
+  workflow_call:
+    inputs:
+      quadrants_run_id:
+        description: Run whose wheel artifacts hold the Quadrants to install in place of the release Genesis pins.
+        type: number
+      unit_tests_markexpr:
+        description: Marker expression selecting the unit tests to run, all of them by default.
+        type: string
+      unit_tests_modes:
+        description: JSON list of the array modes of the unit tests ('1' dynamic arrays, '0' fields), both by default.
+        type: string
+    secrets:
+      HF_TOKEN:
+        required: false
+      WANDB_API_KEY:
+        required: false
 
 concurrency:
   # Cancel all workflows that are still running if any when updating branches associated with PRs,
@@ -19,50 +40,157 @@ env:
   # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
   HF_HUB_DOWNLOAD_TIMEOUT: 60
-  GENESIS_IMAGE_VER: "1_22"
+  # Increment to switch new jobs to fresh caches before deleting the previous version.
+  CACHE_VERSION: "1"
   TIMEOUT_MINUTES: 60
   FORCE_COLOR: 1
   PY_COLORS: 1
   MADRONA_DISABLE_CUDA_HEAP_SIZE: "1"
 
+defaults:
+  run:
+    shell: bash --noprofile --norc -exo pipefail {0}
+
 jobs:
+  image-version:
+    name: production-image_version
+
+    runs-on: ubuntu-24.04
+
+    outputs:
+      GENESIS_IMAGE_VER: ${{ steps.resolve.outputs.ver }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # The revision holding this very workflow file: the commit of the event for a run of this repository, the
+          # commit of the default branch of Genesis whose file runs for a call.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+
+      # Another repository is served for the completion of the workflow of a pull request against its default branch
+      # alone. The event of a pull request from a fork names no base branch, so the pull request is asked of the API.
+      # The runner jobs follow through 'needs'.
+      - name: Check the calling workflow
+        if: github.repository != job.workflow_repository
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            if (run?.event !== 'pull_request') {
+              throw new Error(`Started by '${run?.event || context.eventName}', where a pull request alone is served.`);
+            }
+            // The pull requests of the calling repository, so one opened within a fork is never among them.
+            const { data } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              base: context.payload.repository.default_branch,
+              head: `${run.head_repository.owner.login}:${run.head_branch}`,
+            });
+            if (!data.some((pull) => pull.head.sha === run.head_sha)) {
+              throw new Error(`Commit ${run.head_sha} heads no pull request against the default branch.`);
+            }
+
+      # The pin lives in the tree rather than in this file so that a pull request bumping it is validated by its own
+      # run instead of only taking effect once merged.
+      - name: Resolve the pinned container image version
+        id: resolve
+        run: |
+          if [[ ! -f .github/genesis_image_ver ]] ; then
+            echo "::error::'.github/genesis_image_ver' is missing. Rebase onto the default branch."
+            exit 1
+          fi
+          VER=$(tr -d '[:space:]' < .github/genesis_image_ver)
+          if [[ ! "${VER}" =~ ^[0-9]+_[0-9]+[a-z0-9]*$ ]] ; then
+            echo "::error::'.github/genesis_image_ver' must hold a version of the form '<major>_<minor>[<suffix>]'."
+            exit 1
+          fi
+          echo "ver=${VER}" >> $GITHUB_OUTPUT
+
   unit-tests:
     name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
-    runs-on: [self-hosted, coreweave, genesis-world]
+    needs: image-version
+    # A call takes the one runner carrying the 'external' label, so calls queue there in order whichever repository
+    # they come from, and the other runner stays available to this repository. Which repositories reach these runners
+    # at all is decided by their runner group.
+    runs-on: >-
+      ${{ github.event_name == 'workflow_run'
+          && fromJSON('["self-hosted", "coreweave", "genesis-world", "external"]')
+          || fromJSON('["self-hosted", "coreweave", "genesis-world"]') }}
 
     strategy:
       fail-fast: true
       max-parallel: 1
       matrix:
-        GS_ENABLE_NDARRAY: ["0", "1"]
+        # Run ndarray mode first, because it is twice faster.
+        GS_ENABLE_NDARRAY: ${{ fromJSON(inputs.unit_tests_modes || '["1", "0"]') }}
 
     env:
+      GENESIS_IMAGE_VER: ${{ needs.image-version.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
+      # A push to the default branch was validated by its pull request already.
+      HAS_UNIT_TESTS: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_run' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # See the image version job.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+
+      # Every wheel artifact of the run, whichever Python and platform it was built for.
+      - name: Download the Quadrants wheels
+        if: inputs.quadrants_run_id != 0
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*wheel*'
+          merge-multiple: true
+          run-id: ${{ inputs.quadrants_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: quadrants_wheels
+      # 'production_build.sh' installs the release of Quadrants that Genesis pins. Through the overrides file and the
+      # wheel directory that 'uv' reads from the environment (see the Slurm job), the version of the wheels takes the
+      # place of that single requirement, served by the wheel fitting the interpreter and platform of the environment
+      # and refused when none does. Every other dependency stays resolved from the metadata of Genesis.
+      - name: Write the dependency override
+        if: inputs.quadrants_run_id != 0
+        run: |
+          WHEELS=(quadrants_wheels/*.whl)
+          if [[ ! -f "${WHEELS[0]}" ]] ; then
+            echo "::error::Run ${{ inputs.quadrants_run_id }} holds no wheel."
+            exit 1
+          fi
+          echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
 
       - name: Spawn Slurm job
-        if: github.event_name == 'pull_request'
+        if: env.HAS_UNIT_TESTS == 'true'
         run: |
-          set -e
-
           SLURM_JOB_NAME="$(uuidgen)_$(date +%Y%m%d_%H%M%S)"
           CONTAINER_NAME="${SLURM_JOB_NAME}"
           SRUN_CONTAINER_OPTS="\
                --container-name=${CONTAINER_NAME} \
                --container-mounts=\
           ${{ github.workspace }}:/root/workspace,\
-          ${HOME}/.cache/uv:/root/.cache/uv,\
-          ${HOME}/.cache/genesis:/root/.cache/genesis,\
-          ${HOME}/.cache/huggingface:/root/.cache/huggingface \
+          ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
+          ${HOME}/.cache/${CACHE_VERSION}/genesis:/root/.cache/genesis,\
+          ${HOME}/.cache/${CACHE_VERSION}/quadrants:/root/.cache/quadrants,\
+          ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
           SLURM_ENV_VARS="NVIDIA_DRIVER_CAPABILITIES=all,BASH_ENV=/root/.bashrc,HF_TOKEN,GS_ENABLE_NDARRAY=${GS_ENABLE_NDARRAY}"
+          if ${{ inputs.quadrants_run_id != 0 }} ; then
+            SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
+            SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
+          fi
 
-          mkdir -p ${HOME}/.cache/uv ${HOME}/.cache/genesis ${HOME}/.cache/huggingface
+          mkdir -p \
+            "${HOME}/.cache/${CACHE_VERSION}/uv" \
+            "${HOME}/.cache/${CACHE_VERSION}/genesis" \
+            "${HOME}/.cache/${CACHE_VERSION}/quadrants" \
+            "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
@@ -83,13 +211,13 @@ jobs:
           echo "SLURM_JOB_NAME=${SLURM_JOB_NAME}" >> $GITHUB_ENV
           echo "SRUN_COMMON=${SRUN_COMMON}" >> "$GITHUB_ENV"
       - name: Initialize Python virtual env
-        if: github.event_name == 'pull_request'
+        if: env.HAS_UNIT_TESTS == 'true'
         run: srun ${SRUN_COMMON} bash .github/workflows/scripts/production_build.sh
       - name: Run unit tests
-        if: github.event_name == 'pull_request'
+        if: env.HAS_UNIT_TESTS == 'true'
         run: |
           srun ${SRUN_COMMON} bash -s <<'EOF'
-            set -e
+            set -ex
             source /venv/bin/activate
 
             # sudo apt update
@@ -98,7 +226,9 @@ jobs:
             # tmate -S /tmp/tmate.sock wait tmate-ready
             # tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
 
-            pytest -v -ra --backend gpu --dev --forked ./tests
+            # Given no expression, the selection of 'pyproject.toml' stays in charge.
+            pytest -v -ra --backend gpu --dev --forked ./tests \
+                ${{ inputs.unit_tests_markexpr && format('-m "{0}"', inputs.unit_tests_markexpr) }}
 
             # tmate -S /tmp/tmate.sock wait tmate-exit
           EOF
@@ -112,8 +242,12 @@ jobs:
   benchmarks:
     name: production-benchmarks-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
-    needs: unit-tests
-    runs-on: [self-hosted, coreweave, genesis-world]
+    needs: [image-version, unit-tests]
+    # See the unit tests job.
+    runs-on: >-
+      ${{ github.event_name == 'workflow_run'
+          && fromJSON('["self-hosted", "coreweave", "genesis-world", "external"]')
+          || fromJSON('["self-hosted", "coreweave", "genesis-world"]') }}
 
     strategy:
       matrix:
@@ -122,15 +256,39 @@ jobs:
     env:
       # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+      GENESIS_IMAGE_VER: ${{ needs.image-version.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          # See the image version job.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           # Checkout full history is required to shallow cloning while mark HEAD as "grafted". This breaks remote
           # tracking thereby making it impossible to detect whether a commit is contained in upstream main.
           fetch-depth: 0
+
+      # See the unit tests job for the mechanism.
+      - name: Download the Quadrants wheels
+        if: inputs.quadrants_run_id != 0
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*wheel*'
+          merge-multiple: true
+          run-id: ${{ inputs.quadrants_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: quadrants_wheels
+      - name: Write the dependency override
+        if: inputs.quadrants_run_id != 0
+        run: |
+          WHEELS=(quadrants_wheels/*.whl)
+          if [[ ! -f "${WHEELS[0]}" ]] ; then
+            echo "::error::Run ${{ inputs.quadrants_run_id }} holds no wheel."
+            exit 1
+          fi
+          echo "quadrants==$(basename "${WHEELS[0]}" | cut -d- -f2)" > overrides.txt
 
       - name: Spawn Slurm job
         run: |
@@ -141,15 +299,20 @@ jobs:
                --container-mounts=\
           /mnt/data/artifacts:/mnt/data/artifacts,\
           ${{ github.workspace }}:/root/workspace,\
-          ${HOME}/.cache/uv:/root/.cache/uv,\
-          ${HOME}/.cache/genesis:/root/.cache/genesis,\
-          ${HOME}/.cache/huggingface:/root/.cache/huggingface \
+          ${HOME}/.cache/${CACHE_VERSION}/uv:/root/.cache/uv,\
+          ${HOME}/.cache/${CACHE_VERSION}/huggingface:/root/.cache/huggingface \
                --no-container-mount-home \
                --container-workdir=/root/workspace"
           SLURM_ENV_VARS="NVIDIA_DRIVER_CAPABILITIES=all,BASH_ENV=/root/.bashrc,HF_TOKEN,GS_ENABLE_NDARRAY=${GS_ENABLE_NDARRAY}"
-          if [[ "${{ github.repository }}" == 'Genesis-Embodied-AI/Genesis' && "${{ github.ref }}" == 'refs/heads/main' ]] ; then
+          if ${{ inputs.quadrants_run_id != 0 }} ; then
+            SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_OVERRIDE=/root/workspace/overrides.txt"
+            SLURM_ENV_VARS="${SLURM_ENV_VARS},UV_FIND_LINKS=/root/workspace/quadrants_wheels"
+          fi
+          if [[ "${{ github.repository }}" == 'Genesis-Embodied-AI/genesis-world' && "${{ github.ref }}" == 'refs/heads/main' ]] ; then
             SLURM_ENV_VARS="${SLURM_ENV_VARS},WANDB_API_KEY"
           fi
+
+          mkdir -p "${HOME}/.cache/${CACHE_VERSION}/uv" "${HOME}/.cache/${CACHE_VERSION}/huggingface"
 
           JOBID_FIFO="${{ github.workspace }}/.slurm_job_id_fifo"
           [[ -e "$JOBID_FIFO" ]] && rm -f "$JOBID_FIFO"
@@ -174,14 +337,15 @@ jobs:
       - name: Run benchmarks
         run: |
           srun ${SRUN_COMMON} bash -s <<'EOF'
-            set -e
+            set -ex
             source /venv/bin/activate
 
             pytest --mem-monitoring-filepath "/mnt/data/artifacts/mem_test_${SLURM_JOB_NAME}.txt" \
                    --print -m "benchmarks" ./tests
 
             cat speed_test*.txt > "/mnt/data/artifacts/speed_test_${SLURM_JOB_NAME}.txt"
-            if [ -n "${WANDB_API_KEY}" ] ; then {
+            if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ] ; then (
+              ls -lh /mnt/data/artifacts/*.txt
               python tests/upload_benchmarks_table_to_wandb.py \
                   --in-file "/mnt/data/artifacts/mem_test_${SLURM_JOB_NAME}.txt" \
                   --project genesis-benchmarks-2 \
@@ -192,7 +356,9 @@ jobs:
                   --project genesis-benchmarks-2 \
                   --metrics compile_time runtime_fps realtime_factor \
                   --run-prefix speed
-            } fi
+            ) else (
+              echo "Not on main branch => skipping wandb uploads"
+            ) fi
           EOF
       - name: Kill Slurm job
         if: always()

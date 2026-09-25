@@ -285,9 +285,7 @@ class Alarm:
         wandb_parser: WandbParser,
     ) -> dict[str, dict[frozendict[str, str], dict[str, float | int]]]:
         api = wandb.Api()
-        runs_iter: Iterable[Run] = api.runs(
-            f"{self.wandb_entity}/{wandb_parser.project}", order="-created_at", lazy=False
-        )
+        runs_iter: Iterable[Run] = api.runs(f"{self.wandb_entity}/{wandb_parser.project}", order="-created_at")
 
         commit_hashes = set()
         records_by_commit_hash: dict[str, dict[frozendict[str, str], dict[str, float | int]]] = defaultdict(

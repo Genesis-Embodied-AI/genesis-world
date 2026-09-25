@@ -26,9 +26,7 @@ class PBDBaseEntity(ParticleEntity):
 
     @qd.kernel
     def _kernel_add_uvs_and_faces_to_solver(
-        self,
-        uvs: qd.types.ndarray(element_dim=1),
-        faces: qd.types.ndarray(element_dim=1),
+        self, uvs: qd.types.ndarray(element_dim=1), faces: qd.types.ndarray(element_dim=1)
     ):
         # Copy UVs to solver's global UV buffer (skip if no UVs provided)
         n_uvs = uvs.shape[0]
@@ -101,7 +99,7 @@ class PBDBaseEntity(ParticleEntity):
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         self._sim._coupler.kernel_attach_pbd_to_rigid_link(
-            particles_idx, envs_idx, link_idx, self._scene.rigid_solver.links_state
+            particles_idx, envs_idx, link_idx, self._scene.rigid_solver.dyn_state.links
         )
 
     @gs.assert_built
@@ -266,9 +264,16 @@ class PBDTetEntity(PBDBaseEntity):
         Applies transformation from the morph, stores mesh vertices and faces, and performs remeshing based on the
         particle size.
         """
-        # We don't use ParticleEntity.sample() because we need to maintain the remeshed self._mesh as well
-        pos = np.asarray(self._morph.pos, dtype=gs.np_float)
-        quat = np.asarray(self._morph.quat, dtype=gs.np_float)
+        # We don't use ParticleEntity.sample() because we need to maintain the remeshed self._mesh as well. The morph
+        # pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
+        pos, quat = gu.transform_pos_quat_by_trans_quat(
+            np.array(self._morph.offset_pos, dtype=gs.np_float),
+            np.array(self._morph.offset_quat, dtype=gs.np_float),
+            np.array(self._morph.pos, dtype=gs.np_float),
+            np.array(self._morph.quat, dtype=gs.np_float),
+        )
+        # Composed world placement, used as the origin for the particle offsets in the subclasses' 'sample'.
+        self._sampled_pos = pos
         self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
         self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
         self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
@@ -378,7 +383,7 @@ class PBD2DEntity(PBDTetEntity):
         self._mass = self._vmesh.area * self.material.rho
 
         self._particles = np.asarray(self._mesh.verts, dtype=gs.np_float)
-        self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(self._morph.pos)
+        self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(self._sampled_pos)
 
         self._edges = np.asarray(self._mesh.get_unique_edges(), dtype=gs.np_int)
 
@@ -401,9 +406,7 @@ class PBD2DEntity(PBDTetEntity):
     def _add_particles_to_solver(self):
         super()._add_particles_to_solver()
 
-        self._kernel_add_particles_air_resistance_to_solver(
-            f=self._scene.sim.cur_substep_local,
-        )
+        self._kernel_add_particles_air_resistance_to_solver(f=self._scene.sim.cur_substep_local)
 
         self._kernel_add_inner_edges_to_solver(
             f=self._scene.sim.cur_substep_local,
@@ -419,10 +422,7 @@ class PBD2DEntity(PBDTetEntity):
 
     @qd.kernel
     def _kernel_add_inner_edges_to_solver(
-        self,
-        f: qd.i32,
-        inner_edges: qd.types.ndarray(),
-        inner_edges_len_rest: qd.types.ndarray(),
+        self, f: qd.i32, inner_edges: qd.types.ndarray(), inner_edges_len_rest: qd.types.ndarray()
     ):
         for i_ie_ in range(self.n_inner_edges):
             i_ie = i_ie_ + self._inner_edge_start
@@ -518,7 +518,7 @@ class PBD3DEntity(PBDTetEntity):
         tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
         particles, elems, *_ = self._mesh.tetrahedralize(tet_cfg)
         self._particles = particles.astype(gs.np_float, copy=False)
-        self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(self._morph.pos)
+        self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(self._sampled_pos)
 
         self._elems = elems.astype(gs.np_int, copy=False)
         self._edges = np.array(
@@ -547,11 +547,7 @@ class PBD3DEntity(PBDTetEntity):
         self._kernel_add_elems_to_solver(elems=self._elems, elems_vol_rest=self._elems_vol_rest)
 
     @qd.kernel
-    def _kernel_add_elems_to_solver(
-        self,
-        elems: qd.types.ndarray(),
-        elems_vol_rest: qd.types.ndarray(),
-    ):
+    def _kernel_add_elems_to_solver(self, elems: qd.types.ndarray(), elems_vol_rest: qd.types.ndarray()):
         for i_el_ in range(self.n_elems):
             i_el = i_el_ + self._elem_start
             self.solver.elems_info[i_el].volume_compliance = self.material.volume_compliance
@@ -621,12 +617,7 @@ class PBDParticleEntity(PBDBaseEntity):
 
     @qd.kernel
     def _kernel_add_particles_to_solver(
-        self,
-        f: qd.i32,
-        particles: qd.types.ndarray(),
-        rho: qd.float32,
-        material_type: qd.i32,
-        active: qd.i32,
+        self, f: qd.i32, particles: qd.types.ndarray(), rho: qd.float32, material_type: qd.i32, active: qd.i32
     ):
         for i_p_ in range(self._n_particles):
             i_p = i_p_ + self._particle_start
@@ -699,12 +690,7 @@ class PBDFreeParticleEntity(PBDBaseEntity):
 
     @qd.kernel
     def _kernel_add_particles_to_solver(
-        self,
-        f: qd.i32,
-        particles: qd.types.ndarray(),
-        rho: qd.float32,
-        material_type: qd.i32,
-        active: qd.i32,
+        self, f: qd.i32, particles: qd.types.ndarray(), rho: qd.float32, material_type: qd.i32, active: qd.i32
     ):
         for i_p_ in range(self.n_particles):
             i_p = i_p_ + self._particle_start

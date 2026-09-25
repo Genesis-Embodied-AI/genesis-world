@@ -1,4 +1,6 @@
-import inspect
+import collections
+import contextlib
+import math
 import os
 import time
 
@@ -7,6 +9,7 @@ import quadrants as qd
 from PIL import Image
 
 import genesis as gs
+from genesis.utils.misc import get_entry_point_name
 
 
 def animate(imgs, filename=None, fps=60):
@@ -15,7 +18,8 @@ def animate(imgs, filename=None, fps=60):
 
     Args:
         imgs (list): List of input images.
-        filename (str, optional): Name of the output video file. If not provided, the name will be default to the name of the caller file, with a timestamp and '.mp4' extension.
+        filename (str, optional): Name of the output video file. If not provided, the name will default to the name
+            of the script the process was launched from, with a timestamp and '.mp4' extension.
     """
     assert isinstance(imgs, list)
     if len(imgs) == 0:
@@ -23,9 +27,7 @@ def animate(imgs, filename=None, fps=60):
         return
 
     if filename is None:
-        caller_file = inspect.stack()[-1].filename
-        # caller file + timestamp + .mp4
-        filename = os.path.splitext(os.path.basename(caller_file))[0] + f"_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        filename = f"{get_entry_point_name()}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
     os.makedirs(os.path.abspath(os.path.dirname(filename)), exist_ok=True)
 
     gs.logger.info(f'Saving video to ~<"{filename}">~...')
@@ -163,67 +165,138 @@ def create_timer(name=None, new=False, level=0, qd_sync=False, skip_first_call=F
 
 
 class Rate:
+    """Fixed-frequency loop limiter: call ``sleep`` once per iteration to hold the loop at ``rate`` Hz.
+
+    Each wake-up is scheduled against an ideal clock advanced by exactly one period per tick, rather than from the
+    actual (over-slept) wake time, so ``time.sleep`` overshoot does not accumulate and the average rate stays on target.
+    When an iteration runs longer than one period the limiter does not sleep and resets its schedule from the current
+    time, so a loop that cannot keep up simply runs as fast as it can without building a sleep debt to burn off
+    afterwards.
+    """
+
     def __init__(self, rate):
         self.rate = rate
-        self.last_time = time.perf_counter()
+        self.period = 1.0 / rate
+        self.next_time = time.perf_counter() + self.period
 
     def sleep(self):
-        current_time = time.perf_counter()
-        sleep_duration = 1.0 / self.rate - (current_time - self.last_time)
+        now = time.perf_counter()
+        sleep_duration = self.next_time - now
         if sleep_duration > 0:
             time.sleep(sleep_duration)
-        self.last_time = time.perf_counter()
+            self.next_time += self.period
+        else:
+            self.next_time = now + self.period
 
 
 class FPSTracker:
+    """Times the phases of a stepped process and logs its achieved step rate.
+
+    A step opens with `start`, its phases run under `phase`, named freely, or between `start_phase` and the next
+    `start_phase` or `stop_phase` where a `with` block would indent too much, and `step` closes it: the wall time of
+    every phase timed in the step and of the whole step, under the name `total`, is kept, and `timings` averages the
+    latest `timings_window` of them. When `log` is set, the step rate is logged over fixed wall-clock windows: the
+    per-window rate is the actual step count divided by the actual window duration (so it is phase-stable, unlike
+    dividing a raw count by a smoothed time), then lightly EMA-smoothed for readability.
+    """
+
     def __init__(
-        self, n_envs, alpha=0.95, minimum_interval_seconds: float | None = 0.05, outlier_threshold: float = 1.5
+        self,
+        n_envs,
+        alpha=0.95,
+        minimum_interval_seconds: float | None = 0.05,
+        timings_window: int = 1,
+        log: bool = True,
     ):
-        self.last_time = None
         self.n_envs = n_envs
-        self.dt_ema = None
         self.alpha = alpha
         self.minimum_interval_seconds = minimum_interval_seconds
-        self.outlier_threshold = outlier_threshold
+        self.log = log
+        self.window_start = None
         self.steps_since_last_print: int = 0
+        self.fps_ema = None
         self.total_fps = 0.0
+        self._step_start = None
+        self._phase_open: tuple[str, float] | None = None
+        self._phases_time: dict[str, float] = {}
+        self._timings_history: collections.deque[dict[str, float]] = collections.deque(maxlen=timings_window)
 
-    def step(self, current_time: float | None = None) -> float | None:
-        if not current_time:
+    def start(self):
+        """Open a step: the phases timed from here on belong to it."""
+        self._step_start = time.perf_counter()
+        self._phase_open = None
+        self._phases_time.clear()
+
+    def start_phase(self, phase: str):
+        """Time the code that follows as part of the phase, until the next `start_phase` or `stop_phase`, which lets
+        a loop time each of its iterations under its own phase without a `with` block. A phase running from a previous
+        `start_phase` stops here."""
+        self.stop_phase()
+        self._phase_open = (phase, time.perf_counter())
+
+    def stop_phase(self):
+        """Stop the phase `start_phase` opened, adding its time to what the phase already took in this step."""
+        if self._phase_open is not None:
+            phase, tic = self._phase_open
+            self._phases_time[phase] = self._phases_time.get(phase, 0.0) + time.perf_counter() - tic
+            self._phase_open = None
+
+    @contextlib.contextmanager
+    def phase(self, phase: str):
+        """Time the enclosed code as part of the phase of the current step, adding to the time the phase already
+        took in this step. Blocks nest, each adding to its own phase."""
+        tic = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._phases_time[phase] = self._phases_time.get(phase, 0.0) + time.perf_counter() - tic
+
+    def step(self, count: bool = True, current_time: float | None = None) -> float | None:
+        """Close the step and keep its timings. A counted step enters the step rate, which is logged once the
+        wall-clock window is long enough for a stable estimate, and returned then. current_time stands in for the
+        clock, for a step whose phases were not timed."""
+        self.stop_phase()
+        if current_time is None:
             current_time = time.perf_counter()
+        if self._step_start is not None:
+            self._phases_time["total"] = current_time - self._step_start
+        self._timings_history.append(dict(self._phases_time))
+        if not self.log or not count:
+            return None
 
-        if self.last_time:
-            dt = current_time - self.last_time
-        else:
-            self.last_time = current_time
+        if self.window_start is None:
+            self.window_start = current_time
             return None
 
         self.steps_since_last_print += 1
 
-        # Skip if update is too soon
-        if self.minimum_interval_seconds and current_time - self.last_time < self.minimum_interval_seconds:
+        # Accumulate until the window is long enough to give a stable estimate.
+        window_dt = current_time - self.window_start
+        if self.minimum_interval_seconds and window_dt < self.minimum_interval_seconds:
             return None
 
-        # Outlier rejection
-        if self.dt_ema is not None:
-            if dt > self.dt_ema * self.outlier_threshold or dt * self.outlier_threshold < self.dt_ema:
-                self.dt_ema = dt
+        window_fps = self.steps_since_last_print / window_dt
+        self.fps_ema = window_fps if self.fps_ema is None else self.alpha * self.fps_ema + (1 - self.alpha) * window_fps
 
-        # EMA update
-        if self.dt_ema:
-            self.dt_ema = self.alpha * self.dt_ema + (1 - self.alpha) * dt
-        else:
-            self.dt_ema = dt
-
-        fps = 1 / self.dt_ema * self.steps_since_last_print
         if self.n_envs > 0:
-            self.total_fps = fps * self.n_envs
+            self.total_fps = self.fps_ema * self.n_envs
             gs.logger.info(
-                f"Running at ~<{self.total_fps:,.2f}>~ FPS (~<{fps:.2f}>~ FPS per env, ~<{self.n_envs}>~ envs)."
+                f"Running at ~<{self.total_fps:,.2f}>~ FPS (~<{self.fps_ema:.2f}>~ FPS per env, ~<{self.n_envs}>~ envs)."
             )
         else:
-            self.total_fps = fps
-            gs.logger.info(f"Running at ~<{fps:.2f}>~ FPS.")
-        self.last_time = current_time
+            self.total_fps = self.fps_ema
+            gs.logger.info(f"Running at ~<{self.fps_ema:.2f}>~ FPS.")
+
+        self.window_start = current_time
         self.steps_since_last_print = 0
         return self.total_fps
+
+    @property
+    def timings(self) -> dict[str, float]:
+        """Wall time in seconds of every phase timed in the latest `timings_window` steps, averaged over the steps that
+        timed it."""
+        phases_time = collections.defaultdict(list)
+        for step_phases_time in self._timings_history:
+            for phase, phase_time in step_phases_time.items():
+                phases_time[phase].append(phase_time)
+        return {phase: sum(phase_times) / len(phase_times) for phase, phase_times in phases_time.items()}

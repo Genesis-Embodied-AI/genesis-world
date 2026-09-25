@@ -12,6 +12,7 @@ from genesis.ext.isaacgym import terrain_utils as isaacgym_terrain_utils
 from genesis.options.morphs import Terrain
 
 from .mesh import get_gnd_path
+from .misc import tensor_to_array
 
 
 def parse_terrain(morph: Terrain, surface):
@@ -167,6 +168,7 @@ def parse_terrain(morph: Terrain, surface):
                 pkl.dump(heightfield, file)
 
     need_uvs = getattr(surface, "diffuse_texture", None) is not None
+    heightfield = heightfield.astype(gs.np_float)
     tmesh, sdf_tmesh = convert_heightfield_to_watertight_trimesh(
         heightfield,
         horizontal_scale=morph.horizontal_scale,
@@ -283,10 +285,13 @@ def convert_heightfield_to_watertight_trimesh(
         ind3 = ind2 + 1
         start = 2 * i * (num_cols - 1)
         stop = start + 2 * (num_cols - 1)
+        # Triangulate along the diagonal (i+1,j)<->(i,j+1) to match the collision mesh built by func_contact_mpr_terrain
+        # in narrowphase.py. The opposite diagonal would surface up to one vertical_scale of mismatch between the
+        # rendered terrain and the contact surface.
         triangles_top[start:stop:2, 0] = ind0
-        triangles_top[start:stop:2, 1] = ind3
+        triangles_top[start:stop:2, 1] = ind2
         triangles_top[start:stop:2, 2] = ind1
-        triangles_top[start + 1 : stop : 2, 0] = ind0
+        triangles_top[start + 1 : stop : 2, 0] = ind1
         triangles_top[start + 1 : stop : 2, 1] = ind2
         triangles_top[start + 1 : stop : 2, 2] = ind3
 

@@ -14,18 +14,21 @@ import genesis as gs
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument("-c", "--cpu", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
+    parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     args = parser.parse_args()
 
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu)
+    gs.init(backend=gs.gpu if args.gpu else gs.cpu)
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(dt=2e-3, substeps=20),
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=20,
+        ),
         mpm_options=gs.options.MPMOptions(
+            grid_density=64,
             lower_bound=(-1.0, -1.0, 0.0),
             upper_bound=(1.0, 1.0, 1.5),
-            grid_density=64,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, 0.0, 0.8),
@@ -41,8 +44,15 @@ def main():
     )
 
     mpm_cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(E=5e4, nu=0.3, rho=1000),
-        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.35), size=(0.15, 0.15, 0.15)),
+        material=gs.materials.MPM.Elastic(
+            E=5e4,
+            nu=0.3,
+            rho=1000,
+        ),
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.35),
+            size=(0.15, 0.15, 0.15),
+        ),
     )
 
     scene.build()

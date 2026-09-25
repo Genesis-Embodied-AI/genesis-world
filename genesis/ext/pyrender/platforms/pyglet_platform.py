@@ -2,6 +2,7 @@ from ..constants import TARGET_OPEN_GL_MAJOR, TARGET_OPEN_GL_MINOR, MIN_OPEN_GL_
 from .base import Platform
 
 import OpenGL
+import pyglet
 
 
 __all__ = ["PygletPlatform"]
@@ -12,13 +13,10 @@ class PygletPlatform(Platform):
     an OpenGL context.
     """
 
-    def __init__(self, viewport_width, viewport_height):
-        super().__init__(viewport_width, viewport_height)
+    def __init__(self):
         self._window = None
 
     def init_context(self):
-        import pyglet
-
         pyglet.options["shadow_window"] = False
 
         try:
@@ -73,11 +71,23 @@ class PygletPlatform(Platform):
 
     def make_uncurrent(self):
         try:
-            import pyglet
-
             pyglet.gl.xlib.glx.glXMakeContextCurrent(self._window.context.x_display, 0, 0, None)
         except Exception:
             pass
+        # The glx call above is a no-op off X11, so explicitly clear pyglet's current-context bookkeeping too. This
+        # keeps it accurate on every platform (e.g. Cocoa), so 'save_current_context' never mistakes this renderer's
+        # own context for an external one to restore, and the next 'make_current' rebinds rather than short-circuiting.
+        # Clear gl_info in lockstep, exactly as pyglet's own Context.set_current and Context.destroy do. Otherwise
+        # gl_info.have_context() stays True while no context is current, and pyglet's Windows pixel-format matching
+        # then takes the WGL ARB path, whose extension functions resolve only with a context current and otherwise
+        # raise "wglChoosePixelFormatARB before GL context created".
+        pyglet.gl.current_context = None
+        pyglet.gl.gl_info.remove_active_context()
+
+    def save_current_context(self):
+        # 'set_current' is a bound method of the current Context, i.e. a self-contained zero-argument restore callable.
+        context = pyglet.gl.current_context
+        return context.set_current if context is not None else None
 
     def delete_context(self):
         if self._window is not None:
@@ -91,6 +101,3 @@ class PygletPlatform(Platform):
             self._window = None
             OpenGL.contextdata.cleanupContext(cid)
             del cid
-
-    def supports_framebuffers(self):
-        return True

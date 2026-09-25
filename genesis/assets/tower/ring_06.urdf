@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="ring_06">
+  <link name="world"/>
+  <joint name="world_to_ring_06" type="floating">
+    <parent link="world"/>
+    <child link="ring_06"/>
+  </joint>
+  <link name="ring_06">
+    <inertial>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <mesh filename="ring_06.glb" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="ring_06_coll.glb" scale="1 1 1"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

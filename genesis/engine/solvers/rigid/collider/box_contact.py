@@ -3,6 +3,7 @@ Box collision contact detection functions.
 
 This module contains specialized contact detection algorithms for box geometries:
 - Plane-box contact detection
+- Sphere-box contact detection
 - Box-box contact detection (MuJoCo algorithm)
 """
 
@@ -13,12 +14,87 @@ import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
 from . import support_field
 
-from .contact import (
-    func_add_contact,
-    func_compute_tolerance,
-    rotaxis,
-    rotmatx,
-)
+from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, rotmatx
+
+
+@qd.func
+def func_sphere_box_contact(
+    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info: array_class.DynInfo, rigid_info: array_class.RigidInfo
+):
+    """
+    Analytical sphere-box collision detection.
+
+    Reduces to finding the closest point on the box (in the box's local frame) to the sphere center,
+    then comparing the distance to the sphere radius. Produces an exact normal aligned with one of the
+    box's face axes, avoiding the small tilt that MPR/GJK introduces for shallow contacts.
+
+    Parameters
+    ----------
+    ga_pos, ga_quat : Position and orientation of geom A (may be perturbed for multi-contact).
+    gb_pos, gb_quat : Position and orientation of geom B (may be perturbed for multi-contact).
+    """
+    EPS = rigid_info.EPS[None]
+
+    # Caller guarantees sphere is i_ga and box is i_gb (geoms are sorted by ascending type).
+    sphere_center = ga_pos
+    box_center = gb_pos
+    box_quat = gb_quat
+    sphere_radius = dyn_info.geoms.data[i_ga][0]
+    box_half_size = qd.Vector(
+        [0.5 * dyn_info.geoms.data[i_gb][0], 0.5 * dyn_info.geoms.data[i_gb][1], 0.5 * dyn_info.geoms.data[i_gb][2]],
+        dt=gs.qd_float,
+    )
+
+    # Express the sphere center in the box's local frame
+    p_local = gu.qd_inv_transform_by_trans_quat(sphere_center, box_center, box_quat)
+
+    # Closest point on the box to the sphere center, in the box's local frame
+    closest_local = qd.Vector(
+        [
+            qd.math.clamp(p_local[0], -box_half_size[0], box_half_size[0]),
+            qd.math.clamp(p_local[1], -box_half_size[1], box_half_size[1]),
+            qd.math.clamp(p_local[2], -box_half_size[2], box_half_size[2]),
+        ],
+        dt=gs.qd_float,
+    )
+    diff_local = p_local - closest_local
+    dist_sq = diff_local.dot(diff_local)
+
+    is_col = False
+    normal_unit = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    contact_pos = qd.Vector.zero(gs.qd_float, 3)
+    penetration = gs.qd_float(0.0)
+
+    if dist_sq < sphere_radius * sphere_radius:
+        is_col = True
+        normal_local = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+        if dist_sq > EPS:
+            # Sphere center outside the box, normal points from box surface to sphere center
+            dist = qd.sqrt(dist_sq)
+            normal_local = diff_local / dist
+            penetration = sphere_radius - dist
+        else:
+            # Sphere center inside the box. The gap to the nearest face along each axis is half_size[i] - |p_local[i]|;
+            # the smallest of those three gaps picks the contact axis, with the normal sign determined by which side
+            # the sphere center is on.
+            gaps = box_half_size - qd.abs(p_local)
+            sign_x = gs.qd_float(1.0) if p_local[0] >= 0.0 else gs.qd_float(-1.0)
+            sign_y = gs.qd_float(1.0) if p_local[1] >= 0.0 else gs.qd_float(-1.0)
+            sign_z = gs.qd_float(1.0) if p_local[2] >= 0.0 else gs.qd_float(-1.0)
+            normal_local = qd.Vector([sign_x, 0.0, 0.0], dt=gs.qd_float)
+            min_gap = gaps[0]
+            if gaps[1] < min_gap:
+                min_gap = gaps[1]
+                normal_local = qd.Vector([0.0, sign_y, 0.0], dt=gs.qd_float)
+            if gaps[2] < min_gap:
+                min_gap = gaps[2]
+                normal_local = qd.Vector([0.0, 0.0, sign_z], dt=gs.qd_float)
+            penetration = sphere_radius + min_gap
+
+        normal_unit = gu.qd_transform_by_quat(normal_local, box_quat)
+        contact_pos = sphere_center - (sphere_radius - 0.5 * penetration) * normal_unit
+
+    return is_col, normal_unit, contact_pos, penetration
 
 
 @qd.func
@@ -27,26 +103,26 @@ def func_plane_box_contact(
     i_gb,
     i_b,
     i_pair,
-    geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
     geoms_init_AABB: array_class.GeomsInitAABB,
-    verts_info: array_class.VertsInfo,
-    static_rigid_sim_config: qd.template(),
+    dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
     collider_static_config: qd.template(),
-    errno: array_class.V_ANNOTATION,
+    errno: qd.Tensor,
 ):
-    ga_pos, ga_quat = geoms_state.pos[i_ga, i_b], geoms_state.quat[i_ga, i_b]
-    gb_pos, gb_quat = geoms_state.pos[i_gb, i_b], geoms_state.quat[i_gb, i_b]
+    ga_pos, ga_quat = dyn_state.geoms.pos[i_ga, i_b], dyn_state.geoms.quat[i_ga, i_b]
+    gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
 
     plane_dir = qd.Vector(
-        [geoms_info.data[i_ga][0], geoms_info.data[i_ga][1], geoms_info.data[i_ga][2]], dt=gs.qd_float
+        [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]], dt=gs.qd_float
     )
-    plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
+    plane_dir = gu.qd_transform_by_quat_fast(plane_dir, ga_quat)
     normal = -plane_dir.normalized()
 
-    v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat)
+    v1, _, _ = support_field._func_support_box(i_gb, normal, gb_pos, gb_quat, dyn_info)
     penetration = normal.dot(v1 - ga_pos)
 
     if penetration > 0.0:
@@ -54,27 +130,31 @@ def func_plane_box_contact(
         func_add_contact(
             i_ga,
             i_gb,
+            i_b,
+            i_pair,
             normal,
             contact_pos,
             penetration,
-            i_b,
-            i_pair,
-            geoms_state,
-            geoms_info,
+            dyn_state,
             collider_state,
+            dyn_info,
+            rigid_info,
             collider_info,
-            errno,
+            use_atomic=False,
+            errno=errno,
         )
 
-        if qd.static(static_rigid_sim_config.enable_multi_contact):
+        if qd.static(rigid_config.enable_multi_contact):
             n_con = 1
             contact_pos_0 = contact_pos
-            tolerance = func_compute_tolerance(
-                i_ga, i_gb, i_b, collider_info.mc_tolerance[None], geoms_info, geoms_init_AABB
+            tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(
+                i_ga, i_gb, geoms_init_AABB, dyn_info
             )
-            for i_v in range(geoms_info.vert_start[i_gb], geoms_info.vert_end[i_gb]):
-                if n_con < qd.static(collider_static_config.n_contacts_per_pair):
-                    pos_corner = gu.qd_transform_by_trans_quat(verts_info.init_pos[i_v], gb_pos, gb_quat)
+            for i_v in range(dyn_info.geoms.vert_start[i_gb], dyn_info.geoms.vert_end[i_gb]):
+                # Plane-box pairs are sized with the convex cap (they are not in the large-contact mask), so the
+                # emission must stay within it to avoid overflowing a buffer allocated as a convex pair.
+                if n_con < qd.static(collider_static_config.n_contacts_per_convex_pair):
+                    pos_corner = gu.qd_transform_by_trans_quat_fast(dyn_info.verts.init_pos[i_v], gb_pos, gb_quat)
                     penetration = normal.dot(pos_corner - ga_pos)
                     if penetration > 0.0:
                         contact_pos = pos_corner - 0.5 * penetration * normal
@@ -82,16 +162,18 @@ def func_plane_box_contact(
                             func_add_contact(
                                 i_ga,
                                 i_gb,
+                                i_b,
+                                i_pair,
                                 normal,
                                 contact_pos,
                                 penetration,
-                                i_b,
-                                i_pair,
-                                geoms_state,
-                                geoms_info,
+                                dyn_state,
                                 collider_state,
+                                dyn_info,
+                                rigid_info,
                                 collider_info,
-                                errno,
+                                use_atomic=False,
+                                errno=errno,
                             )
                             n_con = n_con + 1
 
@@ -102,13 +184,13 @@ def func_box_box_contact(
     i_gb,
     i_b,
     i_pair,
-    geoms_state: array_class.GeomsState,
-    geoms_info: array_class.GeomsInfo,
+    dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
-    rigid_global_info: array_class.RigidGlobalInfo,
     collider_static_config: qd.template(),
-    errno: array_class.V_ANNOTATION,
+    errno: qd.Tensor,
 ):
     """
     Use Mujoco's box-box contact detection algorithm for more stable collision detection.
@@ -119,7 +201,7 @@ def func_box_box_contact(
 
     https://github.com/google-deepmind/mujoco/blob/main/src/engine/engine_collision_box.c
     """
-    EPS = rigid_global_info.EPS[None]
+    EPS = rigid_info.EPS[None]
 
     n = 0
     code = -1
@@ -131,16 +213,22 @@ def func_box_box_contact(
     margin2 = margin * margin
     rotmore = qd.Matrix.zero(gs.qd_float, 3, 3)
 
-    ga_pos = geoms_state.pos[i_ga, i_b]
-    gb_pos = geoms_state.pos[i_gb, i_b]
-    ga_quat = geoms_state.quat[i_ga, i_b]
-    gb_quat = geoms_state.quat[i_gb, i_b]
+    ga_pos = dyn_state.geoms.pos[i_ga, i_b]
+    gb_pos = dyn_state.geoms.pos[i_gb, i_b]
+    ga_quat = dyn_state.geoms.quat[i_ga, i_b]
+    gb_quat = dyn_state.geoms.quat[i_gb, i_b]
 
     size1 = (
-        qd.Vector([geoms_info.data[i_ga][0], geoms_info.data[i_ga][1], geoms_info.data[i_ga][2]], dt=gs.qd_float) / 2
+        qd.Vector(
+            [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]], dt=gs.qd_float
+        )
+        / 2
     )
     size2 = (
-        qd.Vector([geoms_info.data[i_gb][0], geoms_info.data[i_gb][1], geoms_info.data[i_gb][2]], dt=gs.qd_float) / 2
+        qd.Vector(
+            [dyn_info.geoms.data[i_gb][0], dyn_info.geoms.data[i_gb][1], dyn_info.geoms.data[i_gb][2]], dt=gs.qd_float
+        )
+        / 2
     )
 
     pos1, pos2 = ga_pos, gb_pos
@@ -419,15 +507,14 @@ def func_box_box_contact(
             r = (mat2 if q2 else mat1) @ rotmore.transpose()
             p = pos2 if q2 else pos1
             tmp2 = qd.Vector(
-                [(-1 if q2 else 1) * r[0, 2], (-1 if q2 else 1) * r[1, 2], (-1 if q2 else 1) * r[2, 2]],
-                dt=gs.qd_float,
+                [(-1 if q2 else 1) * r[0, 2], (-1 if q2 else 1) * r[1, 2], (-1 if q2 else 1) * r[2, 2]], dt=gs.qd_float
             )
             normal_0 = tmp2
 
             n_added = 0
             n_start = collider_state.n_contacts[i_b]
             for i in range(n):
-                if n_added < qd.static(collider_static_config.n_contacts_per_pair):
+                if n_added < qd.static(collider_static_config.n_contacts_per_nonconvex_pair):
                     dist = collider_state.box_points[i, i_b][2]
                     collider_state.box_points[i, i_b][2] = collider_state.box_points[i, i_b][2] + hz
                     contact_pos = p + r @ collider_state.box_points[i, i_b]
@@ -443,16 +530,18 @@ def func_box_box_contact(
                         func_add_contact(
                             i_ga,
                             i_gb,
+                            i_b,
+                            i_pair,
                             -normal_0,
                             contact_pos,
                             -dist,
-                            i_b,
-                            i_pair,
-                            geoms_state,
-                            geoms_info,
+                            dyn_state,
                             collider_state,
+                            dyn_info,
+                            rigid_info,
                             collider_info,
-                            errno,
+                            use_atomic=False,
+                            errno=errno,
                         )
                         n_added = n_added + 1
         else:
@@ -755,7 +844,7 @@ def func_box_box_contact(
                 n_added = 0
                 n_start = collider_state.n_contacts[i_b]
                 for i in range(n):
-                    if n_added < qd.static(collider_static_config.n_contacts_per_pair):
+                    if n_added < qd.static(collider_static_config.n_contacts_per_nonconvex_pair):
                         dist = collider_state.box_depth[i, i_b]
                         collider_state.box_points[i, i_b][2] = collider_state.box_points[i, i_b][2] + hz
                         contact_pos = pos1 + (r @ collider_state.box_points[i, i_b])
@@ -771,15 +860,17 @@ def func_box_box_contact(
                             func_add_contact(
                                 i_ga,
                                 i_gb,
+                                i_b,
+                                i_pair,
                                 -normal_0,
                                 contact_pos,
                                 -dist,
-                                i_b,
-                                i_pair,
-                                geoms_state,
-                                geoms_info,
+                                dyn_state,
                                 collider_state,
+                                dyn_info,
+                                rigid_info,
                                 collider_info,
-                                errno,
+                                use_atomic=False,
+                                errno=errno,
                             )
                             n_added = n_added + 1

@@ -37,13 +37,13 @@ see how your change affects other areas of the code, etc. -->
 ## Screenshots (if appropriate):
 
 ## Checklist:
+
 <!--- Go over all the following points, and put an `x` in all the boxes that apply. -->
 - [ ] I read the **CONTRIBUTING** document.
 - [ ] I followed the `Submitting Code Changes` section of **CONTRIBUTING** document.
 - [ ] I tagged the title correctly (including BUG FIX/FEATURE/MISC/BREAKING)
 - [ ] I updated the [documentation](https://github.com/Genesis-Embodied-AI/genesis-doc) accordingly or no change is needed.
 - [ ] I tested my changes and added instructions on how to test it for reviewers.
-
 <!--- Optionally -->
 - [ ] I have added tests to cover my changes.
 - [ ] All new and existing tests passed.

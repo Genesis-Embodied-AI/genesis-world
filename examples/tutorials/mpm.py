@@ -1,10 +1,8 @@
 import os
 import genesis as gs
 
-########################## init ##########################
-gs.init()
+gs.init(backend=gs.cpu)
 
-########################## create a scene ##########################
 
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
@@ -19,13 +17,12 @@ scene = gs.Scene(
         visualize_mpm_boundary=True,
     ),
     viewer_options=gs.options.ViewerOptions(
-        camera_fov=30,
         res=(960, 640),
+        camera_fov=30,
     ),
     show_viewer=True,
 )
 
-########################## entities ##########################
 plane = scene.add_entity(
     morph=gs.morphs.Plane(),
 )
@@ -67,7 +64,6 @@ obj_plastic = scene.add_entity(
 )
 
 
-########################## build ##########################
 scene.build()
 
 horizon = 1000 if "PYTEST_VERSION" not in os.environ else 5

@@ -36,20 +36,18 @@ def main():
     # Initialize Genesis
     gs.init(backend=gs.cpu)
 
-    # Create scene
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
             gravity=(0, 0, -9.81),
         ),
+        vis_options=gs.options.VisOptions(
+            show_world_frame=False,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -2.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.3),
             camera_fov=45,
-            max_FPS=60,
-        ),
-        vis_options=gs.options.VisOptions(
-            show_world_frame=False,
         ),
         show_viewer=True,
         show_FPS=False,
@@ -69,7 +67,6 @@ def main():
     # Initialize controller
     controller = DroneController()
 
-    # Build scene
     scene.build()
 
     # Register keybindings
@@ -111,10 +108,10 @@ def main():
 
     # Print control instructions
     print("\nDrone Controls:")
-    print("↑ - Move Forward (North)")
-    print("↓ - Move Backward (South)")
-    print("← - Move Left (West)")
-    print("→ - Move Right (East)")
+    print("Up - Move Forward (North)")
+    print("Down - Move Backward (South)")
+    print("Left - Move Left (West)")
+    print("Right - Move Right (East)")
     print("space - Increase RPM")
     print("shift - Decrease RPM")
 

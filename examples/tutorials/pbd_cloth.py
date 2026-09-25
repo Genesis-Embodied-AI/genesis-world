@@ -2,10 +2,8 @@ import os
 
 import genesis as gs
 
-########################## init ##########################
-gs.init()
+gs.init(backend=gs.cpu)
 
-########################## create a scene ##########################
 
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
@@ -13,14 +11,12 @@ scene = gs.Scene(
         substeps=10,
     ),
     viewer_options=gs.options.ViewerOptions(
-        camera_fov=30,
         res=(1280, 720),
-        max_FPS=60,
+        camera_fov=30,
     ),
     show_viewer=True,
 )
 
-########################## entities ##########################
 plane = scene.add_entity(
     morph=gs.morphs.Plane(),
 )
@@ -53,7 +49,6 @@ cloth_2 = scene.add_entity(
     ),
 )
 
-########################## build ##########################
 scene.build()
 
 cloth_1.fix_particles(cloth_1.find_closest_particle((-1, -1, 1.0)))

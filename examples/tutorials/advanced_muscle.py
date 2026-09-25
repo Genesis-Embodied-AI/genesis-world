@@ -3,38 +3,41 @@ import numpy as np
 import genesis as gs
 
 
-########################## init ##########################
-gs.init(precision="32", logging_level="info")
+gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
-########################## create a scene ##########################
 dt = 5e-4
+substep_dt = 5e-5
 scene = gs.Scene(
     sim_options=gs.options.SimOptions(
-        substeps=10,
+        dt=dt,
         gravity=(0, 0, 0),
+    ),
+    rigid_options=gs.options.RigidOptions(
+        dt=substep_dt,
+    ),
+    mpm_options=gs.options.MPMOptions(
+        dt=substep_dt,
+        lower_bound=(-1.0, -1.0, -0.2),
+        upper_bound=(1.0, 1.0, 1.0),
+    ),
+    fem_options=gs.options.FEMOptions(
+        dt=substep_dt,
+        damping=45.0,
+    ),
+    vis_options=gs.options.VisOptions(
+        show_world_frame=False,
     ),
     viewer_options=gs.options.ViewerOptions(
         camera_pos=(1.5, 0, 0.8),
         camera_lookat=(0.0, 0.0, 0.0),
         camera_fov=40,
     ),
-    mpm_options=gs.options.MPMOptions(
-        dt=dt,
-        lower_bound=(-1.0, -1.0, -0.2),
-        upper_bound=(1.0, 1.0, 1.0),
-    ),
-    fem_options=gs.options.FEMOptions(
-        dt=dt,
-        damping=45.0,
-    ),
-    vis_options=gs.options.VisOptions(
-        show_world_frame=False,
-    ),
     show_viewer=True,
 )
 
-########################## entities ##########################
-scene.add_entity(morph=gs.morphs.Plane())
+scene.add_entity(
+    morph=gs.morphs.Plane(),
+)
 
 E, nu = 3.0e4, 0.45
 rho = 1000.0
@@ -65,10 +68,8 @@ robot_fem = scene.add_entity(
     ),
 )
 
-########################## build ##########################
 scene.build(n_envs=0)
 
-########################## run ##########################
 horizon = 1000 if "PYTEST_VERSION" not in os.environ else 5
 scene.reset()
 for i in range(horizon):

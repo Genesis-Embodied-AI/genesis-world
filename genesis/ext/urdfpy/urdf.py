@@ -227,7 +227,7 @@ class URDFType(object):
             if r or v is not None:
                 node.attrib[a] = self._unparse_attrib(t, v)
 
-    def _unparse_simple_elements(self, node, path):
+    def _unparse_simple_elements(self, node):
         """Unparse all Python types from the _ELEMENTS array back into child
         nodes of an XML node.
 
@@ -236,30 +236,21 @@ class URDFType(object):
         node : :class:`object`
             The XML node for this object. Elements will be added as children
             of this node.
-        path : str
-            The string path where the XML file is being written to (used for
-            writing out meshes and image files).
         """
         for a in self._ELEMENTS:
             t, r, m = self._ELEMENTS[a]
             v = getattr(self, a, None)
             if not m:
                 if r or v is not None:
-                    node.append(v._to_xml(node, path))
+                    node.append(v._to_xml(node))
             else:
                 vs = v
                 for v in vs:
-                    node.append(v._to_xml(node, path))
+                    node.append(v._to_xml(node))
 
-    def _unparse(self, path):
+    def _unparse(self):
         """Create a node for this object and unparse all elements and
         attributes in the class arrays.
-
-        Parameters
-        ----------
-        path : str
-            The string path where the XML file is being written to (used for
-            writing out meshes and image files).
 
         Returns
         -------
@@ -268,10 +259,10 @@ class URDFType(object):
         """
         node = ET.Element(self._TAG)
         self._unparse_simple_attribs(node)
-        self._unparse_simple_elements(node, path)
+        self._unparse_simple_elements(node)
         return node
 
-    def _to_xml(self, parent, path):
+    def _to_xml(self, parent):
         """Create and return an XML node for this object.
 
         Parameters
@@ -280,16 +271,13 @@ class URDFType(object):
             The parent node that this element will eventually be added to.
             This base implementation doesn't use this information, but
             classes that override this function may use it.
-        path : str
-            The string path where the XML file is being written to (used for
-            writing out meshes and image files).
 
         Returns
         -------
         node : :class:`xml.etree.ElementTree.Element`
             The newly-created node.
         """
-        return self._unparse(path)
+        return self._unparse()
 
 
 ###############################################################################
@@ -671,21 +659,8 @@ class Mesh(URDFType):
 
         return Mesh(**kwargs)
 
-    def _to_xml(self, parent, path):
-        # Make sure that parent directory exists
-        get_filename(path, self.filename, makedirs=True)
-
-        # Export the meshes as a single file
-        # meshes = self.meshes
-        # if len(meshes) == 1:
-        #     meshes = meshes[0]
-        # elif os.path.splitext(fn)[1] == ".glb":
-        #     meshes = trimesh.scene.Scene(geometry=meshes)
-        # trimesh.exchange.export.export_mesh(meshes, fn)
-
-        # Unparse the node
-        node = self._unparse(path)
-        return node
+    def _to_xml(self, parent):
+        return self._unparse()
 
     def copy(self, prefix="", scale=None):
         """Create a deep copy with the prefix applied to all names.
@@ -710,7 +685,7 @@ class Mesh(URDFType):
             for i, m in enumerate(meshes):
                 meshes[i] = m.apply_transform(sm)
         base, fn = os.path.split(self.filename)
-        fn = "{}{}".format(prefix, self.filename)
+        fn = "{}{}".format(prefix, fn)
         m = Mesh(
             filename=os.path.join(base, fn),
             scale=(self.scale.copy() if self.scale is not None else None),
@@ -915,12 +890,8 @@ class Texture(URDFType):
 
         return Texture(**kwargs)
 
-    def _to_xml(self, parent, path):
-        # Save the image
-        filepath = get_filename(path, self.filename, makedirs=True)
-        self.image.save(filepath)
-
-        return self._unparse(path)
+    def _to_xml(self, parent):
+        return self._unparse()
 
     def copy(self, prefix="", scale=None):
         """Create a deep copy with the prefix applied to all names.
@@ -1013,12 +984,12 @@ class Material(URDFType):
 
         return Material(**kwargs)
 
-    def _to_xml(self, parent, path):
+    def _to_xml(self, parent):
         # Simplify materials by collecting them at the top level.
 
         # For top-level elements, save the full material specification
         if parent.tag == "robot":
-            node = self._unparse(path)
+            node = self._unparse()
             if self.color is not None:
                 color = ET.Element("color")
                 color.attrib["rgba"] = np.array2string(self.color)[1:-1]
@@ -1108,8 +1079,8 @@ class Collision(URDFType):
         kwargs["origin"] = parse_origin(node, default=True)
         return Collision(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         node.append(unparse_origin(self.origin))
         return node
 
@@ -1216,8 +1187,8 @@ class Visual(URDFType):
         kwargs["origin"] = parse_origin(node, default=True)
         return Visual(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         node.append(unparse_origin(self.origin))
         return node
 
@@ -1312,7 +1283,7 @@ class Inertial(URDFType):
         inertia = np.array([[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]], dtype=np.float64)
         return Inertial(mass=mass, inertia=inertia, origin=origin)
 
-    def _to_xml(self, parent, path):
+    def _to_xml(self, parent):
         node = ET.Element("inertial")
         if self.origin is not None:
             node.append(unparse_origin(self.origin))
@@ -1345,7 +1316,7 @@ class Inertial(URDFType):
         """
         if mass is None:
             mass = self.mass
-        if origin is None:
+        if origin is None and self.origin is not None:
             origin = self.origin.copy()
         if inertia is None:
             inertia = self.inertia.copy()
@@ -1842,8 +1813,8 @@ class Actuator(URDFType):
         kwargs["hardwareInterfaces"] = hi
         return Actuator(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         if self.mechanicalReduction is not None:
             mr = ET.Element("mechanicalReduction")
             mr.text = str(self.mechanicalReduction)
@@ -1928,8 +1899,8 @@ class TransmissionJoint(URDFType):
         kwargs["hardwareInterfaces"] = hi
         return TransmissionJoint(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         if len(self.hardwareInterfaces) > 0:
             for hi in self.hardwareInterfaces:
                 h = ET.Element("hardwareInterface")
@@ -2050,8 +2021,8 @@ class Transmission(URDFType):
         kwargs["trans_type"] = node.find("type").text
         return Transmission(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         ttype = ET.Element("type")
         ttype.text = self.trans_type
         node.append(ttype)
@@ -2441,8 +2412,8 @@ class Joint(URDFType):
         kwargs["origin"] = parse_origin(node, default=True)
         return Joint(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         parent = ET.Element("parent")
         parent.attrib["link"] = self.parent
         node.append(parent)
@@ -3625,30 +3596,9 @@ class URDF(URDFType):
             other_xml=self.other_xml,
         )
 
-    def save(self, file_obj):
-        """Save this URDF to a file.
-
-        Parameters
-        ----------
-        file_obj : str or file-like object
-            The file to save the URDF to. Should be the path to the
-            ``.urdf`` XML file. Any paths in the URDF should be specified
-            as relative paths to the ``.urdf`` file instead of as ROS
-            resources.
-
-        Returns
-        -------
-        urdf : :class:`.URDF`
-            The parsed URDF.
-        """
-        if isinstance(file_obj, str):
-            path = os.path.dirname(file_obj)
-        else:
-            path = os.path.dirname(os.path.realpath(file_obj.name))
-
-        node = self._to_xml(None, path)
-        tree = ET.ElementTree(node)
-        tree.write(file_obj, pretty_print=True, xml_declaration=True, encoding="utf-8")
+    def to_xml(self):
+        """Return the XML document of this URDF as the root node of an element tree."""
+        return self._to_xml(None)
 
     def join(self, other, link, origin=None, name=None, prefix=""):
         """Join another URDF to this one by rigidly fixturing the two at a link.
@@ -3945,8 +3895,8 @@ class URDF(URDFType):
         kwargs["other_xml"] = data
         return URDF(**kwargs)
 
-    def _to_xml(self, parent, path):
-        node = self._unparse(path)
+    def _to_xml(self, parent):
+        node = self._unparse()
         if self.other_xml:
             extra_tree = ET.fromstring(self.other_xml)
             for child in extra_tree:

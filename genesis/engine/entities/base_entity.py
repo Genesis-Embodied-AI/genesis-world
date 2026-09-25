@@ -1,10 +1,27 @@
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import torch
+
 import genesis as gs
+from genesis.engine.materials.base import Material
+from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
+    from genesis.engine.sensors.base_sensor import Sensor
+
+
+@dataclass
+class EntityDescription:
+    """Base class of what one entity of a scene is created from, whatever the solver simulating it.
+
+    A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
+    material is what every description holds, since the simulator picks the solver from it.
+    """
+
+    material: Material
 
 
 class Entity(RBC):
@@ -22,6 +39,9 @@ class Entity(RBC):
         surface,
         name: str | None = None,
     ):
+        # An entity is created from one morph. A kind of entity built from several passes the primary one here.
+        if not isinstance(morph, Morph):
+            gs.raise_exception(f"An entity is created from one morph, got {type(morph).__name__}.")
         uid = gs.UID()
         while any(entity.uid.match(uid, short_only=True) for entity in scene.entities):
             uid = gs.UID()
@@ -81,12 +101,27 @@ class Entity(RBC):
         return self._morph
 
     @property
+    def desc(self) -> EntityDescription | None:
+        """The description this entity was created from, or None for a kind of entity no description carries.
+
+        'Scene.export' writes every entity as its description and rejects a scene holding an entity without one. A
+        kind of entity gains export support by returning its description here.
+        """
+        return None
+
+    @property
     def material(self):
         return self._material
 
     @property
     def is_built(self):
         return self._solver._scene._is_built
+
+    def _repr_brief(self):
+        return f"{self.__repr_name__()}, idx: {self.idx}, morph: {self._repr_morph()}, material: {self.material}"
+
+    def _repr_morph(self):
+        return f"{self.morph}"
 
     @property
     def name(self) -> str:
@@ -101,6 +136,32 @@ class Entity(RBC):
             morph type and UID is returned.
         """
         return self._name
+
+    @property
+    def sensors(self) -> "gs.List[Sensor]":
+        """List of sensors attached to this entity."""
+        return self._sim._sensor_manager.get_sensors_by_entity(self._idx)
+
+    @gs.assert_built
+    def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
+        """
+        Read every sensor attached to this entity as a tensor per sensor class.
+
+        Always returns a fresh tensor independent of the internal sensor storage; the caller is free to mutate the
+        result.
+
+        Parameters
+        ----------
+        envs_idx : array-like | int | slice | None
+            Environment selection. Defaults to all environments.
+
+        Returns
+        -------
+        dict[Type[Sensor], torch.Tensor]
+            For each sensor class with at least one sensor on this entity, a tensor of shape
+            (B, [history,] entity_cache_size_for_class).
+        """
+        return self._sim._sensor_manager.read_sensors(entity_idx=self._idx, envs_idx=envs_idx)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
