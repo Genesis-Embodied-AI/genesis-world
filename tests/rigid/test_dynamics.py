@@ -250,7 +250,8 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     end_effector_link_idx_local = robot.links[-1].idx_local
     duck_link_idx = duck.links[0].idx
     duck_mass = duck.get_mass()
-    duck_init_link_pos = duck.base_link.get_pos()
+    # Match the solver's center-of-mass frame for the aligned free link
+    duck_init_link_pos = duck.base_link.get_pos(relative=False)
     duck_init_link_R = gu.quat_to_R(duck.base_link.get_quat())
     # The duck is held at rest by cancelling gravity, but the cancelling force is applied away from its center of mass
     # so that the moment arm of 'pos' is exercised: the spurious torque it generates is undone by an opposite torque
@@ -702,6 +703,9 @@ def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
             pos=(0.0, 0.0, 0.5),
             euler=(-90, 0, 0),
             fixed=True,
+            # The grasp state below was calibrated on the collision-derived masses, and the residual the assertions
+            # bound is that of the solve at the default iteration count on this state.
+            inertia_from_visual=False,
         ),
     )
     cube = scene.add_entity(

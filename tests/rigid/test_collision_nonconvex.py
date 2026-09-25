@@ -657,6 +657,9 @@ def test_mesh_repair(convexify, show_viewer, gjk_collision):
             euler=(0.0, -2.5 if convexify else 0.0, 0.0),
             convexify=convexify,
             scale=1.0,
+            # The center of mass of the drawn spoon lies over the bottom of its bowl, where the repaired collision
+            # hulls give it a knife edge to rock on, and the rest checked below is that of the hulls' own mass.
+            inertia_from_visual=False,
         ),
         vis_mode="collision",
         visualize_contact=True,

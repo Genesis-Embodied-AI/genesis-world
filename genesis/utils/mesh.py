@@ -5,6 +5,7 @@ import os
 import pickle as pkl
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 import coacd
 import igl
@@ -14,10 +15,13 @@ import OpenEXR
 import tetgen
 import trimesh
 from PIL import Image
+from scipy.spatial import Delaunay, QhullError
 
 import genesis as gs
+from genesis.typing import Matrix3x3Type, Vec3FType
 
 from . import geom as gu
+from . import serialization
 from .misc import (
     SizeCappedCache,
     get_assets_dir,
@@ -463,6 +467,72 @@ def convex_decompose(mesh, coacd_options):
             cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
 
     return mesh_parts
+
+
+# Winding-number estimates, shared by the meshes an asset repeats (one per leg or finger) and keyed by their geometry. A
+# value is a few hundred bytes, so the entry count is the bound that matters.
+_INERTIAL_CACHE = SizeCappedCache(max_bytes=1024 * 1024, max_entries=4096)
+
+
+class InertialProperties(NamedTuple):
+    """A rigid body's intrinsic inertial: mass, center of mass 'com', and inertia tensor 'i' about that COM."""
+
+    mass: float
+    com: Vec3FType
+    i: Matrix3x3Type
+
+
+def _exported_inertial(inertial: InertialProperties, exporting: serialization.Exporting) -> dict:
+    """Store the center of mass and inertia tensor in the file's array member, beside the mass."""
+    return {"mass": float(inertial.mass), "com": exporting.array(inertial.com), "i": exporting.array(inertial.i)}
+
+
+def _loaded_inertial(raw: dict, loading: serialization.Loading) -> InertialProperties:
+    """Recreate the inertial properties as they were exported."""
+    return InertialProperties(raw["mass"], loading.array(raw["com"]), loading.array(raw["i"]))
+
+
+serialization.register(InertialProperties, _exported_inertial, _loaded_inertial)
+
+
+def inertial_from_winding_number(verts, faces) -> InertialProperties:
+    """Unit-density mass properties of the volume an open, self-intersecting or inverted triangle soup encloses.
+
+    The convex hull of the vertices is split into the tetrahedra of their Delaunay triangulation, and a tetrahedron is
+    interior where the generalized winding number of the surface at its centroid exceeds one half in magnitude. The
+    interior tetrahedra are integrated exactly, so the estimate is exact where the surface lies on tetrahedron faces,
+    and its error elsewhere comes from the tetrahedra the surface cuts through. A single-sided surface enclosing a
+    cavity is filled, and a surface spanning no volume carries no mass.
+    """
+    verts = np.ascontiguousarray(verts, dtype=np.float64)
+    faces = np.ascontiguousarray(faces, dtype=np.int64)
+    key = get_hashkey(verts, faces)
+    inertial = _INERTIAL_CACHE.get(key)
+    if inertial is not None:
+        return inertial
+
+    inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+    try:
+        tets = verts[Delaunay(verts).simplices]
+    except QhullError:
+        # Fewer than four non-coplanar vertices
+        tets = np.zeros((0, 4, 3))
+    if len(tets) > 0:
+        tets = tets[np.abs(igl.fast_winding_number(verts, faces, tets.mean(axis=1))) > 0.5]
+        tets_volume = np.abs(np.linalg.det(tets[:, 1:] - tets[:, :1])) / 6.0
+        volume = tets_volume.sum()
+        if volume > 0.0:
+            com = tets_volume @ tets.mean(axis=1) / volume
+            tets_rel_pos = tets - com
+            tets_rel_pos_sum = tets_rel_pos.sum(axis=1)
+            # Second moment of a tetrahedron of volume V: V / 20 * (sum_i v_i v_i^T + s s^T), with s = sum_i v_i
+            second_moment = (
+                np.einsum("t,tij,tik->jk", tets_volume, tets_rel_pos, tets_rel_pos)
+                + np.einsum("t,tj,tk->jk", tets_volume, tets_rel_pos_sum, tets_rel_pos_sum)
+            ) / 20.0
+            inertial = InertialProperties(volume, com, np.eye(3) * np.trace(second_moment) - second_moment)
+    _INERTIAL_CACHE.put(key, inertial, inertial.com.nbytes + inertial.i.nbytes + 8)
+    return inertial
 
 
 # 512 MiB of processed collision geometry. Sized by the geometry footprint actually retained (vertices and faces of
