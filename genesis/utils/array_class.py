@@ -239,20 +239,25 @@ class RigidInfo:
     mass_mat_tiled_scratch: qd.Tensor = of_kind(DataKind.SCRATCH)
     # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. A root spans the links
     # [root, links_root_end[root]) whose root it is (a span may interleave links of other roots, so the walks gate each
-    # link on its root). The composite inertia and the center of mass are per root.
-    roots_link_idx: qd.Tensor
+    # link on its root). The composite inertia and the center of mass are per root. Kinematic trees: the links a chain
+    # of moving joints connects, so a static link belongs to none (links_tree_idx -1) and each branch of a fixed base is
+    # a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links [trees_root_idx[i_t], trees_link_end[i_t])
+    # mapped to it and the contiguous dofs [trees_dof_start[i_t], trees_dof_start[i_t] + trees_n_dofs[i_t]), in
+    # ascending dof order. The islands are built on the trees. A scene without any tree keeps one padded slot at root 0
+    # and link end 0, so every tree walk is empty. The depth of a link is its number of ancestors, and a root or a tree
+    # spans one level past its deepest link. The level sweep (see func_sweep_links_by_level) runs one block per (tree or
+    # root, env) over the levels in order, one lane per link, so each link reads its parent from the level before.
     links_root_end: qd.Tensor
-    # Kinematic trees: the links a chain of moving joints connects, so a static link belongs to none (links_tree_idx
-    # -1) and each branch of a fixed base is a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
-    # [trees_root_idx[i_t], trees_link_end[i_t]) mapped to it and the contiguous dofs [trees_dof_start[i_t],
-    # trees_dof_start[i_t] + trees_n_dofs[i_t]), in ascending dof order. The islands are built on the trees. A scene
-    # without any tree keeps one padded slot at root 0 and link end 0, so every tree walk is empty.
+    links_tree_idx: qd.Tensor
+    links_depth: qd.Tensor
+    roots_link_idx: qd.Tensor
+    roots_n_levels: qd.Tensor
     trees_root_idx: qd.Tensor
     trees_link_end: qd.Tensor
     trees_n_links: qd.Tensor
     trees_dof_start: qd.Tensor
     trees_n_dofs: qd.Tensor
-    links_tree_idx: qd.Tensor
+    trees_n_levels: qd.Tensor
     # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
     # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
     # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
@@ -326,14 +331,17 @@ def get_rigid_info(solver, kinematic_only):
             mass_mat_L=V(dtype=gs.qd_float, shape=()),
             mass_mat_D_inv=V(dtype=gs.qd_float, shape=()),
             mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=()),
-            roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
             links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+            links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+            links_depth=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+            roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+            roots_n_levels=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
             trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_dof_start=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_n_dofs=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
-            links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+            trees_n_levels=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
@@ -365,14 +373,17 @@ def get_rigid_info(solver, kinematic_only):
         mass_mat_L=V(dtype=gs.qd_float, shape=mass_mat_shape, needs_grad=requires_grad),
         mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), needs_grad=requires_grad),
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
-        roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
         links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+        links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+        links_depth=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+        roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
+        roots_n_levels=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
         trees_root_idx=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_link_end=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_n_links=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_dof_start=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_n_dofs=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
-        links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+        trees_n_levels=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
@@ -1175,9 +1186,14 @@ class NarrowphaseWorkQueues:
     mpr_i_ga: qd.Tensor
     mpr_i_gb: qd.Tensor
     mpr_i_pair: qd.Tensor
-    mpr_contact_pos_0: qd.Tensor
-    mpr_normal_0: qd.Tensor
-    mpr_penetration_0: qd.Tensor
+    # Candidate contacts of the multicontact pass, one slot per contact a pair can hold. The contact0 kernel stores the
+    # first contact of the pair in slot 0, the detections of the pass store theirs in their own slot, and the gather
+    # accepts them in slot order according to their status (see MULTICONTACT_SLOT in collider/constants.py). Under the
+    # contact patch an entry holds slot 0 alone and no status.
+    mpr_contact_pos: qd.Tensor
+    mpr_normal: qd.Tensor
+    mpr_penetration: qd.Tensor
+    mpr_contact_status: qd.Tensor
     # Whether contact0 preferred GJK (the per-pair MPR->GJK gate fired). The multicontact pass uses GJK for contact0
     # when set, and otherwise tries MPR first and falls back to GJK per perturbed contact.
     mpr_prefer_gjk: qd.Tensor
@@ -1185,15 +1201,16 @@ class NarrowphaseWorkQueues:
     mpr_work_counter: qd.Tensor
 
 
-def get_narrowphase_work_queues(max_entries):
+def get_narrowphase_work_queues(max_entries, n_slots):
     return NarrowphaseWorkQueues(
         mpr_i_b=V(dtype=gs.qd_int, shape=(max_entries,)),
         mpr_i_ga=V(dtype=gs.qd_int, shape=(max_entries,)),
         mpr_i_gb=V(dtype=gs.qd_int, shape=(max_entries,)),
         mpr_i_pair=V(dtype=gs.qd_int, shape=(max_entries,)),
-        mpr_contact_pos_0=V_VEC(3, dtype=gs.qd_float, shape=(max_entries,)),
-        mpr_normal_0=V_VEC(3, dtype=gs.qd_float, shape=(max_entries,)),
-        mpr_penetration_0=V(dtype=gs.qd_float, shape=(max_entries,)),
+        mpr_contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(max_entries, n_slots)),
+        mpr_normal=V_VEC(3, dtype=gs.qd_float, shape=(max_entries, n_slots)),
+        mpr_penetration=V(dtype=gs.qd_float, shape=(max_entries, n_slots)),
+        mpr_contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), n_slots > 1)),
         mpr_prefer_gjk=V(dtype=gs.qd_int, shape=(max_entries,)),
         mpr_queue_size=V(dtype=gs.qd_int, shape=(1,)),
         mpr_work_counter=V(dtype=gs.qd_int, shape=(1,)),
@@ -1291,8 +1308,10 @@ def get_collider_state(
         broad_collision_pairs=V_VEC(2, dtype=gs.qd_int, shape=(max(max_collision_pairs_broad, 1), _B)),
         contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
         diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
+        # See NarrowphaseWorkQueues for the slots under the contact patch
         narrowphase_work_queues=get_narrowphase_work_queues(
-            max(max_collision_pairs_broad * _B, 1) if collider_static_config.has_non_box_plane_convex_convex else 1
+            max(max_collision_pairs_broad * _B, 1) if collider_static_config.has_non_box_plane_convex_convex else 1,
+            1 if solver._options.enable_contact_patch else collider_static_config.n_multicontact_detections,
         ),
         contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
@@ -1352,6 +1371,8 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     spatial_sort_supported: bool
     # maximum number of contact pairs per collision pair
     n_contacts_per_convex_pair: int
+    # number of detections of the multi-contact of a convex pair, its first contact and the perturbed ones
+    n_multicontact_detections: int
     # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair
     n_contacts_per_nonconvex_pair: int
     # ccd algorithm
@@ -2881,6 +2902,10 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10
     parallel_init: bool = False  # parallelize init over (constraints, envs) when GPU is not saturated by envs alone
+    # Whether the GPU walks of the kinematic trees and roots sweep them level by level, in blocks of
+    # level_sweep_block_dim lanes (see links_depth in RigidInfo)
+    enable_tree_level_sweep: bool = False
+    level_sweep_block_dim: int = 32
     broadphase_traversal: int = 0
     enable_tiled_cholesky_mass_matrix: bool = False
     mass_matrix_fits_shared: bool = False

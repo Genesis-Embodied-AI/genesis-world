@@ -589,6 +589,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         constraint_layout_batch_first = (
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
+        # The level sweep (see enable_tree_level_sweep in array_class.py) pays while its blocks fill the GPU cores at
+        # most twice, past which the lanes the narrow levels leave idle outweigh the shorter serial chain. A serialized
+        # run keeps the serial walks.
+        enable_tree_level_sweep = (
+            gs.backend != gs.cpu
+            and not self.sim.options.requires_grad
+            and self.sim._para_level == gs.PARA_LEVEL.ALL
+            and max(self._n_trees, self._n_roots) * self._B * array_class.RigidSimStaticConfig.level_sweep_block_dim
+            <= 2 * get_gpu_core_count()
+        )
 
         rigid_config = dict(
             backend=gs.backend,
@@ -616,6 +626,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             parallel_init=(
                 gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
             ),
+            enable_tree_level_sweep=enable_tree_level_sweep,
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             enable_cooperative_noslip=enable_cooperative_noslip,

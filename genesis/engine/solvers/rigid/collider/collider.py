@@ -247,6 +247,9 @@ class Collider:
             has_prunable_contacts=has_prunable_contacts,
             spatial_sort_supported=spatial_sort_supported,
             n_contacts_per_convex_pair=n_contacts_per_convex_pair,
+            # The first contact and the perturbations of the two orthogonal axes in both directions (see
+            # _func_multicontact_detect in narrowphase.py)
+            n_multicontact_detections=5,
             n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
             ccd_algorithm=ccd_algorithm,
         )

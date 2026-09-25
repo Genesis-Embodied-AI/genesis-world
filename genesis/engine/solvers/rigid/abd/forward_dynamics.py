@@ -20,7 +20,13 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
-from .forward_kinematics import func_forward_velocity_root, func_update_cartesian_space_root
+from .forward_kinematics import (
+    LINK_SWEEP_PASS,
+    func_forward_velocity_root,
+    func_sweep_links_by_level,
+    func_update_acc_link,
+    func_update_cartesian_space_root,
+)
 from .misc import (
     func_add_safe_backward,
     func_is_awake_link,
@@ -1564,63 +1570,6 @@ def func_torque_and_passive_force(
 
 
 @qd.func
-def func_update_acc_link(
-    i_l,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    update_cacc: qd.template(),
-    is_backward: qd.template(),
-):
-    """Compute the Cartesian acceleration of link i_l of env i_b.
-
-    It follows from the parent's acceleration and the velocities and accelerations of the link's dofs.
-
-    The parent's acceleration must be current. A root link starts from the gravity left uncompensated by its entity.
-    """
-    BW = qd.static(is_backward)
-    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-    i_p = dyn_info.links.parent_idx[I_l]
-
-    if i_p == -1:
-        i_e = dyn_info.links.entity_idx[I_l]
-        dyn_state.links.cdd_vel[i_l, i_b] = -rigid_info.gravity[i_b] * (1 - dyn_info.entities.gravity_compensation[i_e])
-        dyn_state.links.cdd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        if qd.static(update_cacc):
-            dyn_state.links.cacc_lin[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-            dyn_state.links.cacc_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-    else:
-        dyn_state.links.cdd_vel[i_l, i_b] = dyn_state.links.cdd_vel[i_p, i_b]
-        dyn_state.links.cdd_ang[i_l, i_b] = dyn_state.links.cdd_ang[i_p, i_b]
-        if qd.static(update_cacc):
-            dyn_state.links.cacc_lin[i_l, i_b] = dyn_state.links.cacc_lin[i_p, i_b]
-            dyn_state.links.cacc_ang[i_l, i_b] = dyn_state.links.cacc_ang[i_p, i_b]
-
-    for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
-        # cacc = cacc_parent + cdofdot * qvel + cdof * qacc
-        local_cdd_vel = dyn_state.dofs.cdofd_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-        local_cdd_ang = dyn_state.dofs.cdofd_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-
-        func_add_safe_backward([i_l, i_b], local_cdd_vel, dyn_state.links.cdd_vel, BW)
-        func_add_safe_backward([i_l, i_b], local_cdd_ang, dyn_state.links.cdd_ang, BW)
-        if qd.static(update_cacc):
-            func_add_safe_backward(
-                [i_l, i_b],
-                local_cdd_vel + dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
-                dyn_state.links.cacc_lin,
-                BW,
-            )
-            func_add_safe_backward(
-                [i_l, i_b],
-                local_cdd_ang + dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
-                dyn_state.links.cacc_ang,
-                BW,
-            )
-
-
-@qd.func
 def func_update_acc(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -1629,20 +1578,37 @@ def func_update_acc(
     update_cacc: qd.template(),
     is_backward: qd.template(),
 ):
-    """Compute the Cartesian accelerations of every awake link of every env, one thread per kinematic root.
+    """Compute the Cartesian accelerations of every awake link of every env, per kinematic root.
+
+    A root takes one thread, or one block that sweeps it level by level under enable_tree_level_sweep (see
+    func_update_cartesian_space in forward_kinematics.py).
 
     A tree root reads the acceleration of its static parent, the gravity term alone, so the walk covers the static
     links of the root ahead of its trees: one walk keeps the link body inlined once in the kernel, where a static pass
     and a tree pass would inline it twice. Differentiability wants the loop outermost in its kernel, which it is.
     """
-    qd.loop_config(name="update_acc", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
-        i_l_root = rigid_info.roots_link_idx[i_r]
-        i_l_end = rigid_info.links_root_end[i_l_root]
-        for i_l in range(i_l_root, i_l_end):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
-                func_update_acc_link(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, update_cacc, is_backward)
+    if qd.static(rigid_config.enable_tree_level_sweep):
+        func_sweep_links_by_level(
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            sweep_pass=LINK_SWEEP_PASS.ACCELERATION,
+            force_update_all_geoms=False,
+            update_cacc=update_cacc,
+            is_backward=is_backward,
+        )
+    else:
+        qd.loop_config(name="update_acc", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+        for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+            i_l_root = rigid_info.roots_link_idx[i_r]
+            i_l_end = rigid_info.links_root_end[i_l_root]
+            for i_l in range(i_l_root, i_l_end):
+                I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
+                    func_update_acc_link(
+                        i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, update_cacc, is_backward
+                    )
 
 
 @qd.func
