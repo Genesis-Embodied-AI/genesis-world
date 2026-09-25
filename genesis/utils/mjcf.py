@@ -1,16 +1,16 @@
 import os
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from itertools import chain
 from bisect import bisect_right
+from itertools import chain
+from pathlib import Path
+
+import numpy as np
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
-
-import numpy as np
+from PIL import Image
 import trimesh
 from trimesh.visual.texture import TextureVisuals
-from PIL import Image
 
 import genesis as gs
 from genesis.constants import XACRO_FORMAT
@@ -62,6 +62,157 @@ def get_model_name(file_path):
     return None
 
 
+def prepare_xml(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep):
+    robot = None
+    if isinstance(xml, urdfpy.URDF):
+        is_urdf_file = True
+        # An in-memory model resolves its relative mesh paths against the working directory, as the URDF pass does
+        # (see parse_urdf in urdf.py), so that both passes read the same files.
+        asset_path = os.getcwd()
+        root = xml.to_xml()
+        mjcf = ET.SubElement(root, "mujoco")
+    else:
+        # Make sure that it is pointing to a valid XML content (either file path or string)
+        path = os.path.join(get_assets_dir(), xml)
+        is_valid_path = False
+        try:
+            if os.path.exists(path):
+                xml = ET.parse(path)
+                is_valid_path = True
+            else:
+                xml = ET.fromstring(xml)
+        except ET.ParseError:
+            gs.raise_exception_from(f"'{xml}' is not a valid XML file path or string.")
+
+        # Best guess for the search path
+        asset_path = os.path.dirname(path) if is_valid_path else os.getcwd()
+
+        # Detect whether it is a URDF file or a Mujoco MJCF file. `ET.parse` yields an ElementTree, while
+        # `ET.fromstring` (inline XML content) yields the root Element directly.
+        root = xml.getroot() if isinstance(xml, ET.ElementTree) else xml
+        is_urdf_file = root.tag == "robot"
+        mjcf = ET.SubElement(root, "mujoco") if is_urdf_file else root
+
+    # Parse all included sub-models recursively
+    root_parent_stack = [(mjcf, Path(""))]
+    while root_parent_stack:
+        xml_root, parent_path = root_parent_stack.pop()
+        for elem in tuple(xml_root.findall("include")):
+            include_path = parent_path / elem.attrib["file"]
+            include_root = ET.parse(Path(asset_path) / include_path).getroot()
+            # Mesh file paths in the included file are relative to that file's directory, whereas meshdir
+            # points at the top-level model, so rewrite them to stay valid once inlined. Only <asset> meshes
+            # reference a file; a <mesh> under <default> is a default class setting attributes (e.g.
+            # maxhullvert) and a vertex mesh under <asset> is procedural, both carrying no file to rewrite.
+            for include_elem in include_root.findall(".//asset/mesh[@file]"):
+                include_elem.attrib["file"] = str(include_path.parent / include_elem.attrib["file"])
+            for child in include_root:
+                mjcf.append(child)
+            mjcf.remove(elem)
+            root_parent_stack.append((include_root, include_path))
+
+    # Drop ground planes authored directly under the worldbody so a model that embeds its own floor can be
+    # loaded into a scene that already provides a ground. Removing the source geoms before compilation leaves
+    # planes authored under child bodies untouched, even when the compiler fuses them into the worldbody.
+    if not is_urdf_file and exclude_ground_plane:
+        for worldbody in mjcf.findall("worldbody"):
+            for geom in tuple(worldbody.findall("geom")):
+                if geom.attrib.get("type") == "plane":
+                    worldbody.remove(geom)
+
+    # Make sure compiler options are defined
+    compiler = mjcf.find("compiler")
+    if compiler is None:
+        compiler = ET.SubElement(mjcf, "compiler")
+
+    # Set absolute asset search directory
+    for name in ("assetdir", "meshdir", "texturedir"):
+        compiler.attrib[name] = str(Path(asset_path) / compiler.attrib.get(name, ""))
+
+    # Set default constraint solver time constant.
+    # Note that these default options are ignored when parsing URDF files.
+    default = mjcf.find("default")
+    if default is None:
+        default = ET.SubElement(mjcf, "default")
+    for group_name, params_name in (
+        ("geom", ("solref",)),
+        ("joint", ("solreflimit", "solreffriction")),
+        ("equality", ("solref",)),
+    ):
+        group = default.find(group_name)
+        if group is None:
+            group = ET.SubElement(default, group_name)
+        for param_name in params_name:
+            # 0.0 cannot be used because it is considered as an error, so that it will fallback to the original
+            # default value...
+            group.attrib.setdefault(param_name, str(MIN_TIMECONST))
+
+    # Must pre-process URDF to overwrite default Mujoco compile flags
+    if is_urdf_file:
+        robot = urdfpy.URDF._from_xml(root, root, asset_path)
+
+        # Merge fixed links if requested
+        if merge_fixed_links:
+            robot = uu.merge_fixed_links(robot, links_to_keep)
+            root = robot.to_xml()
+            root.append(mjcf)
+
+        # Enforce some compiler options
+        compiler.attrib |= dict(
+            fusestatic="false",
+            strippath="false",
+            inertiafromgeom="false",
+            balanceinertia="false",
+            discardvisual="true" if discard_visual else "false",
+            autolimits="true",
+        )
+
+        # MuJoCo rejects a moving body whose mass or inertia is below 'mjMINVAL'. Bounding both at that value keeps
+        # a zero or missing inertial compilable, and the placeholder is discarded below.
+        compiler.attrib |= dict(
+            boundmass=str(mujoco.mjMINVAL),
+            boundinertia=str(mujoco.mjMINVAL),
+        )
+
+        # Resolve relative mesh paths
+        for elem in root.findall(".//mesh"):
+            mesh_path = elem.get("filename")
+            if mesh_path.startswith("package://"):
+                mesh_path = mesh_path[10:]
+            # Beware symlinks must NOT be resolved, otherwise it may break the file extension, which is used by
+            # Mujoco MJCF parser to determine how to load mesh files.
+            elem.set("filename", str(Path(asset_path) / mesh_path))
+
+    return root, robot
+
+
+def compile_model(spec: mujoco.MjSpec, robot: urdfpy.URDF | None) -> mujoco.MjModel:
+    with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
+        mj = spec.compile()
+    # Special treatment for URDF
+    if robot is not None:
+        # Discard placeholder inertias that were used to avoid parsing failure
+        for link in robot.links:
+            inertial = link.inertial
+            mass = (inertial.mass or 0.0) if inertial is not None else 0.0
+            is_inertia_defined = inertial is not None and np.linalg.norm(inertial.inertia, np.inf) > 0.0
+            if mass > 0.0 and is_inertia_defined:
+                continue
+            body = mj.body(link.name)
+            body.mass[:] = mass
+            # Keep non-zero authored inertia with invalid diagonal so the consistency check reports it
+            if not is_inertia_defined:
+                body.inertia[:] = 0.0
+            # invweight0 derives from placeholder mass and inertia; zero triggers recomputation
+            body.invweight0[:] = 0.0
+
+        # Set default constraint solver time constant
+        mj.jnt_solref[:, 0] = MIN_TIMECONST
+        mj.geom_solref[:, 0] = MIN_TIMECONST
+        mj.eq_solref[:, 0] = MIN_TIMECONST
+    return mj
+
+
 def build_model(
     xml,
     discard_visual,
@@ -69,158 +220,13 @@ def build_model(
     exclude_ground_plane=False,
     links_to_keep=(),
 ):
-    if isinstance(xml, (str, Path, urdfpy.URDF)):
-        if isinstance(xml, urdfpy.URDF):
-            is_urdf_file = True
-            # An in-memory model resolves its relative mesh paths against the working directory, as the URDF pass does
-            # (see parse_urdf in urdf.py), so that both passes read the same files.
-            asset_path = os.getcwd()
-            root = xml.to_xml()
-            mjcf = ET.SubElement(root, "mujoco")
-        else:
-            # Make sure that it is pointing to a valid XML content (either file path or string)
-            path = os.path.join(get_assets_dir(), xml)
-            is_valid_path = False
-            try:
-                if os.path.exists(path):
-                    xml = ET.parse(path)
-                    is_valid_path = True
-                else:
-                    xml = ET.fromstring(xml)
-            except ET.ParseError:
-                gs.raise_exception_from(f"'{xml}' is not a valid XML file path or string.")
-
-            # Best guess for the search path
-            asset_path = os.path.dirname(path) if is_valid_path else os.getcwd()
-
-            # Detect whether it is a URDF file or a Mujoco MJCF file. `ET.parse` yields an ElementTree, while
-            # `ET.fromstring` (inline XML content) yields the root Element directly.
-            root = xml.getroot() if isinstance(xml, ET.ElementTree) else xml
-            is_urdf_file = root.tag == "robot"
-            mjcf = ET.SubElement(root, "mujoco") if is_urdf_file else root
-
-        # Parse all included sub-models recursively
-        root_parent_stack = [(mjcf, Path(""))]
-        while root_parent_stack:
-            xml_root, parent_path = root_parent_stack.pop()
-            for elem in tuple(xml_root.findall("include")):
-                include_path = parent_path / elem.attrib["file"]
-                include_root = ET.parse(Path(asset_path) / include_path).getroot()
-                # Mesh file paths in the included file are relative to that file's directory, whereas meshdir
-                # points at the top-level model, so rewrite them to stay valid once inlined. Only <asset> meshes
-                # reference a file; a <mesh> under <default> is a default class setting attributes (e.g.
-                # maxhullvert) and a vertex mesh under <asset> is procedural, both carrying no file to rewrite.
-                for include_elem in include_root.findall(".//asset/mesh[@file]"):
-                    include_elem.attrib["file"] = str(include_path.parent / include_elem.attrib["file"])
-                for child in include_root:
-                    mjcf.append(child)
-                mjcf.remove(elem)
-                root_parent_stack.append((include_root, include_path))
-
-        # Drop ground planes authored directly under the worldbody so a model that embeds its own floor can be
-        # loaded into a scene that already provides a ground. Removing the source geoms before compilation leaves
-        # planes authored under child bodies untouched, even when the compiler fuses them into the worldbody.
-        if not is_urdf_file and exclude_ground_plane:
-            for worldbody in mjcf.findall("worldbody"):
-                for geom in tuple(worldbody.findall("geom")):
-                    if geom.attrib.get("type") == "plane":
-                        worldbody.remove(geom)
-
-        # Make sure compiler options are defined
-        compiler = mjcf.find("compiler")
-        if compiler is None:
-            compiler = ET.SubElement(mjcf, "compiler")
-
-        # Set absolute asset search directory
-        for name in ("assetdir", "meshdir", "texturedir"):
-            compiler.attrib[name] = str(Path(asset_path) / compiler.attrib.get(name, ""))
-
-        # Set default constraint solver time constant.
-        # Note that these default options are ignored when parsing URDF files.
-        default = mjcf.find("default")
-        if default is None:
-            default = ET.SubElement(mjcf, "default")
-        for group_name, params_name in (
-            ("geom", ("solref",)),
-            ("joint", ("solreflimit", "solreffriction")),
-            ("equality", ("solref",)),
-        ):
-            group = default.find(group_name)
-            if group is None:
-                group = ET.SubElement(default, group_name)
-            for param_name in params_name:
-                # 0.0 cannot be used because it is considered as an error, so that it will fallback to the original
-                # default value...
-                group.attrib.setdefault(param_name, str(MIN_TIMECONST))
-
-        # Must pre-process URDF to overwrite default Mujoco compile flags
-        if is_urdf_file:
-            robot = urdfpy.URDF._from_xml(root, root, asset_path)
-
-            # Merge fixed links if requested
-            if merge_fixed_links:
-                robot = uu.merge_fixed_links(robot, links_to_keep)
-                root = robot.to_xml()
-                root.append(mjcf)
-
-            # Enforce some compiler options
-            compiler.attrib |= dict(
-                fusestatic="false",
-                strippath="false",
-                inertiafromgeom="false",
-                balanceinertia="false",
-                discardvisual="true" if discard_visual else "false",
-                autolimits="true",
-            )
-
-            # MuJoCo rejects a moving body whose mass or inertia is below 'mjMINVAL'. Bounding both at that value keeps
-            # a zero or missing inertial compilable, and the placeholder is discarded below.
-            compiler.attrib |= dict(
-                boundmass=str(mujoco.mjMINVAL),
-                boundinertia=str(mujoco.mjMINVAL),
-            )
-
-            # Resolve relative mesh paths
-            for elem in root.findall(".//mesh"):
-                mesh_path = elem.get("filename")
-                if mesh_path.startswith("package://"):
-                    mesh_path = mesh_path[10:]
-                # Beware symlinks must NOT be resolved, otherwise it may break the file extension, which is used by
-                # Mujoco MJCF parser to determine how to load mesh files.
-                elem.set("filename", str(Path(asset_path) / mesh_path))
-
-        with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
-            # Parse updated URDF file as a string
-            data = ET.tostring(root, encoding="utf8")
-            mj = mujoco.MjModel.from_xml_string(data)
-
-            # Special treatment for URDF
-            if is_urdf_file:
-                # Discard placeholder inertias that were used to avoid parsing failure
-                for link in robot.links:
-                    inertial = link.inertial
-                    mass = (inertial.mass or 0.0) if inertial is not None else 0.0
-                    is_inertia_defined = inertial is not None and np.linalg.norm(inertial.inertia, np.inf) > 0.0
-                    if mass > 0.0 and is_inertia_defined:
-                        continue
-                    body = mj.body(link.name)
-                    body.mass[:] = mass
-                    # Keep non-zero authored inertia with invalid diagonal so the consistency check reports it
-                    if not is_inertia_defined:
-                        body.inertia[:] = 0.0
-                    # invweight0 derives from placeholder mass and inertia; zero triggers recomputation
-                    body.invweight0[:] = 0.0
-
-                # Set default constraint solver time constant
-                mj.jnt_solref[:, 0] = MIN_TIMECONST
-                mj.geom_solref[:, 0] = MIN_TIMECONST
-                mj.eq_solref[:, 0] = MIN_TIMECONST
-    elif isinstance(xml, mujoco.MjModel):
-        mj = xml
-    else:
+    if isinstance(xml, mujoco.MjModel):
+        return xml
+    if not isinstance(xml, (str, Path, urdfpy.URDF)):
         gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
-
-    return mj
+    root, robot = prepare_xml(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep)
+    spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
+    return compile_model(spec, robot)
 
 
 def parse_xml(morph, surface, rigid_options=None):
@@ -235,13 +241,36 @@ def parse_xml(morph, surface, rigid_options=None):
     # the expanded model is only ever read by the parsers.
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
-    mj = build_model(
-        file,
-        not morph.visualization,
-        merge_fixed_links,
-        exclude_ground_plane,
-        links_to_keep,
-    )
+    if isinstance(file, mujoco.MjModel):
+        mj = file
+        geoms_density = [None] * mj.ngeom
+    else:
+        root, robot = prepare_xml(file, not morph.visualization, merge_fixed_links, exclude_ground_plane, links_to_keep)
+        spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
+        geoms_density_map: dict[mujoco.MjsGeom, float | None] = {}
+        if robot is None:
+            density_spec = spec
+            default_geom = root.find("default/geom")
+            if "density" not in default_geom.attrib:
+                # Changing the implicit default only affects geoms without an authored or inherited density
+                default_geom.set("density", "0")
+                density_spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
+            for geom, density_geom in zip(spec.geoms, density_spec.geoms, strict=True):
+                if geom.type == mujoco.mjtGeom.mjGEOM_MESH:
+                    is_shell = spec.mesh(geom.meshname).inertia == mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
+                else:
+                    is_shell = geom.typeinertia == mujoco.mjtGeomInertia.mjINERTIA_SHELL
+                geoms_density_map[geom] = (
+                    geom.density
+                    if np.isnan(geom.mass) and not is_shell and geom.density == density_geom.density
+                    else None
+                )
+        mj = compile_model(spec, robot)
+        geoms_density = [None] * mj.ngeom
+        if robot is None:
+            # Compilation can discard visual geoms. Only retained geoms have valid final model IDs.
+            for geom in spec.geoms:
+                geoms_density[geom.id] = geoms_density_map[geom]
 
     # We have another more informative warning later so we suppress this one
     # gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
@@ -249,7 +278,7 @@ def parse_xml(morph, surface, rigid_options=None):
     #     gs.logger.warning("(MJCF) Tendon not supported")
 
     # Parse all geometries grouped by parent joint (or world)
-    links_g_infos = parse_geoms(mj, morph.scale, surface, file)
+    links_g_infos = parse_geoms(mj, geoms_density, morph.scale, surface, file)
 
     # Parse all bodies (links and joints)
     l_infos, links_j_infos = parse_links(mj, morph.scale)
@@ -510,7 +539,7 @@ def parse_links(mj, scale):
     return l_infos, j_infos
 
 
-def parse_geom(mj, i_g, scale, surface, xml_path):
+def parse_geom(mj, i_g, density, scale, surface, xml_path):
     mj_geom = mj.geom(i_g)
 
     geom_size = mj_geom.size
@@ -733,6 +762,9 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         "friction_rolling": mj_geom.friction[2] if mj_geom.condim[0] >= 6 else 0.0,
         "sol_params": np.concatenate((mj_geom.solref, mj_geom.solimp)),
     }
+    # Omit unspecified values: fusion grouping compares them numerically
+    if is_col and density is not None:
+        info["density"] = density
     if is_col:
         info["mesh"] = mesh
     else:
@@ -741,7 +773,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
     return info
 
 
-def parse_geoms(mj, scale, surface, xml_path):
+def parse_geoms(mj, geoms_density, scale, surface, xml_path):
     links_g_info = [[] for _ in range(mj.nbody)]
 
     # Loop over all geometries sequentially
@@ -751,7 +783,7 @@ def parse_geoms(mj, scale, surface, xml_path):
             continue
 
         # try parsing a given geometry
-        g_info = parse_geom(mj, i_g, scale, surface, xml_path)
+        g_info = parse_geom(mj, i_g, geoms_density[i_g], scale, surface, xml_path)
         if g_info is None:
             continue
 
@@ -832,6 +864,7 @@ def parse_geoms(mj, scale, surface, xml_path):
             if g_info["group"] in (0, 1, 2):
                 g_info = g_info.copy()
                 mesh = g_info.pop("mesh")
+                g_info.pop("density", None)
                 vmesh = gs.Mesh.from_trimesh(
                     mesh=mesh.trimesh,
                     surface=surface,

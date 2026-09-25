@@ -6,9 +6,9 @@ from typing import NamedTuple, Sequence
 import numpy as np
 
 import genesis as gs
-from genesis.engine.mesh import InertialProperties
 from genesis.typing import Matrix3x3Type, UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
+from genesis.utils.mesh import InertialProperties
 
 RHO_OBJECT = 600.0
 RHO_ROBOT = 1500.0
@@ -122,11 +122,22 @@ def compose_inertial_properties(geoms_inertial_info: Sequence[GeomInertialInfo])
     return InertialProperties(global_mass, global_com, global_inertia)
 
 
+def select_mass_bearing_g_infos(
+    cg_infos: Sequence[dict], vg_infos: Sequence[dict], is_from_visual: bool
+) -> Sequence[dict]:
+    """Select visual or collision geometry for inertia estimation, falling back to whichever is available.
+
+    Authored collision densities take precedence over the visual preference.
+    """
+    if is_from_visual and vg_infos and all(g_info.get("density") is None for g_info in cg_infos):
+        return vg_infos
+    return cg_infos if cg_infos else vg_infos
+
+
 def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> InertialProperties:
     """Compose the inertial of the geoms one link holds, at 'rho' where a geom states no density of its own.
 
-    Every primitive collision type is handled analytically, and a mesh defers to its cached unit-density mass
-    properties. A geom the link is only drawn with is taken as its visual mesh, so one call covers either kind.
+    Primitives use analytic inertia. Meshes use cached unit-density mass properties.
 
     Parameters
     ----------
@@ -144,8 +155,8 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
         tuple(
             GeomInertialInfo(
                 get_local_inertial_from_geom(
-                    gs.GEOM_TYPE.MESH if "vmesh" in g_info else g_info["type"],
-                    None if "vmesh" in g_info else g_info.get("data"),
+                    g_info.get("type", gs.GEOM_TYPE.MESH),
+                    g_info.get("data"),
                     g_info["vmesh"] if "vmesh" in g_info else g_info["mesh"],
                     rho if g_info.get("density") is None else g_info["density"],
                 ),
