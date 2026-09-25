@@ -3212,40 +3212,36 @@ def get_bvh_state(
     n_sort_chunks: int,
     n_extent_lanes: int,
     bvh_config: BVHStaticConfig,
+    is_active: bool,
 ) -> BVHState:
     n_nodes = 2 * n_leaves - 1
+    is_device_radix = is_active and bvh_config.sort_kind == BVH_SORT_KIND.DEVICE_RADIX
+    is_per_tree_radix = is_active and bvh_config.sort_kind == BVH_SORT_KIND.PER_TREE_RADIX
+    is_block_sweep = is_active and bvh_config.fit_kind == BVH_FIT_KIND.BLOCK_SWEEP
     return BVHState(
         tree=BVHTreeState(
-            nodes_left=V(dtype=gs.qd_int, shape=(n_trees, n_nodes)),
-            nodes_right=V(dtype=gs.qd_int, shape=(n_trees, n_nodes)),
-            nodes_min=V(dtype=gs.qd_vec3, shape=(n_trees, n_nodes)),
-            nodes_max=V(dtype=gs.qd_vec3, shape=(n_trees, n_nodes)),
-            leaves_idx=V(dtype=gs.qd_int, shape=(n_trees, n_leaves)),
+            nodes_left=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
+            nodes_right=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
+            nodes_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_nodes), is_active)),
+            nodes_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_nodes), is_active)),
+            leaves_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_leaves), is_active)),
         ),
         leaves=BVHLeaves(
-            aabbs_min=V(dtype=gs.qd_vec3, shape=(n_trees, n_leaves)),
-            aabbs_max=V(dtype=gs.qd_vec3, shape=(n_trees, n_leaves)),
+            aabbs_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_leaves), is_active)),
+            aabbs_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_leaves), is_active)),
         ),
-        leaves_keys=V(dtype=qd.u64, shape=(n_trees * n_leaves,)),
-        keys_scratch=V(dtype=qd.u64, shape=(n_trees * n_leaves,)),
-        sort_scratch=V(
-            dtype=qd.u32, shape=maybe_shape((n_sort_scratch,), bvh_config.sort_kind == BVH_SORT_KIND.DEVICE_RADIX)
-        ),
-        sort_hist=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((n_trees, n_sort_chunks, 256), bvh_config.sort_kind == BVH_SORT_KIND.PER_TREE_RADIX),
-        ),
+        leaves_keys=V(dtype=qd.u64, shape=maybe_shape((n_trees * n_leaves,), is_active)),
+        keys_scratch=V(dtype=qd.u64, shape=maybe_shape((n_trees * n_leaves,), is_active)),
+        sort_scratch=V(dtype=qd.u32, shape=maybe_shape((n_sort_scratch,), is_device_radix)),
+        sort_hist=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_sort_chunks, 256), is_per_tree_radix)),
         n_keys=V_SCALAR_FROM(gs.qd_int, n_trees * n_leaves),
-        nodes_parent=V(dtype=gs.qd_int, shape=(n_trees, n_nodes)),
-        nodes_fitted=V(dtype=gs.qd_int, shape=(n_trees, max(n_leaves - 1, 1))),
-        fit_frontier=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((n_trees, 2, max(n_leaves - 1, 1)), bvh_config.fit_kind == BVH_FIT_KIND.BLOCK_SWEEP),
-        ),
-        lanes_min=V(dtype=gs.qd_vec3, shape=(n_trees, n_extent_lanes)),
-        lanes_max=V(dtype=gs.qd_vec3, shape=(n_trees, n_extent_lanes)),
-        trees_min=V(dtype=gs.qd_vec3, shape=(n_trees,)),
-        trees_max=V(dtype=gs.qd_vec3, shape=(n_trees,)),
+        nodes_parent=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
+        nodes_fitted=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, max(n_leaves - 1, 1)), is_active)),
+        fit_frontier=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, 2, max(n_leaves - 1, 1)), is_block_sweep)),
+        lanes_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_extent_lanes), is_active)),
+        lanes_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees, n_extent_lanes), is_active)),
+        trees_min=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees,), is_active)),
+        trees_max=V(dtype=gs.qd_vec3, shape=maybe_shape((n_trees,), is_active)),
     )
 
 
@@ -3277,6 +3273,16 @@ class BVHQueryState:
     results: BVHQueryResults
 
 
+def get_bvh_query_results(max_results: int, is_active: bool = True) -> BVHQueryResults:
+    return BVHQueryResults(
+        triplets=V(dtype=gs.qd_ivec3, shape=maybe_shape((max_results,), is_active)),
+        count=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_active)),
+    )
+
+
+# =========================================== SAPCoupler ===========================================
+
+
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class SAPContactQueriesState:
     """The box queries of the SAP coupler, one per contact handler traversing a tree.
@@ -3289,10 +3295,3 @@ class SAPContactQueriesState:
     fem_self: BVHQueryState
     rigid_tri: BVHQueryState
     rigid_tet: BVHQueryState
-
-
-def get_bvh_query_results(max_results: int) -> BVHQueryResults:
-    return BVHQueryResults(
-        triplets=V(dtype=gs.qd_ivec3, shape=(max_results,)),
-        count=V(dtype=gs.qd_int, shape=(1,)),
-    )

@@ -18,14 +18,16 @@ from quadrants.algorithms import sort_scratch_slots
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.constants import backend as gs_backend
+from genesis.utils.misc import get_gpu_core_count
 
 # Bits of a morton code: three interleaved 10-bit coordinates.
 MORTON_BITS = 30
-# Up to this leaf count every leaf ranks itself among the keys of its tree in one pass, quadratic per tree; above it
-# a radix sort takes over, the device-wide one of quadrants on the GPU, one per tree on the CPU. The crossover sits
-# where the quadratic pass stops hiding behind the fixed cost of the radix passes, measured per backend.
-RANK_SORT_MAX_LEAVES = {gs_backend.cpu: 256, gs_backend.metal: 1024, gs_backend.cuda: 2048}
+# The rank sort, quadratic per tree, beats the radix sort up to a leaf count. On the CPU the trees sort serially, so
+# the bound holds at every tree count. On the GPU the passes of every tree run together and the crossover sits near
+# one leaf per core for one tree, shrinking with the cube root of the tree count: n_trees * n_leaves**3 stays under
+# the cube of this fraction of the core count, set under the crossover of every device measured.
+RANK_SORT_MAX_LEAVES_CPU = 256
+RANK_SORT_LEAVES_PER_CORE = 0.75
 # Lanes reducing the extent of one tree, each over a strided slice of its leaves, folded by one thread per tree.
 EXTENT_LANES = 64
 # Most chunks of the leaves of one tree the host radix sort counts and scatters in parallel (see func_build_bvh). The
@@ -41,9 +43,13 @@ class BVHData(NamedTuple):
     config: array_class.BVHStaticConfig
 
 
-def get_bvh_data(n_trees: int, n_leaves: int) -> BVHData:
-    """Return a set of trees, one per batch, over the same number of leaves each."""
-    if n_leaves < 1:
+def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData:
+    """Return a set of trees, one per batch, over the same number of leaves each.
+
+    A set switched off takes the empty shape on every tensor (see maybe_shape in array_class.py), for the tree a
+    kernel argument carries but a static configuration skips.
+    """
+    if is_active and n_leaves < 1:
         gs.raise_exception(f"A BVH set needs at least one leaf per tree, got {n_leaves}.")
 
     # The config: the bits of the leaf keys a sort orders, and the sort the backend and the tree size take
@@ -59,7 +65,12 @@ def get_bvh_data(n_trees: int, n_leaves: int) -> BVHData:
     log256_max_n = 1
     while 256**log256_max_n < n_keys:
         log256_max_n += 1
-    if n_leaves <= RANK_SORT_MAX_LEAVES.get(gs.backend, RANK_SORT_MAX_LEAVES[gs_backend.cuda]):
+    if gs.backend == gs.cpu:
+        is_rank_sort = n_leaves <= RANK_SORT_MAX_LEAVES_CPU
+    else:
+        max_leaves = RANK_SORT_LEAVES_PER_CORE * get_gpu_core_count()
+        is_rank_sort = n_trees * n_leaves**3 <= max_leaves**3
+    if is_rank_sort:
         sort_kind = array_class.BVH_SORT_KIND.RANK
     elif gs.backend == gs.cpu:
         sort_kind = array_class.BVH_SORT_KIND.PER_TREE_RADIX
@@ -82,7 +93,9 @@ def get_bvh_data(n_trees: int, n_leaves: int) -> BVHData:
         sort_scratch_slots(n_keys, log256_max_n) if sort_kind == array_class.BVH_SORT_KIND.DEVICE_RADIX else 0
     )
     n_sort_chunks = max(1, min(SORT_MAX_CHUNKS, (os.cpu_count() or 1) // n_trees))
-    bvh_state = array_class.get_bvh_state(n_trees, n_leaves, n_sort_scratch, n_sort_chunks, EXTENT_LANES, bvh_config)
+    bvh_state = array_class.get_bvh_state(
+        n_trees, n_leaves, n_sort_scratch, n_sort_chunks, EXTENT_LANES, bvh_config, is_active
+    )
 
     return BVHData(bvh_state, bvh_config)
 

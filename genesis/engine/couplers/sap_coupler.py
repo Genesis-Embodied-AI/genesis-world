@@ -261,6 +261,12 @@ class SAPCoupler(RBC):
                 )
             if self._fem_floor_contact_type == FEMFloorContactType.TET or self._enable_fem_self_tet_contact:
                 init_tet_tables = True
+            # The rigid-FEM handler reads the FEM pressure field and gradient as the hydroelastic FEM handlers do
+            if (
+                self._fem_floor_contact_type == FEMFloorContactType.TET
+                or self._enable_fem_self_tet_contact
+                or self._enable_rigid_fem_contact
+            ):
                 self._init_hydroelastic_fem_fields_and_info()
 
             if self._fem_floor_contact_type == FEMFloorContactType.TET:
@@ -434,52 +440,48 @@ class SAPCoupler(RBC):
 
     def _init_bvh(self):
         """Allocate the tree set and the box query of each contact handler traversing a tree."""
-        # A disabled handler gets a one-leaf tree set and a one-pair result list: the contact kernel takes the queries
-        # as one struct, so every member exists whether or not its handler does
-        if self._enable_fem_self_tet_contact:
-            n_tets = self.fem_solver.n_surface_elements
-            self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(self.fem_solver._B, n_tets)
-        else:
-            self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(1, 1)
-        if self._enable_fem_self_tet_contact:
-            max_results = max(1, min(n_tets * MAX_N_QUERY_RESULT_PER_AABB * self.fem_solver._B, 0x7FFFFFFF))
-        else:
-            max_results = 1
+        # The contact kernel takes the queries as one struct, so a disabled handler keeps its members, switched off
+        # The surface tet boxes serve the self-contact tree and the rigid triangle query alike
+        has_fem_tet_tree = self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact
+        n_tets = self.fem_solver.n_surface_elements if has_fem_tet_tree else 0
+        self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
+            self.sim._B, n_tets, is_active=has_fem_tet_tree
+        )
+        max_results = min(n_tets * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF)
         # The surface tets of each environment queried against their own tree
         fem_self_query = array_class.BVHQueryState(
             leaves=self.fem_surface_tet_bvh_state.leaves,
             tree=self.fem_surface_tet_bvh_state.tree,
-            results=array_class.get_bvh_query_results(max_results),
+            results=array_class.get_bvh_query_results(max_results, is_active=self._enable_fem_self_tet_contact),
         )
 
+        n_faces = self.rigid_solver.n_faces
+        self.rigid_tri_bvh_state, self.rigid_tri_bvh_config = get_bvh_data(
+            self.sim._B, n_faces, is_active=self._enable_rigid_fem_contact
+        )
         if self._enable_rigid_fem_contact:
-            n_faces = self.rigid_solver.n_faces
-            self.rigid_tri_bvh_state, self.rigid_tri_bvh_config = get_bvh_data(self.sim._B, n_faces)
-            max_n_query_results_per_face = (
-                max(n_faces, self.fem_solver.n_surface_elements) * MAX_N_QUERY_RESULT_PER_AABB // n_faces
-            )
-            max_results = max(1, min(n_faces * max_n_query_results_per_face * self.sim._B, 0x7FFFFFFF))
+            max_n_query_results_per_face = max(n_faces, n_tets) * MAX_N_QUERY_RESULT_PER_AABB // n_faces
+            max_results = min(n_faces * max_n_query_results_per_face * self.sim._B, 0x7FFFFFFF)
         else:
-            self.rigid_tri_bvh_state, self.rigid_tri_bvh_config = get_bvh_data(1, 1)
-            max_results = 1
+            max_results = 0
         # The surface tets of each environment queried against the rigid triangle tree of that environment
         rigid_tri_query = array_class.BVHQueryState(
             leaves=self.fem_surface_tet_bvh_state.leaves,
             tree=self.rigid_tri_bvh_state.tree,
-            results=array_class.get_bvh_query_results(max_results),
+            results=array_class.get_bvh_query_results(max_results, is_active=self._enable_rigid_fem_contact),
         )
 
-        if self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET:
-            self.rigid_tet_bvh_state, self.rigid_tet_bvh_config = get_bvh_data(self.sim._B, self.n_rigid_volume_elems)
-            max_results = max(1, min(self.n_rigid_volume_elems * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF))
-        else:
-            self.rigid_tet_bvh_state, self.rigid_tet_bvh_config = get_bvh_data(1, 1)
-            max_results = 1
+        has_rigid_tet_tree = self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET
+        n_rigid_tets = self.n_rigid_volume_elems if has_rigid_tet_tree else 0
+        self.rigid_tet_bvh_state, self.rigid_tet_bvh_config = get_bvh_data(
+            self.sim._B, n_rigid_tets, is_active=has_rigid_tet_tree
+        )
+        max_results = min(n_rigid_tets * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF)
         # The rigid tets of each environment queried against their own tree
         rigid_tet_query = array_class.BVHQueryState(
             leaves=self.rigid_tet_bvh_state.leaves,
             tree=self.rigid_tet_bvh_state.tree,
-            results=array_class.get_bvh_query_results(max_results),
+            results=array_class.get_bvh_query_results(max_results, is_active=has_rigid_tet_tree),
         )
         self.contact_queries_state = array_class.SAPContactQueriesState(
             fem_self=fem_self_query, rigid_tri=rigid_tri_query, rigid_tet=rigid_tet_query
@@ -648,7 +650,11 @@ class SAPCoupler(RBC):
         from genesis.engine.solvers.rigid.rigid_solver import kernel_update_all_verts
 
         if self.fem_solver.is_active:
-            if qd.static(self._fem_floor_contact_type == FEMFloorContactType.TET or self._enable_fem_self_tet_contact):
+            if qd.static(
+                self._fem_floor_contact_type == FEMFloorContactType.TET
+                or self._enable_fem_self_tet_contact
+                or self._enable_rigid_fem_contact
+            ):
                 self.fem_compute_pressure_gradient(i_step)
 
         if self.rigid_solver.is_active:
@@ -748,8 +754,9 @@ class SAPCoupler(RBC):
     # ------------------------------------------------------------------------------------
 
     def update_bvh(self, i_step: qd.i32):
-        if self._enable_fem_self_tet_contact:
+        if self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact:
             self.compute_fem_surface_tet_aabb(i_step)
+        if self._enable_fem_self_tet_contact:
             build_bvh(self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config, eps=gs.EPS)
 
         if self._enable_rigid_fem_contact:
