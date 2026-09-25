@@ -2692,8 +2692,8 @@ def _func_narrowphase_multicontact(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     gjk_static_config: qd.template(),
-    n_total_threads: qd.template(),
-    max_items_per_thread: qd.template(),
+    n_total_threads: int,
+    max_items_per_thread: int,
     errno: qd.Tensor,
 ):
     for i_tid in range(n_total_threads):
@@ -2735,13 +2735,6 @@ def _func_narrowphase_multicontact(
             )
 
 
-@qd.kernel(fastcache=True)
-def _func_reset_narrowphase_work_queues(collider_state: array_class.ColliderState):
-    for _i in range(1):
-        collider_state.narrowphase_work_queues.mpr_queue_size[0] = 0
-        collider_state.narrowphase_work_queues.mpr_work_counter[0] = 0
-
-
 @qd.func
 def _func_enqueue_for_multicontact(
     i_b,
@@ -2777,12 +2770,18 @@ def _func_narrowphase_contact0(
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
-    n_envs: qd.template(),
-    n_chunks: qd.template(),
+    n_chunks: int,
     errno: qd.Tensor,
 ):
+    n_envs = collider_state.n_broad_pairs.shape[0]
     _grid_size = n_envs * n_chunks
     max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
+
+    # The queue the loop below fills is emptied first. The top-level loops of a kernel run in order, so the reset
+    # costs no launch of its own
+    for _ in range(1):
+        collider_state.narrowphase_work_queues.mpr_queue_size[0] = 0
+        collider_state.narrowphase_work_queues.mpr_work_counter[0] = 0
 
     for flat_idx in range(_grid_size):
         i_b = flat_idx // n_chunks

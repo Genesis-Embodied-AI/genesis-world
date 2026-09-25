@@ -578,7 +578,10 @@ def test_sap_fem_vs_robot(show_viewer):
         fem_options=gs.options.FEMOptions(
             use_implicit_solver=True,
         ),
-        coupler_options=gs.options.SAPCouplerOptions(),
+        # Rigid-FEM contact without FEM self-contact, which no other test covers
+        coupler_options=gs.options.SAPCouplerOptions(
+            enable_fem_self_tet_contact=False,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(2.0, 1.5, 1.2),
         ),

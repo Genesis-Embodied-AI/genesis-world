@@ -2920,6 +2920,26 @@ class RigidEntity(KinematicEntity):
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_force(dofs_idx, envs_idx)
 
+    def get_dofs_acc(self, dofs_idx_local=None, envs_idx=None):
+        """
+        Get the entity's dofs' acceleration at the current time step, the one the last step integrated.
+
+        Parameters
+        ----------
+        dofs_idx_local : None | array_like, optional
+            The indices of the dofs to get. If None, all dofs will be returned. Note that here this uses the local
+            `q_idx`, not the scene-level one. Defaults to None.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+
+        Returns
+        -------
+        acc : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
+            The entity's dofs' acceleration.
+        """
+        dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
+        return self._solver.get_dofs_acc(dofs_idx, envs_idx)
+
     # ------------------------------------------------------------------------------------
     # ----------------------------- DOF property getters ---------------------------------
     # ------------------------------------------------------------------------------------

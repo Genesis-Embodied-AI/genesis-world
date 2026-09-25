@@ -3027,6 +3027,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_state.dofs.force, envs_idx, dofs_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
+    def get_dofs_acc(self, dofs_idx=None, envs_idx=None):
+        tensor = qd_to_torch(self.dyn_state.dofs.acc, envs_idx, dofs_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 else tensor
+
     def get_dofs_kp(self, dofs_idx=None, envs_idx=None):
         if not self._options.batch_dofs_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched dofs info.")
