@@ -1612,9 +1612,9 @@ class Scene(RBC):
         show_viewer : bool, optional
             Whether to open an interactive viewer on the scene. Defaults to False.
         viewer_options : ViewerOptions, optional
-            Viewer options replacing the recorded ones. If None, the recorded ones stand. Defaults to None.
+            Viewer options overriding the recorded ones, for the fields they set. Defaults to None.
         vis_options : VisOptions, optional
-            Visualizer options replacing the recorded ones. If None, the recorded ones stand. Defaults to None.
+            Visualizer options overriding the recorded ones, for the fields they set. Defaults to None.
         renderer : RendererOptions, optional
             Renderer replacing the recorded one. If None, the recorded one stands. Defaults to None.
 
@@ -1637,11 +1637,23 @@ class Scene(RBC):
     ) -> "Scene":
         """Create the scene a description states, waiting to be built.
 
-        The viewer, visualizer and renderer options are replaced where given. The physics options stand as described,
-        since they size the arrays a recorded state fills.
+        The viewer and visualizer options override the described ones field by field, for the fields they set, and the
+        renderer is replaced where given. The physics options stand as described, since they size the arrays a
+        recorded state fills.
         """
-        replaced = (("viewer", viewer_options), ("vis", vis_options), ("renderer", renderer))
-        options = described.options.model_copy(update={name: value for name, value in replaced if value is not None})
+        # A field left at its default keeps the described value, so asking for one change keeps the lights, the
+        # background and the camera the scene was authored with.
+        updates = {}
+        for name, recorded, given in (
+            ("viewer", described.options.viewer, viewer_options),
+            ("vis", described.options.vis, vis_options),
+        ):
+            if given is not None:
+                given_fields = {field: value for field, value in dict(given).items() if field in given.model_fields_set}
+                updates[name] = recorded.model_copy(update=given_fields)
+        if renderer is not None:
+            updates["renderer"] = renderer
+        options = described.options.model_copy(update=updates)
         scene = cls(show_viewer=show_viewer, options=options)
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
@@ -1698,8 +1710,8 @@ class Scene(RBC):
     ) -> "Scene":
         """Create and build the scene a checkpoint file holds, standing in the final state the file records.
 
-        The file is one written by 'save_checkpoint' or by recording a 'TrajectoryFile' to its end. The viewer,
-        visualizer and renderer options may be replaced (see 'load').
+        The file is one written by 'save_checkpoint' or by recording a 'TrajectoryFile' to its end. The viewer and
+        visualizer options may be overridden and the renderer replaced (see 'load').
 
         Parameters
         ----------
@@ -1708,9 +1720,9 @@ class Scene(RBC):
         show_viewer : bool, optional
             Whether to open an interactive viewer on the scene. Defaults to False.
         viewer_options : ViewerOptions, optional
-            Viewer options replacing the recorded ones. Defaults to None.
+            Viewer options overriding the recorded ones, for the fields they set. Defaults to None.
         vis_options : VisOptions, optional
-            Visualizer options replacing the recorded ones. Defaults to None.
+            Visualizer options overriding the recorded ones, for the fields they set. Defaults to None.
         renderer : RendererOptions, optional
             Renderer replacing the recorded one. Defaults to None.
 
@@ -1734,8 +1746,8 @@ class Scene(RBC):
     ) -> Trajectory:
         """Open a recorded trajectory in the scene it was recorded from, created and built here, to seek and replay.
 
-        The file is one written by recording a 'TrajectoryFile'. The viewer, visualizer and renderer options may be
-        replaced (see 'load').
+        The file is one written by recording a 'TrajectoryFile'. The viewer and visualizer options may be overridden
+        and the renderer replaced (see 'load').
 
         Parameters
         ----------
@@ -1744,9 +1756,9 @@ class Scene(RBC):
         show_viewer : bool, optional
             Whether to open an interactive viewer on the scene. Defaults to False.
         viewer_options : ViewerOptions, optional
-            Viewer options replacing the recorded ones. Defaults to None.
+            Viewer options overriding the recorded ones, for the fields they set. Defaults to None.
         vis_options : VisOptions, optional
-            Visualizer options replacing the recorded ones. Defaults to None.
+            Visualizer options overriding the recorded ones, for the fields they set. Defaults to None.
         renderer : RendererOptions, optional
             Renderer replacing the recorded one. Defaults to None.
 

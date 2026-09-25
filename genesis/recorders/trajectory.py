@@ -371,9 +371,9 @@ class Trajectory:
     show_viewer : bool, optional
         Whether the created scene opens an interactive viewer. Defaults to False.
     viewer_options : ViewerOptions, optional
-        Viewer options replacing the recorded ones in the created scene. If None, the recorded ones stand.
+        Viewer options overriding the recorded ones in the created scene, for the fields they set.
     vis_options : VisOptions, optional
-        Visualizer options replacing the recorded ones in the created scene. If None, the recorded ones stand.
+        Visualizer options overriding the recorded ones in the created scene, for the fields they set.
     renderer : RendererOptions, optional
         Renderer replacing the recorded one in the created scene. If None, the recorded one stands.
     """

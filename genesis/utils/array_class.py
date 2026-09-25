@@ -191,10 +191,11 @@ def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch
     Where zero-copy views exist the values go through them, so a device-resident record stays on the device. On Metal
     these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once before the next kernel.
     """
+    # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
     for array, value in check_data(items, values):
         if gs.use_zerocopy:
             view = qd_to_torch(array, copy=False)
-            view.copy_(torch.as_tensor(value, device=view.device))
+            view.copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
         else:
             array.from_numpy(value)
 

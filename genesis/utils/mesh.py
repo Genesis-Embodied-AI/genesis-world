@@ -351,10 +351,11 @@ def compute_sdf_data(mesh, res):
 def surface_uvs_to_trimesh_visual(surface, uvs=None, n_verts=None):
     texture = surface.get_rgba()
 
-    # 'trimesh' uses uvs starting from the top-left corner, so flip them to Genesis' convention.
+    # 'trimesh' uses uvs starting from the top-left corner, so flip them to Genesis' convention. The flip runs at the
+    # precision a mesh stores its uvs at, so a mesh drawn from uvs read back from a file matches the one it was built as.
     flipped_uvs = None
     if uvs is not None:
-        flipped_uvs = uvs.copy()
+        flipped_uvs = uvs.astype(gs.np_float)
         flipped_uvs[:, 1] = 1.0 - flipped_uvs[:, 1]
 
     # Composite emissive additively on top of the base color, but only when the base color is the packed albedo

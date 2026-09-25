@@ -11,8 +11,10 @@ from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 FPS = 60
 
 
-def launch(filename=None, collision=False, rotate=False, scale=1.0, show_link_frame=False, deprecated=False):
-    gs.init(backend=gs.cpu)
+def launch(
+    filename=None, collision=False, rotate=False, scale=1.0, show_link_frame=False, deprecated=False, backend=gs.cpu
+):
+    gs.init(backend=backend)
 
     if deprecated:
         gs.logger.warning("'gs view' is deprecated and will be removed in a future release. Use 'gs launch' instead.")
@@ -101,8 +103,8 @@ def launch(filename=None, collision=False, rotate=False, scale=1.0, show_link_fr
         scene.step()
 
 
-def play(filename=None, collision=False, scale=1.0):
-    gs.init()
+def play(filename=None, collision=False, scale=1.0, backend=gs.cpu):
+    gs.init(backend=backend)
 
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -143,18 +145,19 @@ def play(filename=None, collision=False, scale=1.0):
         scene.step()
 
 
-def replay(filename):
-    gs.init()
+def replay(filename, envs_idx, backend=gs.cpu):
+    gs.init(backend=backend)
 
-    gs.Scene.load_trajectory(filename, show_viewer=True).play(loop=True)
+    vis_options = None if envs_idx is None else gs.options.VisOptions(rendered_envs_idx=envs_idx)
+    gs.Scene.load_trajectory(filename, show_viewer=True, vis_options=vis_options).play(loop=True)
 
 
-def animate(filename_pattern, fps):
+def animate(filename_pattern, fps, backend=gs.cpu):
     import glob
 
     from PIL import Image
 
-    gs.init()
+    gs.init(backend=backend)
     files = sorted(glob.glob(filename_pattern))
     imgs = []
     for file in files:
@@ -167,7 +170,19 @@ def main():
     parser = argparse.ArgumentParser(description="Genesis CLI")
     subparsers = parser.add_subparsers(dest="command")
 
-    launch_args = argparse.ArgumentParser(add_help=False)
+    backend_args = argparse.ArgumentParser(add_help=False)
+    backend_args.add_argument(
+        "-b",
+        "--backend",
+        type=str,
+        choices=[backend.name for backend in gs.constants.backend],
+        default=gs.cpu.name,
+        help="Backend running the simulation. 'cpu' compiles faster and suits a few environments, a GPU backend runs "
+        "many environments faster. 'gpu' picks the first GPU backend available and falls back to 'cpu'. "
+        "Defaults to 'cpu'.",
+    )
+
+    launch_args = argparse.ArgumentParser(add_help=False, parents=[backend_args])
     launch_args.add_argument(
         "filename",
         type=str,
@@ -186,7 +201,9 @@ def main():
     subparsers.add_parser("launch", parents=[launch_args], help="Visualize a given asset (Mesh/URDF/MJCF/USD)")
     subparsers.add_parser("view", parents=[launch_args], help="[DEPRECATED] Alias of 'launch'.")
 
-    parser_play = subparsers.add_parser("play", help="Interactive viewer with ImGui joint controls and simulation")
+    parser_play = subparsers.add_parser(
+        "play", parents=[backend_args], help="Interactive viewer with ImGui joint controls and simulation"
+    )
     parser_play.add_argument(
         "filename",
         type=str,
@@ -199,14 +216,28 @@ def main():
     )
     parser_play.add_argument("-s", "--scale", type=float, default=1.0, help="Scale of the entity")
 
-    parser_replay = subparsers.add_parser("replay", help="Replay a recorded trajectory in the viewer")
+    parser_replay = subparsers.add_parser(
+        "replay", parents=[backend_args], help="Replay a recorded trajectory in the viewer"
+    )
     parser_replay.add_argument("filename", type=str, help="Trajectory file (.gstraj)")
+    parser_replay.add_argument(
+        "-e",
+        "--envs",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Indices of the environments to render. Rendering fewer environments speeds up the replay of large "
+        "batches. Defaults to the environments rendered when recording.",
+    )
 
-    parser_animate = subparsers.add_parser("animate", help="Compile a list of image files into a video")
+    parser_animate = subparsers.add_parser(
+        "animate", parents=[backend_args], help="Compile a list of image files into a video"
+    )
     parser_animate.add_argument("filename_pattern", type=str, help="Image files, via glob pattern")
     parser_animate.add_argument("--fps", type=int, default=30, help="FPS of the output video")
 
     args = parser.parse_args()
+    backend = None if args.command is None else gs.constants.backend[args.backend]
 
     if args.command in ("launch", "view"):
         launch(
@@ -216,13 +247,14 @@ def main():
             args.scale,
             args.link_frame,
             deprecated=args.command == "view",
+            backend=backend,
         )
     elif args.command == "play":
-        play(args.filename, args.collision, args.scale)
+        play(args.filename, args.collision, args.scale, backend)
     elif args.command == "replay":
-        replay(args.filename)
+        replay(args.filename, args.envs, backend)
     elif args.command == "animate":
-        animate(args.filename_pattern, args.fps)
+        animate(args.filename_pattern, args.fps, backend)
     elif args.command is None:
         parser.print_help()
 

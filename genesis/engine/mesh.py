@@ -689,6 +689,10 @@ class Mesh(RBC, serialization.SerializationMixin):
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
             metadata=loading.value(raw["metadata"], Any),
         )
+        # Construction derives the visual from the surface and the uvs unless the mesh states vertex colours, which are
+        # the only visual a file carries (see '_exported_geometry'), so a textured mesh gets its visual back this way.
+        if raw["geometry"]["colours"] is None:
+            mesh._mesh.visual = mu.surface_uvs_to_trimesh_visual(mesh.surface, mesh.uvs, len(mesh.verts))
         source = loading.shared.setdefault((raw["geometry"]["verts"], raw["geometry"]["faces"]), mesh)
         if source is not mesh:
             mesh._unique_edges = source.get_unique_edges()
