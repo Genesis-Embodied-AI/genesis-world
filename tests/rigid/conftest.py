@@ -2,9 +2,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+from PIL import Image
 import pytest
 import trimesh
-from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
 
@@ -649,11 +650,116 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 
 @pytest.fixture(scope="session")
+def authored_geom_density_mjcf():
+    """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
+    mjcf = ET.Element("mujoco", model="authored_geom_density")
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, attrib in (
+        ("on_geom", dict(density="250")),
+        ("on_class", {"class": "water"}),
+        ("on_default", dict(density="1000")),
+        ("unstated", {}),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos="0.0 0.0 1.0")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
+
+    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
+    ET.SubElement(mixed, "freejoint")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
+    fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
+    ET.SubElement(fused, "freejoint")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
+
+    weightless = ET.SubElement(worldbody, "body", name="weightless", pos="0.0 0.0 1.0")
+    ET.SubElement(weightless, "freejoint")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_geom_density_defaults():
+    models = []
+    for root_density, discard_visual, material_density in (
+        (None, False, None),
+        (None, True, None),
+        (700.0, False, None),
+        (700.0, True, None),
+        (None, True, 2000.0),
+    ):
+        mjcf = ET.Element("mujoco")
+        ET.SubElement(mjcf, "compiler", inertiafromgeom="false", discardvisual=str(discard_visual).lower())
+        default = ET.SubElement(mjcf, "default")
+        if root_density is not None:
+            ET.SubElement(default, "geom", density=str(root_density))
+        ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="mounted")
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
+        for i_g, attrib in enumerate(
+            ({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(density="500"))
+        ):
+            ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
+        replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
+        ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")
+        models.append((ET.tostring(mjcf, encoding="unicode"), root_density, material_density))
+    return models
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia():
     """Generate a URDF with a single link that has no inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.09")
     return ET.tostring(urdf, encoding="unicode")
+
+
+def _add_simplified_collision_link(urdf, link_name, visual_meshes, scale):
+    """Append a link with visual meshes, a smaller collision sphere, and unspecified inertia."""
+    link = ET.SubElement(urdf, "link", name=link_name)
+    for visual_mesh in visual_meshes:
+        visual = ET.SubElement(link, "visual")
+        geometry = ET.SubElement(visual, "geometry")
+        ET.SubElement(geometry, "mesh", filename=visual_mesh, scale=f"{scale} {scale} {scale}")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "sphere", radius="0.04")
+
+
+@pytest.fixture(scope="session")
+def simplified_collision_sphere():
+    """Generate a URDF whose single link carries a watertight sphere visual mesh and a smaller collision sphere."""
+    urdf = ET.Element("robot", name="simplified_collision_sphere")
+    _add_simplified_collision_link(urdf, "base_link", [os.path.join(get_assets_dir(), "meshes", "sphere.obj")], 0.05)
+    return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def simplified_collision_open_mesh(asset_tmp_path):
+    """Return a URDF whose link is drawn with an open pipe, and the volume that pipe closes to.
+
+    Its convex hull fills the bore and overestimates the volume. The surface is split across two visual meshes that
+    each sample the whole pipe, as an asset splits one surface by material, so estimating them one by one counts the
+    pipe twice. Its faces wind inward, as exported meshes commonly do.
+    """
+    pipe = trimesh.creation.annulus(r_min=0.08, r_max=0.1, height=0.2)
+    closed_volume = pipe.volume
+    pipe.update_faces(np.abs(pipe.face_normals[:, 2]) < 0.5)
+    pipe.invert()
+    mesh_paths = []
+    for i_half, faces in enumerate((pipe.faces[::2], pipe.faces[1::2])):
+        mesh_paths.append(str(asset_tmp_path / f"open_pipe_{i_half}.obj"))
+        trimesh.Trimesh(vertices=pipe.vertices, faces=faces, process=False).export(mesh_paths[-1])
+
+    urdf = ET.Element("robot", name="simplified_collision_open_mesh")
+    _add_simplified_collision_link(urdf, "base_link", mesh_paths, 1.0)
+    return ET.tostring(urdf, encoding="unicode"), closed_volume
 
 
 @pytest.fixture(scope="session")

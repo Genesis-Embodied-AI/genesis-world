@@ -5,6 +5,7 @@ import os
 import pickle as pkl
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 import coacd
 import igl
@@ -14,8 +15,10 @@ import OpenEXR
 import tetgen
 import trimesh
 from PIL import Image
+from scipy.spatial import QhullError
 
 import genesis as gs
+from genesis.typing import Matrix3x3Type, Vec3FType
 
 from . import geom as gu
 from .misc import (
@@ -462,6 +465,89 @@ def convex_decompose(mesh, coacd_options):
             cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
 
     return mesh_parts
+
+
+# Grid the occupancy estimate starts from, in cells along the longest extent of the surface, and the cell count it stays
+# under while refining. A budget on the count lets an elongated surface refine further than a cube-shaped one for the
+# same cost.
+OCCUPANCY_CELLS_MIN = 32
+OCCUPANCY_CELLS_MAX = 2_000_000
+# Relative change of the estimated volume from one grid to the next twice as fine, under which the grid resolves the
+# solid. A part thinner than a cell is counted from both sides by the cells around it, and shrinks toward its volume as
+# the grid refines, so the change between levels measures how much of the solid is still unresolved.
+OCCUPANCY_VOLUME_RTOL = 2e-2
+
+# Occupancy estimates, shared by the meshes an asset repeats (one per leg or finger) and keyed by their geometry. A
+# value is a few hundred bytes, so the entry count is the bound that matters.
+_INERTIAL_CACHE = SizeCappedCache(max_bytes=1024 * 1024, max_entries=4096)
+
+
+class InertialProperties(NamedTuple):
+    """A rigid body's intrinsic inertial: mass, center of mass 'com', and inertia tensor 'i' about that COM."""
+
+    mass: float
+    com: Vec3FType
+    i: Matrix3x3Type
+
+
+def inertial_from_occupancy(verts, faces) -> InertialProperties:
+    """Unit-density mass properties of the volume an open, self-intersecting or inverted triangle soup encloses.
+
+    A cell of a regular grid is interior where the generalized winding number of the surface exceeds one half in
+    magnitude, and a cell the surface crosses is filled by the fraction its distance to the surface leaves on the
+    interior side. The grid starts at `OCCUPANCY_CELLS_MIN` cells along the longest extent and is refined while the
+    volume changes by more than `OCCUPANCY_VOLUME_RTOL` from one grid to the next and the next grid stays under
+    `OCCUPANCY_CELLS_MAX` cells. The convex hull bounds the result: a volume above it means the surface is thinner than
+    the finest grid, and the hull's mass properties are returned. A single-sided surface enclosing a cavity is filled,
+    and a surface too degenerate for a hull carries no mass.
+    """
+    verts = np.ascontiguousarray(verts, dtype=np.float64)
+    faces = np.ascontiguousarray(faces, dtype=np.int64)
+    key = get_hashkey(verts, faces)
+    inertial = _INERTIAL_CACHE.get(key)
+    if inertial is not None:
+        return inertial
+
+    try:
+        hull = trimesh.Trimesh(vertices=verts, faces=faces, process=False).convex_hull
+    except QhullError:
+        hull = None
+    if hull is None or hull.volume <= 0.0:
+        inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+    else:
+        verts_min = verts.min(axis=0)
+        extent = verts.max(axis=0) - verts_min
+        n_cells_axis = OCCUPANCY_CELLS_MIN
+        volume_coarse = None
+        while True:
+            pitch = extent.max() / n_cells_axis
+            # One cell of padding: the occupancy of a surface lying on the bounding box spills half a cell outside it
+            n_cells = np.ceil(extent / pitch).astype(int) + 2
+            cells_axes = [verts_min[i] + (np.arange(n) - 0.5) * pitch for i, n in enumerate(n_cells)]
+            cells_pos = np.stack(np.meshgrid(*cells_axes, indexing="ij"), axis=-1).reshape(-1, 3)
+            cells_sqr_dist, _, _ = igl.point_mesh_squared_distance(cells_pos, verts, faces)
+            cells_winding = igl.fast_winding_number(verts, faces, cells_pos)
+            cells_signed_dist = np.sqrt(cells_sqr_dist) * np.where(np.abs(cells_winding) > 0.5, -1.0, 1.0)
+            cells_occupancy = np.clip(0.5 - cells_signed_dist / pitch, 0.0, 1.0)
+            volume = cells_occupancy.sum() * pitch**3
+            is_converged = volume_coarse is not None and abs(volume - volume_coarse) < OCCUPANCY_VOLUME_RTOL * volume
+            if is_converged or 8 * cells_pos.shape[0] > OCCUPANCY_CELLS_MAX:
+                break
+            volume_coarse = volume
+            n_cells_axis *= 2
+
+        if volume > hull.volume:
+            inertial = InertialProperties(hull.volume, hull.center_mass, hull.moment_inertia)
+        else:
+            com = (cells_occupancy @ cells_pos) * pitch**3 / volume
+            cells_rel_pos = cells_pos - com
+            # Each cell as a point mass about the center of mass, plus its own inertia as a cube about its center
+            inertia = np.eye(3) * (cells_occupancy * (cells_rel_pos**2).sum(axis=1)).sum()
+            inertia -= (cells_occupancy[:, None] * cells_rel_pos).T @ cells_rel_pos
+            inertia = inertia * pitch**3 + np.eye(3) * (volume * pitch**2 / 6.0)
+            inertial = InertialProperties(volume, com, inertia)
+    _INERTIAL_CACHE.put(key, inertial, inertial.com.nbytes + inertial.i.nbytes + 8)
+    return inertial
 
 
 # 512 MiB of processed collision geometry. Sized by the geometry footprint actually retained (vertices and faces of

@@ -563,6 +563,12 @@ class FileMorph(Morph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether to estimate a missing or recomputed inertia from the visual geometry rather than the collision
+        geometry. Collision geometry is routinely a simplification (a hull, a sphere, a capsule), so the visual
+        surface describes the mass distribution of a link more closely, at a small load-time cost for each open visual
+        mesh, whose enclosed volume has to be estimated. Authored collision densities take precedence, and whichever
+        geometry is absent falls back to the other. Defaults to True.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
@@ -601,6 +607,7 @@ class FileMorph(Morph):
     decompose_robot_error_threshold: float = Field(default=float("inf"), ge=0, allow_inf_nan=True)
     coacd_options: CoacdOptions | None = None
     recompute_inertia: StrictBool = False
+    inertia_from_visual: StrictBool = True
     align: StrictBool | None = None
     file_meshes_are_zup: StrictBool | None = True
     batch_fixed_verts: StrictBool = False
@@ -765,6 +772,12 @@ class Mesh(FileMorph, TetGenMixin):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether to estimate a missing or recomputed inertia from the visual geometry rather than the collision
+        geometry. Collision geometry is routinely a simplification (a hull, a sphere, a capsule), so the visual
+        surface describes the mass distribution of a link more closely, at a small load-time cost for each open visual
+        mesh, whose enclosed volume has to be estimated. Authored collision densities take precedence, and whichever
+        geometry is absent falls back to the other. Defaults to True.
     merge_submeshes_for_collision : bool, optional
         Whether to merge submeshes for collision. Defaults to False. **This is only used for RigidEntity.**
     visualization : bool, optional
@@ -957,7 +970,15 @@ class MJCF(FileMorph):
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
-        broken assets from external providers that cannot be re-exported from source. Default to False.
+        broken assets from external providers that cannot be re-exported from source. Each collision geom keeps the
+        density of the file (1000 kg/m^3 where omitted, as the MJCF format specifies) over the material density.
+        Default to False.
+    inertia_from_visual : bool, optional
+        Whether to estimate a missing or recomputed inertia from the visual geometry rather than the collision
+        geometry. Collision geometry is routinely a simplification (a hull, a sphere, a capsule), so the visual
+        surface describes the mass distribution of a link more closely, at a small load-time cost for each open visual
+        mesh, whose enclosed volume has to be estimated. Authored collision densities take precedence, and whichever
+        geometry is absent falls back to the other. Defaults to True.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1095,6 +1116,12 @@ class URDF(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether to estimate a missing or recomputed inertia from the visual geometry rather than the collision
+        geometry. Collision geometry is routinely a simplification (a hull, a sphere, a capsule), so the visual
+        surface describes the mass distribution of a link more closely, at a small load-time cost for each open visual
+        mesh, whose enclosed volume has to be estimated. Authored collision densities take precedence, and whichever
+        geometry is absent falls back to the other. Defaults to True.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1234,6 +1261,12 @@ class Drone(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether to estimate a missing or recomputed inertia from the visual geometry rather than the collision
+        geometry. Collision geometry is routinely a simplification (a hull, a sphere, a capsule), so the visual
+        surface describes the mass distribution of a link more closely, at a small load-time cost for each open visual
+        mesh, whose enclosed volume has to be estimated. Authored collision densities take precedence, and whichever
+        geometry is absent falls back to the other. Defaults to True.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1582,6 +1615,12 @@ class USD(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    inertia_from_visual : bool, optional
+        Whether to estimate a missing or recomputed inertia from the visual geometry rather than the collision
+        geometry. Collision geometry is routinely a simplification (a hull, a sphere, a capsule), so the visual
+        surface describes the mass distribution of a link more closely, at a small load-time cost for each open visual
+        mesh, whose enclosed volume has to be estimated. Authored collision densities take precedence, and whichever
+        geometry is absent falls back to the other. Defaults to True.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
