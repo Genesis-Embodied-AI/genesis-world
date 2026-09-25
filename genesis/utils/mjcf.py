@@ -1,15 +1,15 @@
 import os
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from itertools import chain
 from bisect import bisect_right
-
-# Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
-import mujoco
+from itertools import chain
+from pathlib import Path
 
 import numpy as np
 import trimesh
 from trimesh.visual.texture import TextureVisuals
+
+# Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
+import mujoco
 from PIL import Image
 
 import genesis as gs
@@ -20,7 +20,6 @@ from . import geom as gu
 from . import urdf as uu
 from .collision import solve_contype_conaffinity
 from .misc import get_assets_dir, redirect_libc_stderr
-
 
 MIN_TIMECONST = np.finfo(np.double).eps
 
@@ -249,7 +248,7 @@ def parse_xml(morph, surface, rigid_options=None):
     #     gs.logger.warning("(MJCF) Tendon not supported")
 
     # Parse all geometries grouped by parent joint (or world)
-    links_g_infos = parse_geoms(mj, morph.scale, surface, file)
+    links_g_infos = parse_geoms(mj, morph.scale, surface, file, rigid_options)
 
     # Parse all bodies (links and joints)
     l_infos, links_j_infos = parse_links(mj, morph.scale)
@@ -269,7 +268,7 @@ def parse_xml(morph, surface, rigid_options=None):
                 "(MJCF) The model declares the elliptic friction cone; set 'friction_cone' to "
                 "'gs.friction_cone.elliptic' to honor it."
             )
-        geoms_max_condim = mj.geom_condim.max() if mj.ngeom else 3
+        geoms_max_condim = max(mj.geom_condim.max() if mj.ngeom else 3, mj.pair_dim.max() if mj.npair else 3)
         if geoms_max_condim >= 4 and not rigid_options.enable_torsional_friction:
             gs.logger.warning(
                 "(MJCF) The model declares torsional friction (geom condim >= 4); enable "
@@ -725,7 +724,12 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         "conaffinity": mj_geom.conaffinity[0],
         "group": mj_geom.group[0],
         "data": geom_data,
-        "friction": mj_geom.friction[0],
+        "friction": mj_geom.friction[0] if mj_geom.condim[0] >= 3 else 0.0,
+        "contact_id": i_g,
+        "contact_priority": mj_geom.priority[0],
+        "condim": mj_geom.condim[0],
+        "has_contact_pair": bool(np.any(mj.pair_geom1 == i_g) or np.any(mj.pair_geom2 == i_g)),
+        "contact_pairs": [],
         # MuJoCo only applies torsional friction from condim 4 and rolling friction from condim 6 onward, and the
         # friction vector carries its defaults on every geom regardless, so the coefficients of a lower-condim geom
         # must parse as inert or the geom would resist spin or rolling that MuJoCo leaves free.
@@ -741,7 +745,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
     return info
 
 
-def parse_geoms(mj, scale, surface, xml_path):
+def parse_geoms(mj, scale, surface, xml_path, rigid_options=None):
     links_g_info = [[] for _ in range(mj.nbody)]
 
     # Loop over all geometries sequentially
@@ -812,6 +816,41 @@ def parse_geoms(mj, scale, surface, xml_path):
         else:
             for g_info, (contype, conaffinity) in zip(cg_infos, masks):
                 g_info["contype"], g_info["conaffinity"] = contype, conaffinity
+
+    geoms_by_id = {g_info["contact_id"]: g_info for g_info in chain.from_iterable(links_g_info)}
+    for i_pair in range(mj.npair):
+        i_ga, i_gb = mj.pair_geom1[i_pair], mj.pair_geom2[i_pair]
+        friction = mj.pair_friction[i_pair]
+        condim = mj.pair_dim[i_pair]
+        if (condim >= 3 and not np.isclose(friction[0], friction[1])) or (
+            condim >= 6 and not np.isclose(friction[3], friction[4])
+        ):
+            gs.raise_exception("MJCF contact pairs with anisotropic friction are not supported.")
+        coefficients = (
+            friction[0] if condim >= 3 else 0.0,
+            friction[2] if condim >= 4 else 0.0,
+            friction[3] if condim >= 6 else 0.0,
+        )
+        if i_ga not in geoms_by_id or i_gb not in geoms_by_id:
+            gs.logger.warning(f"(MJCF) Contact pair {i_pair} references a geom excluded from import.")
+            continue
+        geom_a, geom_b = geoms_by_id[i_ga], geoms_by_id[i_gb]
+        i_la, i_lb = mj.geom_bodyid[i_ga], mj.geom_bodyid[i_gb]
+        if rigid_options is not None and not rigid_options.enable_self_collision:
+            gs.logger.warning(
+                f"(MJCF) Contact pair {i_pair} is excluded by self-collision filtering. Material pairs set parameters only."
+            )
+        if rigid_options is not None and not rigid_options.enable_adjacent_collision:
+            if i_la > 0 and i_lb > 0 and (mj.body_parentid[i_la] == i_lb or mj.body_parentid[i_lb] == i_la):
+                gs.logger.warning(
+                    f"(MJCF) Contact pair {i_pair} joins adjacent links excluded by collision filtering. "
+                    "Material pairs set parameters only."
+                )
+        if not (geom_a["contype"] & geom_b["conaffinity"] or geom_b["contype"] & geom_a["conaffinity"]):
+            gs.logger.warning(
+                f"(MJCF) Contact pair {i_pair} is excluded by collision masks. Material pairs set parameters only."
+            )
+        geom_a["contact_pairs"].append((i_gb, coefficients))
 
     # Inform the user that collision geometries are not displayed by default
     if is_any_col and surface.vis_mode != "collision":

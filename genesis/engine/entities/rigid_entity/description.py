@@ -22,7 +22,8 @@ from typing_extensions import Self
 
 import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
-from genesis.engine.materials.base import Material
+from genesis.engine.materials.base import MaterialOptions
+from genesis.engine.materials.rigid import Rigid
 from genesis.engine.mesh import InertialProperties
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
@@ -93,6 +94,16 @@ class RigidGeomDescription(BaseRigidGeomDescription):
     friction_torsional: float
     friction_rolling: float
     sol_params: np.ndarray
+    material_idx: int = -1
+
+
+@dataclass
+class ContactPairDescription:
+    """Exact friction between two materials, indexed within the owning scene or entity description."""
+
+    material_a: int
+    material_b: int
+    friction: tuple[float, float, float]
 
 
 @dataclass
@@ -328,7 +339,7 @@ class KinematicEntityDescription(EntityDescription):
     def resolve(
         cls,
         morphs: Sequence[Morph],
-        material: Material,
+        material: MaterialOptions,
         surface: Surface,
         options: Options,
         enable_mujoco_compatibility: bool,
@@ -1069,6 +1080,49 @@ class KinematicEntityDescription(EntityDescription):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
+        if isinstance(self, RigidEntityDescription) and isinstance(morph, gs.morphs.MJCF):
+            materials_by_key = {}
+            materials_by_geom = {}
+            for g_info in chain.from_iterable(links_g_infos):
+                if not (g_info["contype"] or g_info["conaffinity"]):
+                    continue
+                coefficients = tuple(
+                    g_info[name] if value is None else value
+                    for name, value in (
+                        ("friction", self.material.friction),
+                        ("friction_torsional", self.material.friction_torsional),
+                        ("friction_rolling", self.material.friction_rolling),
+                    )
+                )
+                priority = (
+                    self.material.contact_priority
+                    if "contact_priority" in self.material.model_fields_set
+                    else g_info["contact_priority"]
+                )
+                key = (
+                    *coefficients,
+                    priority,
+                    g_info["condim"],
+                    *g_info["sol_params"],
+                    g_info["contact_id"] if g_info["has_contact_pair"] else -1,
+                )
+                if key not in materials_by_key:
+                    materials_by_key[key] = len(self.contact_materials)
+                    options = self.material.model_copy()
+                    options.friction, options.friction_torsional, options.friction_rolling = coefficients
+                    options.contact_priority = priority
+                    self.contact_materials.append(options)
+                g_info["material_idx"] = materials_by_key[key]
+                materials_by_geom[g_info["contact_id"]] = materials_by_key[key]
+            for g_info in chain.from_iterable(links_g_infos):
+                if not (g_info["contype"] or g_info["conaffinity"]):
+                    continue
+                for i_other, coefficients in g_info["contact_pairs"]:
+                    if i_other in materials_by_geom:
+                        self.contact_pairs.append(
+                            ContactPairDescription(g_info["material_idx"], materials_by_geom[i_other], coefficients)
+                        )
+
         return l_infos, links_j_infos, links_g_infos, eqs_info
 
     def _load_scene(self, morph, resolution: Resolution):
@@ -1470,6 +1524,10 @@ class RigidEntityDescription(KinematicEntityDescription):
 
     links: list[RigidLinkDescription] = field(default_factory=list)
     equalities: list[RigidEqualityDescription] = field(default_factory=list)
+    contact_materials: list[Rigid] = field(default_factory=list)
+    contact_pairs: list[ContactPairDescription] = field(default_factory=list)
+    material_idx: int = -1
+    contact_material_indices: list[int] = field(default_factory=list)
 
     def _describe_variant_link(self, i_link, v_l_info, cg_infos, vg_infos, morph, inertial_info):
         """Describe what one variant gives one simulated link, the inertial it is simulated with included.
@@ -1526,6 +1584,22 @@ class RigidEntityDescription(KinematicEntityDescription):
                 coefficient = asset_coefficient if material_coefficient is None else material_coefficient
                 coefficients.append(default_coefficient() if coefficient is None else coefficient)
             friction, friction_torsional, friction_rolling = coefficients
+            material_idx = g_info.get("material_idx", -1)
+            if material_idx < 0:
+                defaults = (
+                    gu.default_friction() if self.material.friction is None else self.material.friction,
+                    gu.default_friction_torsional()
+                    if self.material.friction_torsional is None
+                    else self.material.friction_torsional,
+                    gu.default_friction_rolling()
+                    if self.material.friction_rolling is None
+                    else self.material.friction_rolling,
+                )
+                if not np.allclose(coefficients, defaults, rtol=0.0, atol=gs.EPS):
+                    material_idx = len(self.contact_materials)
+                    options = self.material.model_copy()
+                    options.friction, options.friction_torsional, options.friction_rolling = coefficients
+                    self.contact_materials.append(options)
             cg_descs.append(
                 RigidGeomDescription(
                     pos=g_info.get("pos", gu.zero_pos()),
@@ -1540,6 +1614,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     friction_torsional=friction_torsional,
                     friction_rolling=friction_rolling,
                     sol_params=g_info.get("sol_params", gu.default_solver_params()),
+                    material_idx=material_idx,
                 )
             )
         return cg_descs

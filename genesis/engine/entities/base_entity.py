@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import genesis as gs
-from genesis.engine.materials.base import Material
+from genesis.engine.materials.base import MaterialOptions
 from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
 
@@ -21,7 +21,7 @@ class EntityDescription:
     material is what every description holds, since the simulator picks the solver from it.
     """
 
-    material: Material
+    material: MaterialOptions
 
 
 class Entity(RBC):

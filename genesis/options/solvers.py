@@ -1,6 +1,7 @@
 from typing import Any, Literal
 
 import numpy as np
+
 from pydantic import PrivateAttr, StrictBool, model_validator
 
 import genesis as gs
@@ -523,6 +524,11 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         for the description of each model. Defaults to None, resolving to 'signorini' with the elliptic cone and the
         Newton solver, and 'convex' otherwise - the pyramidal cone's rows do not separate, and the conjugate gradient
         solver does not reach the fixed point. Always 'convex' when 'enable_mujoco_compatibility' is set.
+    friction_combine : str, optional
+        Combine equal-priority materials coefficient by coefficient using 'max', 'min', 'average' or 'multiply'.
+        'max' lets the rougher surface dominate, 'min' the smoother surface, 'average' interpolates between them,
+        and 'multiply' makes either surface's low coefficient reduce the result. Exact pairs override this rule.
+        Defaults to 'max'.
     enable_torsional_friction : bool, optional
         Whether contacts also resist relative spin about their normal, with strength set per geometry by the material
         option 'friction_torsional' (see 'gs.materials.Rigid'). Enable it when spin resistance matters - a grasped
@@ -616,6 +622,7 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     noslip_iterations: NonNegativeInt = 0
     noslip_tolerance: PositiveFloat = 1e-6
     friction_cone: gs.friction_cone = gs.friction_cone.pyramidal
+    friction_combine: Literal["max", "min", "average", "multiply"] = "max"
     contact_resolution: gs.contact_resolution | None = None
     enable_torsional_friction: StrictBool = False
     enable_rolling_friction: StrictBool = False

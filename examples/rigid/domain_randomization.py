@@ -44,7 +44,7 @@ def main():
     scene.build(n_envs=n_envs)
 
     robot.set_friction_ratio(
-        friction_ratio=0.5 + torch.rand(scene.n_envs, robot.n_links),
+        ratio=0.5 + torch.rand(scene.n_envs, robot.n_links, 3),
         links_idx_local=np.arange(0, robot.n_links),
     )
 

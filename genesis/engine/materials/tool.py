@@ -4,13 +4,13 @@ from pydantic import StrictBool
 
 from genesis.typing import NonNegativeFloat, PositiveInt
 
-from .base import Material
+from .base import MaterialOptions
 
 if TYPE_CHECKING:
     from genesis.engine.entities.tool_entity import ToolEntity
 
 
-class Tool(Material["ToolEntity"]):
+class Tool(MaterialOptions["ToolEntity"]):
     """
     Material for tool entities.
 

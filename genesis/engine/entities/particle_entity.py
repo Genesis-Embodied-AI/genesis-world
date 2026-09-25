@@ -2,16 +2,17 @@ import functools
 from pathlib import Path
 
 import numpy as np
-import quadrants as qd
 import torch
 import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
 from genesis.engine.states.cache import QueriedStates
-from genesis.utils.misc import to_gs_tensor, broadcast_tensor
+from genesis.utils.misc import broadcast_tensor, to_gs_tensor
 
 from .base_entity import Entity
 
@@ -37,7 +38,7 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    material : Material
+    material : MaterialOptions
         The material definition, including sampling strategy and physical properties.
     morph : Morph
         Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).

@@ -2,11 +2,12 @@ import os
 import pickle as pkl
 from typing import TYPE_CHECKING
 
-import igl
 import numpy as np
 import skimage
 import torch
 import trimesh
+
+import igl
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -17,7 +18,7 @@ from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
 from .description import RigidGeomDescription, RigidVisGeomDescription
 
 if TYPE_CHECKING:
-    from genesis.engine.materials.rigid import Rigid as RigidMaterial
+    from genesis.engine.materials.rigid import RigidMaterial
     from genesis.engine.mesh import Mesh
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
@@ -50,7 +51,9 @@ class RigidGeom(RBC):
         self.desc: RigidGeomDescription = desc
         self._link: "RigidLink" = link
         self._entity: "RigidEntity" = link.entity
-        self._material: "RigidMaterial" = link.entity.material
+        self._material: "RigidMaterial" = (
+            link.entity.material if desc.material_idx < 0 else link.entity._contact_materials[desc.material_idx]
+        )
         self._solver: "RigidSolver" = link.entity.solver
 
         self._uid = gs.UID()
@@ -327,70 +330,34 @@ class RigidGeom(RBC):
             )
             self._solver.scene.draw_debug_mesh(boundary_mesh, T=T)
 
-    @gs.assert_built
-    def set_friction(self, friction):
+    def set_material(self, material: "RigidMaterial"):
         """
-        Set the friction coefficient of this geometry.
-        """
-        if friction < 0:
-            gs.raise_exception("`friction` must be non-negative.")
-        self._solver.set_geom_friction(friction, self._idx)
+        Assign a material to this geom, in place of the one inherited from its entity.
 
-    @gs.assert_built
-    def get_friction(self):
-        """
-        Get the friction coefficient the simulation is currently using for this geom.
+        The material identifies the surface that contact parameters declared for a pair of materials apply to, so
+        one entity carries as many surfaces as its geoms have materials (see 'Scene.set_friction_pair'). It
+        must be assigned before the scene is built.
 
-        Returns
-        -------
-        friction : torch.Tensor, shape ()
-            The friction coefficient of the geom.
+        The geom takes the material's complete resolved friction coefficients. The signed distance field (SDF)
+        resolution stays the one the entity's material set when the geom was created.
         """
-        return self._solver.get_geoms_friction(self._idx)[0]
+        if self._solver.is_built:
+            gs.raise_exception("A geom's material must be assigned before the scene is built.")
+        if material.scene is not self._entity.scene:
+            gs.raise_exception("The material is registered on another scene.")
+        self._material = material
+        self.desc.material_idx = len(self._entity._contact_materials)
+        self._entity._contact_materials.append(material)
+        self._entity.desc.contact_materials.append(material.options)
+        self._entity.desc.contact_material_indices.append(material.idx)
 
-    @gs.assert_built
-    def get_friction_torsional(self):
-        """
-        Get the torsional friction coefficient the simulation is currently using for this geom (see
-        'gs.materials.Rigid').
-
-        Returns
-        -------
-        friction_torsional : torch.Tensor, shape ()
-            The torsional friction coefficient of the geom.
-        """
-        return self._solver.get_geoms_friction_torsional(self._idx)[0]
-
-    @gs.assert_built
-    def get_friction_rolling(self):
-        """
-        Get the rolling friction coefficient the simulation is currently using for this geom (see
-        'gs.materials.Rigid').
-
-        Returns
-        -------
-        friction_rolling : torch.Tensor, shape ()
-            The rolling friction coefficient of the geom.
-        """
-        return self._solver.get_geoms_friction_rolling(self._idx)[0]
-
-    @gs.assert_built
-    def set_friction_torsional(self, friction_torsional):
-        """
-        Set the torsional friction coefficient of this geometry (see 'gs.materials.Rigid').
-        """
-        if friction_torsional < 0:
-            gs.raise_exception("`friction_torsional` must be non-negative.")
-        self._solver.set_geom_friction_torsional(friction_torsional, self._idx)
-
-    @gs.assert_built
-    def set_friction_rolling(self, friction_rolling):
-        """
-        Set the rolling friction coefficient of this geometry (see 'gs.materials.Rigid').
-        """
-        if friction_rolling < 0:
-            gs.raise_exception("`friction_rolling` must be non-negative.")
-        self._solver.set_geom_friction_rolling(friction_rolling, self._idx)
+        options = material.options
+        self.desc.friction, self.desc.friction_torsional, self.desc.friction_rolling = material.friction
+        coup_links = options.coup_links
+        self._needs_coup = options.needs_coup and (coup_links is None or self._link.name in coup_links)
+        self._coup_softness = options.coup_softness
+        self._coup_friction = options.coup_friction
+        self._coup_restitution = options.coup_restitution
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- real-time state -----------------------------------
@@ -480,6 +447,13 @@ class RigidGeom(RBC):
         Get the type of the geom.
         """
         return self.desc.type
+
+    @property
+    def material(self) -> "RigidMaterial":
+        """
+        Get the material of the geom, inherited from its entity unless assigned through 'set_material'.
+        """
+        return self._material
 
     @property
     def data(self):

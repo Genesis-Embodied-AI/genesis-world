@@ -1,22 +1,24 @@
 from functools import wraps
 from pathlib import Path
 
-import igl
 import numpy as np
-import quadrants as qd
 import torch
 import trimesh
+
+import igl
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.couplers import SAPCoupler
+from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.cache import QueriedStates
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
-from genesis.utils.misc import to_gs_tensor, tensor_to_array, broadcast_tensor
+from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor
 
 from .base_entity import Entity
 
@@ -132,7 +134,7 @@ class FEMEntity(Entity):
         The simulation scene that this entity belongs to.
     solver : Solver
         The physics solver instance used for simulation.
-    material : Material
+    material : MaterialOptions
         The material properties defining elasticity, density, etc.
     morph : Morph
         The morph specification that defines the entity's shape.

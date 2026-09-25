@@ -4,9 +4,34 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 import trimesh
+
 from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
+
+
+@pytest.fixture
+def contact_material_mjcf():
+    mjcf = ET.Element("mujoco")
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(default, "geom", friction="0.4 0.003 0.0002", condim="3")
+    world = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(world, "geom", name="floor", type="box", size="3 1 0.05", pos="0 6 0.95")
+    for i_box, (friction, priority) in enumerate((("0.4", "0"), ("0.4", "0"), ("0.002", "1"))):
+        link = ET.SubElement(world, "body", name=f"box{i_box}", pos=f"0 {5.5 + 0.4 * i_box} 1.05")
+        ET.SubElement(link, "freejoint")
+        ET.SubElement(
+            link,
+            "geom",
+            name=f"geom{i_box}",
+            type="box",
+            size="0.05 0.05 0.05",
+            friction=f"{friction} 0.003 0.0002",
+            priority=priority,
+        )
+    contact = ET.SubElement(mjcf, "contact")
+    ET.SubElement(contact, "pair", geom1="floor", geom2="geom0", friction="0.07 0.07 0.003 0.0002 0.0002", condim="3")
+    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture

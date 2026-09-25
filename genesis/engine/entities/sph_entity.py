@@ -17,7 +17,7 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    material : Material
+    material : MaterialOptions
         Material properties (e.g., density, stiffness).
     morph : Morph
         Morphological configuration.

@@ -489,7 +489,7 @@ def kernel_manual_add_collision_constraints_bw(
             link_b = collider_state.contact_data.link_b[i_col, i_b]
             contact_pos = collider_state.contact_data.pos[i_col, i_b]
             normal = collider_state.contact_data.normal[i_col, i_b]
-            friction = collider_state.contact_data.friction[i_col, i_b]
+            friction = collider_state.contact_data.friction[i_col, i_b][array_class.FrictionIdx.SLIDING]
             sol_params = collider_state.contact_data.sol_params[i_col, i_b]
             penetration = collider_state.contact_data.penetration[i_col, i_b]
 

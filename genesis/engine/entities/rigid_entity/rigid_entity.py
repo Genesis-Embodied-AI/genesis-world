@@ -29,8 +29,8 @@ from .rigid_link import KinematicLink, RigidLink
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
-    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
+    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
 
 # Wrapper to track the arguments of a function and save them in the target buffer
@@ -87,6 +87,20 @@ class KinematicEntity(Entity):
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
 
         super().__init__(idx, scene, desc.morphs[0], solver, desc.material, desc.surface, name=desc.name)
+        if isinstance(desc.material, gs.materials.Rigid):
+            self._material = scene.add_material(desc.material)
+            self._contact_materials = [scene.add_material(options) for options in desc.contact_materials]
+            if desc.material_idx < 0:
+                for pair in desc.contact_pairs:
+                    scene.set_friction_pair(
+                        self._contact_materials[pair.material_a],
+                        self._contact_materials[pair.material_b],
+                        sliding=pair.friction[0],
+                        torsional=pair.friction[1],
+                        rolling=pair.friction[2],
+                    )
+            desc.material_idx = self._material.idx
+            desc.contact_material_indices = [material.idx for material in self._contact_materials]
         # The scene names an entity as it is added, so the description takes the name the entity received
         desc.name = self._name
 
@@ -3264,98 +3278,14 @@ class RigidEntity(KinematicEntity):
     # ----------------------------------- friction ---------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def set_friction_ratio(self, friction_ratio, links_idx_local=None, envs_idx=None):
+    def set_friction_ratio(self, ratio, links_idx_local=None, envs_idx=None):
+        """Set per-environment sliding, torsional and rolling friction factors for selected links.
+
+        A scalar scales all coefficients. Per-axis values have a trailing axis of length three. The two contacting
+        geoms' factors multiply the resolved material-pair coefficients.
         """
-        Set the friction ratio of the geoms of the specified links.
-
-        Parameters
-        ----------
-        friction_ratio : torch.Tensor, shape (n_envs, n_links)
-            The friction ratio
-        links_idx_local : array_like
-            The indices of the links to set friction ratio.
-        envs_idx : None | array_like, optional
-            The indices of the environments. If None, all environments will be considered. Defaults to None.
-        """
-        links_idx_local = self._get_global_idx(links_idx_local, self.n_links, 0, unsafe=True)
-
-        links_n_geoms = torch.tensor(
-            [self._links[i_l].n_geoms for i_l in links_idx_local], dtype=gs.tc_int, device=gs.device
-        )
-        links_friction_ratio = torch.as_tensor(friction_ratio, dtype=gs.tc_float, device=gs.device)
-        geoms_friction_ratio = torch.repeat_interleave(links_friction_ratio, links_n_geoms, dim=-1)
-        geoms_idx = [
-            i_g for i_l in links_idx_local for i_g in range(self._links[i_l].geom_start, self._links[i_l].geom_end)
-        ]
-
-        self._solver.set_geoms_friction_ratio(geoms_friction_ratio, geoms_idx, envs_idx)
-
-    def set_friction(self, friction):
-        """
-        Set the friction coefficient of all the links (and in turn, geometries) of the rigid entity.
-
-        Note
-        ----
-        The friction coefficient associated with a pair of geometries in contact is defined as the maximum between
-        their respective values, so one must be careful the set the friction coefficient properly for both of them.
-
-        Warning
-        -------
-        The friction coefficient must be in range [1e-2, 5.0] for simulation stability.
-
-        Parameters
-        ----------
-        friction : float
-            The friction coefficient to set.
-        """
-
-        if friction < 1e-2 or friction > 5.0:
-            gs.raise_exception("`friction` must be in the range [1e-2, 5.0] for simulation stability.")
-
-        for link in self._links:
-            link.set_friction(friction)
-
-    def set_friction_torsional(self, friction_torsional):
-        """
-        Set the torsional friction coefficient of all the links (and in turn, geometries) of the rigid entity.
-
-        Note
-        ----
-        The torsional friction coefficient associated with a pair of geometries in contact is defined as the maximum
-        between their respective values (see 'gs.materials.Rigid'). Only effective when torsional friction is enabled
-        at the scene level (see 'RigidOptions.enable_torsional_friction').
-
-        Parameters
-        ----------
-        friction_torsional : float
-            The torsional friction coefficient to set.
-        """
-        if friction_torsional < 0:
-            gs.raise_exception("`friction_torsional` must be non-negative.")
-
-        for link in self._links:
-            link.set_friction_torsional(friction_torsional)
-
-    def set_friction_rolling(self, friction_rolling):
-        """
-        Set the rolling friction coefficient of all the links (and in turn, geometries) of the rigid entity.
-
-        Note
-        ----
-        The rolling friction coefficient associated with a pair of geometries in contact is defined as the maximum
-        between their respective values (see 'gs.materials.Rigid'). Only effective when rolling friction is enabled
-        at the scene level (see 'RigidOptions.enable_rolling_friction').
-
-        Parameters
-        ----------
-        friction_rolling : float
-            The rolling friction coefficient to set.
-        """
-        if friction_rolling < 0:
-            gs.raise_exception("`friction_rolling` must be non-negative.")
-
-        for link in self._links:
-            link.set_friction_rolling(friction_rolling)
+        links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
+        self._solver.set_links_friction_ratio(ratio, links_idx, envs_idx)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- mass / inertia -----------------------------------

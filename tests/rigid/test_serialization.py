@@ -73,6 +73,7 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
         ),
         material=gs.materials.Rigid() if requires_grad else gs.materials.Kinematic(),
     )
+    scene.set_friction_pair(scene.entities[0].material, scene.entities[1].material, sliding=0.07)
     return scene
 
 

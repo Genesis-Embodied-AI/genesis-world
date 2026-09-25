@@ -210,7 +210,6 @@ def test_data_accessor(n_envs, batched, tol):
             gs_s.set_geoms_friction_ratio,
             gs_s.dyn_state.geoms.friction_ratio,
         ),
-        (gs_s.n_geoms, -1, gs_s.get_geoms_friction, gs_s.set_geoms_friction, gs_s.dyn_info.geoms.friction),
         (gs_s.n_qs, n_envs, gs_s.get_qpos, gs_s.set_qpos, gs_s.qpos),
         # ROBOT
         (gs_robot.n_links, n_envs, gs_robot.get_links_pos, None, None),
@@ -218,7 +217,7 @@ def test_data_accessor(n_envs, batched, tol):
         (gs_robot.n_links, n_envs, gs_robot.get_links_vel, None, None),
         (gs_robot.n_links, n_envs, gs_robot.get_links_ang, None, None),
         (gs_robot.n_links, n_envs, gs_robot.get_links_acc, None, None),
-        (gs_robot.n_links, n_envs, (), gs_robot.set_friction_ratio, None),
+        (gs_robot.n_links, n_envs, (3,), gs_robot.set_friction_ratio, None),
         (gs_robot.n_links, n_envs_info, gs_robot.get_links_mass, gs_robot.set_links_mass, None),
         (gs_robot.n_links, n_envs_info, (3,), gs_robot.set_links_COM, None),
         (gs_robot.n_links, n_envs_info, gs_robot.get_links_inertia, gs_robot.set_links_inertia, None),
@@ -618,6 +617,88 @@ def test_geom_pos_quat(n_envs, show_viewer):
             assert vgeom_quat.shape == (*batch_shape, 4)
             assert_allclose(geom_pos, vgeom_pos, atol=gs.EPS)
             assert_allclose(geom_quat, vgeom_quat, atol=gs.EPS)
+
+
+@pytest.mark.required
+def test_registered_material_shared_between_entities(tmp_path):
+    scene = gs.Scene(
+        show_viewer=False,
+    )
+    rubber = scene.add_material(
+        gs.materials.Rigid(
+            friction=1.2,
+        ),
+        name="rubber",
+    )
+    plane = scene.add_entity(
+        gs.morphs.Plane(),
+        material=rubber,
+    )
+    shared_box = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=rubber,
+    )
+    inline_box = scene.add_entity(
+        gs.morphs.Box(
+            pos=(0.0, 1.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.Rigid(
+            friction=0.3,
+        ),
+    )
+
+    # Entities built from one registered material report it as their identity, while a material passed inline is
+    # registered on the spot and stays private to its entity.
+    assert plane.material is rubber
+    assert shared_box.material is rubber
+    assert scene.add_material(rubber.options) is rubber
+    assert inline_box.material.idx != rubber.idx
+
+    # The declared options remain readable through the material, which is where the geoms take their coefficient from.
+    assert_equal([geom.material.friction[0] for geom in shared_box.geoms], 1.2)
+    assert_equal([geom.material.friction[0] for geom in inline_box.geoms], 0.3)
+
+    # A geom assigned a material takes its complete resolved coefficients
+    steel = scene.add_material(
+        gs.materials.Rigid(
+            friction=0.9,
+            friction_torsional=0.05,
+        )
+    )
+    unspecified = scene.add_material(
+        gs.materials.Rigid(),
+    )
+    shared_box.geoms[0].set_material(steel)
+    inline_box.geoms[0].set_material(unspecified)
+    assert_equal(shared_box.geoms[0].material.friction[0], 0.9)
+    assert_equal(shared_box.geoms[0].material.friction[1], 0.05)
+    assert_equal(inline_box.geoms[0].material.friction[0], gu.default_friction())
+
+    with pytest.raises(gs.GenesisException):
+        scene.add_material(gs.materials.MPM.Elastic())
+
+    # A material is numbered within the scene it was registered on, so pairing one against a material of another
+    # scene would key the pair on some unrelated material.
+    with pytest.raises(gs.GenesisException):
+        scene.set_friction_pair(rubber, gs.Scene(show_viewer=False).add_material(gs.materials.Rigid()), sliding=0.5)
+    with pytest.raises(gs.GenesisException, match="Anisotropic"):
+        scene.set_friction_pair(rubber, steel, sliding=(0.4, 0.2))
+    options = gs.materials.Rigid()
+    with pytest.raises(gs.GenesisException, match="already registered"):
+        scene.add_material(options, name="rubber")
+    assert scene.add_material(options, name="ice").name == "ice"
+
+    scene.set_friction_pair(rubber, steel, sliding=0.05)
+    exported = tmp_path / "materials.gscene"
+    scene.export(exported)
+    restored = gs.Scene.load(exported)
+    assert restored.entities[0].material is restored.entities[1].material
+    assert restored.entities[0].material.name == "rubber"
+    assert_equal(restored.entities[1].geoms[0].material.friction, steel.friction)
 
 
 @pytest.mark.slow  # ~200s

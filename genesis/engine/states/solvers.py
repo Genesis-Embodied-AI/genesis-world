@@ -148,7 +148,7 @@ class RigidSolverState:
         self.dofs_acc = gs.zeros((_B, scene.sim.rigid_solver.n_dofs), **args)
         self.links_pos = gs.zeros((_B, scene.sim.rigid_solver.n_links, 3), **args)
         self.links_quat = gs.zeros((_B, scene.sim.rigid_solver.n_links, 4), **args)
-        self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms), **args)
+        self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms, 3), **args)
 
     @property
     def s_global(self):

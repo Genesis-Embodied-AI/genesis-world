@@ -3,14 +3,16 @@ import re
 import sys
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-import quadrants as qd
-from pydantic import BeforeValidator, Field, PrivateAttr
 from pydantic_core import PydanticCustomError
+
+from pydantic import BeforeValidator, Field, PrivateAttr
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
-from ..base import Material
+from ..base import MaterialOptions
 
 if TYPE_CHECKING:
     from genesis.engine.entities.mpm_entity import MPMEntity
@@ -33,7 +35,7 @@ DEFAULT_SAMPLER = "pbs" if (sys.platform == "linux" and platform.machine() == "x
 
 
 @qd.data_oriented
-class Base(Material["MPMEntity"]):
+class Base(MaterialOptions["MPMEntity"]):
     """
     The base class of MPM materials.
 

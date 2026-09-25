@@ -194,6 +194,17 @@ class Collider:
             self._large_contact_pair_mask,
         ) = self._compute_collision_pair_idx()
 
+        self._material_pairs = sorted(
+            {
+                tuple(sorted((self._solver.geoms[i_ga].material.idx, self._solver.geoms[i_gb].material.idx)))
+                for i_ga, i_gb in self._valid_collision_pairs
+            }
+        )
+        n_materials = len(self._solver.scene._materials)
+        self._material_pair_idx = np.full((n_materials, n_materials), fill_value=-1, dtype=gs.np_int)
+        for i_pair, (i_ma, i_mb) in enumerate(self._material_pairs):
+            self._material_pair_idx[i_ma, i_mb] = self._material_pair_idx[i_mb, i_ma] = i_pair
+
         # Link-pair pruning does useful work whenever a (link_a, link_b) bucket can hold a point interior to the hull of
         # the others, which the hull prune drops. Nonconvex geoms and terrain reach that through a vertex-based
         # narrowphase emitting many contacts per pair, and multi-contact detection reaches it from a single convex pair,
@@ -254,6 +265,8 @@ class Collider:
             self._solver,
             n_vert_neighbors,
             n_valid_pairs,
+            len(self._solver.scene._materials),
+            len(self._material_pairs),
             self.collider_config,
             self._mpr._mpr_info,
             self._gjk._gjk_info,
@@ -270,6 +283,9 @@ class Collider:
             prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
         )
         self._init_collision_pair_idx(self._collision_pair_idx)
+        if self._solver.scene._materials:
+            self.collider_info.material_pair_idx.from_numpy(self._material_pair_idx)
+        self.update_friction_pairs()
         self._init_valid_pairs()
         self._init_verts_connectivity(vert_neighbors, vert_neighbor_start, vert_n_neighbors)
         self._init_verts_spatial_grid()
@@ -672,6 +688,47 @@ class Collider:
             self.collider_info.collision_pair_idx.fill(-1)
             return
         self.collider_info.collision_pair_idx.from_numpy(collision_pair_idx)
+
+    def update_friction_pairs(self):
+        """Resolve collidable material pairs from exact declarations, priorities and the scene's combine rule."""
+        if not self._material_pairs:
+            return
+        coefficients = np.empty((len(self._material_pairs), 3), dtype=gs.np_float)
+        declarations = {
+            tuple(sorted((pair.material_a, pair.material_b))): pair.friction
+            for pair in self._solver.scene.desc.friction_pairs
+        }
+        materials = self._solver.scene._materials
+        for i_pair, (i_ma, i_mb) in enumerate(self._material_pairs):
+            if (i_ma, i_mb) in declarations:
+                coefficients[i_pair] = declarations[i_ma, i_mb]
+                continue
+            material_a, material_b = materials[i_ma], materials[i_mb]
+            if material_a.contact_priority != material_b.contact_priority:
+                winner = material_a if material_a.contact_priority > material_b.contact_priority else material_b
+                coefficients[i_pair] = winner.friction
+                continue
+            friction_a, friction_b = np.array(material_a.friction), np.array(material_b.friction)
+            match self._solver._options.friction_combine:
+                case "max":
+                    coefficients[i_pair] = np.maximum(friction_a, friction_b)
+                case "min":
+                    coefficients[i_pair] = np.minimum(friction_a, friction_b)
+                case "average":
+                    coefficients[i_pair] = 0.5 * (friction_a + friction_b)
+                case "multiply":
+                    coefficients[i_pair] = friction_a * friction_b
+        self.collider_info.friction_pairs.from_numpy(coefficients)
+        if self._solver.is_built and self._solver._use_hibernation:
+            envs_idx = self._solver.scene._sanitize_envs_idx(None)
+            rigid_solver.kernel_reset_hibernation(
+                envs_idx,
+                self._solver.dyn_state,
+                self._solver.constraint_solver.constraint_state,
+                self._solver.dyn_info,
+                self._solver.rigid_info,
+                self._solver.rigid_config,
+            )
 
     def _init_valid_pairs(self):
         if len(self._valid_collision_pairs) > 0:

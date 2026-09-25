@@ -13,9 +13,10 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
-from genesis.engine.entities.base_entity import Entity
+from genesis.engine.entities.rigid_entity.description import ContactPairDescription
 from genesis.engine.materials import Rigid
-from genesis.engine.states import KinematicSolverCheckpoint, QueriedStates, RigidSolverState
+from genesis.engine.materials.rigid import RigidMaterial
+from genesis.engine.states import KinematicSolverCheckpoint, RigidSolverState
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.utils.misc import (
@@ -30,94 +31,14 @@ from genesis.utils.misc import (
     qd_zero_grad,
     tensor_to_array,
 )
-from genesis.utils.sdf import SDF
 
-from ..base_solver import GravityMixin, MutatedLinks, Solver, StateChange, TimeBasedMixin, mutates
+from ..base_solver import GravityMixin, MutatedLinks, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
     _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
-)
-from .collider import Collider
-from .constraint import ConstraintSolver
-from .constraint.backward import (
-    kernel_accumulate_constraint_solver_grads,
-    kernel_load_dL_dqacc_from_acc_grad,
-    kernel_manual_add_collision_constraints_bw,
-    kernel_manual_add_equality_constraints_bw,
-    kernel_manual_add_frictionloss_constraints_bw,
-    kernel_manual_add_joint_limit_constraints_bw,
-)
-from .abd.misc import (
-    kernel_init_link_dynamics,
-    func_add_safe_backward,
-    func_apply_coupling_force,
-    func_atomic_add_if,
-    func_check_index_range,
-    func_clear_external_force,
-    func_read_field_if,
-    func_write_and_read_field_if,
-    func_write_field_if,
-    kernel_apply_links_external_wrench,
-    kernel_apply_links_external_wrench_at_pos,
-    kernel_bit_reduction,
-    kernel_clear_external_force,
-    kernel_init_dof_fields,
-    kernel_init_entity_fields,
-    kernel_init_equality_fields,
-    kernel_init_geom_fields,
-    kernel_init_joint_fields,
-    kernel_init_vert_fields,
-    kernel_init_vgeom_fields,
-    kernel_init_vvert_fields,
-    kernel_reset_hibernation,
-    kernel_set_zero,
-    kernel_update_heterogeneous_link_info,
-    kernel_wakeup_coupled_links,
-)
-from .abd.forward_kinematics import (
-    func_forward_kinematics_root,
-    func_forward_velocity,
-    func_update_all_verts,
-    func_update_cartesian_space,
-    func_update_geoms,
-    func_update_geoms_root,
-    func_update_verts_for_geom,
-    kernel_COM_links_replay,
-    kernel_forward_kinematics_links_geoms,
-    kernel_forward_kinematics_replay,
-    kernel_forward_velocity,
-    kernel_masked_forward_kinematics_links_geoms,
-    kernel_masked_forward_velocity,
-    kernel_update_all_verts,
-    kernel_update_cartesian_space,
-    kernel_update_geom_aabbs,
-    kernel_update_geoms_replay,
-    kernel_update_verts_for_geoms,
-    kernel_update_vgeoms,
-)
-from .abd.forward_dynamics import (
-    func_actuation,
-    func_bias_force,
-    func_compute_mass_matrix,
-    func_compute_qacc,
-    func_factor_mass,
-    func_forward_dynamics,
-    func_implicit_damping,
-    func_integrate,
-    func_solve_mass_batch,
-    func_torque_and_passive_force,
-    func_update_acc,
-    func_update_force,
-    func_vel_at_point,
-    kernel_forward_dynamics,
-    kernel_forward_dynamics_without_qacc,
-    kernel_refresh_invweight_and_meaninertia,
-    kernel_update_acc,
-    update_qacc_from_qvel_delta,
-    update_qvel,
 )
 from .abd.accessor import (
     ConstraintType,
@@ -140,17 +61,8 @@ from .abd.accessor import (
     kernel_set_dofs_limit,
     kernel_set_dofs_position,
     kernel_set_dofs_stiffness,
-    kernel_set_dofs_velocity,
-    kernel_set_dofs_velocity_grad,
-    kernel_set_dofs_zero_velocity,
     kernel_set_drone_rpm,
-    kernel_set_geom_friction,
-    kernel_set_geom_friction_rolling,
-    kernel_set_geom_friction_torsional,
-    kernel_set_geoms_friction,
     kernel_set_geoms_friction_ratio,
-    kernel_set_geoms_friction_rolling,
-    kernel_set_geoms_friction_torsional,
     kernel_set_global_sol_params,
     kernel_set_links_COM,
     kernel_set_links_inertia,
@@ -166,23 +78,74 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
 )
 from .abd.diff import (
-    func_copy_cartesian_space,
     func_copy_next_to_curr,
-    func_copy_next_to_curr_grad,
     func_integrate_dq_entity,
-    func_is_grad_valid,
-    func_load_adjoint_cache,
-    func_save_adjoint_cache,
     kernel_begin_backward_substep,
     kernel_copy_acc,
     kernel_copy_next_to_curr_no_check,
     kernel_prepare_backward_substep,
     kernel_save_adjoint_cache,
 )
+from .abd.forward_dynamics import (
+    func_forward_dynamics,
+    func_implicit_damping,
+    func_integrate,
+    func_update_acc,
+    func_vel_at_point,
+    kernel_forward_dynamics,
+    kernel_forward_dynamics_without_qacc,
+    kernel_refresh_invweight_and_meaninertia,
+    kernel_update_acc,
+    update_qacc_from_qvel_delta,
+    update_qvel,
+)
+from .abd.forward_kinematics import (
+    func_forward_kinematics_root,
+    func_forward_velocity,
+    func_update_all_verts,
+    func_update_cartesian_space,
+    func_update_geoms_root,
+    kernel_COM_links_replay,
+    kernel_forward_kinematics_links_geoms,
+    kernel_forward_kinematics_replay,
+    kernel_forward_velocity,
+    kernel_masked_forward_kinematics_links_geoms,
+    kernel_update_all_verts,
+    kernel_update_cartesian_space,
+    kernel_update_geom_aabbs,
+    kernel_update_geoms_replay,
+    kernel_update_verts_for_geoms,
+)
 from .abd.manual_bw import (
     kernel_manual_compute_qacc_bw,
     kernel_manual_forward_kinematics_bw,
     kernel_manual_forward_velocity_bw,
+)
+from .abd.misc import (
+    func_apply_coupling_force,
+    kernel_apply_links_external_wrench,
+    kernel_apply_links_external_wrench_at_pos,
+    kernel_bit_reduction,
+    kernel_clear_external_force,
+    kernel_init_entity_fields,
+    kernel_init_equality_fields,
+    kernel_init_geom_fields,
+    kernel_init_link_dynamics,
+    kernel_init_vert_fields,
+    kernel_reset_hibernation,
+    kernel_set_zero,
+    kernel_update_heterogeneous_link_info,
+    kernel_wakeup_coupled_links,
+)
+from .collider import Collider
+from .constraint import ConstraintSolver
+from .constraint.backward import (
+    kernel_accumulate_constraint_solver_grads,
+    kernel_load_dL_dqacc_from_acc_grad,
+    kernel_manual_add_collision_constraints_bw,
+    kernel_manual_add_equality_constraints_bw,
+    kernel_manual_add_frictionloss_constraints_bw,
+    kernel_manual_add_joint_limit_constraints_bw,
 )
 
 if TYPE_CHECKING:
@@ -761,7 +724,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gs.raise_exception(
                     "Only approximate_implicitfast integrator is supported yet when requires_grad is True."
                 )
-            from genesis.engine.couplers import SAPCoupler, IPCCoupler
+            from genesis.engine.couplers import IPCCoupler, SAPCoupler
 
             if isinstance(self.sim.coupler, (SAPCoupler, IPCCoupler)):
                 gs.raise_exception(
@@ -1173,6 +1136,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
             kernel_init_geom_fields(
                 np.array([geom.link.idx for geom in geoms], dtype=gs.np_int),
+                np.array([geom.material.idx for geom in geoms], dtype=gs.np_int),
                 np.array([geom.vert_start for geom in geoms], dtype=gs.np_int),
                 np.array([geom.face_start for geom in geoms], dtype=gs.np_int),
                 np.array([geom.edge_start for geom in geoms], dtype=gs.np_int),
@@ -1185,9 +1149,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array(geoms_center, dtype=gs.np_float),
                 np.array([geom.init_quat for geom in geoms], dtype=gs.np_float),
                 np.array([geom.type for geom in geoms], dtype=gs.np_int),
-                np.array([geom.desc.friction for geom in geoms], dtype=gs.np_float),
-                np.array([geom.desc.friction_torsional for geom in geoms], dtype=gs.np_float),
-                np.array([geom.desc.friction_rolling for geom in geoms], dtype=gs.np_float),
                 geoms_sol_params,
                 np.array([geom.data for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_convex for geom in geoms], dtype=gs.np_bool),
@@ -1675,7 +1636,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_backward = False
 
     def substep_post_coupling(self, f):
-        from genesis.engine.couplers import SAPCoupler, IPCCoupler
+        from genesis.engine.couplers import IPCCoupler, SAPCoupler
 
         if not self.is_active:
             return
@@ -1796,7 +1757,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 cfrc_vel_dst.masked_fill_(envs_mask[:, None, None], 0.0)
                 cfrc_ang_dst.masked_fill_(envs_mask[:, None, None], 0.0)
                 if self.n_geoms:
-                    torch.where(envs_mask[:, None], state.friction_ratio, fric_dst, out=fric_dst)
+                    torch.where(envs_mask[:, None, None], state.friction_ratio, fric_dst, out=fric_dst)
                 if self._use_hibernation:
                     links_hibernated_dst.masked_fill_(envs_mask[:, None], 0)
                     awake_steps_dst.masked_fill_(envs_mask[:, None], 0)
@@ -2382,12 +2343,22 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._set_links_info(com, links_idx, "COM", envs_idx)
 
     def set_geoms_friction_ratio(self, friction_ratio, geoms_idx=None, envs_idx=None):
+        """Set sliding, torsional and rolling friction factors per geom, along a trailing axis of length three."""
         friction_ratio, geoms_idx, envs_idx = self._sanitize_io_variables(
-            friction_ratio, geoms_idx, self.n_geoms, "geoms_idx", envs_idx, skip_allocation=True
+            friction_ratio, geoms_idx, self.n_geoms, "geoms_idx", envs_idx, element_shape=(3,), skip_allocation=True
         )
         if self.n_envs == 0:
             friction_ratio = friction_ratio[None]
         kernel_set_geoms_friction_ratio(geoms_idx, envs_idx, friction_ratio, self.dyn_state, self.rigid_config)
+        if self._use_hibernation:
+            kernel_reset_hibernation(
+                envs_idx,
+                self.dyn_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+            )
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
@@ -2959,7 +2930,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         tensor = qd_to_torch(self.dyn_info.links.invweight, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
+    def set_links_friction_ratio(self, ratio, links_idx=None, envs_idx=None):
+        """Set per-axis friction factors for selected links, expanding each link's factors onto its geoms."""
+        ratio, links_idx, envs_idx = self._sanitize_io_variables(
+            ratio, links_idx, self.n_links, "links_idx", envs_idx, element_shape=(3,), skip_allocation=True
+        )
+        links_idx = tensor_to_array(links_idx)
+        geoms_idx = [geom.idx for i_l in links_idx for geom in self.links[i_l].geoms]
+        counts = torch.tensor([self.links[i_l].n_geoms for i_l in links_idx], dtype=gs.tc_int, device=gs.device)
+        ratios = torch.repeat_interleave(ratio, counts, dim=-2)
+        self.set_geoms_friction_ratio(ratios, geoms_idx, envs_idx if self.n_envs else None)
+
     def get_geoms_friction_ratio(self, geoms_idx=None, envs_idx=None):
+        """Sliding, torsional and rolling friction ratio of each geom, packed along the trailing axis."""
         tensor = qd_to_torch(self.dyn_state.geoms.friction_ratio, envs_idx, geoms_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
@@ -3242,15 +3225,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         """
         return self.get_kinetic_energy(envs_idx=envs_idx) + self.get_potential_energy(envs_idx=envs_idx)
 
-    def get_geoms_friction(self, geoms_idx=None):
-        return qd_to_torch(self.dyn_info.geoms.friction, geoms_idx, copy=True)
-
-    def get_geoms_friction_torsional(self, geoms_idx=None):
-        return qd_to_torch(self.dyn_info.geoms.friction_torsional, geoms_idx, copy=True)
-
-    def get_geoms_friction_rolling(self, geoms_idx=None):
-        return qd_to_torch(self.dyn_info.geoms.friction_rolling, geoms_idx, copy=True)
-
     def get_AABB(self, entities_idx=None, envs_idx=None):
         from genesis.engine.couplers import LegacyCoupler
 
@@ -3285,32 +3259,33 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         return aabb[0] if self.n_envs == 0 else aabb
 
-    def set_geom_friction(self, friction, geoms_idx):
-        kernel_set_geom_friction(geoms_idx, self.dyn_info, friction)
-
-    def set_geom_friction_torsional(self, friction_torsional, geoms_idx):
-        kernel_set_geom_friction_torsional(geoms_idx, self.dyn_info, friction_torsional)
-
-    def set_geom_friction_rolling(self, friction_rolling, geoms_idx):
-        kernel_set_geom_friction_rolling(geoms_idx, self.dyn_info, friction_rolling)
-
-    def set_geoms_friction(self, friction, geoms_idx=None):
-        friction, geoms_idx, _ = self._sanitize_io_variables(
-            friction, geoms_idx, self.n_geoms, "geoms_idx", envs_idx=None, batched=False, skip_allocation=True
-        )
-        kernel_set_geoms_friction(geoms_idx, friction, self.dyn_info, self.rigid_config)
-
-    def set_geoms_friction_torsional(self, friction_torsional, geoms_idx=None):
-        friction_torsional, geoms_idx, _ = self._sanitize_io_variables(
-            friction_torsional, geoms_idx, self.n_geoms, "geoms_idx", envs_idx=None, batched=False, skip_allocation=True
-        )
-        kernel_set_geoms_friction_torsional(geoms_idx, friction_torsional, self.dyn_info, self.rigid_config)
-
-    def set_geoms_friction_rolling(self, friction_rolling, geoms_idx=None):
-        friction_rolling, geoms_idx, _ = self._sanitize_io_variables(
-            friction_rolling, geoms_idx, self.n_geoms, "geoms_idx", envs_idx=None, batched=False, skip_allocation=True
-        )
-        kernel_set_geoms_friction_rolling(geoms_idx, friction_rolling, self.dyn_info, self.rigid_config)
+    def set_friction_pair(self, material_a, material_b, sliding=None, torsional=None, rolling=None):
+        """Declare a complete friction row for two registered materials."""
+        for material in (material_a, material_b):
+            if not isinstance(material, RigidMaterial) or material.scene is not self.scene:
+                gs.raise_exception("A friction pair requires two rigid materials registered on this scene.")
+        values = (sliding, torsional, rolling)
+        if any(value is not None and np.ndim(value) != 0 for value in values):
+            gs.raise_exception("Anisotropic friction coefficients are not supported.")
+        if any(value is not None and (not np.isfinite(value) or value < 0.0) for value in values):
+            gs.raise_exception("Friction coefficients must be finite and non-negative.")
+        key = {material_a.idx, material_b.idx}
+        coefficients = (gu.default_friction(), gu.default_friction_torsional(), gu.default_friction_rolling())
+        declarations = self.scene.desc.friction_pairs
+        for i_pair, pair in enumerate(declarations):
+            if {pair.material_a, pair.material_b} == key:
+                coefficients = pair.friction
+                break
+        else:
+            i_pair = len(declarations)
+        coefficients = tuple(old if value is None else value for old, value in zip(coefficients, values))
+        description = ContactPairDescription(material_a.idx, material_b.idx, coefficients)
+        if i_pair == len(declarations):
+            declarations.append(description)
+        else:
+            declarations[i_pair] = description
+        if self.is_built:
+            self.collider.update_friction_pairs()
 
     def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
         return self.constraint_solver.add_weld_constraint(link1_idx, link2_idx, envs_idx)

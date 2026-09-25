@@ -6,13 +6,14 @@ import pickle as pkl
 from functools import lru_cache
 from pathlib import Path
 
-import coacd
-import igl
 import Imath
 import numpy as np
 import OpenEXR
 import tetgen
 import trimesh
+
+import coacd
+import igl
 from PIL import Image
 
 import genesis as gs
@@ -514,6 +515,9 @@ def postprocess_collision_geoms(
             -1 if geom_type is None else int(geom_type),
             int(g_info.get("contype", 0)),
             int(g_info.get("conaffinity", 0)),
+            int(g_info.get("material_idx", -1)),
+            g_info.get("friction_torsional", 0.0),
+            g_info.get("friction_rolling", 0.0),
             float("nan") if friction is None else float(friction),
             float("nan") if density is None else float(density),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
@@ -679,12 +683,15 @@ def _postprocess_collision_geoms_impl(
                     first_g_info = g_infos[fusion_group[0]]
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
-                        and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
+                        and all(
+                            first_g_info.get(name) == g_info.get(name)
+                            for name in ("contype", "conaffinity", "material_idx")
+                        )
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
                             # A fused mesh carries a single density, so geoms with different authored densities must
                             # stay separate for the density-weighted link inertial to survive fusion.
-                            for name in ("friction", "sol_params", "density")
+                            for name in ("friction", "friction_torsional", "friction_rolling", "sol_params", "density")
                         )
                     ):
                         fusion_group.append(i)

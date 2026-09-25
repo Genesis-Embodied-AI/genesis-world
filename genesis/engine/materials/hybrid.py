@@ -4,21 +4,21 @@ from pydantic import StrictBool
 
 from genesis.typing import NonNegativeFloat, ValidFloat
 
-from .base import Material
+from .base import MaterialOptions
 
 if TYPE_CHECKING:
     from genesis.engine.entities.hybrid_entity import HybridEntity
 
 
-class Hybrid(Material["HybridEntity"]):
+class Hybrid(MaterialOptions["HybridEntity"]):
     """
     The class for hybrid body material (soft skin actuated by inner rigid skeleton).
 
     Parameters
     ----------
-    material_rigid : Material
+    material_rigid : MaterialOptions
         The material of the rigid body.
-    material_soft : Material
+    material_soft : MaterialOptions
         The material of the soft body.
     use_default_coupling : bool, optional
         Whether to use default solver coupling. Default is False.
@@ -36,8 +36,8 @@ class Hybrid(Material["HybridEntity"]):
         The function that determines the association of the rigid and the soft body. Default is None.
     """
 
-    material_rigid: Material = ...
-    material_soft: Material = ...
+    material_rigid: MaterialOptions = ...
+    material_soft: MaterialOptions = ...
     use_default_coupling: StrictBool = False
     damping: NonNegativeFloat = 0.0
     thickness: ValidFloat = 0.05

@@ -1,5 +1,5 @@
-from ..base import Material
+from ..base import MaterialOptions
 
 
-class Base(Material):
+class Base(MaterialOptions):
     pass

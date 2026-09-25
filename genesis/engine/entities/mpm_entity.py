@@ -1,13 +1,14 @@
 import functools
 
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import to_gs_tensor
 
-from .particle_entity import assert_active, ParticleEntity
+from .particle_entity import ParticleEntity, assert_active
 
 
 def assert_muscle(method):
@@ -31,7 +32,7 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    material : Material
+    material : MaterialOptions
         Material used to determine physical behavior (e.g., Snow, Sand, Muscle).
     morph : Morph
         Shape description used for particle sampling.

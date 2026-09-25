@@ -1,6 +1,7 @@
-import quadrants as qd
 import numpy as np
 import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -160,7 +161,7 @@ class PBDTetEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
+    material : MaterialOptions
         Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
@@ -318,7 +319,7 @@ class PBD2DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
+    material : MaterialOptions
         Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
@@ -451,7 +452,7 @@ class PBD3DEntity(PBDTetEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
+    material : MaterialOptions
         Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
@@ -585,7 +586,7 @@ class PBDParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
+    material : MaterialOptions
         Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).
@@ -658,7 +659,7 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         The simulation scene this entity is part of.
     solver : Solver
         The PBD solver instance managing this entity.
-    material : Material
+    material : MaterialOptions
         Material model defining physical properties such as density and compliance.
     morph : Morph
         Morph object specifying shape and initial transform (position and rotation).

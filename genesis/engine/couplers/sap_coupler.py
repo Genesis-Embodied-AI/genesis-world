@@ -1,13 +1,15 @@
-from typing import TYPE_CHECKING
 import math
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 import igl
-import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.element as eu
 import genesis.utils.array_class as array_class
+import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
 from genesis.engine.bvh import AABB, LBVH, FEMSurfaceTetLBVH, RigidTetLBVH
@@ -564,14 +566,16 @@ class SAPCoupler(RBC):
         self.update_bvh(i_step)
         self.has_contact, overflow = self.update_contact(
             i_step,
+            free_verts_state=self.rigid_solver.dyn_state.free_verts,
+            fixed_verts_state=self.rigid_solver.dyn_state.fixed_verts,
+            dofs_state=self.rigid_solver.dyn_state.dofs,
+            links_state=self.rigid_solver.dyn_state.links,
+            geoms_state=self.rigid_solver.dyn_state.geoms,
             links_info=self.rigid_solver.dyn_info.links,
             faces_info=self.rigid_solver.dyn_info.faces,
             verts_info=self.rigid_solver.dyn_info.verts,
-            free_verts_state=self.rigid_solver.dyn_state.free_verts,
-            fixed_verts_state=self.rigid_solver.dyn_state.fixed_verts,
             geoms_info=self.rigid_solver.dyn_info.geoms,
-            dofs_state=self.rigid_solver.dyn_state.dofs,
-            links_state=self.rigid_solver.dyn_state.links,
+            collider_info=self.rigid_solver.collider.collider_info,
         )
         if overflow:
             message = "Overflowed In Contact Query: \n"
@@ -607,26 +611,30 @@ class SAPCoupler(RBC):
     def update_contact(
         self,
         i_step: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        dofs_state: array_class.DofsState,
+        links_state: array_class.LinksState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         faces_info: array_class.FacesInfo,
         verts_info: array_class.VertsInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
-        dofs_state: array_class.DofsState,
-        links_state: array_class.LinksState,
+        collider_info: array_class.ColliderInfo,
     ) -> tuple[bool, bool]:
         has_contact = False
         overflow = False
         for contact in qd.static(self.contact_handlers):
             overflow |= contact.detection(
                 i_step,
+                free_verts_state=free_verts_state,
+                fixed_verts_state=fixed_verts_state,
+                geoms_state=geoms_state,
                 links_info=links_info,
                 verts_info=verts_info,
                 faces_info=faces_info,
-                free_verts_state=free_verts_state,
-                fixed_verts_state=fixed_verts_state,
                 geoms_info=geoms_info,
+                collider_info=collider_info,
             )
             has_contact |= contact.n_contact_pairs[None] > 0
             contact.compute_jacobian(links_info=links_info, dofs_state=dofs_state, links_state=links_state)
@@ -2515,12 +2523,14 @@ class FEMFloorTetContactHandler(FEMContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         # Compute contact pairs
@@ -2916,12 +2926,14 @@ class FEMSelfTetContactHandler(FEMContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         overflow |= self.coupler.fem_surface_tet_bvh.query(self.coupler.fem_surface_tet_aabb.aabbs)
@@ -3050,12 +3062,14 @@ class FEMFloorVertContactHandler(FEMContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         sap_info = qd.static(self.contact_pairs.sap_info)
@@ -3142,12 +3156,14 @@ class RigidFloorVertContactHandler(RigidContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         sap_info = qd.static(self.contact_pairs.sap_info)
@@ -3211,12 +3227,14 @@ class RigidFloorTetContactHandler(RigidContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         candidates = qd.static(self.contact_candidates)
@@ -3554,12 +3572,14 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         overflow |= self.coupler.rigid_tri_bvh.query(self.coupler.fem_surface_tet_aabb.aabbs)
@@ -3773,7 +3793,13 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         return overflow
 
     @qd.func
-    def compute_pairs(self, i_step: qd.i32, geoms_info: array_class.GeomsInfo):
+    def compute_pairs(
+        self,
+        i_step: qd.i32,
+        geoms_state: array_class.GeomsState,
+        geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
+    ):
         overflow = False
         candidates = qd.static(self.contact_candidates)
         pairs = qd.static(self.contact_pairs)
@@ -3905,7 +3931,15 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
                 pairs[i_p].link_idx1 = i_l1
                 sap_info[i_p].k = rigid_k
                 sap_info[i_p].phi0 = rigid_phi0
-                sap_info[i_p].mu = qd.sqrt(geoms_info.friction[i_g0] * geoms_info.friction[i_g1])
+                i_m0 = geoms_info.material_idx[i_g0]
+                i_m1 = geoms_info.material_idx[i_g1]
+                i_pair = collider_info.material_pair_idx[i_m0, i_m1]
+                friction = (
+                    collider_info.friction_pairs[i_pair]
+                    * geoms_state.friction_ratio[i_g0, i_b]
+                    * geoms_state.friction_ratio[i_g1, i_b]
+                )
+                sap_info[i_p].mu = qd.max(friction[array_class.FrictionIdx.SLIDING], 1e-5)
             else:
                 overflow = True
         return overflow
@@ -3914,15 +3948,17 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
     def detection(
         self,
         f: qd.i32,
+        free_verts_state: array_class.VertsState,
+        fixed_verts_state: array_class.VertsState,
+        geoms_state: array_class.GeomsState,
         links_info: array_class.LinksInfo,
         verts_info: array_class.VertsInfo,
         faces_info: array_class.FacesInfo,
-        free_verts_state: array_class.VertsState,
-        fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        collider_info: array_class.ColliderInfo,
     ):
         overflow = False
         overflow |= self.coupler.rigid_tet_bvh.query(self.coupler.rigid_tet_aabb.aabbs)
         overflow |= self.compute_candidates(f)
-        overflow |= self.compute_pairs(f, geoms_info)
+        overflow |= self.compute_pairs(f, geoms_state, geoms_info, collider_info)
         return overflow

@@ -9,11 +9,10 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
-
 import trimesh
 
 import genesis as gs
@@ -21,11 +20,12 @@ import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.base_entity import Entity, EntityDescription
 from genesis.engine.entities.rigid_entity import KinematicEntity
+from genesis.engine.entities.rigid_entity.description import ContactPairDescription, RigidEntityDescription
 from genesis.engine.force_fields import ForceField
-from genesis.engine.materials.base import EntityT, Material
+from genesis.engine.materials.base import EntityT, Material, MaterialOptions
+from genesis.engine.materials.rigid import Rigid, RigidMaterial
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
@@ -33,6 +33,7 @@ from genesis.options import (
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
+    SceneOptions,
     SFOptions,
     SimOptions,
     SPHOptions,
@@ -76,6 +77,9 @@ class SceneDescription:
 
     options: SceneOptions
     entities: list[EntityDescription] = dataclasses.field(default_factory=list)
+    materials: list[Rigid] = dataclasses.field(default_factory=list)
+    material_names: list[str | None] = dataclasses.field(default_factory=list)
+    friction_pairs: list[ContactPairDescription] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -259,6 +263,11 @@ class Scene(RBC):
         # emitters
         self._emitters = gs.List()
 
+        self._materials: list[Material] = []
+        # Keyed on the identity of the options object, so two materials carrying the same friction and density
+        # stay distinct. See add_material for the registration contract.
+        self._material_idx: dict[int, int] = {}
+
         self._backward_ready = False
         self._forward_ready = False
 
@@ -295,6 +304,63 @@ class Scene(RBC):
                 self._sim.destroy()
                 self._sim = None
 
+    @gs.assert_built
+    def set_friction_ratio(self, ratio, links_idx=None, envs_idx=None):
+        """Set per-environment friction factors for the selected links.
+
+        A scalar scales every coefficient. A trailing axis of length three supplies sliding, torsional and rolling
+        factors. Both contacting geoms' factors multiply the resolved material-pair coefficients.
+        """
+        self._sim.rigid_solver.set_links_friction_ratio(ratio, links_idx, envs_idx)
+
+    @gs.assert_unbuilt
+    def add_material(self, material: Rigid, name: str | None = None) -> RigidMaterial:
+        """
+        Register a material on the scene and get back the handle to pass to `add_entity`.
+
+        Registration is idempotent: passing the same options object again returns the same handle, so every entity
+        built from it shares one material identity. Passing a freshly constructed material to `add_entity` instead
+        registers one of its own, which is why a material declared inline stays private to its entity.
+
+        A shared handle also shares the per-morph tuning `add_entity` applies to its options: a rigid material used by
+        both a `gs.morphs.Primitive` and another morph type carries the reduced SDF resolution of the primitive
+        throughout.
+
+        Parameters
+        ----------
+        material : gs.materials.Rigid
+            The options describing the material. Rigid materials are the ones that carry a handle.
+        name : str or None, optional
+            Unique material name within this scene. Defaults to None.
+
+        Returns
+        -------
+        material : RigidMaterial
+            The registered material.
+        """
+        if not isinstance(material, Rigid):
+            gs.raise_exception(f"Only 'gs.materials.Rigid' materials can be registered. Got {material}.")
+
+        idx = self._material_idx.get(id(material))
+        if idx is None:
+            idx = len(self._materials)
+            if name is not None and any(other.name == name for other in self._materials):
+                gs.raise_exception(f"A material named '{name}' is already registered.")
+            self._material_idx[id(material)] = idx
+            self._materials.append(RigidMaterial(self, idx, material, name))
+            self._desc.materials.append(material)
+            self._desc.material_names.append(name)
+        return self._materials[idx]
+
+    def set_friction_pair(self, material_a, material_b, *, sliding=None, torsional=None, rolling=None):
+        """Set the friction between two registered materials, before or after build.
+
+        An exact pair overrides material priority and the combine rule in every environment. Omitted coefficients
+        take their built-in defaults on the first declaration and retain their declared values on subsequent calls.
+        Per-environment friction ratios multiply the resulting coefficients.
+        """
+        self.sim.rigid_solver.set_friction_pair(material_a, material_b, sliding, torsional, rolling)
+
     @overload
     def add_entity(
         self,
@@ -310,7 +376,18 @@ class Scene(RBC):
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
-        material: Material[EntityT] = ...,
+        material: RigidMaterial = ...,
+        surface: Surface | None = ...,
+        visualize_contact: bool = ...,
+        vis_mode: str | None = ...,
+        name: str | None = ...,
+    ) -> "RigidEntity": ...
+
+    @overload
+    def add_entity(
+        self,
+        morph: Morph | Iterable[Morph],
+        material: MaterialOptions[EntityT] = ...,
         surface: Surface | None = ...,
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
@@ -321,7 +398,7 @@ class Scene(RBC):
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
-        material: Material | None = None,
+        material: MaterialOptions | Material | None = None,
         surface: Surface | None = None,
         visualize_contact: bool = False,
         vis_mode: str | None = None,
@@ -336,8 +413,9 @@ class Scene(RBC):
             The morph of the entity. If a list of morphs is provided, the entity will be heterogeneous
             (rigid only, single-link entities only). Each parallel environment will simulate a different
             geometry variant from the list.
-        material : gs.materials.Material | None, optional
-            The material of the entity. If None, use ``gs.materials.Rigid()``.
+        material : gs.materials.MaterialOptions | gs.materials.Material | None, optional
+            The material of the entity, either the options describing it or a material registered through
+            ``add_material`` and thereby shareable with other entities. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
         visualize_contact : bool
@@ -357,6 +435,13 @@ class Scene(RBC):
         """
         if material is None:
             material = gs.materials.Rigid()
+
+        # Every check and dispatch below keys on the material options, so an already-registered material is unwrapped
+        # here. The registration downstream is idempotent, restoring the very same handle for the entity.
+        if isinstance(material, Material):
+            if material.scene is not self:
+                gs.raise_exception("The material is registered on another scene.")
+            material = material.options
 
         if surface is None:
             # assign a local surface, otherwise modification will apply on global default surface
@@ -455,7 +540,7 @@ class Scene(RBC):
     def add_stage(
         self,
         morph: gs.morphs.USD,
-        material: Material | None = None,
+        material: MaterialOptions | None = None,
         surface: Surface | None = None,
         visualize_contact: bool = False,
         vis_mode: Literal["visual", "collision"] = "visual",
@@ -467,7 +552,7 @@ class Scene(RBC):
         ----------
         morph : gs.morphs.USD
             The stage to add to the scene.
-        material : gs.materials.Material | None, optional
+        material : gs.materials.MaterialOptions | None, optional
             The material of the stage. If None, use ``gs.materials.Rigid()`` for all morphs.
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
@@ -751,7 +836,7 @@ class Scene(RBC):
     @gs.assert_unbuilt
     def add_emitter(
         self,
-        material: Material,
+        material: MaterialOptions,
         max_particles=20000,
         surface: Surface | None = None,
     ):
@@ -760,7 +845,7 @@ class Scene(RBC):
 
         Parameters
         ----------
-        material : gs.materials.Material
+        material : gs.materials.MaterialOptions
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
             `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`.
         max_particles : int
@@ -1643,10 +1728,23 @@ class Scene(RBC):
         replaced = (("viewer", viewer_options), ("vis", vis_options), ("renderer", renderer))
         options = described.options.model_copy(update={name: value for name, value in replaced if value is not None})
         scene = cls(show_viewer=show_viewer, options=options)
+        for material, name in zip(described.materials, described.material_names):
+            scene.add_material(material, name)
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
         for desc in described.entities:
+            if isinstance(desc, RigidEntityDescription) and desc.material_idx >= 0:
+                desc.material = scene._materials[desc.material_idx].options
+                desc.contact_materials = [scene._materials[idx].options for idx in desc.contact_material_indices]
             scene._sim._add_entity(desc=desc)
+        for pair in described.friction_pairs:
+            scene.set_friction_pair(
+                scene._materials[pair.material_a],
+                scene._materials[pair.material_b],
+                sliding=pair.friction[0],
+                torsional=pair.friction[1],
+                rolling=pair.friction[2],
+            )
         return scene
 
     @gs.assert_built

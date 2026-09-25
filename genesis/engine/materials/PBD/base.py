@@ -1,7 +1,7 @@
-from ..base import EntityT, Material
+from ..base import EntityT, MaterialOptions
 
 
-class Base(Material[EntityT]):
+class Base(MaterialOptions[EntityT]):
     """
     The base class of PBD materials.
 
