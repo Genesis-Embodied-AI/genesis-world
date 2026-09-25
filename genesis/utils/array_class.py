@@ -3094,3 +3094,205 @@ def get_raycast_result(n_envs: int):
 
 
 GeomsInitAABB = qd.Tensor
+
+
+# =========================================== BVH ===========================================
+
+
+class BVH_SORT_KIND(IntEnum):
+    """The sort ordering the leaf keys of a BVH set.
+
+    See genesis.engine.bvh.
+    """
+
+    # The device-wide radix sort of quadrants over every key of the set (GPU, large trees)
+    DEVICE_RADIX = 0
+    # The rank of each leaf among the keys of its tree (small trees)
+    RANK = 1
+    # A radix sort per tree, its chunks in parallel (CPU, large trees)
+    PER_TREE_RADIX = 2
+
+
+class BVH_FIT_KIND(IntEnum):
+    """The bottom-up fit of the node boxes of a BVH set.
+
+    See genesis.engine.bvh.
+    """
+
+    # One thread per leaf walking to the root, the arrival counters sequentially consistent (CPU)
+    LEAF_WALK = 0
+    # The leaf walk with a device fence on each side of the relaxed arrival atomic (GPU)
+    FENCED_LEAF_WALK = 1
+    # One block per tree sweeping the nodes level by level, every barrier uniform (Metal, see quadrants#925)
+    BLOCK_SWEEP = 2
+
+
+@qd.data_oriented
+class BVHStaticConfig(metaclass=AutoInitMeta):
+    """The compile-time shape of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh. The leaf keys pack the tree, the morton code and the leaf index in that order, so one flat
+    sort orders every tree.
+    """
+
+    # The bits of a morton code, three interleaved coordinates of the same width
+    morton_bits: int
+    # The bits a sort must order, a multiple of 16 up to 64
+    end_bit: int
+    # Scan depth of the device-wide radix sort (see quadrants.algorithms.sort), 1 to 8
+    log256_max_n: int
+    # BVH_SORT_KIND
+    sort_kind: int
+    # BVH_FIT_KIND
+    fit_kind: int
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class BVHTreeState:
+    """What a traversal reads of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh for the build. The internal nodes come first, n_leaves - 1 of them, then the leaves, so
+    node n_leaves - 1 + i holds the i-th sorted leaf, whose leaf index is leaves_idx[i_t, i]. A leaf node holds -1 in
+    nodes_left.
+    """
+
+    kind: ClassVar[DataKind] = DataKind.SCRATCH
+
+    nodes_left: qd.Tensor
+    nodes_right: qd.Tensor
+    nodes_min: qd.Tensor
+    nodes_max: qd.Tensor
+    leaves_idx: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class BVHLeaves:
+    """The boxes of the leaves of a set of linear bounding volume hierarchies (LBVH).
+
+    See genesis.engine.bvh. The caller writes them before a build, and a box query tests them against a tree.
+    """
+
+    kind: ClassVar[DataKind] = DataKind.SCRATCH
+
+    aabbs_min: qd.Tensor
+    aabbs_max: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class BVHState:
+    """The linear bounding volume hierarchies (LBVH) of a set of trees.
+
+    A build (see genesis.engine.bvh) takes the boxes of the leaves (see BVHLeaves) and produces the tree a traversal
+    reads (see BVHTreeState), plus the sorted leaf keys, the parent of each node and the scratch of the sort, the extent
+    and the fit.
+    """
+
+    kind: ClassVar[DataKind] = DataKind.SCRATCH
+
+    leaves: BVHLeaves
+    tree: BVHTreeState
+    leaves_keys: qd.Tensor
+    keys_scratch: qd.Tensor
+    sort_scratch: qd.Tensor
+    sort_hist: qd.Tensor
+    n_keys: qd.Tensor
+    nodes_parent: qd.Tensor
+    nodes_fitted: qd.Tensor
+    fit_frontier: qd.Tensor
+    lanes_min: qd.Tensor
+    lanes_max: qd.Tensor
+    trees_min: qd.Tensor
+    trees_max: qd.Tensor
+
+
+def get_bvh_state(
+    n_trees: int,
+    n_leaves: int,
+    n_sort_scratch: int,
+    n_sort_chunks: int,
+    n_extent_lanes: int,
+    bvh_config: BVHStaticConfig,
+) -> BVHState:
+    n_nodes = 2 * n_leaves - 1
+    return BVHState(
+        tree=BVHTreeState(
+            nodes_left=V(dtype=gs.qd_int, shape=(n_trees, n_nodes)),
+            nodes_right=V(dtype=gs.qd_int, shape=(n_trees, n_nodes)),
+            nodes_min=V(dtype=gs.qd_vec3, shape=(n_trees, n_nodes)),
+            nodes_max=V(dtype=gs.qd_vec3, shape=(n_trees, n_nodes)),
+            leaves_idx=V(dtype=gs.qd_int, shape=(n_trees, n_leaves)),
+        ),
+        leaves=BVHLeaves(
+            aabbs_min=V(dtype=gs.qd_vec3, shape=(n_trees, n_leaves)),
+            aabbs_max=V(dtype=gs.qd_vec3, shape=(n_trees, n_leaves)),
+        ),
+        leaves_keys=V(dtype=qd.u64, shape=(n_trees * n_leaves,)),
+        keys_scratch=V(dtype=qd.u64, shape=(n_trees * n_leaves,)),
+        sort_scratch=V(
+            dtype=qd.u32, shape=maybe_shape((n_sort_scratch,), bvh_config.sort_kind == BVH_SORT_KIND.DEVICE_RADIX)
+        ),
+        sort_hist=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((n_trees, n_sort_chunks, 256), bvh_config.sort_kind == BVH_SORT_KIND.PER_TREE_RADIX),
+        ),
+        n_keys=V_SCALAR_FROM(gs.qd_int, n_trees * n_leaves),
+        nodes_parent=V(dtype=gs.qd_int, shape=(n_trees, n_nodes)),
+        nodes_fitted=V(dtype=gs.qd_int, shape=(n_trees, max(n_leaves - 1, 1))),
+        fit_frontier=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape((n_trees, 2, max(n_leaves - 1, 1)), bvh_config.fit_kind == BVH_FIT_KIND.BLOCK_SWEEP),
+        ),
+        lanes_min=V(dtype=gs.qd_vec3, shape=(n_trees, n_extent_lanes)),
+        lanes_max=V(dtype=gs.qd_vec3, shape=(n_trees, n_extent_lanes)),
+        trees_min=V(dtype=gs.qd_vec3, shape=(n_trees,)),
+        trees_max=V(dtype=gs.qd_vec3, shape=(n_trees,)),
+    )
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class BVHQueryResults:
+    """The (tree, leaf, query) triplets a box query of a BVH collects, and their count, above the capacity on overflow.
+
+    See func_bvh_query_aabb in genesis.engine.bvh.
+    """
+
+    kind: ClassVar[DataKind] = DataKind.SCRATCH
+
+    triplets: qd.Tensor
+    count: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class BVHQueryState:
+    """A box query of a set of trees: the leaves whose boxes are tested, the trees traversed and the pairs found.
+
+    Leaf ``i_q`` of tree ``i_t`` of ``leaves`` is tested against tree ``i_t`` of ``tree`` (see func_bvh_query_leaves
+    in genesis.engine.bvh).
+    """
+
+    kind: ClassVar[DataKind] = DataKind.SCRATCH
+
+    leaves: BVHLeaves
+    tree: BVHTreeState
+    results: BVHQueryResults
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class SAPContactQueriesState:
+    """The box queries of the SAP coupler, one per contact handler traversing a tree.
+
+    See SAPCoupler._init_bvh.
+    """
+
+    kind: ClassVar[DataKind] = DataKind.SCRATCH
+
+    fem_self: BVHQueryState
+    rigid_tri: BVHQueryState
+    rigid_tet: BVHQueryState
+
+
+def get_bvh_query_results(max_results: int) -> BVHQueryResults:
+    return BVHQueryResults(
+        triplets=V(dtype=gs.qd_ivec3, shape=(max_results,)),
+        count=V(dtype=gs.qd_int, shape=(1,)),
+    )

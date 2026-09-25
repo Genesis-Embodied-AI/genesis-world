@@ -8,7 +8,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.bvh import STACK_SIZE as _BVH_STACK_SIZE
 from genesis.engine.solvers.rigid.collider.utils import func_point_in_geom_aabb
 from genesis.options.sensors import ContactDepthProbe as ContactDepthProbeOptions
 from genesis.options.sensors import ContactProbe as ContactProbeOptions
@@ -94,7 +93,7 @@ _MAX_CONTACTS_PER_SENSOR = 1024
 _MAX_GEOMS_PER_SENSOR = 64
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_build_sensor_contact_idx(
     sensor_link_idx: qd.types.ndarray(),
     filter_links_idx: qd.types.ndarray(),
@@ -132,7 +131,7 @@ def _kernel_build_sensor_contact_idx(
         sensor_n_contacts[i_b, i_s] = count
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_build_sensor_geom_idx(
     sensor_link_idx: qd.types.ndarray(),
     filter_links_idx: qd.types.ndarray(),
@@ -296,7 +295,7 @@ def _func_kinematic_spring_damper(
     return force_local, torque_local
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_kinematic_taxel(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
@@ -358,7 +357,7 @@ def _kernel_kinematic_taxel(
         probe_radius_noise = probe_radii_noise[i_p]
         use_noised_radius = probe_radius_noise > eps
         probe_radius_m = (
-            func_noised_probe_radius(probe_radius, probe_radius_noise) if use_noised_radius else probe_radius
+            func_noised_probe_radius(probe_radius, probe_radius_noise, eps) if use_noised_radius else probe_radius
         )
 
         (
@@ -432,7 +431,7 @@ def _kernel_kinematic_taxel(
             output_measured[torque_start + j, i_b] = torque_local_m[j]
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_contact_depth_probe(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
@@ -449,6 +448,7 @@ def _kernel_contact_depth_probe(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
+    eps: float,
 ):
     total_n_probes = probe_positions_local.shape[0]
     n_batches = output_gt.shape[-1]
@@ -476,7 +476,9 @@ def _kernel_contact_depth_probe(
         probe_radius = probe_radii[i_p]
         probe_radius_noise = probe_radii_noise[i_p]
         probe_radius_m = (
-            func_noised_probe_radius(probe_radius, probe_radius_noise) if probe_radius_noise > gs.EPS else probe_radius
+            func_noised_probe_radius(probe_radius, probe_radius_noise, eps)
+            if probe_radius_noise > eps
+            else probe_radius
         )
 
         max_penetration_gt, max_penetration_m = _func_query_contact_depth_penetration(
@@ -500,7 +502,7 @@ def _kernel_contact_depth_probe(
 # ============================ Raycast / BVH contact-depth path ============================
 
 
-@qd.kernel
+@qd.kernel(fastcache=True)
 def _kernel_build_sensor_candidate_geom_mask(
     sensor_link_idx: qd.types.ndarray(),
     sensor_contacts_idx: qd.types.ndarray(),
@@ -542,10 +544,9 @@ def _func_query_contact_depth_penetration_bvh(
     probe_pos: qd.types.vector(3),
     probe_radius_gt: float,
     probe_radius_m: float,
-    bvh_nodes: qd.template(),
-    bvh_morton_codes: qd.template(),
     sensor_candidate_geom_mask: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    bvh_tree_state: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
 ):
     """
@@ -559,26 +560,30 @@ def _func_query_contact_depth_penetration_bvh(
     split-tree caller can select the globally nearest answer (see the kernels' fold).
     """
     # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_morton_codes.shape[1]
+    n_triangles = bvh_tree_state.leaves_idx.shape[1]
     radius_query = qd.max(probe_radius_gt, probe_radius_m)
     best_dist_sq = radius_query * radius_query
     best_signed = radius_query
 
-    node_stack = qd.Vector.zero(gs.qd_int, qd.static(_BVH_STACK_SIZE))
+    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
+    STACK_SIZE = qd.static(64)
+    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
     node_stack[0] = 0
     stack_idx = 1
 
     while stack_idx > 0:
         stack_idx -= 1
         node_idx = node_stack[stack_idx]
-        node = bvh_nodes[i_t, node_idx]
 
-        if not func_sphere_intersects_aabb(probe_pos, best_dist_sq, node.bound.min, node.bound.max):
+        if not func_sphere_intersects_aabb(
+            probe_pos, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
+        ):
             continue
 
-        if node.left == -1:
+        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
+        if i_left == -1:
             sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = qd.cast(bvh_morton_codes[i_t, sorted_leaf_idx][1], gs.qd_int)
+            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
             i_g = dyn_info.faces.geom_idx[i_f]
             if not sensor_candidate_geom_mask[i_b, i_s, i_g]:
                 continue
@@ -598,9 +603,9 @@ def _func_query_contact_depth_penetration_bvh(
                 best_signed = d * sign_v
                 best_dist_sq = d_sq
         else:
-            if stack_idx < qd.static(_BVH_STACK_SIZE - 2):
-                node_stack[stack_idx] = node.left
-                node_stack[stack_idx + 1] = node.right
+            if stack_idx < STACK_SIZE - 2:
+                node_stack[stack_idx] = i_left
+                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
                 stack_idx += 2
 
     max_pen_gt = qd.max(gs.qd_float(0.0), probe_radius_gt - best_signed)
@@ -616,10 +621,9 @@ def _func_query_contact_depth_bvh(
     probe_pos: qd.types.vector(3),
     probe_radius_gt: float,
     probe_radius_m: float,
-    bvh_nodes: qd.template(),
-    bvh_morton_codes: qd.template(),
     sensor_candidate_geom_mask: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    bvh_tree_state: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
 ):
     """
@@ -631,28 +635,32 @@ def _func_query_contact_depth_bvh(
     distance is appended so a split-tree caller can select the globally nearest answer (see the kernels' fold).
     """
     # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_morton_codes.shape[1]
+    n_triangles = bvh_tree_state.leaves_idx.shape[1]
     radius_query = qd.max(probe_radius_gt, probe_radius_m)
     best_dist_sq = radius_query * radius_query
     best_signed = radius_query
     contact_link = gs.qd_int(-1)
     contact_normal = qd.Vector.zero(gs.qd_float, 3)
 
-    node_stack = qd.Vector.zero(gs.qd_int, qd.static(_BVH_STACK_SIZE))
+    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
+    STACK_SIZE = qd.static(64)
+    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
     node_stack[0] = 0
     stack_idx = 1
 
     while stack_idx > 0:
         stack_idx -= 1
         node_idx = node_stack[stack_idx]
-        node = bvh_nodes[i_t, node_idx]
 
-        if not func_sphere_intersects_aabb(probe_pos, best_dist_sq, node.bound.min, node.bound.max):
+        if not func_sphere_intersects_aabb(
+            probe_pos, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
+        ):
             continue
 
-        if node.left == -1:
+        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
+        if i_left == -1:
             sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = qd.cast(bvh_morton_codes[i_t, sorted_leaf_idx][1], gs.qd_int)
+            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
             i_g = dyn_info.faces.geom_idx[i_f]
             if not sensor_candidate_geom_mask[i_b, i_s, i_g]:
                 continue
@@ -674,9 +682,9 @@ def _func_query_contact_depth_bvh(
                 contact_link = dyn_info.geoms.link_idx[i_g]
                 contact_normal = fn
         else:
-            if stack_idx < qd.static(_BVH_STACK_SIZE - 2):
-                node_stack[stack_idx] = node.left
-                node_stack[stack_idx + 1] = node.right
+            if stack_idx < STACK_SIZE - 2:
+                node_stack[stack_idx] = i_left
+                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
                 stack_idx += 2
 
     # Penetration only; the link / normal are meaningful only for the branch that actually reports contact.
@@ -689,7 +697,7 @@ def _func_query_contact_depth_bvh(
     return max_pen_gt, contact_link_gt, contact_normal_gt, max_pen_m, contact_link_m, contact_normal_m, best_signed
 
 
-@qd.kernel(fastcache=False)
+@qd.kernel(fastcache=True)
 def _kernel_contact_depth_probe_bvh(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
@@ -702,14 +710,13 @@ def _kernel_contact_depth_probe_bvh(
     probe_radii_noise: qd.types.ndarray(),
     probe_gains: qd.types.ndarray(),
     sensor_candidate_geom_mask: qd.types.ndarray(),
-    bvh_nodes_a: qd.template(),
-    bvh_morton_codes_a: qd.template(),
-    bvh_nodes_b: qd.template(),
-    bvh_morton_codes_b: qd.template(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    bvh_tree_state_a: array_class.BVHTreeState,
+    bvh_tree_state_b: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
+    eps: float,
     is_split: qd.template(),
 ):
     total_n_probes = probe_positions_local.shape[0]
@@ -737,7 +744,9 @@ def _kernel_contact_depth_probe_bvh(
         probe_radius = probe_radii[i_p]
         probe_radius_noise = probe_radii_noise[i_p]
         probe_radius_m = (
-            func_noised_probe_radius(probe_radius, probe_radius_noise) if probe_radius_noise > gs.EPS else probe_radius
+            func_noised_probe_radius(probe_radius, probe_radius_noise, eps)
+            if probe_radius_noise > eps
+            else probe_radius
         )
 
         max_penetration_gt, max_penetration_m, signed_dist = _func_query_contact_depth_penetration_bvh(
@@ -747,10 +756,9 @@ def _kernel_contact_depth_probe_bvh(
             probe_pos,
             probe_radius,
             probe_radius_m,
-            bvh_nodes_a,
-            bvh_morton_codes_a,
             sensor_candidate_geom_mask,
             dyn_state,
+            bvh_tree_state_a,
             dyn_info,
         )
         if is_split:
@@ -765,10 +773,9 @@ def _kernel_contact_depth_probe_bvh(
                 probe_pos,
                 probe_radius,
                 probe_radius_m,
-                bvh_nodes_b,
-                bvh_morton_codes_b,
                 sensor_candidate_geom_mask,
                 dyn_state,
+                bvh_tree_state_b,
                 dyn_info,
             )
             if qd.abs(signed_dist_b) < qd.abs(signed_dist):
@@ -780,7 +787,7 @@ def _kernel_contact_depth_probe_bvh(
         output_measured[cache_idx, i_b] = max_penetration_m
 
 
-@qd.kernel(fastcache=False)
+@qd.kernel(fastcache=True)
 def _kernel_kinematic_taxel_bvh(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
@@ -799,15 +806,14 @@ def _kernel_kinematic_taxel_bvh(
     twist_scalar: qd.types.ndarray(),
     n_probes_per_sensor: qd.types.ndarray(),
     sensor_candidate_geom_mask: qd.types.ndarray(),
-    bvh_nodes_a: qd.template(),
-    bvh_morton_codes_a: qd.template(),
-    bvh_nodes_b: qd.template(),
-    bvh_morton_codes_b: qd.template(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    bvh_tree_state_a: array_class.BVHTreeState,
+    bvh_tree_state_b: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
     measured_equals_gt: int,
+    eps: float,
     is_split: qd.template(),
 ):
     total_n_probes = probe_positions_local.shape[0]
@@ -841,9 +847,9 @@ def _kernel_kinematic_taxel_bvh(
 
         probe_radius = probe_radii[i_p]
         probe_radius_noise = probe_radii_noise[i_p]
-        use_noised_radius = probe_radius_noise > gs.EPS
+        use_noised_radius = probe_radius_noise > eps
         probe_radius_m = (
-            func_noised_probe_radius(probe_radius, probe_radius_noise) if use_noised_radius else probe_radius
+            func_noised_probe_radius(probe_radius, probe_radius_noise, eps) if use_noised_radius else probe_radius
         )
 
         (
@@ -861,10 +867,9 @@ def _kernel_kinematic_taxel_bvh(
             probe_pos,
             probe_radius,
             probe_radius_m,
-            bvh_nodes_a,
-            bvh_morton_codes_a,
             sensor_candidate_geom_mask,
             dyn_state,
+            bvh_tree_state_a,
             dyn_info,
         )
         if is_split:
@@ -885,10 +890,9 @@ def _kernel_kinematic_taxel_bvh(
                 probe_pos,
                 probe_radius,
                 probe_radius_m,
-                bvh_nodes_b,
-                bvh_morton_codes_b,
                 sensor_candidate_geom_mask,
                 dyn_state,
+                bvh_tree_state_b,
                 dyn_info,
             )
             if qd.abs(signed_dist_b) < qd.abs(signed_dist):
@@ -1040,6 +1044,7 @@ class ContactDepthProbeSensor(
                 solver.dyn_state,
                 solver.dyn_info,
                 solver.collider.collider_info,
+                eps=gs.EPS,
             )
         else:
             _kernel_build_sensor_contact_idx(
@@ -1074,14 +1079,13 @@ class ContactDepthProbeSensor(
                 shared_metadata.probe_radii_noise,
                 shared_metadata.probe_gains,
                 shared_metadata.sensor_candidate_geom_mask,
-                entry_a.bvh.nodes,
-                entry_a.bvh.morton_codes,
-                entry_b.bvh.nodes,
-                entry_b.bvh.morton_codes,
                 current_ground_truth_data_T,
                 measured_cols_b,
                 solver.dyn_state,
+                entry_a.bvh_state.tree,
+                entry_b.bvh_state.tree,
                 solver.dyn_info,
+                eps=gs.EPS,
                 is_split=entry_b is not entry_a,
             )
         if ground_truth_data_timeline is not None:
@@ -1363,15 +1367,14 @@ class KinematicTaxelSensor(
                 shared_metadata.twist_scalar,
                 shared_metadata.n_probes_per_sensor,
                 shared_metadata.sensor_candidate_geom_mask,
-                entry_a.bvh.nodes,
-                entry_a.bvh.morton_codes,
-                entry_b.bvh.nodes,
-                entry_b.bvh.morton_codes,
                 current_ground_truth_data_T,
                 measured_cols_b,
                 solver.dyn_state,
+                entry_a.bvh_state.tree,
+                entry_b.bvh_state.tree,
                 solver.dyn_info,
                 measured_equals_gt,
+                eps=gs.EPS,
                 is_split=entry_b is not entry_a,
             )
         if ground_truth_data_timeline is not None:
