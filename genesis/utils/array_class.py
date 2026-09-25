@@ -1355,6 +1355,9 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     n_contacts_per_nonconvex_pair: int
     # ccd algorithm
     ccd_algorithm: int
+    # GPU core count and cores per compute unit, sizing the split narrow phase launches and scratch states
+    gpu_cores: int
+    gpu_cores_per_unit: int
 
 
 # =========================================== MPR ===========================================

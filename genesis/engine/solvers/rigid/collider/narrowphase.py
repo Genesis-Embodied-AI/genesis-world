@@ -2692,12 +2692,10 @@ def _func_narrowphase_multicontact(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     gjk_static_config: qd.template(),
-    n_total_threads: int,
-    max_items_per_thread: int,
     errno: qd.Tensor,
 ):
-    for i_tid in range(n_total_threads):
-        for _iter in range(max_items_per_thread):
+    for i_tid in range(collider_static_config.gpu_cores):
+        for _iter in range(collider_static_config.gpu_cores_per_unit):
             idx = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_work_counter[0], 1)
             if idx >= collider_state.narrowphase_work_queues.mpr_queue_size[0]:
                 break
@@ -2770,10 +2768,10 @@ def _func_narrowphase_contact0(
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
-    n_chunks: int,
     errno: qd.Tensor,
 ):
     n_envs = collider_state.n_broad_pairs.shape[0]
+    n_chunks = (collider_static_config.gpu_cores + n_envs - 1) // n_envs
     _grid_size = n_envs * n_chunks
     max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
 

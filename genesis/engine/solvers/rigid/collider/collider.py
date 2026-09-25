@@ -6,7 +6,6 @@ including broad-phase (sweep-and-prune), narrow-phase (convex-convex, SDF-based,
 terrain), and contact management.
 """
 
-import math
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -239,6 +238,8 @@ class Collider:
         # Initialize the static config, which stores every data that are compile-time constants.
         # Note that updating any of them will trigger recompilation.
         self.collider_config = array_class.ColliderStaticConfig(
+            gpu_cores=get_gpu_core_count(),
+            gpu_cores_per_unit=get_gpu_cores_per_unit(),
             has_terrain=has_terrain,
             has_non_box_plane_convex_convex=has_non_box_plane_convex_convex,
             has_convex_specialization=has_convex_specialization,
@@ -305,22 +306,18 @@ class Collider:
             and not self._solver.rigid_config.requires_grad
             and self.collider_config.has_prunable_contacts
             and (self._solver._options.contact_pruning_tolerance or 0.0) > 0.0
-            and self._solver._B <= 0.5 * get_gpu_core_count()
+            and self._solver._B <= 0.5 * self.collider_config.gpu_cores
         )
 
         # Contact0 & multicontact scratch states only needed when split narrowphase is active. An upper-bound estimate
         # of the core count sizes their launches as well as a query: on an RTX 6000 Blackwell, the hardware-derived
         # 21760 threads against a hardcoded 40000 changed the timings marginally (Genesis-Embodied-AI/Genesis#2616).
         if self._use_split_narrowphase:
-            gpu_cores = get_gpu_core_count()
-            self._contact0_n_chunks = max(1, math.ceil(gpu_cores / self._solver._B))
-            self._contact0_grid_size = self._solver._B * self._contact0_n_chunks
-            self.contact0_mpr_state = array_class.get_mpr_state(self._contact0_grid_size)
-            self.contact0_gjk_state = array_class.get_gjk_state_contact_only(self._contact0_grid_size)
-
-            self._multicontact_n_total_threads = gpu_cores
-            self._multicontact_max_items_per_thread = get_gpu_cores_per_unit()
-            self.multicontact_mpr_state = array_class.get_mpr_state(self._multicontact_n_total_threads)
+            gpu_cores = self.collider_config.gpu_cores
+            contact0_grid_size = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
+            self.contact0_mpr_state = array_class.get_mpr_state(contact0_grid_size)
+            self.contact0_gjk_state = array_class.get_gjk_state_contact_only(contact0_grid_size)
+            self.multicontact_mpr_state = array_class.get_mpr_state(gpu_cores)
 
     def _init_multicontact_gjk_state(self):
         """Allocate the GJK scratch state for the multicontact pass.
@@ -328,7 +325,7 @@ class Collider:
         Must be called after self._gjk is initialized. Sized to all multicontact threads because any thread may fall
         back to GJK for its own contact."""
         self.multicontact_gjk_state = array_class.get_gjk_state(
-            self._multicontact_n_total_threads,
+            self.collider_config.gpu_cores,
             self._solver.rigid_config,
             self._gjk._gjk_info,
             True,
@@ -864,8 +861,6 @@ class Collider:
             self._solver.rigid_config,
             self.collider_config,
             self._gjk.gjk_config,
-            self._multicontact_n_total_threads,
-            self._multicontact_max_items_per_thread,
             self._solver._errno,
         )
 
@@ -900,7 +895,6 @@ class Collider:
                 self.collider_info,
                 self._solver.rigid_config,
                 self.collider_config,
-                self._contact0_n_chunks,
                 self._solver._errno,
             )
             self._call_multicontact()
