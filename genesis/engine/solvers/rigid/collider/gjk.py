@@ -116,25 +116,30 @@ class GJK:
             diff_contact_min_penetration=gs.EPS * 100.0,
         )
 
-        # Initialize GJK state
-        self.gjk_state = array_class.get_gjk_state(
-            rigid_solver._B, rigid_solver.rigid_config, self._gjk_info, False, rigid_solver.rigid_config.requires_grad
-        )
+        # The scratch states GJK runs on, allocated by 'activate' for the narrowphase that runs it
+        self.gjk_state = None
+        self.contact0_gjk_state = None
+        self.multicontact_gjk_state = None
 
-        self._is_active = False
+    def activate(self, n_contact0_threads=0, n_multicontact_threads=0):
+        """Allocate the scratch states GJK runs on, for the narrowphase that runs it.
 
-    def activate(self):
-        if self._is_active:
-            return
-
-        self.gjk_state = array_class.get_gjk_state(
-            self._solver._B, self._solver.rigid_config, self._gjk_info, True, self._solver.rigid_config.requires_grad
-        )
-        self._is_active = True
-
-    @property
-    def is_active(self):
-        return self._is_active
+        Without thread counts, the single-kernel narrowphase runs GJK on one state per environment. With them, the split
+        narrowphase runs it on one state per thread of its contact0 pass (n_contact0_threads), which detects the first
+        contact alone, and on one full state per thread of its multicontact pass (n_multicontact_threads).
+        """
+        if n_contact0_threads > 0:
+            self.contact0_gjk_state = array_class.get_gjk_state_contact_only(n_contact0_threads)
+            self.multicontact_gjk_state = array_class.get_gjk_state(
+                n_multicontact_threads,
+                self._solver.rigid_config,
+                self._gjk_info,
+                self._solver.rigid_config.requires_grad,
+            )
+        else:
+            self.gjk_state = array_class.get_gjk_state(
+                self._solver._B, self._solver.rigid_config, self._gjk_info, self._solver.rigid_config.requires_grad
+            )
 
 
 @qd.func
@@ -219,13 +224,13 @@ def func_gjk_contact(
                 quat_a,
                 pos_b,
                 quat_b,
-                shrink_sphere,
                 collider_state,
                 gjk_state,
                 dyn_info,
                 collider_info,
                 rigid_config,
                 collider_static_config,
+                shrink_sphere,
             )
 
             if shrink_sphere:
@@ -451,13 +456,13 @@ def func_gjk(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    shrink_sphere,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
+    shrink_sphere: bool,
 ):
     """
     GJK algorithm to compute the minimum distance between two convex objects.
@@ -551,13 +556,13 @@ def func_gjk(
             quat_a,
             pos_b,
             quat_b,
-            shrink_sphere,
             collider_state,
             gjk_state,
             dyn_info,
             collider_info,
             rigid_config,
             collider_static_config,
+            shrink_sphere,
         )
 
         # Early stopping based on Frank-Wolfe duality gap. We need to find the minimum [support_vector_norm],
@@ -782,13 +787,13 @@ def func_gjk_intersect(
             quat_a,
             pos_b,
             quat_b,
+            collider_state,
+            gjk_state,
+            dyn_info,
+            collider_info,
+            rigid_config,
+            collider_static_config,
             shrink_sphere=False,
-            collider_state=collider_state,
-            gjk_state=gjk_state,
-            dyn_info=dyn_info,
-            collider_info=collider_info,
-            rigid_config=rigid_config,
-            collider_static_config=collider_static_config,
         )
 
         # Check if the origin is strictly outside of the Minkowski difference (which means there is no collision)
@@ -1708,13 +1713,13 @@ def func_safe_gjk_support(
                 d,
                 pos,
                 quat,
+                collider_state,
+                gjk_state,
+                dyn_info,
+                collider_info,
+                rigid_config,
+                collider_static_config,
                 shrink_sphere=False,
-                collider_state=collider_state,
-                gjk_state=gjk_state,
-                dyn_info=dyn_info,
-                collider_info=collider_info,
-                rigid_config=rigid_config,
-                collider_static_config=collider_static_config,
             )
             if j == 0:
                 obj1 = sp

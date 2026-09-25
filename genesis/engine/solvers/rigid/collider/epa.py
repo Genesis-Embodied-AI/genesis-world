@@ -817,13 +817,13 @@ def func_epa_support(
         quat_a,
         pos_b,
         quat_b,
+        collider_state,
+        gjk_state,
+        dyn_info,
+        collider_info,
+        rigid_config,
+        collider_static_config,
         shrink_sphere=False,
-        collider_state=collider_state,
-        gjk_state=gjk_state,
-        dyn_info=dyn_info,
-        collider_info=collider_info,
-        rigid_config=rigid_config,
-        collider_static_config=collider_static_config,
     )
 
     # Insert the support points into the polytope

@@ -99,7 +99,6 @@ from .abd.forward_kinematics import (
     kernel_update_vgeoms,
 )
 from .abd.forward_dynamics import (
-    func_actuation,
     func_bias_force,
     func_compute_mass_matrix,
     func_compute_qacc,
@@ -1584,7 +1583,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_forward_kinematics_replay(
             envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
         )
-        kernel_COM_links_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
+        kernel_COM_links_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         kernel_update_geoms_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
         kernel_forward_velocity(
             envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
@@ -1593,9 +1592,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Reverse the stages: velocity first, forward kinematics last. COM and geoms both consume only FK
         # outputs, so their mutual order is free.
         kernel_manual_forward_velocity_bw(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-        kernel_COM_links_replay.grad(
-            self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
-        )
+        kernel_COM_links_replay.grad(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         kernel_update_geoms_replay.grad(
             self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
         )

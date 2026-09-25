@@ -67,13 +67,13 @@ def support_driver(
     direction,
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    shrink_sphere,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
+    shrink_sphere: bool,
 ):
     """
     @ shrink_sphere: If True, use point and line support for sphere and capsule.
@@ -122,13 +122,13 @@ def func_support(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    shrink_sphere,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
+    shrink_sphere: bool,
 ):
     """
     Find support points on the two objects using [dir].
@@ -158,13 +158,13 @@ def func_support(
             d,
             pos,
             quat,
-            shrink_sphere,
             collider_state,
             gjk_state,
             dyn_info,
             collider_info,
             rigid_config,
             collider_static_config,
+            shrink_sphere,
         )
 
         if i == 0:

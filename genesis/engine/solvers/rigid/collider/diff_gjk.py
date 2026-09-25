@@ -631,13 +631,13 @@ def func_add_diff_contact_input(
         quat_a,
         pos_b,
         quat_b,
+        collider_state,
+        gjk_state,
+        dyn_info,
+        collider_info,
+        rigid_config,
+        collider_static_config,
         shrink_sphere=False,
-        collider_state=collider_state,
-        gjk_state=gjk_state,
-        dyn_info=dyn_info,
-        collider_info=collider_info,
-        rigid_config=rigid_config,
-        collider_static_config=collider_static_config,
     )
 
     gjk_state.diff_contact_input.local_pos1_a[i_b, n] = gjk_state.polytope_verts.local_obj1[i_b, i_v1]

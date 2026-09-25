@@ -2370,7 +2370,6 @@ def _func_multicontact_mpr(
     contact_pos_0: qd.types.vector(3),
     normal_0: qd.types.vector(3),
     penetration_0,
-    prefer_gjk_0: bool,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -2382,6 +2381,7 @@ def _func_multicontact_mpr(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     gjk_static_config: qd.template(),
+    prefer_gjk_0: bool,
     errno: qd.Tensor,
 ):
     """Compute all contacts for a pair and write them contiguously via a single atomic reservation.
@@ -2717,7 +2717,6 @@ def _func_narrowphase_multicontact(
                 contact_pos_0,
                 normal_0,
                 penetration_0,
-                prefer_gjk_0,
                 geoms_init_AABB,
                 dyn_state,
                 collider_state,
@@ -2729,6 +2728,7 @@ def _func_narrowphase_multicontact(
                 rigid_config,
                 collider_static_config,
                 gjk_static_config,
+                prefer_gjk_0,
                 errno,
             )
 
@@ -2742,8 +2742,8 @@ def _func_enqueue_for_multicontact(
     contact_pos_0: qd.types.vector(3),
     normal_0: qd.types.vector(3),
     penetration_0,
-    prefer_gjk: bool,
     collider_state: array_class.ColliderState,
+    prefer_gjk: bool,
 ):
     idx = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_queue_size[0], 1)
     collider_state.narrowphase_work_queues.mpr_i_b[idx] = i_b
@@ -2899,13 +2899,13 @@ def _func_narrowphase_contact0(
                         ga_quat,
                         gb_pos,
                         gb_quat,
+                        collider_state,
+                        gjk_state,
+                        dyn_info,
+                        collider_info,
+                        rigid_config,
+                        collider_static_config,
                         shrink_sphere=False,
-                        collider_state=collider_state,
-                        gjk_state=gjk_state,
-                        dyn_info=dyn_info,
-                        collider_info=collider_info,
-                        rigid_config=rigid_config,
-                        collider_static_config=collider_static_config,
                     )
                     is_col = distance < collider_info.gjk.collision_eps[None]
                     if distance >= 0.5 * collider_info.gjk.FLOAT_MAX[None]:
@@ -2989,7 +2989,7 @@ def _func_narrowphase_contact0(
                     # contacts always try MPR first and fall back to GJK per contact. prefer_gjk is never set for the
                     # MJ_MPR algorithm (no GJK), so a non-multi_contact MJ_MPR pair always takes the fast path below.
                     _func_enqueue_for_multicontact(
-                        i_b, i_ga, i_gb, i_pair, contact_pos, normal, penetration, prefer_gjk, collider_state
+                        i_b, i_ga, i_gb, i_pair, contact_pos, normal, penetration, collider_state, prefer_gjk
                     )
                 else:
                     func_add_contact(

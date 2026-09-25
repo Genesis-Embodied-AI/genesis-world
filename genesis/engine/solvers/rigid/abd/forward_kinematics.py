@@ -153,7 +153,7 @@ def func_update_kinematics_root(
     func_forward_kinematics_root(
         i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
     )
-    func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+    func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
     func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
@@ -165,7 +165,6 @@ def func_COM_root(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    is_backward: qd.template(),
 ):
     """Compute the center of mass of kinematic root i_l_root of env i_b and the inertial of each of its links about it.
 
@@ -177,7 +176,6 @@ def func_COM_root(
     their sleep state.
     """
     EPS = rigid_info.EPS[None]
-    BW = qd.static(is_backward)
     i_b = qd.cast(i_b, qd.i32)
     if func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config):
         i_l_end = rigid_info.links_root_end[i_l_root]
@@ -238,59 +236,6 @@ def func_COM_root(
             I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
             if dyn_info.links.root_idx[I_l] == i_l_root:
                 if dyn_info.links.n_dofs[I_l] > 0:
-                    i_p = dyn_info.links.parent_idx[I_l]
-
-                    _i_j = dyn_info.links.joint_start[I_l]
-                    _I_j = [_i_j, i_b] if qd.static(rigid_config.batch_joints_info) else _i_j
-                    joint_type = dyn_info.joints.type[_I_j]
-
-                    p_pos = qd.Vector.zero(gs.qd_float, 3)
-                    p_quat = gu.qd_identity_quat()
-                    if i_p != -1:
-                        p_pos = dyn_state.links.pos[i_p, i_b]
-                        p_quat = dyn_state.links.quat[i_p, i_b]
-
-                    if joint_type == gs.JOINT_TYPE.FREE or (dyn_info.links.is_fixed[I_l] and i_p == -1):
-                        dyn_state.links.j_pos[i_l, i_b] = dyn_state.links.pos[i_l, i_b]
-                        dyn_state.links.j_quat[i_l, i_b] = dyn_state.links.quat[i_l, i_b]
-                    else:
-                        (dyn_state.links.j_pos_bw[i_l, 0, i_b], dyn_state.links.j_quat_bw[i_l, 0, i_b]) = (
-                            gu.qd_transform_pos_quat_by_trans_quat(
-                                dyn_info.links.pos[I_l], dyn_info.links.quat[I_l], p_pos, p_quat
-                            )
-                        )
-
-                        n_joints = dyn_info.links.joint_end[I_l] - dyn_info.links.joint_start[I_l]
-
-                        for i_j_ in range(n_joints):
-                            i_j = i_j_ + dyn_info.links.joint_start[I_l]
-
-                            curr_i_j = 0 if qd.static(not BW) else i_j_
-                            next_i_j = 0 if qd.static(not BW) else i_j_ + 1
-
-                            if func_check_index_range(
-                                i_j, dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l], BW
-                            ):
-                                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
-
-                                (
-                                    dyn_state.links.j_pos_bw[i_l, next_i_j, i_b],
-                                    dyn_state.links.j_quat_bw[i_l, next_i_j, i_b],
-                                ) = gu.qd_transform_pos_quat_by_trans_quat(
-                                    dyn_info.joints.pos[I_j],
-                                    gu.qd_identity_quat(),
-                                    dyn_state.links.j_pos_bw[i_l, curr_i_j, i_b],
-                                    dyn_state.links.j_quat_bw[i_l, curr_i_j, i_b],
-                                )
-
-                        i_j_ = 0 if qd.static(not BW) else n_joints
-                        dyn_state.links.j_pos[i_l, i_b] = dyn_state.links.j_pos_bw[i_l, i_j_, i_b]
-                        dyn_state.links.j_quat[i_l, i_b] = dyn_state.links.j_quat_bw[i_l, i_j_, i_b]
-
-        for i_l in range(i_l_root, i_l_end):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.root_idx[I_l] == i_l_root:
-                if dyn_info.links.n_dofs[I_l] > 0:
                     for i_j in range(dyn_info.links.joint_start[I_l], dyn_info.links.joint_end[I_l]):
                         offset_pos = dyn_state.links.root_COM[i_l, i_b] - dyn_state.joints.xanchor[i_j, i_b]
                         I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
@@ -319,14 +264,6 @@ def func_COM_root(
                             for i in qd.static(range(3)):
                                 dyn_state.dofs.cdof_ang[i + dof_start + 3, i_b] = xmat_T[i, :]
                                 dyn_state.dofs.cdof_vel[i + dof_start + 3, i_b] = xmat_T[i, :].cross(offset_pos)
-
-                        for i_d in range(dof_start, dyn_info.joints.dof_end[I_j]):
-                            dyn_state.dofs.cdofvel_ang[i_d, i_b] = (
-                                dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-                            )
-                            dyn_state.dofs.cdofvel_vel[i_d, i_b] = (
-                                dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
-                            )
 
 
 @qd.func
@@ -899,7 +836,7 @@ def func_update_cartesian_space_root(
         if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
             func_forward_kinematics_link(i_l, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
             func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms, is_backward)
-    func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.func
@@ -960,7 +897,7 @@ def func_update_cartesian_space(
     )
     for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
         i_l_root = rigid_info.roots_link_idx[i_r]
-        func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+        func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)
@@ -1019,8 +956,7 @@ def kernel_COM_links_replay(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    is_backward: qd.template(),
 ):
     for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
         i_l_root = rigid_info.roots_link_idx[i_r]
-        func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+        func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
