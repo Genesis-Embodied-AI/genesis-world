@@ -1680,30 +1680,6 @@ def func_update_force(
 
 
 @qd.func
-def func_actuation(self):
-    if qd.static(self._use_hibernation):
-        pass
-    else:
-        qd.loop_config(serialize=self._para_level < gs.PARA_LEVEL.PARTIAL)
-        for i_l, i_b in qd.ndrange(self.n_links, self._B):
-            I_l = [i_l, i_b] if qd.static(self._options.batch_links_info) else i_l
-            for i_j in range(self.dyn_info.links.joint_start[I_l], self.dyn_info.links.joint_end[I_l]):
-                I_j = [i_j, i_b] if qd.static(self._options.batch_joints_info) else i_j
-                joint_type = self.dyn_info.joints.type[I_j]
-                q_start = self.dyn_info.joints.q_start[I_j]
-
-                if joint_type == gs.JOINT_TYPE.REVOLUTE or joint_type == gs.JOINT_TYPE.PRISMATIC:
-                    gear = -1  # TODO
-                    i_d = self.dyn_info.links.dof_start[I_l]
-                    self.dyn_state.dofs.act_length[i_d, i_b] = gear * self.qpos[q_start, i_b]
-                    self.dyn_state.dofs.qf_actuator[i_d, i_b] = self.dyn_state.dofs.act_length[i_d, i_b]
-                else:
-                    for i_d in range(self.dyn_info.links.dof_start[I_l], self.dyn_info.links.dof_end[I_l]):
-                        self.dyn_state.dofs.act_length[i_d, i_b] = 0.0
-                        self.dyn_state.dofs.qf_actuator[i_d, i_b] = self.dyn_state.dofs.act_length[i_d, i_b]
-
-
-@qd.func
 def func_bias_force(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -1730,7 +1706,6 @@ def func_bias_force(
                     dyn_state.dofs.qf_passive[i_d, i_b]
                     - dyn_state.dofs.qf_bias[i_d, i_b]
                     + dyn_state.dofs.qf_applied[i_d, i_b]
-                    # + self.dyn_state.dofs.qf_actuator[i_d, i_b]
                 )
 
                 dyn_state.dofs.qf_smooth[i_d, i_b] = dyn_state.dofs.force[i_d, i_b]
