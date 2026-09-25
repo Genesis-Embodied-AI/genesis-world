@@ -1868,7 +1868,7 @@ def _np_z_up_to_R(z, up=None, out=None):
 
 
 @torch.jit.script
-def _tc_z_up_to_R(z, eps: float, up=None, out: torch.Tensor | None = None):
+def _tc_z_up_to_R(z, eps: float, up: torch.Tensor | None = None, out: torch.Tensor | None = None):
     if out is None:
         R = torch.empty(z.shape[:-1] + (3, 3), dtype=z.dtype, device=z.device)
     else:
@@ -1898,10 +1898,12 @@ def _tc_z_up_to_R(z, eps: float, up=None, out: torch.Tensor | None = None):
     if up is not None:
         x[:] = torch.cross(torch.broadcast_to(up, z.shape), z, dim=-1)
     else:
-        up_mask = z[..., 2:].abs() < 1.0 - eps
+        up_mask = z[..., 2].abs() < 1.0 - eps
+        # TorchScript only offers 'out=' on the tensor-tensor overload of 'torch.where'. A 0-d CPU tensor acts as a scalar.
+        zero = torch.zeros((), dtype=z.dtype, device=torch.device("cpu"))
         torch.where(up_mask, z[..., 1], z[..., 2], out=x[..., 0])
-        torch.where(up_mask, -z[..., 0], 0.0, out=x[..., 1])
-        torch.where(up_mask, 0.0, -z[..., 0], out=x[..., 2])
+        torch.where(up_mask, -z[..., 0], zero, out=x[..., 1])
+        torch.where(up_mask, zero, -z[..., 0], out=x[..., 2])
 
     # Normalize x vectors
     x_norm = torch.linalg.vector_norm(x, ord=2, dim=-1, keepdim=True)
