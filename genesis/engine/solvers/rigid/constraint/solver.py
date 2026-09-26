@@ -2285,9 +2285,9 @@ def func_copy_cone_free_hessian_island(
         i_dg = constraint_state.island.dof_id[dof_base + i_d, i_b]
         env_start = constraint_state.island.dof_env_start_local[dof_base + i_d, i_b]
         if qd.static(save):
-            constraint_state.nt_H_cone_free_diag[i_b, i_dg] = constraint_state.nt_H[i_b, i_dg, i_dg]
+            constraint_state.nt_H_cone_free_diag[i_dg, i_b] = constraint_state.nt_H[i_b, i_dg, i_dg]
         else:
-            constraint_state.nt_H[i_b, i_dg, i_dg] = constraint_state.nt_H_cone_free_diag[i_b, i_dg]
+            constraint_state.nt_H[i_b, i_dg, i_dg] = constraint_state.nt_H_cone_free_diag[i_dg, i_b]
         for j_d in range(env_start, i_d):
             j_dg = constraint_state.island.dof_id[dof_base + j_d, i_b]
             if qd.static(save):
@@ -2323,7 +2323,7 @@ def func_update_cone_free_hessian_flip(
             if qd.static(rigid_config.enable_jacobi_equilibration):
                 v = v * constraint_state.nt_jacobi[i_d1, i_b] * constraint_state.nt_jacobi[i_d2, i_b]
             if i_d1 == i_d2:
-                constraint_state.nt_H_cone_free_diag[i_b, i_d1] = constraint_state.nt_H_cone_free_diag[i_b, i_d1] + v
+                constraint_state.nt_H_cone_free_diag[i_d1, i_b] = constraint_state.nt_H_cone_free_diag[i_d1, i_b] + v
             else:
                 row = qd.max(i_d1, i_d2)
                 col = qd.min(i_d1, i_d2)

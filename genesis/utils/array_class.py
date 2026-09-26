@@ -17,20 +17,50 @@ def _tensor_backend():
     return qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD
 
 
-def V(*args, **kwargs):
-    return qd.tensor(*args, backend=_tensor_backend(), **kwargs)
+def _allocation_kwargs(shape, n_envs, env_first, layout, kwargs):
+    """Canonical shape and physical layout of a tensor from its per-env data shape and number of environments."""
+    if shape is None:
+        return {**kwargs, "shape": ()}
+    shape = (shape,) if isinstance(shape, int) else tuple(shape)
+    if n_envs is None:
+        assert not env_first
+        full_shape, full_layout = shape, layout
+    else:
+        n_data = len(shape)
+        data_axes = tuple(range(n_data)) if layout is None else tuple(layout)
+        full_shape = (*shape, n_envs)
+        full_layout = (n_data, *data_axes) if env_first else (*data_axes, n_data)
+    # An identity layout is left out, which the tensor factories of every version accept
+    if full_layout is None or tuple(full_layout) == tuple(range(len(full_shape))):
+        return {**kwargs, "shape": full_shape}
+    return {**kwargs, "shape": full_shape, "layout": tuple(full_layout)}
 
 
-def V_VEC(*args, **kwargs):
-    return qd.Vector.tensor(*args, backend=_tensor_backend(), **kwargs)
+def V(dtype, shape, n_envs=None, *, env_first=False, layout=None, **kwargs):
+    """Allocate a scalar tensor holding one value per data index and environment.
+
+    shape is the per-env data shape, None for an empty placeholder. n_envs is the number of environments, None for a
+    tensor shared by every environment. With n_envs, the environment is the last index of the tensor and env_first
+    places it outermost in memory instead of innermost. layout permutes the data axes in memory.
+    """
+    kwargs = _allocation_kwargs(shape, n_envs, env_first, layout, kwargs)
+    return qd.tensor(dtype, backend=_tensor_backend(), **kwargs)
 
 
-def V_MAT(*args, **kwargs):
-    return qd.Matrix.tensor(*args, backend=_tensor_backend(), **kwargs)
+def V_VEC(n, dtype, shape, n_envs=None, *, env_first=False, layout=None, **kwargs):
+    """Allocate a vector tensor, laid out as V does."""
+    kwargs = _allocation_kwargs(shape, n_envs, env_first, layout, kwargs)
+    return qd.Vector.tensor(n, dtype, backend=_tensor_backend(), **kwargs)
 
 
-def maybe_shape(shape, is_on):
-    return shape if is_on else ()
+def V_MAT(n, m, dtype, shape, n_envs=None, *, env_first=False, layout=None, **kwargs):
+    """Allocate a matrix tensor, laid out as V does."""
+    kwargs = _allocation_kwargs(shape, n_envs, env_first, layout, kwargs)
+    return qd.Matrix.tensor(n, m, dtype, backend=_tensor_backend(), **kwargs)
+
+
+def maybe_shape(shape, is_active):
+    return shape if is_active else None
 
 
 @dataclass_transform(eq_default=True, kw_only_default=False, frozen_default=True)
@@ -284,8 +314,8 @@ class RigidInfo:
 def get_rigid_info(solver, kinematic_only):
     _B = solver._B
 
-    mass_mat_shape = (solver.n_dofs_, solver.n_dofs_, _B)
-    if math.prod(mass_mat_shape) > np.iinfo(np.int32).max:
+    mass_mat_shape = (solver.n_dofs_, solver.n_dofs_)
+    if math.prod(mass_mat_shape) * _B > np.iinfo(np.int32).max:
         gs.raise_exception(
             f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={_B}) is too large."
         )
@@ -299,27 +329,25 @@ def get_rigid_info(solver, kinematic_only):
     if not kinematic_only and solver.rigid_config.enable_register_tiled_mass:
         mass_mat_tiled_scratch_shape = (_B, solver.n_dofs_, solver.n_dofs_)
 
-    # Flip mass_mat from canonical (n_dofs(i_d1), n_dofs(i_d2), _B) -> physical (_B, n_dofs(i_d2), n_dofs(i_d1)) via
-    # layout=(2, 1, 0): i_d1 becomes innermost / stride-1, which coalesces consumer kernels whose lanes stride i_d1
-    # with a serial inner i_d2 loop. The trade-off is regression on writer-side kernels that pair with cooperative
-    # rewrites to recover under the same enable_cooperative_constraint_kernels flag.
+    # Under the cooperative kernels mass_mat goes env-first with its two dof axes swapped, canonical (n_dofs(i_d1),
+    # n_dofs(i_d2), _B) -> physical (_B, n_dofs(i_d2), n_dofs(i_d1)): i_d1 becomes innermost / stride-1, which coalesces
+    # consumer kernels whose lanes stride i_d1 with a serial inner i_d2 loop. The trade-off is regression on writer-side
+    # kernels that pair with cooperative rewrites to recover under the same enable_cooperative_constraint_kernels flag.
     #
     # mass_mat_L stays canonical. Its dominant consumer is a serial Cholesky-style back-substitution that is already
     # coalesced under (n_dofs, n_dofs, _B) with lanes varying i_b, so flipping L would regress that path more than
     # the corresponding writer-side win on the tiled factor_mass.
-    mass_mat_layout = (
-        (2, 1, 0) if not kinematic_only and solver.rigid_config.enable_cooperative_constraint_kernels else None
-    )
+    is_mass_mat_flipped = not kinematic_only and solver.rigid_config.enable_cooperative_constraint_kernels
 
     # FIXME: Add a better split between kinematic and Genesis
     if kinematic_only:
         return RigidInfo(
             gravity=V_VEC(3, dtype=gs.qd_float, shape=()),
             meaninertia=V(dtype=gs.qd_float, shape=()),
-            n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-            qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
-            qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
-            qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
+            n_awake_dofs=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+            qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_,), n_envs=_B),
+            qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_,), n_envs=_B),
+            qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_,), n_envs=_B),
             links_T=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(solver.n_links_,)),
             geoms_init_AABB=V_VEC(3, dtype=gs.qd_float, shape=()),
             mass_mat=V(dtype=gs.qd_float, shape=()),
@@ -353,17 +381,24 @@ def get_rigid_info(solver, kinematic_only):
         )
 
     return RigidInfo(
-        gravity=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
-        meaninertia=V(dtype=gs.qd_float, shape=(_B,)),
-        n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-        qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
-        qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
-        qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
+        gravity=V_VEC(3, dtype=gs.qd_float, shape=(), n_envs=_B),
+        meaninertia=V(dtype=gs.qd_float, shape=(), n_envs=_B),
+        n_awake_dofs=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_,), n_envs=_B),
+        qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_,), n_envs=_B, needs_grad=requires_grad),
+        qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_,), n_envs=_B, needs_grad=requires_grad),
         links_T=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(solver.n_links_,)),
         geoms_init_AABB=V_VEC(3, dtype=gs.qd_float, shape=(solver.n_geoms_, 8)),
-        mass_mat=V(dtype=gs.qd_float, shape=mass_mat_shape, layout=mass_mat_layout, needs_grad=requires_grad),
-        mass_mat_L=V(dtype=gs.qd_float, shape=mass_mat_shape, needs_grad=requires_grad),
-        mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), needs_grad=requires_grad),
+        mass_mat=V(
+            dtype=gs.qd_float,
+            shape=mass_mat_shape,
+            n_envs=_B,
+            env_first=is_mass_mat_flipped,
+            layout=(1, 0) if is_mass_mat_flipped else None,
+            needs_grad=requires_grad,
+        ),
+        mass_mat_L=V(dtype=gs.qd_float, shape=mass_mat_shape, n_envs=_B, needs_grad=requires_grad),
+        mass_mat_D_inv=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, needs_grad=requires_grad),
         mass_mat_tiled_scratch=V(dtype=gs.qd_float, shape=mass_mat_tiled_scratch_shape),
         roots_link_idx=V(dtype=gs.qd_int, shape=(solver.n_roots_,)),
         links_root_end=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
@@ -407,14 +442,14 @@ class IslandSlices:
     start: qd.Tensor
 
 
-def get_slices(solver, layout, is_active=True):
+def get_slices(solver, env_first, is_active=True):
     _B = solver._B
     n_trees = solver.n_trees_
 
     return IslandSlices(
-        curr=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active), layout=layout if is_active else None),
-        n=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active), layout=layout if is_active else None),
-        start=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), is_active), layout=layout if is_active else None),
+        curr=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), is_active), n_envs=_B, env_first=env_first),
+        n=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), is_active), n_envs=_B, env_first=env_first),
+        start=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), is_active), n_envs=_B, env_first=env_first),
     )
 
 
@@ -500,60 +535,49 @@ def get_island_state(solver, collider, len_constraints_):
     worklist_active = solver.rigid_config.enable_tiled_island_seed and not solver.rigid_config.is_single_island
     # Batch-first under the cooperative kernels, whose block serves one env: the lanes then read consecutive items of
     # their env from consecutive addresses (see the constraint-state layouts in get_constraint_state).
-    island_layout = (1, 0) if solver.rigid_config.constraint_layout_batch_first else None
+    env_first = solver.rigid_config.constraint_layout_batch_first
     n_classes = len(
         island_tile_caps(solver.rigid_config.island_tile_cap_first, solver.rigid_config.island_tile_cap_last)
     )
     # The island build lists the contacts left once collision detection clamped them to max_contacts, and the
     # constraints assembled, at most len_constraints_ (see ConstraintSolver)
     max_contacts = max(collider.collider_info.max_contacts[None], 1)
+    contact_id_shape = maybe_shape((max_contacts,), rcm_active or coop_active)
     return IslandState(
-        trees_parent_idx=V(dtype=gs.qd_int, shape=(n_trees, _B), layout=island_layout),
-        trees_island_idx=V(dtype=gs.qd_int, shape=(n_trees, _B), layout=island_layout),
-        links_island_idx=V(dtype=gs.qd_int, shape=(n_links, _B), layout=island_layout),
-        n_islands=V(dtype=gs.qd_int, shape=(_B,)),
-        link_slices=get_slices(solver, island_layout, solver._use_hibernation),
+        trees_parent_idx=V(dtype=gs.qd_int, shape=(n_trees,), n_envs=_B, env_first=env_first),
+        trees_island_idx=V(dtype=gs.qd_int, shape=(n_trees,), n_envs=_B, env_first=env_first),
+        links_island_idx=V(dtype=gs.qd_int, shape=(n_links,), n_envs=_B, env_first=env_first),
+        n_islands=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        link_slices=get_slices(solver, env_first, solver._use_hibernation),
         link_id=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((n_links, _B), solver._use_hibernation),
-            layout=island_layout if solver._use_hibernation else None,
+            dtype=gs.qd_int, shape=maybe_shape((n_links,), solver._use_hibernation), n_envs=_B, env_first=env_first
         ),
-        dof_slices=get_slices(solver, island_layout),
-        dof_id=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
-        dof_local_pos=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
-        dofs_island_idx=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
-        dof_range_start=V(dtype=gs.qd_int, shape=(n_trees, _B), layout=island_layout),
-        dof_env_start_local=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
-        dof_env_col_end=V(dtype=gs.qd_int, shape=(n_dofs, _B), layout=island_layout),
-        contact_slices=get_slices(solver, island_layout, rcm_active),
-        contact_id=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((max_contacts, _B), rcm_active or coop_active),
-            layout=island_layout if rcm_active or coop_active else None,
-        ),
-        constraint_slices=get_slices(solver, island_layout),
-        constraint_id=V(dtype=gs.qd_int, shape=(len_constraints_, _B), layout=island_layout),
-        constraint_island_idx=V(dtype=gs.qd_int, shape=(len_constraints_, _B), layout=island_layout),
-        is_hibernated=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), solver._use_hibernation)),
-        hibernated_next_link=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_hibernation)),
+        dof_slices=get_slices(solver, env_first),
+        dof_id=V(dtype=gs.qd_int, shape=(n_dofs,), n_envs=_B, env_first=env_first),
+        dof_local_pos=V(dtype=gs.qd_int, shape=(n_dofs,), n_envs=_B, env_first=env_first),
+        dofs_island_idx=V(dtype=gs.qd_int, shape=(n_dofs,), n_envs=_B, env_first=env_first),
+        dof_range_start=V(dtype=gs.qd_int, shape=(n_trees,), n_envs=_B, env_first=env_first),
+        dof_env_start_local=V(dtype=gs.qd_int, shape=(n_dofs,), n_envs=_B, env_first=env_first),
+        dof_env_col_end=V(dtype=gs.qd_int, shape=(n_dofs,), n_envs=_B, env_first=env_first),
+        contact_slices=get_slices(solver, env_first, rcm_active),
+        contact_id=V(dtype=gs.qd_int, shape=contact_id_shape, n_envs=_B, env_first=env_first),
+        constraint_slices=get_slices(solver, env_first),
+        constraint_id=V(dtype=gs.qd_int, shape=(len_constraints_,), n_envs=_B, env_first=env_first),
+        constraint_island_idx=V(dtype=gs.qd_int, shape=(len_constraints_,), n_envs=_B, env_first=env_first),
+        is_hibernated=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), solver._use_hibernation), n_envs=_B),
+        hibernated_next_link=V(dtype=gs.qd_int, shape=maybe_shape((n_links,), solver._use_hibernation), n_envs=_B),
         factor_worklist_i_b=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),
         factor_worklist_i_island=V(dtype=gs.qd_int, shape=maybe_shape((n_classes * n_trees * _B,), worklist_active)),
         factor_worklist_size=V(dtype=gs.qd_int, shape=maybe_shape((n_classes,), worklist_active)),
-        rcm_tree_pos=V(
-            dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
-        ),
-        rcm_tree_degree=V(
-            dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
-        ),
+        rcm_tree_pos=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), rcm_active), n_envs=_B, env_first=env_first),
+        rcm_tree_degree=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), rcm_active), n_envs=_B, env_first=env_first),
         rcm_tree_is_ordered=V(
-            dtype=gs.qd_bool, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
+            dtype=gs.qd_bool, shape=maybe_shape((n_trees,), rcm_active), n_envs=_B, env_first=env_first
         ),
-        rcm_tree_order=V(
-            dtype=gs.qd_int, shape=maybe_shape((n_trees, _B), rcm_active), layout=island_layout if rcm_active else None
-        ),
-        inertia=V(dtype=gs.qd_float, shape=(n_trees, _B), layout=island_layout),
-        improved=V(dtype=gs.qd_bool, shape=(n_trees, _B), layout=island_layout),
-        ls_improvement=V(dtype=gs.qd_float, shape=(n_trees, _B), layout=island_layout),
+        rcm_tree_order=V(dtype=gs.qd_int, shape=maybe_shape((n_trees,), rcm_active), n_envs=_B, env_first=env_first),
+        inertia=V(dtype=gs.qd_float, shape=(n_trees,), n_envs=_B, env_first=env_first),
+        improved=V(dtype=gs.qd_bool, shape=(n_trees,), n_envs=_B, env_first=env_first),
+        ls_improvement=V(dtype=gs.qd_float, shape=(n_trees,), n_envs=_B, env_first=env_first),
     )
 
 
@@ -701,8 +725,8 @@ def get_kinematics_scratch(solver):
     is_active = n_dofs > 0
 
     return KinematicsScratch(
-        jacobian=V(dtype=gs.qd_float, shape=maybe_shape((6, n_dofs, solver._B), is_active)),
-        qpos_cache=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_qs, solver._B), is_active)),
+        jacobian=V(dtype=gs.qd_float, shape=maybe_shape((6, n_dofs), is_active), n_envs=solver._B),
+        qpos_cache=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_qs,), is_active), n_envs=solver._B),
     )
 
 
@@ -720,8 +744,8 @@ class WeightScratch(NamedTuple):
 
 def get_weight_scratch(solver):
     return WeightScratch(
-        jac_row=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver._B)),
-        solve_out=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver._B)),
+        jac_row=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=solver._B),
+        solve_out=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=solver._B),
     )
 
 
@@ -866,37 +890,38 @@ def get_constraint_state(constraint_solver, solver, collider):
     _B = solver._B
     len_constraints_ = constraint_solver.len_constraints_
 
-    # The constraint-state layout flips (con / jac / dof_vec) gate on constraint_layout_batch_first; jac additionally
-    # picks its batch-first permutation from enable_cooperative_constraint_kernels. See the per-flip docs below.
+    # The env-first constraint-state tensors (con / jac / dof_vec) gate on constraint_layout_batch_first, jac also
+    # swapping its data axes under enable_cooperative_constraint_kernels. See the per-flip docs below.
     cooperative = solver.rigid_config.enable_cooperative_constraint_kernels
     batch_first = solver.rigid_config.constraint_layout_batch_first
     # Serialized execution visits envs in the outermost loop of every constraint kernel, so the hot per-env rows of the
-    # constraint tensors must be contiguous in memory: batch-first physical layout. With the canonical batch-last layout
+    # constraint tensors must be contiguous in memory: env-first physical layout. With the canonical batch-last layout
     # every scalar access strides by n_envs, wasting a full cache line per element, which makes the constraint solver
     # DRAM-bound once the combined per-env working sets exceed the CPU caches and batched stepping scales super-linearly
     # with n_envs.
     serialized = solver.rigid_config.para_level < gs.PARA_LEVEL.ALL
     # Layout-flippable constraint-state tensors (Jaref, jv, efc_D, efc_frictionloss, diag, active) keep their
-    # canonical (len_constraints_, _B) shape; the static config flag picks the physical layout via ``layout=(1, 0)``.
+    # canonical (len_constraints_, _B) shape; the static config flag picks the physical layout via ``env_first``.
     # Cooperative kernels read the same flag at compile time to switch between serial and warp-cooperative reductions.
     # The remaining (len_constraints_,) tensors outside the GPU cooperative flip set follow only the serialized flip.
-    con_layout = (1, 0) if batch_first else None
-    serial_layout = (1, 0) if serialized else None
+    con_env_first = batch_first
+    serial_env_first = serialized
     # The CPU incremental factor maintains the elliptic cone by a per-iteration rank-3 update reading the previous cone
     # residuals, so the residual cache is allocated for the CPU elliptic case.
     is_cone_incremental = solver.rigid_config.enable_elliptic_friction and solver.rigid_config.backend == gs.cpu
     is_signorini = solver.rigid_config.enable_signorini_contact
     n_cones_ = max(1, constraint_solver.n_cone_constraints_ // solver.rigid_config.rows_per_contact)
     # The 3D Jacobian and its sparse-column-index sibling extend the flip: canonical (len_constraints_, n_dofs_, _B) ->
-    # physical (_B, n_dofs_, len_constraints_) via layout=(2, 1, 0). This makes cooperative-warp-per-env access (lanes
-    # stride i_c) coalesced for the hot p0 J@search, hessian_direct_tiled, and patch_hessian_delta kernels.
-    # Serialized execution instead wants physical (_B, len_constraints_, n_dofs_) via layout=(2, 0, 1): constraint rows
-    # are read and written dof-by-dof for a fixed env.
-    jac_layout = (2, 1, 0) if cooperative else (2, 0, 1) if serialized else None
-    # DOF-vec family flip: canonical (n_dofs_, _B) -> physical (_B, n_dofs_) via layout=(1, 0). Adjacent-lane reads
+    # physical (_B, n_dofs_, len_constraints_), env-first with the data axes swapped. This makes cooperative
+    # warp-per-env access (lanes stride i_c) coalesced for the hot p0 J@search, hessian_direct_tiled, and
+    # patch_hessian_delta kernels. Serialized execution instead wants physical (_B, len_constraints_, n_dofs_),
+    # env-first alone: constraint rows are read and written dof-by-dof for a fixed env.
+    jac_env_first = cooperative or serialized
+    jac_layout = (1, 0) if cooperative else None
+    # DOF-vec family flip: canonical (n_dofs_, _B) -> physical (_B, n_dofs_), env-first. Adjacent-lane reads
     # striding i_d in cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on
     # a per-consumer basis under the same enable_cooperative_constraint_kernels flag.
-    dof_vec_layout = (1, 0) if batch_first else None
+    dof_vec_env_first = batch_first
     # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one slot
     # per fused update of the per-island factor (func_rank_batch_update_island), a single slot for the whole-env factor
     # of a single-island scene (indexing then reduces to [i_d]). Flat 2D to keep the DOF-vec rank and layout everywhere.
@@ -907,15 +932,13 @@ def get_constraint_state(constraint_solver, solver, collider):
     )
     # The Hessian, its equilibration and the incremental factor update exist for the Newton solver alone
     is_newton = solver.rigid_config.solver_type == gs.constraint_solver.Newton
-    newton_dof_vec_layout = dof_vec_layout if is_newton else None
-    newton_serial_layout = serial_layout if is_newton else None
     # The noslip scratch holds one M^{-1} J^T column per env, or per lane of the 32-lane blocks of the cooperative sweep
     # (see kernel_noslip in noslip.py).
     is_noslip_active = solver._options.noslip_iterations > 0
     is_noslip_cooperative = solver.rigid_config.enable_cooperative_noslip
     noslip_n_lanes = 32 if is_noslip_cooperative else 1
 
-    jac_shape = (len_constraints_, solver.n_dofs_, _B)
+    jac_shape = (len_constraints_, solver.n_dofs_)
     # The sparse-Jacobian representation is always active, so its index buffers are always allocated. The skyline DOF
     # permutation/envelope buffers stay gated on sparse_solve (CPU-only skyline Cholesky). A row lists the dofs of the
     # kinematic chains of the two links it couples, or at most two dofs for a joint equality. Each pass of the walk
@@ -928,48 +951,46 @@ def get_constraint_state(constraint_solver, solver, collider):
         has_ancestor = links_ancestor_idx >= 0
         links_chain_n_dofs += np.where(has_ancestor, links_n_dofs[links_ancestor_idx], 0)
         links_ancestor_idx = np.where(has_ancestor, links_parent_idx[links_ancestor_idx], -1)
-    jac_dofs_idx_shape = (len_constraints_, min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))), _B)
-    jac_n_dofs_shape = (len_constraints_, _B)
+    jac_dofs_idx_shape = (len_constraints_, min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))))
 
-    if math.prod(jac_shape) > np.iinfo(np.int32).max:
+    if math.prod(jac_shape) * _B > np.iinfo(np.int32).max:
         gs.raise_exception(
             f"Jacobian shape (n_constraints={len_constraints_}, n_dofs={solver.n_dofs_}, n_envs={_B}) is too large."
         )
 
+    cone_prev_jaref_shape = maybe_shape((constraint_solver.n_cone_constraints_,), is_cone_incremental)
+    nt_vec_shape = maybe_shape((solver.n_dofs_ * nt_vec_n_slots,), is_newton)
+    nt_H_cone_free_diag_shape = maybe_shape((solver.n_dofs_,), solver.rigid_config.enable_cone_free_hessian_reuse)
+    noslip_MinvJT_shape = maybe_shape((solver.n_dofs_, noslip_n_lanes * _B), is_noslip_active)
+    noslip_rows_color_shape = maybe_shape((len_constraints_,), is_noslip_cooperative)
+    noslip_islands_n_colors_shape = maybe_shape((solver.n_trees_,), is_noslip_cooperative)
+    noslip_blocks_n_colors_shape = maybe_shape((solver.n_dofs_,), is_noslip_cooperative)
     # /!\ Changing allocation order of these tensors may reduce runtime speed by >10%  /!\
     return ConstraintState(
-        n_constraints=V(dtype=gs.qd_int, shape=(_B,)),
-        qd_n_equalities=V(dtype=gs.qd_int, shape=(_B,)),
-        n_constraints_equality=V(dtype=gs.qd_int, shape=(_B,)),
-        n_constraints_frictionloss=V(dtype=gs.qd_int, shape=(_B,)),
-        n_constraints_cone=V(dtype=gs.qd_int, shape=(_B,)),
-        is_warmstart=V(dtype=gs.qd_bool, shape=(_B,)),
-        improved=V(dtype=gs.qd_bool, shape=(_B,)),
-        cost_ws=V(dtype=gs.qd_float, shape=(_B,)),
-        cost=V(dtype=gs.qd_float, shape=(_B,)),
-        Ma=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        Ma_ws=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        grad=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        Mgrad=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        cone_prev_jaref=V(
-            dtype=gs.qd_float,
-            shape=maybe_shape((constraint_solver.n_cone_constraints_, _B), is_cone_incremental),
-            layout=serial_layout if is_cone_incremental else None,
-        ),
-        cone_latch=V(dtype=gs.qd_float, shape=maybe_shape((n_cones_, _B), is_signorini)),
-        cone_latch_gap=V(dtype=gs.qd_float, shape=maybe_shape((n_cones_, _B), is_signorini)),
-        search=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        qfrc_constraint=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        qacc=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        qacc_ws=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        mv=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        cg_prev_grad=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        cg_prev_Mgrad=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
-        nt_vec=V(
-            dtype=gs.qd_float,
-            shape=maybe_shape((solver.n_dofs_ * nt_vec_n_slots, _B), is_newton),
-            layout=newton_dof_vec_layout,
-        ),
+        n_constraints=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        qd_n_equalities=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        n_constraints_equality=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        n_constraints_frictionloss=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        n_constraints_cone=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        is_warmstart=V(dtype=gs.qd_bool, shape=(), n_envs=_B),
+        improved=V(dtype=gs.qd_bool, shape=(), n_envs=_B),
+        cost_ws=V(dtype=gs.qd_float, shape=(), n_envs=_B),
+        cost=V(dtype=gs.qd_float, shape=(), n_envs=_B),
+        Ma=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        Ma_ws=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        grad=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        Mgrad=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        cone_prev_jaref=V(dtype=gs.qd_float, shape=cone_prev_jaref_shape, n_envs=_B, env_first=serial_env_first),
+        cone_latch=V(dtype=gs.qd_float, shape=maybe_shape((n_cones_,), is_signorini), n_envs=_B),
+        cone_latch_gap=V(dtype=gs.qd_float, shape=maybe_shape((n_cones_,), is_signorini), n_envs=_B),
+        search=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        qfrc_constraint=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        qacc=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        qacc_ws=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        mv=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        cg_prev_grad=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        cg_prev_Mgrad=V(dtype=gs.qd_float, shape=(solver.n_dofs_,), n_envs=_B, env_first=dof_vec_env_first),
+        nt_vec=V(dtype=gs.qd_float, shape=nt_vec_shape, n_envs=_B, env_first=dof_vec_env_first),
         # When the register-tiled mass factor is on, reuse its scratch (rigid_info.mass_mat_tiled_scratch, allocated
         # with this exact shape) as the Hessian buffer rather than allocating a second one: the factor only writes it
         # before the constraint solve repopulates it in the same step.
@@ -979,73 +1000,65 @@ def get_constraint_state(constraint_solver, solver, collider):
             else V(dtype=gs.qd_float, shape=maybe_shape((_B, solver.n_dofs_, solver.n_dofs_), is_newton))
         ),
         nt_jacobi=V(
-            dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), is_newton), layout=newton_dof_vec_layout
+            dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), is_newton), n_envs=_B, env_first=dof_vec_env_first
         ),
         incr_changed_idx=V(
-            dtype=gs.qd_int, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_serial_layout
+            dtype=gs.qd_int, shape=maybe_shape((len_constraints_,), is_newton), n_envs=_B, env_first=serial_env_first
         ),
-        incr_n_changed=V(dtype=gs.qd_int, shape=(_B,)),
-        # Layout-flippable constraint-state tensors: allocated as qd.Tensor wrappers, optionally with
-        # ``layout=(1, 0)`` to physically store as (_B, len_constraints_). Canonical shape stays (len_constraints_, _B);
-        # kernel-body indexing ``Jaref[i_c, i_b]`` is rewritten by the AST when ``layout != None``.
-        active=V(dtype=gs.qd_bool, shape=(len_constraints_, _B), layout=con_layout),
+        incr_n_changed=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        # Layout-flippable constraint-state tensors, physically stored as (_B, len_constraints_) under con_env_first.
+        # Their canonical shape stays (len_constraints_, _B), and the AST rewrites kernel indexing (Jaref[i_c, i_b]).
+        active=V(dtype=gs.qd_bool, shape=(len_constraints_,), n_envs=_B, env_first=con_env_first),
         prev_active=V(
-            dtype=gs.qd_bool, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_serial_layout
+            dtype=gs.qd_bool, shape=maybe_shape((len_constraints_,), is_newton), n_envs=_B, env_first=serial_env_first
         ),
-        diag=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
-        Jaref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
-        efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),
+        diag=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=con_env_first),
+        aref=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=serial_env_first),
+        Jaref=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=con_env_first),
+        efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=con_env_first),
+        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=serial_env_first),
+        efc_D=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=con_env_first),
+        jv=V(dtype=gs.qd_float, shape=(len_constraints_,), n_envs=_B, env_first=con_env_first),
+        jac=V(dtype=gs.qd_float, shape=jac_shape, n_envs=_B, env_first=jac_env_first, layout=jac_layout),
         jac_dofs_idx=V(
-            dtype=gs.qd_int, shape=jac_dofs_idx_shape, layout=jac_layout if constraint_solver.sparse_solve else None
+            dtype=gs.qd_int,
+            shape=jac_dofs_idx_shape,
+            n_envs=_B,
+            env_first=jac_env_first and constraint_solver.sparse_solve,
+            layout=jac_layout if constraint_solver.sparse_solve else None,
         ),
-        jac_n_dofs=V(dtype=gs.qd_int, shape=jac_n_dofs_shape, layout=serial_layout if jac_n_dofs_shape else None),
+        jac_n_dofs=V(dtype=gs.qd_int, shape=(len_constraints_,), n_envs=_B, env_first=serial_env_first),
         # Backward gradients
-        dL_dqacc=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
-        dL_dM=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, solver.n_dofs_, _B), solver._requires_grad)),
-        dL_djac=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, solver.n_dofs_, _B), solver._requires_grad)),
-        dL_daref=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
-        dL_defc_D=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
-        dL_dforce=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
-        bw_u=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
-        bw_r=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
-        bw_p=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
-        bw_Ap=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
-        bw_Ju=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
-        bw_y=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
-        bw_w=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_, _B), solver._requires_grad)),
+        dL_dqacc=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), solver._requires_grad), n_envs=_B),
+        dL_dM=V(
+            dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, solver.n_dofs_), solver._requires_grad), n_envs=_B
+        ),
+        dL_djac=V(
+            dtype=gs.qd_float, shape=maybe_shape((len_constraints_, solver.n_dofs_), solver._requires_grad), n_envs=_B
+        ),
+        dL_daref=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_,), solver._requires_grad), n_envs=_B),
+        dL_defc_D=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_,), solver._requires_grad), n_envs=_B),
+        dL_dforce=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), solver._requires_grad), n_envs=_B),
+        bw_u=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), solver._requires_grad), n_envs=_B),
+        bw_r=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), solver._requires_grad), n_envs=_B),
+        bw_p=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), solver._requires_grad), n_envs=_B),
+        bw_Ap=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_,), solver._requires_grad), n_envs=_B),
+        bw_Ju=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_,), solver._requires_grad), n_envs=_B),
+        bw_y=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_,), solver._requires_grad), n_envs=_B),
+        bw_w=V(dtype=gs.qd_float, shape=maybe_shape((len_constraints_,), solver._requires_grad), n_envs=_B),
         # Timers
-        timers=V(dtype=qd.i64 if gs.backend != gs.metal else qd.i32, shape=(10, _B)),
+        timers=V(dtype=qd.i64 if gs.backend != gs.metal else qd.i32, shape=(10,), n_envs=_B),
         solver_iter_counter=V(dtype=qd.i32, shape=()),
         graph_counter=qd.ndarray(qd.i32, shape=()),
         early_exit_flag=V(dtype=qd.i32, shape=()),
-        nt_H_cone_free_diag=V(
-            dtype=gs.qd_float,
-            shape=maybe_shape((_B, solver.n_dofs_), solver.rigid_config.enable_cone_free_hessian_reuse),
-        ),
-        noslip_MinvJT=V(
-            dtype=gs.qd_float,
-            shape=maybe_shape((solver.n_dofs_, noslip_n_lanes * _B), is_noslip_active),
-            layout=dof_vec_layout if is_noslip_active else None,
-        ),
-        noslip_rows_color=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((len_constraints_, _B), is_noslip_cooperative),
-            layout=con_layout if is_noslip_cooperative else None,
-        ),
+        nt_H_cone_free_diag=V(dtype=gs.qd_float, shape=nt_H_cone_free_diag_shape, n_envs=_B, env_first=True),
+        noslip_MinvJT=V(dtype=gs.qd_float, shape=noslip_MinvJT_shape, layout=(1, 0) if dof_vec_env_first else None),
+        noslip_rows_color=V(dtype=gs.qd_int, shape=noslip_rows_color_shape, n_envs=_B, env_first=con_env_first),
         noslip_islands_n_colors=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((solver.n_trees_, _B), is_noslip_cooperative),
-            layout=con_layout if is_noslip_cooperative else None,
+            dtype=gs.qd_int, shape=noslip_islands_n_colors_shape, n_envs=_B, env_first=con_env_first
         ),
         noslip_blocks_n_colors=V(
-            dtype=gs.qd_int,
-            shape=maybe_shape((solver.n_dofs_, _B), is_noslip_cooperative),
-            layout=dof_vec_layout if is_noslip_cooperative else None,
+            dtype=gs.qd_int, shape=noslip_blocks_n_colors_shape, n_envs=_B, env_first=dof_vec_env_first
         ),
         # Allocated last to preserve the allocation order of the tensors above (see the warning at the top).
         island=get_island_state(solver, collider, len_constraints_),
@@ -1079,19 +1092,19 @@ def get_contact_data(solver, max_candidate_contacts, requires_grad):
     max_candidate_contacts_ = max(max_candidate_contacts, 1)
 
     return ContactData(
-        geom_a=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        geom_b=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        normal=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_, _B), needs_grad=requires_grad),
-        pos=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_, _B), needs_grad=requires_grad),
-        penetration=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B), needs_grad=requires_grad),
-        friction=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        friction_torsional=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        friction_rolling=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        sol_params=V_VEC(7, dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        force=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_, _B)),
-        link_a=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        link_b=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        pair_idx=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
+        geom_a=V(dtype=gs.qd_int, shape=(max_candidate_contacts_,), n_envs=_B),
+        geom_b=V(dtype=gs.qd_int, shape=(max_candidate_contacts_,), n_envs=_B),
+        normal=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_,), n_envs=_B, needs_grad=requires_grad),
+        pos=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_,), n_envs=_B, needs_grad=requires_grad),
+        penetration=V(dtype=gs.qd_float, shape=(max_candidate_contacts_,), n_envs=_B, needs_grad=requires_grad),
+        friction=V(dtype=gs.qd_float, shape=(max_candidate_contacts_,), n_envs=_B),
+        friction_torsional=V(dtype=gs.qd_float, shape=(max_candidate_contacts_,), n_envs=_B),
+        friction_rolling=V(dtype=gs.qd_float, shape=(max_candidate_contacts_,), n_envs=_B),
+        sol_params=V_VEC(7, dtype=gs.qd_float, shape=(max_candidate_contacts_,), n_envs=_B),
+        force=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_,), n_envs=_B),
+        link_a=V(dtype=gs.qd_int, shape=(max_candidate_contacts_,), n_envs=_B),
+        link_b=V(dtype=gs.qd_int, shape=(max_candidate_contacts_,), n_envs=_B),
+        pair_idx=V(dtype=gs.qd_int, shape=(max_candidate_contacts_,), n_envs=_B),
     )
 
 
@@ -1126,22 +1139,22 @@ class DiffContactInput:
 
 
 def get_diff_contact_input(_B, max_contacts_per_pair, is_active, requires_grad=False):
-    shape = maybe_shape((_B, max_contacts_per_pair), is_active and requires_grad)
+    shape = maybe_shape((max_contacts_per_pair,), is_active and requires_grad)
     return DiffContactInput(
-        geom_a=V(dtype=gs.qd_int, shape=shape),
-        geom_b=V(dtype=gs.qd_int, shape=shape),
-        local_pos1_a=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos1_b=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos1_c=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos2_a=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos2_b=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos2_c=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        w_local_pos1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        w_local_pos2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        core_local=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        ref_id=V(dtype=gs.qd_int, shape=shape),
-        valid=V(dtype=gs.qd_int, shape=shape),
-        ref_penetration=V(dtype=gs.qd_float, shape=shape, needs_grad=True),
+        geom_a=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        geom_b=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        local_pos1_a=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_pos1_b=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_pos1_c=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_pos2_a=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_pos2_b=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_pos2_c=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        w_local_pos1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        w_local_pos2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        core_local=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        ref_id=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        valid=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        ref_penetration=V(dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True, needs_grad=True),
     )
 
 
@@ -1158,9 +1171,9 @@ def get_sort_buffer(solver):
     _B = solver._B
 
     return SortBuffer(
-        value=V(dtype=gs.qd_float, shape=(2 * solver.n_geoms_, _B)),
-        i_g=V(dtype=gs.qd_int, shape=(2 * solver.n_geoms_, _B)),
-        is_max=V(dtype=gs.qd_bool, shape=(2 * solver.n_geoms_, _B)),
+        value=V(dtype=gs.qd_float, shape=(2 * solver.n_geoms_,), n_envs=_B),
+        i_g=V(dtype=gs.qd_int, shape=(2 * solver.n_geoms_,), n_envs=_B),
+        is_max=V(dtype=gs.qd_bool, shape=(2 * solver.n_geoms_,), n_envs=_B),
     )
 
 
@@ -1175,10 +1188,10 @@ class ContactCache:
 
 def get_contact_cache(solver, n_possible_pairs, active):
     # Only the convex-convex detection reads the cache, so the other scenes keep it empty
-    shape = maybe_shape((n_possible_pairs, solver._B), active)
+    shape = maybe_shape((n_possible_pairs,), active)
     return ContactCache(
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        penetration=V(dtype=gs.qd_float, shape=shape),
+        normal=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=solver._B),
+        penetration=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B),
     )
 
 
@@ -1271,51 +1284,45 @@ def get_collider_state(
     requires_grad = rigid_config.requires_grad
 
     box_depth_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection
+        (collider_static_config.n_contacts_per_nonconvex_pair,), rigid_config.box_box_detection
     )
     box_points_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection
+        (collider_static_config.n_contacts_per_nonconvex_pair,), rigid_config.box_box_detection
     )
-    box_pts_shape = maybe_shape((6, _B), rigid_config.box_box_detection)
-    box_lines_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
-    box_linesu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
-    box_axi_shape = maybe_shape((3, _B), rigid_config.box_box_detection)
-    box_ppts2_shape = maybe_shape((4, 2, _B), rigid_config.box_box_detection)
-    box_pu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
-    prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_static_config.has_prunable_contacts)
+    prune_shape = maybe_shape((max(max_candidate_contacts, 1),), collider_static_config.has_prunable_contacts)
 
     return ColliderState(
         sort_buffer=get_sort_buffer(solver),
-        active_buffer=V(dtype=gs.qd_int, shape=(n_geoms, _B)),
-        n_broad_pairs=V(dtype=gs.qd_int, shape=(_B,)),
-        active_buffer_awake=V(dtype=gs.qd_int, shape=(n_geoms, _B)),
-        active_buffer_hib=V(dtype=gs.qd_int, shape=(n_geoms, _B)),
-        box_depth=V(dtype=gs.qd_float, shape=box_depth_shape),
-        box_points=V_VEC(3, dtype=gs.qd_float, shape=box_points_shape),
-        box_pts=V_VEC(3, dtype=gs.qd_float, shape=box_pts_shape),
-        box_lines=V_VEC(6, dtype=gs.qd_float, shape=box_lines_shape),
-        box_linesu=V_VEC(6, dtype=gs.qd_float, shape=box_linesu_shape),
-        box_axi=V_VEC(3, dtype=gs.qd_float, shape=box_axi_shape),
-        box_ppts2=V(dtype=gs.qd_float, shape=box_ppts2_shape),
-        box_pu=V_VEC(3, dtype=gs.qd_float, shape=box_pu_shape),
-        xyz_max_min=V(dtype=gs.qd_float, shape=(6, _B)),
-        prism=V_VEC(3, dtype=gs.qd_float, shape=(6, _B)),
-        n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
-        n_contacts_hibernated=V(dtype=gs.qd_int, shape=(_B,)),
-        first_time=V(dtype=gs.qd_bool, shape=(_B,)),
+        active_buffer=V(dtype=gs.qd_int, shape=(n_geoms,), n_envs=_B),
+        n_broad_pairs=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        active_buffer_awake=V(dtype=gs.qd_int, shape=(n_geoms,), n_envs=_B),
+        active_buffer_hib=V(dtype=gs.qd_int, shape=(n_geoms,), n_envs=_B),
+        box_depth=V(dtype=gs.qd_float, shape=box_depth_shape, n_envs=_B),
+        box_points=V_VEC(3, dtype=gs.qd_float, shape=box_points_shape, n_envs=_B),
+        box_pts=V_VEC(3, dtype=gs.qd_float, shape=maybe_shape((6,), rigid_config.box_box_detection), n_envs=_B),
+        box_lines=V_VEC(6, dtype=gs.qd_float, shape=maybe_shape((4,), rigid_config.box_box_detection), n_envs=_B),
+        box_linesu=V_VEC(6, dtype=gs.qd_float, shape=maybe_shape((4,), rigid_config.box_box_detection), n_envs=_B),
+        box_axi=V_VEC(3, dtype=gs.qd_float, shape=maybe_shape((3,), rigid_config.box_box_detection), n_envs=_B),
+        box_ppts2=V(dtype=gs.qd_float, shape=maybe_shape((4, 2), rigid_config.box_box_detection), n_envs=_B),
+        box_pu=V_VEC(3, dtype=gs.qd_float, shape=maybe_shape((4,), rigid_config.box_box_detection), n_envs=_B),
+        xyz_max_min=V(dtype=gs.qd_float, shape=(6,), n_envs=_B),
+        prism=V_VEC(3, dtype=gs.qd_float, shape=(6,), n_envs=_B),
+        n_contacts=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        n_contacts_hibernated=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        first_time=V(dtype=gs.qd_bool, shape=(), n_envs=_B),
         contact_cache=get_contact_cache(
             solver, n_possible_pairs, collider_static_config.has_non_box_plane_convex_convex
         ),
-        broad_collision_pairs=V_VEC(2, dtype=gs.qd_int, shape=(max(max_collision_pairs_broad, 1), _B)),
+        broad_collision_pairs=V_VEC(2, dtype=gs.qd_int, shape=(max(max_collision_pairs_broad, 1),), n_envs=_B),
         contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
         diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
         narrowphase_work_queues=get_narrowphase_work_queues(max_collision_pairs_broad * _B, split_narrowphase),
-        contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B)),
-        contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
-        contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape),
-        contact_keep=V(dtype=gs.qd_int, shape=prune_shape),
-        contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape),
-        contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape),
+        contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1),), n_envs=_B),
+        contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1),), n_envs=_B),
+        contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape, n_envs=_B),
+        contact_keep=V(dtype=gs.qd_int, shape=prune_shape, n_envs=_B),
+        contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape, n_envs=_B),
+        contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape, n_envs=_B),
     )
 
 
@@ -1451,29 +1458,29 @@ class MDVertex:
 
 
 def get_gjk_simplex_vertex(_B):
-    shape = (_B, 4)
+    shape = (4,)
     return MDVertex(
-        obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
-        mink=V_VEC(3, dtype=gs.qd_float, shape=shape),
+        obj1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        obj2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        id1=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        id2=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        mink=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
     )
 
 
 def get_epa_polytope_vertex(_B, gjk_info):
     max_num_polytope_verts = 5 + gjk_info.epa_max_iterations[None]
-    shape = (_B, max_num_polytope_verts)
+    shape = (max_num_polytope_verts,)
     return MDVertex(
-        obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
-        mink=V_VEC(3, dtype=gs.qd_float, shape=shape),
+        obj1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        obj2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        local_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        id1=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        id2=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        mink=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
     )
 
 
@@ -1485,8 +1492,8 @@ class GJKSimplex:
 
 
 def get_gjk_simplex(_B):
-    shape = (_B,)
-    return GJKSimplex(nverts=V(dtype=gs.qd_int, shape=shape))
+    shape = ()
+    return GJKSimplex(nverts=V(dtype=gs.qd_int, shape=shape, n_envs=_B))
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -1498,8 +1505,11 @@ class GJKSimplexBuffer:
 
 
 def get_gjk_simplex_buffer(_B):
-    shape = (_B, 4)
-    return GJKSimplexBuffer(normal=V_VEC(3, dtype=gs.qd_float, shape=shape), sdist=V(dtype=gs.qd_float, shape=shape))
+    shape = (4,)
+    return GJKSimplexBuffer(
+        normal=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        sdist=V(dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+    )
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -1514,13 +1524,13 @@ class EPAPolytope:
 
 
 def get_epa_polytope(_B):
-    shape = (_B,)
+    shape = ()
     return EPAPolytope(
-        nverts=V(dtype=gs.qd_int, shape=shape),
-        nfaces=V(dtype=gs.qd_int, shape=shape),
-        nfaces_map=V(dtype=gs.qd_int, shape=shape),
-        horizon_nedges=V(dtype=gs.qd_int, shape=shape),
-        horizon_w=V_VEC(3, dtype=gs.qd_float, shape=shape),
+        nverts=V(dtype=gs.qd_int, shape=shape, n_envs=_B),
+        nfaces=V(dtype=gs.qd_int, shape=shape, n_envs=_B),
+        nfaces_map=V(dtype=gs.qd_int, shape=shape, n_envs=_B),
+        horizon_nedges=V(dtype=gs.qd_int, shape=shape, n_envs=_B),
+        horizon_w=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B),
     )
 
 
@@ -1537,14 +1547,14 @@ class EPAPolytopeFace:
 
 
 def get_epa_polytope_face(_B, polytope_max_faces):
-    shape = (_B, polytope_max_faces)
+    shape = (polytope_max_faces,)
     return EPAPolytopeFace(
-        verts_idx=V_VEC(3, dtype=gs.qd_int, shape=shape),
-        adj_idx=V_VEC(3, dtype=gs.qd_int, shape=shape),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        dist2=V(dtype=gs.qd_float, shape=shape),
-        map_idx=V(dtype=gs.qd_int, shape=shape),
-        visited=V(dtype=gs.qd_int, shape=shape),
+        verts_idx=V_VEC(3, dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        adj_idx=V_VEC(3, dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        normal=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        dist2=V(dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        map_idx=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        visited=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
     )
 
 
@@ -1557,8 +1567,11 @@ class EPAPolytopeHorizonData:
 
 
 def get_epa_polytope_horizon_data(_B, polytope_max_horizons):
-    shape = (_B, polytope_max_horizons)
-    return EPAPolytopeHorizonData(face_idx=V(dtype=gs.qd_int, shape=shape), edge_idx=V(dtype=gs.qd_int, shape=shape))
+    shape = (polytope_max_horizons,)
+    return EPAPolytopeHorizonData(
+        face_idx=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        edge_idx=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+    )
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -1575,15 +1588,15 @@ class ContactFace:
 
 
 def get_contact_face(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
+    shape = (max_contact_polygon_verts,)
     return ContactFace(
-        vert1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        vert2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
+        vert1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        vert2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        normal1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        normal2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        id1=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
+        id2=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
     )
 
 
@@ -1597,11 +1610,11 @@ class ContactNormal:
 
 
 def get_contact_normal(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
+    shape = (max_contact_polygon_verts,)
     return ContactNormal(
-        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id=V(dtype=gs.qd_int, shape=shape),
+        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        normal=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        id=V(dtype=gs.qd_int, shape=shape, n_envs=_B, env_first=True),
     )
 
 
@@ -1614,8 +1627,11 @@ class ContactHalfspace:
 
 
 def get_contact_halfspace(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactHalfspace(normal=V_VEC(3, dtype=gs.qd_float, shape=shape), dist=V(dtype=gs.qd_float, shape=shape))
+    shape = (max_contact_polygon_verts,)
+    return ContactHalfspace(
+        normal=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        dist=V(dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+    )
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -1627,9 +1643,10 @@ class Witness:
 
 
 def get_witness(_B, max_contacts_per_pair):
-    shape = (_B, max_contacts_per_pair)
+    shape = (max_contacts_per_pair,)
     return Witness(
-        point_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape), point_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape)
+        point_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
+        point_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape, n_envs=_B, env_first=True),
     )
 
 
@@ -1682,42 +1699,46 @@ def get_gjk_state(_B, rigid_config, gjk_info, requires_grad=False):
     # FIXME: Define GJKState and MujocoCompatGJKState that derives from the former but defines additional attributes
     return GJKState(
         # GJK simplex
-        support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
+        support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(2,), n_envs=_B, env_first=True),
         simplex_vertex=get_gjk_simplex_vertex(_B),
         simplex_buffer=get_gjk_simplex_buffer(_B),
         simplex=get_gjk_simplex(_B),
-        last_searched_simplex_vertex_id=V(dtype=gs.qd_int, shape=(_B,)),
+        last_searched_simplex_vertex_id=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         simplex_vertex_intersect=get_gjk_simplex_vertex(_B),
         simplex_buffer_intersect=get_gjk_simplex_buffer(_B),
-        nsimplex=V(dtype=gs.qd_int, shape=(_B,)),
+        nsimplex=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         # EPA polytope
         polytope=get_epa_polytope(_B),
         polytope_verts=get_epa_polytope_vertex(_B, gjk_info),
         polytope_faces=get_epa_polytope_face(_B, polytope_max_faces),
-        polytope_faces_map=V(dtype=gs.qd_int, shape=(_B, polytope_max_faces)),
+        polytope_faces_map=V(dtype=gs.qd_int, shape=(polytope_max_faces,), n_envs=_B, env_first=True),
         polytope_horizon_data=get_epa_polytope_horizon_data(_B, 6 + gjk_info.epa_max_iterations[None]),
         polytope_horizon_stack=get_epa_polytope_horizon_data(_B, polytope_max_faces * 3),
         # Multi-contact detection (MuJoCo compatibility)
         contact_faces=get_contact_face(_B, max_contact_polygon_verts),
         contact_normals=get_contact_normal(_B, max_contact_polygon_verts),
         contact_halfspaces=get_contact_halfspace(_B, max_contact_polygon_verts),
-        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(_B, 2, max_contact_polygon_verts)),
-        multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
+        contact_clipped_polygons=V_VEC(
+            3, dtype=gs.qd_float, shape=(2, max_contact_polygon_verts), n_envs=_B, env_first=True
+        ),
+        multi_contact_flag=V(dtype=gs.qd_bool, shape=(), n_envs=_B),
         # Final results
         witness=get_witness(_B, max_contacts_per_pair),
-        n_witness=V(dtype=gs.qd_int, shape=(_B,)),
-        n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
-        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(_B, max_contacts_per_pair)),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=(_B, max_contacts_per_pair)),
-        is_col=V(dtype=gs.qd_bool, shape=(_B,)),
-        penetration=V(dtype=gs.qd_float, shape=(_B,)),
-        distance=V(dtype=gs.qd_float, shape=(_B,)),
-        nearest_face=V(dtype=gs.qd_int, shape=(_B,)),
+        n_witness=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        n_contacts=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(max_contacts_per_pair,), n_envs=_B, env_first=True),
+        normal=V_VEC(3, dtype=gs.qd_float, shape=(max_contacts_per_pair,), n_envs=_B, env_first=True),
+        is_col=V(dtype=gs.qd_bool, shape=(), n_envs=_B),
+        penetration=V(dtype=gs.qd_float, shape=(), n_envs=_B),
+        distance=V(dtype=gs.qd_float, shape=(), n_envs=_B),
+        nearest_face=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         diff_contact_input=get_diff_contact_input(
             _B, max(max_contacts_per_pair, 1), is_active=True, requires_grad=requires_grad
         ),
-        n_diff_contact_input=V(dtype=gs.qd_int, shape=(_B,)),
-        diff_penetration=V(dtype=gs.qd_float, shape=maybe_shape((_B, max_contacts_per_pair), requires_grad)),
+        n_diff_contact_input=V(dtype=gs.qd_int, shape=(), n_envs=_B),
+        diff_penetration=V(
+            dtype=gs.qd_float, shape=maybe_shape((max_contacts_per_pair,), requires_grad), n_envs=_B, env_first=True
+        ),
     )
 
 
@@ -1731,45 +1752,45 @@ def get_gjk_state_contact_only(_B):
     _dummy_B = 1
 
     return GJKState(
-        support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
+        support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(2,), n_envs=_B, env_first=True),
         simplex_vertex=get_gjk_simplex_vertex(_B),
         simplex_buffer=get_gjk_simplex_buffer(_B),
         simplex=get_gjk_simplex(_B),
-        last_searched_simplex_vertex_id=V(dtype=gs.qd_int, shape=(_B,)),
+        last_searched_simplex_vertex_id=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         simplex_vertex_intersect=get_gjk_simplex_vertex(_B),
         simplex_buffer_intersect=get_gjk_simplex_buffer(_B),
-        nsimplex=V(dtype=gs.qd_int, shape=(_B,)),
+        nsimplex=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         # EPA - dummy allocations, never accessed by func_gjk
         polytope=get_epa_polytope(_dummy_B),
         polytope_verts=MDVertex(
-            obj1=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            obj2=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            local_obj1=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            local_obj2=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            id1=V(dtype=gs.qd_int, shape=(1, 1)),
-            id2=V(dtype=gs.qd_int, shape=(1, 1)),
-            mink=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
+            obj1=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
+            obj2=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
+            local_obj1=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
+            local_obj2=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
+            id1=V(dtype=gs.qd_int, shape=(1,), n_envs=1, env_first=True),
+            id2=V(dtype=gs.qd_int, shape=(1,), n_envs=1, env_first=True),
+            mink=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
         ),
         polytope_faces=get_epa_polytope_face(_dummy_B, 1),
-        polytope_faces_map=V(dtype=gs.qd_int, shape=(1, 1)),
+        polytope_faces_map=V(dtype=gs.qd_int, shape=(1,), n_envs=1, env_first=True),
         polytope_horizon_data=get_epa_polytope_horizon_data(_dummy_B, 1),
         polytope_horizon_stack=get_epa_polytope_horizon_data(_dummy_B, 1),
         # Multi-contact - dummy
         contact_faces=get_contact_face(_dummy_B, 1),
         contact_normals=get_contact_normal(_dummy_B, 1),
         contact_halfspaces=get_contact_halfspace(_dummy_B, 1),
-        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(1, 2, 1)),
-        multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
+        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(2, 1), n_envs=1, env_first=True),
+        multi_contact_flag=V(dtype=gs.qd_bool, shape=(), n_envs=_B),
         # Results - full _B for fields func_gjk writes; dummy for EPA-only fields
         witness=get_witness(_B, 1),
-        n_witness=V(dtype=gs.qd_int, shape=(_B,)),
+        n_witness=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         n_contacts=V(dtype=gs.qd_int, shape=(1,)),
-        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
+        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
+        normal=V_VEC(3, dtype=gs.qd_float, shape=(1,), n_envs=1, env_first=True),
         is_col=V(dtype=gs.qd_bool, shape=(1,)),
         penetration=V(dtype=gs.qd_float, shape=(1,)),
-        distance=V(dtype=gs.qd_float, shape=(_B,)),
-        nearest_face=V(dtype=gs.qd_int, shape=(_B,)),
+        distance=V(dtype=gs.qd_float, shape=(), n_envs=_B),
+        nearest_face=V(dtype=gs.qd_int, shape=(), n_envs=_B),
         diff_contact_input=get_diff_contact_input(_dummy_B, 1, is_active=False),
         n_diff_contact_input=V(dtype=gs.qd_int, shape=(1,)),
         diff_penetration=V(dtype=gs.qd_float, shape=()),
@@ -2071,22 +2092,23 @@ class DofsInfo:
 
 
 def get_dofs_info(solver):
-    shape = (solver.n_dofs_, solver._B) if solver._options.batch_dofs_info else (solver.n_dofs_,)
+    shape = (solver.n_dofs_,)
+    n_envs = solver._B if solver._options.batch_dofs_info else None
 
     return DofsInfo(
-        entity_idx=V(dtype=gs.qd_int, shape=shape),
-        stiffness=V(dtype=gs.qd_float, shape=shape),
-        invweight=V(dtype=gs.qd_float, shape=shape),
-        armature=V(dtype=gs.qd_float, shape=shape),
-        damping=V(dtype=gs.qd_float, shape=shape),
-        frictionloss=V(dtype=gs.qd_float, shape=shape),
-        motion_ang=V(dtype=gs.qd_vec3, shape=shape),
-        motion_vel=V(dtype=gs.qd_vec3, shape=shape),
-        limit=V(dtype=gs.qd_vec2, shape=shape),
-        act_gain=V(dtype=gs.qd_float, shape=shape),
-        act_bias=V(dtype=gs.qd_vec3, shape=shape),
-        force_range=V(dtype=gs.qd_vec2, shape=shape),
-        dof_length=V(dtype=gs.qd_float, shape=shape),
+        entity_idx=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        stiffness=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
+        invweight=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
+        armature=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
+        damping=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
+        frictionloss=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
+        motion_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=n_envs),
+        motion_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=n_envs),
+        limit=V(dtype=gs.qd_vec2, shape=shape, n_envs=n_envs),
+        act_gain=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
+        act_bias=V(dtype=gs.qd_vec3, shape=shape, n_envs=n_envs),
+        force_range=V(dtype=gs.qd_vec2, shape=shape, n_envs=n_envs),
+        dof_length=V(dtype=gs.qd_float, shape=shape, n_envs=n_envs),
     )
 
 
@@ -2127,37 +2149,37 @@ class DofsState:
 
 
 def get_dofs_state(solver):
-    shape = (solver.n_dofs_, solver._B)
+    shape = (solver.n_dofs_,)
     requires_grad = solver._requires_grad
     shape_bw = maybe_shape((2, *shape), requires_grad)
 
     return DofsState(
-        force=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_bias=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_passive=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_applied=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        pos=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        vel=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        vel_prev=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        vel_next=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, needs_grad=requires_grad),
-        qf_smooth=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_constraint=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        qf_damping_implicit=V(dtype=gs.qd_float, shape=shape),
-        qacc_damping_implicit=V(dtype=gs.qd_float, shape=shape),
-        cdof_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdof_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdofd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdofd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        f_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        f_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        ctrl_force=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        ctrl_pos=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        ctrl_vel=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        ctrl_mode=V(dtype=gs.qd_int, shape=shape),
-        is_hibernated=V(dtype=gs.qd_int, shape=shape),
+        force=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        qf_bias=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        qf_passive=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        qf_applied=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        pos=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        vel=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        vel_prev=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        vel_next=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        acc=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        acc_smooth=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        acc_smooth_bw=V(dtype=gs.qd_float, shape=shape_bw, n_envs=solver._B, needs_grad=requires_grad),
+        qf_smooth=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        qf_constraint=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        qf_damping_implicit=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B),
+        qacc_damping_implicit=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B),
+        cdof_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cdof_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cdofd_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cdofd_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        f_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        f_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        ctrl_force=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        ctrl_pos=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        ctrl_vel=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        ctrl_mode=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
+        is_hibernated=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
     )
 
 
@@ -2214,49 +2236,49 @@ class LinksState:
 
 
 def get_links_state(solver):
-    shape = (solver.n_links_, solver._B)
+    shape = (solver.n_links_,)
     requires_grad = solver._requires_grad
     # The backward joint buffers hold one slot per joint of a link plus the link itself; collapsed when grad is off.
     n_joints_bw = (max(link.n_joints for link in solver.links) + 1) if requires_grad and solver.n_links else 1
-    shape_bw = (solver.n_links_, n_joints_bw, solver._B)
+    shape_bw = (solver.n_links_, n_joints_bw)
 
     return LinksState(
-        cinr_inertial=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        cinr_pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cinr_quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        cinr_mass=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        crb_inertial=V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
-        crb_pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        crb_quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        crb_mass=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        cdd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cdd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        pos_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
-        quat_bw=V(dtype=gs.qd_vec4, shape=shape_bw, needs_grad=requires_grad),
-        i_pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        i_pos_bw=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        i_quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        is_constrained=V(dtype=gs.qd_bool, shape=shape),
-        cd_ang_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
-        cd_vel_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
-        mass_sum=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
-        root_COM=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        root_COM_bw=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cacc_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cacc_lin=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_applied_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_applied_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_coupling_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        cfrc_coupling_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        contact_force=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        is_hibernated=V(dtype=gs.qd_int, shape=shape),
-        awake_steps=V(dtype=gs.qd_int, shape=shape),
+        cinr_inertial=V(dtype=gs.qd_mat3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cinr_pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cinr_quat=V(dtype=gs.qd_vec4, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cinr_mass=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        crb_inertial=V(dtype=gs.qd_mat3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        crb_pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        crb_quat=V(dtype=gs.qd_vec4, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        crb_mass=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cdd_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cdd_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        quat=V(dtype=gs.qd_vec4, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        pos_bw=V(dtype=gs.qd_vec3, shape=shape_bw, n_envs=solver._B, needs_grad=requires_grad),
+        quat_bw=V(dtype=gs.qd_vec4, shape=shape_bw, n_envs=solver._B, needs_grad=requires_grad),
+        i_pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        i_pos_bw=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        i_quat=V(dtype=gs.qd_vec4, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cd_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cd_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        is_constrained=V(dtype=gs.qd_bool, shape=shape, n_envs=solver._B),
+        cd_ang_bw=V(dtype=gs.qd_vec3, shape=shape_bw, n_envs=solver._B, needs_grad=requires_grad),
+        cd_vel_bw=V(dtype=gs.qd_vec3, shape=shape_bw, n_envs=solver._B, needs_grad=requires_grad),
+        mass_sum=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        root_COM=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        root_COM_bw=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cacc_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cacc_lin=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cfrc_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cfrc_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cfrc_applied_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cfrc_applied_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cfrc_coupling_ang=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        cfrc_coupling_vel=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        contact_force=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        is_hibernated=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
+        awake_steps=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
     )
 
 
@@ -2290,32 +2312,33 @@ class LinksInfo:
 
 
 def get_links_info(solver):
-    links_info_shape = (solver.n_links_, solver._B) if solver._options.batch_links_info else solver.n_links_
+    links_info_shape = (solver.n_links_,)
+    links_info_n_envs = solver._B if solver._options.batch_links_info else None
 
     return LinksInfo(
-        parent_idx=V(dtype=gs.qd_int, shape=links_info_shape),
-        root_idx=V(dtype=gs.qd_int, shape=links_info_shape),
-        q_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        dof_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        joint_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        q_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        dof_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        joint_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        n_dofs=V(dtype=gs.qd_int, shape=links_info_shape),
-        pos=V(dtype=gs.qd_vec3, shape=links_info_shape),
-        quat=V(dtype=gs.qd_vec4, shape=links_info_shape),
-        invweight=V(dtype=gs.qd_vec2, shape=links_info_shape),
-        is_fixed=V(dtype=gs.qd_bool, shape=links_info_shape),
-        inertial_pos=V(dtype=gs.qd_vec3, shape=links_info_shape),
-        inertial_quat=V(dtype=gs.qd_vec4, shape=links_info_shape),
-        inertial_i=V(dtype=gs.qd_mat3, shape=links_info_shape),
-        inertial_mass=V(dtype=gs.qd_float, shape=links_info_shape),
-        entity_idx=V(dtype=gs.qd_int, shape=links_info_shape),
+        parent_idx=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        root_idx=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        q_start=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        dof_start=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        joint_start=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        q_end=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        dof_end=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        joint_end=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        n_dofs=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        pos=V(dtype=gs.qd_vec3, shape=links_info_shape, n_envs=links_info_n_envs),
+        quat=V(dtype=gs.qd_vec4, shape=links_info_shape, n_envs=links_info_n_envs),
+        invweight=V(dtype=gs.qd_vec2, shape=links_info_shape, n_envs=links_info_n_envs),
+        is_fixed=V(dtype=gs.qd_bool, shape=links_info_shape, n_envs=links_info_n_envs),
+        inertial_pos=V(dtype=gs.qd_vec3, shape=links_info_shape, n_envs=links_info_n_envs),
+        inertial_quat=V(dtype=gs.qd_vec4, shape=links_info_shape, n_envs=links_info_n_envs),
+        inertial_i=V(dtype=gs.qd_mat3, shape=links_info_shape, n_envs=links_info_n_envs),
+        inertial_mass=V(dtype=gs.qd_float, shape=links_info_shape, n_envs=links_info_n_envs),
+        entity_idx=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
         # Heterogeneous simulation support: per-link geom/vgeom index ranges
-        geom_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        geom_end=V(dtype=gs.qd_int, shape=links_info_shape),
-        vgeom_start=V(dtype=gs.qd_int, shape=links_info_shape),
-        vgeom_end=V(dtype=gs.qd_int, shape=links_info_shape),
+        geom_start=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        geom_end=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        vgeom_start=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
+        vgeom_end=V(dtype=gs.qd_int, shape=links_info_shape, n_envs=links_info_n_envs),
     )
 
 
@@ -2337,17 +2360,18 @@ class JointsInfo:
 
 
 def get_joints_info(solver):
-    shape = (solver.n_joints_, solver._B) if solver._options.batch_joints_info else (solver.n_joints_,)
+    shape = (solver.n_joints_,)
+    n_envs = solver._B if solver._options.batch_joints_info else None
 
     return JointsInfo(
-        type=V(dtype=gs.qd_int, shape=shape),
-        sol_params=V(dtype=gs.qd_vec7, shape=shape),
-        q_start=V(dtype=gs.qd_int, shape=shape),
-        dof_start=V(dtype=gs.qd_int, shape=shape),
-        q_end=V(dtype=gs.qd_int, shape=shape),
-        dof_end=V(dtype=gs.qd_int, shape=shape),
-        n_dofs=V(dtype=gs.qd_int, shape=shape),
-        pos=V(dtype=gs.qd_vec3, shape=shape),
+        type=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        sol_params=V(dtype=gs.qd_vec7, shape=shape, n_envs=n_envs),
+        q_start=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        dof_start=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        q_end=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        dof_end=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        n_dofs=V(dtype=gs.qd_int, shape=shape, n_envs=n_envs),
+        pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=n_envs),
     )
 
 
@@ -2360,12 +2384,12 @@ class JointsState:
 
 
 def get_joints_state(solver):
-    shape = (solver.n_joints_, solver._B)
+    shape = (solver.n_joints_,)
     requires_grad = solver._requires_grad
 
     return JointsState(
-        xanchor=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        xaxis=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        xanchor=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        xaxis=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
     )
 
 
@@ -2461,17 +2485,17 @@ class GeomsState:
 
 
 def get_geoms_state(solver, is_active=True):
-    shape = (solver.n_geoms_, solver._B) if is_active else ()
+    shape = (solver.n_geoms_,) if is_active else None
     requires_grad = solver.rigid_config.requires_grad
 
     return GeomsState(
-        pos=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        quat=V(dtype=gs.qd_vec4, shape=shape, needs_grad=requires_grad),
-        aabb_min=V(dtype=gs.qd_vec3, shape=shape),
-        aabb_max=V(dtype=gs.qd_vec3, shape=shape),
-        verts_updated=V(dtype=gs.qd_bool, shape=shape),
-        is_hibernated=V(dtype=gs.qd_int, shape=shape),
-        friction_ratio=V(dtype=gs.qd_float, shape=shape),
+        pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        quat=V(dtype=gs.qd_vec4, shape=shape, n_envs=solver._B, needs_grad=requires_grad),
+        aabb_min=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B),
+        aabb_max=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B),
+        verts_updated=V(dtype=gs.qd_bool, shape=shape, n_envs=solver._B),
+        is_hibernated=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
+        friction_ratio=V(dtype=gs.qd_float, shape=shape, n_envs=solver._B),
     )
 
 
@@ -2517,7 +2541,10 @@ class FacesInfo:
 def get_faces_info(solver, is_active=True):
     shape = (solver.n_faces_,) if is_active else ()
 
-    return FacesInfo(verts_idx=V(dtype=gs.qd_ivec3, shape=shape), geom_idx=V(dtype=gs.qd_int, shape=shape))
+    return FacesInfo(
+        verts_idx=V(dtype=gs.qd_ivec3, shape=shape),
+        geom_idx=V(dtype=gs.qd_int, shape=shape),
+    )
 
 
 # =========================================== EdgesInfo ===========================================
@@ -2536,7 +2563,9 @@ def get_edges_info(solver, is_active=True):
     shape = (solver.n_edges_,) if is_active else ()
 
     return EdgesInfo(
-        v0=V(dtype=gs.qd_int, shape=shape), v1=V(dtype=gs.qd_int, shape=shape), length=V(dtype=gs.qd_float, shape=shape)
+        v0=V(dtype=gs.qd_int, shape=shape),
+        v1=V(dtype=gs.qd_int, shape=shape),
+        length=V(dtype=gs.qd_float, shape=shape),
     )
 
 
@@ -2551,7 +2580,7 @@ class VertsState:
 
 
 def get_free_verts_state(solver, is_active=True):
-    return VertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_free_verts_, solver._B) if is_active else ()))
+    return VertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_free_verts_,) if is_active else None, n_envs=solver._B))
 
 
 def get_fixed_verts_state(solver, is_active=True):
@@ -2600,7 +2629,7 @@ def get_vverts_state(solver, is_active=True):
             f"Custom-vverts state shape (n_custom_vverts={solver.n_custom_vverts_}, B={solver._B}, 3) is too large. "
             "Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing 'n_envs'."
         )
-    return VVertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_custom_vverts_, solver._B)))
+    return VVertsState(pos=V(dtype=gs.qd_vec3, shape=(solver.n_custom_vverts_,), n_envs=solver._B))
 
 
 # =========================================== VfacesInfo ===========================================
@@ -2617,7 +2646,10 @@ class VFacesInfo:
 def get_vfaces_info(solver):
     shape = (solver.n_vfaces_,)
 
-    return VFacesInfo(vverts_idx=V(dtype=gs.qd_ivec3, shape=shape), vgeom_idx=V(dtype=gs.qd_int, shape=shape))
+    return VFacesInfo(
+        vverts_idx=V(dtype=gs.qd_ivec3, shape=shape),
+        vgeom_idx=V(dtype=gs.qd_int, shape=shape),
+    )
 
 
 # =========================================== VgeomsInfo ===========================================
@@ -2668,9 +2700,12 @@ class VGeomsState:
 
 
 def get_vgeoms_state(solver, is_active=True):
-    shape = (solver.n_vgeoms_, solver._B) if is_active else ()
+    shape = (solver.n_vgeoms_,) if is_active else None
 
-    return VGeomsState(pos=V(dtype=gs.qd_vec3, shape=shape), quat=V(dtype=gs.qd_vec4, shape=shape))
+    return VGeomsState(
+        pos=V(dtype=gs.qd_vec3, shape=shape, n_envs=solver._B),
+        quat=V(dtype=gs.qd_vec4, shape=shape, n_envs=solver._B),
+    )
 
 
 # =========================================== EqualitiesInfo ===========================================
@@ -2688,14 +2723,14 @@ class EqualitiesInfo:
 
 
 def get_equalities_info(solver, is_active=True):
-    shape = (solver.n_candidate_equalities_, solver._B) if is_active else ()
+    shape = (solver.n_candidate_equalities_,) if is_active else None
 
     return EqualitiesInfo(
-        eq_obj1id=V(dtype=gs.qd_int, shape=shape),
-        eq_obj2id=V(dtype=gs.qd_int, shape=shape),
-        eq_data=V(dtype=gs.qd_vec11, shape=shape),
-        eq_type=V(dtype=gs.qd_int, shape=shape),
-        sol_params=V(dtype=gs.qd_vec7, shape=shape),
+        eq_obj1id=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
+        eq_obj2id=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
+        eq_data=V(dtype=gs.qd_vec11, shape=shape, n_envs=solver._B),
+        eq_type=V(dtype=gs.qd_int, shape=shape, n_envs=solver._B),
+        sol_params=V(dtype=gs.qd_vec7, shape=shape, n_envs=solver._B),
     )
 
 
@@ -2748,7 +2783,9 @@ class EntitiesState:
 
 
 def get_entities_state(solver, is_active=True):
-    return EntitiesState(is_hibernated=V(dtype=gs.qd_int, shape=(solver.n_entities_, solver._B) if is_active else ()))
+    return EntitiesState(
+        is_hibernated=V(dtype=gs.qd_int, shape=(solver.n_entities_,) if is_active else None, n_envs=solver._B)
+    )
 
 
 # =========================================== RigidAdjointCache ===========================================
@@ -2770,12 +2807,12 @@ def get_rigid_adjoint_cache(solver):
     substeps_local = solver._sim.substeps_local
     requires_grad = solver._requires_grad
 
-    qs_shape = maybe_shape((substeps_local + 1, solver.n_qs_, solver._B), requires_grad)
-    dofs_shape = maybe_shape((substeps_local + 1, solver.n_dofs_, solver._B), requires_grad)
+    qs_shape = maybe_shape((substeps_local + 1, solver.n_qs_), requires_grad)
+    dofs_shape = maybe_shape((substeps_local + 1, solver.n_dofs_), requires_grad)
     return RigidAdjointCache(
-        qpos=V(dtype=gs.qd_float, shape=qs_shape, needs_grad=requires_grad),
-        dofs_vel=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-        dofs_acc=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
+        qpos=V(dtype=gs.qd_float, shape=qs_shape, n_envs=solver._B, needs_grad=requires_grad),
+        dofs_vel=V(dtype=gs.qd_float, shape=dofs_shape, n_envs=solver._B, needs_grad=requires_grad),
+        dofs_acc=V(dtype=gs.qd_float, shape=dofs_shape, n_envs=solver._B, needs_grad=requires_grad),
     )
 
 
@@ -3042,7 +3079,7 @@ class DataManager:
             self.dyn_state_adjoint_cache = get_dyn_state_adjoint_cache(solver)
 
         self.rigid_adjoint_cache = get_rigid_adjoint_cache(solver)
-        self.errno = V(dtype=gs.qd_int, shape=(solver._B,))
+        self.errno = V(dtype=gs.qd_int, shape=(), n_envs=solver._B)
 
         self._solver = solver
         self._ik_scratch = None
@@ -3086,10 +3123,10 @@ class RaycastResult:
 
 def get_raycast_result(n_envs: int):
     return RaycastResult(
-        distance=V(dtype=gs.qd_float, shape=(n_envs,)),
-        geom_idx=V(dtype=gs.qd_int, shape=(n_envs,)),
-        hit_point=V_VEC(3, dtype=gs.qd_float, shape=(n_envs,)),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=(n_envs,)),
+        distance=V(dtype=gs.qd_float, shape=(), n_envs=n_envs),
+        geom_idx=V(dtype=gs.qd_int, shape=(), n_envs=n_envs),
+        hit_point=V_VEC(3, dtype=gs.qd_float, shape=(), n_envs=n_envs),
+        normal=V_VEC(3, dtype=gs.qd_float, shape=(), n_envs=n_envs),
     )
 
 

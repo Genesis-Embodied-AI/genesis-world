@@ -476,20 +476,20 @@ def func_add_diff_contact_input(
 ):
     i_c = collider_state.n_contacts[i_b]
     if i_c < collider_info.max_candidate_contacts[None]:
-        collider_state.diff_contact_input.geom_a[i_b, i_c] = i_ga
-        collider_state.diff_contact_input.geom_b[i_b, i_c] = i_gb
-        collider_state.diff_contact_input.local_pos1_a[i_b, i_c] = gjk_state.diff_contact_input.local_pos1_a[i_b, i_d]
-        collider_state.diff_contact_input.local_pos1_b[i_b, i_c] = gjk_state.diff_contact_input.local_pos1_b[i_b, i_d]
-        collider_state.diff_contact_input.local_pos1_c[i_b, i_c] = gjk_state.diff_contact_input.local_pos1_c[i_b, i_d]
-        collider_state.diff_contact_input.local_pos2_a[i_b, i_c] = gjk_state.diff_contact_input.local_pos2_a[i_b, i_d]
-        collider_state.diff_contact_input.local_pos2_b[i_b, i_c] = gjk_state.diff_contact_input.local_pos2_b[i_b, i_d]
-        collider_state.diff_contact_input.local_pos2_c[i_b, i_c] = gjk_state.diff_contact_input.local_pos2_c[i_b, i_d]
-        collider_state.diff_contact_input.w_local_pos1[i_b, i_c] = gjk_state.diff_contact_input.w_local_pos1[i_b, i_d]
-        collider_state.diff_contact_input.w_local_pos2[i_b, i_c] = gjk_state.diff_contact_input.w_local_pos2[i_b, i_d]
+        collider_state.diff_contact_input.geom_a[i_c, i_b] = i_ga
+        collider_state.diff_contact_input.geom_b[i_c, i_b] = i_gb
+        collider_state.diff_contact_input.local_pos1_a[i_c, i_b] = gjk_state.diff_contact_input.local_pos1_a[i_d, i_b]
+        collider_state.diff_contact_input.local_pos1_b[i_c, i_b] = gjk_state.diff_contact_input.local_pos1_b[i_d, i_b]
+        collider_state.diff_contact_input.local_pos1_c[i_c, i_b] = gjk_state.diff_contact_input.local_pos1_c[i_d, i_b]
+        collider_state.diff_contact_input.local_pos2_a[i_c, i_b] = gjk_state.diff_contact_input.local_pos2_a[i_d, i_b]
+        collider_state.diff_contact_input.local_pos2_b[i_c, i_b] = gjk_state.diff_contact_input.local_pos2_b[i_d, i_b]
+        collider_state.diff_contact_input.local_pos2_c[i_c, i_b] = gjk_state.diff_contact_input.local_pos2_c[i_d, i_b]
+        collider_state.diff_contact_input.w_local_pos1[i_c, i_b] = gjk_state.diff_contact_input.w_local_pos1[i_d, i_b]
+        collider_state.diff_contact_input.w_local_pos2[i_c, i_b] = gjk_state.diff_contact_input.w_local_pos2[i_d, i_b]
         # The first contact point is the reference contact point
-        collider_state.diff_contact_input.ref_id[i_b, i_c] = i_c - i_d
-        collider_state.diff_contact_input.ref_penetration[i_b, i_c] = gjk_state.diff_contact_input.ref_penetration[
-            i_b, i_d
+        collider_state.diff_contact_input.ref_id[i_c, i_b] = i_c - i_d
+        collider_state.diff_contact_input.ref_penetration[i_c, i_b] = gjk_state.diff_contact_input.ref_penetration[
+            i_d, i_b
         ]
 
 
