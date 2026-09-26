@@ -1190,9 +1190,14 @@ class NarrowphaseWorkQueues:
     mpr_i_ga: qd.Tensor
     mpr_i_gb: qd.Tensor
     mpr_i_pair: qd.Tensor
-    mpr_contact_pos_0: qd.Tensor
-    mpr_normal_0: qd.Tensor
-    mpr_penetration_0: qd.Tensor
+    # Candidate contacts of the multicontact pass, one slot per contact a pair can hold. The contact0 kernel stores the
+    # first contact of the pair in slot 0, the detections of the pass store theirs in their own slot, and the gather
+    # accepts them in slot order according to their status (see MULTICONTACT_SLOT in collider/constants.py). Under the
+    # contact patch an entry holds slot 0 alone and no status.
+    mpr_contact_pos: qd.Tensor
+    mpr_normal: qd.Tensor
+    mpr_penetration: qd.Tensor
+    mpr_contact_status: qd.Tensor
     # Whether contact0 preferred GJK (the per-pair MPR->GJK gate fired). The multicontact pass uses GJK for contact0
     # when set, and otherwise tries MPR first and falls back to GJK per perturbed contact.
     mpr_prefer_gjk: qd.Tensor
@@ -1200,16 +1205,18 @@ class NarrowphaseWorkQueues:
     mpr_work_counter: qd.Tensor
 
 
-def get_narrowphase_work_queues(max_entries, active):
+def get_narrowphase_work_queues(max_entries, n_slots, active):
     entries_shape = maybe_shape((max_entries,), active)
+    slots_shape = maybe_shape((max_entries, n_slots), active)
     return NarrowphaseWorkQueues(
         mpr_i_b=V(dtype=gs.qd_int, shape=entries_shape),
         mpr_i_ga=V(dtype=gs.qd_int, shape=entries_shape),
         mpr_i_gb=V(dtype=gs.qd_int, shape=entries_shape),
         mpr_i_pair=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_contact_pos_0=V_VEC(3, dtype=gs.qd_float, shape=entries_shape),
-        mpr_normal_0=V_VEC(3, dtype=gs.qd_float, shape=entries_shape),
-        mpr_penetration_0=V(dtype=gs.qd_float, shape=entries_shape),
+        mpr_contact_pos=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
+        mpr_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
+        mpr_penetration=V(dtype=gs.qd_float, shape=slots_shape),
+        mpr_contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), active and n_slots > 1)),
         mpr_prefer_gjk=V(dtype=gs.qd_int, shape=entries_shape),
         mpr_queue_size=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
         mpr_work_counter=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
@@ -1309,7 +1316,11 @@ def get_collider_state(
         broad_collision_pairs=V_VEC(2, dtype=gs.qd_int, shape=(max(max_collision_pairs_broad, 1), _B)),
         contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
         diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
-        narrowphase_work_queues=get_narrowphase_work_queues(max_collision_pairs_broad * _B, split_narrowphase),
+        # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its
+        # first contact alone under the contact patch (see NarrowphaseWorkQueues)
+        narrowphase_work_queues=get_narrowphase_work_queues(
+            max_collision_pairs_broad * _B, 1 if solver._options.enable_contact_patch else 5, split_narrowphase
+        ),
         contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
         contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape),
