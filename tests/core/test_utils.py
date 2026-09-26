@@ -181,6 +181,9 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         np_args, tc_args = [], []
         for i in range(len(shape_args)):
             np_arg = np.random.randn(*batch_shape, *shape_args[i]).clip(-1.0, 1.0).astype(gs.np_float)
+            # Axis-aligned vectors hit the degenerate branches: poles, up colinear with z, coincident pos and lookat
+            if batch_shape and shape_args[i] == [3]:
+                np_arg[..., :6, :] = np.concatenate((np.eye(3), -np.eye(3)))
             tc_arg = torch.as_tensor(np_arg, dtype=gs.tc_float, device=gs.device)
 
             if i < num_inputs:
