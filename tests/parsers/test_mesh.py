@@ -23,7 +23,6 @@ from .conftest import (
     check_gs_tm_textures,
 )
 
-
 # ==================== Scale Tests ====================
 
 
@@ -295,6 +294,7 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, show_viewer):
         "normal_accessor_zero_glb",
         "texcoord_0_accessor_zero_glb",
         "texcoord_1_accessor_zero_glb",
+        "triangle_strip_nodes_glb",
     ],
 )
 def test_glb_parse_geometry(request, glb_file, tol):
@@ -324,20 +324,6 @@ def test_glb_parse_geometry(request, glb_file, tol):
         mesh_name = gs_mesh.metadata["name"]
         tm_mesh = tm_meshes[mesh_name]
         check_gs_tm_meshes(gs_mesh, tm_mesh, mesh_name, tol, tol)
-
-
-@pytest.mark.required
-def test_glb_strip_nodes_stay_separate(triangle_strip_nodes_glb):
-    # Two nodes are two meshes, and one collision geom each, whatever primitive mode they declare
-    gs_meshes = gltf_utils.parse_mesh_glb(
-        triangle_strip_nodes_glb,
-        group_by_material=False,
-        scale=None,
-        is_mesh_zup=True,
-        surface=gs.surfaces.Default(),
-    )
-    assert {gs_mesh.metadata["name"] for gs_mesh in gs_meshes} == {"near_strip", "far_strip"}
-    assert {gs_mesh.metadata["node_index"] for gs_mesh in gs_meshes} == {0, 1}
 
 
 @pytest.mark.required
