@@ -205,20 +205,17 @@ def func_copy_cartesian_space(
     # dofs state
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for I in qd.grouped(qd.ndrange(*dyn_state.dofs.pos.shape)):
-        # pos, cdof_ang, cdof_vel, cdofvel_ang, cdofvel_vel, cdofd_ang, cdofd_vel
+        # pos, cdof_ang, cdof_vel, cdofd_ang, cdofd_vel
         dyn_state_adjoint_cache.dofs.pos[I] = dyn_state.dofs.pos[I]
         dyn_state_adjoint_cache.dofs.cdof_ang[I] = dyn_state.dofs.cdof_ang[I]
         dyn_state_adjoint_cache.dofs.cdof_vel[I] = dyn_state.dofs.cdof_vel[I]
-        dyn_state_adjoint_cache.dofs.cdofvel_ang[I] = dyn_state.dofs.cdofvel_ang[I]
-        dyn_state_adjoint_cache.dofs.cdofvel_vel[I] = dyn_state.dofs.cdofvel_vel[I]
         dyn_state_adjoint_cache.dofs.cdofd_ang[I] = dyn_state.dofs.cdofd_ang[I]
         dyn_state_adjoint_cache.dofs.cdofd_vel[I] = dyn_state.dofs.cdofd_vel[I]
 
     # links state
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for I in qd.grouped(qd.ndrange(*dyn_state.links.pos.shape)):
-        # pos, quat, root_COM, mass_sum, i_pos, i_quat, cinr_inertial, cinr_pos, cinr_quat, cinr_mass, j_pos, j_quat,
-        # cd_vel, cd_ang
+        # pos, quat, root_COM, mass_sum, i_pos, i_quat, cinr_inertial, cinr_pos, cinr_quat, cinr_mass, cd_vel, cd_ang
         dyn_state_adjoint_cache.links.pos[I] = dyn_state.links.pos[I]
         dyn_state_adjoint_cache.links.quat[I] = dyn_state.links.quat[I]
         dyn_state_adjoint_cache.links.root_COM[I] = dyn_state.links.root_COM[I]
@@ -229,8 +226,6 @@ def func_copy_cartesian_space(
         dyn_state_adjoint_cache.links.cinr_pos[I] = dyn_state.links.cinr_pos[I]
         dyn_state_adjoint_cache.links.cinr_quat[I] = dyn_state.links.cinr_quat[I]
         dyn_state_adjoint_cache.links.cinr_mass[I] = dyn_state.links.cinr_mass[I]
-        dyn_state_adjoint_cache.links.j_pos[I] = dyn_state.links.j_pos[I]
-        dyn_state_adjoint_cache.links.j_quat[I] = dyn_state.links.j_quat[I]
         dyn_state_adjoint_cache.links.cd_vel[I] = dyn_state.links.cd_vel[I]
         dyn_state_adjoint_cache.links.cd_ang[I] = dyn_state.links.cd_ang[I]
 

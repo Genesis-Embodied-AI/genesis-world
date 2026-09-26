@@ -161,10 +161,9 @@ def collider_kernel_reset(
     envs_idx: qd.types.ndarray(),
     collider_state: array_class.ColliderState,
     rigid_config: qd.template(),
+    collider_static_config: qd.template(),
     cache_only: qd.template(),
 ):
-    max_possible_pairs = collider_state.contact_cache.normal.shape[0]
-
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
@@ -172,9 +171,11 @@ def collider_kernel_reset(
         if qd.static(not cache_only):
             collider_state.first_time[i_b] = True
 
-        for i_pair in range(max_possible_pairs):
-            collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
-            collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
+        # The contact cache is only held for the convex-convex pairs (see get_contact_cache in array_class.py)
+        if qd.static(collider_static_config.has_non_box_plane_convex_convex):
+            for i_pair in range(collider_state.contact_cache.normal.shape[0]):
+                collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
 
 
 @qd.func

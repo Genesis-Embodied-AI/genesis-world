@@ -290,10 +290,14 @@ def create_modified_narrowphase_file(tmp_path: Path):
         lines, "gjk.func_gjk_contact(", ERRNO_CALLED_GJK_K2, "MODIFIED: GJK called for collision detection"
     )
 
-    # Split path: mark the multicontact dispatch call (errno/i_b in scope; in this forced-GJK scene the multicontact
-    # pass always resolves contacts with GJK).
+    # Split path: mark the multicontact dispatch call (in this forced-GJK scene the multicontact pass always resolves
+    # contacts with GJK), indexing errno by the env of the queue entry it dispatches.
     lines = insert_errno_before_call(
-        lines, "_func_multicontact_mpr(", ERRNO_CALLED_GJK_K2, "MODIFIED: GJK path in multicontact", "i_b"
+        lines,
+        "_func_multicontact_detect(",
+        ERRNO_CALLED_GJK_K2,
+        "MODIFIED: GJK path in multicontact",
+        "collider_state.narrowphase_work_queues.mpr_i_b[i_work]",
     )
 
     content = "\n".join(lines)
@@ -995,8 +999,9 @@ def test_split_vs_monolithic_narrowphase(
         scene.step()
         contacts_split = collider.get_contacts(as_tensor=False, to_torch=False)
 
-        # Run with monolithic narrowphase
+        # Run with monolithic narrowphase, which runs GJK on the per-env state the split arm leaves unallocated
         monkeypatch.setattr(collider, "_use_split_narrowphase", False)
+        collider._gjk.activate()
         capsule_a.set_qpos((*pos_a, *quat_a))
         capsule_b.set_qpos((*pos_b, *quat_b))
         box.set_pos(pos_box)

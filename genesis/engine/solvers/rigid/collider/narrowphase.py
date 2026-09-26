@@ -14,7 +14,7 @@ import genesis.utils.sdf as sdf
 
 from . import capsule_contact, diff_gjk, gjk, mpr
 from .box_contact import func_box_box_contact, func_plane_box_contact, func_sphere_box_contact
-from .constants import CCD_ALGORITHM_CODE, PORTAL_STATUS
+from .constants import CCD_ALGORITHM_CODE, MULTICONTACT_SLOT, PORTAL_STATUS
 from .contact import (
     func_add_contact,
     func_add_diff_contact_input,
@@ -2361,16 +2361,11 @@ def _func_multicontact_run_detection(
 
 
 @qd.func
-def _func_multicontact_mpr(
+def _func_multicontact_detect(
     i_scratch,
-    i_b,
-    i_ga,
-    i_gb,
-    i_pair,
-    contact_pos_0: qd.types.vector(3),
-    normal_0: qd.types.vector(3),
-    penetration_0,
-    prefer_gjk_0: bool,
+    i_work,
+    i_det_start,
+    i_det_end,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -2384,21 +2379,33 @@ def _func_multicontact_mpr(
     gjk_static_config: qd.template(),
     errno: qd.Tensor,
 ):
-    """Compute all contacts for a pair and write them contiguously via a single atomic reservation.
+    """Run a range of the detections of a queued pair and store each contact it finds.
 
-    Contact 0 uses GJK when prefer_gjk_0 is set (its penetration gate fired in the contact0 kernel), expanding a GJK
-    native multi-contact manifold and skipping perturbation when one is returned; otherwise it uses the MPR seed
-    passed from the contact0 kernel. Each perturbed contact tries MPR first and falls back to GJK on its own when its
-    penetration gate fires, except under the pure GJK algorithm where every contact is detected with GJK. The single
-    atomic reservation gives deterministic per-pair contact ordering."""
+    The call runs the detections [i_det_start, i_det_end) of the pair of multicontact queue entry i_work, with the GJK
+    and MPR scratch of slot i_scratch. Detection 0 takes the MPR seed the contact0 kernel detected, refined and cached,
+    which slot 0 of the entry holds, or re-detects contact 0 with GJK when its penetration gate fired in the contact0
+    kernel. Detections 1 to 4 are the perturbed contacts, each tried again with GJK when its own gate fires, except
+    under the pure GJK algorithm where every contact is detected with GJK.
+
+    Without the contact patch, detection i stores its contact in slot i of the entry (see mpr_contact_status in
+    array_class.py) for _func_multicontact_gather, and a range starting past 0 requires contact 0 to be the MPR seed.
+    With the contact patch, the call runs every detection of the pair: it takes the manifold GJK returns for contact 0
+    when there is one, which skips perturbation, accepts each contact as it comes and writes those of the pair itself.
+    """
     EPS = rigid_info.EPS[None]
+
+    i_b = collider_state.narrowphase_work_queues.mpr_i_b[i_work]
+    i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
+    i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
+    i_pair = collider_state.narrowphase_work_queues.mpr_i_pair[i_work]
+    is_gjk_preferred_0 = collider_state.narrowphase_work_queues.mpr_prefer_gjk[i_work] == 1
 
     ga_pos_original = dyn_state.geoms.pos[i_ga, i_b]
     ga_quat_original = dyn_state.geoms.quat[i_ga, i_b]
     gb_pos_original = dyn_state.geoms.pos[i_gb, i_b]
     gb_quat_original = dyn_state.geoms.quat[i_gb, i_b]
 
-    multi_contact = (
+    is_multi_contact = (
         rigid_config.enable_multi_contact
         and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.SPHERE
         and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.ELLIPSOID
@@ -2407,45 +2414,52 @@ def _func_multicontact_mpr(
     )
     if qd.static(rigid_config.enable_mujoco_compatibility):
         # Capsule-capsule exclusion under compatibility: see func_convex_convex_contact.
-        multi_contact = multi_contact and not (
+        is_multi_contact = is_multi_contact and not (
             dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
         )
 
     geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
     tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
 
+    contact0_normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
+    contact0_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
+    has_contact0 = not is_gjk_preferred_0
+    is_gjk_multi_done = False
     n_con = gs.qd_int(0)
     local_contact_pos = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
     local_normal = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
     local_penetration = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 1)
-    gjk_multi_done = False
 
-    contact0_normal = normal_0
-    contact0_pos = contact_pos_0
-    if not prefer_gjk_0:
-        # Contact 0 from the MPR seed already detected, refined and cached by the contact0 kernel.
-        for i_3 in qd.static(range(3)):
-            local_contact_pos[0, i_3] = contact_pos_0[i_3]
-            local_normal[0, i_3] = normal_0[i_3]
-        local_penetration[0, 0] = penetration_0
-        n_con = 1
-
-    # Detection 0 re-detects contact 0 with GJK when its penetration gate fired in the contact0 kernel, expanding a
-    # native multi-contact manifold and skipping perturbation when one is returned. Detections 1 to 4 are the
-    # perturbed contacts, each tried again with GJK when its own gate fires. One runtime loop drives them all, so the
-    # detection pipeline is inlined once in the kernel.
+    # One runtime loop drives every detection of the call, so the detection pipeline is inlined once in the kernel
     axis_0 = qd.Vector.zero(gs.qd_float, 3)
     axis_1 = qd.Vector.zero(gs.qd_float, 3)
-    for i_det in range(5):
+    is_axes_computed = False
+    for i_det in range(i_det_start, i_det_end):
         is_initial_detection = i_det == 0
-        is_active = prefer_gjk_0
+        is_active = is_gjk_preferred_0
         if not is_initial_detection:
-            is_active = multi_contact and n_con > 0 and not gjk_multi_done
+            is_active = is_multi_contact and has_contact0 and not is_gjk_multi_done
+        slot_status = MULTICONTACT_SLOT.EMPTY
+        slot_normal = qd.Vector.zero(gs.qd_float, 3)
+        slot_pos = qd.Vector.zero(gs.qd_float, 3)
+        slot_penetration = gs.qd_float(0.0)
+        is_slot_written = False
+        if is_initial_detection and not is_gjk_preferred_0:
+            # Slot 0 holds contact 0 from the MPR seed, already detected, refined and cached by the contact0 kernel
+            if qd.static(gjk_static_config.enable_contact_patch):
+                slot_status = MULTICONTACT_SLOT.BASE
+                slot_normal = contact0_normal
+                slot_pos = contact0_pos
+                slot_penetration = collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0]
+            else:
+                collider_state.narrowphase_work_queues.mpr_contact_status[i_work, 0] = MULTICONTACT_SLOT.BASE
+                is_slot_written = True
         if is_active:
-            if i_det == 1:
+            if not is_initial_detection and not is_axes_computed:
                 axis_0, axis_1 = func_contact_orthogonals(
                     i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
                 )
+                is_axes_computed = True
             # Declared ahead of the branches that assign them, as quadrants scoping requires.
             qrot = qd.Vector.zero(gs.qd_float, 4)
             ga_pos_current = ga_pos_original
@@ -2479,11 +2493,11 @@ def _func_multicontact_mpr(
             normal = qd.Vector.zero(gs.qd_float, 3)
             contact_pos = qd.Vector.zero(gs.qd_float, 3)
             penetration = gs.qd_float(0.0)
-            _used_gjk = False
+            is_gjk_used = False
             is_detected = False
             for i_try in range(2):
                 if not is_detected:
-                    is_col, normal, contact_pos, penetration, _used_gjk = _func_multicontact_run_detection(
+                    is_col, normal, contact_pos, penetration, is_gjk_used = _func_multicontact_run_detection(
                         i_ga,
                         i_gb,
                         i_scratch,
@@ -2512,7 +2526,7 @@ def _func_multicontact_mpr(
                         # When the refinement is called for it applies to this perturbed contact only, rather than
                         # upgrading the whole pair, which keeps the MPR-first model.
                         if not is_initial_detection and is_col and not use_gjk:
-                            prefer_gjk = func_prefer_gjk_refinement(
+                            is_gjk_preferred = func_prefer_gjk_refinement(
                                 i_pair,
                                 i_b,
                                 mpr_state.portal_status[i_scratch],
@@ -2522,7 +2536,7 @@ def _func_multicontact_mpr(
                                 collider_state,
                                 collider_info,
                             )
-                            if prefer_gjk:
+                            if is_gjk_preferred:
                                 use_gjk = True
                                 is_detected = False
 
@@ -2530,40 +2544,37 @@ def _func_multicontact_mpr(
                 if is_col:
                     collider_state.contact_cache.normal[i_pair, i_b] = normal
                     collider_state.contact_cache.penetration[i_pair, i_b] = penetration
-                    if _used_gjk:
-                        # GJK populated gjk_state: take the single contact (i_c 0) or, when a native manifold was
-                        # returned, all of its points (which sets gjk_multi_done to skip perturbation). The single
-                        # contact is gjk_state[0], so it is just a one-point manifold.
-                        gjk_multi_done = gjk_state.multi_contact_flag[i_scratch] == 1
-                        n_contacts_gjk = gjk_state.n_contacts[i_scratch] if gjk_multi_done else 1
-                        for i_c in range(n_contacts_gjk):
-                            if n_con < collider_static_config.n_contacts_per_convex_pair:
-                                gjk_normal = gjk_state.normal[i_scratch, i_c]
-                                gjk_contact_pos = func_apply_smooth_refinement(
-                                    i_ga,
-                                    i_gb,
-                                    gjk_normal,
-                                    penetration,
-                                    gjk_state.contact_pos[i_scratch, i_c],
-                                    ga_pos_original,
-                                    ga_quat_original,
-                                    gb_pos_original,
-                                    gb_quat_original,
-                                    dyn_info,
-                                    rigid_config,
-                                )
-                                for i_3 in qd.static(range(3)):
-                                    local_contact_pos[n_con, i_3] = gjk_contact_pos[i_3]
-                                    local_normal[n_con, i_3] = gjk_normal[i_3]
-                                local_penetration[n_con, 0] = penetration
-                                if i_c == 0:
-                                    contact0_normal = gjk_normal
-                                    contact0_pos = gjk_contact_pos
-                                n_con = n_con + 1
-                    else:
-                        # Analytic detection (plane/capsule/sphere-box) leaves gjk_state untouched, so use the returned
-                        # contact directly. Reading gjk_state here would pick up a stale contact from another pair on
-                        # this thread, which is non-deterministic because the thread-to-pair assignment is racy.
+                    # Only the contact patch returns a manifold, whose points are all accepted as they are and replace
+                    # perturbation. GJK otherwise returns the single contact it found, and an analytic detection returns
+                    # its contact directly.
+                    n_contacts_manifold = 0
+                    if qd.static(gjk_static_config.enable_contact_patch):
+                        if is_gjk_used and gjk_state.multi_contact_flag[i_scratch] == 1:
+                            n_contacts_manifold = qd.min(
+                                gjk_state.n_contacts[i_scratch], collider_static_config.n_contacts_per_convex_pair
+                            )
+                            is_gjk_multi_done = True
+                    for i_c in range(n_contacts_manifold):
+                        manifold_normal = gjk_state.normal[i_scratch, i_c]
+                        manifold_pos = func_apply_smooth_refinement(
+                            i_ga,
+                            i_gb,
+                            manifold_normal,
+                            penetration,
+                            gjk_state.contact_pos[i_scratch, i_c],
+                            ga_pos_original,
+                            ga_quat_original,
+                            gb_pos_original,
+                            gb_quat_original,
+                            dyn_info,
+                            rigid_config,
+                        )
+                        for i_3 in qd.static(range(3)):
+                            local_contact_pos[n_con, i_3] = manifold_pos[i_3]
+                            local_normal[n_con, i_3] = manifold_normal[i_3]
+                        local_penetration[n_con, 0] = penetration
+                        n_con = n_con + 1
+                    if not is_gjk_multi_done:
                         contact_pos = func_apply_smooth_refinement(
                             i_ga,
                             i_gb,
@@ -2579,11 +2590,11 @@ def _func_multicontact_mpr(
                         )
                         contact0_normal = normal
                         contact0_pos = contact_pos
-                        for i_3 in qd.static(range(3)):
-                            local_contact_pos[0, i_3] = contact_pos[i_3]
-                            local_normal[0, i_3] = normal[i_3]
-                        local_penetration[0, 0] = penetration
-                        n_con = 1
+                        slot_status = MULTICONTACT_SLOT.BASE
+                        slot_normal = normal
+                        slot_pos = contact_pos
+                        slot_penetration = penetration
+                    has_contact0 = True
                 else:
                     collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
                     collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
@@ -2608,7 +2619,7 @@ def _func_multicontact_mpr(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        _used_gjk,
+                        is_gjk_used,
                         mpr_state,
                         gjk_state,
                         dyn_info,
@@ -2616,34 +2627,126 @@ def _func_multicontact_mpr(
                         collider_info,
                         rigid_config,
                     )
+                slot_status = MULTICONTACT_SLOT.EXACT if is_exact else MULTICONTACT_SLOT.APPROX
+                slot_normal = normal
+                slot_pos = contact_pos
+                slot_penetration = penetration
 
-                # Perturbed contacts carry the initial contact's penetration under compatibility: see the twin
-                # acceptance in func_convex_convex_contact.
-                if qd.static(
-                    collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MJ_MPR, CCD_ALGORITHM_CODE.MJ_GJK)
-                ):
-                    penetration = local_penetration[0, 0]
+        if qd.static(gjk_static_config.enable_contact_patch):
+            if slot_status != MULTICONTACT_SLOT.EMPTY:
+                is_accepted, slot_penetration = _func_multicontact_accept(
+                    n_con,
+                    slot_status,
+                    slot_pos,
+                    slot_penetration,
+                    geom_pair_scale,
+                    tolerance,
+                    local_contact_pos,
+                    local_penetration,
+                    rigid_info,
+                    collider_static_config,
+                )
+                if is_accepted:
+                    for i_3 in qd.static(range(3)):
+                        local_contact_pos[n_con, i_3] = slot_pos[i_3]
+                        local_normal[n_con, i_3] = slot_normal[i_3]
+                    local_penetration[n_con, 0] = slot_penetration
+                    n_con = n_con + 1
+        elif not is_slot_written:
+            # The MPR seed marks its slot above, and every other detection stores its outcome here, empty when it did
+            # not run or found no contact
+            collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, i_det] = slot_pos
+            collider_state.narrowphase_work_queues.mpr_normal[i_work, i_det] = slot_normal
+            collider_state.narrowphase_work_queues.mpr_penetration[i_work, i_det] = slot_penetration
+            collider_state.narrowphase_work_queues.mpr_contact_status[i_work, i_det] = slot_status
 
-                repeated = False
-                for i_c in range(n_con):
-                    if not repeated:
-                        prev = qd.Vector(
-                            [local_contact_pos[i_c, 0], local_contact_pos[i_c, 1], local_contact_pos[i_c, 2]],
-                            dt=gs.qd_float,
-                        )
-                        if (contact_pos - prev).norm() < tolerance:
-                            repeated = True
+    if qd.static(gjk_static_config.enable_contact_patch):
+        _func_multicontact_write(
+            i_b,
+            i_ga,
+            i_gb,
+            i_pair,
+            n_con,
+            local_contact_pos,
+            local_normal,
+            local_penetration,
+            dyn_state,
+            collider_state,
+            dyn_info,
+            rigid_info,
+            collider_info,
+            errno,
+        )
 
-                if not repeated:
-                    # Rounding-scale guard for exact candidates: see the twin acceptance in func_convex_convex_contact.
-                    if penetration > (-EPS * geom_pair_scale if is_exact else -tolerance):
-                        penetration = qd.max(penetration, 0.0)
-                        for i_3 in qd.static(range(3)):
-                            local_contact_pos[n_con, i_3] = contact_pos[i_3]
-                            local_normal[n_con, i_3] = normal[i_3]
-                        local_penetration[n_con, 0] = penetration
-                        n_con = n_con + 1
 
+@qd.func
+def _func_multicontact_accept(
+    n_con,
+    status,
+    contact_pos: qd.types.vector(3),
+    penetration,
+    geom_pair_scale,
+    tolerance,
+    local_contact_pos,
+    local_penetration,
+    rigid_info: array_class.RigidInfo,
+    collider_static_config: qd.template(),
+):
+    """Decide whether a candidate contact of a pair is kept, given the contacts of the pair kept so far.
+
+    The first n_con rows of local_contact_pos and local_penetration hold the contacts kept so far. A contact of status
+    BASE (see MULTICONTACT_SLOT in constants.py) is kept as it is. A perturbed contact is kept unless it lies within the
+    tolerance of a contact already kept or its penetration falls below its acceptance threshold, and it is then clamped
+    to non-negative. Returns whether the contact is kept and its penetration.
+    """
+    EPS = rigid_info.EPS[None]
+    is_accepted = status == MULTICONTACT_SLOT.BASE
+    if not is_accepted:
+        # Perturbed contacts carry the initial contact's penetration under compatibility: see the twin acceptance in
+        # func_convex_convex_contact.
+        if qd.static(collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.MJ_MPR, CCD_ALGORITHM_CODE.MJ_GJK)):
+            penetration = local_penetration[0, 0]
+
+        is_repeated = False
+        for i_c in range(n_con):
+            if not is_repeated:
+                prev = qd.Vector(
+                    [local_contact_pos[i_c, 0], local_contact_pos[i_c, 1], local_contact_pos[i_c, 2]], dt=gs.qd_float
+                )
+                if (contact_pos - prev).norm() < tolerance:
+                    is_repeated = True
+
+        if not is_repeated:
+            # Rounding-scale guard for exact candidates: see the twin acceptance in func_convex_convex_contact
+            is_exact = status == MULTICONTACT_SLOT.EXACT
+            if penetration > (-EPS * geom_pair_scale if is_exact else -tolerance):
+                penetration = qd.max(penetration, 0.0)
+                is_accepted = True
+    return is_accepted, penetration
+
+
+@qd.func
+def _func_multicontact_write(
+    i_b,
+    i_ga,
+    i_gb,
+    i_pair,
+    n_con,
+    local_contact_pos,
+    local_normal,
+    local_penetration,
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    errno: qd.Tensor,
+):
+    """Write the contacts kept for a pair contiguously via a single atomic reservation.
+
+    The first n_con rows of the local arrays hold the contacts, and the single reservation gives deterministic per-pair
+    contact ordering. The contacts that no longer fit in the contact buffer are dropped and flag the overflow in errno.
+    """
     if n_con > 0:
         # Non-atomic pre-check to avoid reserving slots we cannot fill. A rare race between the read and the
         # atomic_add below may still overshoot; in that case we write only the contacts that fit and set errno.
@@ -2679,6 +2782,78 @@ def _func_multicontact_mpr(
                 )
 
 
+@qd.func
+def _func_multicontact_gather(
+    i_work,
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+    collider_static_config: qd.template(),
+    errno: qd.Tensor,
+):
+    """Accept the candidate contacts of a queued pair in slot order and write those it keeps.
+
+    The slots of multicontact queue entry i_work (see mpr_contact_status in array_class.py) go through
+    _func_multicontact_accept in order, and the contacts kept are written by _func_multicontact_write.
+    """
+    i_b = collider_state.narrowphase_work_queues.mpr_i_b[i_work]
+    i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
+    i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
+    i_pair = collider_state.narrowphase_work_queues.mpr_i_pair[i_work]
+
+    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
+
+    n_con = gs.qd_int(0)
+    local_contact_pos = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
+    local_normal = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
+    local_penetration = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 1)
+    for i_s in range(collider_static_config.n_multicontact_detections):
+        status = collider_state.narrowphase_work_queues.mpr_contact_status[i_work, i_s]
+        if status != MULTICONTACT_SLOT.EMPTY:
+            contact_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, i_s]
+            is_accepted, penetration = _func_multicontact_accept(
+                n_con,
+                status,
+                contact_pos,
+                collider_state.narrowphase_work_queues.mpr_penetration[i_work, i_s],
+                geom_pair_scale,
+                tolerance,
+                local_contact_pos,
+                local_penetration,
+                rigid_info,
+                collider_static_config,
+            )
+            if is_accepted:
+                normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, i_s]
+                for i_3 in qd.static(range(3)):
+                    local_contact_pos[n_con, i_3] = contact_pos[i_3]
+                    local_normal[n_con, i_3] = normal[i_3]
+                local_penetration[n_con, 0] = penetration
+                n_con = n_con + 1
+
+    _func_multicontact_write(
+        i_b,
+        i_ga,
+        i_gb,
+        i_pair,
+        n_con,
+        local_contact_pos,
+        local_normal,
+        local_penetration,
+        dyn_state,
+        collider_state,
+        dyn_info,
+        rigid_info,
+        collider_info,
+        errno,
+    )
+
+
 @qd.kernel(fastcache=True)
 def _func_narrowphase_multicontact(
     geoms_init_AABB: array_class.GeomsInitAABB,
@@ -2694,30 +2869,37 @@ def _func_narrowphase_multicontact(
     gjk_static_config: qd.template(),
     errno: qd.Tensor,
 ):
+    # While the GPU cores outnumber the work units, each queued pair splits into one unit per perturbed detection: the
+    # perturbed detections read contact 0 and nothing of one another, so they run in parallel. The first unit of a pair
+    # also stores its contact 0. A pair that re-detects contact 0 with GJK perturbs around the contact it finds, so its
+    # first unit runs every detection in order and the other units idle. A queue long enough to saturate the GPU keeps
+    # one unit per pair, which runs every detection in order, since the split then adds work without adding lanes. The
+    # contact patch keeps one unit per pair (see _func_multicontact_detect).
+    N_PERTURBATIONS = qd.static(collider_static_config.n_multicontact_detections - 1)
     for i_tid in range(collider_static_config.gpu_cores):
         for _iter in range(collider_static_config.gpu_cores_per_unit):
-            idx = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_work_counter[0], 1)
-            if idx >= collider_state.narrowphase_work_queues.mpr_queue_size[0]:
+            n_queue = collider_state.narrowphase_work_queues.mpr_queue_size[0]
+            n_units = 1
+            if qd.static(not gjk_static_config.enable_contact_patch):
+                if N_PERTURBATIONS * n_queue <= collider_static_config.gpu_cores:
+                    n_units = N_PERTURBATIONS
+            i_flat = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_work_counter[0], 1)
+            if i_flat >= n_units * n_queue:
                 break
-            i_b = collider_state.narrowphase_work_queues.mpr_i_b[idx]
-            i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[idx]
-            i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[idx]
-            i_pair = collider_state.narrowphase_work_queues.mpr_i_pair[idx]
-            contact_pos_0 = collider_state.narrowphase_work_queues.mpr_contact_pos_0[idx]
-            normal_0 = collider_state.narrowphase_work_queues.mpr_normal_0[idx]
-            penetration_0 = collider_state.narrowphase_work_queues.mpr_penetration_0[idx]
-            prefer_gjk_0 = collider_state.narrowphase_work_queues.mpr_prefer_gjk[idx] == 1
-
-            _func_multicontact_mpr(
+            i_work = i_flat // n_units
+            i_unit = i_flat % n_units
+            i_det_start = i_unit + 1
+            i_det_end = i_unit + 2
+            if n_units == 1 or collider_state.narrowphase_work_queues.mpr_prefer_gjk[i_work] == 1:
+                i_det_start = 0
+                i_det_end = N_PERTURBATIONS + 1 if i_unit == 0 else 0
+            elif i_unit == 0:
+                i_det_start = 0
+            _func_multicontact_detect(
                 i_tid,
-                i_b,
-                i_ga,
-                i_gb,
-                i_pair,
-                contact_pos_0,
-                normal_0,
-                penetration_0,
-                prefer_gjk_0,
+                i_work,
+                i_det_start,
+                i_det_end,
                 geoms_init_AABB,
                 dyn_state,
                 collider_state,
@@ -2731,6 +2913,30 @@ def _func_narrowphase_multicontact(
                 gjk_static_config,
                 errno,
             )
+
+    # The top-level loops of a kernel run in order, so the gather reads every slot the units wrote and the counter
+    # reset costs no launch of its own
+    if qd.static(not gjk_static_config.enable_contact_patch):
+        for _ in range(1):
+            collider_state.narrowphase_work_queues.mpr_work_counter[0] = 0
+
+        for i_tid in range(collider_static_config.gpu_cores):
+            for _iter in range(collider_static_config.gpu_cores_per_unit):
+                i_work = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_work_counter[0], 1)
+                if i_work >= collider_state.narrowphase_work_queues.mpr_queue_size[0]:
+                    break
+                _func_multicontact_gather(
+                    i_work,
+                    geoms_init_AABB,
+                    dyn_state,
+                    collider_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    rigid_config,
+                    collider_static_config,
+                    errno,
+                )
 
 
 @qd.func
@@ -2750,9 +2956,9 @@ def _func_enqueue_for_multicontact(
     collider_state.narrowphase_work_queues.mpr_i_ga[idx] = i_ga
     collider_state.narrowphase_work_queues.mpr_i_gb[idx] = i_gb
     collider_state.narrowphase_work_queues.mpr_i_pair[idx] = i_pair
-    collider_state.narrowphase_work_queues.mpr_contact_pos_0[idx] = contact_pos_0
-    collider_state.narrowphase_work_queues.mpr_normal_0[idx] = normal_0
-    collider_state.narrowphase_work_queues.mpr_penetration_0[idx] = penetration_0
+    collider_state.narrowphase_work_queues.mpr_contact_pos[idx, 0] = contact_pos_0
+    collider_state.narrowphase_work_queues.mpr_normal[idx, 0] = normal_0
+    collider_state.narrowphase_work_queues.mpr_penetration[idx, 0] = penetration_0
     collider_state.narrowphase_work_queues.mpr_prefer_gjk[idx] = 1 if prefer_gjk else 0
 
 

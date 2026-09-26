@@ -475,6 +475,11 @@ class KinematicSolver(Solver):
         # A static link belongs to no tree, and a scene without any tree keeps its padded tree slot empty (see
         # trees_root_idx in array_class.py)
         links_tree_idx = np.full(self.n_links_, -1, dtype=gs.np_int)
+        links_depth = np.zeros(self.n_links_, dtype=gs.np_int)
+        links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
+        # The dofs of a link and of all its ancestors, the most a constraint row reads per link it couples (see
+        # jac_dofs_idx in array_class.py)
+        self._max_n_chain_dofs = 0
         if self._n_roots:
             links_root_idx = np.array([link.root_idx for link in self.links], dtype=gs.np_int)
             roots_link_idx, links_root_rank = np.unique(links_root_idx, return_inverse=True)
@@ -482,8 +487,21 @@ class KinematicSolver(Solver):
             np.maximum.at(roots_link_end, links_root_rank, np.arange(1, self.n_links + 1, dtype=gs.np_int))
             self.rigid_info.roots_link_idx.from_numpy(roots_link_idx)
             self.rigid_info.links_root_end.from_numpy(roots_link_end[links_root_rank])
+            # Each pass moves every link one ancestor up, so the passes a link takes to run out of parents is its depth,
+            # and the dofs of the ancestors it passes add up to its chain
+            links_parent_idx = np.array([link.parent_idx for link in self.links], dtype=gs.np_int)
+            links_chain_n_dofs = links_n_dofs.copy()
+            links_ancestor_idx = links_parent_idx
+            while (links_ancestor_idx >= 0).any():
+                has_ancestor = links_ancestor_idx >= 0
+                links_depth[: self.n_links] += has_ancestor
+                links_chain_n_dofs += np.where(has_ancestor, links_n_dofs[links_ancestor_idx], 0)
+                links_ancestor_idx = np.where(has_ancestor, links_parent_idx[links_ancestor_idx], -1)
+            self._max_n_chain_dofs = links_chain_n_dofs.max()
+            roots_n_levels = np.zeros(self._n_roots, dtype=gs.np_int)
+            np.maximum.at(roots_n_levels, links_root_rank, links_depth[: self.n_links] + 1)
+            self.rigid_info.roots_n_levels.from_numpy(roots_n_levels)
         if self._n_trees:
-            links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
             links_dof_start = np.array([link.dof_start for link in self.links], dtype=gs.np_int)
             links_dof_end = np.array([link.dof_end for link in self.links], dtype=gs.np_int)
             tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
@@ -511,10 +529,15 @@ class KinematicSolver(Solver):
             self.rigid_info.trees_n_links.from_numpy(trees_n_links[trees_order])
             self.rigid_info.trees_dof_start.from_numpy(trees_dof_start[trees_order])
             self.rigid_info.trees_n_dofs.from_numpy(trees_n_dofs[trees_order])
+            trees_n_levels = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.maximum.at(trees_n_levels, links_tree_rank, links_depth[tree_links] + 1)
+            self.rigid_info.trees_n_levels.from_numpy(trees_n_levels[trees_order])
         else:
             self.rigid_info.trees_root_idx.fill(0)
             self.rigid_info.trees_link_end.fill(0)
+            self.rigid_info.trees_n_levels.fill(0)
         self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
+        self.rigid_info.links_depth.from_numpy(links_depth)
 
     def _init_link_fields(self):
         if self.links:

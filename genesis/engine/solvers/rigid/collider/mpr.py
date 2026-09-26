@@ -25,6 +25,18 @@ class MPR:
             CCD_ITERATIONS=50,
         )
         self.mpr_state = array_class.get_mpr_state(self._solver._B)
+        # The scratch states of the split narrowphase, allocated by 'activate' when it runs
+        self.contact0_mpr_state = None
+        self.multicontact_mpr_state = None
+
+    def activate(self, n_contact0_threads, n_multicontact_threads):
+        """Allocate the scratch states the split narrowphase runs MPR on.
+
+        The split narrowphase runs MPR on one state per thread of its contact0 pass (n_contact0_threads) and of its
+        multicontact pass (n_multicontact_threads), while the other passes run it on one state per environment.
+        """
+        self.contact0_mpr_state = array_class.get_mpr_state(n_contact0_threads)
+        self.multicontact_mpr_state = array_class.get_mpr_state(n_multicontact_threads)
 
 
 @qd.kernel

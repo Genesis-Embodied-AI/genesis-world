@@ -99,7 +99,6 @@ from .abd.forward_kinematics import (
     kernel_update_vgeoms,
 )
 from .abd.forward_dynamics import (
-    func_actuation,
     func_bias_force,
     func_compute_mass_matrix,
     func_compute_qacc,
@@ -589,6 +588,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         constraint_layout_batch_first = (
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
+        # The level sweep (see enable_tree_level_sweep in array_class.py) pays while its blocks fill the GPU cores at
+        # most twice, past which the lanes the narrow levels leave idle outweigh the shorter serial chain. A serialized
+        # run keeps the serial walks.
+        enable_tree_level_sweep = (
+            gs.backend != gs.cpu
+            and not self.sim.options.requires_grad
+            and self.sim._para_level == gs.PARA_LEVEL.ALL
+            and max(self._n_trees, self._n_roots) * self._B * array_class.RigidSimStaticConfig.level_sweep_block_dim
+            <= 2 * get_gpu_core_count()
+        )
 
         rigid_config = dict(
             backend=gs.backend,
@@ -616,6 +625,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             parallel_init=(
                 gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
             ),
+            enable_tree_level_sweep=enable_tree_level_sweep,
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             enable_cooperative_noslip=enable_cooperative_noslip,
@@ -1584,7 +1594,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_forward_kinematics_replay(
             envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
         )
-        kernel_COM_links_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
+        kernel_COM_links_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         kernel_update_geoms_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
         kernel_forward_velocity(
             envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
@@ -1593,9 +1603,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Reverse the stages: velocity first, forward kinematics last. COM and geoms both consume only FK
         # outputs, so their mutual order is free.
         kernel_manual_forward_velocity_bw(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-        kernel_COM_links_replay.grad(
-            self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
-        )
+        kernel_COM_links_replay.grad(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         kernel_update_geoms_replay.grad(
             self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
         )

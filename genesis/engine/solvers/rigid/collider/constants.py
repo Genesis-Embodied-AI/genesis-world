@@ -61,6 +61,22 @@ class PORTAL_STATUS(IntEnum):
     EXACT = 4
 
 
+class MULTICONTACT_SLOT(IntEnum):
+    """
+    What a candidate slot of the split multi-contact pass holds, which decides how the gather accepts it.
+
+    EMPTY: no contact, either a detection that found none or one that did not run.
+    BASE: the first contact of the pair, accepted as it is.
+    EXACT: a perturbed contact whose recovered penetration is exact, discarded as soon as it is non-positive.
+    APPROX: a perturbed contact whose recovered penetration is first-order, kept within a negative tolerance.
+    """
+
+    EMPTY = 0
+    BASE = 1
+    EXACT = 2
+    APPROX = 3
+
+
 class EPA_POLY_INIT_RETURN_CODE(IntEnum):
     """
     Return codes for the EPA polytope initialization.

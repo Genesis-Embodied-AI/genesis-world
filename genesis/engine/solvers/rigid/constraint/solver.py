@@ -43,12 +43,12 @@ def _append_relevant_dof(
     """Append dof i_d to jac_dofs_idx[i_con, :n, i_b] unless already present, returning the new count.
 
     A row coupling two links of the same kinematic tree walks both ancestor chains, so shared ancestor DOFs come up
-    twice: every sparse consumer (J.v / J^T.v products, Hessian assembly, noslip residuals) treats the list as a
-    set, and appending duplicates blindly can push the count past the row capacity (n_dofs), spilling into the next
-    row. The serialized CPU assembly rebuilds rows in index order and self-heals the spill, but the parallel GPU
-    assembly does not, leaving clobbered supports. Duplicates only ever arise while walking the second chain of a
-    row whose links share a kinematic root, so callers pass dedup=False everywhere else and the O(n) scan - which
-    costs >10% on contact-heavy free-body scenes - is skipped.
+    twice: every sparse consumer (J.v / J^T.v products, Hessian assembly, noslip residuals) treats the list as a set,
+    and appending duplicates blindly can push the count past the row capacity (see jac_dofs_idx in array_class.py),
+    spilling into the next row. The serialized CPU assembly rebuilds rows in index order and self-heals the spill, but
+    the parallel GPU assembly does not, leaving clobbered supports. Duplicates only ever arise while walking the second
+    chain of a row whose links share a kinematic root, so callers pass dedup=False everywhere else and the O(n) scan
+    (which costs >10% on contact-heavy free-body scenes) is skipped.
     """
     is_new = True
     if dedup:
@@ -170,7 +170,6 @@ class ConstraintSolver:
         self.qfrc_constraint = cs.qfrc_constraint
         self.qacc = cs.qacc
         self.qacc_ws = cs.qacc_ws
-        self.qacc_prev = cs.qacc_prev
         self.cost_ws = cs.cost_ws
         self.cost = cs.cost
         self.mv = cs.mv

@@ -116,25 +116,30 @@ class GJK:
             diff_contact_min_penetration=gs.EPS * 100.0,
         )
 
-        # Initialize GJK state
-        self.gjk_state = array_class.get_gjk_state(
-            rigid_solver._B, rigid_solver.rigid_config, self._gjk_info, False, rigid_solver.rigid_config.requires_grad
-        )
+        # The scratch states GJK runs on, allocated by 'activate' for the narrowphase that runs it
+        self.gjk_state = None
+        self.contact0_gjk_state = None
+        self.multicontact_gjk_state = None
 
-        self._is_active = False
+    def activate(self, n_contact0_threads=0, n_multicontact_threads=0):
+        """Allocate the scratch states GJK runs on, for the narrowphase that runs it.
 
-    def activate(self):
-        if self._is_active:
-            return
-
-        self.gjk_state = array_class.get_gjk_state(
-            self._solver._B, self._solver.rigid_config, self._gjk_info, True, self._solver.rigid_config.requires_grad
-        )
-        self._is_active = True
-
-    @property
-    def is_active(self):
-        return self._is_active
+        Without thread counts, the single-kernel narrowphase runs GJK on one state per environment. With them, the split
+        narrowphase runs it on one state per thread of its contact0 pass (n_contact0_threads), which detects the first
+        contact alone, and on one full state per thread of its multicontact pass (n_multicontact_threads).
+        """
+        if n_contact0_threads > 0:
+            self.contact0_gjk_state = array_class.get_gjk_state_contact_only(n_contact0_threads)
+            self.multicontact_gjk_state = array_class.get_gjk_state(
+                n_multicontact_threads,
+                self._solver.rigid_config,
+                self._gjk_info,
+                self._solver.rigid_config.requires_grad,
+            )
+        else:
+            self.gjk_state = array_class.get_gjk_state(
+                self._solver._B, self._solver.rigid_config, self._gjk_info, self._solver.rigid_config.requires_grad
+            )
 
 
 @qd.func
