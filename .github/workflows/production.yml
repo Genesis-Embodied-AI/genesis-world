@@ -10,8 +10,8 @@ on:
       - main
   # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
   # completion of a pull request's workflow. A called workflow sees the event, runners and secrets of its caller, so
-  # 'workflow_run' below always means a call, which the image version job vets. The benchmark upload stays gated on the
-  # default branch of this repository, which keeps the results of a caller out of the history compared against.
+  # 'workflow_run' below always means a call, which the setup job vets. The benchmark upload stays gated on the default
+  # branch of this repository, which keeps the results of a caller out of the history compared against.
   workflow_call:
     inputs:
       quadrants_run_id:
@@ -26,7 +26,7 @@ on:
     outputs:
       is_skipped:
         description: Whether the pull request was closed before its run, the tests and benchmarks being skipped.
-        value: ${{ jobs.image-version.outputs.IS_SKIPPED }}
+        value: ${{ jobs.setup.outputs.IS_SKIPPED }}
     secrets:
       HF_TOKEN:
         required: false
@@ -57,8 +57,8 @@ defaults:
     shell: bash --noprofile --norc -exo pipefail {0}
 
 jobs:
-  image-version:
-    name: production-image_version
+  setup:
+    name: production-setup
 
     runs-on: ubuntu-24.04
 
@@ -125,42 +125,36 @@ jobs:
           fi
           echo "ver=${VER}" >> $GITHUB_OUTPUT
 
-  # One of the two runners of this repository stays reserved to it at all times, the other going to whichever run asks
-  # first. The calls of every repository therefore take a single runner all together: a call runs one job at a time,
-  # and waits here, on a runner hosted by GitHub, until every older call has completed its benchmarks. Run ids increase
-  # across repositories, so every call agrees on the order. The repositories that can make a call are the members of the
-  # runner group of these runners, which only a token of an organization-wide GitHub App may list: its id is the
-  # variable 'GENESIS_CI_APP_ID' and its private key the secret 'GENESIS_CI_APP_PRIVATE_KEY' of the organization, and
-  # it needs the organization permission 'Self-hosted runners' and the repository permission 'Actions', both read-only.
-  schedule:
-    name: production-schedule
-
-    needs: image-version
-    # See the check of the calling workflow.
-    if: needs.image-version.outputs.GENESIS_IMAGE_VER != ''
-    runs-on: ubuntu-24.04
-
-    steps:
+      # One of the two runners of this repository stays reserved to it at all times, the other going to whichever run
+      # asks first. The calls of every other repository therefore take a single runner all together: a call runs one job
+      # at a time, and waits here until every older call has completed its unit tests and benchmarks. Run ids increase
+      # across repositories, so every call agrees on the order. A repository can call this workflow once it is added to
+      # the runner group below and to the repository access of the organization variable 'GENESIS_CI_APP_ID' and secret
+      # 'GENESIS_CI_APP_PRIVATE_KEY', and passes its secrets on through 'secrets: inherit'.
       - name: Create a token of the GitHub App
         id: token
-        if: github.event_name == 'workflow_run'
+        if: github.repository != job.workflow_repository && steps.check.outputs.is_open != 'false'
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.GENESIS_CI_APP_ID }}
           private-key: ${{ secrets.GENESIS_CI_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
-      - name: Wait for the older calls
-        if: github.event_name == 'workflow_run'
+      - name: Wait for the runner shared by all calls
+        if: github.repository != job.workflow_repository && steps.check.outputs.is_open != 'false'
         uses: actions/github-script@v8
         env:
           RUNNER_GROUP: genesis-world
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_FILE_PATH: ${{ job.workflow_file_path }}
         with:
           github-token: ${{ steps.token.outputs.token }}
           script: |
             const org = context.repo.owner;
-            const workflowPrefix = `${process.env.WORKFLOW_REPOSITORY}/.github/workflows/production.yml@`;
+            if (!process.env.WORKFLOW_FILE_PATH) {
+              throw new Error("The path of this workflow file is missing from the context 'job'.");
+            }
+            const workflowPath = `${process.env.WORKFLOW_REPOSITORY}/${process.env.WORKFLOW_FILE_PATH}`;
 
             const groups = await github.paginate(github.rest.actions.listSelfHostedRunnerGroupsForOrg, { org });
             const group = groups.find((group) => group.name === process.env.RUNNER_GROUP);
@@ -184,13 +178,13 @@ jobs:
                   owner: org, repo: repo.name, status,
                 });
                 runsOlder.push(...runs.filter((run) => run.id < context.runId
-                  && run.referenced_workflows.some((workflow) => workflow.path.startsWith(workflowPrefix))));
+                  && run.referenced_workflows.some((workflow) => workflow.path.split('@')[0] === workflowPath)));
               }
             }
 
-            // The benchmarks are the last jobs of a call to run on these runners. They are skipped rather than missing
-            // once the unit tests fail, and missing before, so a call has released its runner once they all exist and
-            // have completed.
+            // The benchmarks follow the unit tests and are the last jobs of a call on these runners. They are missing
+            // until the unit tests complete and skipped if these fail, so a call releases its runner once they all
+            // exist and have completed.
             let runsPending = runsOlder;
             while (runsPending.length > 0) {
               const runsStill = [];
@@ -214,8 +208,10 @@ jobs:
   unit-tests:
     name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
-    needs: [image-version, schedule]
-    # See the schedule job.
+    needs: setup
+    # See the check of the calling workflow.
+    if: needs.setup.outputs.GENESIS_IMAGE_VER != ''
+    # See the wait for the runner shared by all calls in the setup job.
     runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
@@ -226,7 +222,7 @@ jobs:
         GS_ENABLE_NDARRAY: ${{ fromJSON(inputs.unit_tests_modes || '["1", "0"]') }}
 
     env:
-      GENESIS_IMAGE_VER: ${{ needs.image-version.outputs.GENESIS_IMAGE_VER }}
+      GENESIS_IMAGE_VER: ${{ needs.setup.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
       # A push to the default branch was validated by its pull request already.
       HAS_UNIT_TESTS: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_run' }}
@@ -235,7 +231,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # See the image version job.
+          # See the setup job.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
 
@@ -340,27 +336,27 @@ jobs:
   benchmarks:
     name: production-benchmarks-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
-    needs: [image-version, unit-tests]
-    # See the schedule job.
+    needs: [setup, unit-tests]
+    # See the unit tests job.
     runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
-      # A call runs one job at a time. See the schedule job.
-      max-parallel: ${{ github.event_name == 'workflow_run' && 1 || 2 }}
+      # A call runs one job at a time. 256 is the largest number of jobs of a matrix, which lifts the limit otherwise.
+      max-parallel: ${{ github.event_name == 'workflow_run' && 1 || 256 }}
       matrix:
         GS_ENABLE_NDARRAY: ["0", "1"]
 
     env:
       # Note that secrets are not passed to workflows that are triggered by a pull request from a fork
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      GENESIS_IMAGE_VER: ${{ needs.image-version.outputs.GENESIS_IMAGE_VER }}
+      GENESIS_IMAGE_VER: ${{ needs.setup.outputs.GENESIS_IMAGE_VER }}
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # See the image version job.
+          # See the setup job.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           # Checkout full history is required to shallow cloning while mark HEAD as "grafted". This breaks remote
