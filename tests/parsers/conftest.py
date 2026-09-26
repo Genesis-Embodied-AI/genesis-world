@@ -500,16 +500,25 @@ def usd_scene(request, model_name, scale, fixed):
     return build_usd_scene(request.getfixturevalue(model_name), scale=scale, fixed=fixed)
 
 
-def _build_textured_triangle_glb(asset_tmp_path, name, first_attribute, primitive_mode=None, node_count=1):
+def _build_textured_triangle_glb(
+    asset_tmp_path,
+    name,
+    first_attribute,
+    vertex_normal=(1.0, 0.0, 0.0),
+    node_scale=None,
+    primitive_mode=None,
+    node_count=1,
+):
     """Build a textured triangle with NORMAL or TEXCOORD_0 at accessor zero, returning the glTF document and path.
 
-    The primitive is declared with primitive_mode when one is given, and node_count nodes hold it, each through a
-    mesh of its own."""
+    Every vertex carries vertex_normal as its authored shading normal, and the node holding the triangle is scaled by
+    node_scale when one is given. The primitive is declared with primitive_mode when one is given, and node_count nodes
+    hold it, each through a mesh of its own."""
     mesh = trimesh.Trimesh(
         vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         faces=[[0, 1, 2]],
         # Authored shading normals differ from the triangle's geometric normal
-        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
+        vertex_normals=[list(vertex_normal)] * 3,
         visual=trimesh.visual.TextureVisuals(
             uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
             material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
@@ -519,6 +528,8 @@ def _build_textured_triangle_glb(asset_tmp_path, name, first_attribute, primitiv
     path = str(asset_tmp_path / f"{name}.glb")
     mesh.export(path, include_normals=True)
     glb = pygltflib.GLTF2().load(path)
+    if node_scale is not None:
+        glb.nodes[0].scale = list(node_scale)
     primitive = glb.meshes[0].primitives[0]
     attributes = primitive.attributes
     accessor = attributes.NORMAL if first_attribute == "NORMAL" else attributes.TEXCOORD_0
@@ -672,47 +683,18 @@ def triangle_strip_nodes_glb(asset_tmp_path):
 
 @pytest.fixture(scope="session")
 def non_uniform_node_scale_glb(asset_tmp_path):
-    """Path to a GLB whose node scales its one triangle by a different factor along each axis.
+    """Path to a GLB whose node scales its triangle by a different factor along each axis.
 
-    The authored normals are the triangle's own geometric normal, which points diagonally, so the node scale has to
-    tilt them for them to stay perpendicular to the scaled triangle."""
-    positions = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    normal = np.cross(positions[1] - positions[0], positions[2] - positions[0])
-    normals = np.tile(normal / np.linalg.norm(normal), (3, 1)).astype(np.float32)
-
-    blob = b""
-    buffer_views = []
-    for data in (positions.tobytes(), normals.tobytes()):
-        buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
-        blob += data
-
-    gltf = pygltflib.GLTF2(
-        scene=0,
-        scenes=[pygltflib.Scene(nodes=[0])],
-        nodes=[pygltflib.Node(mesh=0, scale=[2.0, 0.5, 0.5])],
-        meshes=[
-            pygltflib.Mesh(
-                name="scaled_triangle",
-                primitives=[pygltflib.Primitive(attributes=pygltflib.Attributes(POSITION=0, NORMAL=1))],
-            )
-        ],
-        accessors=[
-            pygltflib.Accessor(
-                bufferView=0,
-                componentType=pygltflib.FLOAT,
-                count=len(positions),
-                type="VEC3",
-                min=positions.min(axis=0).tolist(),
-                max=positions.max(axis=0).tolist(),
-            ),
-            pygltflib.Accessor(bufferView=1, componentType=pygltflib.FLOAT, count=len(normals), type="VEC3"),
-        ],
-        bufferViews=buffer_views,
-        buffers=[pygltflib.Buffer(byteLength=len(blob))],
+    The authored normals point diagonally, so the inverse transpose of that scale, which normals map through, tilts
+    them differently than the scale itself would."""
+    glb, path = _build_textured_triangle_glb(
+        asset_tmp_path,
+        "non_uniform_node_scale",
+        first_attribute="NORMAL",
+        vertex_normal=np.full(3, 1.0 / np.sqrt(3.0)),
+        node_scale=(2.0, 0.5, 0.5),
     )
-    gltf.set_binary_blob(blob)
-    path = str(asset_tmp_path / "non_uniform_node_scale.glb")
-    gltf.save_binary(path)
+    glb.save_binary(path)
     return path
 
 

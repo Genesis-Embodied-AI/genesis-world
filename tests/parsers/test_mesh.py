@@ -295,6 +295,7 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, show_viewer):
         "texcoord_0_accessor_zero_glb",
         "texcoord_1_accessor_zero_glb",
         "triangle_strip_nodes_glb",
+        "non_uniform_node_scale_glb",
     ],
 )
 def test_glb_parse_geometry(request, glb_file, tol):
@@ -312,11 +313,25 @@ def test_glb_parse_geometry(request, glb_file, tol):
     )
 
     tm_scene = trimesh.load(glb_path, process=False)
+    # A mesh whose primitives all declare NORMAL carries authored normals, which map through the inverse transpose
+    # of the node transform's linear part. 'apply_transform' maps the normals it holds through the linear part
+    # itself, so the authored ones are mapped here and written back over its result. A mesh declaring none leaves
+    # its normals to be derived from the geometry, which both parsers do once the node transform is applied.
+    glb = pygltflib.GLTF2().load(glb_path)
+    authored_normals_names = {
+        mesh.name for mesh in glb.meshes if all(prim.attributes.NORMAL is not None for prim in mesh.primitives)
+    }
     tm_meshes = {}
     for node_name in tm_scene.graph.nodes_geometry:
         transform, geometry_name = tm_scene.graph[node_name]
         ts_mesh = tm_scene.geometry[geometry_name].copy(include_cache=True)
+        normals = None
+        if geometry_name in authored_normals_names:
+            normals = ts_mesh.vertex_normals @ np.linalg.inv(transform[:3, :3])
+            normals /= np.linalg.norm(normals, axis=1, keepdims=True)
         ts_mesh = ts_mesh.apply_transform(transform)
+        if normals is not None:
+            ts_mesh.vertex_normals = normals
         tm_meshes[geometry_name] = ts_mesh
     assert len(tm_meshes) == len(gs_meshes)
 
@@ -324,25 +339,6 @@ def test_glb_parse_geometry(request, glb_file, tol):
         mesh_name = gs_mesh.metadata["name"]
         tm_mesh = tm_meshes[mesh_name]
         check_gs_tm_meshes(gs_mesh, tm_mesh, mesh_name, tol, tol)
-
-
-@pytest.mark.required
-def test_glb_node_scale_normals(non_uniform_node_scale_glb):
-    # The normal of a flat triangle is the geometric normal of that triangle, whatever the node scales it by
-    gs_meshes = gltf_utils.parse_mesh_glb(
-        non_uniform_node_scale_glb,
-        group_by_material=False,
-        scale=None,
-        is_mesh_zup=True,
-        surface=gs.surfaces.Default(),
-    )
-    assert len(gs_meshes) == 1
-    tm_mesh = gs_meshes[0].trimesh
-    triangle = tm_mesh.vertices[tm_mesh.faces[0]]
-    geometric_normal = np.cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
-    geometric_normal /= np.linalg.norm(geometric_normal)
-    # The authored normals are stored in a float accessor, so they round to float32 in the file
-    assert_allclose(tm_mesh.vertex_normals, geometric_normal, tol=np.finfo(np.float32).eps)
 
 
 @pytest.mark.required
