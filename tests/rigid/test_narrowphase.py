@@ -290,10 +290,14 @@ def create_modified_narrowphase_file(tmp_path: Path):
         lines, "gjk.func_gjk_contact(", ERRNO_CALLED_GJK_K2, "MODIFIED: GJK called for collision detection"
     )
 
-    # Split path: mark the multicontact dispatch call (errno/i_b in scope; in this forced-GJK scene the multicontact
-    # pass always resolves contacts with GJK).
+    # Split path: mark the multicontact dispatch call (in this forced-GJK scene the multicontact pass always resolves
+    # contacts with GJK), indexing errno by the env of the queue entry it dispatches.
     lines = insert_errno_before_call(
-        lines, "_func_multicontact_mpr(", ERRNO_CALLED_GJK_K2, "MODIFIED: GJK path in multicontact", "i_b"
+        lines,
+        "_func_multicontact_detect(",
+        ERRNO_CALLED_GJK_K2,
+        "MODIFIED: GJK path in multicontact",
+        "collider_state.narrowphase_work_queues.mpr_i_b[i_work]",
     )
 
     content = "\n".join(lines)
