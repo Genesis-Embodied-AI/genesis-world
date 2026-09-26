@@ -528,8 +528,12 @@ def _build_textured_triangle_glb(
     path = str(asset_tmp_path / f"{name}.glb")
     mesh.export(path, include_normals=True)
     glb = pygltflib.GLTF2().load(path)
+    # The exported node layout depends on the trimesh version, which may nest the mesh node under a mesh-less root
+    i_mesh_node = next(i_node for i_node, node in enumerate(glb.nodes) if node.mesh == 0)
+    mesh_node = glb.nodes[i_mesh_node]
+    siblings_idx = next((node.children for node in glb.nodes if i_mesh_node in node.children), glb.scenes[0].nodes)
     if node_scale is not None:
-        glb.nodes[0].scale = list(node_scale)
+        mesh_node.scale = list(node_scale)
     primitive = glb.meshes[0].primitives[0]
     attributes = primitive.attributes
     accessor = attributes.NORMAL if first_attribute == "NORMAL" else attributes.TEXCOORD_0
@@ -545,10 +549,10 @@ def _build_textured_triangle_glb(
     for i_node in range(1, node_count):
         # The same primitive on a mesh and node of its own, ten units further along x
         glb.meshes.append(pygltflib.Mesh(name=f"{glb.meshes[0].name}_{i_node}", primitives=[copy.deepcopy(primitive)]))
+        siblings_idx.append(len(glb.nodes))
         glb.nodes.append(
-            pygltflib.Node(mesh=i_node, name=f"{glb.nodes[0].name}_{i_node}", translation=[10.0 * i_node, 0.0, 0.0])
+            pygltflib.Node(mesh=i_node, name=f"{mesh_node.name}_{i_node}", translation=[10.0 * i_node, 0.0, 0.0])
         )
-        glb.scenes[0].nodes.append(i_node)
     return glb, path
 
 
