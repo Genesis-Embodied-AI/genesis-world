@@ -10,9 +10,8 @@ on:
       - main
   # Repositories that Genesis depends on validate their changes by calling this workflow from one started by the
   # completion of a pull request's workflow. A called workflow sees the event, runners and secrets of its caller, so
-  # 'workflow_run' below always means a call, which the image version job vets. Calls queue on the one runner labelled
-  # 'external' so that the other stays with this repository, and the benchmark upload stays gated on the default branch
-  # of this repository, which keeps the results of a caller out of the history compared against.
+  # 'workflow_run' below always means a call, which the image version job vets. The benchmark upload stays gated on the
+  # default branch of this repository, which keeps the results of a caller out of the history compared against.
   workflow_call:
     inputs:
       quadrants_run_id:
@@ -32,6 +31,8 @@ on:
       HF_TOKEN:
         required: false
       WANDB_API_KEY:
+        required: false
+      GENESIS_CI_APP_PRIVATE_KEY:
         required: false
 
 concurrency:
@@ -124,19 +125,98 @@ jobs:
           fi
           echo "ver=${VER}" >> $GITHUB_OUTPUT
 
-  unit-tests:
-    name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
+  # One of the two runners of this repository stays reserved to it at all times, the other going to whichever run asks
+  # first. The calls of every repository therefore take a single runner all together: a call runs one job at a time,
+  # and waits here, on a runner hosted by GitHub, until every older call has completed its benchmarks. Run ids increase
+  # across repositories, so every call agrees on the order. The repositories that can make a call are the members of the
+  # runner group of these runners, which only a token of an organization-wide GitHub App may list: its id is the
+  # variable 'GENESIS_CI_APP_ID' and its private key the secret 'GENESIS_CI_APP_PRIVATE_KEY' of the organization, and
+  # it needs the organization permission 'Self-hosted runners' and the repository permission 'Actions', both read-only.
+  schedule:
+    name: production-schedule
 
     needs: image-version
     # See the check of the calling workflow.
     if: needs.image-version.outputs.GENESIS_IMAGE_VER != ''
-    # A call takes the one runner carrying the 'external' label, so calls queue there in order whichever repository
-    # they come from, and the other runner stays available to this repository. Which repositories reach these runners
-    # at all is decided by their runner group.
-    runs-on: >-
-      ${{ github.event_name == 'workflow_run'
-          && fromJSON('["self-hosted", "coreweave", "genesis-world", "external"]')
-          || fromJSON('["self-hosted", "coreweave", "genesis-world"]') }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Create a token of the GitHub App
+        id: token
+        if: github.event_name == 'workflow_run'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GENESIS_CI_APP_ID }}
+          private-key: ${{ secrets.GENESIS_CI_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Wait for the older calls
+        if: github.event_name == 'workflow_run'
+        uses: actions/github-script@v8
+        env:
+          RUNNER_GROUP: genesis-world
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+        with:
+          github-token: ${{ steps.token.outputs.token }}
+          script: |
+            const org = context.repo.owner;
+            const workflowPrefix = `${process.env.WORKFLOW_REPOSITORY}/.github/workflows/production.yml@`;
+
+            const groups = await github.paginate(github.rest.actions.listSelfHostedRunnerGroupsForOrg, { org });
+            const group = groups.find((group) => group.name === process.env.RUNNER_GROUP);
+            if (!group) {
+              throw new Error(`Runner group '${process.env.RUNNER_GROUP}' is missing from organization '${org}'.`);
+            }
+            const repos = group.visibility === 'selected'
+              ? await github.paginate(github.rest.actions.listRepoAccessToSelfHostedRunnerGroupInOrg, {
+                  org, runner_group_id: group.id,
+                })
+              : await github.paginate(github.rest.repos.listForOrg, { org, type: 'all' });
+
+            // A call only waits for the older ones, which all exist by now, so they are listed once.
+            const runsOlder = [];
+            for (const repo of repos) {
+              if (repo.full_name === process.env.WORKFLOW_REPOSITORY) {
+                continue;
+              }
+              for (const status of ['requested', 'queued', 'pending', 'waiting', 'in_progress']) {
+                const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                  owner: org, repo: repo.name, status,
+                });
+                runsOlder.push(...runs.filter((run) => run.id < context.runId
+                  && run.referenced_workflows.some((workflow) => workflow.path.startsWith(workflowPrefix))));
+              }
+            }
+
+            // The benchmarks are the last jobs of a call to run on these runners. They are skipped rather than missing
+            // once the unit tests fail, and missing before, so a call has released its runner once they all exist and
+            // have completed.
+            let runsPending = runsOlder;
+            while (runsPending.length > 0) {
+              const runsStill = [];
+              for (const run of runsPending) {
+                const params = { owner: org, repo: run.repository.name, run_id: run.id };
+                const { data } = await github.rest.actions.getWorkflowRun(params);
+                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, params);
+                const jobsBenchmarks = jobs.filter((job) => job.name.includes('production-benchmarks-'));
+                if (data.status !== 'completed'
+                    && !(jobsBenchmarks.length > 0 && jobsBenchmarks.every((job) => job.status === 'completed'))) {
+                  runsStill.push(run);
+                }
+              }
+              runsPending = runsStill;
+              if (runsPending.length > 0) {
+                core.info(`Waiting for ${runsPending.map((run) => run.html_url).join(', ')}`);
+                await new Promise((resolve) => setTimeout(resolve, 60000));
+              }
+            }
+
+  unit-tests:
+    name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
+
+    needs: [image-version, schedule]
+    # See the schedule job.
+    runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
       fail-fast: true
@@ -261,13 +341,12 @@ jobs:
     name: production-benchmarks-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
     needs: [image-version, unit-tests]
-    # See the unit tests job.
-    runs-on: >-
-      ${{ github.event_name == 'workflow_run'
-          && fromJSON('["self-hosted", "coreweave", "genesis-world", "external"]')
-          || fromJSON('["self-hosted", "coreweave", "genesis-world"]') }}
+    # See the schedule job.
+    runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
+      # A call runs one job at a time. See the schedule job.
+      max-parallel: ${{ github.event_name == 'workflow_run' && 1 || 2 }}
       matrix:
         GS_ENABLE_NDARRAY: ["0", "1"]
 
