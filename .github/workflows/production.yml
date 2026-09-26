@@ -24,6 +24,10 @@ on:
       unit_tests_modes:
         description: JSON list of the array modes of the unit tests ('1' dynamic arrays, '0' fields), both by default.
         type: string
+    outputs:
+      is_skipped:
+        description: Whether the pull request was closed before its run, the tests and benchmarks being skipped.
+        value: ${{ jobs.image-version.outputs.IS_SKIPPED }}
     secrets:
       HF_TOKEN:
         required: false
@@ -59,6 +63,7 @@ jobs:
 
     outputs:
       GENESIS_IMAGE_VER: ${{ steps.resolve.outputs.ver }}
+      IS_SKIPPED: ${{ steps.check.outputs.is_open == 'false' }}
 
     steps:
       - name: Checkout code
@@ -71,8 +76,10 @@ jobs:
 
       # Another repository is served for the completion of the workflow of a pull request against its default branch
       # alone. The event of a pull request from a fork names no base branch, so the pull request is asked of the API.
-      # The runner jobs follow through 'needs'.
+      # A pull request closed while its wheel was building has nothing left to validate: the check passes without an
+      # image version, the runner jobs, which follow through 'needs', are skipped, and the caller is told so.
       - name: Check the calling workflow
+        id: check
         if: github.repository != job.workflow_repository
         uses: actions/github-script@v8
         with:
@@ -85,17 +92,24 @@ jobs:
             const { data } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
+              state: 'all',
               base: context.payload.repository.default_branch,
               head: `${run.head_repository.owner.login}:${run.head_branch}`,
             });
-            if (!data.some((pull) => pull.head.sha === run.head_sha)) {
+            const pull = data.find((pull) => pull.head.sha === run.head_sha);
+            if (!pull) {
               throw new Error(`Commit ${run.head_sha} heads no pull request against the default branch.`);
             }
+            if (pull.state !== 'open') {
+              core.notice(`Pull request #${pull.number} is closed, so its commit ${run.head_sha} is left untested.`);
+            }
+            core.setOutput('is_open', pull.state === 'open');
 
       # The pin lives in the tree rather than in this file so that a pull request bumping it is validated by its own
       # run instead of only taking effect once merged.
       - name: Resolve the pinned container image version
         id: resolve
+        if: steps.check.outputs.is_open != 'false'
         run: |
           if [[ ! -f .github/genesis_image_ver ]] ; then
             echo "::error::'.github/genesis_image_ver' is missing. Rebase onto the default branch."
@@ -112,6 +126,8 @@ jobs:
     name: production-unit_tests-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
 
     needs: image-version
+    # See the check of the calling workflow.
+    if: needs.image-version.outputs.GENESIS_IMAGE_VER != ''
     # A call takes the one runner carrying the 'external' label, so calls queue there in order whichever repository
     # they come from, and the other runner stays available to this repository. Which repositories reach these runners
     # at all is decided by their runner group.
