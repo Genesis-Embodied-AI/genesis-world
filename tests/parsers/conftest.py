@@ -179,9 +179,9 @@ def check_gs_textures(gs_texture1, gs_texture2, default_value, material_name, te
             err_msg=f"Texture mismatch for material {material_name} in {texture_name}.",
         )
     else:
-        assert gs_texture1 is None and gs_texture2 is None, (
-            f"Both textures should be None for material {material_name} in {texture_name}."
-        )
+        assert (
+            gs_texture1 is None and gs_texture2 is None
+        ), f"Both textures should be None for material {material_name} in {texture_name}."
 
 
 def check_gs_surfaces(gs_surface1, gs_surface2, material_name):
@@ -556,20 +556,38 @@ def texcoord_1_accessor_zero_glb(asset_tmp_path):
     return path
 
 
-@pytest.fixture(scope="session")
-def emissive_material_variants_glb(asset_tmp_path):
-    """Path to a GLB with three materials on distinct base/emissive texCoord sets and a triangle carrying two of them.
+# The alpha channel of the atlas the alpha-mode materials of material_variants_glb share: the ramp a cutout has
+# along its edge
+ALPHA_RAMP = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+# Those materials, as name: (alphaMode, alphaCutoff, alpha of baseColorFactor)
+ALPHA_MODE_MATERIALS = {
+    "masked": ("MASK", 0.6, 1.0),
+    "masked_factor": ("MASK", 0.5, 0.6),
+    "blended": ("BLEND", 0.5, 1.0),
+    "opaque": ("OPAQUE", 0.5, 1.0),
+}
 
-    The materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base color
-    with an emissive atlas on texCoord 1, and a KHR_materials_unlit material whose red base atlas stands in for the
-    unlit imagery. The red base atlas is index 0. The triangle holds the first two materials as primitives, with the
-    same texture coordinates stored as float in set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows,
-    in set 1."""
+
+@pytest.fixture(scope="session")
+def material_variants_glb(asset_tmp_path):
+    """Path to a GLB with materials on distinct base/emissive texCoord sets and on every alpha mode, and a triangle
+    carrying all of them but one.
+
+    The first materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base
+    color with an emissive atlas on texCoord 1, and a KHR_materials_unlit material whose red base atlas stands in for
+    the unlit imagery. The red base atlas is index 0. Then come ALPHA_MODE_MATERIALS, on an RGBA atlas whose alpha is
+    ALPHA_RAMP. The triangle holds every material but the unlit one as primitives, with the same texture coordinates
+    stored as float in set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows, in set 1."""
     images = []
     for color in (np.array([220, 30, 30], np.uint8), np.array([30, 220, 30], np.uint8)):
         buffer = io.BytesIO()
         Image.fromarray(np.broadcast_to(color, (8, 8, 3)).copy()).save(buffer, format="PNG")
         images.append(buffer.getvalue())
+    rgba = np.full((1, len(ALPHA_RAMP), 4), 255, dtype=np.uint8)
+    rgba[..., 3] = ALPHA_RAMP
+    buffer = io.BytesIO()
+    Image.fromarray(rgba, mode="RGBA").save(buffer, format="PNG")
+    images.append(buffer.getvalue())
 
     positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
     uvs = np.array([[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]], dtype=np.float32)
@@ -592,22 +610,26 @@ def emissive_material_variants_glb(asset_tmp_path):
                     pygltflib.Primitive(
                         attributes=pygltflib.Attributes(POSITION=0, TEXCOORD_0=1, TEXCOORD_1=2), material=material
                     )
-                    for material in range(2)
+                    for material in (0, 1, *range(3, 3 + len(ALPHA_MODE_MATERIALS)))
                 ]
             )
         ],
         accessors=[
             pygltflib.Accessor(
-                bufferView=2,
+                bufferView=len(images),
                 componentType=pygltflib.FLOAT,
                 count=3,
                 type="VEC3",
                 min=positions.min(axis=0).tolist(),
                 max=positions.max(axis=0).tolist(),
             ),
-            pygltflib.Accessor(bufferView=3, componentType=pygltflib.FLOAT, count=3, type="VEC2"),
+            pygltflib.Accessor(bufferView=len(images) + 1, componentType=pygltflib.FLOAT, count=3, type="VEC2"),
             pygltflib.Accessor(
-                bufferView=4, componentType=pygltflib.UNSIGNED_SHORT, normalized=True, count=3, type="VEC2"
+                bufferView=len(images) + 2,
+                componentType=pygltflib.UNSIGNED_SHORT,
+                normalized=True,
+                count=3,
+                type="VEC2",
             ),
         ],
         materials=[
@@ -629,14 +651,26 @@ def emissive_material_variants_glb(asset_tmp_path):
                 ),
                 extensions={"KHR_materials_unlit": {}},
             ),
+            *(
+                pygltflib.Material(
+                    name=name,
+                    pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
+                        baseColorTexture=pygltflib.TextureInfo(index=2, texCoord=0),
+                        baseColorFactor=[1.0, 1.0, 1.0, alpha_factor],
+                    ),
+                    alphaMode=alpha_mode,
+                    alphaCutoff=alpha_cutoff,
+                )
+                for name, (alpha_mode, alpha_cutoff, alpha_factor) in ALPHA_MODE_MATERIALS.items()
+            ),
         ],
-        textures=[pygltflib.Texture(source=0), pygltflib.Texture(source=1)],
-        images=[pygltflib.Image(bufferView=i, mimeType="image/png") for i in range(2)],
+        textures=[pygltflib.Texture(source=i) for i in range(len(images))],
+        images=[pygltflib.Image(bufferView=i, mimeType="image/png") for i in range(len(images))],
         bufferViews=buffer_views,
         buffers=[pygltflib.Buffer(byteLength=len(blob))],
     )
     gltf.set_binary_blob(blob)
-    path = asset_tmp_path / "emissive_material_variants.glb"
+    path = asset_tmp_path / "material_variants.glb"
     gltf.save_binary(str(path))
     return str(path)
 
