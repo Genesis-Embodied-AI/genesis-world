@@ -136,8 +136,8 @@ def kernel_masked_forward_velocity(
 
 @qd.func
 def func_update_kinematics_root(
-    i_l_root,
-    i_b,
+    i_l_root: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -159,8 +159,8 @@ def func_update_kinematics_root(
 
 @qd.func
 def func_COM_root(
-    i_l_root,
-    i_b,
+    i_l_root: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -268,8 +268,8 @@ def func_COM_root(
 
 @qd.func
 def func_forward_kinematics_link(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     qpos: qd.Tensor,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -394,8 +394,8 @@ def func_forward_kinematics_link(
 
 @qd.func
 def func_forward_kinematics_root(
-    i_l_root,
-    i_b,
+    i_l_root: int,
+    i_b: int,
     qpos: qd.Tensor,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -418,8 +418,8 @@ def func_forward_kinematics_root(
 
 @qd.func
 def func_update_geoms_link(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
@@ -459,8 +459,8 @@ def func_update_geoms_link(
 
 @qd.func
 def func_update_geoms_root(
-    i_l_root,
-    i_b,
+    i_l_root: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -532,8 +532,8 @@ def kernel_update_geoms(
 
 @qd.func
 def func_forward_velocity_link(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -633,8 +633,8 @@ def func_forward_velocity_link(
 
 @qd.func
 def func_forward_velocity_root(
-    i_l_root,
-    i_b,
+    i_l_root: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -816,8 +816,8 @@ def kernel_update_vverts_for_vgeoms(
 
 @qd.func
 def func_update_cartesian_space_root(
-    i_l_root,
-    i_b,
+    i_l_root: int,
+    i_b: int,
     qpos: qd.Tensor,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,

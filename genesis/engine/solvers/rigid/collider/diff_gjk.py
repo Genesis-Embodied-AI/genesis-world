@@ -7,15 +7,15 @@ from . import gjk as GJK, contact, epa
 
 @qd.func
 def func_gjk_contact(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    pos_tol,
-    normal_tol,
+    pos_tol: float,
+    normal_tol: float,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -343,14 +343,14 @@ def func_gjk_contact(
 
 @qd.func
 def func_extended_epa(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     pos_a: qd.types.vector(3),
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    max_iter,
+    max_iter: int,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
@@ -550,10 +550,10 @@ def func_extended_epa(
 
 @qd.func
 def func_add_diff_contact_input(
-    i_ga,
-    i_gb,
-    i_b,
-    i_f,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_f: int,
     pos_a: qd.types.vector(3),
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
@@ -654,9 +654,9 @@ def func_add_diff_contact_input(
 
 @qd.func
 def func_contact_orthogonals(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     normal: qd.types.vector(3),
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
@@ -717,11 +717,11 @@ def func_compute_minkowski_point(
 # --------------------------------------------------------------------------------------------
 @qd.func
 def func_differentiable_contact(
-    i_ga,
-    i_gb,
-    i_b,
-    i_c,
-    ref_penetration,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_c: int,
+    ref_penetration: float,
     dyn_state: array_class.DynState,
     diff_contact_input: array_class.DiffContactInput,
     collider_info: array_class.ColliderInfo,
@@ -831,9 +831,9 @@ def func_differentiable_contact(
 
 @qd.func
 def func_plane_contact_frame(
-    i_b,
-    i_ga,
-    i_gb,
+    i_b: int,
+    i_ga: int,
+    i_gb: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
 ):
@@ -855,7 +855,12 @@ def func_plane_contact_frame(
 
 @qd.func
 def func_differentiable_sphere_contact(
-    i_ga, i_gb, i_b, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_info: array_class.RigidInfo
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
 ):
     """Differentiable sphere-sphere contact reconstruction.
 
@@ -889,10 +894,10 @@ def func_differentiable_sphere_contact(
 
 @qd.func
 def func_differentiable_plane_contact(
-    i_ga,
-    i_gb,
-    i_b,
-    i_c,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_c: int,
     dyn_state: array_class.DynState,
     diff_contact_input: array_class.DiffContactInput,
     dyn_info: array_class.DynInfo,
@@ -928,7 +933,7 @@ def func_differentiable_plane_contact(
 
 
 @qd.func
-def func_plane_normal(v1, v2, v3):
+def func_plane_normal(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3)):
     """
     Compute the normal of the plane defined by three points. The length of the normal corresponds to the two times the
     area of the triangle.
@@ -940,7 +945,9 @@ def func_plane_normal(v1, v2, v3):
 
 
 @qd.func
-def func_project_origin_to_plane(v1, v2, v3, normal):
+def func_project_origin_to_plane(
+    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), normal: qd.types.vector(3)
+):
     """
     Project the origin onto the plane defined by a point on the plane and its normal.
 
@@ -955,7 +962,13 @@ def func_project_origin_to_plane(v1, v2, v3, normal):
 
 
 @qd.func
-def func_triangle_affine_coords(v1, v2, v3, normal, point):
+def func_triangle_affine_coords(
+    v1: qd.types.vector(3),
+    v2: qd.types.vector(3),
+    v3: qd.types.vector(3),
+    normal: qd.types.vector(3),
+    point: qd.types.vector(3),
+):
     """
     Compute the affine coordinates of the point with respect to the triangle.
 

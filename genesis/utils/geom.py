@@ -16,6 +16,27 @@ from genesis.typing import Vec3FType
 
 
 @qd.func
+def qd_compare_sign(a, b):
+    """
+    Return 1 when both values are positive, -1 when both are negative, and 0 otherwise.
+    """
+    ret = 0
+    if a > 0 and b > 0:
+        ret = 1
+    elif a < 0 and b < 0:
+        ret = -1
+    return ret
+
+
+@qd.func
+def qd_is_equal_vec(a, b, eps: float):
+    """
+    Return whether every component of two vectors agrees within the tolerance eps.
+    """
+    return (qd.abs(a - b) < eps).all()
+
+
+@qd.func
 def qd_i_cross_vec(vec):
     return qd.Vector([0.0, -vec[2], vec[1]], dt=gs.qd_float)
 

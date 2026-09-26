@@ -136,8 +136,8 @@ def _kernel_init_support(
 
 @qd.func
 def _func_support_world(
-    i_g,
-    d,
+    i_g: int,
+    d: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
     dyn_info: array_class.DynInfo,
@@ -165,7 +165,7 @@ def _func_support_world(
 
 
 @qd.func
-def _func_direction_grid_coords(d_mesh, support_res):
+def _func_direction_grid_coords(d_mesh: qd.types.vector(3), support_res: int):
     """
     Chart of a mesh-frame direction and its continuous cell coordinates within that chart.
 
@@ -190,7 +190,7 @@ def _func_direction_grid_coords(d_mesh, support_res):
 
 
 @qd.func
-def _func_support_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
+def _func_support_mesh(i_g: int, d_mesh: qd.types.vector(3), collider_info: array_class.ColliderInfo):
     """
     support point at mesh frame coordinate.
     """
@@ -229,7 +229,7 @@ def _func_support_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
 
 
 @qd.func
-def _func_support_mesh_exhaustive(i_g, d_mesh, dyn_info: array_class.DynInfo):
+def _func_support_mesh_exhaustive(i_g: int, d_mesh: qd.types.vector(3), dyn_info: array_class.DynInfo):
     """Support vertex by exhaustive scan in the mesh frame, the first maximum winning, like the scan the reference
     engine's fallback collision pipeline runs below its hill-climb threshold."""
     dot_max = gs.qd_float(-1e20)
@@ -244,7 +244,12 @@ def _func_support_mesh_exhaustive(i_g, d_mesh, dyn_info: array_class.DynInfo):
 
 @qd.func
 def _func_support_sphere(
-    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), shrink, dyn_info: array_class.DynInfo
+    i_g: int,
+    d: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    shrink: bool,
 ):
     sphere_center = pos
     sphere_radius = dyn_info.geoms.data[i_g][0]
@@ -264,7 +269,9 @@ def _func_support_sphere(
 
 
 @qd.func
-def _func_support_ellipsoid(i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo):
+def _func_support_ellipsoid(
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo
+):
     a = dyn_info.geoms.data[i_g][0]
     b = dyn_info.geoms.data[i_g][1]
     c = dyn_info.geoms.data[i_g][2]
@@ -284,7 +291,12 @@ def _func_support_ellipsoid(i_g, d, pos: qd.types.vector(3), quat: qd.types.vect
 
 @qd.func
 def _func_support_capsule(
-    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), shrink, dyn_info: array_class.DynInfo
+    i_g: int,
+    d: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    shrink: bool,
 ):
     """
     Support function for capsule geometry.
@@ -312,7 +324,12 @@ def _func_support_capsule(
 
 @qd.func
 def _func_support_cylinder(
-    i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), shrink, dyn_info: array_class.DynInfo
+    i_g: int,
+    d: qd.types.vector(3),
+    pos: qd.types.vector(3),
+    quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    shrink: bool,
 ):
     """
     Support function for cylinder geometry.
@@ -335,7 +352,7 @@ def _func_support_cylinder(
 
 
 @qd.func
-def _func_support_prism(i_b, d, collider_state: array_class.ColliderState):
+def _func_support_prism(i_b: int, d: qd.types.vector(3), collider_state: array_class.ColliderState):
     istart = 3
     if d[2] < 0:
         istart = 0
@@ -352,7 +369,9 @@ def _func_support_prism(i_b, d, collider_state: array_class.ColliderState):
 
 
 @qd.func
-def _func_support_box(i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo):
+def _func_support_box(
+    i_g: int, d: qd.types.vector(3), pos: qd.types.vector(3), quat: qd.types.vector(4), dyn_info: array_class.DynInfo
+):
     d_box = gu.qd_inv_transform_by_quat(d, quat)
 
     v_ = qd.Vector(
@@ -370,7 +389,9 @@ def _func_support_box(i_g, d, pos: qd.types.vector(3), quat: qd.types.vector(4),
 
 
 @qd.func
-def _func_count_supports_world(i_g, d, quat: qd.types.vector(4), collider_info: array_class.ColliderInfo):
+def _func_count_supports_world(
+    i_g: int, d: qd.types.vector(3), quat: qd.types.vector(4), collider_info: array_class.ColliderInfo
+):
     """
     Count the number of valid support points for the given world direction.
     Only needs quat since counting doesn't depend on position.
@@ -380,7 +401,7 @@ def _func_count_supports_world(i_g, d, quat: qd.types.vector(4), collider_info: 
 
 
 @qd.func
-def _func_count_supports_mesh(i_g, d_mesh, collider_info: array_class.ColliderInfo):
+def _func_count_supports_mesh(i_g: int, d_mesh: qd.types.vector(3), collider_info: array_class.ColliderInfo):
     """
     Count the number of distinct support vertices tied for the maximum dot product in the given direction.
 
@@ -442,7 +463,7 @@ def _func_count_supports_mesh(i_g, d_mesh, collider_info: array_class.ColliderIn
 
 
 @qd.func
-def _func_count_supports_box(d, quat: qd.types.vector(4)):
+def _func_count_supports_box(d: qd.types.vector(3), quat: qd.types.vector(4)):
     """
     Count the number of valid support points for a box in the given direction.
 

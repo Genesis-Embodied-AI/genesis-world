@@ -13,7 +13,13 @@ from .utils import func_det3
 
 
 @qd.func
-def func_ray_triangle_intersection(ray_v1, ray_v2, tri_v1, tri_v2, tri_v3):
+def func_ray_triangle_intersection(
+    ray_v1: qd.types.vector(3),
+    ray_v2: qd.types.vector(3),
+    tri_v1: qd.types.vector(3),
+    tri_v2: qd.types.vector(3),
+    tri_v3: qd.types.vector(3),
+):
     """
     Check if the ray intersects the triangle.
 
@@ -40,7 +46,9 @@ def func_ray_triangle_intersection(ray_v1, ray_v2, tri_v1, tri_v2, tri_v3):
 
 
 @qd.func
-def func_triangle_affine_coords(point, tri_v1, tri_v2, tri_v3):
+def func_triangle_affine_coords(
+    point: qd.types.vector(3), tri_v1: qd.types.vector(3), tri_v2: qd.types.vector(3), tri_v3: qd.types.vector(3)
+):
     """
     Compute the affine coordinates of the point with respect to the triangle.
     """
@@ -103,7 +111,13 @@ def func_triangle_affine_coords(point, tri_v1, tri_v2, tri_v3):
 
 
 @qd.func
-def func_point_triangle_intersection(point, tri_v1, tri_v2, tri_v3, collider_info: array_class.ColliderInfo):
+def func_point_triangle_intersection(
+    point: qd.types.vector(3),
+    tri_v1: qd.types.vector(3),
+    tri_v2: qd.types.vector(3),
+    tri_v3: qd.types.vector(3),
+    collider_info: array_class.ColliderInfo,
+):
     """
     Check if the point is inside the triangle.
     """
@@ -122,7 +136,9 @@ def func_point_triangle_intersection(point, tri_v1, tri_v2, tri_v3, collider_inf
 
 
 @qd.func
-def func_point_plane_same_side(point, plane_v1, plane_v2, plane_v3):
+def func_point_plane_same_side(
+    point: qd.types.vector(3), plane_v1: qd.types.vector(3), plane_v2: qd.types.vector(3), plane_v3: qd.types.vector(3)
+):
     """
     Check if the point is on the same side of the plane as the origin.
     """
@@ -142,7 +158,9 @@ def func_point_plane_same_side(point, plane_v1, plane_v2, plane_v3):
 
 
 @qd.func
-def func_origin_tetra_intersection(tet_v1, tet_v2, tet_v3, tet_v4):
+def func_origin_tetra_intersection(
+    tet_v1: qd.types.vector(3), tet_v2: qd.types.vector(3), tet_v3: qd.types.vector(3), tet_v4: qd.types.vector(3)
+):
     """
     Check if the origin is inside the tetrahedron.
     """
@@ -162,7 +180,9 @@ def func_origin_tetra_intersection(tet_v1, tet_v2, tet_v3, tet_v4):
 
 
 @qd.func
-def func_project_origin_to_plane(v1, v2, v3, collider_info: array_class.ColliderInfo):
+def func_project_origin_to_plane(
+    v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3), collider_info: array_class.ColliderInfo
+):
     """
     Project the origin onto the plane defined by the simplex vertices.
     """

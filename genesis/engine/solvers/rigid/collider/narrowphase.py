@@ -30,9 +30,9 @@ from .utils import func_point_in_geom_aabb
 
 @qd.func
 def func_contact_sphere_sdf(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -68,15 +68,15 @@ def func_contact_sphere_sdf(
 
 @qd.func
 def func_add_polytope_vertex_contacts_sdf(
-    i_ga,
-    i_gb,
-    i_b,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_pair: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    tolerance,
+    tolerance: float,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -595,15 +595,15 @@ def func_add_polytope_vertex_contacts_sdf(
 
 @qd.func
 def func_add_polytope_vertex_contacts_sdf_shell(
-    i_ga,
-    i_gb,
-    i_b,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_pair: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
-    tolerance,
+    tolerance: float,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -997,9 +997,9 @@ def func_add_polytope_vertex_contacts_sdf_shell(
 
 @qd.func
 def func_contact_vertex_sdf(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
@@ -1052,9 +1052,9 @@ def func_contact_vertex_sdf(
 
 @qd.func
 def func_contact_nonconvex_convex_sdf(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
@@ -1133,10 +1133,10 @@ def func_contact_nonconvex_convex_sdf(
 
 @qd.func
 def func_contact_convex_convex_sdf(
-    i_ga,
-    i_gb,
-    i_b,
-    i_va_ws,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_va_ws: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -1272,9 +1272,9 @@ def func_contact_convex_convex_sdf(
 
 @qd.func
 def func_contact_mpr_terrain(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -1525,7 +1525,7 @@ def func_contact_mpr_terrain(
 
 
 @qd.func
-def func_add_prism_vert(i_b, x, y, z, collider_state: array_class.ColliderState):
+def func_add_prism_vert(i_b: int, x: float, y: float, z: float, collider_state: array_class.ColliderState):
     collider_state.prism[0, i_b] = collider_state.prism[1, i_b]
     collider_state.prism[1, i_b] = collider_state.prism[2, i_b]
     collider_state.prism[3, i_b] = collider_state.prism[4, i_b]
@@ -1540,11 +1540,11 @@ def func_add_prism_vert(i_b, x, y, z, collider_state: array_class.ColliderState)
 
 @qd.func
 def func_recompute_perturbed_contact(
-    i_ga,
-    i_gb,
-    i_scratch,
+    i_ga: int,
+    i_gb: int,
+    i_scratch: int,
     normal: qd.types.vector(3),
-    penetration,
+    penetration: float,
     contact_pos: qd.types.vector(3),
     normal_0: qd.types.vector(3),
     contact_pos_0: qd.types.vector(3),
@@ -1553,13 +1553,13 @@ def func_recompute_perturbed_contact(
     ga_quat_original: qd.types.vector(4),
     gb_pos_original: qd.types.vector(3),
     gb_quat_original: qd.types.vector(4),
-    used_gjk,
     mpr_state: array_class.MPRState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
+    used_gjk: bool,
 ):
     """
     Recompute a perturbed multi-contact point exactly, by un-rotating the portal the perturbed detection found.
@@ -1692,12 +1692,12 @@ def func_recompute_perturbed_contact(
 
 @qd.func
 def func_prefer_gjk_refinement(
-    i_pair,
-    i_b,
-    portal_status,
-    penetration,
-    geom_pair_scale,
-    tolerance,
+    i_pair: int,
+    i_b: int,
+    portal_status: int,
+    penetration: float,
+    geom_pair_scale: float,
+    tolerance: float,
     collider_state: array_class.ColliderState,
     collider_info: array_class.ColliderInfo,
 ):
@@ -1733,9 +1733,9 @@ def func_prefer_gjk_refinement(
 
 @qd.func
 def func_convex_convex_contact(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -2160,13 +2160,13 @@ def func_convex_convex_contact(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        _used_gjk,
                         mpr_state,
                         gjk_state,
                         dyn_info,
                         rigid_info,
                         collider_info,
                         rigid_config,
+                        _used_gjk,
                     )
 
                 # For MuJoCo-compatible GJK, set penetration of perturbed contacts to equal the initial contact's
@@ -2213,11 +2213,11 @@ def func_convex_convex_contact(
 
 @qd.func
 def _func_multicontact_run_detection(
-    i_ga,
-    i_gb,
-    i_scratch,
-    i_b,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_scratch: int,
+    i_b: int,
+    i_pair: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
@@ -2362,14 +2362,14 @@ def _func_multicontact_run_detection(
 
 @qd.func
 def _func_multicontact_mpr(
-    i_scratch,
-    i_b,
-    i_ga,
-    i_gb,
-    i_pair,
+    i_scratch: int,
+    i_b: int,
+    i_ga: int,
+    i_gb: int,
+    i_pair: int,
     contact_pos_0: qd.types.vector(3),
     normal_0: qd.types.vector(3),
-    penetration_0,
+    penetration_0: float,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -2608,13 +2608,13 @@ def _func_multicontact_mpr(
                         ga_quat_original,
                         gb_pos_original,
                         gb_quat_original,
-                        _used_gjk,
                         mpr_state,
                         gjk_state,
                         dyn_info,
                         rigid_info,
                         collider_info,
                         rigid_config,
+                        _used_gjk,
                     )
 
                 # Perturbed contacts carry the initial contact's penetration under compatibility: see the twin
@@ -2735,13 +2735,13 @@ def _func_narrowphase_multicontact(
 
 @qd.func
 def _func_enqueue_for_multicontact(
-    i_b,
-    i_ga,
-    i_gb,
-    i_pair,
+    i_b: int,
+    i_ga: int,
+    i_gb: int,
+    i_pair: int,
     contact_pos_0: qd.types.vector(3),
     normal_0: qd.types.vector(3),
-    penetration_0,
+    penetration_0: float,
     collider_state: array_class.ColliderState,
     prefer_gjk: bool,
 ):

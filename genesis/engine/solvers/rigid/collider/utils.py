@@ -6,7 +6,13 @@ from genesis.constants import GEOM_TYPE
 
 
 @qd.func
-def func_closest_points_on_segments(seg_a_p1, seg_a_p2, seg_b_p1, seg_b_p2, EPS):
+def func_closest_points_on_segments(
+    seg_a_p1: qd.types.vector(3),
+    seg_a_p2: qd.types.vector(3),
+    seg_b_p1: qd.types.vector(3),
+    seg_b_p2: qd.types.vector(3),
+    eps: float,
+):
     """
     Compute closest points on two line segments using analytical solution.
 
@@ -29,10 +35,10 @@ def func_closest_points_on_segments(seg_a_p1, seg_a_p2, seg_b_p1, seg_b_p2, EPS)
     s = gs.qd_float(0.0)
     t = gs.qd_float(0.0)
 
-    if denom < EPS:
+    if denom < eps:
         # Segments are parallel or one/both are degenerate
         s = 0.0
-        if b_squared_len > EPS:
+        if b_squared_len > eps:
             t = qd.math.clamp(e / b_squared_len, 0.0, 1.0)
         else:
             t = 0.0
@@ -44,13 +50,13 @@ def func_closest_points_on_segments(seg_a_p1, seg_a_p2, seg_b_p1, seg_b_p2, EPS)
         s = qd.math.clamp(s, 0.0, 1.0)
 
         # Recompute t for clamped s
-        t = qd.math.clamp((dot_product_dir * s + e) / b_squared_len if b_squared_len > EPS else 0.0, 0.0, 1.0)
+        t = qd.math.clamp((dot_product_dir * s + e) / b_squared_len if b_squared_len > eps else 0.0, 0.0, 1.0)
 
         # Recompute s for clamped t (ensures we're on segment boundaries)
-        s_new = qd.math.clamp((dot_product_dir * t - d) / a_squared_len if a_squared_len > EPS else 0.0, 0.0, 1.0)
+        s_new = qd.math.clamp((dot_product_dir * t - d) / a_squared_len if a_squared_len > eps else 0.0, 0.0, 1.0)
 
         # Use refined s if it improves the solution
-        if a_squared_len > EPS:
+        if a_squared_len > eps:
             s = s_new
 
     seg_a_closest = seg_a_p1 + s * segment_a_dir
@@ -60,7 +66,7 @@ def func_closest_points_on_segments(seg_a_p1, seg_a_p2, seg_b_p1, seg_b_p2, EPS)
 
 
 @qd.func
-def func_det3(v1, v2, v3):
+def func_det3(v1: qd.types.vector(3), v2: qd.types.vector(3), v3: qd.types.vector(3)):
     """
     Compute the determinant of a 3x3 matrix M = [v1 | v2 | v3].
     """
@@ -81,7 +87,7 @@ def func_point_in_geom_aabb(
 
 
 @qd.func
-def func_is_geom_aabbs_overlap(i_ga, i_gb, i_b, dyn_state: array_class.DynState):
+def func_is_geom_aabbs_overlap(i_ga: int, i_gb: int, i_b: int, dyn_state: array_class.DynState):
     return not (
         (dyn_state.geoms.aabb_max[i_ga, i_b] <= dyn_state.geoms.aabb_min[i_gb, i_b]).any()
         or (dyn_state.geoms.aabb_min[i_ga, i_b] >= dyn_state.geoms.aabb_max[i_gb, i_b]).any()
@@ -89,7 +95,7 @@ def func_is_geom_aabbs_overlap(i_ga, i_gb, i_b, dyn_state: array_class.DynState)
 
 
 @qd.func
-def func_is_discrete_geom(i_g, dyn_info: array_class.DynInfo):
+def func_is_discrete_geom(i_g: int, dyn_info: array_class.DynInfo):
     """
     Check if the given geom is a discrete geometry.
     """
@@ -98,16 +104,8 @@ def func_is_discrete_geom(i_g, dyn_info: array_class.DynInfo):
 
 
 @qd.func
-def func_is_discrete_geoms(i_ga, i_gb, dyn_info: array_class.DynInfo):
+def func_is_discrete_geoms(i_ga: int, i_gb: int, dyn_info: array_class.DynInfo):
     """
     Check if the given geoms are discrete geometries.
     """
     return func_is_discrete_geom(i_ga, dyn_info) and func_is_discrete_geom(i_gb, dyn_info)
-
-
-@qd.func
-def func_is_equal_vec(a, b, eps):
-    """
-    Check if two vectors are equal within a small tolerance.
-    """
-    return (qd.abs(a - b) < eps).all()

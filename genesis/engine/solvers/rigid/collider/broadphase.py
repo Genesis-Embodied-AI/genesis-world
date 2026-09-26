@@ -16,9 +16,9 @@ from .utils import func_is_geom_aabbs_overlap
 
 @qd.func
 def func_check_collision_valid(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,

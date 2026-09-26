@@ -404,9 +404,9 @@ def kernel_set_links_quat_grad(
 
 @qd.func
 def func_set_link_mass(
-    i_l,
-    i_b,
-    inertial_mass,
+    i_l: int,
+    i_b: int,
+    inertial_mass: float,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
     is_inertia_scaled: qd.template(),
@@ -1040,8 +1040,8 @@ def kernel_control_dofs_position_velocity(
 
 @qd.func
 def func_link_offset_shift(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     links_offset_pos: qd.types.ndarray(),
     links_offset_quat: qd.types.ndarray(),
     dyn_state: array_class.DynState,
@@ -1282,17 +1282,17 @@ def kernel_update_drone_propeller_vgeoms(
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_geom_friction(geoms_idx: qd.i32, dyn_info: array_class.DynInfo, friction: float):
+def kernel_set_geom_friction(geoms_idx: qd.i32, friction: float, dyn_info: array_class.DynInfo):
     dyn_info.geoms.friction[geoms_idx] = friction
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_geom_friction_torsional(geoms_idx: qd.i32, dyn_info: array_class.DynInfo, friction_torsional: float):
+def kernel_set_geom_friction_torsional(geoms_idx: qd.i32, friction_torsional: float, dyn_info: array_class.DynInfo):
     dyn_info.geoms.friction_torsional[geoms_idx] = friction_torsional
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_geom_friction_rolling(geoms_idx: qd.i32, dyn_info: array_class.DynInfo, friction_rolling: float):
+def kernel_set_geom_friction_rolling(geoms_idx: qd.i32, friction_rolling: float, dyn_info: array_class.DynInfo):
     dyn_info.geoms.friction_rolling[geoms_idx] = friction_rolling
 
 

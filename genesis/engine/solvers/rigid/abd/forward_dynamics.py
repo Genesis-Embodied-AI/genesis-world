@@ -137,7 +137,7 @@ def kernel_update_acc(
 
 
 @qd.func
-def func_vel_at_point(link_idx, i_b, pos_world, links_state: array_class.LinksState):
+def func_vel_at_point(link_idx: int, i_b: int, pos_world: qd.types.vector(3), links_state: array_class.LinksState):
     """
     Velocity of a certain point on a rigid link.
     """
@@ -148,8 +148,8 @@ def func_vel_at_point(link_idx, i_b, pos_world, links_state: array_class.LinksSt
 
 @qd.func
 def func_crb_initialize(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -166,8 +166,8 @@ def func_crb_initialize(
 
 @qd.func
 def func_crb_fold(
-    i_r,
-    i_b,
+    i_r: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -200,8 +200,8 @@ def func_crb_fold(
 
 @qd.func
 def func_mass_mat_force(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -226,7 +226,12 @@ def func_mass_mat_force(
 
 @qd.func
 def func_mass_mat_assemble_tree_cooperative(
-    tid, i_t, i_b, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, BLOCK_DIM: qd.template()
+    tid: int,
+    i_t: int,
+    i_b: int,
+    dyn_state: array_class.DynState,
+    rigid_info: array_class.RigidInfo,
+    BLOCK_DIM: qd.template(),
 ):
     """Write the share that one warp lane owns of the mass blocks of one kinematic tree.
 
@@ -265,7 +270,7 @@ def func_mass_mat_assemble_tree_cooperative(
 
 @qd.func
 def func_mass_mat_assemble_tree(
-    i_t, i_b, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+    i_t: int, i_b: int, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
     """Write the mass blocks of one kinematic tree, then mirror them onto their upper triangle."""
     if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
@@ -408,8 +413,8 @@ def func_compute_mass_matrix_masked(
 
 @qd.func
 def func_has_implicit_damping_tree(
-    i_t,
-    i_b,
+    i_t: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -440,9 +445,9 @@ def func_has_implicit_damping_tree(
 
 @qd.func
 def func_factor_mass_tree_tiled(
-    tid,
-    i_t,
-    i_b,
+    tid: int,
+    i_t: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -647,9 +652,9 @@ def func_factor_mass_tiled_masked(
 
 @qd.func
 def func_factor_mass_tree_global(
-    tid,
-    i_t,
-    i_b,
+    tid: int,
+    i_t: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -746,8 +751,8 @@ def func_factor_mass_tree_global(
 
 @qd.func
 def func_factor_mass_tree(
-    i_t,
-    i_b,
+    i_t: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -801,9 +806,9 @@ def func_factor_mass_tree(
 
 @qd.func
 def func_factor_mass_tree_shared(
-    tid,
-    i_t,
-    i_b,
+    tid: int,
+    i_t: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -1143,8 +1148,8 @@ def func_init_meaninertia(envs_idx: qd.types.ndarray(), rigid_info: array_class.
 
 @qd.func
 def func_init_link_invweight(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
     dyn_state: array_class.DynState,
@@ -1212,8 +1217,8 @@ def func_init_link_invweight(
 
 @qd.func
 def func_init_dofs_invweight(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     jac_row: qd.Tensor,
     solve_out: qd.Tensor,
     dyn_state: array_class.DynState,
@@ -1565,8 +1570,8 @@ def func_torque_and_passive_force(
 
 @qd.func
 def func_update_acc_link(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -1774,8 +1779,8 @@ def func_compute_qacc(
 
 @qd.func
 def func_midpoint_eligible(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -1816,8 +1821,8 @@ def func_midpoint_eligible(
 
 @qd.func
 def func_midpoint_has_fixed_children(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -1833,8 +1838,8 @@ def func_midpoint_has_fixed_children(
 
 @qd.func
 def func_midpoint_is_aligned(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -1860,8 +1865,8 @@ def func_midpoint_is_aligned(
 
 @qd.func
 def func_midpoint_free_body(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -2210,8 +2215,8 @@ def func_integrate(
 
 @qd.func
 def func_count_settled_step(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,

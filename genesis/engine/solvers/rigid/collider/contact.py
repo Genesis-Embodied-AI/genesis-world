@@ -15,12 +15,12 @@ import genesis.utils.simt as su
 
 @qd.func
 def func_refine_smooth_contact_pos(
-    geom_type,
-    geom_data,
+    geom_type: int,
+    geom_data: qd.types.vector(7),
     geom_pos: qd.types.vector(3),
     geom_quat: qd.types.vector(4),
     normal: qd.types.vector(3),
-    penetration,
+    penetration: float,
     ccd_contact_pos: qd.types.vector(3),
 ):
     """
@@ -90,10 +90,10 @@ def func_refine_smooth_contact_pos(
 
 @qd.func
 def func_apply_smooth_refinement(
-    i_ga,
-    i_gb,
+    i_ga: int,
+    i_gb: int,
     normal: qd.types.vector(3),
-    penetration,
+    penetration: float,
     contact_pos: qd.types.vector(3),
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
@@ -139,7 +139,7 @@ def func_apply_smooth_refinement(
 
 
 @qd.func
-def rotaxis(vecin, i0, i1, i2, f0, f1, f2):
+def rotaxis(i0: int, i1: int, i2: int, vecin: qd.types.vector(3), f0: int, f1: int, f2: int):
     vecres = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
     vecres[0] = vecin[i0] * f0
     vecres[1] = vecin[i1] * f1
@@ -148,7 +148,7 @@ def rotaxis(vecin, i0, i1, i2, f0, f1, f2):
 
 
 @qd.func
-def rotmatx(matin, i0, i1, i2, f0, f1, f2):
+def rotmatx(i0: int, i1: int, i2: int, matin: qd.types.matrix(3, 3), f0: int, f1: int, f2: int):
     matres = qd.Matrix.zero(gs.qd_float, 3, 3)
     matres[0, :] = matin[i0, :] * f0
     matres[1, :] = matin[i1, :] * f1
@@ -180,7 +180,7 @@ def collider_kernel_reset(
 
 @qd.func
 def func_collider_clear_env(
-    i_b,
+    i_b: int,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
@@ -265,7 +265,7 @@ def func_collider_clear_env(
 
 
 @qd.func
-def func_promote_woken_contacts(i_b, dyn_state: array_class.DynState, collider_state: array_class.ColliderState):
+def func_promote_woken_contacts(i_b: int, dyn_state: array_class.DynState, collider_state: array_class.ColliderState):
     """Move the kept contacts of the links of env i_b that woke this step among the live contacts.
 
     A kept contact holds where its sleeper rests, and the narrowphase left the sleeper's pairs out while it slept, so
@@ -364,13 +364,13 @@ def collider_kernel_get_contacts(
 
 @qd.func
 def func_add_contact(
-    i_ga,
-    i_gb,
-    i_b,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_pair: int,
     normal: qd.types.vector(3),
     contact_pos: qd.types.vector(3),
-    penetration,
+    penetration: float,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
@@ -410,14 +410,14 @@ def func_add_contact(
 
 @qd.func
 def func_set_contact(
-    i_ga,
-    i_gb,
-    i_b,
-    i_c,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_c: int,
+    i_pair: int,
     normal: qd.types.vector(3),
     contact_pos: qd.types.vector(3),
-    penetration,
+    penetration: float,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
@@ -466,10 +466,10 @@ def func_set_contact(
 
 @qd.func
 def func_add_diff_contact_input(
-    i_ga,
-    i_gb,
-    i_b,
-    i_d,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_d: int,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     collider_info: array_class.ColliderInfo,
@@ -494,7 +494,7 @@ def func_add_diff_contact_input(
 
 
 @qd.func
-def func_compute_geom_rbound(i_g, geoms_init_AABB: array_class.GeomsInitAABB, dyn_info: array_class.DynInfo):
+def func_compute_geom_rbound(i_g: int, geoms_init_AABB: array_class.GeomsInitAABB, dyn_info: array_class.DynInfo):
     """Compute the bounding sphere radius for a geom, matching MuJoCo's geom_rbound."""
     geom_type = dyn_info.geoms.type[i_g]
     rbound = gs.qd_float(0.0)
@@ -518,7 +518,9 @@ def func_compute_geom_rbound(i_g, geoms_init_AABB: array_class.GeomsInitAABB, dy
 
 
 @qd.func
-def func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB: array_class.GeomsInitAABB, dyn_info: array_class.DynInfo):
+def func_compute_geom_pair_scale(
+    i_ga: int, i_gb: int, geoms_init_AABB: array_class.GeomsInitAABB, dyn_info: array_class.DynInfo
+):
     # Intrinsic length scale of a geom pair: half the smaller geom's world-aligned bounding-box diagonal. The
     # original (rest-pose) AABB is used so the scale is a constant independent of the current orientation, which
     # makes sense since the size of the geometries is an intrinsic property. Multiply by a relative tolerance to
@@ -534,7 +536,7 @@ def func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB: array_class.GeomsI
 
 @qd.func
 def func_compute_geom_pair_scale_mj(
-    i_ga, i_gb, geoms_init_AABB: array_class.GeomsInitAABB, dyn_info: array_class.DynInfo
+    i_ga: int, i_gb: int, geoms_init_AABB: array_class.GeomsInitAABB, dyn_info: array_class.DynInfo
 ):
     """Geom-pair length scale matching MuJoCo's formula: min(rbound_g1, rbound_g2). Multiply by a relative tolerance
     to recover MuJoCo's absolute tolerance."""
@@ -545,8 +547,8 @@ def func_compute_geom_pair_scale_mj(
 
 @qd.func
 def func_compute_mc_tolerance(
-    i_ga,
-    i_gb,
+    i_ga: int,
+    i_gb: int,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
@@ -565,9 +567,9 @@ def func_compute_mc_tolerance(
 
 @qd.func
 def func_contact_orthogonals(
-    i_ga,
-    i_gb,
-    i_b,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
     normal: qd.types.vector(3),
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,

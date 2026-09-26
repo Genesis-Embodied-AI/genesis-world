@@ -16,13 +16,13 @@ from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kin
 
 @qd.func
 def func_forward_kinematics_scratch(
-    i_col_out,
-    i_col_q,
-    i_b,
-    entity_idx,
-    link_offset,
-    joint_offset,
-    q_offset,
+    i_col_out: int,
+    i_col_q: int,
+    i_b: int,
+    entity_idx: int,
+    link_offset: int,
+    joint_offset: int,
+    q_offset: int,
     qpos: qd.Tensor,
     links_pos: qd.Tensor,
     links_quat: qd.Tensor,
@@ -131,12 +131,12 @@ def func_forward_kinematics_scratch(
 
 @qd.func
 def func_jacobian_scratch(
-    i_col,
-    i_b,
-    entity_idx,
-    joint_offset,
-    ee_link,
-    ee_pos,
+    i_col: int,
+    i_b: int,
+    entity_idx: int,
+    joint_offset: int,
+    ee_link: int,
+    ee_pos: qd.types.vector(3),
     jacobian: qd.Tensor,
     joints_xanchor: qd.Tensor,
     joints_xaxis: qd.Tensor,
@@ -191,10 +191,10 @@ def func_jacobian_scratch(
 
 @qd.func
 def func_get_jacobian(
-    i_b,
-    tgt_link_idx,
-    dof_start,
-    p_local,
+    i_b: int,
+    tgt_link_idx: int,
+    dof_start: int,
+    p_local: qd.types.vector(3),
     jacobian: qd.Tensor,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -295,16 +295,16 @@ def kernel_get_jacobian_zero(
 
 @qd.func
 def func_integrate_dq_scratch(
-    i_col,
-    i_b,
-    entity_idx,
-    q_offset,
+    i_col: int,
+    i_b: int,
+    entity_idx: int,
+    q_offset: int,
     dq: qd.Tensor,
     qpos: qd.Tensor,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    respect_joint_limit,
+    respect_joint_limit: int,
 ):
     """Integrate a joint-space step into the scratch configuration column.
 
@@ -359,10 +359,10 @@ def func_integrate_dq_scratch(
 
 @qd.func
 def func_inverse_kinematics(
-    entity_idx,
-    q_offset,
-    link_offset,
-    joint_offset,
+    entity_idx: int,
+    q_offset: int,
+    link_offset: int,
+    joint_offset: int,
     dyn_state: array_class.DynState,
     ik_state: array_class.IKState,
     fk: array_class.IKScratchFK,
@@ -370,20 +370,20 @@ def func_inverse_kinematics(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    n_qs,
-    entity_n_dofs,
-    n_links,
-    n_dofs,
-    n_envs,
-    custom_init_qpos,
-    max_samples,
-    max_solver_iters,
-    damping,
-    pos_tol,
-    rot_tol,
-    max_step_size,
-    seed,
-    respect_joint_limit,
+    n_qs: int,
+    entity_n_dofs: int,
+    n_links: int,
+    n_dofs: int,
+    n_envs: int,
+    custom_init_qpos: int,
+    max_samples: int,
+    max_solver_iters: int,
+    damping: float,
+    pos_tol: float,
+    rot_tol: float,
+    max_step_size: float,
+    seed: int,
+    respect_joint_limit: int,
 ):
     """Damped-least-squares inverse kinematics for the target links.
 

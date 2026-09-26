@@ -20,7 +20,7 @@ LS_ALPHA_MAX = 1e4
 
 @qd.func
 def _func_update_constraint_forces_body(
-    i_c, i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_c: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
 ):
     """Per-element body for ``_func_update_constraint_forces``. Factored out so the two
     ndrange orderings (coalescing-optimal for each layout) share a single implementation."""
