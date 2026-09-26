@@ -713,10 +713,6 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         visual=TextureVisuals(uv=uv, material=tmesh_mat),
         process=False,
     )
-    mesh = gs.Mesh.from_trimesh(
-        tmesh, scale=scale, surface=gs.surfaces.Collision() if is_col else surface, metadata=metadata
-    )
-
     info = {
         "type": gs_type,
         "pos": mj_geom.pos * scale,
@@ -734,9 +730,11 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         "sol_params": np.concatenate((mj_geom.solref, mj_geom.solimp)),
     }
     if is_col:
-        info["mesh"] = mesh
-    else:
-        info["vmesh"] = mesh
+        info["mesh"] = gs.Mesh.from_trimesh(tmesh, scale=scale, surface=gs.surfaces.Collision(), metadata=metadata)
+    # Collision geometries of visual groups (0, 1 or 2) are also rendered in accordance with Mujoco logics. Their visual
+    # mesh is built from the parsed geometry rather than the collision mesh, whose surface discards the asset material.
+    if not is_col or mj_geom.group[0] in (0, 1, 2):
+        info["vmesh"] = gs.Mesh.from_trimesh(tmesh, scale=scale, surface=surface, metadata=metadata)
 
     return info
 
@@ -827,17 +825,11 @@ def parse_geoms(mj, scale, surface, xml_path):
             if not (g_info["contype"] or g_info["conaffinity"]):
                 continue
 
-            # Duplicate collision geometries as visual in accordance with Mujoco logics:
-            # If groups are defined, only create visual for geoms in visual groups (0, 1 or 2).
-            if g_info["group"] in (0, 1, 2):
-                g_info = g_info.copy()
-                mesh = g_info.pop("mesh")
-                vmesh = gs.Mesh.from_trimesh(
-                    mesh=mesh.trimesh,
-                    surface=surface,
-                    metadata=mesh.metadata,
-                )
+            # Duplicate collision geometries of visual groups as visual geometries
+            vmesh = g_info.pop("vmesh", None)
+            if vmesh is not None:
                 g_info = {**g_info, "vmesh": vmesh, "contype": 0, "conaffinity": 0}
+                del g_info["mesh"]
                 link_g_info.append(g_info)
 
     return links_g_info

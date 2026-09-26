@@ -778,6 +778,16 @@ def textured_mjcf():
     ET.SubElement(worldbody, "geom", name="capsule_repeated", type="capsule", size="2 3", material="repeated")
     ET.SubElement(worldbody, "geom", name="cylinder_repeated", type="cylinder", size="2 3", material="repeated")
     ET.SubElement(worldbody, "geom", name="box_uniform", type="box", size="2 3 4", material="uniform")
+    ET.SubElement(
+        worldbody,
+        "geom",
+        name="box_uniform_collision",
+        type="box",
+        size="2 3 4",
+        material="uniform",
+        contype="1",
+        conaffinity="1",
+    )
     ET.SubElement(worldbody, "geom", name="mesh_generated", type="mesh", mesh="plain_mesh", material="repeated")
     ET.SubElement(
         worldbody,
