@@ -1,16 +1,17 @@
+import inspect
 import os
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from itertools import chain
 from bisect import bisect_right
+from itertools import chain
+from pathlib import Path
+
+import numpy as np
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
-
-import numpy as np
 import trimesh
-from trimesh.visual.texture import TextureVisuals
 from PIL import Image
+from trimesh.visual.texture import TextureVisuals
 
 import genesis as gs
 from genesis.constants import XACRO_FORMAT
@@ -279,6 +280,23 @@ def parse_xml(morph, surface, rigid_options=None):
             gs.logger.warning(
                 "(MJCF) The model declares rolling friction (geom condim >= 6); enable "
                 "'enable_rolling_friction' to honor the parsed coefficients."
+            )
+        # Solver options come from the scene options, so every <option> value departing from the MuJoCo default is
+        # dropped. The friction cone has its own warning above. Both sides are MjOption instances, so their members come
+        # out paired, sorted by name.
+        opt_members = zip(inspect.getmembers(mj.opt), inspect.getmembers(mujoco.MjOption()))
+        opt_names_ignored = [
+            name
+            for (name, value), (_, value_default) in opt_members
+            if not name.startswith("_")
+            and name != "cone"
+            and not callable(value)
+            and not np.allclose(value, value_default, atol=gs.EPS)
+        ]
+        if opt_names_ignored:
+            gs.logger.warning(
+                "(MJCF) The model sets solver options in <option> that Genesis does not parse and ignores: "
+                f"{', '.join(opt_names_ignored)}. Use 'gs.options.SimOptions' and 'gs.options.RigidOptions' instead."
             )
 
     return l_infos, links_j_infos, links_g_infos, eqs_info

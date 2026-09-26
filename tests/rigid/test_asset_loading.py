@@ -110,6 +110,37 @@ def test_ground_plane_preservation(box_plan):
     assert_equal(sum(geom.type == gs.GEOM_TYPE.BOX for geom in entity_without_ground.geoms), 1)
 
 
+@pytest.mark.required
+def test_warn_ignored_mjcf_solver_options(caplog):
+    scene = gs.Scene()
+    for option_attrib, flag_attrib, opt_names_ignored in (
+        (dict(timestep="0.001", impratio="10", gravity="0 0 -1"), None, "gravity, impratio, timestep"),
+        (dict(), dict(contact="disable"), "disableflags"),
+        (None, None, None),
+        (dict(cone="elliptic"), None, None),
+    ):
+        mjcf = ET.Element("mujoco")
+        if option_attrib is not None:
+            option = ET.SubElement(mjcf, "option", option_attrib)
+            if flag_attrib is not None:
+                ET.SubElement(option, "flag", flag_attrib)
+        body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", type="sphere", size="0.1")
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            scene.add_entity(
+                gs.morphs.MJCF(
+                    file=ET.tostring(mjcf, encoding="unicode"),
+                )
+            )
+        messages = [record.getMessage() for record in caplog.records if "<option>" in record.getMessage()]
+        assert_equal(len(messages), 0 if opt_names_ignored is None else 1)
+        if opt_names_ignored is not None:
+            assert f"ignores: {opt_names_ignored}." in messages[0]
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_urdf_parsing(show_viewer, tol):
