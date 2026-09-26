@@ -18,11 +18,12 @@ import genesis.utils.mesh as mu
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
+    ALPHA_MODE_MATERIALS,
+    ALPHA_RAMP,
     check_gs_textures,
     check_gs_tm_meshes,
     check_gs_tm_textures,
 )
-
 
 # ==================== Scale Tests ====================
 
@@ -351,20 +352,39 @@ def test_glb_draco_missing_normals_texcoord(glb_file):
 
 
 @pytest.mark.required
-def test_glb_texcoord(emissive_material_variants_glb):
-    # Material 0 reads the float set 0 and material 1 the normalized set 1, so both meshes carry the authored UVs
+def test_glb_material_variants(material_variants_glb):
     gs_meshes = gltf_utils.parse_mesh_glb(
-        emissive_material_variants_glb,
+        material_variants_glb,
         group_by_material=True,
         scale=None,
         is_mesh_zup=True,
         surface=gs.surfaces.Default(),
     )
-    assert len(gs_meshes) == 2
-    # V is flipped to the image-space convention
+    assert len(gs_meshes) == 2 + len(ALPHA_MODE_MATERIALS)
+
+    # Material 0 reads the float set 0 and material 1 the normalized set 1, so every mesh carries the authored UVs,
+    # with V flipped to the image-space convention
     expected_uvs = np.array([[0.125, 0.75], [0.375, 0.5], [0.625, 0.25]], dtype=np.float32)
     for gs_mesh in gs_meshes:
         assert_allclose(gs_mesh.trimesh.visual.uv, expected_uvs, tol=1.0 / np.iinfo(np.uint16).max)
+
+    # A masked material splits the alpha ramp at its cutoff, taken after the alpha factor: 0.6 of full opacity is
+    # 153, between the third and the fourth texel, and a factor of 0.6 leaves only the last texel at 0.5 or above.
+    # A blended material keeps the ramp and an opaque one discards it.
+    expected_opacities = {
+        "masked": [0, 0, 0, 255, 255],
+        "masked_factor": [0, 0, 0, 0, 255],
+        "blended": ALPHA_RAMP,
+        "opaque": [255, 255, 255, 255, 255],
+    }
+    opacities = {
+        gs_mesh.metadata["name"]: gs_mesh.surface.opacity_texture.image_array[0]
+        for gs_mesh in gs_meshes
+        if gs_mesh.metadata["name"] in expected_opacities
+    }
+    assert opacities.keys() == expected_opacities.keys()
+    for material_name, expected in expected_opacities.items():
+        assert_equal(opacities[material_name], expected, err_msg=material_name)
 
 
 # ==================== Material/Texture Parsing Tests ====================
@@ -447,31 +467,6 @@ def test_glb_parse_material(glb_file):
 
 
 @pytest.mark.required
-def test_glb_alpha_mode(alpha_mode_variants_glb):
-    # A cutoff of 0.6 lands at an opacity of 153, between the third and the fourth texel of the ramp
-    expected_opacities = {
-        "masked": [0, 0, 0, 255, 255],
-        "blended": [0, 64, 128, 192, 255],
-        "opaque": [255, 255, 255, 255, 255],
-    }
-    gs_meshes = gltf_utils.parse_mesh_glb(
-        alpha_mode_variants_glb,
-        group_by_material=True,
-        scale=None,
-        is_mesh_zup=True,
-        surface=gs.surfaces.Default(),
-    )
-    assert {gs_mesh.metadata["name"] for gs_mesh in gs_meshes} == set(expected_opacities)
-    for gs_mesh in gs_meshes:
-        material_name = gs_mesh.metadata["name"]
-        assert_equal(
-            gs_mesh.surface.opacity_texture.image_array[0],
-            expected_opacities[material_name],
-            err_msg=material_name,
-        )
-
-
-@pytest.mark.required
 def test_glb_shared_texture_not_duplicated(tmp_path):
     from genesis.vis.batch_renderer import GenesisGeomRetriever
 
@@ -533,10 +528,10 @@ def test_glb_shared_texture_not_duplicated(tmp_path):
 
 
 @pytest.mark.required
-def test_glb_uv_set_and_unlit_albedo_resolution(emissive_material_variants_glb):
+def test_glb_uv_set_and_unlit_albedo_resolution(material_variants_glb):
     # A single UV set is baked per mesh, following whichever texture actually samples it, and unlit imagery must not be
     # hidden by the white base that a missing color installs. parse_glb_material returns the chosen texCoord and surface.
-    glb = pygltflib.GLTF2().load(emissive_material_variants_glb)
+    glb = pygltflib.GLTF2().load(material_variants_glb)
     glb.convert_images(pygltflib.ImageFormat.DATAURI)
 
     # A base-color atlas owns the UV set; an emissive on a different texCoord does not replace it.

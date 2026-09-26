@@ -253,7 +253,9 @@ class ImageTexture(Texture, SerializationMixin):
     def apply_cutoff(self, cutoff):
         if cutoff is None or self.image_array is None:  # Cutoff does not apply on image file.
             return
-        self.image_array = np.where(self.image_array >= 255.0 * cutoff, 255, 0).astype(np.uint8)
+        # The cutoff applies to the texel alpha scaled by the material's alpha factor, which image_color holds
+        self.image_array = np.where(self.image_array * self.image_color >= 255.0 * cutoff, 255, 0).astype(np.uint8)
+        self.image_color = np.ones_like(self.image_color)
 
     def export(self, exporting: Exporting) -> dict | None:
         """Return the pixels of the image and how they are read, or None where a file can hold none of it.
