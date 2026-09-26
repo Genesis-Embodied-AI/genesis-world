@@ -111,8 +111,8 @@ def description_digest(desc: SceneDescription) -> str:
     'Scene.load' replaces. Two scenes sharing the digest allocate the same state, so a record of one restores into the
     other. The Genesis version and sources are left out, so a record survives the code moving on.
 
-    The digest exports the description in memory, meshes included, so it is taken once per built scene and once per
-    trajectory opened, never per restore.
+    The digest exports the description in memory, meshes included, so a scene takes it on its first save or restore
+    and keeps it (see 'Scene.desc_digest'), and a trajectory takes it once when opened.
     """
     defaults = SceneOptions()
     visual = {
@@ -869,8 +869,6 @@ class Scene(RBC):
             # reset state
             self._reset()
 
-            # The description is fixed once built, so its digest is taken once (see 'description_digest')
-            self._desc_digest = description_digest(self._desc)
             self._is_built = True
 
         with gs.logger.timer("Compiling simulation kernels..."):
@@ -1677,7 +1675,7 @@ class Scene(RBC):
         """
         self._reject_unexportable()
         return SceneCheckpoint(
-            scene=self.desc, digest=self._desc_digest, layout=self._layout, sim=self._sim.__getstate__()
+            scene=self.desc, digest=self.desc_digest, layout=self._layout, sim=self._sim.__getstate__()
         )
 
     def __reduce__(self):
@@ -1796,7 +1794,7 @@ class Scene(RBC):
             gs.raise_exception(
                 f"The state was read from a scene built with {state.layout} and this one was built with {self._layout}."
             )
-        if state.digest != self._desc_digest:
+        if state.digest != self.desc_digest:
             gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
         # Every solver checks its record before anything is touched, so a record from another scene leaves this one as
         # it was, the recorders included
@@ -1947,6 +1945,14 @@ class Scene(RBC):
         scene rather than the state it has simulated to.
         """
         return self._desc
+
+    @property
+    def desc_digest(self) -> str:
+        """The digest of this scene's description (see 'description_digest'), which a saved state must share to be
+        restored here. It is taken on first use and kept, as the description is fixed once built."""
+        if self._desc_digest is None:
+            self._desc_digest = description_digest(self._desc)
+        return self._desc_digest
 
     def get_entity(self, name: str | None = None, *, uid: str | None = None) -> "Entity":
         """

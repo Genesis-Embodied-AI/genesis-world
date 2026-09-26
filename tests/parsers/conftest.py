@@ -586,11 +586,11 @@ def texcoord_1_accessor_zero_glb(asset_tmp_path):
 
 @pytest.fixture(scope="session")
 def emissive_material_variants_glb(asset_tmp_path):
-    """Path to a GLB with three materials on distinct base/emissive texCoord sets and a triangle carrying two of them.
+    """Path to a GLB with four materials on distinct base/emissive texCoord sets and a triangle carrying two of them.
 
     The materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base color
-    with an emissive atlas on texCoord 1, and a KHR_materials_unlit material whose red base atlas stands in for the
-    unlit imagery. The red base atlas is index 0. The triangle holds the first two materials as primitives, with the
+    with an emissive atlas on texCoord 1, a KHR_materials_unlit material whose red base atlas stands in for the unlit
+    imagery, and a KHR_materials_pbrSpecularGlossiness material with the red atlas as diffuse. The red atlas is index 0. The triangle holds the first two materials as primitives, with the
     same texture coordinates stored as float in set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows,
     in set 1."""
     images = []
@@ -656,6 +656,9 @@ def emissive_material_variants_glb(asset_tmp_path):
                     baseColorTexture=pygltflib.TextureInfo(index=0, texCoord=0)
                 ),
                 extensions={"KHR_materials_unlit": {}},
+            ),
+            pygltflib.Material(
+                extensions={"KHR_materials_pbrSpecularGlossiness": {"diffuseTexture": {"index": 0, "texCoord": 0}}},
             ),
         ],
         textures=[pygltflib.Texture(source=0), pygltflib.Texture(source=1)],

@@ -268,49 +268,55 @@ def change_scene(args: list[str]):
 
     _initialize_genesis(backend=args.backend)
 
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            sparse_solve=False,
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1, 1, 0.5),
-            camera_lookat=(0.0, 0.0, 0.0),
-        ),
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
-        ),
-        show_viewer=False,
-    )
-    scene.add_entity(
-        gs.morphs.Plane(),
-    )
-    for i_obj in range(args.n_objs):
-        scene.add_entity(
-            gs.morphs.Box(
-                size=(0.4, 0.4, 0.4),
-                pos=(0.0, 0.5 * i_obj, 0.5),
-            )
-        )
-    scene.build(n_envs=args.n_envs)
-
-    for _ in range(60):
-        scene.step()
-
-    qpos = scene.sim.rigid_solver.get_qpos()
-    if args.n_envs > 0:
-        assert qpos.ndim == 2
-        assert qpos.shape[0] == args.n_envs
-    else:
-        assert qpos.ndim == 1
-    assert qpos.shape[-1] == args.n_objs * 7
-
-    z = qpos.reshape((*qpos.shape[:-1], args.n_objs, 7))[..., 2]
-    assert_allclose(z, 0.2, atol=1e-3)
-
     from genesis.engine.solvers.rigid.rigid_solver import kernel_step_1
 
-    assert kernel_step_1._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
-    assert kernel_step_1._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+    for i_build in range(2):
+        scene = gs.Scene(
+            rigid_options=gs.options.RigidOptions(
+                sparse_solve=False,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(1, 1, 0.5),
+                camera_lookat=(0.0, 0.0, 0.0),
+            ),
+            profiling_options=gs.options.ProfilingOptions(
+                show_FPS=False,
+            ),
+            show_viewer=False,
+        )
+        scene.add_entity(
+            gs.morphs.Plane(),
+        )
+        for i_obj in range(args.n_objs):
+            scene.add_entity(
+                gs.morphs.Box(
+                    size=(0.4, 0.4, 0.4),
+                    pos=(0.0, 0.5 * i_obj, 0.5),
+                )
+            )
+        scene.build(n_envs=args.n_envs)
+
+        for _ in range(60):
+            scene.step()
+
+        qpos = scene.sim.rigid_solver.get_qpos()
+        if args.n_envs > 0:
+            assert qpos.ndim == 2
+            assert qpos.shape[0] == args.n_envs
+        else:
+            assert qpos.ndim == 1
+        assert qpos.shape[-1] == args.n_objs * 7
+
+        z = qpos.reshape((*qpos.shape[:-1], args.n_objs, 7))[..., 2]
+        assert_allclose(z, 0.2, atol=1e-3)
+
+        if i_build == 0:
+            assert kernel_step_1._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
+            assert kernel_step_1._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+            n_kernels = len(kernel_step_1._primal.materialized_kernels)
+
+    # The same scene built again in the process reuses the kernels compiled for the first one
+    assert len(kernel_step_1._primal.materialized_kernels) == n_kernels
 
     sys.exit(RET_SUCCESS)
 

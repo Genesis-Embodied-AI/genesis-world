@@ -1,3 +1,5 @@
+import os
+from functools import lru_cache
 from io import BytesIO
 from urllib import request
 
@@ -9,8 +11,9 @@ from PIL import Image
 
 import genesis as gs
 
-from . import mesh as mu
 from . import geom as gu
+from . import mesh as mu
+from .misc import SizeCappedCache, register_cache_clear
 
 
 ctype_to_numpy = {
@@ -86,16 +89,27 @@ def get_glb_data_from_accessor(glb, accessor_index):
     return array
 
 
+# 512 MiB of decoded texture images, keyed by the data URI of the image and the mode it is converted to. Every texture
+# made from an image shares its array, so the array is read-only.
+_GLB_IMAGES_CACHE = SizeCappedCache(max_bytes=512 * 1024 * 1024)
+
+
 def get_glb_image(glb, image_index, image_type=None):
-    if image_index is not None:
-        image = Image.open(uri_to_PIL(glb.images[image_index].uri))
+    if image_index is None:
+        return None
+    uri = glb.images[image_index].uri
+    image_array = _GLB_IMAGES_CACHE.get((uri, image_type))
+    if image_array is None:
+        image = Image.open(uri_to_PIL(uri))
         if image_type is not None:
             image = image.convert(image_type)
-        return mu.PIL_to_array(image)
-    return None
+        image_array = mu.PIL_to_array(image)
+        image_array.flags.writeable = False
+        _GLB_IMAGES_CACHE.put((uri, image_type), image_array, image_array.nbytes)
+    return image_array
 
 
-def parse_glb_material(glb, material_index, surface):
+def parse_glb_material(glb, path, material_index, surface):
     # parse images
     color_texture = None
     opacity_texture = None
@@ -173,7 +187,7 @@ def parse_glb_material(glb, material_index, surface):
                 uvs_used = pbr_texture.baseColorTexture.texCoord
             if "KHR_texture_basisu" in texture.extensions:
                 gs.logger.warning(
-                    f"Mesh file `{glb.path}` uses 'KHR_texture_basisu' extension for supercompression of texture "
+                    f"Mesh file `{path}` uses 'KHR_texture_basisu' extension for supercompression of texture "
                     "images, which is unsupported. Ignoring texture."
                 )
             color_image = get_glb_image(glb, texture.source, "RGBA")
@@ -199,7 +213,6 @@ def parse_glb_material(glb, material_index, surface):
             color_factor = np.array(extension_material["diffuseFactor"], dtype=np.float32)
 
         color_texture = mu.create_texture(color_image, color_factor, "srgb")
-        material.extensions.pop("KHR_materials_pbrSpecularGlossiness")
 
     if color_texture is not None:
         opacity_texture = color_texture.check_dim(3)
@@ -213,7 +226,6 @@ def parse_glb_material(glb, material_index, surface):
         if color_texture is not None:
             emissive_texture = color_texture
             color_texture = mu.create_texture(None, (0.0, 0.0, 0.0), "srgb")
-        material.extensions.pop("KHR_materials_unlit")
     else:
         # parse emissive
         emissive_image = None
@@ -303,11 +315,21 @@ def parse_glb_tree(glb, node_index):
     return mesh_list
 
 
-def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
+@lru_cache(maxsize=32)
+def _load_glb_cached(path, mtime) -> pygltflib.GLTF2:
+    # Same motivation as '_load_trimesh_scene_cached' in mesh.py. The file is shared by every entity loading it, so
+    # parsing only ever reads it.
     glb = pygltflib.GLTF2().load(path)
     assert glb is not None
     glb.convert_images(pygltflib.ImageFormat.DATAURI)
-    glb.path = path
+    return glb
+
+
+register_cache_clear(_load_glb_cached.cache_clear)
+
+
+def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
+    glb = _load_glb_cached(path, os.path.getmtime(path))
 
     glb_scene = glb.scene or 0
     scene = glb.scenes[glb_scene]
@@ -329,7 +351,7 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
                 material, uv_used, material_name = materials.get(primitive.material, (None, 0, ""))
                 if material is None:
                     material, uv_used, material_name = materials.setdefault(
-                        primitive.material, parse_glb_material(glb, primitive.material, surface)
+                        primitive.material, parse_glb_material(glb, path, primitive.material, surface)
                     )
             else:
                 material, uv_used, material_name = surface.model_copy(), 0, ""

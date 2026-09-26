@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.utils.misc import qd_to_torch
+from genesis.utils.misc import qd_to_torch, register_cache_clear
 
 
 def _tensor_backend():
@@ -33,9 +33,23 @@ def maybe_shape(shape, is_on):
     return shape if is_on else ()
 
 
+_STATIC_CONFIGS: dict[tuple, "AutoInitMeta"] = {}
+register_cache_clear(_STATIC_CONFIGS.clear)
+
+
 @dataclass_transform(eq_default=True, kw_only_default=False, frozen_default=True)
 class AutoInitMeta(type):
-    """Metaclass that generates __init__ from annotations, like a mutable dataclass."""
+    """Metaclass that generates __init__ from annotations, like a dataclass, and hands out one shared instance per
+    distinct set of values, which must therefore never be modified.
+
+    Kernels specialize on a static config by reference, so a scene built again with the same config reuses the kernels
+    already compiled for it. The instances are kept for the process rather than left to garbage collection with their
+    scene, as a config is a few scalars and a collected one takes the kernels specialized on it along.
+    """
+
+    def __call__(cls, *args, **kwargs):
+        config = super().__call__(*args, **kwargs)
+        return _STATIC_CONFIGS.setdefault((cls, tuple(sorted(vars(config).items()))), config)
 
     def __new__(cls, name, bases, namespace):
         names = tuple(namespace["__annotations__"].keys())

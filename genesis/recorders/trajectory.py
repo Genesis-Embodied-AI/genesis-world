@@ -447,7 +447,7 @@ class Trajectory:
             scene.build(**dataclasses.asdict(self._layout))
             description = None
         self._scene = scene
-        self._digest = description_digest(scene.desc)
+        self._digest = scene.desc_digest
         if description is not None:
             recorded = serialization.load(io.BytesIO(description), {"scene": SceneDescription})["scene"]
             if description_digest(recorded) != self._digest:
