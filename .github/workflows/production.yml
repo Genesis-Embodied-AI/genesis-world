@@ -77,7 +77,8 @@ jobs:
       # Another repository is served for the completion of the workflow of a pull request against its default branch
       # alone. The event of a pull request from a fork names no base branch, so the pull request is asked of the API.
       # A pull request closed while its wheel was building has nothing left to validate: the check passes without an
-      # image version, the runner jobs, which follow through 'needs', are skipped, and the caller is told so.
+      # image version, the runner jobs, which follow through 'needs', are skipped, and the caller is told so. A merged
+      # pull request is a special case of a closed one, the API reporting the state 'closed' for both.
       - name: Check the calling workflow
         id: check
         if: github.repository != job.workflow_repository
@@ -101,7 +102,8 @@ jobs:
               throw new Error(`Commit ${run.head_sha} heads no pull request against the default branch.`);
             }
             if (pull.state !== 'open') {
-              core.notice(`Pull request #${pull.number} is closed, so its commit ${run.head_sha} is left untested.`);
+              const status = pull.merged_at ? 'merged' : 'closed without merging';
+              core.notice(`Pull request #${pull.number} is ${status}, so its commit ${run.head_sha} is left untested.`);
             }
             core.setOutput('is_open', pull.state === 'open');
 
