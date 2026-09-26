@@ -341,8 +341,8 @@ jobs:
     runs-on: [self-hosted, coreweave, genesis-world]
 
     strategy:
-      # A call runs one job at a time. 256 is the largest number of jobs of a matrix, which lifts the limit otherwise.
-      max-parallel: ${{ github.event_name == 'workflow_run' && 1 || 256 }}
+      # A run takes one runner at a time.
+      max-parallel: 1
       matrix:
         GS_ENABLE_NDARRAY: ["0", "1"]
 
