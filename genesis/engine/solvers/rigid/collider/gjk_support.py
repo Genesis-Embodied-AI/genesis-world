@@ -37,7 +37,7 @@ def support_mesh(
     vert_end = dyn_info.geoms.vert_end[i_g]
 
     # Use the previous maximum vertex if it is within the current range
-    prev_imax = gjk_state.support_mesh_prev_vertex_id[i_b, i_o]
+    prev_imax = gjk_state.support_mesh_prev_vertex_id[i_o, i_b]
     if (prev_imax >= vert_start) and (prev_imax < vert_end):
         pos_local = dyn_info.verts.init_pos[prev_imax]
         fmax = d_mesh.dot(pos_local)
@@ -53,7 +53,7 @@ def support_mesh(
     v = dyn_info.verts.init_pos[imax]
     vid = imax
 
-    gjk_state.support_mesh_prev_vertex_id[i_b, i_o] = vid
+    gjk_state.support_mesh_prev_vertex_id[i_o, i_b] = vid
 
     v_world = gu.qd_transform_by_trans_quat(v, pos, quat)
     return v_world, vid

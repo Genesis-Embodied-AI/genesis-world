@@ -257,7 +257,7 @@ class GravityMixin:
             if as_field:
                 gravity = qd.tensor(gs.qd_vec3, shape, backend=qd.Backend.FIELD)
             else:
-                gravity = array_class.V(gs.qd_vec3, shape)
+                gravity = array_class.V(gs.qd_vec3, (), n_envs=self._B)
         self._gravity = gravity
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
 
