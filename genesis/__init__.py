@@ -216,6 +216,11 @@ def init(
     # Update torch default dtype and device, just in case
     torch.set_default_device(device)
     torch.set_default_dtype(tc_float)
+    if use_deterministic_algorithms:
+        # TorchScript profiles the first calls of a scripted function unfused, then compiles a fused kernel whose
+        # contracted arithmetic rounds differently, so a getter built on one returns different bits for the same state
+        # depending on how many times it has run. Without profiling runs the function is compiled as it is first called.
+        torch._C._jit_set_num_profiled_runs(0)
 
     # Define smallest float that is considered non-zero
     global EPS
