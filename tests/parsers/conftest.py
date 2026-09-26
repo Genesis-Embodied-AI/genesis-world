@@ -180,9 +180,9 @@ def check_gs_textures(gs_texture1, gs_texture2, default_value, material_name, te
             err_msg=f"Texture mismatch for material {material_name} in {texture_name}.",
         )
     else:
-        assert (
-            gs_texture1 is None and gs_texture2 is None
-        ), f"Both textures should be None for material {material_name} in {texture_name}."
+        assert gs_texture1 is None and gs_texture2 is None, (
+            f"Both textures should be None for material {material_name} in {texture_name}."
+        )
 
 
 def check_gs_surfaces(gs_surface1, gs_surface2, material_name):
