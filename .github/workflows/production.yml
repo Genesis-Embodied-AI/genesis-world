@@ -157,7 +157,7 @@ jobs:
             const workflowPath = `${process.env.WORKFLOW_REPOSITORY}/${process.env.WORKFLOW_FILE_PATH}`;
 
             // The endpoints of the runner groups have no method in the client, so they are requested by route.
-            const groups = await github.paginate('GET /orgs/{org}/actions/runner-groups', { org, per_page: 100 });
+            const groups = await github.paginate('GET /orgs/{org}/actions/runner-groups', { org });
             const group = groups.find((group) => group.name === process.env.RUNNER_GROUP);
             if (!group) {
               const groupNames = groups.map((group) => `'${group.name}'`).join(', ') || 'none';
@@ -166,7 +166,7 @@ jobs:
             }
             const repos = group.visibility === 'selected'
               ? await github.paginate('GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories', {
-                  org, runner_group_id: group.id, per_page: 100,
+                  org, runner_group_id: group.id,
                 })
               : await github.paginate(github.rest.repos.listForOrg, { org, type: 'all' });
 
