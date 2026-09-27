@@ -1,16 +1,18 @@
-from typing import TYPE_CHECKING
 import math
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 import igl
-import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.element as eu
 import genesis.utils.array_class as array_class
+import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
-from genesis.engine.bvh import AABB, LBVH, FEMSurfaceTetLBVH, RigidTetLBVH
+from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 
@@ -50,6 +52,28 @@ COS_ANGLE_THRESHOLD = math.cos(math.pi * 5.0 / 8.0)
 
 # An estimate of the maximum number of contact pairs per AABB query.
 MAX_N_QUERY_RESULT_PER_AABB = 32
+
+
+@qd.func
+def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, fem_solver: qd.template()) -> bool:
+    """Drop a pair of FEM surface tets once per unordered pair, and the pairs sharing a vertex."""
+    is_dropped = i_a >= i_q
+    i_ea = fem_solver.surface_elements[i_a]
+    i_eq = fem_solver.surface_elements[i_q]
+    i_av = fem_solver.elements_i[i_ea].el2v
+    i_qv = fem_solver.elements_i[i_eq].el2v
+    for i, j in qd.static(qd.ndrange(4, 4)):
+        if i_av[i] == i_qv[j]:
+            is_dropped = True
+    return is_dropped
+
+
+@qd.func
+def func_filter_rigid_tets(i_t: int, i_a: int, i_q: int, coupler: qd.template()) -> bool:
+    """Drop a pair of rigid tets whose geoms hold no collision pair."""
+    i_ag = coupler.rigid_volume_elems_geom_idx[i_a]
+    i_qg = coupler.rigid_volume_elems_geom_idx[i_q]
+    return coupler.rigid_collision_pair_idx[i_ag, i_qg] == -1
 
 
 class FEMFloorContactType(IntEnum):
@@ -237,6 +261,12 @@ class SAPCoupler(RBC):
                 )
             if self._fem_floor_contact_type == FEMFloorContactType.TET or self._enable_fem_self_tet_contact:
                 init_tet_tables = True
+            # The rigid-FEM handler reads the FEM pressure field and gradient as the hydroelastic FEM handlers do
+            if (
+                self._fem_floor_contact_type == FEMFloorContactType.TET
+                or self._enable_fem_self_tet_contact
+                or self._enable_rigid_fem_contact
+            ):
                 self._init_hydroelastic_fem_fields_and_info()
 
             if self._fem_floor_contact_type == FEMFloorContactType.TET:
@@ -409,26 +439,53 @@ class SAPCoupler(RBC):
                     grad[i_e] += grad_i * self.rigid_pressure_field[i_v0]
 
     def _init_bvh(self):
-        if self._enable_fem_self_tet_contact:
-            self.fem_surface_tet_aabb = AABB(self.fem_solver._B, self.fem_solver.n_surface_elements)
-            self.fem_surface_tet_bvh = FEMSurfaceTetLBVH(
-                self.fem_solver, self.fem_surface_tet_aabb, max_n_query_result_per_aabb=MAX_N_QUERY_RESULT_PER_AABB
-            )
+        """Allocate the tree set and the box query of each contact handler traversing a tree."""
+        # The contact kernel takes the queries as one struct, so a disabled handler keeps its members, switched off
+        # The surface tet boxes serve the self-contact tree and the rigid triangle query alike
+        has_fem_tet_tree = self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact
+        n_tets = self.fem_solver.n_surface_elements if has_fem_tet_tree else 0
+        self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config = get_bvh_data(
+            self.sim._B, n_tets, is_active=has_fem_tet_tree
+        )
+        max_results = min(n_tets * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF)
+        # The surface tets of each environment queried against their own tree
+        fem_self_query = array_class.BVHQueryState(
+            leaves=self.fem_surface_tet_bvh_state.leaves,
+            tree=self.fem_surface_tet_bvh_state.tree,
+            results=array_class.get_bvh_query_results(max_results, is_active=self._enable_fem_self_tet_contact),
+        )
 
+        n_faces = self.rigid_solver.n_faces
+        self.rigid_tri_bvh_state, self.rigid_tri_bvh_config = get_bvh_data(
+            self.sim._B, n_faces, is_active=self._enable_rigid_fem_contact
+        )
         if self._enable_rigid_fem_contact:
-            self.rigid_tri_aabb = AABB(self.sim._B, self.rigid_solver.n_faces)
-            max_n_query_result_per_aabb = (
-                max(self.rigid_solver.n_faces, self.fem_solver.n_surface_elements)
-                * MAX_N_QUERY_RESULT_PER_AABB
-                // self.rigid_solver.n_faces
-            )
-            self.rigid_tri_bvh = LBVH(self.rigid_tri_aabb, max_n_query_result_per_aabb)
+            max_n_query_results_per_face = max(n_faces, n_tets) * MAX_N_QUERY_RESULT_PER_AABB // n_faces
+            max_results = min(n_faces * max_n_query_results_per_face * self.sim._B, 0x7FFFFFFF)
+        else:
+            max_results = 0
+        # The surface tets of each environment queried against the rigid triangle tree of that environment
+        rigid_tri_query = array_class.BVHQueryState(
+            leaves=self.fem_surface_tet_bvh_state.leaves,
+            tree=self.rigid_tri_bvh_state.tree,
+            results=array_class.get_bvh_query_results(max_results, is_active=self._enable_rigid_fem_contact),
+        )
 
-        if self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET:
-            self.rigid_tet_aabb = AABB(self.sim._B, self.n_rigid_volume_elems)
-            self.rigid_tet_bvh = RigidTetLBVH(
-                self, self.rigid_tet_aabb, max_n_query_result_per_aabb=MAX_N_QUERY_RESULT_PER_AABB
-            )
+        has_rigid_tet_tree = self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET
+        n_rigid_tets = self.n_rigid_volume_elems if has_rigid_tet_tree else 0
+        self.rigid_tet_bvh_state, self.rigid_tet_bvh_config = get_bvh_data(
+            self.sim._B, n_rigid_tets, is_active=has_rigid_tet_tree
+        )
+        max_results = min(n_rigid_tets * MAX_N_QUERY_RESULT_PER_AABB * self.sim._B, 0x7FFFFFFF)
+        # The rigid tets of each environment queried against their own tree
+        rigid_tet_query = array_class.BVHQueryState(
+            leaves=self.rigid_tet_bvh_state.leaves,
+            tree=self.rigid_tet_bvh_state.tree,
+            results=array_class.get_bvh_query_results(max_results, is_active=has_rigid_tet_tree),
+        )
+        self.contact_queries_state = array_class.SAPContactQueriesState(
+            fem_self=fem_self_query, rigid_tri=rigid_tri_query, rigid_tet=rigid_tet_query
+        )
 
     def _init_equality_constraint(self):
         # TODO: Handling dynamically registered weld constraints would requiere passing 'constraint_state' as input.
@@ -572,6 +629,7 @@ class SAPCoupler(RBC):
             geoms_info=self.rigid_solver.dyn_info.geoms,
             dofs_state=self.rigid_solver.dyn_state.dofs,
             links_state=self.rigid_solver.dyn_state.links,
+            contact_queries_state=self.contact_queries_state,
         )
         if overflow:
             message = "Overflowed In Contact Query: \n"
@@ -592,7 +650,11 @@ class SAPCoupler(RBC):
         from genesis.engine.solvers.rigid.rigid_solver import kernel_update_all_verts
 
         if self.fem_solver.is_active:
-            if qd.static(self._fem_floor_contact_type == FEMFloorContactType.TET or self._enable_fem_self_tet_contact):
+            if qd.static(
+                self._fem_floor_contact_type == FEMFloorContactType.TET
+                or self._enable_fem_self_tet_contact
+                or self._enable_rigid_fem_contact
+            ):
                 self.fem_compute_pressure_gradient(i_step)
 
         if self.rigid_solver.is_active:
@@ -615,7 +677,11 @@ class SAPCoupler(RBC):
         geoms_info: array_class.GeomsInfo,
         dofs_state: array_class.DofsState,
         links_state: array_class.LinksState,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ) -> tuple[bool, bool]:
+        # The queries come in as arguments: a struct held by the instance indexes fine in a kernel, but quadrants binds
+        # the struct parameter of a func from kernel arguments only, so self.contact_queries_state would fail at the
+        # traversal call of each handler.
         has_contact = False
         overflow = False
         for contact in qd.static(self.contact_handlers):
@@ -627,6 +693,7 @@ class SAPCoupler(RBC):
                 free_verts_state=free_verts_state,
                 fixed_verts_state=fixed_verts_state,
                 geoms_info=geoms_info,
+                contact_queries_state=contact_queries_state,
             )
             has_contact |= contact.n_contact_pairs[None] > 0
             contact.compute_jacobian(links_info=links_info, dofs_state=dofs_state, links_state=links_state)
@@ -687,18 +754,16 @@ class SAPCoupler(RBC):
     # ------------------------------------------------------------------------------------
 
     def update_bvh(self, i_step: qd.i32):
+        if self._enable_fem_self_tet_contact or self._enable_rigid_fem_contact:
+            self.compute_fem_surface_tet_aabb(i_step)
         if self._enable_fem_self_tet_contact:
-            self.update_fem_surface_tet_bvh(i_step)
+            build_bvh(self.fem_surface_tet_bvh_state, self.fem_surface_tet_bvh_config, eps=gs.EPS)
 
         if self._enable_rigid_fem_contact:
             self.update_rigid_tri_bvh()
 
         if self.rigid_solver.is_active and self._rigid_rigid_contact_type == RigidRigidContactType.TET:
             self.update_rigid_tet_bvh()
-
-    def update_fem_surface_tet_bvh(self, i_step: qd.i32):
-        self.compute_fem_surface_tet_aabb(i_step)
-        self.fem_surface_tet_bvh.build()
 
     def update_rigid_tri_bvh(self):
         self.compute_rigid_tri_aabb(
@@ -707,25 +772,26 @@ class SAPCoupler(RBC):
             fixed_verts_state=self.rigid_solver.dyn_state.fixed_verts,
             verts_info=self.rigid_solver.dyn_info.verts,
         )
-        self.rigid_tri_bvh.build()
+        build_bvh(self.rigid_tri_bvh_state, self.rigid_tri_bvh_config, eps=gs.EPS)
 
     def update_rigid_tet_bvh(self):
         self.compute_rigid_tet_aabb()
-        self.rigid_tet_bvh.build()
+        build_bvh(self.rigid_tet_bvh_state, self.rigid_tet_bvh_config, eps=gs.EPS)
 
     @qd.kernel
     def compute_fem_surface_tet_aabb(self, i_step: qd.i32):
-        aabbs = qd.static(self.fem_surface_tet_aabb.aabbs)
         for i_b, i_se in qd.ndrange(self.fem_solver._B, self.fem_solver.n_surface_elements):
             i_e = self.fem_solver.surface_elements[i_se]
             i_vs = self.fem_solver.elements_i[i_e].el2v
 
-            aabbs[i_b, i_se].min.fill(np.inf)
-            aabbs[i_b, i_se].max.fill(-np.inf)
+            leaf_min = qd.Vector([np.inf, np.inf, np.inf], dt=gs.qd_float)
+            leaf_max = -leaf_min
             for i in qd.static(range(4)):
                 pos_v = self.fem_solver.elements_v[i_step, i_vs[i], i_b].pos
-                aabbs[i_b, i_se].min = qd.min(aabbs[i_b, i_se].min, pos_v)
-                aabbs[i_b, i_se].max = qd.max(aabbs[i_b, i_se].max, pos_v)
+                leaf_min = qd.min(leaf_min, pos_v)
+                leaf_max = qd.max(leaf_max, pos_v)
+            self.fem_surface_tet_bvh_state.leaves.aabbs_min[i_b, i_se] = leaf_min
+            self.fem_surface_tet_bvh_state.leaves.aabbs_max[i_b, i_se] = leaf_max
 
     @qd.kernel
     def compute_rigid_tri_aabb(
@@ -735,7 +801,6 @@ class SAPCoupler(RBC):
         fixed_verts_state: array_class.VertsState,
         verts_info: array_class.VertsInfo,
     ):
-        aabbs = qd.static(self.rigid_tri_aabb.aabbs)
         for i_b, i_f in qd.ndrange(self.rigid_solver._B, self.rigid_solver.n_faces):
             tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
             for i in qd.static(range(3)):
@@ -747,12 +812,11 @@ class SAPCoupler(RBC):
                     tri_vertices[:, i] = free_verts_state.pos[i_fv, i_b]
             pos_v0, pos_v1, pos_v2 = tri_vertices[:, 0], tri_vertices[:, 1], tri_vertices[:, 2]
 
-            aabbs[i_b, i_f].min = qd.min(pos_v0, pos_v1, pos_v2)
-            aabbs[i_b, i_f].max = qd.max(pos_v0, pos_v1, pos_v2)
+            self.rigid_tri_bvh_state.leaves.aabbs_min[i_b, i_f] = qd.min(pos_v0, pos_v1, pos_v2)
+            self.rigid_tri_bvh_state.leaves.aabbs_max[i_b, i_f] = qd.max(pos_v0, pos_v1, pos_v2)
 
     @qd.kernel
     def compute_rigid_tet_aabb(self):
-        aabbs = qd.static(self.rigid_tet_aabb.aabbs)
         for i_b, i_e in qd.ndrange(self._B, self.n_rigid_volume_elems):
             i_v0 = self.rigid_volume_elems[i_e][0]
             i_v1 = self.rigid_volume_elems[i_e][1]
@@ -762,8 +826,8 @@ class SAPCoupler(RBC):
             pos_v1 = self.rigid_volume_verts[i_b, i_v1]
             pos_v2 = self.rigid_volume_verts[i_b, i_v2]
             pos_v3 = self.rigid_volume_verts[i_b, i_v3]
-            aabbs[i_b, i_e].min = qd.min(pos_v0, pos_v1, pos_v2, pos_v3)
-            aabbs[i_b, i_e].max = qd.max(pos_v0, pos_v1, pos_v2, pos_v3)
+            self.rigid_tet_bvh_state.leaves.aabbs_min[i_b, i_e] = qd.min(pos_v0, pos_v1, pos_v2, pos_v3)
+            self.rigid_tet_bvh_state.leaves.aabbs_max[i_b, i_e] = qd.max(pos_v0, pos_v1, pos_v2, pos_v3)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------- Solve ----------------------------------------
@@ -2521,6 +2585,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
         # Compute contact pairs
@@ -2704,15 +2769,12 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         self.contact_pairs = self.contact_pair_type.field(shape=(self.max_contact_pairs,))
 
     @qd.func
-    def compute_candidates(self, f: qd.i32):
+    def compute_candidates(self, f: qd.i32, query_results: array_class.BVHQueryResults):
         overflow = False
         self.n_contact_candidates[None] = 0
-        result_count = qd.min(
-            self.coupler.fem_surface_tet_bvh.query_result_count[None],
-            self.coupler.fem_surface_tet_bvh.max_query_results,
-        )
+        result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
         for i_r in range(result_count):
-            i_b, i_sa, i_sq = self.coupler.fem_surface_tet_bvh.query_result[i_r]
+            i_b, i_sa, i_sq = query_results.triplets[i_r]
             i_a = self.fem_solver.surface_elements[i_sa]
             i_q = self.fem_solver.surface_elements[i_sq]
             i_v0 = self.fem_solver.elements_i[i_a].el2v[0]
@@ -2922,10 +2984,15 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
-        overflow |= self.coupler.fem_surface_tet_bvh.query(self.coupler.fem_surface_tet_aabb.aabbs)
-        overflow |= self.compute_candidates(f)
+        contact_queries_state.fem_self.results.count[0] = 0
+        func_bvh_query_leaves(contact_queries_state.fem_self, func_filter_fem_surface_tets, self.fem_solver)
+        overflow |= (
+            contact_queries_state.fem_self.results.count[0] > contact_queries_state.fem_self.results.triplets.shape[0]
+        )
+        overflow |= self.compute_candidates(f, contact_queries_state.fem_self.results)
         overflow |= self.compute_pairs(f)
         return overflow
 
@@ -3056,6 +3123,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
         sap_info = qd.static(self.contact_pairs.sap_info)
@@ -3148,6 +3216,7 @@ class RigidFloorVertContactHandler(RigidContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
         sap_info = qd.static(self.contact_pairs.sap_info)
@@ -3217,6 +3286,7 @@ class RigidFloorTetContactHandler(RigidContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
         candidates = qd.static(self.contact_candidates)
@@ -3375,14 +3445,13 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         verts_info: array_class.VertsInfo,
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
+        query_results: array_class.BVHQueryResults,
     ):
         self.n_contact_candidates[None] = 0
         overflow = False
-        result_count = qd.min(
-            self.coupler.rigid_tri_bvh.query_result_count[None], self.coupler.rigid_tri_bvh.max_query_results
-        )
+        result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
         for i_r in range(result_count):
-            i_b, i_a, i_sq = self.coupler.rigid_tri_bvh.query_result[i_r]
+            i_b, i_a, i_sq = query_results.triplets[i_r]
             i_q = self.fem_solver.surface_elements[i_sq]
 
             vert_idx1 = qd.Vector.zero(gs.qd_int, 3)
@@ -3560,10 +3629,17 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
-        overflow |= self.coupler.rigid_tri_bvh.query(self.coupler.fem_surface_tet_aabb.aabbs)
-        overflow |= self.compute_candidates(f, faces_info, verts_info, free_verts_state, fixed_verts_state)
+        contact_queries_state.rigid_tri.results.count[0] = 0
+        func_bvh_query_leaves(contact_queries_state.rigid_tri, func_no_filter, filter_ctx=0)
+        overflow |= (
+            contact_queries_state.rigid_tri.results.count[0] > contact_queries_state.rigid_tri.results.triplets.shape[0]
+        )
+        overflow |= self.compute_candidates(
+            f, faces_info, verts_info, free_verts_state, fixed_verts_state, contact_queries_state.rigid_tri.results
+        )
         overflow |= self.compute_pairs(f, verts_info, geoms_info, free_verts_state, fixed_verts_state)
         return overflow
 
@@ -3701,15 +3777,13 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         self.W = qd.field(gs.qd_mat3, shape=(self.max_contact_pairs,))
 
     @qd.func
-    def compute_candidates(self, f: qd.i32):
+    def compute_candidates(self, f: qd.i32, query_results: array_class.BVHQueryResults):
         overflow = False
         candidates = qd.static(self.contact_candidates)
         self.n_contact_candidates[None] = 0
-        result_count = qd.min(
-            self.coupler.rigid_tet_bvh.query_result_count[None], self.coupler.rigid_tet_bvh.max_query_results
-        )
+        result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
         for i_r in range(result_count):
-            i_b, i_a, i_q = self.coupler.rigid_tet_bvh.query_result[i_r]
+            i_b, i_a, i_q = query_results.triplets[i_r]
             i_v0 = self.coupler.rigid_volume_elems[i_a][0]
             i_v1 = self.coupler.rigid_volume_elems[i_q][1]
             x0 = self.coupler.rigid_volume_verts[i_b, i_v0]
@@ -3920,9 +3994,14 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
         free_verts_state: array_class.VertsState,
         fixed_verts_state: array_class.VertsState,
         geoms_info: array_class.GeomsInfo,
+        contact_queries_state: array_class.SAPContactQueriesState,
     ):
         overflow = False
-        overflow |= self.coupler.rigid_tet_bvh.query(self.coupler.rigid_tet_aabb.aabbs)
-        overflow |= self.compute_candidates(f)
+        contact_queries_state.rigid_tet.results.count[0] = 0
+        func_bvh_query_leaves(contact_queries_state.rigid_tet, func_filter_rigid_tets, self.coupler)
+        overflow |= (
+            contact_queries_state.rigid_tet.results.count[0] > contact_queries_state.rigid_tet.results.triplets.shape[0]
+        )
+        overflow |= self.compute_candidates(f, contact_queries_state.rigid_tet.results)
         overflow |= self.compute_pairs(f, geoms_info)
         return overflow

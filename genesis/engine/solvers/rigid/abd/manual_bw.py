@@ -15,8 +15,8 @@ import genesis.utils.geom as gu
 
 @qd.func
 def func_forward_kinematics_link_bw(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -269,11 +269,11 @@ def kernel_manual_forward_kinematics_bw(
 
 @qd.func
 def func_cd_contraction_bw(
-    i_b,
-    i_l,
-    i_slot,
-    dof_lo,
-    dof_hi,
+    i_b: int,
+    i_l: int,
+    i_slot: int,
+    dof_lo: int,
+    dof_hi: int,
     dyn_state: array_class.DynState,
 ):
     """Reverse of the forward-velocity contraction atomic_add(cd_*_bw[i_l, i_slot], cdof_*[i_d] * vel[i_d]) over
@@ -298,8 +298,8 @@ def func_cd_contraction_bw(
 
 @qd.func
 def func_forward_velocity_link_bw(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,

@@ -23,7 +23,6 @@ from .conftest import (
     check_gs_tm_textures,
 )
 
-
 # ==================== Scale Tests ====================
 
 
@@ -295,6 +294,8 @@ def test_urdf_mesh_processing(mesh_path, mesh_urdf, show_viewer):
         "normal_accessor_zero_glb",
         "texcoord_0_accessor_zero_glb",
         "texcoord_1_accessor_zero_glb",
+        "triangle_strip_nodes_glb",
+        "non_uniform_node_scale_glb",
     ],
 )
 def test_glb_parse_geometry(request, glb_file, tol):
@@ -312,11 +313,25 @@ def test_glb_parse_geometry(request, glb_file, tol):
     )
 
     tm_scene = trimesh.load(glb_path, process=False)
+    # A mesh whose primitives all declare NORMAL carries authored normals, which map through the inverse transpose
+    # of the node transform's linear part. 'apply_transform' maps the normals it holds through the linear part
+    # itself, so the authored ones are mapped here and written back over its result. A mesh declaring none leaves
+    # its normals to be derived from the geometry, which both parsers do once the node transform is applied.
+    glb = pygltflib.GLTF2().load(glb_path)
+    authored_normals_names = {
+        mesh.name for mesh in glb.meshes if all(prim.attributes.NORMAL is not None for prim in mesh.primitives)
+    }
     tm_meshes = {}
     for node_name in tm_scene.graph.nodes_geometry:
         transform, geometry_name = tm_scene.graph[node_name]
         ts_mesh = tm_scene.geometry[geometry_name].copy(include_cache=True)
+        normals = None
+        if geometry_name in authored_normals_names:
+            normals = ts_mesh.vertex_normals @ np.linalg.inv(transform[:3, :3])
+            normals /= np.linalg.norm(normals, axis=1, keepdims=True)
         ts_mesh = ts_mesh.apply_transform(transform)
+        if normals is not None:
+            ts_mesh.vertex_normals = normals
         tm_meshes[geometry_name] = ts_mesh
     assert len(tm_meshes) == len(gs_meshes)
 
@@ -801,6 +816,7 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
         "plane_infinite",
         "ellipsoid_uniform",
         "box_uniform",
+        "box_uniform_collision",
     )
     EXPECTED_EXPLICIT_UVS = ((0.125, 0.25), (0.5, 0.875), (0.625, 0.75), (0.75, 0.25))
 
@@ -840,6 +856,10 @@ def test_mjcf_2d_texture_mapping(textured_mjcf):
     spatial_uvs = np.concatenate([vgeoms[name].uvs for name in SPATIAL_GEOM_NAMES], axis=0)
     expected_spatial_uvs = np.column_stack((spatial_xy[:, 0] - 0.5, -1.25 * spatial_xy[:, 1] - 0.5))
     assert_allclose(spatial_uvs, expected_spatial_uvs, tol=gs.EPS)
+
+    collision_texture = vgeoms["box_uniform_collision"].vmesh.surface.diffuse_texture
+    assert isinstance(collision_texture, gs.textures.ImageTexture)
+    assert_equal(collision_texture.image_array, vgeoms["box_uniform"].vmesh.surface.diffuse_texture.image_array)
 
     fitted_uniform = vgeoms["box_fitted"]
     fitted_uniform_xy = fitted_uniform.init_vverts[:, :2] / np.multiply(SCALE, (1.0, 2.0))

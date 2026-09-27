@@ -210,22 +210,36 @@ def get_device(backend: gs.constants.backend, device_idx: Optional[int] = None):
     return device, device_name, total_mem, backend
 
 
+def get_gpu_cores_per_unit() -> int:
+    """Return the number of compute cores per compute unit of the active GPU.
+
+    NVIDIA packs 128 CUDA cores per streaming multiprocessor (SM) and AMD/ROCm 64 stream processors per compute unit
+    (CU); Apple Silicon 128 ALUs per GPU core. Other GPU backends (e.g. Vulkan) take the AMD MI350X as a baseline.
+    """
+    # FIXME: quadrants should expose a query of the GPU core count and layout for every backend.
+    if torch.cuda.is_available():
+        return 64 if torch.version.hip else 128
+    if gs.backend == gs.metal:
+        return 128
+    return 64
+
+
 def get_gpu_core_count() -> int:
     """Return the number of GPU compute cores for the active device.
 
     This is the env count above which one-thread-per-env already saturates the GPU, so cooperative or tiled kernels
-    stop being worthwhile. NVIDIA reports 128 CUDA cores per SM and AMD/ROCm 64 stream processors per CU; for backends
-    where the driver cannot be queried (Metal, or a GPU without a torch.cuda device) an upper-bound estimate is used.
+    stop being worthwhile. Where the driver cannot be queried (Metal, or a GPU without a torch.cuda device) an
+    upper-bound estimate of the compute unit count is used: 40 GPU cores on Apple Silicon, the 256 CUs of an AMD
+    MI350X for other GPU backends (e.g. Vulkan).
     """
+    cores_per_unit = get_gpu_cores_per_unit()
     if torch.cuda.is_available():
-        gpu_props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        cores_per_unit = 64 if torch.version.hip else 128
-        return gpu_props.multi_processor_count * cores_per_unit
+        return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count * cores_per_unit
     if gs.backend == gs.metal:
-        # Upper-bound estimate for Apple Silicon: 40 GPU cores * 128 ALUs.
-        return 5120
-    # Fallback for other GPU backends (e.g. Vulkan), using AMD MI350X (256 CUs * 64 cores) as a baseline.
-    return 16384
+        return 40 * cores_per_unit
+    # AMD MI350X: 256 compute units (https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html). For
+    # comparison, an RTX 6000 Blackwell has 188 SMs and an RTX 5090 170, of 128 cores each.
+    return 256 * cores_per_unit
 
 
 def fits_in_gpu_shared_memory(*dims: int) -> bool:

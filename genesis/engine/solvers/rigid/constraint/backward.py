@@ -9,7 +9,7 @@ from . import solver
 
 @qd.func
 def func_matvec_Ap(
-    i_b,
+    i_b: int,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -49,7 +49,7 @@ def func_matvec_Ap(
 
 @qd.func
 def func_solve_adjoint_u_cg_batch(
-    i_b,
+    i_b: int,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -704,9 +704,9 @@ def kernel_manual_add_frictionloss_constraints_bw(
 
 @qd.func
 def func_cddb_ang_bw(
-    i_b,
-    link,
-    g_cddb_ang,
+    i_b: int,
+    link: int,
+    g_cddb_ang: qd.types.vector(3),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
@@ -724,10 +724,10 @@ def func_cddb_ang_bw(
 
 @qd.func
 def func_equality_jdotv_bw(
-    i_b,
-    link,
-    anchor_pos,
-    g_jdotv,
+    i_b: int,
+    link: int,
+    anchor_pos: qd.types.vector(3),
+    g_jdotv: qd.types.vector(3),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),

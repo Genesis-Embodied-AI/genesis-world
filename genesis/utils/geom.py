@@ -16,6 +16,27 @@ from genesis.typing import Vec3FType
 
 
 @qd.func
+def qd_compare_sign(a, b):
+    """
+    Return 1 when both values are positive, -1 when both are negative, and 0 otherwise.
+    """
+    ret = 0
+    if a > 0 and b > 0:
+        ret = 1
+    elif a < 0 and b < 0:
+        ret = -1
+    return ret
+
+
+@qd.func
+def qd_is_equal_vec(a, b, eps: float):
+    """
+    Return whether every component of two vectors agrees within the tolerance eps.
+    """
+    return (qd.abs(a - b) < eps).all()
+
+
+@qd.func
 def qd_i_cross_vec(vec):
     return qd.Vector([0.0, -vec[2], vec[1]], dt=gs.qd_float)
 
@@ -1868,7 +1889,7 @@ def _np_z_up_to_R(z, up=None, out=None):
 
 
 @torch.jit.script
-def _tc_z_up_to_R(z, eps: float, up=None, out: torch.Tensor | None = None):
+def _tc_z_up_to_R(z, eps: float, up: torch.Tensor | None = None, out: torch.Tensor | None = None):
     if out is None:
         R = torch.empty(z.shape[:-1] + (3, 3), dtype=z.dtype, device=z.device)
     else:
@@ -1898,10 +1919,10 @@ def _tc_z_up_to_R(z, eps: float, up=None, out: torch.Tensor | None = None):
     if up is not None:
         x[:] = torch.cross(torch.broadcast_to(up, z.shape), z, dim=-1)
     else:
-        up_mask = z[..., 2:].abs() < 1.0 - eps
+        up_mask = z[..., 2].abs() < 1.0 - eps
         torch.where(up_mask, z[..., 1], z[..., 2], out=x[..., 0])
-        torch.where(up_mask, -z[..., 0], 0.0, out=x[..., 1])
-        torch.where(up_mask, 0.0, -z[..., 0], out=x[..., 2])
+        x[..., 1] = torch.where(up_mask, -z[..., 0], 0.0)
+        x[..., 2] = torch.where(up_mask, 0.0, -z[..., 0])
 
     # Normalize x vectors
     x_norm = torch.linalg.vector_norm(x, ord=2, dim=-1, keepdim=True)

@@ -8,7 +8,14 @@ import genesis.utils.array_class as array_class
 
 @qd.func
 def func_capsule_capsule_contact(
-    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info: array_class.DynInfo, rigid_info: array_class.RigidInfo
+    i_ga: int,
+    i_gb: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
 ):
     """
     Analytical capsule-capsule collision detection.
@@ -91,7 +98,12 @@ def func_capsule_capsule_contact(
 
 @qd.func
 def func_sphere_sphere_contact(
-    i_ga, i_gb, ga_pos, gb_pos, dyn_info: array_class.DynInfo, rigid_info: array_class.RigidInfo
+    i_ga: int,
+    i_gb: int,
+    ga_pos: qd.types.vector(3),
+    gb_pos: qd.types.vector(3),
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
 ):
     """
     Analytical sphere-sphere collision detection.
@@ -139,7 +151,14 @@ def func_sphere_sphere_contact(
 
 @qd.func
 def func_sphere_capsule_contact(
-    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info: array_class.DynInfo, rigid_info: array_class.RigidInfo
+    i_ga: int,
+    i_gb: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
 ):
     """
     Analytical sphere-capsule collision detection.

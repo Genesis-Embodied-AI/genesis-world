@@ -170,6 +170,7 @@ def test_geom_quadrants_vs_tensor_consistency(batch_shape):
 def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
     for py_func, shapes_in, shapes_out in (
         (gu.slerp, [[4], [4], [1]], [[4]]),
+        (gu.z_up_to_R, [[3]], [[3, 3]]),
         (gu.z_up_to_R, [[3], [3], [3, 3]], [[3, 3]]),
         (gu.pos_lookat_up_to_T, [[3], [3], [3]], [[4, 4]]),
         (partial(polar, pure_rotation=False, side="left", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
@@ -180,6 +181,9 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         np_args, tc_args = [], []
         for i in range(len(shape_args)):
             np_arg = np.random.randn(*batch_shape, *shape_args[i]).clip(-1.0, 1.0).astype(gs.np_float)
+            # Axis-aligned vectors hit the degenerate branches: poles, up colinear with z, coincident pos and lookat
+            if batch_shape and shape_args[i] == [3]:
+                np_arg[..., :6, :] = np.concatenate((np.eye(3), -np.eye(3)))
             tc_arg = torch.as_tensor(np_arg, dtype=gs.tc_float, device=gs.device)
 
             if i < num_inputs:

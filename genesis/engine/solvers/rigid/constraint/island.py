@@ -18,7 +18,7 @@ from ..collider.contact import func_contact_order_key, func_promote_woken_contac
 
 
 @qd.func
-def func_find_tree_root(i_t, i_b, constraint_state: array_class.ConstraintState):
+def func_find_tree_root(i_t: int, i_b: int, constraint_state: array_class.ConstraintState):
     # Path-halving find over the trees
     root = i_t
     while constraint_state.island.trees_parent_idx[root, i_b] != root:
@@ -30,7 +30,7 @@ def func_find_tree_root(i_t, i_b, constraint_state: array_class.ConstraintState)
 
 
 @qd.func
-def func_union_trees(i_ta, i_tb, i_b, constraint_state: array_class.ConstraintState):
+def func_union_trees(i_ta: int, i_tb: int, i_b: int, constraint_state: array_class.ConstraintState):
     # Union by minimum index: the root of a component is its smallest tree, regardless of the order edges are processed
     root_a = func_find_tree_root(i_ta, i_b, constraint_state)
     root_b = func_find_tree_root(i_tb, i_b, constraint_state)
@@ -41,7 +41,7 @@ def func_union_trees(i_ta, i_tb, i_b, constraint_state: array_class.ConstraintSt
 
 
 @qd.func
-def func_joint_link(i_joint, i_b, n_links, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
+def func_joint_link(i_joint: int, i_b: int, n_links: int, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
     # JointsInfo carries no link mapping, so locate the link whose dof range owns the joint's first dof. Joint
     # equalities are rare and link counts are small, so the linear scan is cheap.
     I_j = [i_joint, i_b] if qd.static(rigid_config.batch_joints_info) else i_joint
@@ -56,7 +56,7 @@ def func_joint_link(i_joint, i_b, n_links, dyn_info: array_class.DynInfo, rigid_
 
 
 @qd.func
-def func_equality_links(i_eq, i_b, n_links, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
+def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
     # Map an equality constraint to the pair of links it couples. CONNECT/WELD reference links; JOINT references joints.
     obj1 = dyn_info.equalities.eq_obj1id[i_eq, i_b]
     obj2 = dyn_info.equalities.eq_obj2id[i_eq, i_b]
@@ -75,11 +75,11 @@ def func_equality_links(i_eq, i_b, n_links, dyn_info: array_class.DynInfo, rigid
 
 @qd.func
 def func_edge_trees(
-    i_e,
-    i_b,
-    i_first_contact,
-    n_contacts,
-    n_equalities,
+    i_e: int,
+    i_b: int,
+    i_first_contact: int,
+    n_contacts: int,
+    n_equalities: int,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -117,7 +117,7 @@ def func_edge_trees(
 
 
 @qd.func
-def func_constraint_island(i_c, i_b, constraint_state: array_class.ConstraintState):
+def func_constraint_island(i_c: int, i_b: int, constraint_state: array_class.ConstraintState):
     # A constraint couples dofs of a single island, so its island is that of any dof of its support, read from the
     # sparse dof list every assembly site fills (jac_dofs_idx, see _append_relevant_dof in solver.py); a row with an
     # empty support belongs to no island.
@@ -129,7 +129,9 @@ def func_constraint_island(i_c, i_b, constraint_state: array_class.ConstraintSta
 
 
 @qd.func
-def func_group_constraints_by_island(i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+def func_group_constraints_by_island(
+    i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+):
     """Group the constraints of one env by island and start every island iterating.
 
     The island of each constraint is resolved and the constraints are listed in contiguous per-island ranges of
@@ -188,7 +190,7 @@ def func_group_constraints_by_island(i_b, constraint_state: array_class.Constrai
 
 
 @qd.func
-def func_chunk_island_rank(tid, i_island, sh_chunk):
+def func_chunk_island_rank(tid: int, i_island: int, sh_chunk):
     """Rank of a lane among the lanes of the chunk that hold the same island: the position of this lane's item within
     the island, once added to the island's running total."""
     rank = 0
@@ -200,7 +202,7 @@ def func_chunk_island_rank(tid, i_island, sh_chunk):
 
 @qd.func
 def func_group_constraints_by_island_coop(
-    i_b, tid, sh_chunk, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_b: int, tid: int, sh_chunk, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
 ):
     """Group the constraints of one env by island with the _K lanes of its block, in constraint index order.
 
@@ -275,7 +277,7 @@ def func_group_constraints_by_island_coop(
 
 
 @qd.func
-def func_dof_range_start(i_island, i_b, constraint_state: array_class.ConstraintState):
+def func_dof_range_start(i_island: int, i_b: int, constraint_state: array_class.ConstraintState):
     """First dof of an island whose ascending dof list holds consecutive dofs, -1 otherwise (see dof_range_start in
     array_class.py).
 
@@ -291,7 +293,7 @@ def func_dof_range_start(i_island, i_b, constraint_state: array_class.Constraint
 
 @qd.func
 def func_build_islands(
-    i_b,
+    i_b: int,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -437,7 +439,10 @@ def func_build_islands(
 
 @qd.func
 def func_build_single_island(
-    i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+    i_b: int,
+    constraint_state: array_class.ConstraintState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Write the partition of one env of a single-island scene serially: one island holding every dof in order.
 
@@ -465,8 +470,8 @@ def func_build_single_island(
 
 @qd.func
 def func_build_single_island_coop(
-    i_b,
-    tid,
+    i_b: int,
+    tid: int,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -497,7 +502,7 @@ def func_build_single_island_coop(
 
 
 @qd.func
-def func_tree_component(i_t, i_b, constraint_state: array_class.ConstraintState):
+def func_tree_component(i_t: int, i_b: int, constraint_state: array_class.ConstraintState):
     # Root of a tree's component in the union-find forest, reading only
     root = i_t
     while constraint_state.island.trees_parent_idx[root, i_b] != root:
@@ -507,8 +512,8 @@ def func_tree_component(i_t, i_b, constraint_state: array_class.ConstraintState)
 
 @qd.func
 def func_build_islands_coop(
-    i_b,
-    tid,
+    i_b: int,
+    tid: int,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -752,7 +757,7 @@ def func_build_islands_coop(
 
 @qd.func
 def func_contact_island(
-    i_col, i_b, collider_state: array_class.ColliderState, constraint_state: array_class.ConstraintState
+    i_col: int, i_b: int, collider_state: array_class.ColliderState, constraint_state: array_class.ConstraintState
 ):
     # A contact belongs to the island of its dof-carrying endpoint: both endpoints share an island when both carry dofs,
     # since the contact unioned them, otherwise one side is a fixed body.
@@ -766,8 +771,8 @@ def func_contact_island(
 
 @qd.func
 def func_contact_tree_slots(
-    i_col,
-    i_b,
+    i_col: int,
+    i_b: int,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
@@ -790,7 +795,7 @@ def func_contact_tree_slots(
 
 @qd.func
 def func_reorder_island_dofs(
-    i_b,
+    i_b: int,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
@@ -939,8 +944,8 @@ def func_reorder_island_dofs(
 
 @qd.func
 def func_sort_contacts_coop(
-    i_b,
-    tid,
+    i_b: int,
+    tid: int,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -994,10 +999,10 @@ def func_sort_contacts_coop(
 
 @qd.func
 def func_sort_contacts(
-    i_b,
+    i_b: int,
+    i_first: int,
+    n: int,
     contact_idx: qd.Tensor,
-    i_first,
-    n,
     contacts_pos: qd.Tensor,
     contacts_geom_a: qd.Tensor,
     contacts_geom_b: qd.Tensor,

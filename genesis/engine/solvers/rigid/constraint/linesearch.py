@@ -9,7 +9,7 @@ islands of a group of _K in lockstep with the lanes of the env's block, sweeping
 chunks of _K items and reducing each chunk by island with a segmented subgroup sum whose segment tail is the single
 writer of its island's slot, so the accumulation order is that of the chunks whatever the lanes do. A range of either
 list holding consecutive indices (every island of a single-island env, a group of whole trees in tree order) is swept by
-offset without reading the list, see func_list_range_start.
+offset without reading the list, see func_list_range_start in abd/misc.py.
 
 The line search of one island is MuJoCo's bracketing line search (a Newton walk along the search direction until the
 directional derivative changes sign, then a three-candidate refinement between the bracket points), written as a state
@@ -24,6 +24,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.simt as su
+from genesis.engine.solvers.rigid.abd.misc import func_list_item, func_list_range_start
 
 from . import solver as constraint_solver
 
@@ -33,34 +34,9 @@ from . import solver as constraint_solver
 
 
 @qd.func
-def func_list_range_start(ids: qd.Tensor, lo, hi, i_b):
-    """First index of the ascending id list ids[lo:hi] of one env when its indices are consecutive, -1 otherwise (0 for
-    an empty range).
-
-    A sweep over a consecutive range indexes its items directly, see func_list_item. The constraint list ascends by
-    construction; the dof list only where dof_range_start (array_class.py) says so, since the CPU skyline path reorders
-    it.
-    """
-    start = 0
-    if hi > lo:
-        start = ids[lo, i_b]
-        if ids[hi - 1, i_b] - start + 1 != hi - lo:
-            start = -1
-    return start
-
-
-@qd.func
-def func_list_item(ids: qd.Tensor, i_pos, lo, range_start, i_b):
-    """Item at position i_pos of the id list ids[lo:...] of one env: an offset from ``range_start`` when the range is
-    consecutive (see func_list_range_start), otherwise the list entry."""
-    i_item = range_start + (i_pos - lo)
-    if range_start < 0:
-        i_item = ids[i_pos, i_b]
-    return i_item
-
-
-@qd.func
-def func_group_dof_range_start(i_b, tid, base, n_group, dof_lo, dof_hi, constraint_state: array_class.ConstraintState):
+def func_group_dof_range_start(
+    i_b: int, tid: int, base: int, n_group: int, dof_lo: int, dof_hi: int, constraint_state: array_class.ConstraintState
+):
     """First dof of a group of _K islands whose dof lists, laid end to end, hold consecutive dofs, -1 otherwise.
 
     Every island of the group is in build order (dof_range_start) and the whole range consecutive, decided by all the
@@ -82,11 +58,11 @@ def func_group_dof_range_start(i_b, tid, base, n_group, dof_lo, dof_hi, constrai
 
 @qd.func
 def func_row_p0_terms(
-    i_c,
-    i_b,
-    ne,
-    nef,
-    ncone,
+    i_c: int,
+    i_b: int,
+    ne: int,
+    nef: int,
+    ncone: int,
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
     row_kind: qd.template(),
@@ -117,7 +93,7 @@ def func_row_p0_terms(
             terms[3] = terms[1]
     if qd.static(row_kind != 1):
         terms_alpha, kinks_alpha = func_row_alpha_terms(
-            i_c, i_b, 1, qd.Vector.zero(gs.qd_float, 3), ne, nef, ncone, constraint_state, rigid_config, row_kind
+            i_c, i_b, 1, ne, nef, ncone, qd.Vector.zero(gs.qd_float, 3), constraint_state, rigid_config, row_kind
         )
         terms[2] = terms[2] + terms_alpha[1]
         terms[3] = terms[3] + terms_alpha[2]
@@ -129,13 +105,13 @@ def func_row_p0_terms(
 
 @qd.func
 def func_row_alpha_terms(
-    i_c,
-    i_b,
-    n_alphas,
-    alphas,
-    ne,
-    nef,
-    ncone,
+    i_c: int,
+    i_b: int,
+    n_alphas: int,
+    ne: int,
+    nef: int,
+    ncone: int,
+    alphas: qd.types.vector(3),
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
     row_kind: qd.template(),
@@ -209,7 +185,7 @@ def func_row_alpha_terms(
                     terms[3 * k + 2] = 0.5 * hess_c
             if qd.static(rigid_config.enable_signorini_contact):
                 kinks = func_cone_head_kinks(
-                    rows_jaref, rows_jv, rows_efc_D, rows_friction, latch, n_alphas, alphas, rigid_config
+                    n_alphas, rows_jaref, rows_jv, rows_efc_D, rows_friction, latch, alphas, rigid_config
                 )
     if qd.static(row_kind in (0, 4)):
         is_contact_row = True
@@ -234,7 +210,14 @@ def func_row_alpha_terms(
 
 @qd.func
 def func_cone_head_kinks(
-    rows_jaref, rows_jv, rows_efc_D, rows_friction, latch, n_alphas, alphas, rigid_config: qd.template()
+    n_alphas: int,
+    rows_jaref,
+    rows_jv,
+    rows_efc_D,
+    rows_friction,
+    latch: float,
+    alphas: qd.types.vector(3),
+    rigid_config: qd.template(),
 ):
     """Smallest step beyond each of the first n_alphas candidate steps at which one elliptic contact changes regime
     under 'signorini'.
@@ -279,8 +262,8 @@ def func_cone_head_kinks(
 
 @qd.func
 def func_dof_p0_terms(
-    i_d,
-    i_b,
+    i_d: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
@@ -303,7 +286,7 @@ def func_dof_p0_terms(
 
 
 @qd.func
-def func_dof_exit_terms(i_d, i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+def func_dof_exit_terms(i_d: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
     """Per-dof terms of the convergence test: squared gradient, the descent grad .
 
     Mgrad, and for CG the Hager-Zhang products (d . y, y . My, y . Mgrad, d . grad, |d|^2), see func_exit_decision.
@@ -332,7 +315,12 @@ def func_dof_exit_terms(i_d, i_b, constraint_state: array_class.ConstraintState,
 
 @qd.func
 def func_ls_state_init(
-    sums_dofs, sums_rows, inertia, kink_0, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+    sums_dofs: qd.types.vector(5),
+    sums_rows: qd.types.vector(5),
+    inertia: float,
+    kink_0: float,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
 ):
     """Initialize one island's line search from its initialization sums over its dofs (see func_dof_p0_terms) and over
     its rows (see func_row_p0_terms), on the island's own inertia scale.
@@ -377,7 +365,7 @@ def func_ls_state_init(
 
 
 @qd.func
-def func_bracket_third_candidate(p1_alpha, p1_kink, p2_alpha, p2_kink):
+def func_bracket_third_candidate(p1_alpha: float, p1_kink: float, p2_alpha: float, p2_kink: float):
     """Third candidate of a refinement round between the bracket points: the first regime change inside the bracket,
     read off its lower point, else the midpoint."""
     alpha_lo = qd.min(p1_alpha, p2_alpha)
@@ -393,22 +381,22 @@ def func_bracket_third_candidate(p1_alpha, p1_kink, p2_alpha, p2_kink):
 
 @qd.func
 def func_ls_state_advance(
-    acc,
-    kinks,
-    n_alphas,
-    alphas,
-    phase,
-    p1,
-    p2,
-    p2update,
-    direction,
-    ls_it,
-    gtol,
-    base_1,
-    base_2,
-    p0_deriv_0,
-    p0_deriv_1,
-    kink_0,
+    n_alphas: int,
+    acc: qd.types.vector(9),
+    kinks: qd.types.vector(3),
+    alphas: qd.types.vector(3),
+    phase: int,
+    p1: qd.types.vector(5),
+    p2: qd.types.vector(5),
+    p2update: int,
+    direction: int,
+    ls_it: int,
+    gtol: float,
+    base_1: float,
+    base_2: float,
+    p0_deriv_0: float,
+    p0_deriv_1: float,
+    kink_0: float,
     rigid_info: array_class.RigidInfo,
 ):
     """Advance one island's line search by one transition from the accumulated terms of its pending candidates.
@@ -576,7 +564,13 @@ def func_ls_state_advance(
 
 
 @qd.func
-def func_exit_decision(terms, improvement, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
+def func_exit_decision(
+    terms: qd.types.vector(7),
+    improvement: float,
+    inertia: float,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
     """Convergence test of one island from its exit terms (see func_dof_exit_terms) and the improvement of its last line
     search, on the island's own inertia scale: a flat gradient or a stalled improvement stops the iteration, and for
     Newton the descent grad .
@@ -607,7 +601,9 @@ def func_exit_decision(terms, improvement, inertia, rigid_info: array_class.Rigi
 
 
 @qd.func
-def func_certify_decision(terms, inertia, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
+def func_certify_decision(
+    terms: qd.types.vector(7), inertia: float, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+):
     """Warm-start certificate of one island from its exit terms.
 
     The warm-started acceleration is kept as the solution when its Newton decrement and, for Newton or the Signorini
@@ -626,7 +622,7 @@ def func_certify_decision(terms, inertia, rigid_info: array_class.RigidInfo, rig
 
 
 @qd.func
-def func_mv_jv_dense(i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+def func_mv_jv_dense(i_b: int, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
     """mv = M @ search over the mass blocks and jv = J @ search over every row and dof of one env, the dense read of an
     env whose single island spans it (see is_single_island), whose loads carry no dependent index."""
     n_dofs = constraint_state.search.shape[0]
@@ -643,7 +639,7 @@ def func_mv_jv_dense(i_b, constraint_state: array_class.ConstraintState, rigid_i
 
 
 @qd.func
-def func_mv_jv_islands(i_b, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+def func_mv_jv_islands(i_b: int, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
     """mv and jv of the islands of one env still iterating, each row read over its sparse support, so the cost follows
     the islands' sizes."""
     for i_island in range(constraint_state.island.n_islands[i_b]):
@@ -669,13 +665,13 @@ def func_mv_jv_islands(i_b, constraint_state: array_class.ConstraintState, rigid
 
 @qd.func
 def func_row_p0_sums_by_class(
-    i_b,
-    i_first,
-    stride,
-    ne,
-    nef,
-    ncone,
-    n_con,
+    i_b: int,
+    i_first: int,
+    stride: int,
+    ne: int,
+    nef: int,
+    ncone: int,
+    n_con: int,
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
 ):
@@ -716,15 +712,15 @@ def func_row_p0_sums_by_class(
 
 @qd.func
 def func_row_alpha_sums_by_class(
-    i_b,
-    i_first,
-    stride,
-    n_alphas,
-    alphas,
-    ne,
-    nef,
-    ncone,
-    n_con,
+    i_b: int,
+    i_first: int,
+    stride: int,
+    n_alphas: int,
+    ne: int,
+    nef: int,
+    ncone: int,
+    n_con: int,
+    alphas: qd.types.vector(3),
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
 ):
@@ -738,7 +734,7 @@ def func_row_alpha_sums_by_class(
     i_c = ne + i_first
     while i_c < nef:
         terms, _kinks = func_row_alpha_terms(
-            i_c, i_b, n_alphas, alphas, ne, nef, ncone, constraint_state, rigid_config, row_kind=2
+            i_c, i_b, n_alphas, ne, nef, ncone, alphas, constraint_state, rigid_config, row_kind=2
         )
         acc = acc + terms
         i_c = i_c + stride
@@ -747,7 +743,7 @@ def func_row_alpha_sums_by_class(
         i_cone = i_first
         while i_cone < (ncone - nef) // n_rows:
             terms, kinks_row = func_row_alpha_terms(
-                nef + i_cone * n_rows, i_b, n_alphas, alphas, ne, nef, ncone, constraint_state, rigid_config, row_kind=3
+                nef + i_cone * n_rows, i_b, n_alphas, ne, nef, ncone, alphas, constraint_state, rigid_config, row_kind=3
             )
             acc = acc + terms
             kinks = qd.min(kinks, kinks_row)
@@ -755,7 +751,7 @@ def func_row_alpha_sums_by_class(
     i_c = ncone + i_first
     while i_c < n_con:
         terms, _kinks = func_row_alpha_terms(
-            i_c, i_b, n_alphas, alphas, ne, nef, ncone, constraint_state, rigid_config, row_kind=4
+            i_c, i_b, n_alphas, ne, nef, ncone, alphas, constraint_state, rigid_config, row_kind=4
         )
         acc = acc + terms
         i_c = i_c + stride
@@ -764,9 +760,9 @@ def func_row_alpha_sums_by_class(
 
 @qd.func
 def func_search_single_island(
-    i_b,
-    tid,
-    stride,
+    i_b: int,
+    tid: int,
+    stride: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -828,7 +824,7 @@ def func_search_single_island(
         # rounds are uniform across the block
         while phase < 3:
             acc, kinks = func_row_alpha_sums_by_class(
-                i_b, tid, stride, n_alphas, alphas, ne, nef, ncone, n_con, constraint_state, rigid_config
+                i_b, tid, stride, n_alphas, ne, nef, ncone, n_con, alphas, constraint_state, rigid_config
             )
             if qd.static(is_coop):
                 for k in qd.static(range(9)):
@@ -851,9 +847,9 @@ def func_search_single_island(
                 improvement,
                 ls_result,
             ) = func_ls_state_advance(
+                n_alphas,
                 acc,
                 kinks,
-                n_alphas,
                 alphas,
                 phase,
                 p1,
@@ -903,9 +899,9 @@ def func_search_single_island(
 
 @qd.func
 def func_exit_single_island(
-    i_b,
-    tid,
-    stride,
+    i_b: int,
+    tid: int,
+    stride: int,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -964,7 +960,7 @@ def func_exit_single_island(
 
 @qd.func
 def func_linesearch_islands_serial(
-    i_b,
+    i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -1044,7 +1040,7 @@ def func_linesearch_islands_serial(
                     for i_pos in range(row_lo, row_hi):
                         i_c = func_list_item(constraint_state.island.constraint_id, i_pos, row_lo, row_base, i_b)
                         terms, kinks_row = func_row_alpha_terms(
-                            i_c, i_b, n_alphas, alphas, ne, nef, ncone, constraint_state, rigid_config, row_kind=0
+                            i_c, i_b, n_alphas, ne, nef, ncone, alphas, constraint_state, rigid_config, row_kind=0
                         )
                         acc = acc + terms
                         kinks = qd.min(kinks, kinks_row)
@@ -1061,9 +1057,9 @@ def func_linesearch_islands_serial(
                         improvement,
                         ls_result,
                     ) = func_ls_state_advance(
+                        n_alphas,
                         acc,
                         kinks,
-                        n_alphas,
                         alphas,
                         phase,
                         p1,
@@ -1107,7 +1103,7 @@ def func_linesearch_islands_serial(
 
 @qd.func
 def func_exit_islands_serial(
-    i_b,
+    i_b: int,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -1166,7 +1162,9 @@ def func_exit_islands_serial(
 
 
 @qd.func
-def func_mv_jv_coop(i_b, tid, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo):
+def func_mv_jv_coop(
+    i_b: int, tid: int, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
+):
     """Form mv = M @ search over the dofs and jv = J @ search over the rows of one env, by the _K lanes of its block."""
     _K = qd.static(32)
     n_dofs = constraint_state.search.shape[0]
@@ -1191,8 +1189,8 @@ def func_mv_jv_coop(i_b, tid, constraint_state: array_class.ConstraintState, rig
 
 @qd.func
 def func_linesearch_islands_coop(
-    i_b,
-    tid,
+    i_b: int,
+    tid: int,
     sh_acc,
     sh_kinks,
     sh_alphas,
@@ -1413,10 +1411,10 @@ def func_linesearch_islands_coop(
                                 i_c,
                                 i_b,
                                 n_alphas_i,
-                                row_alphas,
                                 ne,
                                 nef,
                                 ncone,
+                                row_alphas,
                                 constraint_state,
                                 rigid_config,
                                 row_kind=0,
@@ -1453,10 +1451,10 @@ def func_linesearch_islands_coop(
                                 i_c,
                                 i_b,
                                 sh_n_alphas[i_slot],
-                                row_alphas,
                                 ne,
                                 nef,
                                 ncone,
+                                row_alphas,
                                 constraint_state,
                                 rigid_config,
                                 row_kind=0,
@@ -1489,9 +1487,9 @@ def func_linesearch_islands_coop(
                     improvement,
                     ls_result,
                 ) = func_ls_state_advance(
+                    n_alphas,
                     acc,
                     kinks,
-                    n_alphas,
                     alphas,
                     phase,
                     p1,
@@ -1562,8 +1560,8 @@ def func_linesearch_islands_coop(
 
 @qd.func
 def func_exit_islands_coop(
-    i_b,
-    tid,
+    i_b: int,
+    tid: int,
     sh_acc,
     sh_pending,
     sh_alpha,

@@ -6,6 +6,7 @@ import torch
 
 import genesis as gs
 from genesis.utils.misc import tensor_to_array
+from genesis.vis.viewer_plugins.raycast import Raycaster
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -470,7 +471,7 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
     # ordinary step. The per-env obstacle geometry differs here, so it groups into one tree per env.
     collision_bvh = next(entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is None)
     assert collision_bvh.maybe_static
-    assert collision_bvh.aabb.n_batches == 2
+    assert collision_bvh.n_trees == 2
 
     # Make the obstacle geometry identical across envs (sensors still differ in x): the static BVH regroups to a
     # single shared tree read by every env. The set_pos calls must invalidate the static BVH, otherwise the cast
@@ -482,7 +483,7 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
 
     scene.step()
 
-    assert collision_bvh.aabb.n_batches == 1
+    assert collision_bvh.n_trees == 1
 
     shared_distances = lidar.read().distances[:, 0, 0]
     shared_expected = min(SHARED_OBSTACLE_1_X - 0.1, SHARED_OBSTACLE_2_X - 0.025) - shared_sensor_positions[:, 0]
@@ -544,8 +545,8 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
     visual_bvh = next(entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is not None)
     assert not static_bvh.is_env_uniform
     assert visual_bvh.maybe_static
-    assert static_bvh.aabb.n_batches == 1
-    assert visual_bvh.aabb.n_batches == 1
+    assert static_bvh.n_trees == 1
+    assert visual_bvh.n_trees == 1
     assert_allclose(lidar.read().distances[..., 0, 0], 0.8, tol=5e-3)
 
     if n_envs > 0:
@@ -555,8 +556,8 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
         # distances. The visual geometry stays env-identical through its regroup, so it keeps a single tree.
         box.set_pos(np.array([[1.0, 0.0, 0.5], [4.0, 0.0, 0.5], [3.0, 0.0, 0.5], [2.0, 0.0, 0.5]], dtype=gs.np_float))
         scene.step()
-        assert static_bvh.aabb.n_batches == n_envs
-        assert visual_bvh.aabb.n_batches == 1
+        assert static_bvh.n_trees == n_envs
+        assert visual_bvh.n_trees == 1
         assert_allclose(lidar.read().distances[:, 0, 0], (0.8, 3.8, 2.8, 1.8), tol=5e-3)
 
         # A per-env set_pos on the visual box splits the visual BVH into one tree per distinct geometry - two here,
@@ -565,7 +566,7 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
             np.array([[6.0, 0.0, 0.5], [6.0, 0.0, 0.5], [1.5, 0.0, 0.5], [6.0, 0.0, 0.5]], dtype=gs.np_float)
         )
         scene.step()
-        assert visual_bvh.aabb.n_batches == 2
+        assert visual_bvh.n_trees == 2
         assert_allclose(lidar.read().distances[:, 0, 0], (0.8, 3.8, 1.3, 1.8), tol=5e-3)
 
         # Diverge the movable box per env (off the ray corridor), then restore the static box to identical poses:
@@ -576,14 +577,14 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
         )
         box.set_pos((1.0, 0.0, 0.5))
         scene.step()
-        assert static_bvh.aabb.n_batches == 1
+        assert static_bvh.n_trees == 1
         assert_allclose(lidar.read().distances[:, 0, 0], 0.8, tol=5e-3)
 
         # An identical reset restores the built geometry and merges everything back to one shared tree each.
         scene.reset()
         scene.step()
-        assert static_bvh.aabb.n_batches == 1
-        assert visual_bvh.aabb.n_batches == 1
+        assert static_bvh.n_trees == 1
+        assert visual_bvh.n_trees == 1
         assert_allclose(lidar.read().distances[:, 0, 0], 0.8, tol=5e-3)
 
 
@@ -708,7 +709,7 @@ def test_heterogeneous_object(show_viewer, tol):
     collision_entries = [entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is None]
     assert len(collision_entries) == 2
     static_bvh = next(entry for entry in collision_entries if entry.maybe_static)
-    assert static_bvh.aabb.n_batches == 3
+    assert static_bvh.n_trees == 3
 
     # The static BVH is rebuilt only when its geometry actually changes - exactly what is necessary, nothing more: an
     # idle step records no change (rebuild skipped), while a set_pos records a pending change (rebuild scheduled).
@@ -948,5 +949,18 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
 
     # Identical fixed geometry in every env: the static subset collapses to a single shared tree, while the dynamic
     # subset keeps one tree per env by construction.
-    assert static_entry.aabb.n_batches == 1
-    assert dynamic_entry.aabb.n_batches == max(n_envs, 1)
+    assert static_entry.n_trees == 1
+    assert dynamic_entry.n_trees == max(n_envs, 1)
+
+    # The dynamic box behind the static one: the nearer static hit wins over a farther hit of the other set
+    dynamic_box.set_pos((0.0, 0.0, -0.5))
+    scene.step()
+    assert_distances(MOUNT_Z - STATIC_TOP_Z)
+
+    # The viewer picks through the same trees: a ray down from the mount meets the dynamic box moved in front on the
+    # collision meshes, and the visual box on the meshes opted into visual raycasting
+    dynamic_box.set_pos((0.0, 0.0, DYNAMIC_TOP_Z - 0.2))
+    scene.step()
+    for use_visual_geom, top_z in ((False, DYNAMIC_TOP_Z), (True, VISUAL_TOP_Z)):
+        hit = Raycaster(scene, use_visual_geom=use_visual_geom).cast((0.0, 0.0, MOUNT_Z), (0.0, 0.0, -1.0))
+        assert_allclose(hit.distance, MOUNT_Z - top_z, tol=tol)

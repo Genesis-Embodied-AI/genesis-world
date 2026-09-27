@@ -33,8 +33,8 @@ def linear_to_lower_tri(i_pair: qd.i32, strict: qd.template() = False):
 
 @qd.func
 def func_wakeup_island(
-    i_island,
-    i_b,
+    i_island: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -55,8 +55,8 @@ def func_wakeup_island(
 
 @qd.func
 def func_wakeup_link(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -92,7 +92,7 @@ def func_wakeup_link(
 
 
 @qd.func
-def func_is_awake_link(i_l, i_b, dyn_state: array_class.DynState, rigid_config: qd.template()):
+def func_is_awake_link(i_l: int, i_b: int, dyn_state: array_class.DynState, rigid_config: qd.template()):
     """Whether link i_l of env i_b is awake.
 
     A static link never sleeps: only the links of a contact island do (see func_hibernate_island_if_settled).
@@ -105,7 +105,7 @@ def func_is_awake_link(i_l, i_b, dyn_state: array_class.DynState, rigid_config: 
 
 @qd.func
 def func_is_awake_tree(
-    i_t, i_b, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+    i_t: int, i_b: int, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
     """Whether kinematic tree i_t of env i_b is awake.
 
@@ -122,8 +122,8 @@ def func_is_awake_tree(
 
 @qd.func
 def func_hibernate_link(
-    i_l,
-    i_b,
+    i_l: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -157,8 +157,8 @@ def func_hibernate_link(
 
 @qd.func
 def func_hibernate_island_if_settled(
-    i_island,
-    i_b,
+    i_island: int,
+    i_b: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
@@ -846,7 +846,9 @@ def kernel_apply_links_external_wrench_at_pos(
 
 
 @qd.func
-def func_apply_coupling_force(link_idx, env_idx, pos, force, links_state: array_class.LinksState):
+def func_apply_coupling_force(
+    link_idx: int, env_idx: int, pos: qd.types.vector(3), force: qd.types.vector(3), links_state: array_class.LinksState
+):
     torque = (pos - links_state.root_COM[link_idx, env_idx]).cross(force)
     links_state.cfrc_coupling_ang[link_idx, env_idx] -= torque
     links_state.cfrc_coupling_vel[link_idx, env_idx] -= force
@@ -887,11 +889,11 @@ def kernel_wakeup_coupled_links(
 
 @qd.func
 def func_apply_link_external_wrench(
-    link_idx,
-    env_idx,
-    pos,
-    force,
-    torque,
+    link_idx: int,
+    env_idx: int,
+    pos: qd.types.vector(3),
+    force: qd.types.vector(3),
+    torque: qd.types.vector(3),
     dyn_state: array_class.DynState,
     ref: qd.template(),
     local: qd.template(),
@@ -1009,6 +1011,33 @@ def kernel_clear_external_force(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
     func_clear_external_force(dyn_state, rigid_info, rigid_config)
+
+
+@qd.func
+def func_list_range_start(ids: qd.Tensor, lo: int, hi: int, i_b: int):
+    """First index of the ascending id list ids[lo:hi] of one env when its indices are consecutive, -1 otherwise (0 for
+    an empty range).
+
+    A sweep over a consecutive range indexes its items directly, see func_list_item. The constraint list ascends by
+    construction, and the dof list only where dof_range_start (array_class.py) says so, since the CPU skyline path
+    reorders it.
+    """
+    start = 0
+    if hi > lo:
+        start = ids[lo, i_b]
+        if ids[hi - 1, i_b] - start + 1 != hi - lo:
+            start = -1
+    return start
+
+
+@qd.func
+def func_list_item(ids: qd.Tensor, i_pos: int, lo: int, range_start: int, i_b: int):
+    """Item at position i_pos of the id list ids[lo:...] of one env: an offset from ``range_start`` when the range is
+    consecutive (see func_list_range_start), otherwise the list entry."""
+    i_item = range_start + (i_pos - lo)
+    if range_start < 0:
+        i_item = ids[i_pos, i_b]
+    return i_item
 
 
 from genesis.utils.deprecated_module_wrapper import create_virtual_deprecated_module
