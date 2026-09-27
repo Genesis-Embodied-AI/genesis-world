@@ -156,32 +156,19 @@ jobs:
             }
             const workflowPath = `${process.env.WORKFLOW_REPOSITORY}/${process.env.WORKFLOW_FILE_PATH}`;
 
-            // 'github.paginate' leaves the response of the runner groups endpoint unpacked, and the one of the
-            // repository access of a runner group shares its shape, so both read a single page of at most 100 entries.
-            const { data: dataGroups } = await github.rest.actions.listSelfHostedRunnerGroupsForOrg({
-              org, per_page: 100,
-            });
-            if (dataGroups.total_count > dataGroups.runner_groups.length) {
-              throw new Error(`Organization '${org}' has more runner groups than a single page holds.`);
-            }
-            const group = dataGroups.runner_groups.find((group) => group.name === process.env.RUNNER_GROUP);
+            // The endpoints of the runner groups have no method in the client, so they are requested by route.
+            const groups = await github.paginate('GET /orgs/{org}/actions/runner-groups', { org, per_page: 100 });
+            const group = groups.find((group) => group.name === process.env.RUNNER_GROUP);
             if (!group) {
-              const groupNames = dataGroups.runner_groups.map((group) => `'${group.name}'`).join(', ') || 'none';
+              const groupNames = groups.map((group) => `'${group.name}'`).join(', ') || 'none';
               throw new Error(`Runner group '${process.env.RUNNER_GROUP}' is missing from organization '${org}'. `
                 + `Runner groups visible to the token: ${groupNames}.`);
             }
-            let repos;
-            if (group.visibility === 'selected') {
-              const { data: dataRepos } = await github.rest.actions.listRepoAccessToSelfHostedRunnerGroupInOrg({
-                org, runner_group_id: group.id, per_page: 100,
-              });
-              if (dataRepos.total_count > dataRepos.repositories.length) {
-                throw new Error(`Runner group '${group.name}' has more repositories than a single page holds.`);
-              }
-              repos = dataRepos.repositories;
-            } else {
-              repos = await github.paginate(github.rest.repos.listForOrg, { org, type: 'all' });
-            }
+            const repos = group.visibility === 'selected'
+              ? await github.paginate('GET /orgs/{org}/actions/runner-groups/{runner_group_id}/repositories', {
+                  org, runner_group_id: group.id, per_page: 100,
+                })
+              : await github.paginate(github.rest.repos.listForOrg, { org, type: 'all' });
 
             // A call only waits for the older ones, which all exist by now, so they are listed once.
             const runsOlder = [];
