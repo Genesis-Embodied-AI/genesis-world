@@ -159,7 +159,9 @@ jobs:
             const groups = await github.paginate(github.rest.actions.listSelfHostedRunnerGroupsForOrg, { org });
             const group = groups.find((group) => group.name === process.env.RUNNER_GROUP);
             if (!group) {
-              throw new Error(`Runner group '${process.env.RUNNER_GROUP}' is missing from organization '${org}'.`);
+              const groupNames = groups.map((group) => `'${group.name}'`).join(', ') || 'none';
+              throw new Error(`Runner group '${process.env.RUNNER_GROUP}' is missing from organization '${org}'. `
+                + `Runner groups visible to the token: ${groupNames}.`);
             }
             const repos = group.visibility === 'selected'
               ? await github.paginate(github.rest.actions.listRepoAccessToSelfHostedRunnerGroupInOrg, {
