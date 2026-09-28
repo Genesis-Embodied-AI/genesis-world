@@ -291,6 +291,18 @@ class RigidInfo:
     trees_dof_start: qd.Tensor
     trees_n_dofs: qd.Tensor
     links_tree_idx: qd.Tensor
+    # trees_levels_links_idx lists the links of every tree level by level (see KinematicSolver._init_tree_fields). The
+    # levels of tree i_t start at entry trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry
+    # i_k ends before entry trees_levels_links_end[i_k]. The root tables list all the links of every root the same way.
+    # The level sweep walks them (see func_sweep_links_by_level).
+    trees_level_start: qd.Tensor
+    trees_n_levels: qd.Tensor
+    trees_levels_links_idx: qd.Tensor
+    trees_levels_links_end: qd.Tensor
+    roots_level_start: qd.Tensor
+    roots_n_levels: qd.Tensor
+    roots_levels_links_idx: qd.Tensor
+    roots_levels_links_end: qd.Tensor
     # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
     # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
     # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
@@ -349,6 +361,17 @@ def get_rigid_info(solver, kinematic_only):
         (2, 1, 0) if not kinematic_only and solver.rigid_config.enable_cooperative_constraint_kernels else None
     )
 
+    # The tables of the level sweep (see trees_levels_links_idx), empty where it does not run
+    trees_levels_shape = ()
+    trees_levels_links_shape = ()
+    roots_levels_shape = ()
+    roots_levels_links_shape = ()
+    if not kinematic_only and solver.rigid_config.enable_level_sweep:
+        trees_levels_shape = (solver.n_trees_,)
+        trees_levels_links_shape = (max(1, np.count_nonzero(solver._links_tree_root_idx >= 0)),)
+        roots_levels_shape = (solver.n_roots_,)
+        roots_levels_links_shape = (solver.n_links_,)
+
     # FIXME: Add a better split between kinematic and Genesis
     if kinematic_only:
         return RigidInfo(
@@ -372,6 +395,14 @@ def get_rigid_info(solver, kinematic_only):
             trees_dof_start=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             trees_n_dofs=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
             links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+            trees_level_start=V(dtype=gs.qd_int, shape=trees_levels_shape),
+            trees_n_levels=V(dtype=gs.qd_int, shape=trees_levels_shape),
+            trees_levels_links_idx=V(dtype=gs.qd_int, shape=trees_levels_links_shape),
+            trees_levels_links_end=V(dtype=gs.qd_int, shape=trees_levels_links_shape),
+            roots_level_start=V(dtype=gs.qd_int, shape=roots_levels_shape),
+            roots_n_levels=V(dtype=gs.qd_int, shape=roots_levels_shape),
+            roots_levels_links_idx=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
+            roots_levels_links_end=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
@@ -411,6 +442,14 @@ def get_rigid_info(solver, kinematic_only):
         trees_dof_start=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         trees_n_dofs=V(dtype=gs.qd_int, shape=(solver.n_trees_,)),
         links_tree_idx=V(dtype=gs.qd_int, shape=(solver.n_links_,)),
+        trees_level_start=V(dtype=gs.qd_int, shape=trees_levels_shape),
+        trees_n_levels=V(dtype=gs.qd_int, shape=trees_levels_shape),
+        trees_levels_links_idx=V(dtype=gs.qd_int, shape=trees_levels_links_shape),
+        trees_levels_links_end=V(dtype=gs.qd_int, shape=trees_levels_links_shape),
+        roots_level_start=V(dtype=gs.qd_int, shape=roots_levels_shape),
+        roots_n_levels=V(dtype=gs.qd_int, shape=roots_levels_shape),
+        roots_levels_links_idx=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
+        roots_levels_links_end=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
@@ -2928,6 +2967,11 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10
     parallel_init: bool = False  # parallelize init over (constraints, envs) when GPU is not saturated by envs alone
+    # Whether the walks of the kinematic trees and roots sweep them level by level (see func_sweep_links_by_level)
+    enable_level_sweep: bool = False
+    # Lanes of the level sweep per env, a power of two dividing its blocks of 32 lanes. Four envs per block balance the
+    # lanes a narrow level leaves idle against the links a wide level serializes.
+    level_sweep_n_lanes_per_env: int = 8
     broadphase_traversal: int = 0
     enable_tiled_cholesky_mass_matrix: bool = False
     mass_matrix_fits_shared: bool = False

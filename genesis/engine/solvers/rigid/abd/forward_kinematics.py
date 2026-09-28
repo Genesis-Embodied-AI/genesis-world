@@ -4,11 +4,14 @@ Forward kinematics, velocity propagation, and geometry updates for rigid body si
 This module contains Quadrants kernels and functions for:
 - Forward kinematics computation (link and joint pose updates)
 - Velocity propagation through kinematic chains
+- Link acceleration propagation
 - Geometry pose and vertex updates
 - Center of mass calculations
 - AABB updates for collision detection
 - Hibernation management for inactive entities
 """
+
+from enum import IntEnum
 
 import quadrants as qd
 
@@ -16,6 +19,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from .misc import (
+    func_add_safe_backward,
     func_atomic_add_if,
     func_check_index_range,
     func_is_awake_link,
@@ -24,6 +28,14 @@ from .misc import (
     func_write_and_read_field_if,
     func_write_field_if,
 )
+
+
+class LINK_SWEEP_PASS(IntEnum):
+    """Select the per-link pass that func_sweep_links_by_level runs."""
+
+    FORWARD_KINEMATICS = 0
+    FORWARD_VELOCITY = 1
+    ACCELERATION = 2
 
 
 @qd.kernel(fastcache=True)
@@ -670,6 +682,64 @@ def func_forward_velocity_link(
 
 
 @qd.func
+def func_update_acc_link(
+    i_l: int,
+    i_b: int,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    update_cacc: qd.template(),
+    is_backward: qd.template(),
+):
+    """Compute the Cartesian acceleration of a link.
+
+    The acceleration of link i_l of env i_b follows from the acceleration of its parent and the velocities and
+    accelerations of its dofs.
+
+    The parent's acceleration must be current. A root link starts from the gravity left uncompensated by its entity.
+    """
+    BW = qd.static(is_backward)
+    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+    i_p = dyn_info.links.parent_idx[I_l]
+
+    if i_p == -1:
+        i_e = dyn_info.links.entity_idx[I_l]
+        dyn_state.links.cdd_vel[i_l, i_b] = -rigid_info.gravity[i_b] * (1 - dyn_info.entities.gravity_compensation[i_e])
+        dyn_state.links.cdd_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(update_cacc):
+            dyn_state.links.cacc_lin[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dyn_state.links.cacc_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    else:
+        dyn_state.links.cdd_vel[i_l, i_b] = dyn_state.links.cdd_vel[i_p, i_b]
+        dyn_state.links.cdd_ang[i_l, i_b] = dyn_state.links.cdd_ang[i_p, i_b]
+        if qd.static(update_cacc):
+            dyn_state.links.cacc_lin[i_l, i_b] = dyn_state.links.cacc_lin[i_p, i_b]
+            dyn_state.links.cacc_ang[i_l, i_b] = dyn_state.links.cacc_ang[i_p, i_b]
+
+    for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+        # cacc = cacc_parent + cdofdot * qvel + cdof * qacc
+        local_cdd_vel = dyn_state.dofs.cdofd_vel[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+        local_cdd_ang = dyn_state.dofs.cdofd_ang[i_d, i_b] * dyn_state.dofs.vel[i_d, i_b]
+
+        func_add_safe_backward([i_l, i_b], local_cdd_vel, dyn_state.links.cdd_vel, BW)
+        func_add_safe_backward([i_l, i_b], local_cdd_ang, dyn_state.links.cdd_ang, BW)
+        if qd.static(update_cacc):
+            func_add_safe_backward(
+                [i_l, i_b],
+                local_cdd_vel + dyn_state.dofs.cdof_vel[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
+                dyn_state.links.cacc_lin,
+                BW,
+            )
+            func_add_safe_backward(
+                [i_l, i_b],
+                local_cdd_ang + dyn_state.dofs.cdof_ang[i_d, i_b] * dyn_state.dofs.acc[i_d, i_b],
+                dyn_state.links.cacc_ang,
+                BW,
+            )
+
+
+@qd.func
 def func_forward_velocity_root(
     i_l_root: int,
     i_b: int,
@@ -699,7 +769,10 @@ def func_forward_velocity(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Compute the Cartesian velocities of every env, one thread per awake kinematic tree, or per root in backward mode.
+    """Compute the Cartesian velocities of every env, per awake kinematic tree, or per root in backward mode.
+
+    A tree takes one thread, or a few lanes of a block of the level sweep under enable_level_sweep (see
+    func_sweep_links_by_level).
 
     The manual reverse of this pass walks each root leaf to root and reads the per-joint cache of every link of the
     root, static ones included, so backward mode fills that cache with a root walk (see func_forward_velocity_root),
@@ -713,6 +786,15 @@ def func_forward_velocity(
         for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    elif qd.static(rigid_config.enable_level_sweep):
+        func_sweep_links_by_level(
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            sweep_pass=LINK_SWEEP_PASS.FORWARD_VELOCITY,
+            update_cacc=False,
+        )
     else:
         qd.loop_config(name="forward_velocity", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
@@ -878,6 +960,109 @@ def func_update_cartesian_space_root(
 
 
 @qd.func
+def func_sweep_links_by_level(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    sweep_pass: qd.template(),
+    update_cacc: qd.template(),
+):
+    """Run a per-link pass over every env, sweeping each kinematic tree or root level by level.
+
+    The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down: the forward kinematics and velocities on the
+    links of the awake trees, the accelerations on the awake links of every root. update_cacc applies to the
+    accelerations alone.
+
+    A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
+    level among them, and the block syncs before the next level, whose links read their parent from it (see
+    trees_levels_links_idx in array_class.py for the level tables).
+    """
+    BLOCK_DIM = qd.static(32)
+    N_LANES_PER_ENV = qd.static(rigid_config.level_sweep_n_lanes_per_env)
+    N_ENVS_PER_BLOCK = qd.static(BLOCK_DIM // N_LANES_PER_ENV)
+    IS_PER_ROOT = qd.static(sweep_pass == LINK_SWEEP_PASS.ACCELERATION)
+    # A static tuple index picks the tree or root tables, which a conditional expression cannot do on fields
+    groups_level_start = qd.static((rigid_info.trees_level_start, rigid_info.roots_level_start)[IS_PER_ROOT])
+    groups_n_levels = qd.static((rigid_info.trees_n_levels, rigid_info.roots_n_levels)[IS_PER_ROOT])
+    groups_levels_links_idx = qd.static(
+        (rigid_info.trees_levels_links_idx, rigid_info.roots_levels_links_idx)[IS_PER_ROOT]
+    )
+    groups_levels_links_end = qd.static(
+        (rigid_info.trees_levels_links_end, rigid_info.roots_levels_links_end)[IS_PER_ROOT]
+    )
+    _B = dyn_state.links.pos.shape[1]
+    n_env_blocks = (_B + N_ENVS_PER_BLOCK - 1) // N_ENVS_PER_BLOCK
+    qd.loop_config(name="sweep_links_by_level", block_dim=BLOCK_DIM)
+    for i_flat in range(groups_n_levels.shape[0] * n_env_blocks * BLOCK_DIM):
+        tid = i_flat % BLOCK_DIM
+        i_block = i_flat // BLOCK_DIM
+        i_group = i_block // n_env_blocks
+        i_b = (i_block % n_env_blocks) * N_ENVS_PER_BLOCK + tid // N_LANES_PER_ENV
+        i_lane = tid % N_LANES_PER_ENV
+        is_awake = i_b < _B
+        if qd.static(not IS_PER_ROOT):
+            # A hibernated tree keeps its state (see func_update_cartesian_space). A root gates its links one by one.
+            if is_awake:
+                is_awake = func_is_awake_tree(i_group, i_b, dyn_state, rigid_info, rigid_config)
+        i_k_start = groups_level_start[i_group]
+        n_levels = groups_n_levels[i_group]
+        i_k_end = i_k_start
+        if n_levels > 0:
+            i_k_end = groups_levels_links_end[i_k_start]
+        # The envs of a block hold the same group, so every lane of the block walks the same levels and meets every sync
+        for i_level_ in range(n_levels):
+            # The bound of the next level is read ahead, so its latency overlaps the work on this one
+            i_k_next = i_k_start
+            if i_level_ + 1 < n_levels:
+                i_k_next = groups_levels_links_end[i_k_end]
+            if is_awake:
+                for i_chunk_ in range((i_k_end - i_k_start + N_LANES_PER_ENV - 1) // N_LANES_PER_ENV):
+                    i_k = i_k_start + i_chunk_ * N_LANES_PER_ENV + i_lane
+                    if i_k < i_k_end:
+                        i_l = groups_levels_links_idx[i_k]
+                        if qd.static(sweep_pass == LINK_SWEEP_PASS.FORWARD_KINEMATICS):
+                            func_forward_kinematics_link(
+                                i_l=i_l,
+                                i_b=i_b,
+                                qpos=rigid_info.qpos,
+                                dyn_state=dyn_state,
+                                dyn_info=dyn_info,
+                                rigid_info=rigid_info,
+                                rigid_config=rigid_config,
+                                is_backward=False,
+                            )
+                            func_update_geoms_link(
+                                i_l,
+                                i_b,
+                                dyn_state,
+                                dyn_info,
+                                rigid_config,
+                                force_update_all_geoms=False,
+                                is_backward=False,
+                            )
+                        elif qd.static(sweep_pass == LINK_SWEEP_PASS.FORWARD_VELOCITY):
+                            func_forward_velocity_link(
+                                i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
+                            )
+                        else:
+                            if func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
+                                func_update_acc_link(
+                                    i_l,
+                                    i_b,
+                                    dyn_state,
+                                    dyn_info,
+                                    rigid_info,
+                                    rigid_config,
+                                    update_cacc,
+                                    is_backward=False,
+                                )
+            i_k_start = i_k_end
+            i_k_end = i_k_next
+            qd.simt.block.sync()
+
+
+@qd.func
 def func_update_cartesian_space(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -888,8 +1073,9 @@ def func_update_cartesian_space(
 ):
     """Update the Cartesian space of every env: the link poses and geoms, then the centers of mass.
 
-    The link poses and the geom placement run one thread per awake kinematic tree, or per root under
-    force_update_all_geoms and in backward mode, the centers of mass one thread per link and one per root.
+    The link poses and the geom placement run per awake kinematic tree, or per root under force_update_all_geoms and in
+    backward mode. A tree takes one thread, or a few lanes of a block of the level sweep under enable_level_sweep (see
+    func_sweep_links_by_level). The centers of mass take one thread per link and one per root.
 
     A static link moves only when a setter writes the pose of its fixed root, so the step sweep walks the awake trees
     alone (see trees_root_idx in array_class.py), whose static parents hold still, and a tree sleeps as a unit, so a
@@ -914,6 +1100,15 @@ def func_update_cartesian_space(
                     func_update_geoms_link(
                         i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms, is_backward
                     )
+    elif qd.static(rigid_config.enable_level_sweep):
+        func_sweep_links_by_level(
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            sweep_pass=LINK_SWEEP_PASS.FORWARD_KINEMATICS,
+            update_cacc=False,
+        )
     else:
         qd.loop_config(
             name="update_cartesian_space", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)

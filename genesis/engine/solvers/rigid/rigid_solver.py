@@ -562,6 +562,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
 
+        # The level sweep (see func_sweep_links_by_level) syncs the lanes of a block, which neither the CPU nor the
+        # differentiable runs offer. The serial walks run one thread per tree or root and env through all the links of
+        # its group, so they take as long as the longest group. The lanes of an env step through a level in chunks of
+        # their count, so the sweep stays within that time while its lane steps over all the levels and envs fit in the
+        # cores times the longest group. Past that bound it only adds instructions to a busy GPU, whether the links are
+        # grouped by tree or by root.
+        enable_level_sweep = gs.backend != gs.cpu and not self.sim.options.requires_grad
+        if enable_level_sweep:
+            n_lanes_per_env = array_class.RigidSimStaticConfig.level_sweep_n_lanes_per_env
+            for links_group_idx, links_level in (
+                (self._links_tree_root_idx, self._links_tree_level),
+                (self._links_root_idx, self._links_root_level),
+            ):
+                group_links = np.flatnonzero(links_level >= 0)
+                if group_links.size:
+                    _, groups_n_links = np.unique(links_group_idx[group_links], return_counts=True)
+                    _, levels_n_links = np.unique(
+                        links_group_idx[group_links] * self.n_links + links_level[group_links], return_counts=True
+                    )
+                    n_lane_steps = n_lanes_per_env * (-(-levels_n_links // n_lanes_per_env)).sum() * self._sim._B
+                    enable_level_sweep &= bool(n_lane_steps <= groups_n_links.max() * get_gpu_core_count())
+
         rigid_config = dict(
             backend=gs.backend,
             para_level=self.sim._para_level,
@@ -588,6 +610,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             parallel_init=(
                 gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
             ),
+            enable_level_sweep=enable_level_sweep,
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             enable_cooperative_noslip=enable_cooperative_noslip,

@@ -7,6 +7,7 @@
 * Keep interop data as torch tensors or numpy arrays from the start instead of Quadrants kernels operating on CPU numpy arrays. Numpy implementations must be fully vectorized. Use Numba (single thread, CPU backend) for computation-heavy "kernels".
 * Allocate the exact memory size needed. Preallocation based on max size is prohibited.
 * Plain dicts for packing attributes are prohibited. Use strongly typed named data structures instead, either dataclasses or simple NamedTuples. The one exception is the parsed info a rigid asset parser produces: what a format states is unstructured and incomplete until the resolution completes it, so it travels as a plain dict, confined to the parser and the resolution that consumes it. No built object holds one.
+* A named structure exists so that the meaning of each element cannot get lost. A plain tuple is fine wherever that meaning stays in sight: a multi-value return that every caller unpacks into named locals at the call, whichever module the helper lives in, or a small container filled and unpacked a few lines apart. Use a NamedTuple or a dataclass once the value travels far enough for its meaning to get lost: shared by several modules, carried through a stateful algorithm, indexed by position, or returned by public API.
 * Local imports in functions are prohibited, unless strictly necessary to avoid circular dependencies.
 * No commented-out prints. Convert them to logging debug traces.
 * No code duplication.
