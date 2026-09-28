@@ -173,6 +173,7 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         (gu.z_up_to_R, [[3]], [[3, 3]]),
         (gu.z_up_to_R, [[3], [3], [3, 3]], [[3, 3]]),
         (gu.pos_lookat_up_to_T, [[3], [3], [3]], [[4, 4]]),
+        (gu.inv_transform_by_T, [[5, 3], [4, 4]], [[5, 3]]),
         (partial(polar, pure_rotation=False, side="left", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
         (partial(polar, pure_rotation=False, side="right", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
     ):

@@ -1487,7 +1487,7 @@ def inv_transform_by_T(pos, T):
 
     R_inv = R.swapaxes(-1, -2)
     if pos.ndim == T.ndim:
-        trans = trans.reshape((-1, 1, 3))
+        trans = trans[..., None, :]
 
     return transform_by_R(pos - trans, R_inv)
 
