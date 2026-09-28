@@ -540,6 +540,7 @@ class KinematicSolver(Solver):
                         self.rigid_info.trees_level_start,
                         self.rigid_info.trees_n_levels,
                         self.rigid_info.trees_levels_links_idx,
+                        None,
                         self.rigid_info.trees_levels_links_end,
                     ),
                 ),
@@ -551,6 +552,7 @@ class KinematicSolver(Solver):
                         self.rigid_info.roots_level_start,
                         self.rigid_info.roots_n_levels,
                         self.rigid_info.roots_levels_links_idx,
+                        self.rigid_info.roots_levels_links_start,
                         self.rigid_info.roots_levels_links_end,
                     ),
                 ),
@@ -573,17 +575,34 @@ class KinematicSolver(Solver):
                 is_level_last[:-1] = (np.diff(entries_group) != 0) | (np.diff(entries_level) != 0)
                 levels_last_entry = entries_idx[is_level_last]
                 groups_levels_links_end = levels_last_entry[np.searchsorted(levels_last_entry, entries_idx)] + 1
+                is_level_first = np.ones(len(groups_levels_links_idx), dtype=bool)
+                is_level_first[1:] = is_level_last[:-1]
+                levels_first_entry = entries_idx[is_level_first]
+                groups_levels_links_start = levels_first_entry[
+                    np.searchsorted(levels_first_entry, entries_idx, side="right") - 1
+                ]
                 for field, value in zip(
                     groups_fields,
                     (
                         groups_level_start,
                         groups_n_levels,
                         groups_levels_links_idx,
+                        groups_levels_links_start,
                         groups_levels_links_end,
                     ),
                 ):
-                    if len(value):
+                    if field is not None and len(value):
                         field.from_numpy(value)
+            child_links = np.arange(self.n_links, dtype=gs.np_int)[self._links_parent_idx >= 0]
+            links_child_start = np.zeros(self.n_links_ + 1, dtype=gs.np_int)
+            np.cumsum(
+                np.bincount(self._links_parent_idx[child_links], minlength=self.n_links_), out=links_child_start[1:]
+            )
+            self.rigid_info.links_child_start.from_numpy(links_child_start)
+            if len(child_links):
+                self.rigid_info.links_child_idx.from_numpy(
+                    child_links[np.lexsort((-child_links, self._links_parent_idx[child_links]))]
+                )
 
     def _init_link_fields(self):
         if self.links:

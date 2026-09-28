@@ -5,6 +5,7 @@ This module contains Quadrants kernels and functions for:
 - Forward kinematics computation (link and joint pose updates)
 - Velocity propagation through kinematic chains
 - Link acceleration propagation
+- Composite inertia and link force folds
 - Geometry pose and vertex updates
 - Center of mass calculations
 - AABB updates for collision detection
@@ -36,6 +37,8 @@ class LINK_SWEEP_PASS(IntEnum):
     FORWARD_KINEMATICS = 0
     FORWARD_VELOCITY = 1
     ACCELERATION = 2
+    CRB_FOLD = 3
+    FORCE_FOLD = 4
 
 
 @qd.kernel(fastcache=True)
@@ -970,18 +973,20 @@ def func_sweep_links_by_level(
 ):
     """Run a per-link pass over every env, sweeping each kinematic tree or root level by level.
 
-    The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down: the forward kinematics and velocities on the
-    links of the awake trees, the accelerations on the awake links of every root. update_cacc applies to the
-    accelerations alone.
+    The pass sweep_pass (see LINK_SWEEP_PASS) runs from the root down for the forward kinematics and velocities, on the
+    links of the awake trees, and for the accelerations, on the awake links of every root. It runs from the leaves up
+    for the folds of the composite inertia and of the link forces, on the links of the awake roots, each link adding its
+    children (see links_child_start in array_class.py). update_cacc applies to the accelerations alone.
 
     A block of 32 lanes holds 4 envs of one tree or root, 8 lanes per env. The lanes of an env split the links of a
-    level among them, and the block syncs before the next level, whose links read their parent from it (see
-    trees_levels_links_idx in array_class.py for the level tables).
+    level among them, and the block syncs before the next level, whose links read their parent, or their children,
+    from it (see trees_levels_links_idx in array_class.py for the level tables).
     """
     BLOCK_DIM = qd.static(32)
     N_LANES_PER_ENV = qd.static(rigid_config.level_sweep_n_lanes_per_env)
     N_ENVS_PER_BLOCK = qd.static(BLOCK_DIM // N_LANES_PER_ENV)
-    IS_PER_ROOT = qd.static(sweep_pass == LINK_SWEEP_PASS.ACCELERATION)
+    IS_PER_ROOT = qd.static(sweep_pass not in (LINK_SWEEP_PASS.FORWARD_KINEMATICS, LINK_SWEEP_PASS.FORWARD_VELOCITY))
+    IS_LEAF_TO_ROOT = qd.static(sweep_pass in (LINK_SWEEP_PASS.CRB_FOLD, LINK_SWEEP_PASS.FORCE_FOLD))
     # A static tuple index picks the tree or root tables, which a conditional expression cannot do on fields
     groups_level_start = qd.static((rigid_info.trees_level_start, rigid_info.roots_level_start)[IS_PER_ROOT])
     groups_n_levels = qd.static((rigid_info.trees_n_levels, rigid_info.roots_n_levels)[IS_PER_ROOT])
@@ -1002,20 +1007,38 @@ def func_sweep_links_by_level(
         i_lane = tid % N_LANES_PER_ENV
         is_awake = i_b < _B
         if qd.static(not IS_PER_ROOT):
-            # A hibernated tree keeps its state (see func_update_cartesian_space). A root gates its links one by one.
+            # A hibernated tree keeps its state (see func_update_cartesian_space)
             if is_awake:
                 is_awake = func_is_awake_tree(i_group, i_b, dyn_state, rigid_info, rigid_config)
+        elif qd.static(IS_LEAF_TO_ROOT):
+            # The links of a root sleep as a unit (see func_crb_fold in forward_dynamics.py). The accelerations gate
+            # their links one by one below.
+            if is_awake:
+                i_l_root = rigid_info.roots_link_idx[i_group]
+                is_awake = func_is_awake_link(i_l_root, i_b, dyn_state, rigid_config)
+        # From the leaves up, the walk starts past the deepest level, where the entries of the next group begin, and
+        # steps back through the level starts
         i_k_start = groups_level_start[i_group]
-        n_levels = groups_n_levels[i_group]
         i_k_end = i_k_start
+        if qd.static(IS_LEAF_TO_ROOT):
+            i_k_end = groups_levels_links_idx.shape[0]
+            if i_group + 1 < groups_n_levels.shape[0]:
+                i_k_end = groups_level_start[i_group + 1]
+        n_levels = groups_n_levels[i_group]
         if n_levels > 0:
-            i_k_end = groups_levels_links_end[i_k_start]
+            if qd.static(IS_LEAF_TO_ROOT):
+                i_k_start = rigid_info.roots_levels_links_start[i_k_end - 1]
+            else:
+                i_k_end = groups_levels_links_end[i_k_start]
         # The envs of a block hold the same group, so every lane of the block walks the same levels and meets every sync
         for i_level_ in range(n_levels):
             # The bound of the next level is read ahead, so its latency overlaps the work on this one
             i_k_next = i_k_start
             if i_level_ + 1 < n_levels:
-                i_k_next = groups_levels_links_end[i_k_end]
+                if qd.static(IS_LEAF_TO_ROOT):
+                    i_k_next = rigid_info.roots_levels_links_start[i_k_start - 1]
+                else:
+                    i_k_next = groups_levels_links_end[i_k_end]
             if is_awake:
                 for i_chunk_ in range((i_k_end - i_k_start + N_LANES_PER_ENV - 1) // N_LANES_PER_ENV):
                     i_k = i_k_start + i_chunk_ * N_LANES_PER_ENV + i_lane
@@ -1045,7 +1068,7 @@ def func_sweep_links_by_level(
                             func_forward_velocity_link(
                                 i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
                             )
-                        else:
+                        elif qd.static(sweep_pass == LINK_SWEEP_PASS.ACCELERATION):
                             if func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
                                 func_update_acc_link(
                                     i_l,
@@ -1057,8 +1080,36 @@ def func_sweep_links_by_level(
                                     update_cacc,
                                     is_backward=False,
                                 )
-            i_k_start = i_k_end
-            i_k_end = i_k_next
+                        else:
+                            i_child_start = rigid_info.links_child_start[i_l]
+                            for j_l_ in range(rigid_info.links_child_start[i_l + 1] - i_child_start):
+                                j_l = rigid_info.links_child_idx[i_child_start + j_l_]
+                                if qd.static(sweep_pass == LINK_SWEEP_PASS.CRB_FOLD):
+                                    dyn_state.links.crb_inertial[i_l, i_b] = (
+                                        dyn_state.links.crb_inertial[i_l, i_b] + dyn_state.links.crb_inertial[j_l, i_b]
+                                    )
+                                    dyn_state.links.crb_mass[i_l, i_b] = (
+                                        dyn_state.links.crb_mass[i_l, i_b] + dyn_state.links.crb_mass[j_l, i_b]
+                                    )
+                                    dyn_state.links.crb_pos[i_l, i_b] = (
+                                        dyn_state.links.crb_pos[i_l, i_b] + dyn_state.links.crb_pos[j_l, i_b]
+                                    )
+                                    dyn_state.links.crb_quat[i_l, i_b] = (
+                                        dyn_state.links.crb_quat[i_l, i_b] + dyn_state.links.crb_quat[j_l, i_b]
+                                    )
+                                else:
+                                    dyn_state.links.cfrc_vel[i_l, i_b] = (
+                                        dyn_state.links.cfrc_vel[i_l, i_b] + dyn_state.links.cfrc_vel[j_l, i_b]
+                                    )
+                                    dyn_state.links.cfrc_ang[i_l, i_b] = (
+                                        dyn_state.links.cfrc_ang[i_l, i_b] + dyn_state.links.cfrc_ang[j_l, i_b]
+                                    )
+            if qd.static(IS_LEAF_TO_ROOT):
+                i_k_end = i_k_start
+                i_k_start = i_k_next
+            else:
+                i_k_start = i_k_end
+                i_k_end = i_k_next
             qd.simt.block.sync()
 
 

@@ -291,10 +291,11 @@ class RigidInfo:
     trees_dof_start: qd.Tensor
     trees_n_dofs: qd.Tensor
     links_tree_idx: qd.Tensor
-    # trees_levels_links_idx lists the links of every tree level by level (see KinematicSolver._init_tree_fields). The
-    # levels of tree i_t start at entry trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry
-    # i_k ends before entry trees_levels_links_end[i_k]. The root tables list all the links of every root the same way.
-    # The level sweep walks them (see func_sweep_links_by_level).
+    # trees_levels_links_idx lists the links of every tree level by level for the level sweep (see
+    # func_sweep_links_by_level and KinematicSolver._init_tree_fields). The levels of tree i_t start at entry
+    # trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry i_k ends before entry
+    # trees_levels_links_end[i_k]. The root tables list all the links of every root the same way, and the level of entry
+    # i_k starts at entry roots_levels_links_start[i_k].
     trees_level_start: qd.Tensor
     trees_n_levels: qd.Tensor
     trees_levels_links_idx: qd.Tensor
@@ -302,7 +303,12 @@ class RigidInfo:
     roots_level_start: qd.Tensor
     roots_n_levels: qd.Tensor
     roots_levels_links_idx: qd.Tensor
+    roots_levels_links_start: qd.Tensor
     roots_levels_links_end: qd.Tensor
+    # The children of link i_l are links_child_idx[links_child_start[i_l]:links_child_start[i_l + 1]], in descending
+    # order: the leaf-to-root folds of the level sweep add them into their parent in the order of the serial folds.
+    links_child_start: qd.Tensor
+    links_child_idx: qd.Tensor
     # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
     # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
     # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
@@ -366,11 +372,15 @@ def get_rigid_info(solver, kinematic_only):
     trees_levels_links_shape = ()
     roots_levels_shape = ()
     roots_levels_links_shape = ()
+    links_child_start_shape = ()
+    links_child_idx_shape = ()
     if not kinematic_only and solver.rigid_config.enable_level_sweep:
         trees_levels_shape = (solver.n_trees_,)
         trees_levels_links_shape = (max(1, np.count_nonzero(solver._links_tree_root_idx >= 0)),)
         roots_levels_shape = (solver.n_roots_,)
         roots_levels_links_shape = (solver.n_links_,)
+        links_child_start_shape = (solver.n_links_ + 1,)
+        links_child_idx_shape = (max(1, np.count_nonzero(solver._links_parent_idx >= 0)),)
 
     # FIXME: Add a better split between kinematic and Genesis
     if kinematic_only:
@@ -402,7 +412,10 @@ def get_rigid_info(solver, kinematic_only):
             roots_level_start=V(dtype=gs.qd_int, shape=roots_levels_shape),
             roots_n_levels=V(dtype=gs.qd_int, shape=roots_levels_shape),
             roots_levels_links_idx=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
+            roots_levels_links_start=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
             roots_levels_links_end=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
+            links_child_start=V(dtype=gs.qd_int, shape=links_child_start_shape),
+            links_child_idx=V(dtype=gs.qd_int, shape=links_child_idx_shape),
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
@@ -449,7 +462,10 @@ def get_rigid_info(solver, kinematic_only):
         roots_level_start=V(dtype=gs.qd_int, shape=roots_levels_shape),
         roots_n_levels=V(dtype=gs.qd_int, shape=roots_levels_shape),
         roots_levels_links_idx=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
+        roots_levels_links_start=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
         roots_levels_links_end=V(dtype=gs.qd_int, shape=roots_levels_links_shape),
+        links_child_start=V(dtype=gs.qd_int, shape=links_child_start_shape),
+        links_child_idx=V(dtype=gs.qd_int, shape=links_child_idx_shape),
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
