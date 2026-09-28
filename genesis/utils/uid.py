@@ -44,4 +44,6 @@ class UID(RBC):
         """
         if short_only:
             return self.short() == other
-        return self.uid == other
+        # repr and full() insert a hyphen after 7 characters. The stored
+        # hex does not. Both strings identify this UID.
+        return other == self.uid or other == self.full()
