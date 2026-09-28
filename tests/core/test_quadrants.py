@@ -200,6 +200,12 @@ def gs_num_envs_child(args: list[str]):
             pos=(0.0, 0.0, 0.18),
         )
     )
+    scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.05,
+            pos=(0.0, 0.3, 0.04),
+        )
+    )
     scene.build(n_envs=args.n_envs, env_spacing=(0.5, 0.5))
 
     scene.rigid_solver.collider.detection()

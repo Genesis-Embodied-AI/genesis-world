@@ -2,12 +2,15 @@ import dataclasses
 import math
 from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
-from typing import ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
-import quadrants as qd
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 import numpy as np
 import torch
+
+from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
+
+import quadrants as qd
+from quadrants.lang import impl
 
 import genesis as gs
 from genesis.utils.misc import qd_to_torch
@@ -73,9 +76,44 @@ class AutoInitMeta(type):
         return super().__new__(cls, name, bases, namespace)
 
 
+# FIXME: quadrants#941 - a Python-scope fill of a field still being declared closes its SNode tree, one tree per filled
+# constant. 'V_SCALAR_FROM' defers it to the next materialization instead, at the cost of one synchronization there.
+_pending_fields_fill: list[tuple[qd.Tensor, Any]] = []
+_materialize = impl.PyQuadrants.materialize
+_clear = impl.PyQuadrants.clear
+
+
+def _materialize_then_fill(self):
+    _materialize(self)
+    # The list is emptied before replaying it, since each fill launches a kernel that materializes again. The replay
+    # ends with a synchronization because a DLPack export materializes right before handing out its buffer, which
+    # leaves its caller no chance to synchronize between the fill and the first read.
+    fields_fill = _pending_fields_fill.copy()
+    _pending_fields_fill.clear()
+    for tensor, value in fields_fill:
+        tensor.fill(value)
+    if fields_fill:
+        self.prog.synchronize()
+
+
+def _clear_then_drop_fills(self):
+    _clear(self)
+    _pending_fields_fill.clear()
+
+
+impl.PyQuadrants.materialize = _materialize_then_fill
+impl.PyQuadrants.clear = _clear_then_drop_fills
+
+
 def V_SCALAR_FROM(dtype, value):
     data = V(dtype=dtype, shape=())
-    data.fill(value)
+    # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
+    # materialization (see quadrants#941 above). An ndarray is filled right away: its zero-copy export runs no
+    # materialization on CPU and CUDA, so a deferred value could be read before its fill.
+    if _tensor_backend() == qd.Backend.FIELD:
+        _pending_fields_fill.append((data, value))
+    else:
+        data.fill(value)
     return data
 
 
@@ -1434,6 +1472,7 @@ class MPRInfo:
     CCD_EPS: qd.Tensor
     CCD_TOLERANCE: qd.Tensor
     CCD_ITERATIONS: qd.Tensor
+    CCD_EXTRAPOLATION_TOL: qd.Tensor
 
 
 def get_mpr_info(**kwargs):
@@ -1441,6 +1480,7 @@ def get_mpr_info(**kwargs):
         CCD_EPS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_EPS"]),
         CCD_TOLERANCE=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_TOLERANCE"]),
         CCD_ITERATIONS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_ITERATIONS"]),
+        CCD_EXTRAPOLATION_TOL=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_EXTRAPOLATION_TOL"]),
     )
 
 

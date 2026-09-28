@@ -23,6 +23,10 @@ class MPR:
             CCD_TOLERANCE=1e-6 if rigid_solver._enable_mujoco_compatibility else 1e-5,
             # Bounds that refinement, which is not otherwise guaranteed to terminate.
             CCD_ITERATIONS=50,
+            # How far the origin's projection may extrapolate beyond the portal triangle, as a fraction of the triangle
+            # (barycentric), before the infinite-plane penetration is deemed an unreliable extrapolation (portal
+            # EXTRAPOLATED -> refine with GJK).
+            CCD_EXTRAPOLATION_TOL=1.0,
         )
         self.mpr_state = array_class.get_mpr_state(self._solver._B)
         # The scratch states of the split narrowphase, allocated by 'activate' when it runs
@@ -446,13 +450,6 @@ def mpr_find_penetration(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
 ):
-    # How far the origin's projection may extrapolate beyond the portal triangle, as a fraction of the triangle
-    # (barycentric), before the infinite-plane penetration is deemed an unreliable extrapolation (portal INVALID ->
-    # refine with GJK). FIXME: This is a compile-time constant instead of an MPRInfo scalar field because one extra
-    # field read pushes '_func_narrowphase_multicontact' past Metal's limit of 31 buffer bindings per kernel. Move it
-    # back to MPRInfo once quadrants packs root buffers below that limit (e.g. via Metal argument buffers).
-    CCD_EXTRAPOLATION_TOL = qd.static(1.0)
-
     iterations = 0
 
     is_col = False
@@ -535,7 +532,7 @@ def mpr_find_penetration(
                 mpr_state.portal_status[i_b] = PORTAL_STATUS.EXTRAPOLATED
             elif min_b >= 0.0:
                 mpr_state.portal_status[i_b] = PORTAL_STATUS.EXACT
-            elif (-min_b) <= CCD_EXTRAPOLATION_TOL * bsum:
+            elif (-min_b) <= collider_info.mpr.CCD_EXTRAPOLATION_TOL[None] * bsum:
                 mpr_state.portal_status[i_b] = PORTAL_STATUS.LOWER_BOUND
             else:
                 mpr_state.portal_status[i_b] = PORTAL_STATUS.EXTRAPOLATED
