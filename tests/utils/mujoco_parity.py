@@ -8,6 +8,7 @@ import scipy.optimize
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.constraint.solver import func_solve_body
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from .assertions import assert_allclose
@@ -853,9 +854,8 @@ def simulate_and_check_mujoco_consistency(
     # minimize the same problem, keeping the solver comparison exact; the row pairing still validates Genesis's own
     # assembled values beforehand. MuJoCo steps first in the loop below, so its rows describe the same state.
     constraint_solver = gs_sim.rigid_solver.constraint_solver
-    resolve_solver = constraint_solver.resolve
 
-    def resolve_on_mujoco_aref():
+    def solve_on_mujoco_aref(*args):
         if constraint_solver.n_constraints.to_numpy()[0]:
             efc_atol, _ = _compute_efc_tolerances(mj_sim, tol)
             gs_sidx, mj_sidx = _pair_constraint_rows(
@@ -864,11 +864,11 @@ def simulate_and_check_mujoco_consistency(
             aref_rows = constraint_solver.constraint_state.aref.to_numpy()
             aref_rows[gs_sidx, 0] = mj_sim.data.efc_aref[mj_sidx]
             constraint_solver.constraint_state.aref.from_numpy(aref_rows)
-        resolve_solver()
+        func_solve_body(*args)
 
     with pytest.MonkeyPatch.context() as mp:
         if gs.np_float == np.float32 and not ignore_constraints:
-            mp.setattr(constraint_solver, "resolve", resolve_on_mujoco_aref)
+            mp.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_on_mujoco_aref)
 
         for i in range(num_steps):
             # Make sure that all "dynamic" quantities are matching before stepping

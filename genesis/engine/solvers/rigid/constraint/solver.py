@@ -280,7 +280,7 @@ class ConstraintSolver:
     def add_equality_constraints(self):
         self._eq_const_info_cache.clear()
 
-        add_equality_constraints(
+        kernel_add_equality_constraints(
             self._solver.dyn_state,
             self._collider.collider_state,
             self.constraint_state,
@@ -290,7 +290,7 @@ class ConstraintSolver:
         )
 
     def add_inequality_constraints(self):
-        add_inequality_constraints(
+        kernel_add_inequality_constraints(
             self._solver.dyn_state,
             self._collider.collider_state,
             self.constraint_state,
@@ -301,6 +301,7 @@ class ConstraintSolver:
         )
 
     def resolve(self):
+        """Solve the constraint forces, then update the accelerations and the contact forces from them."""
         # func_solve_init is launched by each dispatch entrypoint (func_solve_body_monolith / func_solve_decomposed),
         # not here: only the entrypoint statically knows its arm, which determines whether the init factor/gradient is
         # done (monolith) or skipped (decomposed re-factors in-loop).
@@ -312,28 +313,15 @@ class ConstraintSolver:
             self._solver.rigid_config,
             self._n_iterations,
         )
-
-        func_update_qacc(self._solver.dyn_state, self.constraint_state, self._solver.rigid_config, self._solver._errno)
-
-        if self._solver._options.noslip_iterations > 0:
-            self.noslip()
-
-        func_update_contact_force(
+        kernel_resolve_post(
             self._solver.dyn_state,
             self._collider.collider_state,
             self.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,
             self._solver.rigid_config,
-        )
-
-    def noslip(self):
-        constraint_noslip.kernel_noslip(
-            self._solver.dyn_state,
-            self._collider.collider_state,
-            self.constraint_state,
-            self._solver.rigid_info,
-            self._solver.rigid_config,
+            self._solver._options.noslip_iterations > 0,
+            self._solver._errno,
         )
 
     def get_equality_constraints(self, as_tensor: bool = True, to_torch: bool = True):
@@ -1357,8 +1345,8 @@ def func_equality_joint(
     _sort_relevant_dofs_descending(n_con, i_b, con_n_dofs, constraint_state, rigid_config)
 
 
-@qd.kernel(fastcache=True)
-def add_equality_constraints(
+@qd.func
+def func_add_equality_constraints(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -1389,6 +1377,19 @@ def add_equality_constraints(
                 func_equality_weld(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
             elif dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.JOINT:
                 func_equality_joint(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_equality_constraints(
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Run func_add_equality_constraints on its own, outside the substep graph that captures it."""
+    func_add_equality_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.func
@@ -1516,8 +1517,8 @@ def func_append_factor_worklist(
         constraint_state.island.factor_worklist_i_island[i_slot] = i_island
 
 
-@qd.kernel(fastcache=True)
-def add_inequality_constraints(
+@qd.func
+def func_add_inequality_constraints(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -1542,6 +1543,22 @@ def add_inequality_constraints(
         add_collision_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
     if qd.static(rigid_config.enable_joint_limit):
         add_joint_limit_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_inequality_constraints(
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    collider_static_config: qd.template(),
+):
+    """Run func_add_inequality_constraints on its own, outside the substep graph that captures it."""
+    func_add_inequality_constraints(
+        dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_static_config
+    )
 
 
 @qd.func
@@ -5645,7 +5662,7 @@ def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, 
 # =====================================================================================================================
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_update_contact_force(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -5724,7 +5741,43 @@ def func_update_contact_force(
                 )
 
 
+@qd.func
+def func_resolve_post(
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    noslip: qd.template(),
+    errno: qd.Tensor,
+):
+    """Update the accelerations from the solved constraint forces, then the contact forces.
+
+    noslip runs the noslip iterations on the friction forces in between.
+    """
+    func_update_qacc(dyn_state, constraint_state, rigid_config, errno)
+    if qd.static(noslip):
+        constraint_noslip.func_noslip(dyn_state, collider_state, constraint_state, rigid_info, rigid_config)
+    func_update_contact_force(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
+
+
 @qd.kernel(fastcache=True)
+def kernel_resolve_post(
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    noslip: qd.template(),
+    errno: qd.Tensor,
+):
+    """Run func_resolve_post on its own, outside the substep graph that captures it (see kernel_substep_post)."""
+    func_resolve_post(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno)
+
+
+@qd.func
 def func_update_qacc(
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,

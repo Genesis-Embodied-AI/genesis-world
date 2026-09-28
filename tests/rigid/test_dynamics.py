@@ -8,7 +8,6 @@ from quadrants.lang._perf_dispatch import PerformanceDispatcher
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
-from genesis.engine.solvers.rigid.constraint.solver import ConstraintSolver
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1186,9 +1185,8 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
     )
 
     accelerations = []
-    resolve_orig = ConstraintSolver.resolve
 
-    def resolve_compared(self):
+    def solve_compared(*args):
         nonlocal selected
         inputs = [qd_to_numpy(tensor, copy=True) for tensor in solve_inputs]
         accelerations.clear()
@@ -1196,10 +1194,10 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
         for selected in (1, 0):
             for tensor, value in zip(solve_inputs, inputs):
                 tensor.from_numpy(value)
-            resolve_orig(self)
+            constraint_solver.func_solve_body(*args)
             accelerations.append(qd_to_numpy(constraint_state.qacc, copy=True))
 
-    monkeypatch.setattr(ConstraintSolver, "resolve", resolve_compared)
+    monkeypatch.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_compared)
 
     for i_step in range(N_STEPS):
         scene.step()

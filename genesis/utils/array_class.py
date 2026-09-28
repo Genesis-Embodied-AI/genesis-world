@@ -891,7 +891,7 @@ class ConstraintState:
     graph_counter: qd.types.ndarray()
     early_exit_flag: qd.Tensor
     # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the row being updated, in the column of the
-    # env, or of the lane of the cooperative sweep at [i_d, i_b * 32 + tid] (see kernel_noslip in noslip.py).
+    # env, or of the lane of the cooperative sweep at [i_d, i_b * 32 + tid] (see func_noslip in noslip.py).
     noslip_MinvJT: qd.Tensor
     # Row coloring of the cooperative noslip sweep (empty otherwise, see func_color_rows_batch in noslip.py): the color
     # of each row, the color count of each island and the next free color of the mass block starting at each dof.
@@ -948,7 +948,7 @@ def get_constraint_state(constraint_solver, solver, collider):
     newton_dof_vec_layout = dof_vec_layout if is_newton else None
     newton_serial_layout = serial_layout if is_newton else None
     # The noslip scratch holds one M^{-1} J^T column per env, or per lane of the 32-lane blocks of the cooperative sweep
-    # (see kernel_noslip in noslip.py).
+    # (see func_noslip in noslip.py).
     is_noslip_active = solver._options.noslip_iterations > 0
     is_noslip_cooperative = solver.rigid_config.enable_cooperative_noslip
     noslip_n_lanes = 32 if is_noslip_cooperative else 1
@@ -2956,7 +2956,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     enable_cooperative_constraint_kernels: bool = False
     # When True, the noslip sweep of an island runs on a block of 32 lanes: the island's rows are colored so that the
     # rows of a color touch disjoint mass blocks, the lanes update the rows of a color in parallel and the colors are
-    # swept in order (see kernel_noslip in noslip.py). The rows are visited in another order than by the one-thread
+    # swept in order (see func_noslip in noslip.py). The rows are visited in another order than by the one-thread
     # sweep, so the two sweeps give different iterates. See the rigid solver's resolution for the gating.
     enable_cooperative_noslip: bool = False
     # Purely descriptive layout flag: True whenever the layout-flippable constraint-state tensors are physically

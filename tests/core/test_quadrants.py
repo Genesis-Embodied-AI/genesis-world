@@ -115,14 +115,9 @@ def gs_static_child(args: list[str]):
     scene.rigid_solver.collider.detection()
     actual_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
     assert actual_contacts == args.expected_num_contacts
-    if scene.rigid_solver.collider.collider_config.has_non_box_plane_convex_convex:
-        from genesis.engine.solvers.rigid.collider import _func_narrowphase_contact0
+    from genesis.engine.solvers.rigid.collider.collider import kernel_detection
 
-        kernel_to_check = _func_narrowphase_contact0
-    else:
-        from genesis.engine.solvers.rigid.collider import func_narrow_phase_convex_specializations
-
-        kernel_to_check = func_narrow_phase_convex_specializations
+    kernel_to_check = kernel_detection
 
     assert kernel_to_check._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
     assert kernel_to_check._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
@@ -211,11 +206,13 @@ def gs_num_envs_child(args: list[str]):
     scene.rigid_solver.collider.detection()
     qd.sync()
 
-    from genesis.engine.solvers.rigid.rigid_solver import kernel_step_1
+    from genesis.engine.solvers.rigid.rigid_solver import kernel_substep_dynamics
 
-    assert kernel_step_1._primal.fe_ll_cache_observations.cache_hit == args.expected_fe_ll_cache_hit
-    assert kernel_step_1._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
-    assert kernel_step_1._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+    assert kernel_substep_dynamics._primal.fe_ll_cache_observations.cache_hit == args.expected_fe_ll_cache_hit
+    assert (
+        kernel_substep_dynamics._primal.src_ll_cache_observations.cache_key_generated == args.expected_use_src_ll_cache
+    )
+    assert kernel_substep_dynamics._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
 
     sys.exit(RET_SUCCESS)
 
@@ -313,10 +310,10 @@ def change_scene(args: list[str]):
     z = qpos.reshape((*qpos.shape[:-1], args.n_objs, 7))[..., 2]
     assert_allclose(z, 0.2, atol=1e-3)
 
-    from genesis.engine.solvers.rigid.rigid_solver import kernel_step_1
+    from genesis.engine.solvers.rigid.rigid_solver import kernel_substep_dynamics
 
-    assert kernel_step_1._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
-    assert kernel_step_1._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
+    assert kernel_substep_dynamics._primal.src_ll_cache_observations.cache_validated == args.expected_src_ll_cache_hit
+    assert kernel_substep_dynamics._primal.src_ll_cache_observations.cache_loaded == args.expected_src_ll_cache_hit
 
     sys.exit(RET_SUCCESS)
 

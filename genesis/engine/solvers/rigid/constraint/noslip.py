@@ -11,7 +11,7 @@ def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid
 
     The factor is block-diagonal per mass block (see dofs_mass_block_start in array_class.py), with constant block
     bounds shared by every member dof, so a block is solvable independently from any member dof. The column is the env
-    for a dof vector, the lane slot for the per-lane scratch of the cooperative noslip sweep (see kernel_noslip).
+    for a dof vector, the lane slot for the per-lane scratch of the cooperative noslip sweep (see func_noslip).
     """
     block_start = rigid_info.dofs_mass_block_start[i_d0]
     block_end = rigid_info.dofs_mass_block_end[i_d0]
@@ -545,8 +545,8 @@ def func_dual_finish_batch(
             )
 
 
-@qd.kernel(fastcache=True)
-def kernel_noslip(
+@qd.func
+def func_noslip(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
