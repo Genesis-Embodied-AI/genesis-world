@@ -110,10 +110,12 @@ class GJK:
             diff_contact_min_penetration=gs.EPS * 100.0,
         )
 
-        # The scratch states GJK runs on, allocated by 'activate' for the narrowphase that runs it
-        self.gjk_state = None
-        self.contact0_gjk_state = None
-        self.multicontact_gjk_state = None
+        # The scratch states GJK runs on, at the smallest size until 'activate' sizes those the narrowphase uses
+        # FIXME: quadrants#856 - a kernel cannot take None for a struct argument, so every state is allocated at the
+        # smallest size first, even one the scene never runs GJK on, and 'activate' allocates the used ones again.
+        self.gjk_state = array_class.get_gjk_state_contact_only(1)
+        self.contact0_gjk_state = array_class.get_gjk_state_contact_only(1)
+        self.multicontact_gjk_state = array_class.get_gjk_state_contact_only(1)
 
     def activate(self, n_contact0_threads=0, n_multicontact_threads=0):
         """Allocate the scratch states GJK runs on, for the narrowphase that runs it.

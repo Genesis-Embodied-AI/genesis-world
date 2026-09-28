@@ -775,8 +775,8 @@ def kernel_update_all_verts(
     func_update_all_verts(dyn_state, dyn_info, rigid_config)
 
 
-@qd.kernel(fastcache=True)
-def kernel_update_geom_aabbs(
+@qd.func
+def func_update_geom_aabbs(
     geoms_init_AABB: array_class.GeomsInitAABB, dyn_state: array_class.DynState, rigid_config: qd.template()
 ):
     n_geoms = dyn_state.geoms.pos.shape[0]

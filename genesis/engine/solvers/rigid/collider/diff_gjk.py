@@ -912,7 +912,7 @@ def func_differentiable_plane_contact(
 
     [i_ga] is the plane geom and [i_gb] the convex geom. [core_local] (box vertex / sphere center / capsule nearest
     endpoint, in the convex geom's local frame) is the pose-independent witness stored by
-    kernel_fill_diff_contact_input_analytic; [radius] and the plane direction come from the geoms info. Gradients flow to
+    func_fill_diff_contact_input_analytic; [radius] and the plane direction come from the geoms info. Gradients flow to
     both geom poses through the geoms state pos / quat. For a sphere, [core_local] is the local origin, so the
     orientation gradient is zero, matching the rotation-invariant forward contact.
     """

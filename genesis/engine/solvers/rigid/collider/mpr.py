@@ -29,9 +29,10 @@ class MPR:
             CCD_EXTRAPOLATION_TOL=1.0,
         )
         self.mpr_state = array_class.get_mpr_state(self._solver._B)
-        # The scratch states of the split narrowphase, allocated by 'activate' when it runs
-        self.contact0_mpr_state = None
-        self.multicontact_mpr_state = None
+        # The scratch states of the split narrowphase, at the smallest size until 'activate' sizes them when it runs
+        # FIXME: quadrants#856 - see the scratch states of GJK in gjk.py.
+        self.contact0_mpr_state = array_class.get_mpr_state(1)
+        self.multicontact_mpr_state = array_class.get_mpr_state(1)
 
     def activate(self, n_contact0_threads, n_multicontact_threads):
         """Allocate the scratch states the split narrowphase runs MPR on.

@@ -2854,8 +2854,8 @@ def _func_multicontact_gather(
     )
 
 
-@qd.kernel(fastcache=True)
-def _func_narrowphase_multicontact(
+@qd.func
+def func_narrowphase_multicontact(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -2963,8 +2963,8 @@ def _func_enqueue_for_multicontact(
     collider_state.narrowphase_work_queues.mpr_prefer_gjk[idx] = 1 if prefer_gjk else 0
 
 
-@qd.kernel(fastcache=True)
-def _func_narrowphase_contact0(
+@qd.func
+def func_narrowphase_contact0(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -3220,7 +3220,7 @@ def _func_narrowphase_contact0(
                 collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_narrow_phase_convex_vs_convex(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
@@ -3372,8 +3372,8 @@ def func_narrow_phase_diff_convex_vs_convex(
                 )
 
 
-@qd.kernel(fastcache=True)
-def kernel_fill_diff_contact_input_analytic(
+@qd.func
+def func_fill_diff_contact_input_analytic(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
@@ -3421,7 +3421,7 @@ def kernel_fill_diff_contact_input_analytic(
                 collider_state.diff_contact_input.valid[i_b, i_c] = 1
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_narrow_phase_convex_specializations(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
@@ -3477,7 +3477,7 @@ def func_narrow_phase_convex_specializations(
                     )
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_narrow_phase_any_vs_terrain(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
@@ -3525,7 +3525,7 @@ def func_narrow_phase_any_vs_terrain(
                     )
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_narrow_phase_nonconvex_vs_nonterrain(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,

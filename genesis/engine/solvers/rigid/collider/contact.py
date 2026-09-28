@@ -652,7 +652,7 @@ def func_contact_order_key(pos: qd.types.vector(3)):
     return pos[0] + 1.618033988749895 * pos[1] + 2.618033988749895 * pos[2]
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_clamp_prune_contacts(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -665,7 +665,7 @@ def func_clamp_prune_contacts(
     """Clamp + (optional) link-pair pruning, in one per-env loop pass.
 
     Builds a logical-to-physical contact permutation in contact_sort_idx rather than rewriting contact_data. After this
-    kernel runs, downstream consumers read contact i_col by indirecting through
+    func runs, downstream consumers read contact i_col by indirecting through
     contact_data.X[contact_sort_idx[i_col, i_b], i_b]. The physical layout of contact_data is left intact.
 
     Phases per env (gated at compile time by collider_static_config):
@@ -1081,7 +1081,7 @@ def func_clamp_prune_contacts(
             errno[i_b] = errno[i_b] | array_class.ErrorCode.OVERFLOW_CONTACTS
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_clamp_prune_contacts_coop(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -1092,9 +1092,10 @@ def func_clamp_prune_contacts_coop(
     """GPU-only cooperative warp-per-env variant of func_clamp_prune_contacts.
 
     Only dispatched when pruning is enabled, so it prunes unconditionally (no static gate). Same clamp + prune
-    algorithm and same contract (mandatory clamp + identity-init contact_sort_idx + phase-3 compact) as the serial
-    fused kernel; deterministic ordering of the kept contacts is applied later in add_inequality_constraints.
-    Difference from the serial kernel: 32 warp lanes split the per-env work:
+    algorithm and same contract (mandatory clamp + identity-init contact_sort_idx + phase-3 compact) as
+    func_clamp_prune_contacts. Deterministic ordering of the kept contacts is applied later in
+    add_inequality_constraints.
+    Difference from func_clamp_prune_contacts: 32 warp lanes split the per-env work:
       - PARALLEL: per-contact init, phase-2 mean-normal / centroid reductions, coplanarity reduction, in-plane
         projection writes, phase-1a bitonic sort (when n_con <= 32; falls back to serial insertion sort otherwise).
       - SERIAL on lane 0: bucket walk control, lex sort, Andrew's monotone chain, hull-mark, deep-pen restore, and
@@ -1132,7 +1133,7 @@ def func_clamp_prune_contacts_coop(
             i_c_ += _K
 
         if n_con - n_hib >= 3:
-            # PARALLEL: phase 1a key init, 32 lanes stride over the live contacts (see the serial kernel).
+            # PARALLEL: phase 1a key init, 32 lanes stride over the live contacts (see func_clamp_prune_contacts).
             # contact_sort_idx identity was already written in the unconditional init block above so the phase-1a
             # sort can read+sort it in place.
             i_c_ = n_hib + tid
@@ -1471,7 +1472,7 @@ def func_clamp_prune_contacts_coop(
                             i_pc = collider_state.contact_sort_idx[i_hv, i_b]
                             collider_state.contact_keep[i_pc, i_b] = 1
 
-                        # Lane-0 deep-penetration restore. See serial kernel for the rationale. Indices here live in
+                        # Lane-0 deep-penetration restore. See func_clamp_prune_contacts for the rationale. Indices here live in
                         # orig-space because the cycle-permute is fused into phase 3 below (contact_data is still in
                         # pre-sort order, so we translate sort-space hull/bucket indices through contact_sort_idx).
                         hull_pen_max = gs.qd_float(0.0)

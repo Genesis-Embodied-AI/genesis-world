@@ -355,7 +355,7 @@ class AnalyticalVsGJKSceneCreator:
         self.show_viewer = show_viewer
 
     def setup_scenes(self) -> tuple[gs.Scene, gs.Scene]:
-        """Build both scenes WITHOUT any monkey-patching."""
+        """Build the analytical scene, then patch the narrowphase and build the GJK scene against it."""
         # Scene 1: Using ORIGINAL analytical collision detection
         self.scene_analytical = gs.Scene(
             show_viewer=self.show_viewer,
@@ -366,7 +366,12 @@ class AnalyticalVsGJKSceneCreator:
             tmp_path=self.tmp_path,
         )
 
-        # Scene 2: Will use GJK after monkey-patching (built now with use_gjk_collision=True)
+        # Scene 2: Uses GJK. Building a scene compiles its substep kernels, which inline the narrowphase, so the patch
+        # must precede the build. The two scenes select their collision algorithm statically, so the analytical scene
+        # keeps the kernels it compiled against the original narrowphase. The tests using this creator disable the
+        # kernel cache, which validates the funcs recorded when an entry was stored and would therefore serve a GJK
+        # kernel compiled against the original narrowphase by another test.
+        self.apply_gjk_patch()
         self.scene_gjk = gs.Scene(
             rigid_options=gs.options.RigidOptions(
                 use_gjk_collision=True,
@@ -378,34 +383,19 @@ class AnalyticalVsGJKSceneCreator:
         return self.scene_analytical, self.scene_gjk
 
     def apply_gjk_patch(self) -> None:
-        """
-        Monkey-patch the @qd.kernel for narrowphase with the modified version from a tmp file.
-
-        This replaces the entire kernel object so that:
-        - The new kernel has its own empty materialized_kernels cache
-        - Fastcache sees a different filepath in the cache key (the tmp file),
-          so it won't find a stale on-disk cache hit
-        """
+        """Swap the narrowphase funcs called by the collider for the modified versions from a tmp file."""
         temp_narrowphase_path = create_modified_narrowphase_file(tmp_path=self.tmp_path)
         spec = importlib.util.spec_from_file_location("narrowphase_modified", temp_narrowphase_path)
         narrowphase_modified = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(narrowphase_modified)
-        from genesis.engine.solvers.rigid.collider import narrowphase
+        from genesis.engine.solvers.rigid.collider import collider
 
+        self.monkeypatch.setattr(collider, "func_narrowphase_contact0", narrowphase_modified.func_narrowphase_contact0)
         self.monkeypatch.setattr(
-            narrowphase,
-            "_func_narrowphase_contact0",
-            narrowphase_modified._func_narrowphase_contact0,
+            collider, "func_narrowphase_multicontact", narrowphase_modified.func_narrowphase_multicontact
         )
         self.monkeypatch.setattr(
-            narrowphase,
-            "_func_narrowphase_multicontact",
-            narrowphase_modified._func_narrowphase_multicontact,
-        )
-        self.monkeypatch.setattr(
-            narrowphase,
-            "func_narrow_phase_convex_vs_convex",
-            narrowphase_modified.func_narrow_phase_convex_vs_convex,
+            collider, "func_narrow_phase_convex_vs_convex", narrowphase_modified.func_narrow_phase_convex_vs_convex
         )
 
     def update_pos_quat_analytical(self, entity_idx: int, pos, euler) -> None:
@@ -440,12 +430,11 @@ class AnalyticalVsGJKSceneCreator:
 
 @pytest.mark.slow("gpu")  # gpu ~400s
 @pytest.mark.required
+@pytest.mark.cache(False)
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_capsule_capsule_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool, tol: float) -> None:
-    # Compare the analytical capsule-capsule narrowphase against GJK by monkey-patching the collider;
-    # multiple configurations reuse a single scene build by moving the objects between checks. All analytical
-    # scenarios run first, then the patch swaps in a fresh kernel object (from a tmp file) so the GJK pass
-    # cannot hit the cached analytical kernel.
+    # Compare the analytical capsule-capsule narrowphase against GJK by monkey-patching the collider. Multiple
+    # configurations reuse a single scene build by moving the objects between checks.
     test_cases = [
         # (pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal)
         # Segments cross at origin (distance=0), pen = sum of radii, normal is degenerate
@@ -502,10 +491,7 @@ def test_capsule_capsule_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewe
                 f"Radius: {radius}, Half-length: {half_length}\n"
             ) from e
 
-    # Phase 2: Apply monkey-patch (replace @qd.kernel with version from tmp file)
-    scene_creator.apply_gjk_patch()
-
-    # Phase 3: Run all GJK scenarios (patched kernel, fresh cache)
+    # Phase 2: Run all GJK scenarios (patched narrowphase)
     for pos0, euler0, pos1, euler1, should_collide, description, exp_pen, exp_normal in test_cases:
         try:
             scene_creator.update_pos_quat_gjk(entity_idx=0, pos=pos0, euler=euler0)
@@ -638,15 +624,14 @@ def create_box_mjcf(name, pos, euler, size):
 
 @pytest.mark.slow("gpu")  # gpu ~400s, dominated by recompiling the patched narrowphase kernels
 @pytest.mark.required
+@pytest.mark.cache(False)
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_sphere_pairs_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool) -> None:
     # Compare the analytical sphere-capsule and sphere-sphere narrowphase against GJK by monkey-patching the
     # collider. One scene holds a reference sphere, a capsule and a second sphere; each configuration moves the
-    # reference sphere and the case's partner while parking the third entity far away. All analytical scenarios run
-    # first, then the patch swaps in a fresh kernel object (from a tmp file) so the GJK pass cannot hit the cached
-    # analytical kernel. The GJK arm of the sphere-sphere cases also covers EPA robustness on smooth geometries,
-    # whose extremely small polytope faces near convergence amplify the relative reprojection error and can cause
-    # false contact rejections.
+    # reference sphere and the case's partner while parking the third entity far away. The GJK arm of the
+    # sphere-sphere cases also covers EPA robustness on smooth geometries, whose extremely small polytope faces near
+    # convergence amplify the relative reprojection error and can cause false contact rejections.
     sphere_radius = 0.1
     capsule_radius = 0.1
     capsule_half_length = 0.25
@@ -729,10 +714,7 @@ def test_sphere_pairs_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: 
         except AssertionError as e:
             raise AssertionError(f"\nFAILED TEST SCENARIO (analytical phase): {description}\n") from e
 
-    # Phase 2: Apply monkey-patch (replace @qd.kernel with version from tmp file)
-    scene_creator.apply_gjk_patch()
-
-    # Phase 3: Run all GJK scenarios (patched kernel, fresh cache)
+    # Phase 2: Run all GJK scenarios (patched narrowphase)
     for (
         partner_idx,
         sphere_pos,
@@ -794,6 +776,7 @@ def scene_add_box(tmp_path: Path, scene: gs.Scene, size) -> "RigidEntity":
 
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
+@pytest.mark.cache(False)
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_sphere_box_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bool) -> None:
     sphere_radius = 0.1
@@ -888,8 +871,6 @@ def test_sphere_box_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bo
                 f"Sphere radius: {sphere_radius}\n"
                 f"Box size: {box_size}\n"
             ) from e
-
-    scene_creator.apply_gjk_patch()
 
     for sphere_pos, box_pos, box_euler, should_collide, description, exp_pen, exp_normal in test_cases:
         try:

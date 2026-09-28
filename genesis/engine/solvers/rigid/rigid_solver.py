@@ -93,7 +93,6 @@ from .abd.forward_kinematics import (
     kernel_masked_forward_velocity,
     kernel_update_all_verts,
     kernel_update_cartesian_space,
-    kernel_update_geom_aabbs,
     kernel_update_geoms_replay,
     kernel_update_verts_for_geoms,
     kernel_update_vgeoms,
