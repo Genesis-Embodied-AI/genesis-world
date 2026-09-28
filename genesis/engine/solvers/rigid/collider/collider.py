@@ -909,7 +909,9 @@ class Collider:
                     gather_idx_flat = sort_idx_view.clamp(0, sort_idx_view.shape[1] - 1)
                 else:
                     gather_idx_flat = sort_idx_view[:, :n_contacts_max]
-                gather_idx_vec = gather_idx_flat.unsqueeze(-1).expand(-1, -1, 3)
+                # FIXME: MPS gathers zeros through an expanded index reading a zero-copy view of the quadrants
+                # buffers, while a contiguous one reads correctly. The copy costs one small allocation per call.
+                gather_idx_vec = gather_idx_flat.unsqueeze(-1).expand(-1, -1, 3).contiguous()
                 # Gather indices past each env's n_contacts are stale (the permutation only fills the live range), so
                 # the dense (n_envs, n_contacts_max) tensor has padding columns to reset to the per-field sentinel.
                 # The mask is field-independent, so build it once and broadcast over scalar and vector fields alike.
