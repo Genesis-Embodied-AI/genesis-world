@@ -31,7 +31,6 @@ from genesis.utils.misc import (
 from ..base_solver import GravityMixin, MutatedLinks, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
-    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
@@ -379,9 +378,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
             if entity.desc.variants:
                 variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+                envs_default = variants_default[entity.envs_variant_idx]
             else:
-                variants_default = np.array([entity.main_morph.default_armature or 0.0])
-            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
+                envs_default = np.full((self._B,), entity.main_morph.default_armature or 0.0)
             if (envs_default <= 0.0).all():
                 continue
             dofs_idx.extend(link.dof_start for link in rotor_links)
@@ -1030,8 +1029,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if link._variant_vgeom_ranges is None:
                 continue
 
-            n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
+            variant_idx = link.entity.envs_variant_idx
 
             # Build per-env arrays from link's variant data
             geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)

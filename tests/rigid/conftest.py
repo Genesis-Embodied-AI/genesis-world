@@ -703,6 +703,46 @@ def sliding_ball_pair():
 
 
 @pytest.fixture(scope="session")
+def folding_arm():
+    """Build a URDF of a plate carrying a post, on which hinges a horizontal arm of the requested length that falls
+    onto the plate under gravity. The post is fixed to the plate, so that the arm collides with the plate while being
+    adjacent to the post alone."""
+
+    def build(arm_length):
+        urdf = ET.Element("robot", name="folding_arm")
+        # Plate, post and arm, each as (link name, box size, box center in the link frame, mass)
+        for name, size, center, mass in (
+            ("plate", (1.0, 1.0, 0.02), (0.0, 0.0, -0.01), 5.0),
+            ("post", (0.02, 0.02, 0.06), (0.0, 0.0, 0.03), 0.1),
+            ("arm", (arm_length, 0.02, 0.02), (0.5 * arm_length, 0.0, 0.0), 0.2),
+        ):
+            link = ET.SubElement(urdf, "link", name=name)
+            inertial = ET.SubElement(link, "inertial")
+            ET.SubElement(inertial, "origin", xyz=" ".join(map(str, center)))
+            ET.SubElement(inertial, "mass", value=str(mass))
+            inertia = [mass / 12.0 * (size[j] ** 2 + size[k] ** 2) for j, k in ((1, 2), (0, 2), (0, 1))]
+            ixx, iyy, izz = map(str, inertia)
+            ET.SubElement(inertial, "inertia", ixx=ixx, ixy="0", ixz="0", iyy=iyy, iyz="0", izz=izz)
+            for tag in ("visual", "collision"):
+                geom_prop = ET.SubElement(link, tag)
+                ET.SubElement(geom_prop, "origin", xyz=" ".join(map(str, center)))
+                ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size=" ".join(map(str, size)))
+        joint = ET.SubElement(urdf, "joint", name="post_mount", type="fixed")
+        ET.SubElement(joint, "origin", xyz="-0.4 -0.4 0.0")
+        ET.SubElement(joint, "parent", link="plate")
+        ET.SubElement(joint, "child", link="post")
+        joint = ET.SubElement(urdf, "joint", name="hinge", type="continuous")
+        ET.SubElement(joint, "origin", xyz="0.0 0.0 0.07")
+        ET.SubElement(joint, "axis", xyz="0 1 0")
+        ET.SubElement(joint, "parent", link="post")
+        ET.SubElement(joint, "child", link="arm")
+        ET.SubElement(joint, "limit", effort="100.0", velocity="30.0")
+        return ET.tostring(urdf, encoding="unicode")
+
+    return build
+
+
+@pytest.fixture(scope="session")
 def free_bodies_in_one_model():
     """Generate an MJCF holding two free bodies, i.e. one entity of two kinematic trees sharing its mass blocks."""
     mjcf = ET.Element("mujoco")

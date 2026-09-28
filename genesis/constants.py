@@ -147,7 +147,7 @@ class broadphase_traversal(IntEnum):
 
     - **CPU backend** → ``SAP`` (sequential sweep is efficient on CPU).
     - **GPU backend** → ``ALL_VS_ALL`` (parallel pair checking is faster).
-    - **GPU with heterogeneous entities** → ``SAP`` (each environment sweeps the variants it carries alone).
+    - **GPU with heterogeneous entities** → ``SAP`` (it sweeps only the geoms an environment carries).
     """
 
     SAP = 0
