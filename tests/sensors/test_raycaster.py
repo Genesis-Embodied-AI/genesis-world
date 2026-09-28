@@ -16,7 +16,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 # solver relies on redoing that itself, geoms included, so the arm below pins that a raycaster leaves the physics
 # alone - obstacle_1 falls onto the ground plane and the grid rays must still find its top face where it rests.
 @pytest.mark.parametrize("n_envs, enable_mujoco_compatibility", [(0, False), (2, True)])
-def test_hits(show_viewer, n_envs, enable_mujoco_compatibility):
+def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     NUM_RAYS_XY = (3, 5)
     SPHERE_POS = (2.5, 0.5, 1.0)
     BOX_SIZE = 0.05
@@ -208,6 +208,11 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility):
     assert spherical_distances.shape == (*batch_shape, *NUM_RAYS_XY)
     # Note that the tolerance must be large because the sphere geometry is discretized
     assert_allclose(spherical_distances, RAYCAST_HEIGHT, tol=5e-3)
+    # The horizontal scan lines of a full rotation are evenly spaced, the gap between the last and the first included
+    spherical_azimuths = torch.deg2rad(torch.linspace(-180.0, 180.0, NUM_RAYS_XY[0] + 1)[:-1])
+    spherical_dirs_xy = torch.nn.functional.normalize(spherical_raycaster.read().points[..., :2], dim=-1)
+    assert_allclose(spherical_dirs_xy[..., 0], spherical_azimuths.cos()[:, None], tol=tol)
+    assert_allclose(spherical_dirs_xy[..., 1], spherical_azimuths.sin()[:, None], tol=tol)
 
     # Check that we can read image from depth camera
     assert_equal(depth_camera.read_image().shape, batch_shape + NUM_RAYS_XY)

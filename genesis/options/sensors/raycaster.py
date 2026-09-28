@@ -114,16 +114,6 @@ def _generate_uniform_angles(
         if angles_i is None:
             assert fov_i is not None, "FOV should be provided if angles not given."
 
-            if res_i is not None:
-                if isinstance(fov_i, Sequence):
-                    f_min, f_max = fov_i
-                else:
-                    f_max = fov_i / 2.0
-                    f_min = -f_max
-                n_points_i = math.ceil((f_max - f_min) / res_i) + 1
-
-            assert n_points_i is not None
-
             if isinstance(fov_i, Sequence):
                 f_min, f_max = fov_i
                 fov_size = f_max - f_min
@@ -134,9 +124,16 @@ def _generate_uniform_angles(
 
             assert fov_size <= 360.0 + gs.EPS, "FOV should not be larger than a full rotation."
 
-            # Avoid duplicate angle at 0/360 degrees
-            if fov_size >= 360.0 - gs.EPS:
-                f_max -= fov_size / (n_points_i - 1) * 0.5
+            # A full rotation wraps around, so the angle closing its range would duplicate the first one: the range stops
+            # one step short of it instead, keeping all steps equal.
+            is_full_rotation = fov_size >= 360.0 - gs.EPS
+            if res_i is not None:
+                n_points_i = math.ceil(fov_size / res_i) + (0 if is_full_rotation else 1)
+
+            assert n_points_i is not None
+
+            if is_full_rotation:
+                f_max -= fov_size / n_points_i
 
             angles_i = torch.linspace(f_min, f_max, n_points_i, dtype=gs.tc_float, device=gs.device)
         else:
