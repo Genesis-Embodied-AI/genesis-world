@@ -18,12 +18,11 @@ import genesis.utils.mesh as mu
 from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 from .conftest import (
-    ALPHA_MODE_MATERIALS,
-    ALPHA_RAMP,
     check_gs_textures,
     check_gs_tm_meshes,
     check_gs_tm_textures,
 )
+
 
 # ==================== Scale Tests ====================
 
@@ -360,7 +359,7 @@ def test_glb_material_variants(material_variants_glb):
         is_mesh_zup=True,
         surface=gs.surfaces.Default(),
     )
-    assert len(gs_meshes) == 2 + len(ALPHA_MODE_MATERIALS)
+    assert len(gs_meshes) == 6
 
     # Material 0 reads the float set 0 and material 1 the normalized set 1, so every mesh carries the authored UVs,
     # with V flipped to the image-space convention
@@ -374,7 +373,7 @@ def test_glb_material_variants(material_variants_glb):
     expected_opacities = {
         "masked": [0, 0, 0, 255, 255],
         "masked_factor": [0, 0, 0, 0, 255],
-        "blended": ALPHA_RAMP,
+        "blended": [0, 64, 128, 192, 255],
         "opaque": [255, 255, 255, 255, 255],
     }
     opacities = {
