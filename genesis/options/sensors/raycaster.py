@@ -124,8 +124,7 @@ def _generate_uniform_angles(
 
             assert fov_size <= 360.0 + gs.EPS, "FOV should not be larger than a full rotation."
 
-            # A full rotation wraps around, so the angle closing its range would duplicate the first one: the range stops
-            # one step short of it instead, keeping all steps equal.
+            # Avoid duplicate angle at 0/360 degrees
             is_full_rotation = fov_size >= 360.0 - gs.EPS
             if res_i is not None:
                 n_points_i = math.ceil(fov_size / res_i) + (0 if is_full_rotation else 1)
