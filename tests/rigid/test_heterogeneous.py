@@ -200,6 +200,10 @@ def test_aabb(tol):
     vaabb_size_sphere = vaabb[2, 1] - vaabb[2, 0]
     assert_allclose(aabb_size_sphere, vaabb_size_sphere, tol=1e-3)  # Allow small tolerance for decimation
 
+    # The AABBs maintained by the collision detection bound the variant each environment carries alone
+    scene.step()
+    assert_allclose(het_obj.get_AABB(allow_fast_approx=True), het_obj.get_AABB(), tol=1e-3)
+
 
 # 30s
 @pytest.mark.slow  # ~250s

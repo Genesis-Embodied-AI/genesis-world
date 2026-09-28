@@ -459,13 +459,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _resolve_broadphase_traversal(self):
         if self._options.broadphase_traversal is not None:
             return self._options.broadphase_traversal
-        # For heterogeneous, the valid_collision_pairs array is built once at init from the global geom pair
-        # matrix, but with heterogeneous entities different batch elements have different geoms (different geom_start/
-        # geom_end per link per batch), so a pair (ga, gb) might be valid in batch 0 but not exist in batch 3. To
-        # support this we'd either need per-batch valid pair lists or runtime filtering that checks both geoms exist
-        # in the current batch element. Per-batch lists multiply the memory footprint by the batch size, increasing
-        # memory usage, and increasing L1/L2 cache contention. Runtime filtering keeps the single list, but it will
-        # no longer be compact, and we will have thread divergence.
+        # The valid pairs are shared by every environment, while a heterogeneous environment carries one variant of each
+        # entity. ALL_VS_ALL tests the pairs of every variant in every environment, those of the variants it does not
+        # carry failing on their empty AABB (see func_update_geom_aabbs), whereas SAP sweeps the geoms it carries.
         if gs.backend == gs.cpu or self._enable_heterogeneous:
             return gs.broadphase_traversal.SAP
         return gs.broadphase_traversal.ALL_VS_ALL

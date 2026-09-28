@@ -18,6 +18,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -413,6 +414,33 @@ class Collider:
             is_weld = np.array([(link_min[i], link_max[i]) in weld_pairs for i in range(len(row))], dtype=bool)
             valid &= ~is_weld
 
+        # Heterogeneous variants that no environment carries together never collide, and keeping their pairs would
+        # grow the pair count quadratically with the pool size. An entity dispatches the same variant to all of its
+        # links in a given environment, so a pair is kept only if some environment carries the variant of both geoms.
+        # Every homogeneous geom is the single variant of the pseudo-entity 0, carried by every environment.
+        geoms_hetero_idx = np.zeros((n_geoms,), dtype=gs.np_int)
+        geoms_variant_idx = np.zeros((n_geoms,), dtype=gs.np_int)
+        heteros_envs_variant_idx = [np.zeros((self._solver._B,), dtype=gs.np_int)]
+        heteros_n_variants = [1]
+        for entity in self._solver._entities:
+            if not entity._desc.variants:
+                continue
+            for link in entity.links:
+                for i_v, (geom_start, geom_end) in enumerate(link._variant_geom_ranges):
+                    geoms_hetero_idx[geom_start:geom_end] = len(heteros_n_variants)
+                    geoms_variant_idx[geom_start:geom_end] = i_v
+            heteros_envs_variant_idx.append(_balanced_variant_mapping(len(entity._desc.variants), self._solver._B))
+            heteros_n_variants.append(len(entity._desc.variants))
+        hetero_a, hetero_b = geoms_hetero_idx[row], geoms_hetero_idx[col]
+        is_hetero_pair = valid & ((hetero_a > 0) | (hetero_b > 0))
+        for i_ha, i_hb in np.unique(np.stack((hetero_a[is_hetero_pair], hetero_b[is_hetero_pair]), axis=-1), axis=0):
+            variants_is_carried = np.zeros((heteros_n_variants[i_ha], heteros_n_variants[i_hb]), dtype=bool)
+            variants_is_carried[heteros_envs_variant_idx[i_ha], heteros_envs_variant_idx[i_hb]] = True
+            pairs_mask = is_hetero_pair & (hetero_a == i_ha) & (hetero_b == i_hb)
+            valid[pairs_mask] = variants_is_carried[
+                geoms_variant_idx[row[pairs_mask]], geoms_variant_idx[col[pairs_mask]]
+            ]
+
         # --- Self-collision: adjacent and neutral overlap checks (Python loop, only same-root pairs) ---
         # These checks only apply when self_collision is enabled and the pair passed all vectorized filters
         self_colliding_pairs: list[tuple[int, int]] = []
@@ -426,11 +454,14 @@ class Collider:
             self_root_indices = np.where(valid & same_root)[0]
             self_root_geom_idxs = np.unique(np.concatenate([row[self_root_indices], col[self_root_indices]]))
             # Compute vertices only for geoms involved in self-collision pairs,
-            # shrunk by 0.1% to avoid false positive when detecting self-collision
+            # shrunk by 0.1% to avoid false positive when detecting self-collision.
+            # The pose of a heterogeneous geom is only meaningful in the environments carrying its variant. Every
+            # same-root pair left belongs to a single variant of one entity, whose first environment carries both.
             for gi in self_root_geom_idxs:
+                i_b = geoms[gi].active_envs_idx[0] if geoms[gi].active_envs_idx is not None else 0
                 verts = tensor_to_array(geoms[gi].get_verts())
-                verts = verts.reshape((-1, *verts.shape[-2:]))
-                centroid = verts.mean(axis=1, keepdims=True)
+                verts = verts.reshape((-1, *verts.shape[-2:]))[i_b]
+                centroid = verts.mean(axis=0, keepdims=True)
                 verts = centroid + (1.0 - 1e-3) * (verts - centroid)
                 geoms_verts[gi] = verts
 
@@ -459,9 +490,9 @@ class Collider:
 
                 # active in neutral configuration (qpos0)
                 if needs_neutral_check:
-                    verts_a = geoms_verts[i_ga][0]
+                    verts_a = geoms_verts[i_ga]
                     mesh_a = trimesh.Trimesh(vertices=verts_a, faces=geoms[i_ga].init_faces, process=False)
-                    verts_b = geoms_verts[i_gb][0]
+                    verts_b = geoms_verts[i_gb]
                     mesh_b = trimesh.Trimesh(vertices=verts_b, faces=geoms[i_gb].init_faces, process=False)
                     bounds_a, bounds_b = mesh_a.bounds, mesh_b.bounds
                     if not ((bounds_a[1] < bounds_b[0]).any() or (bounds_b[1] < bounds_a[0]).any()):
@@ -1097,7 +1128,7 @@ def func_detection(
     split_narrowphase runs the convex narrow phase as a contact 0 pass followed by a multi-contact pass, on their own
     scratch states. coop_dedup prunes the contacts cooperatively.
     """
-    func_update_geom_aabbs(geoms_init_AABB, dyn_state, rigid_config)
+    func_update_geom_aabbs(geoms_init_AABB, dyn_state, dyn_info, rigid_config)
     if qd.static(has_possible_pairs):
         func_broad_phase(
             dyn_state,

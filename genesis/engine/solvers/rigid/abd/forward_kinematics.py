@@ -869,22 +869,35 @@ def kernel_update_all_verts(
 
 @qd.func
 def func_update_geom_aabbs(
-    geoms_init_AABB: array_class.GeomsInitAABB, dyn_state: array_class.DynState, rigid_config: qd.template()
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_config: qd.template(),
 ):
+    """Fit the world-frame AABB of every geom in every env.
+
+    A geom of a heterogeneous variant that the env does not carry gets an empty box, which overlaps nothing and drops
+    out of any union of boxes.
+    """
     n_geoms = dyn_state.geoms.pos.shape[0]
     _B = dyn_state.geoms.pos.shape[1]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
-        g_pos = dyn_state.geoms.pos[i_g, i_b]
-        g_quat = dyn_state.geoms.quat[i_g, i_b]
+        is_carried = True
+        if qd.static(rigid_config.batch_links_info):
+            i_l = dyn_info.geoms.link_idx[i_g]
+            is_carried = dyn_info.links.geom_start[i_l, i_b] <= i_g < dyn_info.links.geom_end[i_l, i_b]
 
         lower = gu.qd_vec3(qd.math.inf)
         upper = gu.qd_vec3(-qd.math.inf)
-        for i_corner in qd.static(range(8)):
-            corner_pos = gu.qd_transform_by_trans_quat(geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
-            lower = qd.min(lower, corner_pos)
-            upper = qd.max(upper, corner_pos)
+        if is_carried:
+            g_pos = dyn_state.geoms.pos[i_g, i_b]
+            g_quat = dyn_state.geoms.quat[i_g, i_b]
+            for i_corner in qd.static(range(8)):
+                corner_pos = gu.qd_transform_by_trans_quat(geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
+                lower = qd.min(lower, corner_pos)
+                upper = qd.max(upper, corner_pos)
 
         dyn_state.geoms.aabb_min[i_g, i_b] = lower
         dyn_state.geoms.aabb_max[i_g, i_b] = upper
