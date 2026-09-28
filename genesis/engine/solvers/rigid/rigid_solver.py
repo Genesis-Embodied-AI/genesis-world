@@ -562,6 +562,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
 
+        # The level sweep (see func_sweep_links_by_level) runs on GPU. The CPU and the differentiable runs keep the
+        # serial walks: the sweep syncs the lanes of a block, which neither offers.
+        enable_level_sweep = gs.backend != gs.cpu and not self.sim.options.requires_grad
+
         rigid_config = dict(
             backend=gs.backend,
             para_level=self.sim._para_level,
@@ -588,6 +592,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             parallel_init=(
                 gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
             ),
+            enable_level_sweep=enable_level_sweep,
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             enable_cooperative_noslip=enable_cooperative_noslip,

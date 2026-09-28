@@ -516,6 +516,72 @@ class KinematicSolver(Solver):
             self.rigid_info.trees_link_end.fill(0)
         self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
 
+        # Fill the level tables of every tree and root (see trees_levels_links_idx in array_class.py). The level of a
+        # link is its number of ancestors minus the one of the shallowest link of its tree or root. A scene without any
+        # tree keeps its padded tree slot at zero levels.
+        if self._n_roots:
+            # Each pass moves every link one ancestor up, so the depth of a link is the number of passes it takes to
+            # run out of parents
+            links_depth = np.zeros(self.n_links, dtype=gs.np_int)
+            links_ancestor_idx = self._links_parent_idx
+            while (links_ancestor_idx >= 0).any():
+                has_ancestor = links_ancestor_idx >= 0
+                links_depth += has_ancestor
+                links_ancestor_idx = np.where(has_ancestor, self._links_parent_idx[links_ancestor_idx], -1)
+            for links_group_idx, n_groups, groups_fields in (
+                (
+                    links_tree_idx,
+                    self.n_trees_,
+                    (
+                        self.rigid_info.trees_level_start,
+                        self.rigid_info.trees_n_levels,
+                        self.rigid_info.trees_levels_links_idx,
+                        self.rigid_info.trees_levels_links_end,
+                    ),
+                ),
+                (
+                    links_root_rank,
+                    self._n_roots,
+                    (
+                        self.rigid_info.roots_level_start,
+                        self.rigid_info.roots_n_levels,
+                        self.rigid_info.roots_levels_links_idx,
+                        self.rigid_info.roots_levels_links_end,
+                    ),
+                ),
+            ):
+                group_links = np.arange(self.n_links, dtype=gs.np_int)[links_group_idx >= 0]
+                links_group = links_group_idx[group_links]
+                groups_min_depth = np.full(n_groups, np.iinfo(gs.np_int).max, dtype=gs.np_int)
+                np.minimum.at(groups_min_depth, links_group, links_depth[group_links])
+                links_level = links_depth[group_links] - groups_min_depth[links_group]
+                groups_n_levels = np.zeros(n_groups, dtype=gs.np_int)
+                np.maximum.at(groups_n_levels, links_group, links_level + 1)
+                groups_level_start = np.zeros(n_groups, dtype=gs.np_int)
+                np.cumsum(np.bincount(links_group, minlength=n_groups)[:-1], out=groups_level_start[1:])
+                # The links of every group, group after group, level after level, and each level in ascending order
+                entries_order = np.lexsort((group_links, links_level, links_group))
+                groups_levels_links_idx = group_links[entries_order]
+                entries_group = links_group[entries_order]
+                entries_level = links_level[entries_order]
+                entries_idx = np.arange(len(groups_levels_links_idx), dtype=gs.np_int)
+                # An entry ends its level where the next entry starts another level or another group
+                is_level_last = np.ones(len(groups_levels_links_idx), dtype=bool)
+                is_level_last[:-1] = (np.diff(entries_group) != 0) | (np.diff(entries_level) != 0)
+                levels_last_entry = entries_idx[is_level_last]
+                groups_levels_links_end = levels_last_entry[np.searchsorted(levels_last_entry, entries_idx)] + 1
+                for field, value in zip(
+                    groups_fields,
+                    (
+                        groups_level_start,
+                        groups_n_levels,
+                        groups_levels_links_idx,
+                        groups_levels_links_end,
+                    ),
+                ):
+                    if len(value):
+                        field.from_numpy(value)
+
     def _init_link_fields(self):
         if self.links:
             links = self.links
