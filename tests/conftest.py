@@ -993,3 +993,23 @@ def png_snapshot(request, snapshot):
         )
 
     return snapshot_obj
+
+
+@pytest.fixture
+def trajectory_snapshot(request) -> Path:
+    from genesis.recorders.trajectory import TRAJECTORY_FORMAT
+
+    from .utils.assets import get_hf_dataset
+
+    # The path is the one syrupy gives a single-file snapshot of the test. The test reads the file itself, so syrupy
+    # leaves it out of its count of unused snapshots.
+    path = request.path.parent / "__snapshots__" / request.path.stem / f"{request.node.name}{TRAJECTORY_FORMAT}"
+    # The brackets of a parametrized test name are escaped for the same reason as in 'png_snapshot'
+    snapshot_pattern = "".join(f"[{char}]" if char in ("[", "]") else char for char in path.name)
+    tests_dir = Path(__file__).parent
+    get_hf_dataset(
+        pattern=f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
+        repo_name="snapshots",
+        local_dir=tests_dir,
+    )
+    return path

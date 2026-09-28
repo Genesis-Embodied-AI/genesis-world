@@ -141,59 +141,97 @@ def test_reset_control(robot_path, tol):
 
 
 @pytest.mark.required
-def test_drone_propellers_force_substep_consistency(show_viewer, tol):
+@pytest.mark.parametrize("n_envs, substeps", [(0, 5), (2, 1)])
+def test_drone_propellers_force_application(n_envs, substeps, show_viewer, tol):
     BASE_RPM = 15000
+    RPM_DELTA = 0.01
+    SUBSTEP_DT = 0.004
+    TOTAL_SUBSTEPS = 10
+    GRAVITY = -9.81
+    CF2X_ARMS = np.array(
+        (
+            (0.028, -0.028, 0.0),
+            (-0.028, -0.028, 0.0),
+            (-0.028, 0.028, 0.0),
+            (0.028, 0.028, 0.0),
+        )
+    )
+    n_steps = TOTAL_SUBSTEPS // substeps
 
-    scene_ref = gs.Scene(
+    scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=0.004,
-            substeps=1,
+            dt=SUBSTEP_DT * substeps,
+            substeps=substeps,
+            gravity=(0.0, 0.0, GRAVITY),
+        ),
+        # The closed-form recurrence below is Euler-exact.
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 0.0, 1.6),
+            camera_lookat=(0.0, 0.0, 1.0),
         ),
         show_viewer=show_viewer,
     )
-    drone_ref = scene_ref.add_entity(
+    drone = scene.add_entity(
         morph=gs.morphs.Drone(
+            pos=(0.0, 0.0, 1.0),
             file="urdf/drones/cf2x.urdf",
-            pos=(0, 0, 1),
         ),
     )
-    scene_ref.build(n_envs=2)
+    scene.build(n_envs=n_envs)
 
-    # This not only tests setter, but also proper reset (tracking and clearing applied external force)
-    drone_ref.set_propellers_rpm(BASE_RPM)
+    # The rotor arms are authored as the propeller links' inertial origins, which alignment must leave in place.
+    propellers_idx_local = [drone.get_link(name).idx_local for name in drone.morph.propellers_link_name]
+    propellers_pos = drone.get_links_pos(links_idx_local=propellers_idx_local, ref=gs.link_ref_frame.link_COM)
+    assert_allclose(propellers_pos - drone.get_pos()[..., None, :], CF2X_ARMS, tol=tol)
+
+    # Reset clears the tracked external force and accepts each supported RPM input shape.
+    drone.set_propellers_rpm(BASE_RPM)
     with np.testing.assert_raises(gs.GenesisException):
-        drone_ref.set_propellers_rpm(BASE_RPM)
-    scene_ref.reset()
-    drone_ref.set_propellers_rpm((BASE_RPM,) * 4)
-    scene_ref.reset()
-    drone_ref.set_propellers_rpm(torch.full((scene_ref.n_envs, 4), fill_value=BASE_RPM))
-    scene_ref.reset()
+        drone.set_propellers_rpm(BASE_RPM)
+    scene.reset()
+    drone.set_propellers_rpm((BASE_RPM,) * 4)
+    scene.reset()
+    rpm_shape = (n_envs, 4) if n_envs else (4,)
+    drone.set_propellers_rpm(torch.full(rpm_shape, fill_value=BASE_RPM))
+    scene.reset()
 
-    for _ in range(500):
-        drone_ref.set_propellers_rpm(BASE_RPM)
-        scene_ref.step()
+    # Thrust held over several steps: the propeller forces set once per step act on every substep and are cleared
+    # before the next step, so the vertical response follows the implicit-damping Euler recurrence exactly, with
+    # the semi-implicit position update integrating each new velocity. The recurrence depends only on the total
+    # number of substeps, which the sweep pins across different outer step counts.
+    pos_z = drone.get_dofs_position(dofs_idx_local=2)[..., 0]
+    for _ in range(n_steps):
+        drone.set_propellers_rpm(BASE_RPM)
+        scene.step()
+    thrust = drone.n_propellers * drone.KF * BASE_RPM**2
+    weight = drone.get_mass() * GRAVITY
+    mass = drone.get_mass_mat()[..., 2, 2]
+    damping = drone.get_dofs_damping(dofs_idx_local=2)[..., 0]
+    vel_z = 0.0
+    for _ in range(TOTAL_SUBSTEPS):
+        vel_z = (mass * vel_z + SUBSTEP_DT * (thrust + weight)) / (mass + damping * SUBSTEP_DT)
+        pos_z = pos_z + SUBSTEP_DT * vel_z
+    assert_allclose(drone.get_dofs_position(dofs_idx_local=2)[..., 0], pos_z, tol=tol)
+    assert_allclose(drone.get_dofs_velocity(dofs_idx_local=2)[..., 0], vel_z, tol=tol)
+    assert_allclose(drone.get_dofs_velocity(dofs_idx_local=[3, 4, 5]), 0.0, tol=tol)
+    scene.reset()
 
-    scene_test = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.02,
-            substeps=5,
-        ),
-        show_viewer=show_viewer,
-    )
-    drone_test = scene_test.add_entity(
-        morph=gs.morphs.Drone(
-            file="urdf/drones/cf2x.urdf",
-            pos=(0, 0, 1.0),
-        ),
-    )
-    scene_test.build()
-    for _ in range(100):
-        drone_test.set_propellers_rpm(BASE_RPM)
-        scene_test.step()
-
-    pos_ref = drone_ref.get_dofs_position()
-    pos_test = drone_test.get_dofs_position()
-    assert_allclose(pos_ref, pos_test, tol=tol)
+    # One differential-thrust step isolates the rotor-arm moment and cancels pitch and yaw torque.
+    roll_rpm = tuple(BASE_RPM * scale for scale in (1 + RPM_DELTA, 1 + RPM_DELTA, 1 - RPM_DELTA, 1 - RPM_DELTA))
+    drone.set_propellers_rpm(roll_rpm)
+    scene.step()
+    thrust = drone.KF * np.square(roll_rpm)
+    roll_torque = np.cross(CF2X_ARMS, np.outer(thrust, (0.0, 0.0, 1.0))).sum(axis=0)[0]
+    inertia = drone.get_mass_mat()[..., 3, 3]
+    damping = drone.get_dofs_damping(dofs_idx_local=3)[..., 0]
+    roll_rate = 0.0
+    for _ in range(substeps):
+        roll_rate = (inertia * roll_rate + SUBSTEP_DT * roll_torque) / (inertia + damping * SUBSTEP_DT)
+    assert_allclose(drone.get_dofs_velocity(dofs_idx_local=3)[..., 0], roll_rate, tol=tol)
+    assert_allclose(drone.get_dofs_velocity(dofs_idx_local=[4, 5]), 0.0, tol=tol)
 
 
 @pytest.mark.required
@@ -241,7 +279,7 @@ def test_drone_advanced(show_viewer):
             drone.set_propellers_rpm(50000.0)
         scene.step()
         if i > 350:
-            assert scene.rigid_solver.collider._collider_state.n_contacts.to_numpy()[0] == 2
+            assert scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()[0] == 2
             assert_allclose(scene.rigid_solver.get_dofs_velocity(), 0, tol=2e-3)
 
     # Push the drones symmetrically and wait for them to collide
@@ -251,7 +289,7 @@ def test_drone_advanced(show_viewer):
         for drone in drones:
             drone.set_propellers_rpm(50000.0)
         scene.step()
-        if scene.rigid_solver.collider._collider_state.n_contacts.to_numpy()[0] > 2:
+        if scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()[0] > 2:
             break
     else:
         raise AssertionError

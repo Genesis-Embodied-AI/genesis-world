@@ -13,8 +13,7 @@ class PygletPlatform(Platform):
     an OpenGL context.
     """
 
-    def __init__(self, viewport_width, viewport_height):
-        super().__init__(viewport_width, viewport_height)
+    def __init__(self):
         self._window = None
 
     def init_context(self):
@@ -102,6 +101,3 @@ class PygletPlatform(Platform):
             self._window = None
             OpenGL.contextdata.cleanupContext(cid)
             del cid
-
-    def supports_framebuffers(self):
-        return True

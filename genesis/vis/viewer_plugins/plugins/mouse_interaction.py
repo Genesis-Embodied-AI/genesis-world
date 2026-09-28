@@ -350,7 +350,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         # Current link state in env-local frame
         link_pos = tensor_to_array(self._held_link.get_pos(envs_idx=envs_idx, relative=False).squeeze(0))
         link_quat = tensor_to_array(self._held_link.get_quat(envs_idx=envs_idx, relative=False).squeeze(0))
-        lin_vel = tensor_to_array(self._held_link.get_vel(envs_idx=envs_idx).squeeze(0))
+        lin_vel = tensor_to_array(self._held_link.get_vel(envs_idx=envs_idx, relative=False).squeeze(0))
         ang_vel = tensor_to_array(self._held_link.get_ang(envs_idx=envs_idx).squeeze(0))
 
         # Held point in env-local frame; control point comes from a world-space plane raycast, so strip the offset.

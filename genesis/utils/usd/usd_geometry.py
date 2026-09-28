@@ -13,7 +13,7 @@ from .usd_utils import AXES_T, AXES_VECTOR, usd_attr_array_to_numpy, usd_primvar
 
 
 # UsdPhysics.MeshCollisionAPI 'approximation' tokens -> per-geom collision post-processing overrides
-# consumed by KinematicEntity._resolve_geoms. 'boundingCube'/'boundingSphere' are handled
+# consumed by KinematicEntityDescription._resolve_geoms. 'boundingCube'/'boundingSphere' are handled
 # separately by fitting a primitive geom in the parser.
 _APPROXIMATION_OVERRIDES = {
     "convexHull": {"convexify": True, "decompose_error_threshold": float("inf")},  # single hull, no decomposition
@@ -120,16 +120,16 @@ def parse_prim_geoms(
                         continue
                     face_used_mask[subset_face_ids] = True
                     subset_surface, subset_uvname, _, subset_bake_success = context.apply_surface(subset_prim, surface)
-                    subset_geom_id = context.get_prim_id(subset_prim)
+                    subset_name = subset_prim.GetPath().pathString
                     subset_infos.append(
-                        (subset_face_ids, subset_surface, subset_uvname, subset_geom_id, subset_bake_success)
+                        (subset_face_ids, subset_surface, subset_uvname, subset_name, subset_bake_success)
                     )
                     uvs[subset_uvname] = None
                 else:
                     gs.logger.warning(f"Unsupported geom subset element type: {elem_type} for {geom_id}")
             subset_unused = ~face_used_mask
             if subset_unused.any():
-                subset_infos.append((subset_unused, geom_surface, geom_uvname, geom_id, bake_success))
+                subset_infos.append((subset_unused, geom_surface, geom_uvname, prim.GetPath().pathString, bake_success))
 
             # parse UVs
             for uvname in uvs.keys():
@@ -187,7 +187,7 @@ def parse_prim_geoms(
                     face_triangle_starts = np.arange(len(face_vertex_counts), dtype=np.int32)
 
             # process mesh
-            for subset_face_ids, subset_surface, subset_uvname, subset_geom_id, subset_bake_success in subset_infos:
+            for subset_face_ids, subset_surface, subset_uvname, subset_name, subset_bake_success in subset_infos:
                 tri_starts = face_triangle_starts[subset_face_ids]
                 tri_counts = face_vertex_counts[subset_face_ids] - 2
                 tri_ids = get_triangle_ids(tri_starts, tri_counts)
@@ -234,10 +234,11 @@ def parse_prim_geoms(
                     surface=subset_surface,
                     uvs=subset_uv,
                 )
+                # Named by prim path, as a link is, so the name holds nothing of the author's filesystem
                 mesh.metadata.update(
                     {
                         "mesh_path": context.stage_file,  # unbaked file or cache
-                        "name": subset_geom_id,
+                        "name": subset_name,
                         "bake_success": bool(subset_bake_success),
                     }
                 )
@@ -315,7 +316,7 @@ def parse_prim_geoms(
             # axis_T is NOT baked into mesh vertices — it goes into geom_Q instead.
             tmesh.apply_transform(geom_ST)
             metadata = {
-                "name": geom_id,
+                "name": prim.GetPath().pathString,
                 "bake_success": bool(bake_success),
             }
             meshes.append(gs.Mesh.from_trimesh(tmesh, surface=geom_surface, metadata=metadata))
@@ -397,7 +398,9 @@ def parse_prim_geoms(
                     radius = np.linalg.norm(verts - center, axis=1).max()
                     bv_tmesh = trimesh.creation.icosphere(radius=radius, subdivisions=2)
                     bv_type, bv_data = gs.GEOM_TYPE.SPHERE, np.array([radius])
-                bv_mesh = gs.Mesh.from_trimesh(bv_tmesh, surface=geom_surface, metadata={"name": geom_id})
+                bv_mesh = gs.Mesh.from_trimesh(
+                    bv_tmesh, surface=geom_surface, metadata={"name": prim.GetPath().pathString}
+                )
                 g_infos.append(
                     {
                         **collision_g_info,

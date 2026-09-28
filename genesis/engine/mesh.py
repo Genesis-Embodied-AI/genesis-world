@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.gltf as gltf_utils
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.constants import GLTF_FORMATS, MESH_FORMATS
 import genesis.utils.point_cloud as pc
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
@@ -502,8 +503,8 @@ class Mesh(RBC, serialization.SerializationMixin):
         morphs yield a single mesh.
         """
         if isinstance(morph, gs.options.morphs.Mesh):
-            if morph.is_format(gs.options.morphs.MESH_FORMATS):
-                if morph.is_format(gs.options.morphs.GLTF_FORMATS):
+            if morph.is_format(MESH_FORMATS):
+                if morph.is_format(GLTF_FORMATS):
                     meshes = gltf_utils.parse_mesh_glb(
                         morph.file, morph.group_by_material, morph.scale, morph.file_meshes_are_zup, surface
                     )
@@ -666,16 +667,11 @@ class Mesh(RBC, serialization.SerializationMixin):
         A mesh is written this way rather than through its fields because construction convexifies, decimates and
         rescales it: what a file carries is the geometry as it now stands, so reading one back processes nothing.
         """
-        # The recorded asset path belongs to the author's filesystem, so the file keeps the bare name and the
-        # geometry travels inside it.
-        metadata = self.metadata
-        if metadata.get("mesh_path") is not None:
-            metadata = {**metadata, "mesh_path": os.path.basename(metadata["mesh_path"])}
         return {
             "geometry": _exported_geometry(self.trimesh, exporting),
             "uvs": None if self.uvs is None else exporting.array(self.uvs),
             "surface": exporting.value(self.surface, Surface),
-            "metadata": exporting.value(metadata, Any),
+            "metadata": exporting.value(self.metadata, Any),
         }
 
     @classmethod
@@ -693,6 +689,10 @@ class Mesh(RBC, serialization.SerializationMixin):
             # The metadata says what was already done to the geometry, so it is handed back rather than acted on again
             metadata=loading.value(raw["metadata"], Any),
         )
+        # Construction derives the visual from the surface and the uvs unless the mesh states vertex colours, which are
+        # the only visual a file carries (see '_exported_geometry'), so a textured mesh gets its visual back this way.
+        if raw["geometry"]["colours"] is None:
+            mesh._mesh.visual = mu.surface_uvs_to_trimesh_visual(mesh.surface, mesh.uvs, len(mesh.verts))
         source = loading.shared.setdefault((raw["geometry"]["verts"], raw["geometry"]["faces"]), mesh)
         if source is not mesh:
             mesh._unique_edges = source.get_unique_edges()

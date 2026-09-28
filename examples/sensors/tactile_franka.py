@@ -122,7 +122,7 @@ def _plot_tactile_sensor(
     positions = sensors[0].probe_local_pos.reshape(-1, 3)
     if sensor_type == "elastomer":
         # ElastomerTaxel read() is grid-shaped (ny, nx, 3); flatten each finger to (N, 3) before stacking.
-        scene.start_recording(
+        scene.add_recorder(
             lambda: torch.stack([sensor.read().reshape(-1, 3) for sensor in sensors]),
             gs.recorders.MPLVectorFieldPlot(
                 title="ElastomerTaxel marker displacements",
@@ -134,7 +134,7 @@ def _plot_tactile_sensor(
             ),
         )
     elif sensor_type == "kinematic":
-        scene.start_recording(
+        scene.add_recorder(
             lambda: _force_torque_field(sensors),
             gs.recorders.MPLVectorFieldPlot(
                 title="KinematicTaxel force + twist",
@@ -148,7 +148,7 @@ def _plot_tactile_sensor(
             ),
         )
     elif sensor_type == "proximity":
-        scene.start_recording(
+        scene.add_recorder(
             lambda: _force_torque_field(sensors),
             gs.recorders.MPLVectorFieldPlot(
                 title="ProximityTaxel force + twist",
@@ -162,7 +162,7 @@ def _plot_tactile_sensor(
             ),
         )
     elif sensor_type == "depth":
-        scene.start_recording(
+        scene.add_recorder(
             lambda: tuple(sensor.read().max() for sensor in sensors),
             gs.recorders.MPLLinePlot(
                 labels=labels,

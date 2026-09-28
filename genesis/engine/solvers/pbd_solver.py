@@ -14,6 +14,7 @@ from genesis.engine.entities import (
     PBDParticleEntity,
 )
 from genesis.engine.entities.pbd_entity import PBDTetEntity
+from genesis.engine.materials import PBD
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils.array_class import LinksState
 from genesis.utils.geom import SpatialHasher
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
+    material_cls = PBD.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -241,7 +243,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, name: str | None = None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(

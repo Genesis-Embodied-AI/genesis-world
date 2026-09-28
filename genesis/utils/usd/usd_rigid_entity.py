@@ -12,6 +12,7 @@ from .usd_context import (
     extract_links_referenced_by_joints,
     find_joints_in_range,
     find_rigid_bodies_in_range,
+    get_current_usd_context,
     resolve_rigid_body_link_path,
 )
 from .usd_collision import apply_collision_filtering
@@ -421,7 +422,7 @@ def _parse_link(
                     joint_prim,
                     candidates=morph.joint_armature_attr_candidates,
                     attr_name="dofs_armature",
-                    default_value=morph.default_armature or 0.0,
+                    default_value=0.0,
                 ),
                 dtype=gs.np_float,
             )
@@ -670,7 +671,7 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
     eqs_info : list
         List of equality constraint info dictionaries.
     """
-    context: UsdContext = morph.usd_ctx
+    context = get_current_usd_context() or UsdContext(morph.file)
     context.find_all_materials()
     stage: Usd.Stage = context.stage
 

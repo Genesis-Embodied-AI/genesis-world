@@ -38,6 +38,7 @@ class Visualizer(RBC):
         self._rasterizer = None
         self._raytracer = None
         self._batch_renderer = None
+        self._cameras = gs.List()
         self.viewer_lock = DummyViewerLock()
 
         # Rasterizer context is shared by viewer and rasterizer
@@ -70,22 +71,22 @@ class Visualizer(RBC):
                     "or call `del scene`."
                 )
 
+            # The platform defaults are resolved into a copy handed to the viewer, so the options the scene was authored
+            # with stay as written and an export of the scene opens on any display and platform.
+            resolved = {}
             if viewer_options.res is None:
                 viewer_height = (screen_height * screen_scale) * VIEWER_DEFAULT_HEIGHT_RATIO
                 viewer_width = viewer_height / VIEWER_DEFAULT_ASPECT_RATIO
-                viewer_options.res = (int(viewer_width), int(viewer_height))
-            if viewer_options.run_in_thread is None:
-                if sys.platform == "linux":
-                    viewer_options.run_in_thread = True
-                elif sys.platform == "darwin":
-                    viewer_options.run_in_thread = False
-                elif sys.platform == "win32":
-                    viewer_options.run_in_thread = True
-            if sys.platform == "darwin" and viewer_options.run_in_thread:
+                resolved["res"] = (int(viewer_width), int(viewer_height))
+            run_in_thread = viewer_options.run_in_thread
+            if run_in_thread is None:
+                run_in_thread = sys.platform != "darwin"
+            elif run_in_thread and sys.platform == "darwin":
                 gs.raise_exception("Running viewer in background thread is not supported on MacOS.")
+            resolved["run_in_thread"] = run_in_thread
 
-            self._viewer = Viewer(viewer_options, self._context)
-            if not viewer_options.run_in_thread:
+            self._viewer = Viewer(viewer_options.model_copy(update=resolved), self._context)
+            if not run_in_thread:
                 gs.logger.warning(
                     "Interactive viewer running in main thread. It will only be responsive if a simulation is running."
                 )
@@ -103,8 +104,6 @@ class Visualizer(RBC):
             self._renderer = self._raytracer = Raytracer(renderer_options, vis_options)
         elif isinstance(renderer_options, gs.renderers.Rasterizer):
             self._renderer = self._rasterizer
-
-        self._cameras = gs.List()
 
     def __del__(self):
         self.destroy()
@@ -184,7 +183,7 @@ class Visualizer(RBC):
             self._batch_renderer.reset()
 
         if self._viewer is not None:
-            self._viewer.update(auto_refresh=True)
+            self._viewer.update(auto_refresh=True, force=True)
 
     def build(self):
         self._context.build(self._scene)
@@ -232,7 +231,6 @@ class Visualizer(RBC):
                     camera.update_following()
 
         if self._scene.rigid_solver.is_active:
-            self._scene.rigid_solver.update_geoms_render_T()
             self._scene.rigid_solver.update_vgeoms()
 
             # drone propellers
@@ -240,11 +238,8 @@ class Visualizer(RBC):
                 if isinstance(entity, gs.engine.entities.DroneEntity):
                     entity.update_propeller_vgeoms()
 
-            self._scene.rigid_solver.update_vgeoms_render_T()
-
         if self._scene.kinematic_solver.is_active:
             self._scene.kinematic_solver.update_vgeoms()
-            self._scene.kinematic_solver.update_vgeoms_render_T()
 
         if self._scene.mpm_solver.is_active:
             self._scene.mpm_solver.update_render_fields()

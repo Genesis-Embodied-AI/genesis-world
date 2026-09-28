@@ -2,10 +2,8 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.utils import geom as gu
-from genesis.utils import terrain as tu
-from genesis.utils.description import TerrainEntityDescription
 
+from .description import TerrainEntityDescription
 from .rigid_entity import RigidEntity
 
 
@@ -32,50 +30,6 @@ class TerrainEntity(RigidEntity):
     def terrain_scale(self) -> np.ndarray:
         """Horizontal size of a grid cell in meters, and the factor the elevation is scaled by."""
         return self._desc.terrain_scale
-
-    def _load_morph(self, morph):
-        """Load the height field a terrain morph describes, with its scales and the meshes standing for it."""
-        vmesh, mesh, terrain_hf = tu.parse_terrain(morph, self._surface)
-        self._desc.terrain_scale = np.array((morph.horizontal_scale, morph.vertical_scale), dtype=gs.np_float)
-        self._desc.terrain_hf = terrain_hf * self._desc.terrain_scale[1]
-
-        g_infos = []
-        if morph.visualization:
-            g_infos.append(dict(contype=0, conaffinity=0, vmesh=vmesh))
-        if morph.collision:
-            g_infos.append(
-                dict(
-                    contype=1,
-                    conaffinity=1,
-                    mesh=mesh,
-                    type=gs.GEOM_TYPE.TERRAIN,
-                    sol_params=gu.default_solver_params(),
-                    pos=gu.zero_pos(),
-                    quat=gu.identity_quat(),
-                )
-            )
-
-        self._resolve_link(
-            l_info=dict(
-                name="baselink",
-                parent_idx=-1,
-                root_idx=None,
-                pos=np.array(morph.pos),
-                quat=np.array(morph.quat),
-                is_robot=False,
-                inertial_pos=None,
-                inertial_quat=gu.identity_quat(),
-                inertial_i=None,
-                inertial_mass=None,
-                invweight=None,
-            ),
-            j_infos=[dict(name="joint_baselink", type=gs.JOINT_TYPE.FIXED, n_qs=0, n_dofs=0)],
-            g_infos=g_infos,
-            morph=morph,
-        )
-
-        # Load heterogeneous variants (if any)
-        self._load_heterogeneous_morphs()
 
     @gs.assert_built
     def get_terrain_height(self, positions, envs_idx=None):

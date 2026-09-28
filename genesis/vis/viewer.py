@@ -96,25 +96,30 @@ class Viewer(RBC):
             self._is_built = True
             return
 
-        # Try all candidate onscreen OpenGL "platforms" if none is specifically requested
+        # Try all candidate onscreen OpenGL "platforms" if none is specifically requested. OSMesa is ruled out for the
+        # viewer: it binds PyOpenGL to its own private copy of Mesa for the whole process (see OSMesaPlatform), which
+        # the window-system context of the viewer cannot be driven through.
         opengl_platform_orig = os.environ.get("PYOPENGL_PLATFORM")
+        if opengl_platform_orig == "osmesa":
+            gs.raise_exception(
+                "PYOPENGL_PLATFORM='osmesa' only supports offscreen rendering. Unset it or disable the interactive "
+                "viewer."
+            )
         if opengl_platform_orig is None:
             if sys.platform == "win32":
                 all_opengl_platforms = ("wgl",)  # same as "native"
             elif sys.platform == "linux":
                 if pyglet.options.get("headless"):
                     # pyglet's headless windowing creates an EGL pbuffer context, so only the matching PyOpenGL EGL
-                    # platform can share it; native/glx/osmesa query a different context and fail with "no valid
-                    # context", churning GL state on the way out.
+                    # platform can share it; native/glx query a different context and fail with "no valid context",
+                    # churning GL state on the way out.
                     all_opengl_platforms = ("egl",)
                 else:
                     # "native" is platform-specific ("egl" or "glx")
-                    all_opengl_platforms = ("native", "egl", "glx", "osmesa")
+                    all_opengl_platforms = ("native", "egl", "glx")
             else:
                 all_opengl_platforms = ("native",)
         else:
-            if opengl_platform_orig == "osmesa" and sys.platform != "linux":
-                gs.raise_exception("PYOPENGL_PLATFORM='osmesa' is only supported on Linux OS for now.")
             all_opengl_platforms = (opengl_platform_orig,)
 
         for i, platform in enumerate(all_opengl_platforms):
@@ -133,7 +138,6 @@ class Viewer(RBC):
                         view_center=self._camera_init_lookat,
                         shadow=self.context.shadow,
                         plane_reflection=self.context.plane_reflection,
-                        env_separate_rigid=self.context.env_separate_rigid,
                         enable_help_text=self._enable_help_text,
                         plugins=self._plugins,
                         viewer_flags={
@@ -212,21 +216,22 @@ class Viewer(RBC):
 
         self._pyrender_viewer.update_on_sim_step()
 
-        with self.lock:
-            # Update context
-            self.context.update(force)
+        # Sync the drawn scene with the simulation at most refresh_rate times per second, independently of how often
+        # the simulation steps: a redraw is the only consumer of the sync, and stepping runs far more often than the
+        # screen repaints. A camera rendering in between syncs the scene itself.
+        now = time.perf_counter()
+        is_refresh_due = self._last_refresh_time is None or now - self._last_refresh_time >= 1.0 / self._refresh_rate
+        if force or is_refresh_due:
+            self._last_refresh_time = now
+            with self.lock:
+                self.context.update(force)
 
-            # Refresh viewer by default if and if this is possible
-            if auto_refresh is None:
-                viewer_thread = self._pyrender_viewer._thread or threading.main_thread()
-                auto_refresh = viewer_thread == threading.current_thread()
+                # Refresh viewer by default if and if this is possible
+                if auto_refresh is None:
+                    viewer_thread = self._pyrender_viewer._thread or threading.main_thread()
+                    auto_refresh = viewer_thread == threading.current_thread()
 
-            # Redraw at most refresh_rate times per second, independently of how often the simulation steps, so
-            # the refresh rate stays unrelated to the physics timestep.
-            if auto_refresh and not self._pyrender_viewer.run_in_thread:
-                now = time.perf_counter()
-                if self._last_refresh_time is None or now - self._last_refresh_time >= 1.0 / self._refresh_rate:
-                    self._last_refresh_time = now
+                if auto_refresh and not self._pyrender_viewer.run_in_thread:
                     self._pyrender_viewer.refresh()
 
         # Pace the stepping loop to real time when a factor is set (no effect once the sim falls behind). Read the
@@ -247,7 +252,7 @@ class Viewer(RBC):
         seg=False,
         normal=False,
         skip_markers=False,
-        env_separate_rigid=None,
+        split_envs=False,
     ):
         return self._pyrender_viewer.render_offscreen(
             camera_node,
@@ -257,7 +262,7 @@ class Viewer(RBC):
             seg,
             normal,
             skip_markers=skip_markers,
-            env_separate_rigid=env_separate_rigid,
+            split_envs=split_envs,
         )
 
     def set_camera_pose(self, pose=None, pos=None, lookat=None):

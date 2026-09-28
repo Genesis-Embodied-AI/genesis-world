@@ -24,6 +24,7 @@ layout(location = JOINTS_0_LOC) in vec4 joints_0;
 layout(location = WEIGHTS_0_LOC) in vec4 weights_0;
 #endif
 layout(location = INST_M_LOC) in mat4 inst_m;
+layout(location = INST_ENV_OFFSET_LOC) in vec3 inst_env_offset;
 
 // Uniforms
 uniform mat4 M;
@@ -31,6 +32,8 @@ uniform mat4 V;
 uniform mat4 P;
 
 uniform mat4 reflection_mat;
+// 1 in a pass drawing the environments side by side, which moves each instance by its environment offset, 0 otherwise
+uniform float env_offset_scale;
 
 // Outputs
 #ifdef DOUBLE_SIDED
@@ -80,10 +83,12 @@ uniform mat4 reflection_mat;
 
 void main()
 {
-    gl_Position = P * V * reflection_mat * M * inst_m * vec4(position, 1);
+    vec4 world_position = M * inst_m * vec4(position, 1);
+    world_position.xyz += env_offset_scale * inst_env_offset;
+    gl_Position = P * V * reflection_mat * world_position;
 
 #ifdef DOUBLE_SIDED
-    v_frag_position = vec3(M * inst_m * vec4(position, 1.0));
+    v_frag_position = world_position.xyz;
 
     mat4 N = transpose(inverse(M * inst_m));
 
@@ -111,7 +116,7 @@ void main()
         v_color_multiplier = color_0;
     #endif
 #else
-    frag_position = vec3(M * inst_m * vec4(position, 1.0));
+    frag_position = world_position.xyz;
 
     mat4 N = transpose(inverse(M * inst_m));
 

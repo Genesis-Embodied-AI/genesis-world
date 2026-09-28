@@ -1,6 +1,7 @@
 import enum
 import functools
 import inspect
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
@@ -11,13 +12,14 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
-from genesis.engine.states import QueriedStates
+from genesis.engine.materials.base import Material
+from genesis.engine.states import QueriedStates, SolverCheckpoint
 from genesis.repr_base import RBC
-from genesis.utils.description import Described
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
     indices_to_mask,
+    qd_to_numpy,
     qd_to_torch,
     sanitize_index,
     tensor_to_array,
@@ -309,7 +311,10 @@ class GravityMixin:
         return tensor[0] if self._sim.n_envs == 0 else tensor
 
 
-class Solver(Described, RBC):
+class Solver(RBC):
+    # The material of the entities this solver simulates, None for a solver holding no entity of its own
+    material_cls: type[Material] | None = None
+
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
         self._sim = sim
@@ -322,8 +327,6 @@ class Solver(Described, RBC):
         # here to lift entries owned by a `SimState`, preventing `collect_output_grads` from accumulating adjoints twice
         # through both the simulator-level and the per-solver loop.
         self._queried_states = QueriedStates()
-
-        self.data_manager = None
 
         # force fields
         self._ffs = list()
@@ -356,6 +359,34 @@ class Solver(Described, RBC):
     def build(self):
         self._B = self._sim._B
 
+    @property
+    def data(self) -> Iterator[array_class.DataItem]:
+        """Yield every array and static config the solver holds, tagged by kind (see 'DataKind'), under the dotted name
+        a checkpoint and a trajectory frame use for it.
+        """
+        gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
+
+    def __getstate__(self) -> SolverCheckpoint:
+        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore.
+
+        The state is what 'data' yields of the kinds a checkpoint carries (see 'CHECKPOINT_KINDS'), copied where it
+        lives: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
+        process off the host, and as numpy arrays otherwise.
+        """
+        read = qd_to_torch if gs.use_zerocopy else qd_to_numpy
+        arrays = {}
+        configs = {}
+        for name, value, kind in self.data:
+            if kind == array_class.DataKind.CONFIG:
+                configs[name] = value
+            elif kind in array_class.CHECKPOINT_KINDS:
+                arrays[name] = read(value, copy=True)
+        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=array_class.CHECKPOINT_KINDS)
+
+    def __setstate__(self, state: SolverCheckpoint) -> None:
+        """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
+        array_class.fill_data((item for item in self.data if item.kind in state.kinds), state.arrays)
+
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -383,6 +414,10 @@ class Solver(Described, RBC):
     @property
     def n_entities(self):
         return len(self._entities)
+
+    @property
+    def force_fields(self) -> list:
+        return self._ffs
 
     def _repr_brief(self):
         repr_str = f"{self.__repr_name__()}: {self._uid}, n_entities: {self.n_entities}"

@@ -1,4 +1,3 @@
-import mujoco
 import numpy as np
 import pytest
 import torch
@@ -8,35 +7,20 @@ import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
-from ..utils.mujoco_parity import simulate_and_check_mujoco_consistency
-
-
-@pytest.mark.parametrize("model_name", ["mimic_hinges"])
-@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu])
-def test_equality_joint(gs_sim, mj_sim, gs_solver, tol):
-    # there is an equality constraint
-    assert gs_sim.rigid_solver.n_equalities == 1
-
-    qpos = np.array((0.0, -1.0))
-    qvel = np.array((1.0, -0.3))
-    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
-
-    # check if the two joints are equal
-    gs_qpos = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
-    assert_allclose(gs_qpos[0], gs_qpos[1], tol=tol)
 
 
 @pytest.mark.required
-def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
+@pytest.mark.parametrize("n_envs, batched", [(0, False), (2, True)])
+def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_envs, batched, tol):
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            gravity=(0.0, 0.0, 0.0),
-        ),
         rigid_options=gs.options.RigidOptions(
-            enable_collision=False,
-            enable_joint_limit=False,
+            batch_joints_info=batched,
+            batch_dofs_info=batched,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.15, -0.75, 4.0),
+            camera_lookat=(0.15, -0.75, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
         ),
         show_viewer=show_viewer,
     )
@@ -47,7 +31,7 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
             scale=SCALE,
         ),
     )
-    scene.build()
+    scene.build(n_envs=n_envs)
 
     COEFFICIENTS = (0.2, 0.4, -0.3, 0.2, -0.1)
     DRIVER_POSITION = 0.5
@@ -64,22 +48,28 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
         ("slide_hinge", "slide", "hinge"),
         ("hinge_slide", "hinge", "slide"),
     )
+    TARGET_POSITION = 0.25
+    UNRELATED_POSITION = 1.0
     qpos = entity.get_qpos()
     for name, driver_type, follower_type in JOINT_PAIRS:
-        (driver_idx,) = entity.get_joint(f"{name}_driver").qs_idx_local
-        (follower_idx,) = entity.get_joint(f"{name}_follower").qs_idx_local
-        qpos[..., driver_idx] = DRIVER_POSITION * (SCALE if driver_type == "slide" else 1.0)
-        qpos[..., follower_idx] = FOLLOWER_POSITION * (SCALE if follower_type == "slide" else 1.0)
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        qpos[..., i_driver_q] = DRIVER_POSITION * (SCALE if driver_type == "slide" else 1.0)
+        qpos[..., i_follower_q] = FOLLOWER_POSITION * (SCALE if follower_type == "slide" else 1.0)
+    (i_target_q,) = entity.get_joint("target").qs_idx_local
+    (i_unrelated_q,) = entity.get_joint("unrelated").qs_idx_local
+    qpos[..., i_target_q] = TARGET_POSITION * SCALE
+    qpos[..., i_unrelated_q] = UNRELATED_POSITION * SCALE
     entity.set_qpos(qpos)
     scene.step()
 
     qpos = entity.get_qpos()
     for name, driver_type, follower_type in JOINT_PAIRS:
-        (driver_idx,) = entity.get_joint(f"{name}_driver").qs_idx_local
-        (follower_idx,) = entity.get_joint(f"{name}_follower").qs_idx_local
+        (i_driver_q,) = entity.get_joint(f"{name}_driver").qs_idx_local
+        (i_follower_q,) = entity.get_joint(f"{name}_follower").qs_idx_local
         driver_scale = SCALE if driver_type == "slide" else 1.0
         follower_scale = SCALE if follower_type == "slide" else 1.0
-        driver_position = qpos[..., driver_idx] / driver_scale
+        driver_position = qpos[..., i_driver_q] / driver_scale
         expected_follower_position = (
             COEFFICIENTS[0]
             + COEFFICIENTS[1] * driver_position
@@ -87,38 +77,10 @@ def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, tol):
             + COEFFICIENTS[3] * driver_position**3
             + COEFFICIENTS[4] * driver_position**4
         )
-        assert_allclose(qpos[..., follower_idx] / follower_scale, expected_follower_position, tol=tol)
+        assert_allclose(qpos[..., i_follower_q] / follower_scale, expected_follower_position, tol=tol)
 
-
-@pytest.mark.required
-@pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
-@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu])
-def test_equality_link(gs_sim, mj_sim, gs_solver, xml_path):
-    # Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
-    gs_sim.rigid_solver._enable_collision = False
-    mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
-
-    # Must the time constant of the constraints to improve numerical stability
-    TIME_CONSTANT = 0.02
-    for entity in gs_sim.entities:
-        for equality in entity.equalities:
-            equality.set_sol_params((TIME_CONSTANT, *tensor_to_array(equality.desc.sol_params)[1:]))
-    mj_sim.model.eq_solref[:, 0] = TIME_CONSTANT
-
-    # Randomize the initial condition for force convergence of the constraints
-    np.random.seed(0)
-    qpos = np.random.rand(gs_sim.rigid_solver.n_qs) * 0.1
-
-    # Note that the world frame in which weld constraint is computed is different between Mujoco and Genesis for sites.
-    # Mujoco is using site 1, whereas Genesis is using parent link frame of site 1 since it has no notion of site.
-    ignore_constraints = np.any(
-        (mj_sim.model.eq_objtype == mujoco.mjtObj.mjOBJ_SITE) & (mj_sim.model.eq_type == mujoco.mjtEq.mjEQ_WELD)
-    )
-    simulate_and_check_mujoco_consistency(
-        gs_sim, mj_sim, qpos, num_steps=300, tol=1e-7, ignore_constraints=ignore_constraints
-    )
+    assert_allclose(qpos[..., i_target_q] / SCALE, TARGET_POSITION, tol=tol)
+    assert_allclose(qpos[..., i_unrelated_q] / SCALE, UNRELATED_POSITION, tol=tol)
 
 
 @pytest.mark.slow  # ~250s

@@ -64,7 +64,7 @@ Thank you for your interest in contributing to Genesis! We welcome contributions
   pytest -v --forked -m required ./tests
   ```
 
-- In the title of your Pull Request, please include [BUG FIX], [FEATURE], [MISC], [CHANGING] (behavior change) or [BREAKING] (API break) to indicate the purpose. The title is a sentence and ends with a period.
+- In the title of your Pull Request, please include [BUG FIX], [FEATURE], [MISC], [CHANGING] (the simulated physics change by default: a different model, or different default parameters) or [BREAKING] (API break) to indicate the purpose. The title is a sentence and ends with a period.
 - Commit titles are plain single-line sentences without the bracket tag, also ending with a period.
 - In the description, please provide example code or commands for testing.
 

@@ -1,5 +1,109 @@
 # Genesis Release Note
 
+## 1.4.2
+
+This release focuses on significantly improving performance on large scale scenes via hibernation. Hibernated islands should do not incure any runtime anymore. Besides, the Signorini contact resolution is in better shape but should still be consider experimental due to convergence issue.
+
+### Bug Fixes
+
+* Fix damped joints injecting energy when the constraint solve exits with a force residual. (@duburcqa) (#3375)
+* More robust convergence of the Signorini contact resolution. (@duburcqa) (#3381, #3382)
+
+### Miscellaneous
+
+* Speed up rigid simulation with hibernation enabled. (@duburcqa) (#3363, #3366, #3367, #3369)
+* Speed up the GPU rigid solver for large contact islands. (@duburcqa) (#3368)
+* Speed up the constraint solver under the elliptic friction cone on GPU. (@duburcqa) (#3380)
+* Make the kinematic tree, rather than the entity, the unit of every rigid solver pass. (@duburcqa) (#3376)
+* Avoid spurious precision-loss warning when building a rigid scene in single precision. (@duburcqa) (#3362)
+* Expose the wall time of each phase of a scene step. (@duburcqa) (#3370)
+
+## 1.4.1
+
+This release focuses on significantly improving performance on large scale scenes for both CPU and GPU. The speed is now slowing down sub-linearly wrt the number of islands on both CPU and GPU, and Jacobi equilibration for imbalanced scenes is much cheaper, and contact-rich scenes are much faster on CPU.
+
+### New Features
+
+* Support MJCF joint equalities without joint2. (@ktyang512) (#3290)
+
+### Bug Fixes
+
+* Decode normalized integer glTF accessors instead of reading their raw values. (@VihaanAgarwal) (#3330)
+* Preserve glTF normals and texture coordinates. (@jeetrex17) (#3323)
+* Honor joint actuator force range for MJCF. (@duburcqa) (#3328)
+* Open an exported scene on any platform and through gs launch. (@duburcqa) (#3340)
+
+### Miscellaneous
+
+* Speed up the constraint solver on multi-island scenes on GPU. (@duburcqa) (#3331, #3347, #3349, #3350, #3352, #3353)
+* Speed up the constraint solver when Jacobi equilibration is active. (@duburcqa) (#3344)
+* Speed up the constraint solver on contact-heavy scenes on CPU. (@duburcqa) (#3345)
+* Speed up noslip stage for small batch size on GPU. (@hughperkins) (#3273)
+* Speed up cameras and the interactive viewer for rasterizer. (@duburcqa) (#3326)
+* Speed up live plot recorders. (@duburcqa) (#3358)
+* Reduce the compilation time of the rigid solver. (@duburcqa) (#3359)
+* Decompose the rigid scene into its maximal kinematic trees. (@duburcqa) (#3356)
+* Support heterogeneous default armature. (@duburcqa) (#3326)
+* Expose entity-level public API for setting dofs limit. (@jeetrex17) (#3348)
+
+## 1.4.0
+
+This release introduces the capability to export a scene plus a complete trajectory as a standalone archive that can be loaded on any machine while ensuring bit-exact replay using `gs replay`. The objective is making bug report much easier in the future. Only the rigid solver is supported for now. Beyond that, the static description of entities is now clearly separated from runtime getters to avoid confusion. Finally, a large number of minor bugs have been fixed, most of them related to asset parsing.
+
+### New Features
+
+* [BREAKING] Support applying an external wrench at any local point on a link. (@Milotrince) (#3143)
+* [BREAKING] Apply morph pose offset to velocity/acceleration getters. (@Milotrince) (#3250)
+* [BREAKING] Share a scene as a file that opens without its assets. (@duburcqa) (#3281, #3288, #3294)
+* Save and restore a built scene in memory. (@duburcqa) (#3309, #3303)
+* Record and replay a trajectory to a file that opens without its assets. (@duburcqa) (#3309)
+
+### Bug Fixes
+
+* Always give recorded videos a valid default filename. (@duburcqa) (#3228)
+* Make successive trajectories bit-identical from the reset onwards. (@duburcqa) (#3230)
+* Support FEM vertex constraints and topology queries in multi-entity scenes. (@jeetrex17) (#3239)
+* Support envs_idx mask in FEM vertex constraints. (@jeetrex17) (#3241)
+* Support broadcasting inverse kinematics targets in batched scenes. (@jeetrex17) (#3247)
+* Fix moving debug objects in batched scenes. (@duburcqa) (#3255)
+* Fix parsing URDF for partially specified dynamics attributes. (@catplotlib) (#3262)
+* Fix multidimensional tensor recording as CSV file. (@CoffeeDrivenCoder) (#3266)
+* Fix 'RigidEntity.plan_path' ignoring runtime joint limits. (@duburcqa) (#3278)
+* Preserve URDF mimic joint relations when scaling robots. (@ktyang512) (#3271)
+* Fix buggy hibernation on GPU and correctly report resting force. (@duburcqa) (#3297)
+* Report a zero velocity for a body that fell asleep. (@duburcqa) (#3300)
+* Fix COM frames of fixed links on aligned bodies breaking thrust points. (@jeetrex17) (#3283)
+* Support offscreen rendering with OSMesa. (@duburcqa) (#3302)
+* Apply MeshSet member poses to sampled particles. (@jeetrex17) (#3305)
+* Keep the authored mass and inertia of fixed links on aligned free bodies. (@duburcqa) (#3304)
+* Recover a usable inertia for URDF links stating a zero mass or inertia. (@Milotrince) (#3261)
+* Leave links fixed to the world out of the potential energy. (@duburcqa) (#3311)
+* Fix dynamics of attached entities and resolve assets identically in every precision. (@duburcqa) (#3311)
+* Fix scaling wrongly applied for in-memory URDF file morph. (@jeetrex17) (#3313)
+* Correct a rigid-PBD attachment over the substep interval rather than the whole step. (@duburcqa) (#3237)
+* Honor the textures of URDF materials. (@duburcqa) (#3319)
+* Fix convex collision detection on geom pairs of very different sizes. (@duburcqa) (#3321)
+
+### Miscellaneous
+
+* [BREAKING] Stop offering a checkpoint that restores a fraction of the state. (@duburcqa) (#3228)
+* [BREAKING] Separate the static description of a rigid entity from its runtime state. (@duburcqa) (#3281)
+* [BREAKING] Read gravity, time and mass from the solver that owns them. (@duburcqa) (#3237)
+* [BREAKING] Register a recorder with 'Scene.add_recorder'. (@duburcqa) (#3309)
+* [BREAKING] Drop the rotation of a recorder's file on reset.(@duburcqa) (#3309)
+* Average the joint-space inertia over every degree of freedom of the scene. (@duburcqa) (#3237)
+* Solve the mass matrix for the active trees of a partly hibernated entity. (@duburcqa) (#3237)
+* Support instantiating solver options before Genesis is initialized. (@duburcqa) (#3281)
+* Let a kinematic entity be attached onto another kinematic one. (@duburcqa) (#3228)
+* Remove dockerfiles. (@duburcqa) (#3227)
+* Support negative indices for env and entity index args. (@jeetrex17) (#3165)
+* Support Inverse Kinematics and Jacobians for any entity unconditionally. (@duburcqa) (#3233)
+* Enable cross-platform window-less offscreen rendering. (@duburcqa) (#3238, #3242)
+* More representative rigid benchmarks suite. (@hughperkins) (#3249, #3260)
+* Add sync-free padded layout to get_contacts. (@hughperkins) (#3253)
+* Speed up raycast BVH rebuild by removing atomic contention in the scene-extent reduction. (@Kashu7100) (#3162)
+* Report baking USD materials failures traceback. (@duburcqa) (#3298)
+
 ## 1.3.3
 
 This minor release fixes rigid solver convergence regressions and introduces a new torch-like option 'use_deterministic_algorithms' to ensure bit-exact reproducibility on a given machine. Besides, Mujoco compatibility mode has been improved to now cover native contact patch-based multi-contact (as opposed to the old perturbation-based approach). This experimental feature is now exposed to the user via 'RigidOptions.enable_contact_patch'.

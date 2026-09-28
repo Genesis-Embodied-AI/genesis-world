@@ -143,7 +143,12 @@ def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     # principalAxes (0, 0, 0, 0), diagonalInertia (0, 0, 0), mass (0) - that must be treated as unset and
     # recomputed from geometry, matching an MJCF scene without inertial element. Leaving only 'centerOfMass' at
     # its sentinel keeps the authored mass and inertia and places the center of mass at the link frame, matching an
-    # MJCF body whose inertial frame is the body origin.
+    # MJCF body whose inertial frame is the body origin. Leaving only 'diagonalInertia' at its sentinel keeps the
+    # authored mass and center of mass and takes the inertia from geometry.
+    MASS = 64.0
+    HALF_EXTENT = 0.2
+    COM = (0.1, 0.0, 0.0)
+    BOX_INERTIA = MASS * 2.0 * (2.0 * HALF_EXTENT) ** 2 / 12.0
     mjcf = ET.Element("mujoco", model="massapi_test")
 
     worldbody = ET.SubElement(mjcf, "worldbody")
@@ -159,6 +164,17 @@ def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     ET.SubElement(inertia_box, "inertial", pos="0. 0. 0.", mass="64.", diaginertia="1.5 1.7 2.0")
     ET.SubElement(inertia_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
     ET.SubElement(inertia_box, "joint", name="/worldbody/inertia_box_joint", type="free")
+
+    com_box = ET.SubElement(worldbody, "body", name="/worldbody/com_box", pos="1.2 0. 0.3")
+    ET.SubElement(
+        com_box,
+        "inertial",
+        pos=f"{COM[0]} {COM[1]} {COM[2]}",
+        mass=str(MASS),
+        diaginertia=f"{BOX_INERTIA} {BOX_INERTIA} {BOX_INERTIA}",
+    )
+    ET.SubElement(com_box, "geom", type="box", size="0.2 0.2 0.2", pos="0. 0. 0.")
+    ET.SubElement(com_box, "joint", name="/worldbody/com_box_joint", type="free")
 
     xml_tree = ET.ElementTree(mjcf)
     xml_file = str(asset_tmp_path / "massapi_test.xml")
@@ -210,6 +226,22 @@ def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     inertia_mass_api = UsdPhysics.MassAPI.Apply(inertia_box.GetPrim())
     inertia_mass_api.CreateMassAttr(64.0)
     inertia_mass_api.CreateDiagonalInertiaAttr(Gf.Vec3f(1.5, 1.7, 2.0))
+
+    com_box = UsdGeom.Cube.Define(stage, "/worldbody/com_box")
+    com_box.AddTranslateOp().Set(Gf.Vec3d(1.2, 0.0, 0.3))
+    com_box.GetSizeAttr().Set(2.0 * HALF_EXTENT)
+
+    com_box_joint = UsdPhysics.Joint.Define(stage, "/worldbody/com_box_joint")
+    com_box_joint.CreateBody0Rel().SetTargets([root_prim.GetPath()])
+    com_box_joint.CreateBody1Rel().SetTargets([com_box.GetPrim().GetPath()])
+    com_box_joint.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    com_box_joint.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+
+    UsdPhysics.RigidBodyAPI.Apply(com_box.GetPrim()).GetKinematicEnabledAttr().Set(False)
+
+    com_mass_api = UsdPhysics.MassAPI.Apply(com_box.GetPrim())
+    com_mass_api.CreateMassAttr(MASS)
+    com_mass_api.CreateCenterOfMassAttr(Gf.Vec3f(*COM))
 
     stage.Save()
 
@@ -294,7 +326,6 @@ def test_visual_collision_parsing(visual_collision_usd, tmp_path):
     restored.build()
     restored_link = restored.entities[0].base_link
     assert (restored_link.n_geoms, restored_link.n_vgeoms) == (link.n_geoms, link.n_vgeoms)
-    assert restored.entities[0].morphs[0].usd_ctx is None
     assert_equal(restored.entities[0].get_mass(), entity.get_mass())
 
 

@@ -313,7 +313,7 @@ def test_invalid_variant_specification_raises():
     )
 
     # PBD material should raise an exception
-    with pytest.raises(gs.GenesisException, match="only supported for Rigid and Kinematic"):
+    with pytest.raises(gs.GenesisException, match="created from one morph"):
         scene.add_entity(
             morph=morphs_heterogeneous,
             material=gs.materials.PBD.Cloth(),

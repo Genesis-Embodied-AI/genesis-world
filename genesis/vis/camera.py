@@ -158,7 +158,7 @@ class Camera(RBC):
                 self._is_batched = False
                 self._raytracer.add_camera(self)
             else:
-                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.env_separate_rigid
+                self._is_batched = self._visualizer.scene.n_envs > 0 and self._visualizer._context.split_envs
             if self._visualizer.scene.n_envs > 0:
                 if self._env_idx is None:
                     if not self._is_batched:
@@ -413,7 +413,7 @@ class Camera(RBC):
 
         Note
         ----
-        If `env_separate_rigid` in `VisOptions` is set to True, each component will return a stack of images, with the
+        If `split_envs` in `VisOptions` is set to True, each component will return a stack of images, with the
         number of images equal to `len(rendered_envs_idx)`.
 
         Parameters
@@ -458,12 +458,12 @@ class Camera(RBC):
             if depth or segmentation or normal:
                 self._rasterizer.update_scene(force_render)
                 _, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                    self, False, depth, segmentation, normal=normal
+                    self, False, depth, segmentation, normal=normal, split_envs=self._is_batched
                 )
         else:
             self._rasterizer.update_scene(force_render)
             rgb_arr, depth_arr, seg_idxc_arr, normal_arr = self._rasterizer.render_camera(
-                self, rgb, depth, segmentation, normal=normal
+                self, rgb, depth, segmentation, normal=normal, split_envs=self._is_batched
             )
 
         # Colorize the segmentation map is necessary
@@ -547,7 +547,7 @@ class Camera(RBC):
         else:
             self._rasterizer.update_scene(force_render=False)
             _, depth_arr, _, _ = self._rasterizer.render_camera(
-                self, rgb=False, depth=True, segmentation=False, normal=False
+                self, rgb=False, depth=True, segmentation=False, normal=False, split_envs=self._is_batched
             )
 
         # Convert OpenGL projection matrix to camera intrinsics
@@ -731,7 +731,7 @@ class Camera(RBC):
         Called again after `camera.pause_recording()`, it resumes the very same video, in which case neither the
         filename nor the framerate may be given since they are fixed for the whole of a video.
 
-        If `env_separate_rigid` in `VisOptions` is set to True, each environment records to its own video file,
+        If `split_envs` in `VisOptions` is set to True, each environment records to its own video file,
         identified by the index of the environment.
 
         Parameters
@@ -829,7 +829,7 @@ class Camera(RBC):
         assert self._env_idx is None or envs_idx is None
         envs_idx = () if envs_idx is None else envs_idx
         pos = self._pos[envs_idx]
-        if self._batch_renderer is None and not self._visualizer._context.env_separate_rigid:
+        if self._batch_renderer is None and not self._visualizer._context.split_envs:
             pos = pos + self._envs_offset[envs_idx]
         return pos
 
@@ -838,7 +838,7 @@ class Camera(RBC):
         assert self._env_idx is None or envs_idx is None
         envs_idx = () if envs_idx is None else envs_idx
         lookat = self._lookat[envs_idx]
-        if self._batch_renderer is None and not self._visualizer._context.env_separate_rigid:
+        if self._batch_renderer is None and not self._visualizer._context.split_envs:
             lookat = lookat + self._envs_offset[envs_idx]
         return lookat
 
@@ -861,7 +861,7 @@ class Camera(RBC):
         assert self._env_idx is None or envs_idx is None
         envs_idx = () if envs_idx is None else envs_idx
         transform = self._transform[envs_idx]
-        if self._batch_renderer is None and not self._visualizer._context.env_separate_rigid:
+        if self._batch_renderer is None and not self._visualizer._context.split_envs:
             transform = transform.clone()
             transform[..., :3, 3] += self._envs_offset[envs_idx]
         return transform

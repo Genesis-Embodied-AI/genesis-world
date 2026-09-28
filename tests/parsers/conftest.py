@@ -1,7 +1,8 @@
+import copy
 import io
 import os
 import xml.etree.ElementTree as ET
-from functools import partial
+from functools import partial, partialmethod
 
 import numpy as np
 import pygltflib
@@ -420,10 +421,7 @@ def build_usd_scene(
 
     kwargs = dict(
         morph=gs.morphs.USD(
-            usd_ctx=UsdContext(
-                usd_file,
-                use_bake_cache=False,
-            ),
+            file=usd_file,
             scale=scale,
             fixed=fixed,
             convexify=False,
@@ -437,10 +435,13 @@ def build_usd_scene(
         vis_mode=vis_mode,
     )
 
-    if is_stage:
-        scene.add_stage(**kwargs)
-    else:
-        scene.add_entity(**kwargs)
+    # A stage is read as authored rather than through baked assets an earlier run left on disk
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(UsdContext, "__init__", partialmethod(UsdContext.__init__, use_bake_cache=False))
+        if is_stage:
+            scene.add_stage(**kwargs)
+        else:
+            scene.add_entity(**kwargs)
 
     # Note that it is necessary to build the scene because spatial inertia of some geometries may not be specified.
     # In such a case, it will be estimated from the geometry during build (RigidLink._build to be specific).
@@ -499,25 +500,144 @@ def usd_scene(request, model_name, scale, fixed):
     return build_usd_scene(request.getfixturevalue(model_name), scale=scale, fixed=fixed)
 
 
+def _build_textured_triangle_glb(
+    asset_tmp_path,
+    name,
+    first_attribute,
+    vertex_normal=(1.0, 0.0, 0.0),
+    node_scale=None,
+    primitive_mode=None,
+    node_count=1,
+):
+    """Build a textured triangle with NORMAL or TEXCOORD_0 at accessor zero, returning the glTF document and path.
+
+    Every vertex carries vertex_normal as its authored shading normal, and the node holding the triangle is scaled by
+    node_scale when one is given. The primitive is declared with primitive_mode when one is given, and node_count nodes
+    hold it, each through a mesh of its own."""
+    mesh = trimesh.Trimesh(
+        vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        faces=[[0, 1, 2]],
+        # Authored shading normals differ from the triangle's geometric normal
+        vertex_normals=[list(vertex_normal)] * 3,
+        visual=trimesh.visual.TextureVisuals(
+            uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
+            material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
+        ),
+        process=False,
+    )
+    path = str(asset_tmp_path / f"{name}.glb")
+    mesh.export(path, include_normals=True)
+    glb = pygltflib.GLTF2().load(path)
+    # The exported node layout depends on the trimesh version, which may nest the mesh node under a mesh-less root
+    i_mesh_node = next(i_node for i_node, node in enumerate(glb.nodes) if node.mesh == 0)
+    mesh_node = glb.nodes[i_mesh_node]
+    siblings_idx = next((node.children for node in glb.nodes if i_mesh_node in node.children), glb.scenes[0].nodes)
+    if node_scale is not None:
+        mesh_node.scale = list(node_scale)
+    primitive = glb.meshes[0].primitives[0]
+    attributes = primitive.attributes
+    accessor = attributes.NORMAL if first_attribute == "NORMAL" else attributes.TEXCOORD_0
+    # Keep the triangle's attribute and index references attached to their data
+    order = [accessor] + [i for i in range(len(glb.accessors)) if i != accessor]
+    glb.accessors = [glb.accessors[i] for i in order]
+    attributes.POSITION = order.index(attributes.POSITION)
+    attributes.NORMAL = order.index(attributes.NORMAL)
+    attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
+    primitive.indices = order.index(primitive.indices)
+    if primitive_mode is not None:
+        primitive.mode = primitive_mode
+    for i_node in range(1, node_count):
+        # The same primitive on a mesh and node of its own, ten units further along x
+        glb.meshes.append(pygltflib.Mesh(name=f"{glb.meshes[0].name}_{i_node}", primitives=[copy.deepcopy(primitive)]))
+        siblings_idx.append(len(glb.nodes))
+        glb.nodes.append(
+            pygltflib.Node(mesh=i_node, name=f"{mesh_node.name}_{i_node}", translation=[10.0 * i_node, 0.0, 0.0])
+        )
+    return glb, path
+
+
+@pytest.fixture(scope="session")
+def normal_accessor_zero_glb(asset_tmp_path):
+    """Path to a GLB storing the vertex normals of its triangle at accessor zero."""
+    glb, path = _build_textured_triangle_glb(asset_tmp_path, "normal_accessor_zero", first_attribute="NORMAL")
+    glb.save_binary(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def texcoord_0_accessor_zero_glb(asset_tmp_path):
+    """Path to a GLB storing the first texture coordinate set of its triangle at accessor zero."""
+    glb, path = _build_textured_triangle_glb(asset_tmp_path, "texcoord_0_accessor_zero", first_attribute="TEXCOORD_0")
+    glb.save_binary(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def texcoord_1_accessor_zero_glb(asset_tmp_path):
+    """Path to a GLB whose base color texture reads the second texture coordinate set, stored at accessor zero."""
+    glb, path = _build_textured_triangle_glb(asset_tmp_path, "texcoord_1_accessor_zero", first_attribute="TEXCOORD_0")
+    primitive = glb.meshes[0].primitives[0]
+    # glTF requires set 0 wherever set 1 exists, so set 1 aliases the accessor of set 0
+    primitive.attributes.TEXCOORD_1 = primitive.attributes.TEXCOORD_0
+    glb.materials[primitive.material].pbrMetallicRoughness.baseColorTexture.texCoord = 1
+    glb.save_binary(path)
+    return path
+
+
 @pytest.fixture(scope="session")
 def emissive_material_variants_glb(asset_tmp_path):
-    """Path to a GLB with three materials, each on distinct base/emissive texCoord sets: a base-color atlas (red) on
-    texCoord 0 with an emissive atlas on texCoord 1, a flat base color with an emissive atlas on texCoord 1, and a
-    KHR_materials_unlit material whose red base atlas stands in for the unlit imagery. The red base atlas is index 0."""
+    """Path to a GLB with three materials on distinct base/emissive texCoord sets and a triangle carrying two of them.
+
+    The materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base color
+    with an emissive atlas on texCoord 1, and a KHR_materials_unlit material whose red base atlas stands in for the
+    unlit imagery. The red base atlas is index 0. The triangle holds the first two materials as primitives, with the
+    same texture coordinates stored as float in set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows,
+    in set 1."""
     images = []
     for color in (np.array([220, 30, 30], np.uint8), np.array([30, 220, 30], np.uint8)):
         buffer = io.BytesIO()
         Image.fromarray(np.broadcast_to(color, (8, 8, 3)).copy()).save(buffer, format="PNG")
         images.append(buffer.getvalue())
 
+    positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    uvs = np.array([[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]], dtype=np.float32)
+    uvs_uint16 = np.round(uvs * np.iinfo(np.uint16).max).astype(np.uint16)
+
     blob = b""
     buffer_views = []
-    for data in images:
+    for data in (*images, positions.tobytes(), uvs.tobytes(), uvs_uint16.tobytes()):
         blob += b"\x00" * ((4 - len(blob) % 4) % 4)
         buffer_views.append(pygltflib.BufferView(buffer=0, byteOffset=len(blob), byteLength=len(data)))
         blob += data
 
     gltf = pygltflib.GLTF2(
+        scene=0,
+        scenes=[pygltflib.Scene(nodes=[0])],
+        nodes=[pygltflib.Node(mesh=0)],
+        meshes=[
+            pygltflib.Mesh(
+                primitives=[
+                    pygltflib.Primitive(
+                        attributes=pygltflib.Attributes(POSITION=0, TEXCOORD_0=1, TEXCOORD_1=2), material=material
+                    )
+                    for material in range(2)
+                ]
+            )
+        ],
+        accessors=[
+            pygltflib.Accessor(
+                bufferView=2,
+                componentType=pygltflib.FLOAT,
+                count=3,
+                type="VEC3",
+                min=positions.min(axis=0).tolist(),
+                max=positions.max(axis=0).tolist(),
+            ),
+            pygltflib.Accessor(bufferView=3, componentType=pygltflib.FLOAT, count=3, type="VEC2"),
+            pygltflib.Accessor(
+                bufferView=4, componentType=pygltflib.UNSIGNED_SHORT, normalized=True, count=3, type="VEC2"
+            ),
+        ],
         materials=[
             pygltflib.Material(
                 pbrMetallicRoughness=pygltflib.PbrMetallicRoughness(
@@ -547,6 +667,39 @@ def emissive_material_variants_glb(asset_tmp_path):
     path = asset_tmp_path / "emissive_material_variants.glb"
     gltf.save_binary(str(path))
     return str(path)
+
+
+@pytest.fixture(scope="session")
+def triangle_strip_nodes_glb(asset_tmp_path):
+    """Path to a GLB with two nodes holding TRIANGLE_STRIP primitives of the same material.
+
+    Sharing the material leaves the node each primitive comes from as the only thing separating the two meshes."""
+    glb, path = _build_textured_triangle_glb(
+        asset_tmp_path,
+        "triangle_strip_nodes",
+        first_attribute="NORMAL",
+        primitive_mode=pygltflib.TRIANGLE_STRIP,
+        node_count=2,
+    )
+    glb.save_binary(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def non_uniform_node_scale_glb(asset_tmp_path):
+    """Path to a GLB whose node scales its triangle by a different factor along each axis.
+
+    The authored normals point diagonally, so the inverse transpose of that scale, which normals map through, tilts
+    them differently than the scale itself would."""
+    glb, path = _build_textured_triangle_glb(
+        asset_tmp_path,
+        "non_uniform_node_scale",
+        first_attribute="NORMAL",
+        vertex_normal=np.full(3, 1.0 / np.sqrt(3.0)),
+        node_scale=(2.0, 0.5, 0.5),
+    )
+    glb.save_binary(path)
+    return path
 
 
 @pytest.fixture
@@ -686,6 +839,16 @@ def textured_mjcf():
     ET.SubElement(worldbody, "geom", name="capsule_repeated", type="capsule", size="2 3", material="repeated")
     ET.SubElement(worldbody, "geom", name="cylinder_repeated", type="cylinder", size="2 3", material="repeated")
     ET.SubElement(worldbody, "geom", name="box_uniform", type="box", size="2 3 4", material="uniform")
+    ET.SubElement(
+        worldbody,
+        "geom",
+        name="box_uniform_collision",
+        type="box",
+        size="2 3 4",
+        material="uniform",
+        contype="1",
+        conaffinity="1",
+    )
     ET.SubElement(worldbody, "geom", name="mesh_generated", type="mesh", mesh="plain_mesh", material="repeated")
     ET.SubElement(
         worldbody,

@@ -1,5 +1,68 @@
+import dataclasses
+from typing import NamedTuple
+
+import numpy as np
+import torch
+
 import genesis as gs
 from genesis.repr_base import RBC
+from genesis.utils.array_class import DataKind
+
+
+@dataclasses.dataclass
+class SolverCheckpoint:
+    """The arrays of one solver of the given kinds (see 'DataKind'), for 'Solver.__setstate__' to write back.
+
+    A checkpoint '__getstate__' reads holds every kind a step reads from one step to the next (see 'CHECKPOINT_KINDS'),
+    so stepping on from it lands where the original went. A trajectory frame may hold the state alone, and writing it
+    back recomputes what it leaves out. Each array stands under the name 'Solver.data' gives it, copied where it lives:
+    on the device as a torch tensor when zero-copy views exist, as a numpy array otherwise. The static configs come
+    along as provenance and are never written back.
+    """
+
+    arrays: dict[str, np.ndarray | torch.Tensor]
+    configs: dict[str, object]
+    kinds: frozenset[DataKind]
+
+
+@dataclasses.dataclass
+class KinematicSolverCheckpoint(SolverCheckpoint):
+    """A SolverCheckpoint plus the two forward-kinematics flags of a kinematic or rigid solver,
+    'is_forward_pos_updated' and 'is_forward_vel_updated'.
+
+    The flags decide whether the next step recomputes the Cartesian pose and velocity of the links. Recomputing them
+    where the saved scene skipped it rounds differently on some backends, so the flags travel with the derived arrays
+    they describe.
+    """
+
+    is_forward_pos_updated: bool
+    is_forward_vel_updated: bool
+
+
+class FrameField(NamedTuple):
+    """Where one array stands in a trajectory frame.
+
+    The name, canonical shape, numpy dtype string, byte offset and byte length cut a frame back into its arrays without
+    the scene.
+    """
+
+    name: str
+    shape: tuple[int, ...]
+    dtype: str
+    offset: int
+    nbytes: int
+
+
+@dataclasses.dataclass
+class SimulatorCheckpoint:
+    """The state a simulation stands in.
+
+    How many steps each environment has run, and what every active solver reads from one step to the next, under the
+    name of its class.
+    """
+
+    steps: np.ndarray | torch.Tensor
+    solvers: dict[str, SolverCheckpoint]
 
 
 class SimState(RBC):
@@ -19,13 +82,6 @@ class SimState(RBC):
         self._solvers_state = list()
         for solver in solvers:
             self._solvers_state.append(solver.get_state(f_local))
-
-    def serializable(self):
-        self.scene = None
-
-        for solver_state in self._solvers_state:
-            if solver_state is not None:
-                solver_state.serializable()
 
     @property
     def scene(self):
@@ -66,13 +122,6 @@ class KinematicSolverState:
         self.links_pos = gs.zeros((_B, scene.sim.kinematic_solver.n_links, 3), **args)
         self.links_quat = gs.zeros((_B, scene.sim.kinematic_solver.n_links, 4), **args)
 
-    def serializable(self):
-        self.scene = None
-        self.qpos = self.qpos.detach()
-        self.dofs_vel = self.dofs_vel.detach()
-        self.links_pos = self.links_pos.detach()
-        self.links_quat = self.links_quat.detach()
-
     @property
     def s_global(self):
         return self._s_global
@@ -101,15 +150,6 @@ class RigidSolverState:
         self.links_quat = gs.zeros((_B, scene.sim.rigid_solver.n_links, 4), **args)
         self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms), **args)
 
-    def serializable(self):
-        self.scene = None
-        self.qpos = self.qpos.detach()
-        self.dofs_vel = self.dofs_vel.detach()
-        self.dofs_acc = self.dofs_acc.detach()
-        self.links_pos = self.links_pos.detach()
-        self.links_quat = self.links_quat.detach()
-        self.friction_ratio = self.friction_ratio.detach()
-
     @property
     def s_global(self):
         return self._s_global
@@ -123,12 +163,6 @@ class ToolSolverState:
     def __init__(self, scene):
         self.scene = scene
         self.entities = []
-
-    def serializable(self):
-        self.scene = None
-
-        for entity_state in self.entities:
-            entity_state.serializable()
 
     def __len__(self):
         return len(self.entities)
@@ -161,16 +195,6 @@ class MPMSolverState(RBC):
         args["dtype"] = gs.tc_bool
         args["requires_grad"] = False
         self._active = gs.zeros((scene.sim._B, scene.sim.mpm_solver.n_particles), **args)
-
-    def serializable(self):
-        self._scene = None
-
-        self._pos = self._pos.detach()
-        self._vel = self._vel.detach()
-        self._C = self._C.detach()
-        self._F = self._F.detach()
-        self._Jp = self._Jp.detach()
-        self._active = self._active.detach()
 
     @property
     def scene(self):
@@ -284,13 +308,6 @@ class FEMSolverState:
         args["dtype"] = gs.tc_bool
         args["requires_grad"] = False
         self._active = gs.zeros((scene.sim._B, scene.sim.fem_solver.n_elements), **args)
-
-    def serializable(self):
-        self._scene = None
-
-        self._pos = self._pos.detach()
-        self._vel = self._vel.detach()
-        self._active = self._active.detach()
 
     @property
     def scene(self):

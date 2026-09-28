@@ -5,35 +5,9 @@ from abc import ABCMeta
 class Platform(metaclass=ABCMeta):
     """Base class for all OpenGL platforms.
 
-    Parameters
-    ----------
-    viewport_width : int
-        The width of the main viewport, in pixels.
-    viewport_height : int
-        The height of the main viewport, in pixels
+    Rendering targets framebuffer objects allocated by the renderer itself, so a platform only has to provide a current
+    OpenGL context, whatever the size of its default framebuffer.
     """
-
-    def __init__(self, viewport_width, viewport_height):
-        self.viewport_width = viewport_width
-        self.viewport_height = viewport_height
-
-    @property
-    def viewport_width(self):
-        """int : The width of the main viewport, in pixels."""
-        return self._viewport_width
-
-    @viewport_width.setter
-    def viewport_width(self, value):
-        self._viewport_width = value
-
-    @property
-    def viewport_height(self):
-        """int : The height of the main viewport, in pixels."""
-        return self._viewport_height
-
-    @viewport_height.setter
-    def viewport_height(self, value):
-        self._viewport_height = value
 
     @abc.abstractmethod
     def init_context(self):
@@ -64,11 +38,6 @@ class Platform(metaclass=ABCMeta):
     @abc.abstractmethod
     def delete_context(self):
         """Delete the OpenGL context."""
-        pass
-
-    @abc.abstractmethod
-    def supports_framebuffers(self):
-        """Returns True if the method supports framebuffer rendering."""
         pass
 
     def __del__(self):

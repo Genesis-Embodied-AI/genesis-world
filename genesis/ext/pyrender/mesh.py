@@ -134,8 +134,7 @@ class Mesh(object):
         smooth=False,
         double_sided=False,
         is_floor=False,
-        env_shared=True,
-        active_envs=None,
+        envs=None,
     ):
         """Create a Mesh from a :class:`~trimesh.base.Trimesh`.
 
@@ -158,6 +157,9 @@ class Mesh(object):
         smooth : bool
             If `True`, the mesh will be rendered with interpolated vertex
             normals. Otherwise, the mesh edges will stay sharp.
+        envs : int or (n_envs,) bool, optional
+            The environments the instances belong to (see :class:`Primitive`).
+            Defaults to every environment.
 
         Returns
         -------
@@ -220,8 +222,7 @@ class Mesh(object):
                     vertex_mapping=vertex_mapping,
                     double_sided=double_sided,
                     is_floor=is_floor,
-                    env_shared=env_shared,
-                    active_envs=active_envs,
+                    envs=envs,
                 )
             )
 

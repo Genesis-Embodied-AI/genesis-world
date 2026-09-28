@@ -14,10 +14,10 @@ from . import support_field
 
 @qd.func
 def support_mesh(
-    i_g,
-    i_b,
-    i_o,
-    direction,
+    i_g: int,
+    i_b: int,
+    i_o: int,
+    direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
     gjk_state: array_class.GJKState,
@@ -61,19 +61,19 @@ def support_mesh(
 
 @qd.func
 def support_driver(
-    i_g,
-    i_b,
-    i_o,
-    direction,
+    i_g: int,
+    i_b: int,
+    i_o: int,
+    direction: qd.types.vector(3),
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
-    shrink_sphere,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
+    shrink_sphere: bool,
 ):
     """
     @ shrink_sphere: If True, use point and line support for sphere and capsule.
@@ -84,13 +84,13 @@ def support_driver(
 
     geom_type = dyn_info.geoms.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE:
-        v, v_, vid = support_field._func_support_sphere(i_g, direction, pos, quat, shrink_sphere, dyn_info)
+        v, v_, vid = support_field._func_support_sphere(i_g, direction, pos, quat, dyn_info, shrink_sphere)
     elif geom_type == gs.GEOM_TYPE.ELLIPSOID:
         v = support_field._func_support_ellipsoid(i_g, direction, pos, quat, dyn_info)
     elif geom_type == gs.GEOM_TYPE.CAPSULE:
-        v = support_field._func_support_capsule(i_g, direction, pos, quat, shrink_sphere, dyn_info)
+        v = support_field._func_support_capsule(i_g, direction, pos, quat, dyn_info, shrink_sphere)
     elif geom_type == gs.GEOM_TYPE.CYLINDER:
-        v = support_field._func_support_cylinder(i_g, direction, pos, quat, shrink_sphere, dyn_info)
+        v = support_field._func_support_cylinder(i_g, direction, pos, quat, dyn_info, shrink_sphere)
     elif geom_type == gs.GEOM_TYPE.BOX:
         v, v_, vid = support_field._func_support_box(i_g, direction, pos, quat, dyn_info)
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
@@ -114,21 +114,21 @@ def support_driver(
 
 @qd.func
 def func_support(
-    i_ga,
-    i_gb,
-    i_b,
-    dir,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    dir: qd.types.vector(3),
     pos_a: qd.types.vector(3),
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
-    shrink_sphere,
     collider_state: array_class.ColliderState,
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
+    shrink_sphere: bool,
 ):
     """
     Find support points on the two objects using [dir].
@@ -158,13 +158,13 @@ def func_support(
             d,
             pos,
             quat,
-            shrink_sphere,
             collider_state,
             gjk_state,
             dyn_info,
             collider_info,
             rigid_config,
             collider_static_config,
+            shrink_sphere,
         )
 
         if i == 0:

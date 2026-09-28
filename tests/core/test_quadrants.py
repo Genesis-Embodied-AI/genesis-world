@@ -113,9 +113,9 @@ def gs_static_child(args: list[str]):
     scene.build()
 
     scene.rigid_solver.collider.detection()
-    actual_contacts = scene.rigid_solver.collider._collider_state.n_contacts.to_numpy()
+    actual_contacts = scene.rigid_solver.collider.collider_state.n_contacts.to_numpy()
     assert actual_contacts == args.expected_num_contacts
-    if scene.rigid_solver.collider._collider_static_config.has_non_box_plane_convex_convex:
+    if scene.rigid_solver.collider.collider_config.has_non_box_plane_convex_convex:
         from genesis.engine.solvers.rigid.collider import _func_narrowphase_contact0
 
         kernel_to_check = _func_narrowphase_contact0
@@ -198,6 +198,12 @@ def gs_num_envs_child(args: list[str]):
         gs.morphs.Box(
             size=(0.4, 0.4, 0.4),
             pos=(0.0, 0.0, 0.18),
+        )
+    )
+    scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.05,
+            pos=(0.0, 0.3, 0.04),
         )
     )
     scene.build(n_envs=args.n_envs, env_spacing=(0.5, 0.5))

@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -7,6 +8,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
+from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -14,7 +16,8 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_inverse_kinematics_entity,
     kernel_set_ik_targets,
 )
-from genesis.engine.states.solvers import KinematicSolverState
+from genesis.engine.states.solvers import KinematicSolverCheckpoint, KinematicSolverState
+from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -60,7 +63,6 @@ from .rigid.abd.misc import (
     kernel_init_vgeom_fields,
     kernel_init_vvert_fields,
     kernel_update_heterogeneous_links_vgeom,
-    kernel_update_vgeoms_render_T,
 )
 
 if TYPE_CHECKING:
@@ -85,24 +87,25 @@ def _balanced_variant_mapping(n_variants, B):
 def _select_links_offset(offset, links_idx, envs_idx):
     """Index a base-link forward offset for a transposed state query.
 
-    'offset' has shape '[n_offset_envs, n_links, dim]', where 'n_offset_envs' is 1 for an environment-uniform offset
-    (broadcast over the batch) or 'n_envs' when heterogeneous variants make it environment-specific. It is indexed
-    with the same combined mask as 'qd_to_torch' so the result broadcasts against the '[n_envs, n_sel, dim]' state
-    tensor, keeping the link dimension for integer indices. The environment axis is left unindexed (broadcast) when
-    the offset is environment-uniform.
+    'offset' has shape '[n_links, dim]' for an environment-uniform offset or '[n_envs, n_links, dim]' when
+    heterogeneous variants make it environment-specific. It is indexed with the same combined mask as 'qd_to_torch' so
+    the result broadcasts against the '[n_envs, n_sel, dim]' state tensor, keeping the link dimension for integer
+    indices.
     """
-    row_mask = None if offset.shape[0] == 1 else envs_idx
-    return offset[indices_to_mask(row_mask, links_idx)]
+    if offset.ndim == 2:
+        return offset[indices_to_mask(links_idx)]
+    return offset[indices_to_mask(envs_idx, links_idx)]
 
 
 def _offset_world_shift(offset_pos, offset_quat, world_quat):
     """World-frame displacement contributed by a body-frame offset position at a given world orientation.
 
-    The user orientation is 'world_quat' with the offset stripped, and 'offset_pos' rotates with it. Relative getters
-    subtract this from the world position to recover the user position; relative setters add it to do the reverse.
+    The authored orientation is 'world_quat' with the offset stripped, and 'offset_pos' rotates with it. Relative
+    getters subtract this from the world position to recover the authored position; relative setters add it to do the
+    reverse.
     """
-    user_quat = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), world_quat)
-    return gu.transform_by_quat(offset_pos, user_quat)
+    authored_quat = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), world_quat)
+    return gu.transform_by_quat(offset_pos, authored_quat)
 
 
 def _fill_base_link_geom_offsets(offset_pos, offset_quat, entity, geoms, ranges):
@@ -162,6 +165,10 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
+    material_cls = Kinematic
+    # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
+    _entity_classes = ((Morph, KinematicEntity),)
+
     def __init__(self, scene: "Scene", sim: "Simulator", options: "KinematicOptions") -> None:
         super().__init__(scene, sim, options)
 
@@ -187,38 +194,30 @@ class KinematicSolver(Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name=None, desc=None
     ) -> "KinematicEntity":
-        morph_heterogeneous = []
-        if isinstance(morph, (tuple, list)):
-            morph, *morph_heterogeneous = morph
-            self._enable_heterogeneous |= bool(morph_heterogeneous)
+        """Create an entity from its description.
 
-        if isinstance(morph, gs.morphs.Terrain):
-            gs.raise_exception("Kinematic material is not supported for terrain morph for now.")
-
-        morph._enable_mujoco_compatibility = self._enable_mujoco_compatibility
-
-        entity = KinematicEntity(
-            scene=self._scene,
-            solver=self,
-            material=material,
-            morph=morph,
-            surface=surface,
-            idx=idx,
-            idx_in_solver=self.n_entities,
-            link_start=self.n_links,
-            joint_start=self.n_joints,
-            q_start=self.n_qs,
-            dof_start=self.n_dofs,
-            vgeom_start=self.n_vgeoms,
-            vvert_start=self.n_vverts,
-            vface_start=self.n_vfaces,
-            custom_vvert_start=self.n_custom_vverts,
-            custom_vface_start=self.n_custom_vfaces,
-            morph_heterogeneous=morph_heterogeneous,
-            name=name,
-            desc=desc,
-        )
+        Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
+        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
+        says which kind it holds. Creation from a description reads no asset.
+        """
+        if desc is None:
+            morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
+            entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
+            desc = entity_cls._description_cls.resolve(
+                morphs, material, surface, self._options, self._enable_mujoco_compatibility, visualize_contact, name
+            )
+        else:
+            for _, entity_cls in self._entity_classes:
+                if entity_cls._description_cls is type(desc):
+                    break
+            else:
+                gs.raise_exception(f"{type(self).__name__} simulates no entity described by {type(desc).__name__}.")
+        self._enable_heterogeneous |= bool(desc.variants)
+        entity = entity_cls(self._scene, self, idx, desc)
         self._entities.append(entity)
+        # An attachment names an entity added before this one, which 'attach' requires, so it is restored here
+        if desc.attachment is not None:
+            entity.attach(self._scene.get_entity(desc.attachment.entity_name), desc.attachment.link_name)
         return entity
 
     # ------------------------------------------------------------------------------------
@@ -263,12 +262,12 @@ class KinematicSolver(Solver):
                 base_links_idx.append(joint.link.idx)
         self._base_links_idx = torch.tensor(base_links_idx, dtype=gs.tc_int, device=gs.device)
 
-        # World<-user pose offset, applied by the relative get/set methods. Links carry the morph offset composed with
-        # the base-link inertial alignment (identity for non-base links); geoms and visual geoms carry only the morph
-        # offset, since alignment re-expresses them into the aligned frame. Heterogeneous entities vary the base-link
-        # offset per environment (one offset per variant), so the link offset is stored per-env when any such entity
-        # has divergent variant offsets, and as a single broadcast row otherwise. Forward offset device tensors are
-        # None when everything is identity, and the relative getters recompute the inverse on the fly.
+        # World<-authored pose offset, applied by the relative get/set methods. Links carry the morph offset composed
+        # with the base-link inertial alignment (identity for non-base links); geoms and visual geoms carry only the
+        # morph offset, since alignment re-expresses them into the aligned frame. Heterogeneous entities vary the
+        # base-link offset per environment (one offset per variant), so the link offset is stored per-env when any such
+        # entity has divergent variant offsets, and without an environment axis otherwise. The relative getters
+        # recompute the inverse on the fly.
         links_offset_per_env = any(
             not all(
                 np.allclose(variant.offset_pos, entity._desc.variants[0].offset_pos)
@@ -277,9 +276,9 @@ class KinematicSolver(Solver):
             )
             for entity in self._entities
         )
-        n_offset_envs = self._B if links_offset_per_env else 1
-        links_offset_pos = np.zeros((n_offset_envs, self.n_links, 3), dtype=gs.np_float)
-        links_offset_quat = np.tile(gu.identity_quat(), (n_offset_envs, self.n_links, 1))
+        offset_shape = (self._B, self.n_links) if links_offset_per_env else (self.n_links,)
+        links_offset_pos = np.zeros((*offset_shape, 3), dtype=gs.np_float)
+        links_offset_quat = np.tile(gu.identity_quat(), (*offset_shape, 1))
         vgeoms_offset_pos = np.zeros((self.n_vgeoms, 3), dtype=gs.np_float)
         vgeoms_offset_quat = np.tile(gu.identity_quat(), (self.n_vgeoms, 1))
         for entity in self._entities:
@@ -296,21 +295,24 @@ class KinematicSolver(Solver):
                 # Each root link carries its own offset; children inherit it through the kinematic chain and stay
                 # identity. Visual geoms get the morph offset conjugated into their own frame.
                 for local_idx, link in enumerate(entity.links):
-                    links_offset_pos[:, entity._link_start + local_idx] = link.desc.offset_pos
-                    links_offset_quat[:, entity._link_start + local_idx] = link.desc.offset_quat
+                    links_offset_pos[..., entity._link_start + local_idx, :] = link.desc.offset_pos
+                    links_offset_quat[..., entity._link_start + local_idx, :] = link.desc.offset_quat
                 vgeoms_ranges = None
             _fill_base_link_geom_offsets(vgeoms_offset_pos, vgeoms_offset_quat, entity, entity.vgeoms, vgeoms_ranges)
-        # Per-link identity masks gate the relative set/backward paths: a relative set on a link whose offset is
+        # Per-link identity masks gate the relative get/set/backward paths: a relative set on a link whose offset is
         # identity is a plain passthrough, while a non-identity offset rewrites the world position or drops the
         # composition jacobian. Kept as host-side numpy (never used in kernels) so the gates avoid a GPU->host sync.
         self._links_offset_quat_is_identity = np.all(
-            np.isclose(gu.quat_to_xyz(links_offset_quat), 0.0, atol=gs.EPS), axis=2
-        ).all(axis=0)
-        self._links_offset_pos_is_identity = np.all(np.isclose(links_offset_pos, 0.0, atol=gs.EPS), axis=2).all(axis=0)
-        self._links_offset_pos = self._links_offset_quat = None
-        if not (self._links_offset_pos_is_identity.all() and self._links_offset_quat_is_identity.all()):
-            self._links_offset_pos = torch.from_numpy(links_offset_pos).to(device=gs.device, dtype=gs.tc_float)
-            self._links_offset_quat = torch.from_numpy(links_offset_quat).to(device=gs.device, dtype=gs.tc_float)
+            np.isclose(gu.quat_to_xyz(links_offset_quat), 0.0, atol=gs.EPS), axis=-1
+        )
+        self._links_offset_pos_is_identity = np.all(np.isclose(links_offset_pos, 0.0, atol=gs.EPS), axis=-1)
+        if links_offset_per_env:
+            self._links_offset_quat_is_identity = self._links_offset_quat_is_identity.all(axis=0)
+            self._links_offset_pos_is_identity = self._links_offset_pos_is_identity.all(axis=0)
+        # The link offset tensors are allocated even when every link is identity, so the getter kernels can take them
+        # unconditionally.
+        self._links_offset_pos = torch.from_numpy(links_offset_pos).to(device=gs.device, dtype=gs.tc_float)
+        self._links_offset_quat = torch.from_numpy(links_offset_quat).to(device=gs.device, dtype=gs.tc_float)
         self._vgeoms_offset_pos = self._vgeoms_offset_quat = None
         if not (
             np.allclose(vgeoms_offset_pos, 0.0, atol=gs.EPS)
@@ -330,6 +332,23 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
+        # The kinematic roots and trees, see roots_link_idx and trees_root_idx in array_class.py. A link no dof moves,
+        # its own or an ancestor's, is static and belongs to no tree. A moving link roots the tree of its parent, or its
+        # own when its parent is static or absent. The parents precede the children.
+        self._n_roots = len({link.root_idx for link in self.links})
+        self.n_roots_ = max(1, self._n_roots)
+        links_is_static = np.ones(self.n_links, dtype=bool)
+        links_tree_root_idx = np.full(self.n_links, -1, dtype=gs.np_int)
+        for link in self.links:
+            is_parent_static = link.parent_idx == -1 or links_is_static[link.parent_idx]
+            links_is_static[link.idx] = is_parent_static and link.n_dofs == 0
+            if links_is_static[link.idx]:
+                continue
+            links_tree_root_idx[link.idx] = link.idx if is_parent_static else links_tree_root_idx[link.parent_idx]
+        self._links_tree_root_idx = links_tree_root_idx
+        self._n_trees = np.unique(links_tree_root_idx[links_tree_root_idx >= 0]).size
+        self.n_trees_ = max(1, self._n_trees)
+
         # batch_links_info is required when heterogeneous simulation is used.
         # We must update options because get_links_info reads from solver._options.batch_links_info.
         if self._enable_heterogeneous:
@@ -342,10 +361,10 @@ class KinematicSolver(Solver):
         self._init_vvert_fields()
         self._init_vgeom_fields()
         self._init_link_fields()
+        self._init_tree_fields()
         self._init_entity_fields()
         self._init_vfaces_raycast_mask()
 
-        self._init_envs_offset()
         self._init_vverts_state()
 
     def _init_vverts_state(self):
@@ -380,7 +399,6 @@ class KinematicSolver(Solver):
             enable_joint_limit=False,
             box_box_detection=False,
             sparse_solve=False,
-            sparse_envelope=False,
             integrator=gs.integrator.approximate_implicitfast,
             solver_type=0,
         )
@@ -392,6 +410,16 @@ class KinematicSolver(Solver):
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
+
+    @property
+    def data(self) -> Iterator[array_class.DataItem]:
+        yield from array_class.iter_data(self.rigid_config, "rigid_config")
+        yield from array_class.iter_data(self.data_manager.errno, "errno", array_class.DataKind.STATE)
+        structs = ["rigid_info", "dyn_info", "dyn_state", "rigid_adjoint_cache"]
+        if self.rigid_config.requires_grad:
+            structs.append("dyn_state_adjoint_cache")
+        for name in structs:
+            yield from array_class.iter_data(getattr(self.data_manager, name), name)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------
@@ -436,6 +464,57 @@ class KinematicSolver(Solver):
             )
 
         self.dyn_state.dofs.force.fill(0)
+
+    def _init_tree_fields(self):
+        """Initialize the fields describing the kinematic roots and trees (see roots_link_idx and trees_root_idx in
+        array_class.py).
+
+        The links come parent first and each branch occupies a contiguous index range, so the dofs of a tree form one
+        contiguous range and the trees are disjoint in dof space.
+        """
+        # A static link belongs to no tree, and a scene without any tree keeps its padded tree slot empty (see
+        # trees_root_idx in array_class.py)
+        links_tree_idx = np.full(self.n_links_, -1, dtype=gs.np_int)
+        if self._n_roots:
+            links_root_idx = np.array([link.root_idx for link in self.links], dtype=gs.np_int)
+            roots_link_idx, links_root_rank = np.unique(links_root_idx, return_inverse=True)
+            roots_link_end = np.zeros(self._n_roots, dtype=gs.np_int)
+            np.maximum.at(roots_link_end, links_root_rank, np.arange(1, self.n_links + 1, dtype=gs.np_int))
+            self.rigid_info.roots_link_idx.from_numpy(roots_link_idx)
+            self.rigid_info.links_root_end.from_numpy(roots_link_end[links_root_rank])
+        if self._n_trees:
+            links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
+            links_dof_start = np.array([link.dof_start for link in self.links], dtype=gs.np_int)
+            links_dof_end = np.array([link.dof_end for link in self.links], dtype=gs.np_int)
+            tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
+            trees_root_idx, links_tree_rank = np.unique(self._links_tree_root_idx[tree_links], return_inverse=True)
+            trees_n_dofs = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.add.at(trees_n_dofs, links_tree_rank, links_n_dofs[tree_links])
+            # A dof-less link carries no dof range of its own
+            dof_links = np.flatnonzero(links_n_dofs[tree_links])
+            trees_dof_start = np.full(self._n_trees, self.n_dofs, dtype=gs.np_int)
+            np.minimum.at(trees_dof_start, links_tree_rank[dof_links], links_dof_start[tree_links][dof_links])
+            trees_dof_end = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.maximum.at(trees_dof_end, links_tree_rank[dof_links], links_dof_end[tree_links][dof_links])
+            if (trees_dof_end - trees_dof_start != trees_n_dofs).any():
+                gs.raise_exception("The dofs of a kinematic tree must be contiguous.")
+            trees_link_end = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.maximum.at(trees_link_end, links_tree_rank, tree_links + 1)
+            trees_n_links = np.zeros(self._n_trees, dtype=gs.np_int)
+            np.add.at(trees_n_links, links_tree_rank, 1)
+            trees_order = np.argsort(trees_dof_start)
+            trees_rank = np.empty(self._n_trees, dtype=gs.np_int)
+            trees_rank[trees_order] = np.arange(self._n_trees, dtype=gs.np_int)
+            links_tree_idx[tree_links] = trees_rank[links_tree_rank]
+            self.rigid_info.trees_root_idx.from_numpy(trees_root_idx[trees_order])
+            self.rigid_info.trees_link_end.from_numpy(trees_link_end[trees_order])
+            self.rigid_info.trees_n_links.from_numpy(trees_n_links[trees_order])
+            self.rigid_info.trees_dof_start.from_numpy(trees_dof_start[trees_order])
+            self.rigid_info.trees_n_dofs.from_numpy(trees_n_dofs[trees_order])
+        else:
+            self.rigid_info.trees_root_idx.fill(0)
+            self.rigid_info.trees_link_end.fill(0)
+        self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
 
     def _init_link_fields(self):
         if self.links:
@@ -552,8 +631,6 @@ class KinematicSolver(Solver):
         )
 
     def _init_vgeom_fields(self):
-        self._vgeoms_render_T = np.empty((self.n_vgeoms_, self._B, 4, 4), dtype=np.float32)
-
         if self.n_vgeoms > 0:
             vgeoms = self.vgeoms
             kernel_init_vgeom_fields(
@@ -600,10 +677,6 @@ class KinematicSolver(Solver):
                 self.rigid_info,
                 self.rigid_config,
             )
-
-    def _init_envs_offset(self):
-        self.envs_offset = self.rigid_info.envs_offset
-        self.envs_offset.from_numpy(self._scene.envs_offset)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- simulation no-ops ----------------------------------
@@ -683,15 +756,6 @@ class KinematicSolver(Solver):
         self._queried_states.clear()
 
     # ------------------------------------------------------------------------------------
-    # ----------------------------------- render -----------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def update_vgeoms_render_T(self):
-        kernel_update_vgeoms_render_T(
-            self._vgeoms_render_T, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-        )
-
-    # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
     # ------------------------------------------------------------------------------------
 
@@ -741,6 +805,28 @@ class KinematicSolver(Solver):
         else:
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
+
+    def __getstate__(self) -> KinematicSolverCheckpoint:
+        state = super().__getstate__()
+        return KinematicSolverCheckpoint(
+            arrays=state.arrays,
+            configs=state.configs,
+            kinds=state.kinds,
+            is_forward_pos_updated=self._is_forward_pos_updated,
+            is_forward_vel_updated=self._is_forward_vel_updated,
+        )
+
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    def __setstate__(self, state: KinematicSolverCheckpoint) -> None:
+        super().__setstate__(state)
+        if array_class.DataKind.DERIVED in state.kinds:
+            self._is_forward_pos_updated = state.is_forward_pos_updated
+            self._is_forward_vel_updated = state.is_forward_vel_updated
+        else:
+            # Without the derived arrays, forward kinematics runs now so the scene is drawn where the record put it. The
+            # next step recomputes the rest of the derived state.
+            self._is_forward_pos_updated = self._is_forward_vel_updated = False
+            self.update_forward_pos()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- process_input -------------------------------------
@@ -812,8 +898,10 @@ class KinematicSolver(Solver):
     def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
         if links_idx is None:
             links_idx = self._base_links_idx
-        # Without any pose offset, the user and world frames coincide, so a relative set is just an absolute one.
-        if relative and self._links_offset_pos is None:
+        # Without any offset position on the targeted links, the authored and internal link origins coincide, so a
+        # relative set is just an absolute one.
+        idx = links_idx if isinstance(links_idx, int) else slice(None)
+        if relative and self._links_offset_pos_is_identity[idx].all():
             relative = False
         pos, links_idx, envs_idx = self._sanitize_io_variables(
             pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
@@ -822,8 +910,8 @@ class KinematicSolver(Solver):
             pos = pos[None]
 
         if relative:
-            # Compose the body-frame offset onto the user position while keeping the current orientation, then set the
-            # resulting world position.
+            # Compose the body-frame offset onto the authored position while keeping the current orientation, then set
+            # the resulting world position.
             cur_quat = qd_to_torch(self.dyn_state.links.quat, envs_idx, links_idx, transpose=True, copy=True)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
@@ -845,9 +933,9 @@ class KinematicSolver(Solver):
     def set_base_links_pos_grad(self, links_idx, envs_idx, relative, pos_grad):
         if links_idx is None:
             links_idx = self._base_links_idx
-        # A relative 'set_pos' adds 'R(user_quat) @ offset_pos', which reads the current orientation; that dependency
-        # is not propagated, so with a non-zero offset position the backward pass is only supported on links without
-        # one. 'relative=False' sets the world position directly and is a plain passthrough.
+        # A relative 'set_pos' adds 'R(authored_quat) @ offset_pos', which reads the current orientation; that
+        # dependency is not propagated, so with a non-zero offset position the backward pass is only supported on links
+        # without one. 'relative=False' sets the world position directly and is a plain passthrough.
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if relative and not self._links_offset_pos_is_identity[idx].all():
             gs.raise_exception(
@@ -868,10 +956,13 @@ class KinematicSolver(Solver):
     def set_base_links_quat(self, quat, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
         if links_idx is None:
             links_idx = self._base_links_idx
-        # Without any pose offset, the user and world frames coincide, so a relative set is just an absolute one.
-        if relative and self._links_offset_quat is None:
-            relative = False
+        # Without any pose offset on the targeted links, the authored and internal link origins coincide, so a relative
+        # set is just an absolute one.
         idx = links_idx if isinstance(links_idx, int) else slice(None)
+        if relative and (
+            self._links_offset_quat_is_identity[idx].all() and self._links_offset_pos_is_identity[idx].all()
+        ):
+            relative = False
         relative_pos_passthrough = relative and self._links_offset_pos_is_identity[idx].all()
         quat, links_idx, envs_idx = self._sanitize_io_variables(
             quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True
@@ -882,17 +973,17 @@ class KinematicSolver(Solver):
         if relative:
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             if not relative_pos_passthrough:
-                # The offset position rotates with the orientation, so keep the user-frame position fixed by rewriting
-                # the world position from the current user position and the new user orientation.
+                # The offset position rotates with the orientation, so keep the authored-frame position fixed by
+                # rewriting the world position from the current authored position and the new authored orientation.
                 cur_pos = qd_to_torch(self.dyn_state.links.pos, envs_idx, links_idx, transpose=True, copy=True)
                 cur_quat = qd_to_torch(self.dyn_state.links.quat, envs_idx, links_idx, transpose=True, copy=True)
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
-                user_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
-                world_pos = user_pos + gu.transform_by_quat(offset_pos, quat)
+                authored_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
+                world_pos = authored_pos + gu.transform_by_quat(offset_pos, quat)
                 kernel_set_links_pos(
                     links_idx, envs_idx, world_pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
                 )
-            # Compose the offset onto the user orientation, then set the resulting world orientation.
+            # Compose the offset onto the authored orientation, then set the resulting world orientation.
             quat = gu.transform_quat_by_quat(offset_quat, quat)
             relative = False
 
@@ -1110,13 +1201,14 @@ class KinematicSolver(Solver):
         return heights
 
     def get_links_pos(self, links_idx=None, envs_idx=None, *, relative=False):
+        idx = links_idx if isinstance(links_idx, int) else slice(None)
         if not gs.use_zerocopy:
             _, links_idx, envs_idx = self._sanitize_io_variables(
                 None, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
             )
         tensor = qd_to_torch(self.dyn_state.links.pos, envs_idx, links_idx, transpose=True, copy=True)
-        if relative and self._links_offset_pos is not None:
-            quat = qd_to_torch(self.dyn_state.links.quat, envs_idx, links_idx, transpose=True, copy=True)
+        if relative and not self._links_offset_pos_is_identity[idx].all():
+            quat = qd_to_torch(self.dyn_state.links.quat, envs_idx, links_idx, transpose=True)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             tensor -= _offset_world_shift(offset_pos, offset_quat, quat)
@@ -1124,7 +1216,8 @@ class KinematicSolver(Solver):
 
     def get_links_quat(self, links_idx=None, envs_idx=None, *, relative=False):
         tensor = qd_to_torch(self.dyn_state.links.quat, envs_idx, links_idx, transpose=True, copy=True)
-        if relative and self._links_offset_quat is not None:
+        idx = links_idx if isinstance(links_idx, int) else slice(None)
+        if relative and not self._links_offset_quat_is_identity[idx].all():
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
@@ -1153,23 +1246,39 @@ class KinematicSolver(Solver):
             tensor = gu.transform_quat_by_quat(gu.inv_quat(offset_quat), tensor)
         return tensor[0] if self.n_envs == 0 else tensor
 
-    def get_links_vel(self, links_idx=None, envs_idx=None):
+    def get_links_vel(self, links_idx=None, envs_idx=None, *, relative=False):
+        idx = links_idx if isinstance(links_idx, int) else slice(None)
+        is_relative = relative and not self._links_offset_pos_is_identity[idx].all()
         if gs.use_zerocopy:
-            mask = (0, *indices_to_mask(links_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, links_idx)
+            mask = indices_to_mask(envs_idx, links_idx)
             cd_vel = qd_to_torch(self.dyn_state.links.cd_vel, transpose=True)
             cd_ang = qd_to_torch(self.dyn_state.links.cd_ang, transpose=True)
             pos = qd_to_torch(self.dyn_state.links.pos, transpose=True)
             root_COM = qd_to_torch(self.dyn_state.links.root_COM, transpose=True)
-            return cd_vel[mask] + cd_ang[mask].cross(pos[mask] - root_COM[mask], dim=-1)
+            cpos = pos[mask] - root_COM[mask]
+            if is_relative:
+                quat = qd_to_torch(self.dyn_state.links.quat, envs_idx, links_idx, transpose=True)
+                offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
+                offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
+                cpos = cpos - _offset_world_shift(offset_pos, offset_quat, quat)
+            tensor = cd_vel[mask] + cd_ang[mask].cross(cpos, dim=-1)
+            return tensor[0] if self.n_envs == 0 else tensor
 
         _tensor, links_idx, envs_idx = self._sanitize_io_variables(
             None, links_idx, self.n_links, "links_idx", envs_idx, (3,)
         )
-        assert _tensor is not None
         tensor = _tensor[None] if self.n_envs == 0 else _tensor
         # The frame is passed as a plain int, see 'RigidSolver._sanitize_ref_frame'.
         kernel_get_links_vel(
-            links_idx, envs_idx, tensor, self.dyn_state, self.rigid_config, ref=int(gs.link_ref_frame.link_origin)
+            links_idx,
+            envs_idx,
+            tensor,
+            self._links_offset_pos,
+            self._links_offset_quat,
+            self.dyn_state,
+            self.rigid_config,
+            ref=int(gs.link_ref_frame.link_origin),
+            is_relative=is_relative,
         )
         return _tensor
 
@@ -1538,6 +1647,16 @@ class KinematicSolver(Solver):
         if self.is_built:
             return self._n_qs
         return sum(entity.n_qs for entity in self._entities)
+
+    @property
+    def is_forward_pos_updated(self) -> bool:
+        """Whether the link and geom poses are current for the configuration, so the next step skips forward kinematics."""
+        return self._is_forward_pos_updated
+
+    @property
+    def is_forward_vel_updated(self) -> bool:
+        """Whether the link velocities are current for the generalized velocities."""
+        return self._is_forward_vel_updated
 
     @property
     def n_dofs(self):

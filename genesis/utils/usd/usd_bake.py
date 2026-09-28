@@ -1,8 +1,13 @@
 import argparse
 import asyncio
+import importlib.metadata
 import logging
 import os
 import time
+
+# Kit 106 is the last release with wheels for Python 3.10 and 3.11; Python 3.12 gets Kit 107 and later, whose extension
+# registry, viewport and distiller differ from Kit 106 (see 'omni_bootstrap' and 'bake_usd_material').
+KIT_MAJOR = int(importlib.metadata.version("omniverse-kit").split(".")[0])
 
 
 def omni_bootstrap(device=0, log_level="warning"):
@@ -12,13 +17,14 @@ def omni_bootstrap(device=0, log_level="warning"):
     kit_dir = os.path.dirname(os.path.abspath(os.path.realpath(omni.kit_app.__file__)))
     kit_path = os.path.join(kit_dir, "apps", "omni.app.empty.kit")
 
-    omni_extensions = [
-        "omni.usd",
-        "omni.kit.material.library",
-        "omni.kit.usd.collect",
-        "omni.replicator.core",
-        "omni.mdl.distill_and_bake",
-    ]
+    omni_extensions = ["omni.usd", "omni.kit.material.library", "omni.kit.usd.collect", "omni.mdl.distill_and_bake"]
+    # The distiller reads the material from the RTX render engine attached to the stage, which the viewport window
+    # attaches and feeds when the stage opens. Kit 106 reaches both through the replicator, whose dependencies resolve
+    # from the Kit 107 shared registry; Kit 107 and later ship them in their own registry.
+    if KIT_MAJOR < 107:
+        omni_extensions.append("omni.replicator.core")
+    else:
+        omni_extensions += ["omni.hydra.rtx", "omni.kit.viewport.window"]
     app_args = [
         kit_path,
         "--/app/window/hideUi=True",
@@ -30,8 +36,6 @@ def omni_bootstrap(device=0, log_level="warning"):
         "--/app/python/interceptSysStdOutput=False",
         "--/app/python/logSysStdOutput=False",
         "--/app/settings/fabricDefaultStageFrameHistoryCount=3",
-        "--/exts/omni.kit.registry.nucleus/registries/0/name=kit/default",  # prioritize searching in Kit 107 'shared' extension registry
-        "--/exts/omni.kit.registry.nucleus/registries/0/url=https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/107/shared",
         f"--/omni/log/level={log_level}",
         "--/log/file=",  # Empty string means no log file
         f"--/log/level={log_level}",
@@ -42,6 +46,11 @@ def omni_bootstrap(device=0, log_level="warning"):
         "--no-window",
         "--portable",  # TODO: set portable root to avoid extension conflicts
     ]
+    if KIT_MAJOR < 107:
+        app_args += [
+            "--/exts/omni.kit.registry.nucleus/registries/0/name=kit/default",
+            "--/exts/omni.kit.registry.nucleus/registries/0/url=https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/107/shared",
+        ]
     for extension in omni_extensions:
         app_args += ["--enable", extension]
     app.startup(app_args)
@@ -81,7 +90,17 @@ def bake_usd_material(input_file, output_dir, usd_material_paths, device=0, log_
     for usd_material_path in usd_material_paths:
         material_prim = stage.GetPrimAtPath(usd_material_path)
         distiller = omni.mdl.distill_and_bake.MdlDistillAndBake(material_prim, ouput_folder=output_dir)
-        distiller.distill()
+        if KIT_MAJOR < 107:
+            distiller.distill()
+        else:
+            # The synchronous call of Kit 107 and later returns before the material is baked, so the export below would
+            # collect the stage with its material untouched. The result re-raises what the distill raised, and is False
+            # when the renderer holds no such material; either way the export must never run on the unbaked stage.
+            task = asyncio.ensure_future(distiller.distill_async())
+            while not task.done():
+                app.update()
+            if not task.result():
+                raise RuntimeError(f"Distilling material '{usd_material_path}' failed.")
         carb.log_info("Distilled: " + usd_material_path)
         logs.append(f"\tDistill: {time.time() - start_time}s, {usd_material_path}.")
 

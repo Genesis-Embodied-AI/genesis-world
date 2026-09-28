@@ -20,7 +20,7 @@ def main():
             show_world_frame=True,
             show_link_frame=True,
             plane_reflection=True,
-            env_separate_rigid=args.sep,
+            split_envs=args.sep,
             rendered_envs_idx=list(range(args.num_envs)),
         ),
         viewer_options=gs.options.ViewerOptions(

@@ -494,7 +494,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         Automatically read and process sensor data. See RecorderOptions for more details.
 
         Data from `sensor.read()` is used. If the sensor data needs to be preprocessed before passing to the recorder,
-        consider using `scene.start_recording()` instead with a custom data function.
+        consider using `scene.add_recorder()` instead with a custom data function.
 
         Parameters
         ----------

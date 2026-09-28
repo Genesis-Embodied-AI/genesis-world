@@ -26,14 +26,12 @@ Examples
 >>> import genesis as gs
 >>> from genesis.utils.usd import parse_usd_stage
 >>>
->>> # Create a USD morph and parse the stage
+>>> # Create a USD morph and parse the stage, adding its entities while the stage stays open
 >>> usd_morph = gs.morphs.USD(file="scene.usd")
->>> entity_morphs = parse_usd_stage(usd_morph)
->>>
->>> # Add entities to scene
 >>> scene = gs.Scene()
->>> for entity_morph in entity_morphs:
-...     scene.add_entity(entity_morph)
+>>> with parse_usd_stage(usd_morph) as entity_morphs:
+...     for entity_morph in entity_morphs:
+...         scene.add_entity(entity_morph)
 >>> scene.build()
 """
 

@@ -33,7 +33,9 @@ class RecorderManager:
         Parameters
         ----------
         data_func: Callable[[], Any]
-            A function with no arguments that returns the data to be recorded.
+            A callable with no arguments that returns the data a step records. A recorder that overrides
+            'Recorder._get_frame' receives from it the object it reads the frame from (the trajectory recorder receives
+            a TrajectorySource).
         rec_options: RecorderOptions
             The options for the recorder which determines how the data is recorded and processed.
 
@@ -50,9 +52,26 @@ class RecorderManager:
     @gs.assert_unbuilt
     def build(self):
         """Start data recording."""
-        for recorder in self._recorders:
-            recorder.build()
-            recorder.start()
+        # A recorder that fails to build leaves none of the recorders started before it running
+        started = []
+        try:
+            for recorder in self._recorders:
+                recorder.build()
+                recorder.start()
+                started.append(recorder)
+        except Exception:
+            # Every started recorder is stopped before a failure is raised: the first stop that raised, with the build
+            # failure as its context, or the build failure itself
+            stop_error = None
+            for recorder in started:
+                try:
+                    recorder.stop()
+                except Exception as error:
+                    if stop_error is None:
+                        stop_error = error
+            if stop_error is not None:
+                raise stop_error
+            raise
         self._is_recording = True
         self._is_built = True
 
@@ -63,15 +82,24 @@ class RecorderManager:
             gs.logger.warning("[DataRecorder] Ignoring stop(): data recording is not active.")
         else:
             self._is_recording = False
+            # Every recorder is stopped and flushed before the first failure is raised
+            error = None
             for recorder in self._recorders:
-                recorder.stop()
+                try:
+                    recorder.stop()
+                except Exception as recorder_error:
+                    if error is None:
+                        error = recorder_error
             self._recorders.clear()
+            if error is not None:
+                raise error
 
     @gs.assert_built
     def reset(self, envs_idx=None):
         for recorder in self._recorders:
-            recorder.reset(envs_idx)
-            recorder.start()
+            if recorder.is_alive:
+                recorder.reset(envs_idx)
+                recorder.start()
 
     @gs.assert_built
     def step(self, global_step: int):
@@ -85,6 +113,23 @@ class RecorderManager:
 
         for recorder in self._recorders:
             recorder.step(global_step)
+
+    @gs.assert_built
+    def record(self, global_step: int):
+        """Record the current state through every recorder, whatever its sampling rate."""
+        if not self._is_recording:
+            return
+
+        # Every recorder gets the state before the first failure is raised: it is the state each log ends with
+        error = None
+        for recorder in self._recorders:
+            try:
+                recorder.record(global_step)
+            except Exception as recorder_error:
+                if error is None:
+                    error = recorder_error
+        if error is not None:
+            raise error
 
     @property
     def recorders(self) -> "list[Recorder]":

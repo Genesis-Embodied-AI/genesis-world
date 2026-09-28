@@ -55,11 +55,17 @@ def main():
     link.set_mass(1)
     print("diff mass", robot.get_links_mass() - ori_mass)
 
-    robot.set_links_mass(robot.get_links_mass() * (0.75 + 0.5 * torch.rand(scene.n_envs, robot.n_links)))
+    robot.set_links_mass(
+        robot.get_links_mass() * (0.75 + 0.5 * torch.rand(scene.n_envs, robot.n_links, device=gs.device))
+    )
     # The center of mass is where it is, so a randomized model is the authored one shifted rather than one whose every
     # link carries its mass at its own origin.
-    robot.set_links_COM(com=robot.get_links_COM() + (-0.05 + 0.1 * torch.rand(scene.n_envs, robot.n_links, 3)))
-    robot.set_links_inertia(robot.get_links_inertia() * (0.75 + 0.5 * torch.rand(scene.n_envs, robot.n_links, 1, 1)))
+    robot.set_links_COM(
+        com=robot.get_links_COM() + (-0.05 + 0.1 * torch.rand(scene.n_envs, robot.n_links, 3, device=gs.device))
+    )
+    robot.set_links_inertia(
+        robot.get_links_inertia() * (0.75 + 0.5 * torch.rand(scene.n_envs, robot.n_links, 1, 1, device=gs.device))
+    )
     aabb = robot.get_AABB()
 
     joints_name = (

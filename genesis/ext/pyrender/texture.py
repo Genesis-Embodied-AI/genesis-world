@@ -192,8 +192,14 @@ class Texture(object):
             width = self.source.shape[1]
             height = self.source.shape[0]
 
+        # A 16-bit depth texture halves what sampling a shadow map reads, which is what bounds the cost of the shadow
+        # comparisons at the default map size, and its quantization stays below the depth bias of those comparisons.
+        internal_fmt = fmt
+        if fmt == GL_DEPTH_COMPONENT and self.data_format == GL_UNSIGNED_SHORT:
+            internal_fmt = GL_DEPTH_COMPONENT16
+
         # Bind texture and generate mipmaps
-        glTexImage2D(self.tex_type, 0, fmt, width, height, 0, fmt, self.data_format, data)
+        glTexImage2D(self.tex_type, 0, internal_fmt, width, height, 0, fmt, self.data_format, data)
         if self.source is not None:
             glGenerateMipmap(self.tex_type)
 
@@ -215,9 +221,20 @@ class Texture(object):
         glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, self.sampler.wrapS)
         glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, self.sampler.wrapT)
         border_color = np.full((4,), fill_value=255, dtype=np.uint8)
-        if self.data_format == GL_FLOAT:
+        if fmt == GL_DEPTH_COMPONENT or self.data_format == GL_FLOAT:
             border_color = np.ones((4,), dtype=np.float32)
         glTexParameterfv(self.tex_type, GL_TEXTURE_BORDER_COLOR, border_color)
+
+        if fmt == GL_DEPTH_COMPONENT:
+            # A depth texture is a shadow map read through a sampler2DShadow: a fetch compares the fragment depth against
+            # the texels and blends the comparisons bilinearly, further from the light counting as shadowed. The border
+            # depth of 1.0 leaves fragments beyond the map lit.
+            glTexParameteri(self.tex_type, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE)
+            glTexParameteri(self.tex_type, GL_TEXTURE_COMPARE_FUNC, GL_GREATER)
+            glTexParameteri(self.tex_type, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(self.tex_type, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
+            glTexParameteri(self.tex_type, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
 
         if texture_filter_anisotropic.glInitTextureFilterAnisotropicEXT():
             max_aniso = glGetFloat(texture_filter_anisotropic.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)

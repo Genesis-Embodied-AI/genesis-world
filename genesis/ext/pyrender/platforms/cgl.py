@@ -60,8 +60,7 @@ class CGLPlatform(Platform):
     a virtual machine exposing no screen at all.
     """
 
-    def __init__(self, viewport_width, viewport_height):
-        super().__init__(viewport_width, viewport_height)
+    def __init__(self):
         self._pixel_format = None
         self._context = None
 
@@ -126,9 +125,6 @@ class CGLPlatform(Platform):
         if self._pixel_format is not None:
             _CGLDestroyPixelFormat(self._pixel_format)
             self._pixel_format = None
-
-    def supports_framebuffers(self):
-        return True
 
 
 __all__ = ["CGLPlatform"]

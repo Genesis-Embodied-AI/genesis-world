@@ -1,33 +1,34 @@
 import collections.abc
 import dataclasses
+import hashlib
+import io
+import json
+import math
 import os
 import sys
-import xml.etree.ElementTree as ET
 import weakref
+import zipfile
 from collections import Counter
-from typing import TYPE_CHECKING, Callable, Iterable, Literal, overload
+from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
 
 import numpy as np
 import torch
 
 import trimesh
-from pydantic import Field, model_validator
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-import genesis.ext.urdfpy as urdfpy
-from genesis.engine.entities.base_entity import Entity
+from genesis.engine.entities.base_entity import Entity, EntityDescription
+from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.force_fields import ForceField
-from genesis.engine.solvers.base_solver import Solver
 from genesis.engine.materials.base import EntityT, Material
-from genesis.engine.states.solvers import SimState
+from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
-    LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
     ProfilingOptions,
@@ -39,18 +40,17 @@ from genesis.options import (
     ViewerOptions,
     VisOptions,
 )
-from genesis.options.morphs import URDF_FORMAT, Morph
-from genesis.options.options import Options
-from genesis.options.recorders import RecorderOptions
-from genesis.options.renderers import Rasterizer, RendererOptions
+from genesis.options.morphs import Morph
+from genesis.options.recorders import RecorderOptions, TrajectoryFile
+from genesis.options.renderers import RendererOptions
 from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
+from genesis.recorders.trajectory import Trajectory, save_checkpoint
 from genesis.repr_base import RBC
 from genesis.utils import serialization
-from genesis.utils.serialization import pixel_less_textures
-from genesis.utils.description import Described, SceneDescription
+from genesis.utils.array_class import check_data
 from genesis.utils.misc import sanitize_index, tensor_to_array
-from genesis.utils.tools import FPSTracker
+from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
 from genesis.utils.warnings import warn_once
 from genesis.vis import Visualizer
 
@@ -58,11 +58,79 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
+    from genesis.engine.simulator import Simulator
     from genesis.options.sensors.options import SensorOptions, SensorT
     from genesis.recorders import Recorder
 
 
 SCENE_FORMAT = ".gscene"
+
+
+@dataclasses.dataclass
+class SceneDescription:
+    """Describe one scene as it was authored: the options it was created with, and every entity added to it.
+
+    Each entity stands as its own description (see 'EntityDescription'), so a scene is created from this alone. A
+    scene created from one is built by whoever loads it, with the environment layout they ask for.
+    """
+
+    options: SceneOptions
+    entities: list[EntityDescription] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class EnvironmentLayout:
+    """The environment layout given to 'Scene.build'. It sizes every array of the state."""
+
+    n_envs: int
+    env_spacing: tuple[float, float]
+    n_envs_per_row: int
+    center_envs_at_origin: bool
+
+
+@dataclasses.dataclass
+class SceneCheckpoint:
+    """The checkpoint of a built scene, which 'Scene.__getstate__' returns and a pickled scene serializes."""
+
+    scene: SceneDescription
+    digest: str
+    layout: EnvironmentLayout
+    sim: SimulatorCheckpoint
+
+
+class TrajectorySource(NamedTuple):
+    """The simulator, scene description and environment layout a trajectory recorder reads at build."""
+
+    sim: "Simulator"
+    desc: SceneDescription
+    layout: EnvironmentLayout
+
+
+def description_digest(desc: SceneDescription) -> str:
+    """Digest what a description states of the physics: its entities and every option group but the visual ones, which
+    'Scene.load' replaces. Two scenes sharing the digest allocate the same state, so a record of one restores into the
+    other. The Genesis version and sources are left out, so a record survives the code moving on.
+
+    The digest exports the description in memory, meshes included, so it is taken once per built scene and once per
+    trajectory opened, never per restore.
+    """
+    defaults = SceneOptions()
+    visual = {
+        "vis": defaults.vis,
+        "viewer": defaults.viewer,
+        "renderer": defaults.renderer,
+        "profiling": defaults.profiling,
+    }
+    buffer = io.BytesIO()
+    serialization.export(buffer, {"scene": dataclasses.replace(desc, options=desc.options.model_copy(update=visual))})
+    with zipfile.ZipFile(buffer) as archive:
+        manifest = json.loads(archive.read(MANIFEST_NAME))
+        arrays = np.load(io.BytesIO(archive.read(ARRAY_MEMBER)))
+        digest = hashlib.sha256(json.dumps((manifest["schema"], manifest["held"]), sort_keys=True).encode())
+        for name in sorted(arrays):
+            digest.update(f"{name}{arrays[name].shape}{arrays[name].dtype.str}".encode())
+            digest.update(arrays[name].tobytes())
+    return digest.hexdigest()
 
 
 @gs.assert_initialized
@@ -196,6 +264,7 @@ class Scene(RBC):
 
         self._uid = gs.UID()
         self._is_built = False
+        self._desc_digest: str | None = None
         self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
@@ -211,18 +280,20 @@ class Scene(RBC):
             # This scene may have been destroyed previously
             pass
 
-        if getattr(self, "_recorder_manager", None) is not None:
-            if self._recorder_manager.is_recording:
-                self._recorder_manager.stop()
+        # The recorders are the first to go, and a failure they raise leaves nothing of the scene alive behind it
+        try:
+            if getattr(self, "_recorder_manager", None) is not None and self._recorder_manager.is_recording:
+                self.stop_recording()
+        finally:
             self._recorder_manager = None
 
-        if getattr(self, "_visualizer", None) is not None:
-            self._visualizer.destroy()
-            self._visualizer = None
+            if getattr(self, "_visualizer", None) is not None:
+                self._visualizer.destroy()
+                self._visualizer = None
 
-        if getattr(self, "_sim", None) is not None:
-            self._sim.destroy()
-            self._sim = None
+            if getattr(self, "_sim", None) is not None:
+                self._sim.destroy()
+                self._sim = None
 
     @overload
     def add_entity(
@@ -291,39 +362,16 @@ class Scene(RBC):
             # assign a local surface, otherwise modification will apply on global default surface
             surface = gs.surfaces.Default()
 
-        # Handle heterogeneous morphs (any iterable of morphs, excluding Morph objects)
-        is_heterogeneous = isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph)
-        if is_heterogeneous:
+        # Handle heterogeneous morphs (any iterable of morphs, excluding Morph objects). Whether a morph, or several,
+        # can be built from is for the entity created from it to say.
+        if isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph):
             morph = tuple(morph)
-            morph_for_checks = morph[0]
-            if not isinstance(material, (gs.materials.Rigid, gs.materials.Kinematic)):
-                gs.raise_exception(
-                    "Heterogeneous morphs (iterable of morphs) are only supported for Rigid and Kinematic materials."
-                )
-            if not all(
-                isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)) for m in morph
-            ):
-                gs.raise_exception("Heterogeneous morphs only support Primitive, Mesh, URDF and MJCF types.")
-            if len(set(isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF)) for m in morph)) > 1:
-                gs.raise_exception(
-                    "Heterogeneous morphs must be consistent: either all articulated robots (ie URDF, MJCF) or all "
-                    "basic objects (ie Primitive, Mesh)."
-                )
-        else:
-            morph_for_checks = morph
-
-        if isinstance(material, gs.materials.Rigid):
-            # small sdf res is sufficient for primitives regardless of size
-            if isinstance(morph_for_checks, gs.morphs.Primitive):
-                material.sdf_max_res = 32
 
         # some morph should not smooth surface normal
-        if isinstance(morph_for_checks, (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)):
+        if isinstance(
+            morph[0] if isinstance(morph, tuple) else morph, (gs.morphs.Box, gs.morphs.Cylinder, gs.morphs.Terrain)
+        ):
             surface.smooth = False
-
-        if isinstance(morph_for_checks, (gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD, gs.morphs.Terrain)):
-            if not isinstance(material, (gs.materials.Kinematic, gs.materials.Hybrid)):
-                gs.raise_exception(f"Unsupported material for morph: {material} and {morph_for_checks}.")
 
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
@@ -399,29 +447,6 @@ class Scene(RBC):
         else:
             gs.raise_exception()
 
-        # Set material-dependent default options
-        morphs_to_configure = morph if is_heterogeneous else (morph,)
-        for morph_variant in morphs_to_configure:
-            if isinstance(morph_variant, gs.morphs.FileMorph):
-                # Rigid entities will convexify geom by default
-                if morph_variant.convexify is None:
-                    morph_variant.convexify = isinstance(material, gs.materials.Rigid)
-                # Decimation simplifies away the very surface detail that a non-convex collision mesh is kept for, so
-                # it defaults off when convexify is off and on otherwise. Only applies to meshes that skip
-                # watertightening (already-watertight inputs); watertighten does its own feature-preserving QEM.
-                if morph_variant.decimate is None:
-                    morph_variant.decimate = morph_variant.convexify
-                # Genesis fills in a default rotor armature for joints whose armature is not specified in the model
-                # file, while MuJoCo's own default may differ. Under MuJoCo compatibility, the default is dropped
-                # unless set manually, deferring to MuJoCo. USD keeps the Genesis default since MuJoCo is not
-                # involved in its parsing.
-                if (
-                    isinstance(morph_variant, (gs.morphs.MJCF, gs.morphs.URDF, gs.morphs.Drone))
-                    and "default_armature" not in morph_variant.model_fields_set
-                    and self._sim.rigid_solver._enable_mujoco_compatibility
-                ):
-                    morph_variant.default_armature = None
-
         entity = self._sim._add_entity(morph, material, surface, visualize_contact, name)
 
         return entity
@@ -458,19 +483,15 @@ class Scene(RBC):
         entities : List[genesis.Entity]
             The created entities.
         """
-        entity_morphs = []
-        if isinstance(morph, gs.morphs.USD):
-            from genesis.utils.usd import parse_usd_stage
-
-            # Return a list of `gs.morphs.USD` for each parsed rigid entity in the stage.
-            entity_morphs = parse_usd_stage(morph)
-        else:
+        if not isinstance(morph, gs.morphs.USD):
             gs.raise_exception(f"Unsupported morph: {morph}.")
+        from genesis.utils.usd import parse_usd_stage
 
-        entities = []
-        for entity_morph in entity_morphs:
-            entities.append(self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode))
-
+        # One `gs.morphs.USD` per rigid entity of the stage, added while the stage it was split from stays open.
+        with parse_usd_stage(morph) as entity_morphs:
+            entities = []
+            for entity_morph in entity_morphs:
+                entities.append(self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode))
         return entities
 
     @gs.assert_unbuilt
@@ -591,12 +612,13 @@ class Scene(RBC):
         return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
 
     @gs.assert_unbuilt
-    def start_recording(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
+    def add_recorder(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
         """
         Automatically read and process data. See RecorderOptions for more details.
 
-        Data from `data_func` is automatically read and processed using the recorder at the
-        frequency `rec_options.hz` (or every step if not specified) as the scene is stepped.
+        Data from `data_func` is automatically read and processed using the recorder at the frequency `rec_options.hz`
+        (or every step if not specified) as the scene is stepped. Recording starts with the build and every recorder
+        stops with 'stop_recording'.
 
         Parameters
         ----------
@@ -610,6 +632,31 @@ class Scene(RBC):
         recorder : Recorder
             The created recorder object.
         """
+        return self._recorder_manager.add_recorder(data_func, rec_options)
+
+    @gs.assert_unbuilt
+    def start_recording(self, rec_options: TrajectoryFile) -> "Recorder":
+        """Record the state of the scene at every step to a trajectory file, which 'load_trajectory' opens to seek and
+        replay.
+
+        Recording starts with the build and stops with 'stop_recording'. See 'TrajectoryFile' for what a frame holds
+        and how the file is written.
+
+        Parameters
+        ----------
+        rec_options : TrajectoryFile
+            The file to write and the mode to record in.
+
+        Returns
+        -------
+        recorder : Recorder
+            The created recorder object.
+        """
+
+        def data_func() -> TrajectorySource:
+            self._reject_unexportable()
+            return TrajectorySource(self._sim, self.desc, self._layout)
+
         return self._recorder_manager.add_recorder(data_func, rec_options)
 
     @gs.assert_unbuilt
@@ -822,6 +869,8 @@ class Scene(RBC):
             # reset state
             self._reset()
 
+            # The description is fixed once built, so its digest is taken once (see 'description_digest')
+            self._desc_digest = description_digest(self._desc)
             self._is_built = True
 
         with gs.logger.timer("Compiling simulation kernels..."):
@@ -831,9 +880,6 @@ class Scene(RBC):
         # visualizer
         with gs.logger.timer("Building visualizer..."):
             self._visualizer.build()
-
-        if self.options.profiling.show_FPS:
-            self.FPS_tracker = FPSTracker(self.n_envs, alpha=self.options.profiling.FPS_tracker_alpha)
 
         # recorders
         self._recorder_manager.build()
@@ -855,11 +901,12 @@ class Scene(RBC):
         self._envs_idx = torch.arange(self._B, dtype=gs.tc_int, device=gs.device)
 
         if self.n_envs_per_row is None:
-            self.n_envs_per_row = np.ceil(np.sqrt(self._B)).astype(int)
+            self.n_envs_per_row = math.ceil(math.sqrt(self._B))
 
         # compute offset values for visualizing each env
         if not isinstance(env_spacing, (list, tuple)) or len(env_spacing) != 2:
             gs.raise_exception("`env_spacing` should be a tuple of length 2.")
+        self._layout = EnvironmentLayout(n_envs, tuple(env_spacing), self.n_envs_per_row, center_envs_at_origin)
         offset_x = (np.arange(self._B) // self.n_envs_per_row) * self.env_spacing[0]
         offset_y = (np.arange(self._B) % self.n_envs_per_row) * self.env_spacing[1]
         offset_z = np.zeros((self._B,))
@@ -903,8 +950,12 @@ class Scene(RBC):
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
         gs.logger.debug(f"Resetting Scene ~~~<{self._uid}>~~~.")
-        self._reset(state, envs_idx=envs_idx)
+        # The recorders finish the run first: a reset of the whole scene records the state it leaves behind, and a file
+        # rotated on reset ends with it.
+        if envs_idx is None:
+            self._recorder_manager.record(self._sim.cur_step_global)
         self._recorder_manager.reset(envs_idx)
+        self._reset(state, envs_idx=envs_idx)
 
     def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
         if self._is_built:
@@ -919,7 +970,10 @@ class Scene(RBC):
             self._sim.reset(state, envs_idx)
         else:
             self._init_state = self._get_state()
+        self._restart()
 
+    def _restart(self):
+        """Restart what surrounds the state: the gradient tape, the cache of the visualizer and the emitters."""
         self._forward_ready = True
         self._reset_grad()
 
@@ -1004,27 +1058,38 @@ class Scene(RBC):
         # frame's advance by returning True. The scene treats them opaquely, without knowing what they do or who
         # registered them (e.g. an InteractiveScene driving GUI-requested rebuild/pause). The visualizer is still
         # refreshed when the advance is vetoed, so the viewer keeps rendering and stays responsive while paused.
+        fps_tracker = self._sim.fps_tracker
+        fps_tracker.start()
         advance = not any([callback() for callback in tuple(self._pre_step_callbacks)])
 
         if advance:
             if not self._forward_ready:
                 gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
+            # The recorders read the state a step starts from, with the inputs the step consumes: 'Simulator.step'
+            # zeroes the applied forces at its end. The pre-step callbacks ran, so their inputs are read as well.
+            with fps_tracker.phase("recorders"):
+                self._recorder_manager.step(self._sim.cur_step_global)
             self._sim.step()
 
         if update_visualizer:
             # Force the refresh when the sim did not advance (e.g. paused) so edits made off the step loop -
             # like a GUI joint slider calling set_qpos - are still drawn and the viewer does not appear frozen.
-            self._visualizer.update(force=not advance, auto=refresh_visualizer)
+            with fps_tracker.phase("rendering"):
+                self._visualizer.update(force=not advance, auto=refresh_visualizer)
 
         if advance:
-            if self.options.profiling.show_FPS:
-                self.FPS_tracker.step()
-            self._recorder_manager.step(self._sim.cur_step_global)
-            for camera in self._visualizer.cameras:
-                camera.update_recording()
+            with fps_tracker.phase("video"):
+                for camera in self._visualizer.cameras:
+                    camera.update_recording()
+        fps_tracker.step(count=advance)
 
     def stop_recording(self):
-        self._recorder_manager.stop()
+        # The recorders read before each step, so the state the last step left is recorded here, whatever the
+        # sampling rate: it is the state a stopped run is resumed or studied from.
+        try:
+            self._recorder_manager.record(self._sim.cur_step_global)
+        finally:
+            self._recorder_manager.stop()
 
     def _step_grad(self):
         self._sim.collect_output_grads()
@@ -1439,6 +1504,66 @@ class Scene(RBC):
         self._backward_ready = False
         self._forward_ready = False
 
+    @gs.assert_built
+    def get_time(self, envs_idx=None):
+        """
+        Get the simulated time of each environment, in seconds.
+
+        Environments are stepped and reset independently, so each one carries its own simulated time. The number of
+        `scene.step()` calls is a separate scalar, `Simulator.cur_step_global`.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are returned. Defaults to None.
+
+        Returns
+        -------
+        time : torch.Tensor, shape (n_envs,) or scalar
+            The simulated time of each environment.
+        """
+        return self._sim.get_time(envs_idx)
+
+    # ------------------------------------------------------------------------------------
+    # ----------------------------------- utilities --------------------------------------
+    # ------------------------------------------------------------------------------------
+
+    def _reject_unexportable(self) -> None:
+        """Raise when the scene holds an entity, an emitter or a force field no description covers, and warn about what
+        'export' leaves out.
+        """
+        # A scene holding what alters the simulation is rejected, since a file leaving it out would restore other
+        # physics. Everything else is left out with a warning: what observes or draws the simulation, and every
+        # callback. Every solver holds the same force fields, so one solver names them all.
+        rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
+        rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
+        rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields)
+        omitted_kinds = Counter(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
+        if self._visualizer is not None:
+            omitted_kinds.update(type(camera).__name__ for camera in self._visualizer.cameras)
+        if self._pre_step_callbacks:
+            omitted_kinds["pre_step_callback"] += len(self._pre_step_callbacks)
+        surfaces = [entity.surface for entity in self.entities]
+        if isinstance(self.options.renderer, gs.renderers.RayTracer) and self.options.renderer.env_surface is not None:
+            surfaces.append(self.options.renderer.env_surface)
+        omitted_kinds.update(name for surface in surfaces for name in pixel_less_textures(surface))
+        # Visual vertices written at runtime live in the solver, and a file carries what a scene was authored from.
+        omitted_kinds.update(
+            f"'{entity.name}' visual vertices"
+            for entity in self.entities
+            if isinstance(entity, KinematicEntity) and entity._is_vverts_overridden
+        )
+        for kinds, report, ending in (
+            (omitted_kinds, gs.logger.warning, "is exported without it, so a scene loaded from the file holds none."),
+            (rejected_kinds, gs.raise_exception, "cannot be exported yet."),
+        ):
+            if kinds:
+                listing = ", ".join(
+                    f"{count} {kind}" if kind.endswith("s") else f"{count} {kind}{'s' if count > 1 else ''}"
+                    for kind, count in sorted(kinds.items())
+                )
+                report(f"A scene holding {listing} {ending}")
+
     def export(self, path: str | os.PathLike) -> None:
         """Write a portable copy of this scene to a file that anyone can open.
 
@@ -1453,118 +1578,27 @@ class Scene(RBC):
 
         Only a rigid or a kinematic entity carries a description. A scene
         holding anything that alters the simulation raises, naming it: an emitter and a force field. Everything else
-        a description leaves out is written without, with a warning naming it: a camera, a recorder, a sensor, a
-        callback Genesis calls at every step, a texture read from an HDR or EXR file, and the visual vertices an
-        entity was given at runtime.
+        a description leaves out is written without, with a warning naming it: a camera, a sensor, a callback Genesis
+        calls at every step, a texture read from an HDR or EXR file, and the visual vertices an entity was given at
+        runtime. A recorder neither simulates nor draws, so it is left out without a word.
 
         Parameters
         ----------
         path : str or os.PathLike
             Where to write the file.
         """
-        # A scene holding what alters the simulation is rejected, since a file leaving it out would restore other
-        # physics. Everything else is left out with a warning: what observes or draws the simulation, and every
-        # callable, wherever it is held. A class inherits 'Described' to declare that it travels, so a kind added
-        # later needs nothing here. Sensors and recorders sit behind an accessor, so the list names their managers.
-        # Holders overlap in the objects they reference, so each object counts once by identity.
-        observing = [self._recorder_manager, self._sim._sensor_manager]
-        if self.visualizer is not None:
-            observing += [self.visualizer, self.visualizer.raytracer, self.visualizer.batch_renderer]
-        left_out, rejected = Counter(), Counter()
-        counted = set()
-        holders = [(holder, left_out) for holder in observing if holder is not None]
-        holders += [(holder, rejected) for holder in (self, self._sim, *self._sim.solvers)]
-        for holder, stray in holders:
-            for name, value in vars(holder).items():
-                held = value.values() if isinstance(value, dict) else value if isinstance(value, (list, tuple)) else ()
-                for item in held:
-                    if not callable(item) and not (isinstance(item, RBC) and not isinstance(item, Described)):
-                        continue
-                    if id(item) in counted:
-                        continue
-                    counted.add(id(item))
-                    if isinstance(item, RBC):
-                        stray[type(item).__name__] += 1
-                    else:
-                        # A callable states no class worth naming, so the attribute holding it names it instead.
-                        left_out[name.strip("_").removesuffix("s")] += 1
-        left_out.update(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
-        left_out.update(type(recorder).__name__ for recorder in self._recorder_manager.recorders)
-        surfaces = [entity.surface for entity in self.entities]
-        if isinstance(self.options.renderer, gs.renderers.RayTracer) and self.options.renderer.env_surface is not None:
-            surfaces.append(self.options.renderer.env_surface)
-        left_out.update(name for surface in surfaces for name in pixel_less_textures(surface))
-        # Visual vertices written at runtime live in the solver, and a file carries what a scene was authored from.
-        # Only an entity that travels is drawn with vertices of its own.
-        left_out.update(
-            f"'{entity.name}' visual vertices"
-            for entity in self.entities
-            if isinstance(entity, Described) and entity._is_vverts_overridden
-        )
-        for stray, tell, ending in (
-            (left_out, gs.logger.warning, "is exported without it, so a scene loaded from the file holds none."),
-            (rejected, gs.raise_exception, "cannot be exported yet."),
-        ):
-            if stray:
-                named = ", ".join(
-                    f"{n} {kind}" if kind.endswith("s") else f"{n} {kind}{'s' if n > 1 else ''}"
-                    for kind, n in sorted(stray.items())
-                )
-                tell(f"A scene holding {named} {ending}")
-
-        # A USD context is a live handle onto the stage it opened, and a XACRO morph holds the model its file was
-        # parsed into. The description each produced stands for it, so the morph travels naming the asset alone.
-        desc = self.desc
-        entities = []
-        for e_desc in desc.entities:
-            morphs = []
-            for morph in e_desc.morphs:
-                update = {}
-                if isinstance(morph, gs.options.morphs.USD):
-                    update["usd_ctx"] = None
-                if isinstance(morph, gs.options.morphs.URDF) and isinstance(morph.file, urdfpy.URDF):
-                    update["file"] = f"{morph.file.name}{URDF_FORMAT}"
-                elif isinstance(morph, gs.options.morphs.FileMorph) and isinstance(morph.file, os.PathLike):
-                    update["file"] = str(morph.file)
-                if isinstance(morph, gs.options.morphs.Terrain) and isinstance(morph.height_field, torch.Tensor):
-                    update["height_field"] = tensor_to_array(morph.height_field)
-                morphs.append(morph.model_copy(update=update) if update else morph)
-            entities.append(dataclasses.replace(e_desc, morphs=morphs))
-
-        # These directories belong to the author's filesystem, and every path a parse derives sits under one, so
-        # the manifest keeps each asset's bare name only. A USD morph also names its context's source file, which
-        # holds a baked copy of the stage.
-        morphs = [morph for entity in self.entities for morph in entity.morphs]
-        asset_paths = [
-            morph.file
-            for morph in morphs
-            if isinstance(morph, gs.options.morphs.FileMorph) and isinstance(morph.file, (str, os.PathLike))
-        ]
-        asset_paths += [
-            morph.usd_ctx.stage_file
-            for morph in morphs
-            if isinstance(morph, gs.options.morphs.USD) and morph.usd_ctx is not None
-        ]
-        redact = {f"{os.path.dirname(path)}{os.sep}": "" for path in asset_paths if os.path.isabs(path)}
-
-        # A morph created from a document rather than from a file carries that document, and it names the assets it
-        # was written against. Each name travels without the directory it stood in, as the file of a morph does.
-        for morph in morphs:
-            if not (isinstance(morph, gs.options.morphs.FileMorph) and isinstance(morph.file, str)):
-                continue
-            try:
-                document = ET.fromstring(morph.file)
-            except ET.ParseError:
-                continue
-            for element in document.iter():
-                for stated in element.attrib.values():
-                    if os.path.isabs(stated):
-                        redact[stated] = os.path.basename(stated)
-
-        serialization.export(path, {"scene": dataclasses.replace(desc, entities=entities)}, redact)
+        self._reject_unexportable()
+        serialization.export(path, {"scene": self.desc})
 
     @classmethod
-    def load(cls, path: str | os.PathLike, show_viewer: bool = False) -> "Scene":
+    def load(
+        cls,
+        path: str | os.PathLike | BinaryIO,
+        show_viewer: bool = False,
+        viewer_options: ViewerOptions | None = None,
+        vis_options: VisOptions | None = None,
+        renderer: RendererOptions | None = None,
+    ) -> "Scene":
         """Create the scene a file holds, as written by 'Scene.export'.
 
         The file names what it holds rather than carrying code to run, and Genesis creates only the options,
@@ -1573,10 +1607,16 @@ class Scene(RBC):
 
         Parameters
         ----------
-        path : str or os.PathLike
+        path : str, os.PathLike or binary file
             The file to read.
         show_viewer : bool, optional
             Whether to open an interactive viewer on the scene. Defaults to False.
+        viewer_options : ViewerOptions, optional
+            Viewer options overriding the recorded ones, for the fields they set. Defaults to None.
+        vis_options : VisOptions, optional
+            Visualizer options overriding the recorded ones, for the fields they set. Defaults to None.
+        renderer : RendererOptions, optional
+            Renderer replacing the recorded one. If None, the recorded one stands. Defaults to None.
 
         Returns
         -------
@@ -1584,23 +1624,196 @@ class Scene(RBC):
             The scene the file describes, holding every entity it was authored with and waiting to be built.
         """
         described = serialization.load(path, {"scene": SceneDescription})["scene"]
-        scene = cls(show_viewer=show_viewer, options=described.options)
+        return cls._from_description(described, show_viewer, viewer_options, vis_options, renderer)
 
+    @classmethod
+    def _from_description(
+        cls,
+        described: SceneDescription,
+        show_viewer: bool = False,
+        viewer_options: ViewerOptions | None = None,
+        vis_options: VisOptions | None = None,
+        renderer: RendererOptions | None = None,
+    ) -> "Scene":
+        """Create the scene a description states, waiting to be built.
+
+        The viewer and visualizer options override the described ones field by field, for the fields they set, and the
+        renderer is replaced where given. The physics options stand as described, since they size the arrays a
+        recorded state fills.
+        """
+        # A field left at its default keeps the described value, so asking for one change keeps the lights, the
+        # background and the camera the scene was authored with.
+        updates = {}
+        for name, recorded, given in (
+            ("viewer", described.options.viewer, viewer_options),
+            ("vis", described.options.vis, vis_options),
+        ):
+            if given is not None:
+                given_fields = {field: value for field, value in dict(given).items() if field in given.model_fields_set}
+                updates[name] = recorded.model_copy(update=given_fields)
+        if renderer is not None:
+            updates["renderer"] = renderer
+        options = described.options.model_copy(update=updates)
+        scene = cls(show_viewer=show_viewer, options=options)
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
         for desc in described.entities:
             scene._sim._add_entity(desc=desc)
-
-        # An attachment merges two kinematic trees and renumbers the joints and degrees of freedom after them. The
-        # build sizes its arrays from those numbers, so creation and attachment both precede it.
-        for entity, desc in zip(scene.entities, described.entities):
-            if desc.attachment is not None:
-                entity.attach(scene.get_entity(desc.attachment.entity_name), desc.attachment.link_name)
         return scene
 
-    # ------------------------------------------------------------------------------------
-    # ----------------------------------- utilities --------------------------------------
-    # ------------------------------------------------------------------------------------
+    @gs.assert_built
+    def __getstate__(self) -> SceneCheckpoint:
+        """Return the SceneCheckpoint of this built scene, for '__setstate__' to restore.
+
+        The description travels by reference and the arrays as copies made where they live (see 'Solver.__getstate__'),
+        so a save and a restore within one process cost one copy on the device. Pickling a scene reads this record,
+        and unpickling creates and builds the scene, then restores the record. What a description leaves out is left
+        out of a copy the same way, and reported as 'export' reports it.
+
+        Returns
+        -------
+        state : SceneCheckpoint
+            The scene as its description, the environment layout it was built with, and the state of its simulator.
+        """
+        self._reject_unexportable()
+        return SceneCheckpoint(
+            scene=self.desc, digest=self._desc_digest, layout=self._layout, sim=self._sim.__getstate__()
+        )
+
+    def __reduce__(self):
+        return (self._from_state, (self.__getstate__(),))
+
+    @gs.assert_built
+    def save_checkpoint(self, path: str | os.PathLike) -> None:
+        """Write the whole state of this scene to a file, for 'load_checkpoint' to open a copy standing where it stands.
+
+        The file holds the scene as 'export' writes it and every array of the simulation, scratch included, so the
+        exact state of a failing run is kept for inspection. It is a trajectory file of one frame (see 'TrajectoryFile'),
+        and 'load_trajectory' opens it as such.
+
+        Parameters
+        ----------
+        path : str or os.PathLike
+            The '.gstraj' file to write.
+        """
+        self._reject_unexportable()
+        save_checkpoint(path, TrajectorySource(self._sim, self.desc, self._layout))
+
+    @classmethod
+    def load_checkpoint(
+        cls,
+        path: str | os.PathLike,
+        show_viewer: bool = False,
+        viewer_options: ViewerOptions | None = None,
+        vis_options: VisOptions | None = None,
+        renderer: RendererOptions | None = None,
+    ) -> "Scene":
+        """Create and build the scene a checkpoint file holds, standing in the final state the file records.
+
+        The file is one written by 'save_checkpoint' or by recording a 'TrajectoryFile' to its end. The viewer and
+        visualizer options may be overridden and the renderer replaced (see 'load').
+
+        Parameters
+        ----------
+        path : str or os.PathLike
+            The file to read.
+        show_viewer : bool, optional
+            Whether to open an interactive viewer on the scene. Defaults to False.
+        viewer_options : ViewerOptions, optional
+            Viewer options overriding the recorded ones, for the fields they set. Defaults to None.
+        vis_options : VisOptions, optional
+            Visualizer options overriding the recorded ones, for the fields they set. Defaults to None.
+        renderer : RendererOptions, optional
+            Renderer replacing the recorded one. Defaults to None.
+
+        Returns
+        -------
+        scene : Scene
+            The built scene, in the recorded state.
+        """
+        trajectory = Trajectory(path, None, show_viewer, viewer_options, vis_options, renderer)
+        trajectory.seek(len(trajectory) - 1)
+        return trajectory.scene
+
+    @classmethod
+    def load_trajectory(
+        cls,
+        path: str | os.PathLike,
+        show_viewer: bool = False,
+        viewer_options: ViewerOptions | None = None,
+        vis_options: VisOptions | None = None,
+        renderer: RendererOptions | None = None,
+    ) -> Trajectory:
+        """Open a recorded trajectory in the scene it was recorded from, created and built here, to seek and replay.
+
+        The file is one written by recording a 'TrajectoryFile'. The viewer and visualizer options may be overridden
+        and the renderer replaced (see 'load').
+
+        Parameters
+        ----------
+        path : str or os.PathLike
+            The file to read.
+        show_viewer : bool, optional
+            Whether to open an interactive viewer on the scene. Defaults to False.
+        viewer_options : ViewerOptions, optional
+            Viewer options overriding the recorded ones, for the fields they set. Defaults to None.
+        vis_options : VisOptions, optional
+            Visualizer options overriding the recorded ones, for the fields they set. Defaults to None.
+        renderer : RendererOptions, optional
+            Renderer replacing the recorded one. Defaults to None.
+
+        Returns
+        -------
+        trajectory : Trajectory
+            The trajectory, holding the built scene as 'Trajectory.scene'.
+        """
+        return Trajectory(path, None, show_viewer, viewer_options, vis_options, renderer)
+
+    @classmethod
+    def _from_state(cls, state: SceneCheckpoint) -> "Scene":
+        """Create, build and restore the scene a checkpoint describes. '__reduce__' names it as the loader."""
+        scene = cls._from_description(state.scene)
+        scene.build(**dataclasses.asdict(state.layout))
+        scene.__setstate__(state)
+        return scene
+
+    @gs.assert_built
+    def __setstate__(self, state: SceneCheckpoint) -> None:
+        """Put this built scene in the state a checkpoint holds, as if it had run to there.
+
+        The scene must be built from the description the state was read from, with the same environment layout, since
+        the arrays written back are the ones that build allocates. A state from another layout is rejected, and a state
+        from another build by the names of the arrays that differ. Everything around the state restarts as under
+        'reset': the gradient tape, the sensors and the recorders forget the run that led here, and the visualizer
+        redraws.
+
+        Parameters
+        ----------
+        state : SceneCheckpoint
+            The state to put back, as read by '__getstate__' or cut from a trajectory frame.
+        """
+        if state.layout != self._layout:
+            gs.raise_exception(
+                f"The state was read from a scene built with {state.layout} and this one was built with {self._layout}."
+            )
+        if state.digest != self._desc_digest:
+            gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
+        # Every solver checks its record before anything is touched, so a record from another scene leaves this one as
+        # it was, the recorders included
+        solvers = {type(solver).__name__: solver for solver in self._sim.active_solvers}
+        if set(state.sim.solvers) != set(solvers):
+            gs.raise_exception(
+                f"The checkpoint holds {sorted(state.sim.solvers)} where this scene simulates {sorted(solvers)}."
+            )
+        for name, solver in solvers.items():
+            record = state.sim.solvers[name]
+            check_data((item for item in solver.data if item.kind in record.kinds), record.arrays)
+        # The recorders finish the run first (see 'reset'), and the restart follows the state, so the visualizer draws
+        # the state put back.
+        self._recorder_manager.record(self._sim.cur_step_global)
+        self._recorder_manager.reset()
+        self._sim.__setstate__(state.sim)
+        self._restart()
 
     def _sanitize_envs_idx(
         self, envs_idx: int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None
@@ -1629,26 +1842,6 @@ class Scene(RBC):
 
         return sanitize_index(envs_idx, -1, self.n_envs, 0, "envs_idx")
 
-    @gs.assert_built
-    def get_time(self, envs_idx=None):
-        """
-        Get the simulated time of each environment, in seconds.
-
-        Environments are stepped and reset independently, so each one carries its own simulated time. The number of
-        `scene.step()` calls is a separate scalar, `Simulator.cur_step_global`.
-
-        Parameters
-        ----------
-        envs_idx : None | array_like, optional
-            The indices of the environments. If None, all environments are returned. Defaults to None.
-
-        Returns
-        -------
-        time : torch.Tensor, shape (n_envs,) or scalar
-            The simulated time of each environment.
-        """
-        return self._sim.get_time(envs_idx)
-
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
@@ -1667,6 +1860,25 @@ class Scene(RBC):
     def substeps(self):
         """The number of substeps per simulation step."""
         return self._sim.substeps
+
+    @property
+    def timings(self):
+        """Wall time in seconds of the phases of a call to `step`, averaged over the latest `timings_window` steps
+        (see ProfilingOptions) among the steps that ran the phase, keyed by phase:
+
+        - physics: the solvers advancing the state over the substeps.
+        - sensors: the sensor updates, and sensors/<class name> the share of each sensor class.
+        - rendering: the viewer refresh.
+        - recorders: the recorders reading the state.
+        - video: the cameras rendering and encoding the frame of a recording.
+        - total: the whole step, the pre-step callbacks included.
+
+        A phase the step left out (the simulation vetoed by a pre-step callback, the visualizer update skipped) is
+        absent from that step, so the mapping is empty before the first step. On the GPU backends a phase covers the
+        host work of launching its kernels, which the device completes asynchronously, so the phases split the step on
+        the CPU backend and the total holds on every backend once a step reads the device back.
+        """
+        return self._sim.fps_tracker.timings
 
     @property
     def requires_grad(self):
@@ -1728,13 +1940,11 @@ class Scene(RBC):
 
     @property
     def desc(self) -> SceneDescription:
-        """Return the description this scene came from, as adding each entity to it resolved them.
+        """The description this scene is created from: its options and the description of each entity it holds.
 
-        It suffices to recreate the scene without any asset file.
-
-        Every entity holding a description of its own is named here by reference, so what an entity resolves and
-        what an attachment changes are both visible. What the build allocates is left out, so this describes the
-        authored scene rather than the state it has simulated to.
+        It suffices to recreate the scene without any asset file. Each entity's description stands here by reference,
+        so what an attachment changes is visible. What the build allocates is left out, so this describes the authored
+        scene rather than the state it has simulated to.
         """
         return self._desc
 

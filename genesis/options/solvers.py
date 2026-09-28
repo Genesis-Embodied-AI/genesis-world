@@ -491,8 +491,9 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         Constraint solver type. Current supported constraint solvers are 'gs.constraint_solver.CG' (conjugate gradient)
         and 'gs.constraint_solver.Newton' (Newton's method). Defaults to 'Newton'.
     iterations : int, optional
-        Maximum number of iterations for the constraint solver; the solve exits early once its convergence tolerance
-        is met, so this bound only binds on hard steps. Defaults to 50.
+        Maximum number of iterations of the constraint solver, which exits early once its tolerance is met. A batch of
+        parallel environments waits for its slowest one on every step, so raising the bound buys accuracy on the steps
+        whose hardest contacts never converge at the price of every such step. Defaults to 25.
     tolerance : float, optional
         Tolerance for the constraint solver. If None, resolved based on the floating-point precision selected via
         `gs.init(precision=...)`: 1e-5 for single precision ("32") and 1e-8 for double precision ("64"). Defaults
@@ -558,10 +559,6 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         allows, and what a model authoring its own values expects, at the cost of contacts that respond more abruptly. This parameter is called
         'timeconst' in Mujoco (https://mujoco.readthedocs.io/en/latest/modeling.html#solver-parameters). Defaults to
         0.01.
-    use_contact_island : bool, optional
-        Whether to partition the constraint solve into independent per-island blocks. It has no effect on a scene that
-        is a single dense-coupled tree (one island) or is differentiable, where the dense whole-scene solve is used
-        regardless. Defaults to True.
     use_hibernation : bool, optional
         Whether to put bodies that have come to rest to sleep, so the solver skips them until they are disturbed. It
         quietly has no effect on a body that is differentiable, prunable, or under no-slip friction. Defaults to False.
@@ -585,8 +582,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         otherwise. Defaults to None.
     broadphase_traversal : gs.broadphase_traversal, optional
         Broadphase traversal strategy. ``SAP`` (sweep-and-prune) or ``ALL_VS_ALL`` (parallel pair iteration). Defaults
-        to ``None`` (auto: ``SAP`` on CPU or when hibernation/heterogeneous entities are enabled, ``ALL_VS_ALL`` on GPU
-        otherwise). See ``gs.broadphase_traversal`` for details on each strategy.
+        to ``None`` (auto: ``SAP`` on CPU or with heterogeneous entities, ``ALL_VS_ALL`` on GPU otherwise). See
+        ``gs.broadphase_traversal`` for details on each strategy.
 
     Warning
     -------
@@ -612,7 +609,7 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
 
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton
-    iterations: PositiveInt = 50
+    iterations: PositiveInt = 25
     tolerance: PositiveFloat | None = None
     ls_iterations: PositiveInt = 50
     ls_tolerance: PositiveFloat = 1e-2
@@ -626,7 +623,6 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     contact_pruning_tolerance: PositiveFloat | None = 0.02
     sparse_solve: StrictBool | None = None
     constraint_timeconst: PositiveFloat | None = 0.01
-    use_contact_island: StrictBool = True
     box_box_detection: StrictBool = False
 
     # hibernation threshold
@@ -647,10 +643,17 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
     # broadphase configuration
     broadphase_traversal: gs.broadphase_traversal | None = None
 
-    def __init__(self, *, contact_resolve_time: float | None = None, **data):
+    def __init__(self, *, contact_resolve_time: float | None = None, use_contact_island: bool | None = None, **data):
         super().__init__(**data)
         if contact_resolve_time is not None:
             gs.logger.warning("'contact_resolve_time' is deprecated. Use 'constraint_timeconst' instead.")
+        if use_contact_island is not None:
+            if not use_contact_island:
+                gs.raise_exception(
+                    "'use_contact_island=False' is not supported: the constraint solver always solves the contact "
+                    "islands of the scene."
+                )
+            gs.logger.warning("'use_contact_island' is deprecated and has no effect.")
 
     def model_post_init(self, context):
         super().model_post_init(context)

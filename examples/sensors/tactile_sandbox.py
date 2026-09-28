@@ -201,7 +201,7 @@ def _plot_tactile_sensor(
         title, scale_factor, max_magnitude, twist_scale_factor, twist_max_magnitude, read_field = vector_field_setup[
             sensor_type
         ]
-        scene.start_recording(
+        scene.add_recorder(
             read_field,
             gs.recorders.MPLVectorFieldPlot(
                 title=title,
@@ -221,7 +221,7 @@ def _plot_tactile_sensor(
         "depth": ("ContactDepthProbe max depth", "depth", lambda r: float(r.max())),
         "contact": ("ContactProbe taxels in contact", "# taxels", lambda r: float(r.sum())),
     }[sensor_type]
-    scene.start_recording(
+    scene.add_recorder(
         lambda: tuple(reduce_fn(sensor.read()[i]) for i in range(n_envs)),
         gs.recorders.MPLLinePlot(
             labels=env_titles,

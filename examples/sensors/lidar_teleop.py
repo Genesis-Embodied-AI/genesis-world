@@ -105,7 +105,7 @@ def main():
 
     if args.pattern == "depth":
         sensor = scene.add_sensor(gs.sensors.DepthCamera(pattern=gs.sensors.DepthCameraPattern(), **sensor_kwargs))
-        scene.start_recording(
+        scene.add_recorder(
             data_func=(lambda: sensor.read_image()[0]) if args.num_envs > 0 else sensor.read_image,
             rec_options=gs.recorders.MPLImagePlot(),
         )

@@ -4,11 +4,12 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
 from genesis.repr_base import RBC
-from genesis.utils.description import Described, RigidJointDescription
 from genesis.utils.misc import DeprecationError, tensor_to_array
 
+from .description import RigidJointDescription
 
-class RigidJoint(Described, RBC):
+
+class RigidJoint(RBC):
     """
     Joint class for rigid body entities. Each RigidLink is connected to its parent link via a RigidJoint.
     """

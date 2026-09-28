@@ -129,8 +129,7 @@ class EGLDevice:
 class EGLPlatform(Platform):
     """Renders using EGL."""
 
-    def __init__(self, viewport_width, viewport_height, device_id: int | None = None):
-        super().__init__(viewport_width, viewport_height)
+    def __init__(self, device_id: int | None = None):
         if _eglQueryDevicesEXT is None and device_id not in (0, None):
             raise RuntimeError("EGL platform plugin is not available. Enforcing specific EGL device not supported.")
         self._egl_device_id = device_id
@@ -309,9 +308,6 @@ class EGLPlatform(Platform):
             # driver does not support terminate/re-initialize cycles on the same
             # device (returns EGL_BAD_ACCESS), which breaks multi-scene workflows.
             self._egl_display = None
-
-    def supports_framebuffers(self):
-        return True
 
 
 __all__ = ["EGLPlatform"]

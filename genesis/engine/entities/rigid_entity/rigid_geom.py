@@ -12,8 +12,9 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.repr_base import RBC
-from genesis.utils.description import Described, RigidGeomDescription, RigidVisGeomDescription
 from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
+
+from .description import RigidGeomDescription, RigidVisGeomDescription
 
 if TYPE_CHECKING:
     from genesis.engine.materials.rigid import Rigid as RigidMaterial
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 NUM_VERTS_VISUAL_GEOM_AABB = 200
 
 
-class RigidGeom(Described, RBC):
+class RigidGeom(RBC):
     """
     A `RigidGeom` is the basic building block of a `RigidEntity` for collision checking. It is usually constructed
     from a single mesh. This can be accessed via `link.geoms`.
@@ -400,8 +401,8 @@ class RigidGeom(Described, RBC):
         """
         Get the position of the geom.
 
-        When 'relative' is True (default), the position is reported in the user frame, with the entity's morph pose
-        offset stripped, rather than the world frame used by the solver.
+        When 'relative' is True (default), the position reported is that of the authored geom origin. The internal geom
+        origin used by the solver is the authored one moved by the entity's morph 'offset_pos' / 'offset_quat'.
         """
         return self._solver.get_geoms_pos(self._idx, envs_idx, relative=relative)[..., 0, :]
 
@@ -410,8 +411,8 @@ class RigidGeom(Described, RBC):
         """
         Get the quaternion of the geom.
 
-        When 'relative' is True (default), the orientation is reported in the user frame, with the entity's morph pose
-        offset stripped, rather than the world frame used by the solver.
+        When 'relative' is True (default), the orientation reported is that of the authored geom origin. The internal
+        geom origin used by the solver is the authored one moved by the entity's morph 'offset_pos' / 'offset_quat'.
         """
         return self._solver.get_geoms_quat(self._idx, envs_idx, relative=relative)[..., 0, :]
 
@@ -856,7 +857,7 @@ class RigidGeom(Described, RBC):
         return f"{self.__repr_name__()}: {self._uid}, idx: {self._idx} (from entity {self._entity.uid}, link {self._link.uid})"
 
 
-class RigidVisGeom(Described, RBC):
+class RigidVisGeom(RBC):
     """
     A `RigidVisGeom` is a counterpart of `RigidGeom`, but for visualization purposes. This can be accessed via `link.vis_geoms`.
     """
@@ -901,8 +902,8 @@ class RigidVisGeom(Described, RBC):
         """
         Get the position of the visual geom.
 
-        When 'relative' is True (default), the position is reported in the user frame, with the entity's morph pose
-        offset stripped, rather than the world frame used by the solver.
+        When 'relative' is True (default), the position reported is that of the authored geom origin. The internal geom
+        origin used by the solver is the authored one moved by the entity's morph 'offset_pos' / 'offset_quat'.
         """
         return self._solver.get_vgeoms_pos(self._idx, envs_idx, relative=relative)[..., 0, :]
 
@@ -911,8 +912,8 @@ class RigidVisGeom(Described, RBC):
         """
         Get the quaternion of the visual geom.
 
-        When 'relative' is True (default), the orientation is reported in the user frame, with the entity's morph pose
-        offset stripped, rather than the world frame used by the solver.
+        When 'relative' is True (default), the orientation reported is that of the authored geom origin. The internal
+        geom origin used by the solver is the authored one moved by the entity's morph 'offset_pos' / 'offset_quat'.
         """
         return self._solver.get_vgeoms_quat(self._idx, envs_idx, relative=relative)[..., 0, :]
 

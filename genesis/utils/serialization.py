@@ -15,6 +15,7 @@ import pathlib
 import sys
 import types
 import typing
+import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence, Set
 from enum import IntEnum
@@ -22,7 +23,8 @@ from functools import lru_cache, partial
 from typing import Callable, NamedTuple
 
 import numpy as np
-from pydantic import TypeAdapter, ValidationError
+from frozendict import frozendict
+from pydantic import AfterValidator, TypeAdapter, ValidationError, ValidationInfo
 
 import genesis as gs
 from genesis.options.options import Options
@@ -124,6 +126,27 @@ def _class_codec(cls) -> tuple[Callable, Callable] | None:
         if parent in _REGISTERED:
             return _REGISTERED[parent]
     return None
+
+
+# Validators receive it as 'info.context' while a value read from a file is checked (see 'ignore_invalid_load').
+_FROM_FILE = frozendict({"from_file": True})
+
+
+def ignore_invalid_load(accepted: Iterable) -> AfterValidator:
+    """Returns a validator loading a recorded value outside 'accepted' as None, the unset state of an optional field.
+
+    A value a file records holds wherever the file was written. A field whose values hold there and nowhere else
+    declares beside its type, through this, which of them hold on this machine, so the file opens here whatever it
+    asked for. What a caller gives is left as given, to be rejected where it is used.
+    """
+    accepted = tuple(accepted)
+
+    def settle(value, info: ValidationInfo):
+        if value in accepted or info.context is None or not info.context.get("from_file", False):
+            return value
+        return None
+
+    return AfterValidator(settle)
 
 
 @lru_cache(maxsize=None)
@@ -325,7 +348,7 @@ def _store_array(value, exported: "Exported") -> int:
     file as they share it in memory. Two views onto one buffer read the same bytes, so the memory a view reads keys
     the lookup rather than the view itself, and every keyed array is held until the export ends so no address is
     reused meanwhile. The copy is made contiguous in row order, so the file holds the same bytes however numpy laid
-    the values out.
+    the values out, and keeps the shape it was given: an array holding one value and no axis loads back as such.
     """
     layout = value.__array_interface__
     key = (layout["data"][0], layout["shape"], layout["strides"], layout["typestr"])
@@ -334,7 +357,7 @@ def _store_array(value, exported: "Exported") -> int:
         slot = len(exported.values)
         exported.slots[key] = slot
         exported.stored.append(value)
-        exported.values.append(np.ascontiguousarray(value))
+        exported.values.append(np.require(value, requirements="C"))
     return slot
 
 
@@ -490,7 +513,7 @@ def _load_value(raw, expect, loaded: "Loaded"):
                 ):
                     continue
                 try:
-                    _field_check(cls, name).validate_python(value)
+                    values[name] = _field_check(cls, name).validate_python(value, context=_FROM_FILE)
                 except ValidationError as e:
                     gs.raise_exception_from(f"A Genesis file states a '{name}' that {cls.__name__} rejects.", e)
             return cls.model_construct(_fields_set=set(raw["given"]), **values)
@@ -522,20 +545,46 @@ def _load_value(raw, expect, loaded: "Loaded"):
     gs.raise_exception(f"A Genesis file holds a {type(raw).__name__} where {expect} was declared.")
 
 
-def export(path: str | os.PathLike, values: dict, redact: dict[str, str]) -> None:
+def _redact_paths(value, key=None):
+    """Return the value with every path it holds reduced to the name of what the path points at.
+
+    A directory belongs to the author's filesystem, so a file keeps the name alone. A path stands where a field or a
+    key names one, 'file' or a name ending in '_path' (a morph's file, a mesh's or a texture's path), and inside an
+    inline document as the value of an attribute. Every other string, a prim path or a joint name written with slashes
+    among them, is left as it is.
+    """
+    if isinstance(value, str):
+        try:
+            document = ET.fromstring(value)
+        except ET.ParseError:
+            is_path = key is not None and (key == "file" or key.endswith("_path")) and os.path.isabs(value)
+            return os.path.basename(value) if is_path else value
+        for element in document.iter():
+            for stated in element.attrib.values():
+                if os.path.isabs(stated):
+                    value = value.replace(stated, os.path.basename(stated))
+        return value
+    if isinstance(value, list):
+        return [_redact_paths(item) for item in value]
+    if isinstance(value, dict):
+        if "@dict" in value:
+            return {"@dict": [[k, _redact_paths(v, k if isinstance(k, str) else None)] for k, v in value["@dict"]]}
+        return {name: _redact_paths(item, name) for name, item in value.items()}
+    return value
+
+
+def export(path: str | os.PathLike, values: dict) -> None:
     """Export what a caller holds to a file that loads back as data alone, holding no code and reading no asset.
 
     'values' names each value the file carries, and loading it asks for those names back. The file is a zip archive of
     one manifest and one member holding every array, and what each value is comes from the declared type of what
     holds it, so loading one creates the descriptions, options and meshes those declarations allow and nothing else.
-
-    'redact' names what no file may hold, each with what stands for it. A directory an asset was read from reaches
-    values a caller never sees - the identifier of a mesh, the provenance of another - so the substitution is made
-    over the whole manifest rather than value by value.
+    Every path the values name is reduced here to the name of what it points at (see '_redact_paths'), so no other
+    code has to.
     """
     exported = Exported(values=[], slots={}, stored=[], classes=set())
     # Every class the file holds is known once its values are exported, so the schema follows them.
-    held = {name: _export_value(value, type(value), exported) for name, value in values.items()}
+    held = _redact_paths({name: _export_value(value, type(value), exported) for name, value in values.items()})
     manifest = {
         "genesis": gs.__version__,
         "source": source_digest(),
@@ -543,8 +592,6 @@ def export(path: str | os.PathLike, values: dict, redact: dict[str, str]) -> Non
         "held": held,
     }
     text = json.dumps(manifest, indent=1)
-    for held_path, stands_for in redact.items():
-        text = text.replace(json.dumps(held_path)[1:-1], json.dumps(stands_for)[1:-1])
     member = io.BytesIO()
     # Every array is compressed where it is written: the member holding them is itself an archive, so an archive
     # around it would find nothing left to compress.

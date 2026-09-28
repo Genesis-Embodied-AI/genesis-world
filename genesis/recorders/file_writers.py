@@ -23,29 +23,15 @@ class BaseFileWriter(Recorder):
     """
     Base class for file writers.
 
-    Handles filename counter when save_on_reset is True.
     """
 
     def build(self):
         super().build()
-        self.counter = 0
 
         os.makedirs(os.path.abspath(os.path.dirname(self._options.filename)), exist_ok=True)
         self._initialize_writer()
 
-    def reset(self, envs_idx=None):
-        super().reset(envs_idx)
-
-        # no envs specific saving supported
-        if self._options.save_on_reset:
-            self.cleanup()
-            self.counter += 1
-            self._initialize_writer()
-
     def _get_filename(self):
-        if self._options.save_on_reset:
-            path, ext = os.path.splitext(self._options.filename)
-            return f"{path}_{self.counter}{ext}"
         return self._options.filename
 
     def _initialize_writer(self):

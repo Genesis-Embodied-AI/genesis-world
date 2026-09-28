@@ -11,9 +11,10 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
+from genesis.engine.materials import FEM
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.utils.misc import qd_to_torch
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
+from genesis.utils.misc import qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
+    material_cls = FEM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -354,10 +356,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             # batch fields
             self.init_batch_fields()
 
-            # rendering
-            self.envs_offset = qd.Vector.field(3, dtype=qd.f32, shape=self._B)
-            self.envs_offset.from_numpy(self._scene.envs_offset.astype(np.float32))
-
             self.init_element_fields()
             self.init_surface_fields()
             self.init_vvert_fields()
@@ -389,7 +387,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # every solver integrates at is settled from the active ones, and that is settled before any of them builds.
         return self.n_elements > 0
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "FEMEntity":
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+    ) -> "FEMEntity":
         # add material's update methods if not matching any existing material
         exist = False
         for mat in self._mats:
@@ -1399,8 +1399,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_vv, i_b in qd.ndrange(self._n_vverts, self._B):
             i_v = self.vverts_info[i_vv].vert_idx
             for j in qd.static(range(3)):
-                pos_j = qd.cast(self.elements_v[f, i_v, i_b].pos[j], qd.f32)
-                self.vverts_render[i_vv, i_b].pos[j] = pos_j + self.envs_offset[i_b][j]
+                self.vverts_render[i_vv, i_b].pos[j] = qd.cast(self.elements_v[f, i_v, i_b].pos[j], qd.f32)
 
     @qd.kernel
     def _kernel_add_vverts(

@@ -36,13 +36,12 @@ def joint_torque_pendulums():
 
 @pytest.fixture(scope="session")
 def joint_torque_contact_pendulum():
-    # Single lossless pendulum; the wall it presses against is added separately in the test. armature is set to 0 to
-    # override the MJCF morph's nonzero default_armature.
+    # Single lossless pendulum; the wall it presses against is added separately in the test.
     mjcf = ET.Element("mujoco", model="joint_torque_contact_pendulum")
     ET.SubElement(mjcf, "compiler", angle="radian")
     worldbody = ET.SubElement(mjcf, "worldbody")
     arm = ET.SubElement(worldbody, "body", name="arm")
-    ET.SubElement(arm, "joint", name="hinge", type="hinge", axis="0 1 0", armature="0")
+    ET.SubElement(arm, "joint", name="hinge", type="hinge", axis="0 1 0")
     mass = ET.SubElement(arm, "body", pos="0 0 -1.0")
     ET.SubElement(mass, "geom", type="sphere", size="0.05", mass="1.0")
     return ET.tostring(mjcf, encoding="unicode")
@@ -79,6 +78,7 @@ def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
     pendulums = scene.add_entity(
         morph=gs.morphs.MJCF(
             file=joint_torque_pendulums,
+            default_armature=0.0,
         ),
     )
     sensor = scene.add_sensor(
@@ -145,6 +145,7 @@ def test_joint_torque_with_contact(joint_torque_contact_pendulum, show_viewer, t
     pendulum = scene.add_entity(
         morph=gs.morphs.MJCF(
             file=joint_torque_contact_pendulum,
+            default_armature=0.0,
         ),
     )
     # Box face at x=0.75; the mass (sphere r=0.05) at theta=pi/4 sits at x=0.707, so contact is active from step 1.

@@ -880,7 +880,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.dyn_info.geoms,
                 self.rigid_solver.collider._sdf._sdf_info,
                 self.rigid_solver.rigid_info,
-                self.rigid_solver.collider._collider_static_config,
+                self.rigid_solver.collider.collider_config,
             )
 
     def couple(self, f):
@@ -894,7 +894,7 @@ class LegacyCoupler(RBC):
                 links_state=self.rigid_solver.dyn_state.links,
                 rigid_info=self.rigid_solver.rigid_info,
                 sdf_info=self.rigid_solver.collider._sdf._sdf_info,
-                collider_static_config=self.rigid_solver.collider._collider_static_config,
+                collider_static_config=self.rigid_solver.collider.collider_config,
             )
 
         # SPH <-> Rigid
@@ -907,7 +907,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.dyn_info.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._sdf._sdf_info,
-                self.rigid_solver.collider._collider_static_config,
+                self.rigid_solver.collider.collider_config,
             )
 
         # PBD <-> Rigid
@@ -918,7 +918,7 @@ class LegacyCoupler(RBC):
                 links_state=self.rigid_solver.dyn_state.links,
                 sdf_info=self.rigid_solver.collider._sdf._sdf_info,
                 rigid_info=self.rigid_solver.rigid_info,
-                collider_static_config=self.rigid_solver.collider._collider_static_config,
+                collider_static_config=self.rigid_solver.collider.collider_config,
             )
 
             # 1-way: animate particles by links, over the substep interval and no faster than the clamp allows.
@@ -934,7 +934,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.dyn_state.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._sdf._sdf_info,
-                self.rigid_solver.collider._collider_static_config,
+                self.rigid_solver.collider.collider_config,
             )
             self.fem_rigid_link_constraints()
 
@@ -947,7 +947,7 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.dyn_state.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._sdf._sdf_info,
-                self.rigid_solver.collider._collider_static_config,
+                self.rigid_solver.collider.collider_config,
             )
         if self.mpm_solver.is_active:
             self.mpm_grid_op.grad(
@@ -958,7 +958,7 @@ class LegacyCoupler(RBC):
                 links_state=self.rigid_solver.dyn_state.links,
                 rigid_info=self.rigid_solver.rigid_info,
                 sdf_info=self.rigid_solver.collider._sdf._sdf_info,
-                collider_static_config=self.rigid_solver.collider._collider_static_config,
+                collider_static_config=self.rigid_solver.collider.collider_config,
             )
 
     @property

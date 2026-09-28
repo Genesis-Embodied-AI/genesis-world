@@ -10,6 +10,7 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
 from genesis.utils.misc import DeprecationError, qd_to_torch
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
+    material_cls = MPM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -253,7 +255,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def is_active(self):
         return self.n_particles > 0
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "MPMEntity":
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+    ) -> "MPMEntity":
         self.add_material(material)
 
         # create entity
@@ -574,7 +578,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
-            self.sim.coupler.rigid_solver.collider._collider_static_config,
+            self.sim.coupler.rigid_solver.collider.collider_config,
         )
 
     def substep_pre_coupling_grad(self, f):
@@ -585,7 +589,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
-            self.sim.coupler.rigid_solver.collider._collider_static_config,
+            self.sim.coupler.rigid_solver.collider.collider_config,
         )
         self.svd_grad(f)
         self.compute_F_tmp.grad(f)

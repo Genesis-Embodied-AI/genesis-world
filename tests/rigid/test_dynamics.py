@@ -186,7 +186,7 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
     if dynamics:
         for entity in scene.entities[1:]:
             entity.set_dofs_velocity(4.0 * np.random.rand(6))
-    num_steps = 850 if dynamics else 150
+    num_steps = 900 if dynamics else 150
     for i in range(num_steps):
         scene.step()
         if i > num_steps - 50:
@@ -209,7 +209,7 @@ def test_many_boxes_dynamics(box_box_detection, gjk_collision, dynamics, show_vi
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["double_ball_pendulum"])
-def test_apply_external_wrench(xml_path, show_viewer):
+def test_apply_external_wrench(xml_path, show_viewer, tol):
     GRAVITY = 2.0
 
     scene = gs.Scene(
@@ -300,7 +300,8 @@ def test_apply_external_wrench(xml_path, show_viewer):
     )
 
     # A local force and a local application point are both expressed in the frame that 'ref' designates, which only
-    # shows on a link whose inertial frame is rotated with respect to its own frame.
+    # shows on a link whose inertial frame is rotated with respect to its own frame. The kernel rotates by quaternion
+    # where the reference multiplies by the rotation matrix, two fp32 formulas a few ulps apart.
     base_link = robot.get_link("base")
     with pytest.raises(AssertionError):
         assert_allclose(base_link.desc.inertial_quat, gu.identity_quat(), tol=gs.EPS)
@@ -320,21 +321,21 @@ def test_apply_external_wrench(xml_path, show_viewer):
     )
     force_world = base_link_R @ force_local
     point_world = base_link_pos + base_link_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     # A world application point locates the point on its own, so it reproduces the local one it is derived from.
     rigid_solver.clear_external_force()
     base_link.apply_external_force(force_world, pos=point_world)
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     rigid_solver.clear_external_force()
@@ -343,11 +344,11 @@ def test_apply_external_wrench(xml_path, show_viewer):
     )
     force_world = base_inertial_R @ force_local
     point_world = base_link_COM + base_inertial_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     with pytest.raises(gs.GenesisException, match="'ref' must be one of"):
@@ -359,10 +360,25 @@ def test_apply_external_wrench(xml_path, show_viewer):
     with pytest.raises(gs.GenesisException, match="'pos' requires 'force'"):
         rigid_solver.apply_links_external_wrench(torque=(0, 0, 0), links_idx=duck_link_idx, pos=lever_arm)
 
+    # Armature on a free joint adds to the inertia the solver turns the body with. A torque from rest spins the body up
+    # by that augmented inertia under the implicit integrators too. The torque is given in the inertial frame, which
+    # holds the inertia tensor, and the angular velocity is read in the link frame.
+    ARMATURE, TORQUE = 0.002, (0.02, -0.01, 0.015)
+    duck_inertia = duck.base_link.desc.inertia + ARMATURE * np.eye(3)
+    duck_inertial_R = gu.quat_to_R(duck.base_link.desc.inertial_quat)
+    duck_ang = duck.get_dofs_velocity()[3:]
+    duck.set_dofs_armature(ARMATURE, dofs_idx_local=[3, 4, 5])
+    duck.base_link.apply_external_torque(TORQUE, ref=gs.link_ref_frame.link_COM, local=True)
+    scene.step()
+    duck_spin = duck_inertial_R @ np.linalg.solve(duck_inertia, np.array(TORQUE) * scene.dt)
+    assert_allclose(duck.get_dofs_velocity()[3:] - duck_ang, duck_spin, tol=1e-4)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.approximate_implicitfast])
-def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer, tol, integrator):
+def test_energy_analytical_and_conservation(
+    spring_double_pendulum, implicit_inertial_origin_chain, show_viewer, tol, integrator
+):
     g = 9.81
     dt = 0.001
     h0 = 0.5
@@ -402,9 +418,66 @@ def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer,
             file=spring_double_pendulum,
         ),
     )
+    # A load hung on the elbow link weighs on both joints of the arm and swings with it.
+    arm_load = scene.add_entity(
+        gs.morphs.URDF(
+            file=implicit_inertial_origin_chain,
+            pos=(0.45, 0.5, 0.8),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
+    arm_load.attach(arm, parent_link_name="arm_lower", pos=(0.2, 0.0, 0.0))
+    # Three copies of a tumbling free body, high enough to fall for the whole horizon: one link, a root with a fixed
+    # child, and one link with armature on its angular DOFs.
+    tumblers = [
+        scene.add_entity(
+            gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(x, 1.0, 2.0),
+                merge_fixed_links=merge_fixed_links,
+            ),
+        )
+        for x, merge_fixed_links in ((1.0, True), (1.6, False), (2.2, True))
+    ]
+    # A fourth copy receives a fixed entity off its center of mass, so the body it tumbles as is the pair.
+    tumblers.append(
+        scene.add_entity(
+            gs.morphs.URDF(
+                file=implicit_inertial_origin_chain,
+                pos=(2.8, 1.0, 2.0),
+            ),
+        )
+    )
+    load = scene.add_entity(
+        gs.morphs.URDF(
+            file=implicit_inertial_origin_chain,
+            pos=(2.8, 1.0, 2.0),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
+    load.attach(tumblers[-1], parent_link_name=tumblers[-1].base_link.name, pos=(0.3, 0.0, 0.0))
     scene.build()
+    rigid_solver = scene.rigid_solver
+    # The attachment leaves the anchor of the receiving body where the build put it, so its configuration reads exactly
+    # as the lone copy's, offset by the morph pose.
+    assert_allclose(tumblers[-1].get_qpos() - tumblers[0].get_qpos(), (1.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), tol=gs.EPS)
+    arm_links_idx = [link.idx for link in (*arm.links, *arm_load.links)]
+    arm_dofs_idx = slice(arm.dof_start, arm.dof_end)
+    tumblers_links_idx = [[link.idx for link in tumbler.links] for tumbler in tumblers]
+    tumblers_links_idx[-1] += [link.idx for link in load.links]
+    tumblers_dofs_idx = [slice(tumbler.dof_start, tumbler.dof_end) for tumbler in tumblers]
+    tumblers_links_mass = [rigid_solver.get_links_mass(links_idx) for links_idx in tumblers_links_idx]
+    # One row of mass fractions per tumbler turns the links' centers of mass into the tumblers' own.
+    tumblers_all_links_idx = [idx for links_idx in tumblers_links_idx for idx in links_idx]
+    tumblers_weights = torch.block_diag(*[(links_mass / links_mass.sum())[None] for links_mass in tumblers_links_mass])
 
     arm.set_dofs_position([0.5, -0.8])
+    ARMATURE = 0.05
+    for tumbler in tumblers:
+        tumbler.set_dofs_velocity([0.0, 0.0, 0.0, 3.0, 1.0, 2.0])
+    tumblers[2].set_dofs_armature(ARMATURE, dofs_idx_local=[3, 4, 5])
 
     # Nearly undamped contact for sphere_a: small dampratio gives very stiff elastic spring with minimal damping.
     # Contact sol_params are averaged: 0.5*(geom_a + geom_b), so both geoms must share the same params.
@@ -414,16 +487,39 @@ def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer,
     mass = sphere_a.get_links_mass()
     te_initial = sphere_a.get_total_energy()
 
-    ke_a, pe_a, ke_b, pe_b, te_arm = [], [], [], [], []
+    ke_a, pe_a, ke_b, pe_b, te_arm, ke_tumblers, vel_tumblers, pos_tumblers = [], [], [], [], [], [], [], []
+    pos_tumblers.append(
+        tumblers_weights @ rigid_solver.get_links_pos(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+    )
+    vel_tumblers.append(
+        tumblers_weights @ rigid_solver.get_links_vel(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+    )
     impact_step = -1
     for i in range(n_steps):
         scene.step()
-        te_arm.append(arm.get_total_energy())
+        pos_tumblers.append(
+            tumblers_weights @ rigid_solver.get_links_pos(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+        )
+        vel_tumblers.append(
+            tumblers_weights @ rigid_solver.get_links_vel(tumblers_all_links_idx, ref=gs.link_ref_frame.link_COM)
+        )
+        te_arm.append(
+            rigid_solver.get_kinetic_energy(arm_links_idx, arm_dofs_idx)
+            + rigid_solver.get_potential_energy(arm_links_idx, arm_dofs_idx)
+        )
+        ke_tumblers.append(
+            torch.stack(
+                [
+                    rigid_solver.get_kinetic_energy(links_idx, dofs_idx)
+                    for links_idx, dofs_idx in zip(tumblers_links_idx, tumblers_dofs_idx)
+                ]
+            )
+        )
         ke_a.append(sphere_a.get_kinetic_energy())
         pe_a.append(sphere_a.get_potential_energy())
         ke_b.append(sphere_b.get_kinetic_energy())
         pe_b.append(sphere_b.get_potential_energy())
-        if impact_step < 0 and scene.rigid_solver.collider._collider_state.n_contacts.to_numpy().any():
+        if impact_step < 0 and scene.rigid_solver.collider.collider_state.n_contacts.to_numpy().any():
             impact_step = i
     assert impact_step > 0
 
@@ -446,12 +542,269 @@ def test_energy_analytical_and_conservation(spring_double_pendulum, show_viewer,
     te_b_final = ke_b[-1] + pe_b[-1]
     assert te_b_final < te_initial
 
-    # Spring-driven arm: nothing dissipates, so its energy holds throughout the swing to integration error
+    # Spring-driven arm with its load: nothing dissipates, so its energy holds through the swing to integration error
     te_arm = torch.stack(te_arm)
     assert_allclose(te_arm, te_arm[0], tol=0.01)
-    # The springs must carry a real share of that energy, otherwise the check above would hold with no spring term
+    # The springs must carry a real share of the arm's own energy, or the check above would hold with no spring term
     spring_energy = 0.5 * torch.sum(arm.get_dofs_stiffness() * arm.get_dofs_position() ** 2)
-    assert spring_energy > 0.1 * te_arm[-1]
+    assert spring_energy > 0.1 * arm.get_total_energy()
+
+    # Gravity is the only force on a tumbling body, so its center of mass falls along the parabola the velocity-implicit
+    # update traces, whatever the body turns about it. A body anchored on its center of mass integrates that point
+    # itself and follows the parabola exactly. The pair is anchored on its first link alone: its center of mass starts
+    # moving with the spin, which the parabola carries through the initial velocity, and turns about the integrated
+    # origin, which leaves the parabola by the rotation of the offset over one step, a second-order term per step.
+    tumblers_mass = torch.stack([links_mass.sum() for links_mass in tumblers_links_mass])
+    steps = torch.arange(n_steps + 1, dtype=gs.tc_float, device=gs.device)[:, None, None]
+    pos_tumblers, vel_tumblers = torch.stack(pos_tumblers), torch.stack(vel_tumblers)
+    gravity = torch.tensor((0.0, 0.0, -g), dtype=gs.tc_float, device=gs.device)
+    pos_expected = pos_tumblers[0] + vel_tumblers[0] * steps * dt + gravity * dt**2 * steps * (steps + 1) / 2
+    assert_allclose(pos_tumblers[:, :-1], pos_expected[:, :-1], tol=tol)
+    pair_offset = np.linalg.norm(tensor_to_array(pos_tumblers[0, -1] - tumblers[-1].get_pos()))
+    pair_spin = np.linalg.norm(tensor_to_array(tumblers[-1].get_dofs_velocity()[3:]))
+    assert_allclose(pos_tumblers[:, -1], pos_expected[:, -1], atol=n_steps * (dt * pair_spin) ** 2 * pair_offset)
+    # Gravity exerts no torque about the center of mass, so the rotational energy of a tumbling body is a constant of
+    # its motion. The midpoint rule keeps it, with armature the augmented energy w^T (I + A) w / 2. Each Newton solve
+    # leaves a residual at the working precision, and the horizon accumulates them.
+    ke_rot = torch.stack(ke_tumblers) - 0.5 * tumblers_mass * vel_tumblers[1:].square().sum(dim=-1)
+    if integrator != gs.integrator.Euler:
+        assert_allclose(ke_rot, ke_rot[0], tol=10.0 * tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+            # A single Newton iteration leaves the impact solve short of its fixed point, so the constraint force
+            # disagrees with the solver's acceleration by a residual the flap's inertia would magnify.
+            iterations=1,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.35, -0.55, 0.3),
+            camera_lookat=(0.05, 0.0, 0.03),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_flap,
+        ),
+    )
+    scene.build()
+
+    # Swung into the ground at zero restitution, the flap keeps a small fraction of its mechanical energy: the impact
+    # and the joint damping only take energy away, and the impact solve stopping short of its fixed point pumps a
+    # little back in. Integrating the residual of that solve as an impulse would instead throw the flap back up with
+    # half of its energy, or blow it up at a larger step.
+    entity.set_dofs_velocity(5.0)
+    energy_init = tensor_to_array(entity.get_total_energy())
+    for _ in range(20):
+        scene.step()
+    assert_allclose(entity.get_total_energy(), 0.0, atol=2e-2 * energy_init)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer):
+    G = 9.81
+    DT = 0.002
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0, 0, -G),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            # The velocity update is explicit and no DOF is damped, so the velocity difference over a step is the
+            # acceleration the constraint solve returned.
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.12, -0.16, 0.07),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.8, 0.8),
+            smooth=False,
+        ),
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=resting_light_stick,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.9),
+            smooth=False,
+        ),
+    )
+    scene.build()
+
+    for _ in range(50):
+        scene.step()
+
+    # A slow spin of the resting stick puts its rolling friction at its bound, where the solve must still balance.
+    entity.set_dofs_velocity([0.0, 0.0, 0.0, 3.5e-3, -1.75e-3, 0.0])
+
+    weight = entity.get_mass() * G
+    vel = entity.get_dofs_velocity()
+
+    for _ in range(30):
+        scene.step()
+        vel_next = entity.get_dofs_velocity()
+        acc = (vel_next - vel) / DT
+        inertial_force = entity.get_mass_mat() @ acc
+        assert_allclose(
+            inertial_force / weight, entity.get_dofs_force() / weight, atol=2e-6 if gs.np_float == np.float32 else 1e-9
+        )
+        vel = vel_next
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
+    DT = 0.01
+    FORCE_TOL = 2e-4
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.0, 0.8),
+            camera_lookat=(0.0, 0.3, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    hand = scene.add_entity(
+        gs.morphs.URDF(
+            file="urdf/shadow_hand/shadow_hand.urdf",
+            pos=(0.0, 0.0, 0.5),
+            euler=(-90, 0, 0),
+            fixed=True,
+        ),
+    )
+    cube = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.05, 0.05, 0.05),
+            pos=(0.03, 0.33, 0.57),
+        ),
+        material=gs.materials.Rigid(
+            rho=400.0,
+        ),
+    )
+    scene.build()
+    hand.set_dofs_kp(5.0)
+    hand.set_dofs_kv(0.1)
+    hand.set_dofs_force_range(-1.0, 1.0)
+
+    # A grasp caught mid-motion, the cube sliding over the palm under cupped fingers with several friction contacts
+    # near their bound, where the friction disc radii and the normal forces converge together.
+    # fmt: off
+    cube.set_qpos([0.03309, 0.33606, 0.55939, -0.98304, 0.040303, -0.052302, 0.17111])
+    cube.set_dofs_velocity([-0.0012282, 0.091947, -0.14901, -1.6697, -1.3792, -1.3602])
+    hand.set_qpos([
+        8.5606e-05, -0.066072, -0.016745, 0.5127, -0.023948, -0.0022305, 0.91073, -0.036201, 0.79698, 0.56414, 0.82663,
+        0.053306, 0.82552, 0.81338, 0.74415, 0.041697, 0.70966, 0.45989, 0.76522, 0.30411, -0.013719, 1.0085, 1.0936,
+        0.76916,
+    ])
+    hand.set_dofs_velocity([
+        0.0016572, -0.52164, -0.041012, -0.28545, 0.12339, -1.0535, -0.31426, 0.18571, -0.48743, -2.3359, 0.46389,
+        -0.27495, 0.2125, -1.0205, -0.1225, -0.5791, -0.60223, -1.3898, -0.61759, -0.056213, -0.44572, 1.4352, 1.0566,
+        -0.58018,
+    ])
+    hand.control_dofs_position([
+        0.0, 0.0, -0.14992, 0.98554, 0.028118, -0.21302, 1.261, 0.069669, 1.1161, 0.45466, 0.95139, 0.16301, 0.79595,
+        0.59608, 1.241, 0.13232, 0.99815, 0.97538, 0.87434, 0.56709, -0.010879, 0.58655, 1.0439, 0.98966,
+    ])
+    # fmt: on
+
+    vel_prev = [entity.get_dofs_velocity() for entity in (cube, hand)]
+    scene.step()
+    # An unconverged constraint solve leaves the integrated acceleration and the reported forces apart by its residual,
+    # so the step integrates an acceleration its own forces do not produce and the friction law is violated by that
+    # much. The acceleration stays the integrated quantity: re-solving it from the forces would turn the residual into
+    # an impulse, which on a light body injects energy, and correcting the forces instead would break their sum over
+    # the contacts, since admissible contact forces producing the acceleration are the solution of the problem itself.
+    for entity, vel in zip((cube, hand), vel_prev):
+        acc = (entity.get_dofs_velocity() - vel) / DT
+        assert_allclose(acc, entity.get_dofs_acc(), tol=tol)
+        assert_allclose(entity.get_mass_mat() @ acc, entity.get_dofs_force(), tol=FORCE_TOL)
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_static_equilibrium(damped_pendulum_and_tilted_light_capsule, contact_resolution, show_viewer):
+    N_STEPS = 100
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.002,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.12, -0.16, 0.07),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.8, 0.8),
+            smooth=False,
+        ),
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_pendulum_and_tilted_light_capsule,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.9),
+            smooth=False,
+        ),
+    )
+    scene.build()
+    capsule = entity.get_link("capsule")
+    capsule_dofs_idx = capsule.joints[0].dofs_idx_local
+
+    entity.set_dofs_velocity(2.0, entity.get_joint("shoulder").dofs_idx_local)
+    for _ in range(50):
+        scene.step()
+
+    # The capsule has rocked onto its length and lies still, and a light link at rest must stay at rest
+    for _ in range(N_STEPS):
+        scene.step()
+        vel = entity.get_dofs_velocity(capsule_dofs_idx)
+        assert_allclose(vel[:3], 0.0, atol=2e-5)
+        assert_allclose(vel[3:], 0.0, atol=1e-3)
 
 
 @pytest.mark.slow  # ~250s
@@ -628,6 +981,21 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
         return
     hand.attach(arm, "tip")
     hand_branch.attach(arm, "a2")
+    # A free body attached onto a link the world carries is carried by it too
+    pedestal = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, -2.0, 0.1),
+            fixed=True,
+        )
+    )
+    mounted = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, -2.0, 0.5),
+        )
+    )
+    mounted.attach(pedestal, pedestal.base_link.name, pos=(0.0, 0.0, 0.15))
     if box_position == "inside_target":
         hand_box = scene.add_entity(
             gs.morphs.MJCF(
@@ -646,6 +1014,11 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     assert hand_branch.base_link.parent_idx == arm.get_link("a2").idx
     for child in (hand, hand_chained, hand_branch):
         assert_equal([link.root_idx for link in child.links], tip_link.root_idx)
+    assert all(link.is_fixed for link in mounted.links)
+    assert mounted.n_dofs == 0
+    mounted_verts = mounted.get_verts()
+    assert_allclose(mounted_verts.min(dim=-2).values, (-0.05, -2.05, 0.2), tol=tol)
+    assert_allclose(mounted_verts.max(dim=-2).values, (0.05, -1.95, 0.3), tol=tol)
 
     mono_dofs = torch.arange(mono.dof_start, mono.dof_start + mono.n_dofs)
     hands = (hand, hand_chained, hand_branch)
@@ -669,13 +1042,18 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     assert_allclose(reconstructed, mass_mat, tol=tol)
 
     # One step from a nontrivial pose at rest: the post-step velocities (accelerations times dt, from zero) match the
-    # single equivalent entity's, exercising the solve.
+    # single equivalent entity's, exercising the solve. Joint damping on every DOF sends the merged tree through the
+    # implicit damping pass, whose correction spans the attached entities as it spans the single equivalent entity.
+    DAMPING = 0.5
     q = np.linspace(-0.3, 0.3, mono.n_dofs)
     mono.set_dofs_position(q)
+    mono.set_dofs_damping(DAMPING)
     arm.set_dofs_position(q[: arm.n_dofs])
+    arm.set_dofs_damping(DAMPING)
     i_q = arm.n_dofs
     for h in hands:
         h.set_dofs_position(q[i_q : i_q + h.n_dofs])
+        h.set_dofs_damping(DAMPING)
         i_q += h.n_dofs
     scene.step()
 
@@ -705,10 +1083,8 @@ def test_cholesky_tiling(monkeypatch, tol):
 
             rigid_solver_build_orig(self)
             self.rigid_config.enable_tiled_cholesky_mass_matrix = enable_tiled_cholesky
-            self.rigid_config.enable_tiled_cholesky_hessian = enable_tiled_cholesky
             if enable_tiled_cholesky:
                 self.rigid_config.tiled_n_dofs_per_entity = 32
-                self.rigid_config.tiled_n_dofs = 32
 
         monkeypatch.setattr("genesis.engine.solvers.RigidSolver.build", rigid_solver_build)
 
@@ -729,7 +1105,6 @@ def test_cholesky_tiling(monkeypatch, tol):
         )
         scene.build(n_envs=2)
         assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_mass_matrix == enable_tiled_cholesky
-        assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_hessian == enable_tiled_cholesky
 
         scene.step()
         assert not scene.rigid_solver.get_error_envs_mask().any()
@@ -805,7 +1180,6 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
         constraint_state.incr_n_changed,
         constraint_state.nt_H,
         constraint_state.nt_jacobi,
-        constraint_state.use_full_hessian,
         constraint_state.solver_iter_counter,
         constraint_state.improved,
         dofs.force,
@@ -879,7 +1253,7 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
     scene.build(n_envs=2)
 
     assert scene.rigid_solver.n_dofs == 102
-    assert scene.rigid_solver.rigid_config.enable_tiled_cholesky_hessian
+    assert scene.rigid_solver.rigid_config.island_tile_cap_last == 128
 
     scene.step()
     assert not scene.rigid_solver.get_error_envs_mask().any()

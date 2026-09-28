@@ -13,19 +13,18 @@ from genesis.utils.raycast import Ray, RayHit
 from .base import ViewerPlugin
 
 if TYPE_CHECKING:
-    from genesis.engine.bvh import AABB, LBVH
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.ext.pyrender.node import Node
-    from genesis.utils.array_class import RaycastResult
+    from genesis.utils.array_class import BVHState, BVHStaticConfig, RaycastResult
 
 
 class RaycastTarget(NamedTuple):
     """One bounding volume hierarchy (BVH) the viewer casts against, over one solver's collision or visual mesh."""
 
     solver: "KinematicSolver"
-    aabb: "AABB"
-    bvh: "LBVH"
+    bvh_state: "BVHState"
+    bvh_config: "BVHStaticConfig"
     result: "RaycastResult"
     # (n_vfaces,) opt-in mask for a visual BVH; None for a collision BVH, which covers every face.
     vfaces_mask: torch.Tensor | None
@@ -57,14 +56,14 @@ class Raycaster:
     def __init__(self, scene: "Scene", use_visual_geom: bool = False):
         # NOTE: delayed imports to avoid pulling in rigid_solver / array_class before gs is fully initialized.
         import genesis.utils.array_class as array_class
-        from genesis.engine.bvh import AABB, LBVH
+        from genesis.engine.bvh import get_bvh_data
 
         self.scene = scene
-        self.envs_idx = scene._envs_idx
+        self._envs_offset = torch.as_tensor(scene.envs_offset, dtype=gs.tc_float, device=gs.device)
         self.targets: list[RaycastTarget] = []
         self._lock = Lock()
 
-        n_envs_max = len(self.envs_idx)
+        n_envs_max = scene._B
         # Visual meshes exist on both solvers, while collision geometry is the rigid solver's alone.
         solvers = (scene.sim.rigid_solver, scene.sim.kinematic_solver) if use_visual_geom else (scene.sim.rigid_solver,)
         for solver in solvers:
@@ -76,20 +75,15 @@ class Raycaster:
                 if not vfaces_mask.any():
                     continue
                 # The tree spans every vface, masked-out ones staying unhittable, so a leaf payload is the vface
-                # index itself (see kernel_update_visual_aabbs).
+                # index itself (see kernel_refresh_visual_bvh).
                 n_slots = vfaces_mask.shape[0]
             else:
                 n_slots = solver.dyn_info.faces.geom_idx.shape[0]
                 if n_slots == 0:
                     continue
-            aabb = AABB(n_batches=n_envs_max, n_aabbs=n_slots)
-            bvh = LBVH(
-                aabb,
-                max_n_query_result_per_aabb=0,  # Not used for ray queries
-                n_radix_sort_groups=min(64, n_slots),
-            )
+            bvh = get_bvh_data(n_envs_max, n_slots)
             result = array_class.get_raycast_result(n_envs_max)
-            self.targets.append(RaycastTarget(solver, aabb, bvh, result, vfaces_mask))
+            self.targets.append(RaycastTarget(solver, bvh.state, bvh.config, result, vfaces_mask))
 
         if not self.targets:
             what = (
@@ -110,7 +104,7 @@ class Raycaster:
     @with_lock
     def update(self) -> None:
         """Refresh per-env vertex positions, AABBs and rebuild every BVH."""
-        from genesis.utils.raycast_qd import kernel_update_verts_and_aabbs, kernel_update_visual_aabbs
+        from genesis.utils.raycast_qd import kernel_refresh_collision_bvh, kernel_refresh_visual_bvh
 
         for target in self.targets:
             solver = target.solver
@@ -120,27 +114,40 @@ class Raycaster:
                 # every vertex this pass owns, the buffer moving only when the user calls set_vverts.
                 solver.update_forward_pos()
                 solver.update_vgeoms()
-                kernel_update_visual_aabbs(
-                    target.vfaces_mask, solver.dyn_state, target.aabb, solver.dyn_info, solver.rigid_config
+                kernel_refresh_visual_bvh(
+                    target.vfaces_mask,
+                    solver.dyn_state,
+                    target.bvh_state,
+                    solver.dyn_info,
+                    target.bvh_config,
+                    solver.rigid_config,
+                    eps=gs.EPS,
                 )
             else:
-                kernel_update_verts_and_aabbs(solver.dyn_state, target.aabb, solver.dyn_info, solver.rigid_config)
-            target.bvh.build()
+                kernel_refresh_collision_bvh(
+                    solver.dyn_state,
+                    target.bvh_state,
+                    solver.dyn_info,
+                    target.bvh_config,
+                    solver.rigid_config,
+                    eps=gs.EPS,
+                    update_verts=True,
+                )
 
     @with_lock
-    def cast(
-        self, ray_origin: np.ndarray, ray_direction: np.ndarray, max_range: float = 1000.0, envs_idx=None
-    ) -> RayHit | None:
+    def cast(self, ray_origin, ray_direction, max_range: float = 1000.0, envs_idx=None) -> RayHit | None:
         """
         Cast a single ray against the BVH of each env in parallel and return the closest hit across envs and solvers.
 
+        The ray and the hit are in the displayed world, where each env sits at its offset (see Scene.envs_offset):
+        the physics of every env is in its own coordinates, so the ray is shifted into each env and the hit back out.
         `RayHit.env_idx` reports the env the hit comes from, None when the scene holds no parallel envs.
 
         Parameters
         ----------
-        ray_origin : np.ndarray, shape (3,)
-            Ray origin in world coordinates.
-        ray_direction : np.ndarray, shape (3,)
+        ray_origin : array-like, shape (3,)
+            Ray origin in the displayed world.
+        ray_direction : array-like, shape (3,)
             Normalized ray direction.
         max_range : float, optional
             Per-env BVH traversal max distance.
@@ -149,8 +156,10 @@ class Raycaster:
         """
         from genesis.utils.raycast_qd import kernel_cast_ray
 
-        ray_origin = np.ascontiguousarray(ray_origin, dtype=gs.np_float)
-        ray_direction = np.ascontiguousarray(ray_direction, dtype=gs.np_float)
+        ray_origin = torch.as_tensor(ray_origin, dtype=gs.tc_float, device=gs.device)
+        ray_direction = torch.as_tensor(ray_direction, dtype=gs.tc_float, device=gs.device)
+        rays_origin = ray_origin - self._envs_offset
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
         closest_hit: RayHit | None = None
         for target in self.targets:
             solver = target.solver
@@ -158,15 +167,13 @@ class Raycaster:
             # Each pass caps its traversal at the best distance so far, so any hit it reports is closer by
             # construction and the closest hit across targets needs no further comparison.
             kernel_cast_ray(
-                ray_origin,
-                envs_idx if envs_idx is not None else self.envs_idx,
-                target.bvh.nodes,
-                target.bvh.morton_codes,
+                rays_origin,
+                envs_idx,
                 ray_direction,
                 solver.dyn_state,
+                target.bvh_state.tree,
                 target.result,
                 solver.dyn_info,
-                solver.rigid_info,
                 max_range if closest_hit is None else closest_hit.distance,
                 eps=gs.EPS,
                 is_visual=is_visual,
@@ -181,9 +188,9 @@ class Raycaster:
                 continue
 
             distance = float(distances[winner])
-            # These two escape into the returned hit, which outlives the lock, while the buffers they come from are
-            # rewritten by the next cast.
-            position = qd_to_numpy(target.result.hit_point, row_mask=winner, keepdim=False, transpose=True, copy=True)
+            position = qd_to_numpy(target.result.hit_point, row_mask=winner, keepdim=False, transpose=True)
+            position = position + self.scene.envs_offset[winner]
+            # The normal escapes into the returned hit, which outlives the lock, while the next cast rewrites its buffer
             normal = qd_to_numpy(target.result.normal, row_mask=winner, keepdim=False, transpose=True, copy=True)
             geoms = solver.vgeoms if is_visual else solver.geoms
             geom = geoms[geom_idx] if 0 <= geom_idx < len(geoms) else None

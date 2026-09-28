@@ -1,5 +1,14 @@
 import enum
 
+URDF_FORMAT = ".urdf"
+XACRO_FORMAT = ".xacro"
+MJCF_FORMAT = ".xml"
+# Root tags identifying the format of inline XML content passed as 'FileMorph.file'.
+XML_ROOT_TAG_TO_FORMAT = {"mujoco": MJCF_FORMAT, "robot": URDF_FORMAT}
+GLTF_FORMATS = (".glb", ".gltf")
+MESH_FORMATS = (".obj", ".stl", ".dae", *GLTF_FORMATS)
+USD_FORMATS = (".usd", ".usda", ".usdc", ".usdz")
+
 # dynamic loading
 ACTIVE = 1
 INACTIVE = 0
@@ -129,8 +138,8 @@ class broadphase_traversal(IntEnum):
     ALL_VS_ALL : int
         Checks every valid pair every step (AABB overlap test), dispatching them in parallel across GPU threads.  Cost
         per step is O(n_valid_pairs) which is efficient on GPU when the pair count is moderate, but becomes expensive
-        in scenes with many geometries since the valid pair count grows quadratically. Does not support hibernation or
-        heterogeneous entities at this time.
+        in scenes with many geometries since the valid pair count grows quadratically. Does not support heterogeneous
+        entities at this time.
 
     Notes
     -----
@@ -138,8 +147,7 @@ class broadphase_traversal(IntEnum):
 
     - **CPU backend** → ``SAP`` (sequential sweep is efficient on CPU).
     - **GPU backend** → ``ALL_VS_ALL`` (parallel pair checking is faster).
-    - **GPU with hibernation or heterogeneous entities** → ``SAP``
-      (``ALL_VS_ALL`` is not compatible with these features).
+    - **GPU with heterogeneous entities** → ``SAP`` (``ALL_VS_ALL`` is not compatible with them).
     """
 
     SAP = 0

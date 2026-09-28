@@ -43,6 +43,9 @@ class Light(metaclass=ABCMeta):
         self.intensity = intensity
         self._shadow_camera = None
         self._shadow_texture = None
+        # (scene revision, environment index) the shadow texture holds a map for, None until one is rendered. See
+        # Scene.revision.
+        self.shadow_map_revision = None
 
     @property
     def name(self):
@@ -146,7 +149,7 @@ class DirectionalLight(Light):
         """
         if size is None:
             size = SHADOW_TEX_SZ
-        self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_FLOAT)
+        self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_UNSIGNED_SHORT)
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.
@@ -350,7 +353,7 @@ class SpotLight(Light):
         """
         if size is None:
             size = SHADOW_TEX_SZ
-        self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_FLOAT)
+        self.shadow_texture = Texture(width=size, height=size, source_channels="D", data_format=GL_UNSIGNED_SHORT)
 
     def _get_shadow_camera(self, scene_scale):
         """Generate and return a shadow mapping camera for this light.
