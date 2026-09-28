@@ -890,11 +890,9 @@ def _build_table_bussing_scene(n_envs, solver=None, gjk=None, **scene_kwargs):
     return scene, robot, STEP_DT, compile_time, arm_pose
 
 
-def make_table_bussing_forever(n_envs, solver=None, gjk=None, **scene_kwargs):
-    # Like table_bussing, but every env is periodically reset to its spawn state so the clutter never comes fully to
-    # rest scene-wide: it perpetually re-drops and re-settles. Reset times are drawn independently PER ENV (not a
-    # shared/global reset), so at steady state the batch is a decorrelated mix of just-dropped (active) and settled
-    # envs rather than all going quiet together.
+def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
+    # Reset each env independently to its spawn state so the clutter repeatedly drops and settles. Staggered reset
+    # times keep the batch a mix of active and settled envs rather than letting all envs settle together.
     scene, robot, step_dt, compile_time, arm_pose = _build_table_bussing_scene(
         n_envs, solver=solver, gjk=gjk, **scene_kwargs
     )
@@ -1107,8 +1105,8 @@ def nonconvex_spacecraft(solver, n_envs, gjk):
 
 
 @pytest.fixture
-def table_bussing_forever(solver, n_envs, gjk):
-    _, step_fn, meta = make_table_bussing_forever(n_envs, solver=solver, gjk=gjk)
+def table_bussing(solver, n_envs, gjk):
+    _, step_fn, meta = make_table_bussing(n_envs, solver=solver, gjk=gjk)
     return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
 
 
@@ -1128,15 +1126,15 @@ BENCHMARKS_FIELD = [
     ("shadow_hand", None, None, 0, gs.cpu),
     ("convexify", None, None, 0, gs.cpu),
     ("nonconvex_spacecraft", None, None, 64, gs.cpu),
-    ("table_bussing_forever", None, None, 50, gs.cpu),
-    ("table_bussing_forever", None, None, 50, gs.gpu),
+    ("table_bussing", None, None, 50, gs.cpu),
+    ("table_bussing", None, None, 50, gs.gpu),
 ]
 
 # Reduced subset, run on the 'ndarray' dtype only.
 BENCHMARKS_NDARRAY = [
     ("dex_hand", None, None, 4096, gs.gpu),
     ("g1_fall_accessors", None, None, 4096, gs.gpu),
-    ("table_bussing_forever", None, None, 50, gs.cpu),
+    ("table_bussing", None, None, 50, gs.cpu),
 ]
 
 # The dtype is selected before collection via 'GS_ENABLE_NDARRAY' ('0' => field, otherwise ndarray).
