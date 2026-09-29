@@ -451,8 +451,8 @@ def data_to_array(data):
         return tensor_to_array(data)
     if isinstance(data, np.ndarray):
         return data
-    if isinstance(data, tuple) and "_asdict" in dir(data):
-        return {k: data_to_array(v) for k, v in data._asdict().items()}
+    if isinstance(data, tuple) and (data_asdict := getattr(data, "_asdict", None)) is not None:
+        return {k: data_to_array(v) for k, v in data_asdict().items()}
     if isinstance(data, Mapping):
         return {k: data_to_array(v) for k, v in data.items()}
     if is_sequence(data):
