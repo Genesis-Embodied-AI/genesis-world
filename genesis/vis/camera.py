@@ -996,6 +996,7 @@ class Camera(RBC):
         """The current extrinsics matrix of the camera."""
         res = self.transform.copy()
         res[..., :3, 1:3] *= -1
+        res.flags.writeable = False
         return np.linalg.inv(res)
 
     @cached_property
