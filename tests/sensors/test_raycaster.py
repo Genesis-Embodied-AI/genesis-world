@@ -1063,3 +1063,15 @@ def test_ray_alignment_and_link_exclusion(show_viewer, n_envs, tol):
         reading = raycasters[ray_alignment].read()
         assert_allclose(reading.distances, distances, tol=tol)
         assert_allclose(reading.points, ray_starts + distances[..., None] * ray_dirs, tol=tol)
+
+    scene_visual_raycast = gs.Scene()
+    box = scene_visual_raycast.add_entity(
+        gs.morphs.Box(size=(1.0, 1.0, 1.0)), material=gs.materials.Rigid(use_visual_raycasting=True)
+    )
+    scene_visual_raycast.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=gs.sensors.raycaster.GridPattern(), entity_idx=box.idx, exclude_link_idx=(box.base_link_idx,)
+        )
+    )
+    with pytest.raises(gs.GenesisException, match="use_visual_raycasting"):
+        scene_visual_raycast.build(n_envs=n_envs)

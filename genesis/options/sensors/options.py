@@ -635,7 +635,8 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     exclude_link_idx : array-like[int], optional
         The global indices of the rigid links whose collision geometry the rays pass through, typically the robot's
         own links for a terrain scan. Defaults to none. Excluding any link on any raycaster adds a per-triangle check
-        to the ray casts of every raycaster in the scene.
+        to the ray casts of every raycaster in the scene. It cannot be combined with an entity whose material has
+        use_visual_raycasting=True.
     debug_sphere_radius: float, optional
         The radius of each debug sphere drawn in the scene. Defaults to 0.02.
     debug_ray_start_color: array-like[float, float, float, float], optional
