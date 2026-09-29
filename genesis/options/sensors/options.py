@@ -171,9 +171,8 @@ class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
     """
     Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
 
-    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs
-    here. The attachment is mandatory: entity_idx must refer to an existing RigidEntity, and static sensors are
-    rejected.
+    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs here.
+    The attachment is mandatory: entity_idx must refer to an existing RigidEntity, and static sensors are rejected.
     """
 
     def validate_scene(self, scene: "Scene"):

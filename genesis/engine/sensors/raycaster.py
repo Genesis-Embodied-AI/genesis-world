@@ -545,8 +545,7 @@ class RaycasterSensor(
 
         self._shared_metadata.patterns.append(self._options.pattern)
 
-        # Rays are stored in the sensor frame. The mounting offsets compose with the link pose at every cast, so that
-        # the offset setters take effect, per environment.
+        # Rays stay in the sensor frame, composed with the link pose and mounting offset at every cast.
         self.ray_starts = self._options.pattern.ray_starts.reshape(-1, 3)
         self._shared_metadata.ray_starts = torch.cat([self._shared_metadata.ray_starts, self.ray_starts])
         self.ray_dirs = self._options.pattern.ray_dirs.reshape(-1, 3)
@@ -610,9 +609,8 @@ class RaycasterSensor(
         # The BVHs were already refreshed once this step by SensorManager (``RaycastContext.update``); read them here.
         bvh_contexts = shared_context.bvh_contexts
 
-        # Allocate the link-pose scratch buffers on first cast (B and n_sensors are known here). Identity quat is baked
-        # into the initial allocation so static sensors (entity_idx<0) leave their rows at identity, placing their
-        # mounting offsets in world frame.
+        # Allocate the link-pose buffers on first cast, once B is known. Static sensors (entity_idx<0) keep identity
+        # rows, which places their mounting offsets in world frame.
         if shared_metadata.links_pos is None:
             B = bvh_contexts[0].solver._B
             n_sensors = len(shared_metadata.patterns)
