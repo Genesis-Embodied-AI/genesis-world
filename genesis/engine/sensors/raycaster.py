@@ -30,8 +30,8 @@ from genesis.vis.rasterizer_context import RasterizerContext
 from .base_sensor import (
     KinematicSensorMetadataMixin,
     KinematicSensorMixin,
-    OffsetSensorMetadataMixin,
-    OffsetSensorMixin,
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
     SharedSensorContext,
     SimpleSensor,
     SimpleSensorMetadata,
@@ -479,7 +479,7 @@ class RaycastContext(SharedSensorContext):
 
 
 @dataclass
-class RaycasterSharedMetadata(OffsetSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
+class RaycasterSharedMetadata(OffsettableSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
     # The BVHs cast against each frame live on the shared ``RaycastContext`` (one per active solver per mesh type),
     # so a Raycaster and a DepthCamera share one set of trees. The cast entries chain into the output cache; see
     # write_ray_hit in raycast_qd.py for the merge scheme. Per-sensor link poses are gathered via
@@ -517,7 +517,7 @@ class RaycasterReturnType(NamedTuple):
 
 
 class RaycasterSensor(
-    OffsetSensorMixin,
+    OffsettableSensorMixin,
     KinematicSensorMixin,
     SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType],
 ):

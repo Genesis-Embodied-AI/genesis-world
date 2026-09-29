@@ -151,7 +151,7 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
 
 
-class OffsetSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
+class OffsettableSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
     """
     Options for sensors mounted on their link at a fixed pose, which frames their measurements.
 
@@ -477,7 +477,7 @@ class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSe
 
 
 class IMU(
-    OffsetSensorOptionsMixin["IMUSensor"], RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
+    OffsettableSensorOptionsMixin["IMUSensor"], RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
 ):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
@@ -614,7 +614,7 @@ class SurfaceDistanceProbe(
                 )
 
 
-class Raycaster(OffsetSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
+class Raycaster(OffsettableSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
     """
     Raycaster sensor that performs ray casting to get distance measurements and point clouds.
 

@@ -13,8 +13,8 @@ from genesis.utils.array_class import DynState, RigidInfo
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
 from .base_sensor import (
-    OffsetSensorMetadataMixin,
-    OffsetSensorMixin,
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
     RigidSensorMetadataMixin,
     RigidSensorMixin,
     SimpleSensor,
@@ -109,7 +109,7 @@ def _get_cross_axis_coupling_to_alignment_matrix(
 
 
 @dataclass
-class IMUSharedMetadata(OffsetSensorMetadataMixin, RigidSensorMetadataMixin, SimpleSensorMetadata):
+class IMUSharedMetadata(OffsettableSensorMetadataMixin, RigidSensorMetadataMixin, SimpleSensorMetadata):
     """
     Shared metadata between all IMU sensors.
     """
@@ -128,7 +128,7 @@ class IMUReturnType(NamedTuple):
 
 
 class IMUSensor(
-    OffsetSensorMixin,
+    OffsettableSensorMixin,
     RigidSensorMixin[IMUSharedMetadata],
     SimpleSensor[IMUOptions, None, IMUSharedMetadata, IMUReturnType],
 ):
