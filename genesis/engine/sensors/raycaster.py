@@ -723,7 +723,6 @@ class RaycasterSensor(
                     is_last=is_last,
                     is_env_major=is_env_major,
                     is_split=entry_b is not entry_a,
-                    # One sensor excluding links makes the rays of every sensor pay the per-leaf mask lookup
                     exclude_links=shared_metadata.has_excluded_links,
                 )
             else:
