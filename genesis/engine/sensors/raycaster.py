@@ -656,6 +656,7 @@ class RaycasterSensor(
             links_quat,
             shared_metadata.ray_starts,
             shared_metadata.ray_dirs,
+            shared_metadata.min_ranges,
             shared_metadata.max_ranges,
             shared_metadata.no_hit_values,
             shared_metadata.return_world_frame,

@@ -623,7 +623,8 @@ class Raycaster(OffsetSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions
     pattern: RaycastPatternOptions
         The raycasting pattern for the sensor.
     min_range : float, optional
-        The minimum sensing range in meters. Defaults to 0.0.
+        The minimum sensing range in meters. A ray whose closest hit is nearer reads as a miss (``no_hit_value``), as
+        a surface inside the blind zone of a real range sensor still blocks what lies behind it. Defaults to 0.0.
     max_range : float, optional
         The maximum sensing range in meters. Defaults to 20.0.
     no_hit_value : float, optional
