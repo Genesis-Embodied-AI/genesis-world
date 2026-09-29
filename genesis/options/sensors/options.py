@@ -105,6 +105,8 @@ class SensorOptions[SensorT: "Sensor"](Options):
 
     def _validate(self, sim: "Simulator"):
         # Checks needing the simulator. The ones on the values alone belong to model_post_init.
+        if self.entity_idx >= len(sim.entities):
+            gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
         if self.delay > 0:
             delay_ratio = self.delay / sim.dt
             delay_ts = round(delay_ratio)
@@ -137,8 +139,6 @@ class KinematicSensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
 
         super()._validate(sim)
         if self.entity_idx >= 0:
-            if self.entity_idx >= len(sim.entities):
-                gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
             entity = sim.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
@@ -164,7 +164,7 @@ class OffsettableSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMix
 
 class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[SensorT]):
     """
-    Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
+    Options for sensors mounted on one link of a RigidEntity (e.g. contact, contact force, IMU, tactile).
 
     Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs here.
     """
@@ -179,21 +179,23 @@ class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[Sen
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
-class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
+class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](SensorOptions[SensorT]):
     """
     Options for a sensor that measures nothing without a RigidEntity.
 
     The attachment is mandatory: entity_idx must refer to an existing RigidEntity, static sensors are not allowed. Such
     are the joint-space sensors, bound to a whole entity, and the sensors measuring a quantity of their link (contacts,
-    contact force, temperature).
-
-    ``link_idx_local`` is inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
+    contact force, temperature), which combine this mixin with RigidSensorOptionsMixin.
     """
 
     def _validate(self, sim: "Simulator"):
+        from genesis.engine.entities import RigidEntity
+
         super()._validate(sim)
         if self.entity_idx < 0:
             gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
+        if not isinstance(sim.entities[self.entity_idx], RigidEntity):
+            gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
 class ContactFilterOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[SensorT]):
@@ -440,7 +442,9 @@ class TemperatureProperties(NamedTuple):
 
 
 class TemperatureGrid(
-    RigidEntitySensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]
+    RigidEntitySensorOptionsMixin["TemperatureGridSensor"],
+    RigidSensorOptionsMixin["TemperatureGridSensor"],
+    SimpleSensorOptions["TemperatureGridSensor"],
 ):
     """
     Sensor that returns the temperature in Celsius of the associated RigidLink in its local frame.
