@@ -91,6 +91,8 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
             debug_ray_hit_color=(0.0, 1.0, 0.0, 1.0),
         )
     )
+    with pytest.raises(gs.GenesisException, match="Jitter"):
+        gs.sensors.Raycaster(pattern=gs.sensors.raycaster.GridPattern(), jitter=0.01)
     depth_camera = scene.add_sensor(
         gs.sensors.DepthCamera(
             pattern=gs.sensors.raycaster.DepthCameraPattern(
