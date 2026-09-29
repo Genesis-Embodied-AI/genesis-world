@@ -554,7 +554,9 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
             # per sensor field structure
             index_slice = field_start
 
-        field[:, index_slice] = broadcast_tensor(value, field.dtype, (len(envs_idx), field_size), ("envs_idx", ""))
+        field[envs_idx, index_slice] = broadcast_tensor(
+            value, field.dtype, (len(envs_idx), field_size), ("envs_idx", "")
+        )
 
 
 class _SolverLinkGroup(NamedTuple):
