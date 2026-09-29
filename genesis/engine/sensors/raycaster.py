@@ -545,7 +545,6 @@ class RaycasterSensor(
 
         self._shared_metadata.patterns.append(self._options.pattern)
 
-        # Rays stay in the sensor frame, composed with the link pose and mounting offset at every cast.
         self.ray_starts = self._options.pattern.ray_starts.reshape(-1, 3)
         self._shared_metadata.ray_starts = torch.cat([self._shared_metadata.ray_starts, self.ray_starts])
         self.ray_dirs = self._options.pattern.ray_dirs.reshape(-1, 3)
