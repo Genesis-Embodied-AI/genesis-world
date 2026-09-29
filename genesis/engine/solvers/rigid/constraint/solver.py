@@ -592,6 +592,7 @@ def constraint_solver_kernel_masked_clear(
     n_dofs = constraint_state.qacc_ws.shape[0]
     len_constraints = constraint_state.jac.shape[0]
 
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
             func_clear_constraint_at_env(i_b, n_dofs, len_constraints, constraint_state, rigid_info, rigid_config)
@@ -1419,6 +1420,7 @@ def _sort_contacts_and_build_islands(
         N_CLASSES = qd.static(
             len(array_class.island_tile_caps(rigid_config.island_tile_cap_first, rigid_config.island_tile_cap_last))
         )
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_class in range(N_CLASSES):
             constraint_state.island.factor_worklist_size[i_class] = 0
     if qd.static(rigid_config.enable_cooperative_constraint_kernels):

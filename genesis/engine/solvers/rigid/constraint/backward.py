@@ -125,10 +125,12 @@ def kernel_solve_adjoint_u(
     _B = constraint_state.bw_u.shape[1]
 
     # Initialize u
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         constraint_state.bw_u[i_d, i_b] = 0.0
 
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
             if constraint_state.n_constraints[i_b] == 0:
                 # No active constraint: A = M. The forward's constrained-Hessian Cholesky nt_H is unreliable for
@@ -149,6 +151,7 @@ def kernel_solve_adjoint_u(
                     )
     else:
         # CG solver for A * u = g (parallelized over the batch dimension).
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
             func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
 
@@ -283,6 +286,7 @@ def kernel_accumulate_constraint_solver_grads(
     )
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         dyn_state.dofs.qf_smooth.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i, j, i_b in qd.ndrange(n_dofs, n_dofs, _B):
         rigid_info.mass_mat.grad[i, j, i_b] += constraint_state.dL_dM[i, j, i_b]
 

@@ -315,6 +315,7 @@ def kernel_masked_collider_clear(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(envs_mask.shape[0]):
         if envs_mask[i_b]:
             func_collider_clear_env(i_b, dyn_state, collider_state, dyn_info, rigid_info, rigid_config)

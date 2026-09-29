@@ -272,6 +272,7 @@ def kernel_get_jacobian(
 ):
     """Full spatial Jacobian of a link-local point, for every environment column."""
     p_vec = qd.Vector([p_local[0], p_local[1], p_local[2]], dt=gs.qd_float)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(n_batch):
         func_get_jacobian(i_b, tgt_link_idx, dof_start, p_vec, jacobian, dyn_state, dyn_info, rigid_config)
 
@@ -287,6 +288,7 @@ def kernel_get_jacobian_zero(
     n_batch: int,
 ):
     """Full spatial Jacobian of a link origin, for every environment column."""
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(n_batch):
         func_get_jacobian(
             i_b, tgt_link_idx, dof_start, qd.Vector.zero(gs.qd_float, 3), jacobian, dyn_state, dyn_info, rigid_config
@@ -398,6 +400,7 @@ def func_inverse_kinematics(
 
     n_error_dims = 6 * n_links
 
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(n_envs):
         i_b = targets.envs_idx[i_b_]
 
@@ -767,7 +770,7 @@ def kernel_forward_kinematics_query(
     saved configuration is restored and re-propagated. qpos_cache spans the solver configuration, so the global q
     indices index it directly.
     """
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
         qpos_cache[qs_idx[i_q_], envs_idx[i_b_]] = rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]]
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
@@ -782,14 +785,14 @@ def kernel_forward_kinematics_query(
             i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
         )
 
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
         for i in qd.static(range(3)):
             links_pos[i_b_, i_l_, i] = dyn_state.links.pos[links_idx[i_l_], envs_idx[i_b_]][i]
         for i in qd.static(range(4)):
             links_quat[i_b_, i_l_, i] = dyn_state.links.quat[links_idx[i_l_], envs_idx[i_b_]][i]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos_cache[qs_idx[i_q_], envs_idx[i_b_]]
 

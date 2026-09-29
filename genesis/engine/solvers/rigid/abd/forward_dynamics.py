@@ -39,7 +39,7 @@ def update_qacc_from_qvel_delta(
     n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     _B = dyn_state.dofs.ctrl_mode.shape[1]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -60,7 +60,7 @@ def update_qvel(
     _B = dyn_state.dofs.vel.shape[1]
     n_dofs = dyn_state.dofs.vel.shape[0]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -306,15 +306,15 @@ def func_compute_mass_matrix(
     one: a selection reaches a kernel as an array argument, which has to be wrapped on every launch, and the step is
     launched twice per substep.
     """
-    qd.loop_config(name="crb_initialize", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="crb_initialize", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
         func_crb_initialize(i_l, i_b, dyn_state, rigid_info, rigid_config)
 
-    qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
         func_crb_fold(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
-    qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
         func_mass_mat_force(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
@@ -330,7 +330,7 @@ def func_compute_mass_matrix(
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
                 func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, BLOCK_DIM)
     else:
-        qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+        qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
             func_mass_mat_assemble_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
 
@@ -363,15 +363,15 @@ def func_compute_mass_matrix_masked(
     is_backward: qd.template(),
 ):
     """Assemble the mass matrix of the given environments. See func_compute_mass_matrix."""
-    qd.loop_config(name="crb_initialize", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="crb_initialize", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b_ in qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0]):
         func_crb_initialize(i_l, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
 
-    qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="crb", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         func_crb_fold(i_r, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
-    qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="mass_mat", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b_ in qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0]):
         func_mass_mat_force(i_l, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
 
@@ -387,7 +387,7 @@ def func_compute_mass_matrix_masked(
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
                 func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, BLOCK_DIM)
     else:
-        qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+        qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_t, i_b_ in qd.ndrange(rigid_info.trees_root_idx.shape[0], envs_idx.shape[0]):
             func_mass_mat_assemble_tree(i_t, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
 
@@ -1056,7 +1056,6 @@ def func_solve_mass_batch(
     # A block is the smallest set of coupled degrees of freedom, and one worker's whole share of the work. The degree of
     # freedom starting a block is its root, and tells whether the block's kinematic tree is hibernated, in which case
     # there is nothing to solve.
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_d in range(rigid_info.mass_mat.shape[0]):
         is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
         if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
@@ -1079,7 +1078,7 @@ def func_enter_neutral_configuration(
 
     Only the environments in `envs_idx` are assembled and factorized, hence the masked implementation of those passes.
     """
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_l_root = rigid_info.roots_link_idx[i_r]
@@ -1110,7 +1109,7 @@ def func_exit_neutral_configuration(
     rigid_config: qd.template(),
 ):
     """Evaluate forward kinematics again at the configuration the scene is in, which the neutral pass overwrote."""
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_l_root = rigid_info.roots_link_idx[i_r]
@@ -1304,7 +1303,7 @@ def func_refresh_links_invweight_and_meaninertia(
     n_envs_pending = (
         envs_idx.shape[0] if qd.static(rigid_config.batch_links_info or rigid_config.batch_dofs_info) else 1
     )
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_b_, i_l_ in qd.ndrange(n_envs_pending, links_idx.shape[0]):
         i_b = envs_idx[i_b_]
         # An unbatched weight holds one value for the whole batch, so it is written from the first environment alone.
@@ -1345,7 +1344,7 @@ def func_refresh_links_invweight_and_meaninertia(
     # A velocity is quoted about the center of mass this pass moves, so the same motion reads as a different velocity
     # from here. Both readings are brought back where the caller held them current, since this is what moved them.
     if qd.static(refresh_velocity):
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_forward_velocity_root(
@@ -1373,7 +1372,7 @@ def kernel_refresh_invweight_and_meaninertia(
     into, and a hibernated body cannot settle into the new one.
     """
     if qd.static(rigid_config.use_hibernation):
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_l, i_b_ in qd.ndrange(dyn_info.links.parent_idx.shape[0], envs_idx.shape[0]):
             i_b = envs_idx[i_b_]
             if dyn_state.links.is_hibernated[i_l, i_b]:
@@ -1386,7 +1385,7 @@ def kernel_refresh_invweight_and_meaninertia(
     n_envs_pending = (
         envs_idx.shape[0] if qd.static(rigid_config.batch_links_info or rigid_config.batch_dofs_info) else 1
     )
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_b_, i_r in qd.ndrange(n_envs_pending, rigid_info.roots_link_idx.shape[0]):
         i_b = envs_idx[i_b_]
         is_link_pending = True if qd.static(rigid_config.batch_links_info) else i_b_ == 0
@@ -1414,7 +1413,7 @@ def kernel_refresh_invweight_and_meaninertia(
         func_exit_neutral_configuration(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config)
 
     if qd.static(refresh_velocity):
-        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
             i_l_root = rigid_info.roots_link_idx[i_r]
             func_forward_velocity_root(
@@ -1530,7 +1529,7 @@ def func_torque_and_passive_force(
                     i_is = constraint_state.island.links_island_idx[i_l, i_b]
                     func_wakeup_island(i_is, i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -1539,7 +1538,7 @@ def func_torque_and_passive_force(
             I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
             dyn_state.dofs.qf_passive[i_d, i_b] = -dyn_info.dofs.damping[I_d] * dyn_state.dofs.vel[i_d, i_b]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -1640,7 +1639,7 @@ def func_update_acc(
     links of the root ahead of its trees: one walk keeps the link body inlined once in the kernel, where a static pass
     and a tree pass would inline it twice. Differentiability wants the loop outermost in its kernel, which it is.
     """
-    qd.loop_config(name="update_acc", serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(name="update_acc", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         i_l_root = rigid_info.roots_link_idx[i_r]
         i_l_end = rigid_info.links_root_end[i_l_root]
@@ -1660,7 +1659,7 @@ def func_update_force(
 ):
     BW = qd.static(is_backward)
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.links.pos.shape[1]):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -1700,7 +1699,7 @@ def func_update_force(
     # One thread folds the forces of a whole kinematic tree from its leaves up to its root, gating each link of the
     # span on that root, like func_crb_fold: a tree spans several entities once one is attached beneath another, and a
     # child must fold into its parent before the parent folds further up.
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_r, i_b in qd.ndrange(rigid_info.roots_link_idx.shape[0], dyn_state.links.pos.shape[1]):
         i_l_root = rigid_info.roots_link_idx[i_r]
         is_awake = True
@@ -1728,7 +1727,7 @@ def func_bias_force(
 ):
     BW = qd.static(is_backward)
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -1769,7 +1768,7 @@ def func_compute_qacc(
             )
 
     # A hibernated tree keeps the acceleration it was put to sleep with
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
             dof_start = rigid_info.trees_dof_start[i_t]
@@ -2087,7 +2086,7 @@ def func_integrate(
 ):
     BW = qd.static(is_backward)
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(dyn_state.dofs.ctrl_mode.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -2102,7 +2101,7 @@ def func_integrate(
     # loop after it recovers the true next velocity. Gated out of the differentiable path: the Newton iteration
     # carries no adjoint.
     if qd.static(not is_backward and not rigid_config.requires_grad and rigid_config.integrator != gs.integrator.Euler):
-        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
             is_awake = True
             if qd.static(rigid_config.use_hibernation):
@@ -2111,7 +2110,7 @@ def func_integrate(
                 if func_midpoint_eligible(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config):
                     func_midpoint_free_body(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
         is_awake = True
         if qd.static(rigid_config.use_hibernation):
@@ -2183,7 +2182,7 @@ def func_integrate(
     # Recover the true next velocity of the midpoint-integrated free bodies, whose vel_next held the midpoint
     # velocity for the position update above.
     if qd.static(not is_backward and not rigid_config.requires_grad and rigid_config.integrator != gs.integrator.Euler):
-        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
             is_awake = True
             if qd.static(rigid_config.use_hibernation):

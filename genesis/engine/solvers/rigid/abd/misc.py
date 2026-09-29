@@ -231,6 +231,7 @@ def kernel_init_dof_fields(
     n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     _B = dyn_state.dofs.ctrl_mode.shape[1]
 
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for I_d in qd.grouped(dyn_info.dofs.invweight):
         i_d = I_d[0]  # batching (if any) will be the second dim
 
@@ -331,6 +332,7 @@ def kernel_init_link_fields(
     n_links = links_parent_idx.shape[0]
     _B = dyn_state.links.pos.shape[1]
 
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for I_l in qd.grouped(dyn_info.links.parent_idx):
         i_l = I_l[0]
 
@@ -356,6 +358,7 @@ def kernel_init_link_fields(
         for j in qd.static(range(3)):
             dyn_info.links.pos[I_l][j] = links_pos[i_l, j]
 
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l, i_b in qd.ndrange(n_links, _B):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
 
@@ -463,6 +466,7 @@ def kernel_init_joint_fields(
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
 ):
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for I_j in qd.grouped(dyn_info.joints.type):
         i_j = I_j[0]
 
@@ -806,7 +810,7 @@ def kernel_apply_links_external_wrench(
     ref: qd.template(),
     local: qd.template(),
 ):
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
         force_i = qd.Vector([force[i_b_, i_l_, 0], force[i_b_, i_l_, 1], force[i_b_, i_l_, 2]], dt=gs.qd_float)
         torque_i = qd.Vector([torque[i_b_, i_l_, 0], torque[i_b_, i_l_, 1], torque[i_b_, i_l_, 2]], dt=gs.qd_float)
@@ -835,7 +839,7 @@ def kernel_apply_links_external_wrench_at_pos(
     ref: qd.template(),
     local: qd.template(),
 ):
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
         pos_i = qd.Vector([pos[i_b_, i_l_, 0], pos[i_b_, i_l_, 1], pos[i_b_, i_l_, 2]], dt=gs.qd_float)
         force_i = qd.Vector([force[i_b_, i_l_, 0], force[i_b_, i_l_, 1], force[i_b_, i_l_, 2]], dt=gs.qd_float)
@@ -938,7 +942,7 @@ def func_clear_external_force(
     _B = dyn_state.links.pos.shape[1]
 
     # Every link, a sleeping one included: a wrench wakes the link it is applied to, so a sleeper carries none
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l, i_b in qd.ndrange(n_links, _B):
         dyn_state.links.cfrc_applied_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
         dyn_state.links.cfrc_applied_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)

@@ -76,7 +76,7 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
     # thread rewrites its two tangent rows' active, which would otherwise race the tangent threads capturing
     # prev_active. Pyramidal threads only write their own row, so they snapshot inline in the body (no extra pass).
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction):
-        qd.loop_config(name="snapshot_prev_active")
+        qd.loop_config(name="snapshot_prev_active", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_c, i_b in qd.ndrange(
             len_constraints, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
         ):
@@ -85,7 +85,7 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
 
     # A row of an island standing still keeps its values and shows no flip to the incremental factor, see
     # func_update_constraint_batch.
-    qd.loop_config(name="update_constraint_forces")
+    qd.loop_config(name="update_constraint_forces", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_c, i_b in qd.ndrange(
         len_constraints, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
@@ -112,7 +112,7 @@ def _func_update_qfrc_constraint_per_dof(constraint_state: array_class.Constrain
     n_dofs = constraint_state.qfrc_constraint.shape[0]
     _B = constraint_state.grad.shape[1]
 
-    qd.loop_config(name="update_constraint_qfrc")
+    qd.loop_config(name="update_constraint_qfrc", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(
         n_dofs, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
