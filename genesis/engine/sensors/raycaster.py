@@ -543,6 +543,13 @@ class RaycasterSensor(
                 "Raycaster sensor has no geometry to raycast against: rigid_solver is inactive and no entity "
                 "has material.use_visual_raycasting=True."
             )
+        if self._options.exclude_link_idx and any(
+            entry.raycast_mask is not None for entry in self._shared_context.bvh_contexts
+        ):
+            gs.raise_exception(
+                "Raycaster option 'exclude_link_idx' applies to collision geometry alone, so it cannot be combined with "
+                "an entity whose material has use_visual_raycasting=True."
+            )
 
         self._shared_metadata.patterns.append(self._options.pattern)
 
