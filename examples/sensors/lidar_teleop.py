@@ -26,6 +26,13 @@ def main():
     parser.add_argument(
         "--pattern", type=str, default="spherical", choices=("spherical", "depth", "grid"), help="Sensor pattern type"
     )
+    parser.add_argument(
+        "--ray-alignment",
+        type=str,
+        default="base",
+        choices=("base", "yaw", "world"),
+        help="Frame the ray pattern follows: the full link orientation, its yaw only, or the world frame",
+    )
     args = parser.parse_args()
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="32", logging_level="info")
@@ -100,6 +107,7 @@ def main():
         pos_offset=pos_offset,
         euler_offset=(0.0, 0.0, 0.0),
         return_world_frame=True,
+        ray_alignment=args.ray_alignment,
         draw_debug=True,
     )
 
