@@ -45,7 +45,7 @@ def bvh_ray_cast(
     ray_start: qd.types.vector(3),
     ray_dir: qd.types.vector(3),
     max_range: float,
-    link_excluded: qd.types.ndarray(ndim=2),  # [n_sensors, n_links] bool - 0 marks an excluded link
+    link_excluded: qd.template(),  # [n_sensors, n_links] bool - 0 marks an excluded link
     dyn_state: array_class.DynState,
     bvh_tree_state: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
