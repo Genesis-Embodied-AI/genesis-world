@@ -130,8 +130,9 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     # Add another cube on top of it make sure the forces are correctly aggregated
     box_3.set_dofs_position((-np.pi / 2, -np.pi / 4, -np.pi / 2), dofs_idx_local=slice(3, None))
 
-    # Note that it is necessary to do a first step, because the initial state right after reset is not valid
-    for _ in range(DELAY_STEPS + 1):
+    # Note that it is necessary to do a first step, because the initial state right after reset is not valid, then one
+    # more for the ring slot a jittered read of force_sensor_noisy may reach
+    for _ in range(DELAY_STEPS + 2):
         scene.step()
 
     # Make sure that box CoM is valid

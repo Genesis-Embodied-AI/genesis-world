@@ -811,7 +811,7 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
             self._shared_metadata.noise, to_tuple(self._options.noise), expand=(batch_size, -1), dim=-1
         )
         self._shared_metadata.jitter_ts = concat_with_tensor(
-            self._shared_metadata.jitter_ts, to_tuple(self._options.jitter / self._dt), expand=(batch_size, -1), dim=-1
+            self._shared_metadata.jitter_ts, self._options.jitter / self._dt, expand=(batch_size, 1), dim=1
         )
         if np.any(jitter_np > gs.EPS):
             self._shared_metadata.has_any_jitter = True
