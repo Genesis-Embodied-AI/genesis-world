@@ -126,6 +126,7 @@
 - **Bug fix PRs** must include a regression test that fails on `main` and passes with the fix, added to the test already covering the capability that broke.
 - **Never write a test that pins a known defect.** Tests assert observable physics and public API behavior, never implementation details.
 - **Never test a limitation, but do test that an unsupported input is handled.** A capability Genesis does not offer gets no test. Refusing an input it cannot handle is behavior, so a test asserts the refusal wherever proceeding would corrupt what the user gets.
+- **The source code never changes to accommodate a test.** A test configures what it needs through the public options before building the scene, never by writing solver attributes of a built scene. When a test breaks because the engine changed, the test is fixed.
 - **No deprecation tests.** Do not add unit tests that verify deprecation warnings are emitted.
 - Feature tests exercise the new behavior, not the internal warning machinery.
 - **Unit tests must NOT have docstrings.** A good test name spares writing the short docstring. A code comment is acceptable only when strongly motivated, i.e. it explains something the test body cannot convey. Never state regressions or history.

@@ -108,6 +108,8 @@ def build_genesis_sim(
     show_viewer,
     mj_sim,
     *,
+    enable_collision,
+    disable_constraint,
     friction_cone,
     friction_torsional,
     friction_rolling,
@@ -134,6 +136,8 @@ def build_genesis_sim(
             enable_multi_contact=multi_contact,
             enable_mujoco_compatibility=mujoco_compatibility,
             use_gjk_collision=gjk_collision,
+            enable_collision=enable_collision,
+            disable_constraint=disable_constraint,
             # None gives a geom carrying no time constant of its own the floor, twice the timestep, as Mujoco does.
             constraint_timeconst=None,
         ),
