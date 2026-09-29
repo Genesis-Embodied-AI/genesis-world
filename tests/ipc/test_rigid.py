@@ -526,8 +526,15 @@ def test_objects_colliding(n_envs, show_viewer):
         )
     }
     p_history = {obj: [] for obj in objs_kwargs.keys()}
+    box_pos_prev = box.get_pos().clone()
     for _i in range(NUM_STEPS):
         scene.step()
+
+        box_pos = box.get_pos()
+        assert_allclose(box.get_vel(), (box_pos - box_pos_prev) / DT, tol=TOL_SINGLE)
+        if _i < 2:
+            assert_allclose(box.get_vel(), GRAVITY * (_i + 1) * DT, tol=TOL_SINGLE)
+        box_pos_prev = box_pos.clone()
 
         for obj, obj_kwargs in objs_kwargs.items():
             p_i = get_ipc_positions(scene, **obj_kwargs, envs_idx=envs_idx)

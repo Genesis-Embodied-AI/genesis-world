@@ -847,7 +847,6 @@ class IPCCoupler(RBC):
         # Step 5: Post-advance processing (per entity type)
         self._apply_abd_coupling_forces()
         self._post_advance_external_articulation()
-        self._post_advance_ipc_only()
 
         # Step 6: Update GUI if enabled
         if self._ipc_gui is not None:
@@ -1026,11 +1025,9 @@ class IPCCoupler(RBC):
                 skip_forward=True,
             )
 
-            # FIXME: It is currently necessary to enforce zero velocity to avoid double time integration by Rigid solver
-            # self._apply_base_link_velocity_from_ipc(entity)
-            self.rigid_solver.set_dofs_velocity(
-                velocity=None, dofs_idx=slice(entity.dof_start, entity.dof_start + 6), skip_forward=True
-            )
+            self._apply_base_link_velocity_from_ipc(entity)
+
+        self.rigid_solver.update_forward_pos()
 
     def _retrieve_fem_states(self):
         # IPC world advance/retrieve is handled at Scene level

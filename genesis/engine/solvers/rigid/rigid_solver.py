@@ -1734,6 +1734,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
             if self.sim.coupler.has_any_rigid_coupling:
                 self.substep(f)
+                # IPC owns these states; copy them after the rigid step so they are not integrated twice.
+                self.sim.coupler._post_advance_ipc_only()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
