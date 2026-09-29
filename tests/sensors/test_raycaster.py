@@ -690,10 +690,19 @@ def test_lidar_cache_offset_parallel_env(show_viewer, n_envs, tol):
 @pytest.mark.required
 def test_link_exclusion_refuses_visual_raycasting():
     scene = gs.Scene()
-    box = scene.add_entity(gs.morphs.Box(size=(1.0, 1.0, 1.0)), material=gs.materials.Rigid(use_visual_raycasting=True))
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(1.0, 1.0, 1.0),
+        ),
+        material=gs.materials.Rigid(
+            use_visual_raycasting=True,
+        ),
+    )
     scene.add_sensor(
         gs.sensors.Raycaster(
-            pattern=gs.sensors.raycaster.GridPattern(), entity_idx=box.idx, exclude_link_idx=(box.base_link_idx,)
+            pattern=gs.sensors.raycaster.GridPattern(),
+            entity_idx=box.idx,
+            exclude_link_idx=(box.base_link_idx,),
         )
     )
     with pytest.raises(gs.GenesisException, match="use_visual_raycasting"):
