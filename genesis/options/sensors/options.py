@@ -172,31 +172,26 @@ class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
     Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
 
     Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs
-    here.
+    here. The attachment is mandatory: entity_idx must refer to an existing RigidEntity, and static sensors are
+    rejected.
     """
 
     def validate_scene(self, scene: "Scene"):
         from genesis.engine.entities import RigidEntity
 
         super().validate_scene(scene)
-        if self.entity_idx >= 0:
-            entity = scene.entities[self.entity_idx]
-            if not isinstance(entity, RigidEntity):
-                gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
+        if self.entity_idx < 0:
+            gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
+        if not isinstance(scene.entities[self.entity_idx], RigidEntity):
+            gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
 class RigidEntitySensorOptionsMixin(RigidSensorOptionsMixin[SensorT]):
     """
-    Options for a sensor bound to a whole RigidEntity (e.g. joint-space sensors), where the attachment is mandatory:
-    entity_idx must refer to an existing RigidEntity, static sensors are not allowed.
+    Options for a sensor bound to a whole RigidEntity (e.g. joint-space sensors).
 
-    The link offset parameters are inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
+    ``link_idx_local`` is inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
     """
-
-    def validate_scene(self, scene: "Scene"):
-        super().validate_scene(scene)
-        if self.entity_idx < 0:
-            gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
 
 
 class ContactFilterOptionsMixin(RigidSensorOptionsMixin[SensorT]):

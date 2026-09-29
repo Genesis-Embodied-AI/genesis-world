@@ -205,6 +205,8 @@ def test_filter_link_idx(show_viewer, tol):
             pos=(0.0, 0.5, 0.1),
         ),
     )
+    with pytest.raises(gs.GenesisException, match="entity_idx"):
+        scene.add_sensor(gs.sensors.Contact())
     sensor = scene.add_sensor(
         gs.sensors.Contact(
             entity_idx=box_on_floor.idx,
