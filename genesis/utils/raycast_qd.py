@@ -77,7 +77,6 @@ def bvh_ray_cast(
     hit_face = -1
     closest_distance = gs.qd_float(max_range)
     hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-    # Declared before the compile-time branch, whose body is a nested scope in quadrants.
     is_excluded = False
 
     axes, shear, is_valid_dir = ray_projection(ray_dir, eps)

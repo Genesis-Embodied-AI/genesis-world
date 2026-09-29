@@ -606,9 +606,9 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_lidar_cache_offset_parallel_env(show_viewer, n_envs, tol):
-    CARRIER_POS = (0.0, 0.0, 3.0)
-    CARRIER_EULER = (30.0, 0.0, 45.0)
-    CARRIER_HALF_HEIGHT = 0.1
+    MOUNT_POS = (0.0, 0.0, 3.0)
+    MOUNT_EULER = (30.0, 0.0, 45.0)
+    MOUNT_HALF_HEIGHT = 0.1
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -631,14 +631,14 @@ def test_lidar_cache_offset_parallel_env(show_viewer, n_envs, tol):
             fixed=True,
         ),
     )
-    carrier = scene.add_entity(
+    sensor_mount = scene.add_entity(
         gs.morphs.Box(
-            size=(1.0, 1.0, 2.0 * CARRIER_HALF_HEIGHT),
-            pos=CARRIER_POS,
-            euler=CARRIER_EULER,
+            size=(1.0, 1.0, 2.0 * MOUNT_HALF_HEIGHT),
+            pos=MOUNT_POS,
+            euler=MOUNT_EULER,
         ),
     )
-    # The rays start inside the movable carrier, which sits in a tree set of its own apart from the static obstacle.
+    # The rays start inside the movable mount, which sits in a tree set of its own apart from the static obstacle.
     # Excluding both links lets the rays through to the ground plane.
     pattern = gs.sensors.raycaster.GridPattern(
         resolution=0.5,
@@ -649,7 +649,7 @@ def test_lidar_cache_offset_parallel_env(show_viewer, n_envs, tol):
     raycaster_unexcluded = scene.add_sensor(
         gs.sensors.Raycaster(
             pattern=pattern,
-            entity_idx=carrier.idx,
+            entity_idx=sensor_mount.idx,
             return_points=False,
         )
     )
@@ -657,10 +657,10 @@ def test_lidar_cache_offset_parallel_env(show_viewer, n_envs, tol):
         ray_alignment: scene.add_sensor(
             gs.sensors.Raycaster(
                 pattern=pattern,
-                entity_idx=carrier.idx,
+                entity_idx=sensor_mount.idx,
                 return_world_frame=True,
                 ray_alignment=ray_alignment,
-                exclude_link_idx=(obstacle.base_link_idx, carrier.base_link_idx),
+                exclude_link_idx=(obstacle.base_link_idx, sensor_mount.base_link_idx),
                 draw_debug=show_viewer,
             )
         )
@@ -669,36 +669,35 @@ def test_lidar_cache_offset_parallel_env(show_viewer, n_envs, tol):
     scene.build(n_envs=n_envs)
     scene.step()
 
-    assert_allclose(raycaster_unexcluded.read().distances, CARRIER_HALF_HEIGHT, tol=tol)
+    assert_allclose(raycaster_unexcluded.read().distances, MOUNT_HALF_HEIGHT, tol=tol)
     for ray_alignment, quat in (
-        ("base", carrier.get_quat()),
+        ("base", sensor_mount.get_quat()),
         (
             "yaw",
-            gu.xyz_to_quat(
-                torch.tensor((0.0, 0.0, CARRIER_EULER[2]), dtype=gs.tc_float, device=gs.device), degrees=True
-            ),
+            gu.xyz_to_quat(torch.tensor((0.0, 0.0, MOUNT_EULER[2]), dtype=gs.tc_float, device=gs.device), degrees=True),
         ),
         ("world", torch.tensor((1.0, 0.0, 0.0, 0.0), dtype=gs.tc_float, device=gs.device)),
     ):
         quat = quat[..., None, None, :]
-        ray_starts = carrier.get_pos()[..., None, None, :] + gu.transform_by_quat(pattern.ray_starts, quat)
+        ray_starts = sensor_mount.get_pos()[..., None, None, :] + gu.transform_by_quat(pattern.ray_starts, quat)
         ray_dirs = gu.transform_by_quat(pattern.ray_dirs, quat)
         distances = -ray_starts[..., 2] / ray_dirs[..., 2]
         reading = raycasters[ray_alignment].read()
         assert_allclose(reading.distances, distances, tol=tol)
         assert_allclose(reading.points, ray_starts + distances[..., None] * ray_dirs, tol=tol)
 
-    scene_visual_raycast = gs.Scene()
-    box = scene_visual_raycast.add_entity(
-        gs.morphs.Box(size=(1.0, 1.0, 1.0)), material=gs.materials.Rigid(use_visual_raycasting=True)
-    )
-    scene_visual_raycast.add_sensor(
+
+@pytest.mark.required
+def test_link_exclusion_refuses_visual_raycasting():
+    scene = gs.Scene()
+    box = scene.add_entity(gs.morphs.Box(size=(1.0, 1.0, 1.0)), material=gs.materials.Rigid(use_visual_raycasting=True))
+    scene.add_sensor(
         gs.sensors.Raycaster(
             pattern=gs.sensors.raycaster.GridPattern(), entity_idx=box.idx, exclude_link_idx=(box.base_link_idx,)
         )
     )
     with pytest.raises(gs.GenesisException, match="use_visual_raycasting"):
-        scene_visual_raycast.build(n_envs=n_envs)
+        scene.build()
 
 
 @pytest.mark.required
