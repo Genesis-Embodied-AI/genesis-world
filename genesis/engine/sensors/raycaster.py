@@ -14,6 +14,8 @@ from genesis.utils.raycast_qd import RaycastTarget, RaycastWorldTarget, get_rayc
 from .base_sensor import (
     KinematicSensorMetadataMixin,
     KinematicSensorMixin,
+    OffsetSensorMetadataMixin,
+    OffsetSensorMixin,
     SharedSensorContext,
     SimpleSensor,
     SimpleSensorMetadata,
@@ -79,7 +81,7 @@ class RaycastContext(SharedSensorContext):
 
 
 @dataclass
-class RaycasterSharedMetadata(KinematicSensorMetadataMixin, SimpleSensorMetadata):
+class RaycasterSharedMetadata(OffsetSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
     # The targets cast against each frame live on the shared RaycastContext (see get_raycast_targets), so a Raycaster
     # and a DepthCamera share one set of trees. The casts chain into the output cache (see kernel_cast_rays). The link
     # poses of the sensors are gathered per solver (see KinematicSensorMetadataMixin.solver_groups).
@@ -116,7 +118,9 @@ class RaycasterReturnType(NamedTuple):
 
 
 class RaycasterSensor(
-    KinematicSensorMixin, SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType]
+    OffsetSensorMixin,
+    KinematicSensorMixin,
+    SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType],
 ):
     def __init__(self, options: RaycasterOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
@@ -216,12 +220,9 @@ class RaycasterSensor(
         # kernel apply pos_offset / euler_offset in world frame.
         if shared_metadata.links_pos is None:
             B = raw_data_T.shape[-1]
-            shared_metadata.links_pos = torch.zeros(
-                B, shared_metadata.n_sensors, 3, device=gs.device, dtype=gs.tc_float
-            )
-            shared_metadata.links_quat = torch.zeros(
-                B, shared_metadata.n_sensors, 4, device=gs.device, dtype=gs.tc_float
-            )
+            n_sensors = len(shared_metadata.patterns)
+            shared_metadata.links_pos = torch.zeros(B, n_sensors, 3, device=gs.device, dtype=gs.tc_float)
+            shared_metadata.links_quat = torch.zeros(B, n_sensors, 4, device=gs.device, dtype=gs.tc_float)
             shared_metadata.links_quat[:, :, 0] = 1.0
 
         # Gather link poses per sensor. Sensors are pre-bucketed into shared_metadata.solver_groups at build time so
