@@ -336,6 +336,8 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
 
     scene = gs.Scene(
         coupler_options=gs.options.IPCCouplerOptions(
+            linear_system_solver="fused_pcg",
+            collision_detection_method="info_stackless_bvh",
             contact_resistance=36.0,
             enable_rigid_rigid_contact=enable_rigid_rigid_contact,
         ),
