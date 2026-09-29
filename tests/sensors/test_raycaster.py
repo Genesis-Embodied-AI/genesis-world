@@ -224,6 +224,13 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
         grid_distances_ref[(..., *hit_ij)] = -1.0
         assert_allclose(grid_raycaster_min_range.read().distances, grid_distances_ref, tol=gs.EPS)
 
+    grid_distances_ref = grid_raycaster.read().distances.clone()
+    grid_distances_ref.reshape((-1, *NUM_RAYS_XY))[-1] -= 0.1
+    grid_raycaster.set_pos_offset((0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE - 0.1), envs_idx=[1] if n_envs > 0 else None)
+    scene.sim._sensor_manager.step()
+    assert_allclose(grid_raycaster.read().distances, grid_distances_ref, tol=gs.EPS)
+    grid_raycaster.set_pos_offset((0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE))
+
     assert_allclose(graze_raycaster.read().distances, GRAZE_RANGE, tol=gs.EPS)
 
     # Validate spherical raycast

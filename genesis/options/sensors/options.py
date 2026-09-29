@@ -630,7 +630,8 @@ class Raycaster(OffsetSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions
     no_hit_value : float, optional
         The value to return for no hit. Defaults to max_range if not specified.
     return_world_frame : bool, optional
-        Whether to return points in the world frame. Defaults to False (local frame).
+        Whether to return points in the world frame. Defaults to False, where each point is the hit relative to its ray
+        start, along the axes of the sensor frame (the link frame rotated by ``euler_offset``).
     return_points : bool, optional
         Whether to return the per-ray hit points. Defaults to True. When False, ``read().points`` is None and only
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
