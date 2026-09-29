@@ -76,19 +76,31 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     )
     grid_res = RAYCAST_GRID_SIZE_X / (NUM_RAYS_XY[0] - 1)
     grid_size_y = grid_res * (NUM_RAYS_XY[1] - 1)
+    grid_pattern = gs.sensors.raycaster.GridPattern(
+        resolution=grid_res,
+        size=(RAYCAST_GRID_SIZE_X, grid_size_y),
+        direction=(0.0, 0.0, -1.0),  # pointing downwards to ground
+    )
     grid_raycaster = scene.add_sensor(
         gs.sensors.Raycaster(
-            pattern=gs.sensors.raycaster.GridPattern(
-                resolution=grid_res,
-                size=(RAYCAST_GRID_SIZE_X, grid_size_y),
-                direction=(0.0, 0.0, -1.0),  # pointing downwards to ground
-            ),
+            pattern=grid_pattern,
             entity_idx=grid_sensor.idx,
             pos_offset=(0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE),
             return_world_frame=True,
             draw_debug=show_viewer,
             debug_ray_start_color=(0.0, 0.0, 0.0, 0.0),
             debug_ray_hit_color=(0.0, 1.0, 0.0, 1.0),
+        )
+    )
+    # The obstacle top is closer than min_range while the ground is farther
+    grid_raycaster_min_range = scene.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=grid_pattern,
+            entity_idx=grid_sensor.idx,
+            pos_offset=(0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE),
+            min_range=RAYCAST_HEIGHT - 0.5 * BOX_SIZE,
+            no_hit_value=-1.0,
+            return_points=False,
         )
     )
     with pytest.raises(gs.GenesisException, match="Jitter"):
@@ -207,6 +219,10 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
         )
         grid_distances_ref[(..., *hit_ij)] = RAYCAST_HEIGHT - obstacle_pos[..., 2] - 0.5 * BOX_SIZE
         assert_allclose(grid_distances, grid_distances_ref, tol=gs.EPS)
+
+        # A hit closer than min_range reads as a miss, and still hides the ground behind it
+        grid_distances_ref[(..., *hit_ij)] = -1.0
+        assert_allclose(grid_raycaster_min_range.read().distances, grid_distances_ref, tol=gs.EPS)
 
     assert_allclose(graze_raycaster.read().distances, GRAZE_RANGE, tol=gs.EPS)
 

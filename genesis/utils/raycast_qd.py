@@ -351,6 +351,7 @@ def kernel_cast_rays(
     links_quat: qd.types.ndarray(ndim=3),
     ray_starts: qd.types.ndarray(ndim=2),
     ray_directions: qd.types.ndarray(ndim=2),
+    min_ranges: qd.types.ndarray(ndim=1),
     max_ranges: qd.types.ndarray(ndim=1),
     no_hit_values: qd.types.ndarray(ndim=1),
     is_world_frame: qd.types.ndarray(ndim=1),
@@ -371,9 +372,10 @@ def kernel_cast_rays(
 
     `is_merge` and `is_last` chain the launches over several targets into one output: the first writes every slot and
     each later one overwrites a slot only with a closer hit. A miss never beats a hit of another launch whatever the
-    `no_hit_value` of the sensor (it may lie below the range, e.g. 0 or -1): a miss of a launch before the last seeds
-    the slot with the range, which every hit lies strictly below, and the last launch alone stamps `no_hit_value` on
-    the slots still holding the range.
+    `no_hit_value` of the sensor (it may lie below the range, e.g. 0 or -1): a miss of the first launch seeds the slot
+    with the range, which every hit lies strictly below, and the last launch alone stamps `no_hit_value` on the slots
+    still holding the range. The last launch also stamps it over a hit closer than the minimum range, which is settled
+    only then because that hit still occludes what lies behind it.
     """
     n_envs = output_hits.shape[-1]
     for i_flat in range(ray_starts.shape[0] * n_envs):
@@ -409,13 +411,14 @@ def kernel_cast_rays(
                 for j in qd.static(range(3)):
                     output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = hit_point[j]
         elif not is_merge:
-            if sensor_return_points[i_s]:
-                for j in qd.static(range(3)):
-                    output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = 0.0
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s] if is_last else max_range
-        elif is_last:
-            if output_hits[i_p_dist, i_b] >= max_range:
+            output_hits[i_p_dist, i_b] = max_range
+        if qd.static(is_last):
+            distance_best = output_hits[i_p_dist, i_b]
+            if distance_best >= max_range or distance_best < min_ranges[i_s]:
                 output_hits[i_p_dist, i_b] = no_hit_values[i_s]
+                if sensor_return_points[i_s]:
+                    for j in qd.static(range(3)):
+                        output_hits[i_p_offset + i_p_sensor * 3 + j, i_b] = 0.0
 
 
 @qd.kernel(fastcache=True)
