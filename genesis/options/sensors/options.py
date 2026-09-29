@@ -628,10 +628,13 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
         Pick False for distance-only sensing (e.g. depth images); keep True when the point cloud is needed.
     ray_alignment : str, optional
-        The orientation the ray pattern follows, its origin always following the sensor link. Defaults to "base", the
-        full link orientation, so the pattern tilts with the link. "yaw" keeps the link heading alone, so the pattern
-        stays level when the link rolls or pitches, as a terrain height scan needs, at the cost of no longer seeing
-        what the link tilts toward. "world" keeps the pattern fixed in the world frame whatever the link orientation.
+        The frame in which the rays are projected. Defaults to "base".
+
+        - "base": the ray starts and directions track the full position and orientation of the sensor link.
+        - "yaw": the ray starts and directions track the link position and the yaw component of its orientation
+          alone, so the pattern stays level when the link rolls or pitches. Useful for terrain height maps.
+        - "world": the ray starts track the link position alone and the directions are fixed in the world frame.
+          Useful for querying the scene in a global frame, e.g. alongside a map built by the robot.
     exclude_link_idx : array-like[int], optional
         The global indices of the rigid links whose collision geometry the rays pass through, typically the robot's
         own links for a terrain scan. Defaults to none. Excluding any link on any raycaster adds a per-triangle check

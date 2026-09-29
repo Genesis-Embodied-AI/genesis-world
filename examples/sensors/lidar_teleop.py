@@ -31,7 +31,7 @@ def main():
         type=str,
         default="base",
         choices=("base", "yaw", "world"),
-        help="Frame the ray pattern follows: the full link orientation, its yaw only, or the world frame",
+        help="Frame the rays track: 'base' full link pose, 'yaw' link position and yaw, 'world' link position only",
     )
     args = parser.parse_args()
 
