@@ -248,6 +248,10 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     for angles, n_points in zip(full_rotation_angles, NUM_RAYS_XY):
         angles_ref = torch.deg2rad(torch.linspace(-180.0, 180.0, n_points + 1, dtype=gs.tc_float)[:-1])
         assert_allclose(angles, angles_ref, tol=tol)
+    depth_pattern = gs.sensors.raycaster.DepthCameraPattern(res=(8, 6), fx=5.0)
+    assert_allclose((depth_pattern.fx, depth_pattern.fy), 5.0, tol=gs.EPS)
+    depth_pattern = gs.sensors.raycaster.DepthCameraPattern(res=(8, 6), fov_vertical=90.0)
+    assert_allclose((depth_pattern.fx, depth_pattern.fy), 3.0, tol=gs.EPS)
 
     # Check that we can read image from depth camera
     assert_equal(depth_camera.read_image().shape, batch_shape + NUM_RAYS_XY)
