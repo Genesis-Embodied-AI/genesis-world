@@ -31,7 +31,7 @@ def main():
         type=str,
         default="base",
         choices=("base", "yaw", "world"),
-        help="Frame the rays are projected in: 'base' full link pose, 'yaw' yaw only (height maps), 'world' fixed axes",
+        help="The frame in which rays are projected.",
     )
     args = parser.parse_args()
 
