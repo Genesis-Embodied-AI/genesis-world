@@ -49,6 +49,8 @@ def as_grayscale_image(
     # Apply log scaling if requested
     if enable_log_scale:
         data_float = np.log(1.0 + data_float)
+        data_min = np.log(1.0 + data_min)
+        data_max = np.log(1.0 + data_max)
 
     # Normalize values between 0.0 and 1.0
     data_delta = data_max - data_min

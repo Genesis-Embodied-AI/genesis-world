@@ -207,6 +207,11 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
 )
 @pytest.mark.parametrize("n_envs", [0, 4])
 def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, renderer_type, renderer):
+    depth = np.broadcast_to(array=[[1.0, 3.0, 7.0]], shape=(*((n_envs,) if n_envs else ()), 1, 3))
+    for is_black_to_white, depth_expected in ((False, [[255, 127, 0]]), (True, [[0, 127, 255]])):
+        depth_image = as_grayscale_image(depth, enable_log_scale=True, black_to_white=is_black_to_white)
+        assert_equal(depth_image, depth_expected)
+
     # Small discrepancies between different hardware due the different physics integration
     png_snapshot.extension._std_err_threshold = 1.2
 
