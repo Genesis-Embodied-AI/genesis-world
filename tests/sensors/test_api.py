@@ -300,8 +300,8 @@ def test_pipeline_contract(tol):
             hardware_imp=tuple(H.tolist()),
         )
     )
-    # A three-value sensor ahead of the jittered ones shifts their per-value columns away from their sensor index. With
-    # one value per sensor the two coincide, so a jitter table built per value but read per sensor would go unnoticed.
+    # Include a three-value sensor to intentionally shift values in the shared cache, to test that each sensor reads its
+    # own jitter rather than the one at its index among the cache values.
     s_baseline = scene.add_sensor(FakeSimpleOptions(n_values=3))
     s_history = scene.add_sensor(FakeSimpleOptions(history_length=HISTORY_LEN))
     s_delay = scene.add_sensor(FakeSimpleOptions(delay=DELAY_STEPS * DT))
