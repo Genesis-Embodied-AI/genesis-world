@@ -133,15 +133,9 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
         The global entity index of the entity to which this sensor is attached. -1 or None for static sensors.
     link_idx_local : int, optional
         The local index of the link of the entity to which this sensor is attached.
-    pos_offset : array-like[float, float, float], optional
-        The positional offset of the sensor from the link.
-    euler_offset : array-like[float, float, float], optional
-        The rotational offset of the sensor from the link in degrees.
     """
 
     link_idx_local: NonNegativeInt = 0
-    pos_offset: Vec3FType = (0.0, 0.0, 0.0)
-    euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
     def validate_scene(self, scene: "Scene"):
         from genesis.engine.entities import KinematicEntity
@@ -155,6 +149,22 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
             if self.link_idx_local >= entity.n_links:
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
+
+
+class OffsetSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
+    """
+    Options for sensors mounted on their link at a fixed pose, which frames their measurements.
+
+    Parameters
+    ----------
+    pos_offset : array-like[float, float, float], optional
+        The positional offset of the sensor from the link, or from the world origin for a static sensor.
+    euler_offset : array-like[float, float, float], optional
+        The rotational offset of the sensor from the link in degrees, or from the world frame for a static sensor.
+    """
+
+    pos_offset: Vec3FType = (0.0, 0.0, 0.0)
+    euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
 
 class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
@@ -471,7 +481,9 @@ class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSe
     debug_temperature_range: Vec2FType = (0.0, 100.0)
 
 
-class IMU(RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]):
+class IMU(
+    OffsetSensorOptionsMixin["IMUSensor"], RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
+):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
     of the associated entity link.
@@ -607,7 +619,7 @@ class SurfaceDistanceProbe(
                 )
 
 
-class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
+class Raycaster(OffsetSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
     """
     Raycaster sensor that performs ray casting to get distance measurements and point clouds.
 

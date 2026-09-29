@@ -109,6 +109,8 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
             jitter=0.01,
         )
     )
+    with pytest.raises(gs.GenesisException, match="pos_offset"):
+        gs.sensors.ContactForce(entity_idx=box.idx, pos_offset=(0.0, 0.0, 0.1))
     # Adding extra sensor sharing same dtype to force discontinuous memory layout for ground truth when batched
     scene.add_sensor(
         gs.sensors.IMU(

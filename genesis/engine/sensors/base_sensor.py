@@ -571,17 +571,10 @@ class KinematicSensorMetadataMixin:
     Shared metadata for sensors attached to a KinematicEntity (or any subclass, including RigidEntity).
 
     Sensors are bucketed at build time into per-solver ``_SolverLinkGroup`` entries so the per-step gather is one bulk
-    read per solver. Static sensors (``entity_idx<0``) are not bucketed and keep an identity link pose, leaving the
-    kernel to apply ``pos_offset`` / ``euler_offset`` in world frame.
+    read per solver. Static sensors (``entity_idx<0``) are not bucketed and keep an identity link pose.
     """
 
-    offsets_pos: torch.Tensor = make_tensor_field((0, 0, 3))
-    offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
     solver_groups: list[_SolverLinkGroup] = field(default_factory=list)
-
-    @property
-    def n_sensors(self) -> int:
-        return self.offsets_pos.shape[1]
 
 
 @dataclass
@@ -592,6 +585,14 @@ class RigidSensorMetadataMixin:
 
     solver: "RigidSolver | None" = None
     links_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+
+
+@dataclass
+class OffsetSensorMetadataMixin:
+    """
+    Shared metadata for sensors mounted on their link at a fixed pose.
+    """
+
     offsets_pos: torch.Tensor = make_tensor_field((0, 0, 3))
     offsets_quat: torch.Tensor = make_tensor_field((0, 0, 4))
 
@@ -604,8 +605,7 @@ class _LinkAttachedSensorMixin:
     """
     Common boilerplate for sensors attached to a link.
 
-    Holds the python-side ``_link`` reference, concatenates per-sensor pos/euler offsets into shared metadata at build
-    time, and exposes ``set_{pos,quat}_offset``. Subclasses implement ``_register_link`` to record the link mapping in
+    Holds the python-side ``_link`` reference. Subclasses implement ``_register_link`` to record the link mapping in
     solver-specific shared-metadata shape (single tensor for ``RigidSensorMixin``, per-solver buckets for
     ``KinematicSensorMixin``).
     """
@@ -615,13 +615,26 @@ class _LinkAttachedSensorMixin:
     def build(self):
         super().build()
 
-        batch_size = self._manager._sim._B
         if self._options.entity_idx >= 0:
             entity = self._manager._sim.entities[self._options.entity_idx]
             self._link = entity.links[self._options.link_idx_local]
             link_idx = self._options.link_idx_local + entity.link_start
             self._register_link(entity, link_idx)
 
+    def _register_link(self, entity, link_idx: int):
+        raise NotImplementedError
+
+
+class OffsetSensorMixin:
+    """
+    Sensor mixin for sensors mounted on their link at a fixed pose, adjustable after build through
+    ``set_{pos,quat}_offset``.
+    """
+
+    def build(self):
+        super().build()
+
+        batch_size = self._manager._sim._B
         self._shared_metadata.offsets_pos = concat_with_tensor(
             self._shared_metadata.offsets_pos, self._options.pos_offset, expand=(batch_size, 1, 3), dim=1
         )
@@ -631,9 +644,6 @@ class _LinkAttachedSensorMixin:
             expand=(batch_size, 1, 4),
             dim=1,
         )
-
-    def _register_link(self, entity, link_idx: int):
-        raise NotImplementedError
 
     @gs.assert_built
     def set_pos_offset(self, pos_offset, envs_idx=None):
@@ -665,7 +675,7 @@ class KinematicSensorMixin(_LinkAttachedSensorMixin, Generic[KinematicSensorMeta
     """
 
     def _register_link(self, entity, link_idx: int):
-        sensor_col = self._shared_metadata.n_sensors
+        sensor_col = self._idx
         groups = self._shared_metadata.solver_groups
         existing = next((i for i, g in enumerate(groups) if g.solver is entity.solver), None)
         if existing is None:
