@@ -1354,6 +1354,9 @@ def test_camera_gimbal_lock_singularity(renderer, show_viewer):
 
         prev_right = right
 
+        # The extrinsics follow the camera: the lookat point lies on the optical axis, at the distance of the camera
+        assert_allclose(cam.extrinsics @ (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, np.linalg.norm(cam.pos), 1.0), tol=1e-6)
+
     # Move camera through singularity along x-axis: x=-1.5 to x=1.5 (singularity at x=0)
     prev_right = None
     for i in range(7):

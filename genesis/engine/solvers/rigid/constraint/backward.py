@@ -9,7 +9,7 @@ from . import solver
 
 @qd.func
 def func_matvec_Ap(
-    i_b,
+    i_b: int,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -49,7 +49,7 @@ def func_matvec_Ap(
 
 @qd.func
 def func_solve_adjoint_u_cg_batch(
-    i_b,
+    i_b: int,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -125,10 +125,12 @@ def kernel_solve_adjoint_u(
     _B = constraint_state.bw_u.shape[1]
 
     # Initialize u
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         constraint_state.bw_u[i_d, i_b] = 0.0
 
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton):
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
             if constraint_state.n_constraints[i_b] == 0:
                 # No active constraint: A = M. The forward's constrained-Hessian Cholesky nt_H is unreliable for
@@ -149,6 +151,7 @@ def kernel_solve_adjoint_u(
                     )
     else:
         # CG solver for A * u = g (parallelized over the batch dimension).
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
         for i_b in range(_B):
             func_solve_adjoint_u_cg_batch(i_b, constraint_state, dyn_info, rigid_info, rigid_config)
 
@@ -271,17 +274,19 @@ def kernel_accumulate_constraint_solver_grads(
     rigid_config: qd.template(),
 ):
     """Fold the constraint-solver adjoint outputs into the autodiff grad fields:
-    dyn_state.dofs.force.grad += constraint_state.dL_dforce
-    rigid_info.mass_mat.grad  += constraint_state.dL_dM
+    dyn_state.dofs.qf_smooth.grad += constraint_state.dL_dforce
+    rigid_info.mass_mat.grad      += constraint_state.dL_dM
+    The solve reads its smooth force from qf_smooth (see func_solve_init), so its gradient lands there.
     """
-    _B = dyn_state.dofs.force.shape[1]
-    n_dofs = dyn_state.dofs.force.shape[0]
+    _B = dyn_state.dofs.qf_smooth.shape[1]
+    n_dofs = dyn_state.dofs.qf_smooth.shape[0]
     qd.loop_config(
         name="kernel_accumulate_constraint_solver_grads",
         serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL),
     )
     for i_d, i_b in qd.ndrange(n_dofs, _B):
-        dyn_state.dofs.force.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
+        dyn_state.dofs.qf_smooth.grad[i_d, i_b] += constraint_state.dL_dforce[i_d, i_b]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i, j, i_b in qd.ndrange(n_dofs, n_dofs, _B):
         rigid_info.mass_mat.grad[i, j, i_b] += constraint_state.dL_dM[i, j, i_b]
 
@@ -370,7 +375,8 @@ def kernel_manual_add_joint_limit_constraints_bw(
         )
         if qd.static(enable_collision):
             n_con_counter = n_con_counter + gs.qd_int(
-                collider_state.n_contacts[i_b] * qd.static(rigid_config.rows_per_contact)
+                (collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b])
+                * qd.static(rigid_config.rows_per_contact)
             )
 
         for i_l in range(n_links):
@@ -478,10 +484,11 @@ def kernel_manual_add_collision_constraints_bw(
     for flat_idx in range(max_contact_pairs * _B):
         i_b = flat_idx % _B
         i_col_ = flat_idx // _B
-        if i_col_ < collider_state.n_contacts[i_b]:
-            # The forward assembles the contact rows in logical (sorted) contact order: row group i_col_ maps to
-            # physical contact contact_sort_idx[i_col_] (see add_inequality_constraints).
-            i_col = collider_state.contact_sort_idx[i_col_, i_b]
+        n_hib = collider_state.n_contacts_hibernated[i_b]
+        if i_col_ < collider_state.n_contacts[i_b] - n_hib:
+            # The forward assembles the contact rows in logical (sorted) order of the live contacts: row group i_col_
+            # maps to physical contact contact_sort_idx[n_hib + i_col_] (see add_inequality_constraints).
+            i_col = collider_state.contact_sort_idx[n_hib + i_col_, i_b]
             link_a = collider_state.contact_data.link_a[i_col, i_b]
             link_b = collider_state.contact_data.link_b[i_col, i_b]
             contact_pos = collider_state.contact_data.pos[i_col, i_b]
@@ -701,9 +708,9 @@ def kernel_manual_add_frictionloss_constraints_bw(
 
 @qd.func
 def func_cddb_ang_bw(
-    i_b,
-    link,
-    g_cddb_ang,
+    i_b: int,
+    link: int,
+    g_cddb_ang: qd.types.vector(3),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
@@ -721,10 +728,10 @@ def func_cddb_ang_bw(
 
 @qd.func
 def func_equality_jdotv_bw(
-    i_b,
-    link,
-    anchor_pos,
-    g_jdotv,
+    i_b: int,
+    link: int,
+    anchor_pos: qd.types.vector(3),
+    g_jdotv: qd.types.vector(3),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),

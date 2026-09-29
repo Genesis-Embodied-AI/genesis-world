@@ -183,6 +183,7 @@ def _kernel_surface_distance_probe_bvh(
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    eps: float,
 ):
     """
     BVH-accelerated surface-distance query.
@@ -210,10 +211,10 @@ def _kernel_surface_distance_probe_bvh(
         best_point_gt = probe_world
 
         probe_radius_noise = probe_radii_noise[i_p]
-        use_noised_radius = probe_radius_noise > gs.EPS
+        use_noised_radius = probe_radius_noise > eps
         max_r_m = max_r_gt
         if use_noised_radius:
-            max_r_m = func_noised_probe_radius(max_r_gt, probe_radius_noise)
+            max_r_m = func_noised_probe_radius(max_r_gt, probe_radius_noise, eps)
         best_dist_sq_m = max_r_m * max_r_m
         best_point_m = probe_world
 
@@ -412,6 +413,7 @@ class SurfaceDistanceProbeSensor(
             current_ground_truth_data_T,
             measured_cols_b,
             solver.dyn_state,
+            eps=gs.EPS,
         )
         if ground_truth_data_timeline is not None:
             ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)

@@ -2,15 +2,16 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+import genesis.utils.simt as su
 
 
 @qd.func
-def func_solve_mass_block(i_d0, i_b, i_col, vec: qd.Tensor, rigid_info: array_class.RigidInfo):
+def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid_info: array_class.RigidInfo):
     """LDL^T forward-backward substitution on column i_col of vec, restricted to the mass block containing dof i_d0.
 
     The factor is block-diagonal per mass block (see dofs_mass_block_start in array_class.py), with constant block
     bounds shared by every member dof, so a block is solvable independently from any member dof. The column is the env
-    for a dof vector, the lane slot for the per-lane scratch of the cooperative noslip sweep (see kernel_noslip).
+    for a dof vector, the lane slot for the per-lane scratch of the cooperative noslip sweep (see func_noslip).
     """
     block_start = rigid_info.dofs_mass_block_start[i_d0]
     block_end = rigid_info.dofs_mass_block_end[i_d0]
@@ -37,13 +38,13 @@ def func_solve_mass_block(i_d0, i_b, i_col, vec: qd.Tensor, rigid_info: array_cl
 
 @qd.func
 def func_apply_Minv_rows(
-    i_row_0,
-    i_row_1,
-    i_b,
-    i_col,
+    i_row_0: int,
+    i_row_1: int,
+    i_b: int,
+    i_col: int,
     jac_dofs_idx: qd.Tensor,
-    coef_0,
-    coef_1,
+    coef_0: float,
+    coef_1: float,
     vec: qd.Tensor,
     jac: qd.Tensor,
     jac_n_dofs: qd.Tensor,
@@ -78,9 +79,9 @@ def func_apply_Minv_rows(
 
 @qd.func
 def func_accumulate_row_blocks(
-    i_row,
-    i_b,
-    i_col,
+    i_row: int,
+    i_b: int,
+    i_col: int,
     jac_dofs_idx: qd.Tensor,
     vec_src: qd.Tensor,
     vec_dst: qd.Tensor,
@@ -99,7 +100,9 @@ def func_accumulate_row_blocks(
 
 
 @qd.func
-def func_dot_row(i_row, i_b, i_col, jac_dofs_idx: qd.Tensor, vec: qd.Tensor, jac: qd.Tensor, jac_n_dofs: qd.Tensor):
+def func_dot_row(
+    i_row: int, i_b: int, i_col: int, jac_dofs_idx: qd.Tensor, vec: qd.Tensor, jac: qd.Tensor, jac_n_dofs: qd.Tensor
+):
     """Sparse dot product J[i_row] * vec[:, i_col] over the row dof support."""
     s = gs.qd_float(0.0)
     for i_d_ in range(jac_n_dofs[i_row, i_b]):
@@ -110,7 +113,7 @@ def func_dot_row(i_row, i_b, i_col, jac_dofs_idx: qd.Tensor, vec: qd.Tensor, jac
 
 @qd.func
 def func_color_rows_batch(
-    i_b, i_island, tid, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
+    i_b: int, i_island: int, tid: int, constraint_state: array_class.ConstraintState, rigid_info: array_class.RigidInfo
 ):
     """Color the constraint rows of one island so that the rows of a color touch disjoint mass blocks.
 
@@ -159,10 +162,10 @@ def func_color_rows_batch(
 
 @qd.func
 def func_refresh_qacc_batch(
-    i_b,
-    i_island,
-    tid,
-    n_colors,
+    i_b: int,
+    i_island: int,
+    tid: int,
+    n_colors: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
@@ -234,14 +237,14 @@ def func_refresh_qacc_batch(
 
 @qd.func
 def func_noslip_update_row(
-    i_c,
-    i_b,
-    i_col,
-    ne,
-    nf,
-    const_start,
-    const_end,
-    EPS,
+    i_c: int,
+    i_b: int,
+    i_col: int,
+    ne: int,
+    nf: int,
+    const_start: int,
+    const_end: int,
+    eps: float,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
 ):
@@ -410,7 +413,7 @@ def func_noslip_update_row(
                 y = 0.5 * (constraint_state.efc_force[j_efc, i_b] - constraint_state.efc_force[j_efc + 1, i_b])
                 K1 = Ac[0] + Ac[3] - Ac[1] - Ac[2]
                 K0 = mid * (Ac[0] - Ac[3]) + bc[0] - bc[1]
-                if K1 < EPS:
+                if K1 < eps:
                     constraint_state.efc_force[j_efc, i_b] = constraint_state.efc_force[j_efc + 1, i_b] = mid
                 else:
                     y = -K0 / K1
@@ -423,7 +426,7 @@ def func_noslip_update_row(
                     else:
                         constraint_state.efc_force[j_efc, i_b] = mid + y
                         constraint_state.efc_force[j_efc + 1, i_b] = mid - y
-                cost_change = func_cost_change(i_b, j_efc, Ac, old_force, res, EPS, constraint_state.efc_force, 2)
+                cost_change = func_cost_change(i_b, j_efc, Ac, old_force, res, constraint_state.efc_force, eps, 2)
 
                 delta_0 = constraint_state.efc_force[j_efc, i_b] - old_force[0]
                 delta_1 = constraint_state.efc_force[j_efc + 1, i_b] - old_force[1]
@@ -433,10 +436,10 @@ def func_noslip_update_row(
 
 @qd.func
 def func_noslip_batch(
-    i_b,
-    i_island,
-    tid,
-    n_colors,
+    i_b: int,
+    i_island: int,
+    tid: int,
+    n_colors: int,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -464,7 +467,9 @@ def func_noslip_batch(
     ne = constraint_state.n_constraints_equality[i_b]
     nf = constraint_state.n_constraints_frictionloss[i_b]
     const_start = ne + nf
-    const_end = const_start + qd.static(rigid_config.rows_per_contact) * collider_state.n_contacts[i_b]
+    const_end = const_start + qd.static(rigid_config.rows_per_contact) * (
+        collider_state.n_contacts[i_b] - collider_state.n_contacts_hibernated[i_b]
+    )
 
     n_dofs = constraint_state.island.dof_slices.n[i_island, i_b]
     n_rows = constraint_state.island.constraint_slices.n[i_island, i_b]
@@ -498,9 +503,8 @@ def func_noslip_batch(
                 qd.simt.block.sync()
 
         if qd.static(rigid_config.enable_cooperative_noslip):
-            # Every lane reads the block total from lane 0: the exit test below must be lane-uniform, and the lanes'
-            # own copies of a butterfly reduction may differ in their last bits.
-            improvement = qd.simt.subgroup.broadcast(qd.simt.subgroup.reduce_all_add_tiled(improvement, 5), qd.u32(0))
+            # The exit test below must be lane-uniform (see qd_block_sum in utils/simt.py)
+            improvement = su.qd_block_sum(improvement)
 
         improvement *= scale
 
@@ -510,10 +514,10 @@ def func_noslip_batch(
 
 @qd.func
 def func_dual_finish_batch(
-    i_b,
-    i_island,
-    tid,
-    n_colors,
+    i_b: int,
+    i_island: int,
+    tid: int,
+    n_colors: int,
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
@@ -541,8 +545,8 @@ def func_dual_finish_batch(
             )
 
 
-@qd.kernel(fastcache=True)
-def kernel_noslip(
+@qd.func
+def func_noslip(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -589,7 +593,16 @@ def kernel_noslip(
 
 
 @qd.func
-def func_cost_change(i_b: int, force_start: int, Ac, old_force, res, eps, force: qd.Tensor, dim: int):
+def func_cost_change(
+    i_b: int,
+    force_start: int,
+    Ac: qd.types.vector(4),
+    old_force: qd.types.vector(2),
+    res: qd.types.vector(2),
+    force: qd.Tensor,
+    eps: float,
+    dim: int,
+):
     change = gs.qd_float(0.0)
     if dim == 1:
         delta = force[force_start, i_b] - old_force[0]

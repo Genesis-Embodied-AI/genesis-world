@@ -991,7 +991,7 @@ class Camera(RBC):
         envs_idx = self._env_idx if self._is_batched else None
         return tensor_to_array(self.get_transform(envs_idx), dtype=np.float32)
 
-    @cached_property
+    @property
     def extrinsics(self):
         """The current extrinsics matrix of the camera."""
         res = self.transform.copy()

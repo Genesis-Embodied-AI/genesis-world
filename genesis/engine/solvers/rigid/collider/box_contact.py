@@ -19,7 +19,14 @@ from .contact import func_add_contact, func_compute_geom_pair_scale, rotaxis, ro
 
 @qd.func
 def func_sphere_box_contact(
-    i_ga, i_gb, ga_pos, ga_quat, gb_pos, gb_quat, dyn_info: array_class.DynInfo, rigid_info: array_class.RigidInfo
+    i_ga: int,
+    i_gb: int,
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
 ):
     """
     Analytical sphere-box collision detection.
@@ -99,10 +106,10 @@ def func_sphere_box_contact(
 
 @qd.func
 def func_plane_box_contact(
-    i_ga,
-    i_gb,
-    i_b,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_pair: int,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -180,10 +187,10 @@ def func_plane_box_contact(
 
 @qd.func
 def func_box_box_contact(
-    i_ga,
-    i_gb,
-    i_b,
-    i_pair,
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    i_pair: int,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
@@ -385,13 +392,13 @@ def func_box_box_contact(
             s = qd.Vector.zero(gs.qd_float, 3)
             if q2:
                 r = rotmore @ rot.transpose()
-                p = rotaxis(pos12, i0, i1, i2, f0, f1, f2)
-                tmp1 = rotaxis(size2, i0, i1, i2, f0, f1, f2)
+                p = rotaxis(i0, i1, i2, pos12, f0, f1, f2)
+                tmp1 = rotaxis(i0, i1, i2, size2, f0, f1, f2)
                 s = size1
             else:
-                r = rotmatx(rot, i0, i1, i2, f0, f1, f2)
-                p = rotaxis(pos21, i0, i1, i2, f0, f1, f2)
-                tmp1 = rotaxis(size1, i0, i1, i2, f0, f1, f2)
+                r = rotmatx(i0, i1, i2, rot, f0, f1, f2)
+                p = rotaxis(i0, i1, i2, pos21, f0, f1, f2)
+                tmp1 = rotaxis(i0, i1, i2, size1, f0, f1, f2)
                 s = size2
 
             rt = r.transpose()
@@ -608,9 +615,9 @@ def func_box_box_contact(
             elif clface == 5:
                 f0, f2 = -1, -1
 
-            p = rotaxis(pos21, i0, i1, i2, f0, f1, f2)
-            rnorm = rotaxis(clnorm, i0, i1, i2, f0, f1, f2)
-            r = rotmatx(rot, i0, i1, i2, f0, f1, f2)
+            p = rotaxis(i0, i1, i2, pos21, f0, f1, f2)
+            rnorm = rotaxis(i0, i1, i2, clnorm, f0, f1, f2)
+            r = rotmatx(i0, i1, i2, rot, f0, f1, f2)
 
             # TODO
             tmp1 = rotmore.transpose() @ size1

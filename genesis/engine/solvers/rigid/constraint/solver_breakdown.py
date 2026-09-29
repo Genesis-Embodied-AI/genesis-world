@@ -20,7 +20,7 @@ LS_ALPHA_MAX = 1e4
 
 @qd.func
 def _func_update_constraint_forces_body(
-    i_c, i_b, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+    i_c: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
 ):
     """Per-element body for ``_func_update_constraint_forces``. Factored out so the two
     ndrange orderings (coalescing-optimal for each layout) share a single implementation."""
@@ -76,7 +76,7 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
     # thread rewrites its two tangent rows' active, which would otherwise race the tangent threads capturing
     # prev_active. Pyramidal threads only write their own row, so they snapshot inline in the body (no extra pass).
     if qd.static(rigid_config.solver_type == gs.constraint_solver.Newton and rigid_config.enable_elliptic_friction):
-        qd.loop_config(name="snapshot_prev_active")
+        qd.loop_config(name="snapshot_prev_active", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_c, i_b in qd.ndrange(
             len_constraints, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
         ):
@@ -85,7 +85,7 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
 
     # A row of an island standing still keeps its values and shows no flip to the incremental factor, see
     # func_update_constraint_batch.
-    qd.loop_config(name="update_constraint_forces")
+    qd.loop_config(name="update_constraint_forces", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_c, i_b in qd.ndrange(
         len_constraints, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
@@ -112,7 +112,7 @@ def _func_update_qfrc_constraint_per_dof(constraint_state: array_class.Constrain
     n_dofs = constraint_state.qfrc_constraint.shape[0]
     _B = constraint_state.grad.shape[1]
 
-    qd.loop_config(name="update_constraint_qfrc")
+    qd.loop_config(name="update_constraint_qfrc", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(
         n_dofs, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
     ):
@@ -183,7 +183,12 @@ def _func_islands_linesearch_and_apply(
                 if tid == 0:
                     constraint_state.improved[i_b] = is_moved
             elif qd.static(rigid_config.enable_cooperative_constraint_kernels):
-                sh_acc = qd.simt.block.SharedArray((9 * _K,), gs.qd_float)
+                sh_acc = qd.simt.block.SharedArray((10 * _K,), gs.qd_float)
+                # The regime changes of the 'signorini' cost alone, a single slot otherwise (see func_cone_head_kinks in
+                # linesearch.py)
+                sh_kinks = qd.simt.block.SharedArray(
+                    (qd.static(3 * _K if rigid_config.enable_signorini_contact else 1),), gs.qd_float
+                )
                 sh_alphas = qd.simt.block.SharedArray((3 * _K,), gs.qd_float)
                 sh_n_alphas = qd.simt.block.SharedArray((_K,), gs.qd_int)
                 sh_pending = qd.simt.block.SharedArray((_K,), gs.qd_int)
@@ -192,6 +197,7 @@ def _func_islands_linesearch_and_apply(
                     i_b,
                     tid,
                     sh_acc,
+                    sh_kinks,
                     sh_alphas,
                     sh_n_alphas,
                     sh_pending,

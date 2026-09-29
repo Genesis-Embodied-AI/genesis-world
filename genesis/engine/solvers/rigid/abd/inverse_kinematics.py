@@ -11,18 +11,18 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
 import genesis.utils.array_class as array_class
-from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_entity
+from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
 
 
 @qd.func
 def func_forward_kinematics_scratch(
-    i_col_out,
-    i_col_q,
-    i_b,
-    entity_idx,
-    link_offset,
-    joint_offset,
-    q_offset,
+    i_col_out: int,
+    i_col_q: int,
+    i_b: int,
+    entity_idx: int,
+    link_offset: int,
+    joint_offset: int,
+    q_offset: int,
     qpos: qd.Tensor,
     links_pos: qd.Tensor,
     links_quat: qd.Tensor,
@@ -131,12 +131,12 @@ def func_forward_kinematics_scratch(
 
 @qd.func
 def func_jacobian_scratch(
-    i_col,
-    i_b,
-    entity_idx,
-    joint_offset,
-    ee_link,
-    ee_pos,
+    i_col: int,
+    i_b: int,
+    entity_idx: int,
+    joint_offset: int,
+    ee_link: int,
+    ee_pos: qd.types.vector(3),
     jacobian: qd.Tensor,
     joints_xanchor: qd.Tensor,
     joints_xaxis: qd.Tensor,
@@ -191,10 +191,10 @@ def func_jacobian_scratch(
 
 @qd.func
 def func_get_jacobian(
-    i_b,
-    tgt_link_idx,
-    dof_start,
-    p_local,
+    i_b: int,
+    tgt_link_idx: int,
+    dof_start: int,
+    p_local: qd.types.vector(3),
     jacobian: qd.Tensor,
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
@@ -272,6 +272,7 @@ def kernel_get_jacobian(
 ):
     """Full spatial Jacobian of a link-local point, for every environment column."""
     p_vec = qd.Vector([p_local[0], p_local[1], p_local[2]], dt=gs.qd_float)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(n_batch):
         func_get_jacobian(i_b, tgt_link_idx, dof_start, p_vec, jacobian, dyn_state, dyn_info, rigid_config)
 
@@ -287,6 +288,7 @@ def kernel_get_jacobian_zero(
     n_batch: int,
 ):
     """Full spatial Jacobian of a link origin, for every environment column."""
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(n_batch):
         func_get_jacobian(
             i_b, tgt_link_idx, dof_start, qd.Vector.zero(gs.qd_float, 3), jacobian, dyn_state, dyn_info, rigid_config
@@ -295,16 +297,16 @@ def kernel_get_jacobian_zero(
 
 @qd.func
 def func_integrate_dq_scratch(
-    i_col,
-    i_b,
-    entity_idx,
-    q_offset,
+    i_col: int,
+    i_b: int,
+    entity_idx: int,
+    q_offset: int,
     dq: qd.Tensor,
     qpos: qd.Tensor,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    respect_joint_limit,
+    respect_joint_limit: int,
 ):
     """Integrate a joint-space step into the scratch configuration column.
 
@@ -359,10 +361,10 @@ def func_integrate_dq_scratch(
 
 @qd.func
 def func_inverse_kinematics(
-    entity_idx,
-    q_offset,
-    link_offset,
-    joint_offset,
+    entity_idx: int,
+    q_offset: int,
+    link_offset: int,
+    joint_offset: int,
     dyn_state: array_class.DynState,
     ik_state: array_class.IKState,
     fk: array_class.IKScratchFK,
@@ -370,20 +372,20 @@ def func_inverse_kinematics(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    n_qs,
-    entity_n_dofs,
-    n_links,
-    n_dofs,
-    n_envs,
-    custom_init_qpos,
-    max_samples,
-    max_solver_iters,
-    damping,
-    pos_tol,
-    rot_tol,
-    max_step_size,
-    seed,
-    respect_joint_limit,
+    n_qs: int,
+    entity_n_dofs: int,
+    n_links: int,
+    n_dofs: int,
+    n_envs: int,
+    custom_init_qpos: int,
+    max_samples: int,
+    max_solver_iters: int,
+    damping: float,
+    pos_tol: float,
+    rot_tol: float,
+    max_step_size: float,
+    seed: int,
+    respect_joint_limit: int,
 ):
     """Damped-least-squares inverse kinematics for the target links.
 
@@ -398,6 +400,7 @@ def func_inverse_kinematics(
 
     n_error_dims = 6 * n_links
 
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(n_envs):
         i_b = targets.envs_idx[i_b_]
 
@@ -767,44 +770,37 @@ def kernel_forward_kinematics_query(
     saved configuration is restored and re-propagated. qpos_cache spans the solver configuration, so the global q
     indices index it directly.
     """
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
         qpos_cache[qs_idx[i_q_], envs_idx[i_b_]] = rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]]
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos[i_b_, i_q_]
 
+    i_l_base = dyn_info.entities.link_start[entity_idx]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
-        func_forward_kinematics_entity(
-            entity_idx,
-            envs_idx[i_b_],
-            rigid_info.qpos,
-            dyn_state,
-            dyn_info,
-            rigid_info,
-            rigid_config,
-            is_backward=False,
+        i_b = envs_idx[i_b_]
+        I_l_base = [i_l_base, i_b] if qd.static(rigid_config.batch_links_info) else i_l_base
+        i_l_root = dyn_info.links.root_idx[I_l_base]
+        func_forward_kinematics_root(
+            i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
         )
 
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
         for i in qd.static(range(3)):
             links_pos[i_b_, i_l_, i] = dyn_state.links.pos[links_idx[i_l_], envs_idx[i_b_]][i]
         for i in qd.static(range(4)):
             links_quat[i_b_, i_l_, i] = dyn_state.links.quat[links_idx[i_l_], envs_idx[i_b_]][i]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q_, i_b_ in qd.ndrange(qs_idx.shape[0], envs_idx.shape[0]):
         rigid_info.qpos[qs_idx[i_q_], envs_idx[i_b_]] = qpos_cache[qs_idx[i_q_], envs_idx[i_b_]]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b_ in range(envs_idx.shape[0]):
-        func_forward_kinematics_entity(
-            entity_idx,
-            envs_idx[i_b_],
-            rigid_info.qpos,
-            dyn_state,
-            dyn_info,
-            rigid_info,
-            rigid_config,
-            is_backward=False,
+        i_b = envs_idx[i_b_]
+        I_l_base = [i_l_base, i_b] if qd.static(rigid_config.batch_links_info) else i_l_base
+        i_l_root = dyn_info.links.root_idx[I_l_base]
+        func_forward_kinematics_root(
+            i_l_root, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False
         )

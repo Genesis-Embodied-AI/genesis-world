@@ -45,14 +45,14 @@ def test_equality_joint_mimic(gs_sim, mj_sim, tol):
     assert_allclose(qpos[0], qpos[1], tol=tol)
 
 
+# Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
 @pytest.mark.required
+@pytest.mark.enable_collision(False)
 @pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_equality_link(gs_sim, mj_sim):
-    # Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
-    gs_sim.rigid_solver._enable_collision = False
     mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
 
     # Set the time constant of the constraints on both engines to improve numerical stability
@@ -315,12 +315,12 @@ def test_stickman(gs_sim, mj_sim, tol):
         gs_sim.scene.step()
         assert_equal(gs_robot.get_dofs_velocity(), dofs_vel)
 
-    simulate_and_check_mujoco_consistency(
-        gs_sim, mj_sim, num_steps=500, tol=5e-9 if gs.np_float == np.float64 else 1e-4
-    )
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=500, tol=5e-9 if gs.np_float == np.float64 else tol)
 
 
 @pytest.mark.required
+@pytest.mark.enable_collision(False)
+@pytest.mark.disable_constraint(True)
 @pytest.mark.parametrize("model_name", ["general_actuator"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
@@ -360,11 +360,6 @@ def test_general_actuator(gs_sim, mj_sim, tol):
 
     # Disable constraints, keep actuation enabled
     mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
-    gs_sim.rigid_solver._enable_collision = False
-    gs_sim.rigid_solver._enable_joint_limit = False
-    gs_sim.rigid_solver._disable_constraint = True
-    gs_sim.rigid_solver.collider.clear()
-    gs_sim.rigid_solver.constraint_solver.clear()
 
     # Compare all dynamic quantities against MuJoCo with both PD and general actuators active.
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
@@ -408,6 +403,8 @@ def test_general_actuator(gs_sim, mj_sim, tol):
 
 
 @pytest.mark.required
+@pytest.mark.enable_collision(False)
+@pytest.mark.disable_constraint(True)
 @pytest.mark.parametrize("xml_path", ["xml/franka_emika_panda/panda.xml"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
@@ -417,11 +414,6 @@ def test_robot_kinematics(gs_sim, mj_sim, tol):
     mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT
     mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_ACTUATION
     gs_sim.rigid_solver.dyn_state.dofs.ctrl_mode.fill(int(gs.CTRL_MODE.FORCE))
-    gs_sim.rigid_solver._enable_collision = False
-    gs_sim.rigid_solver._enable_joint_limit = False
-    gs_sim.rigid_solver._disable_constraint = True
-    gs_sim.rigid_solver.collider.clear()
-    gs_sim.rigid_solver.constraint_solver.clear()
 
     check_mujoco_model_consistency(gs_sim, mj_sim, tol=tol)
 

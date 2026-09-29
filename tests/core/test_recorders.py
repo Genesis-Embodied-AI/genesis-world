@@ -220,6 +220,14 @@ def test_file_writers(tmp_path):
     csv_writer = gs.recorders.CSVFile(filename=csv_file, header=("in_contact",))
     contact_sensor.start_recording(csv_writer)
 
+    imu = scene.add_sensor(
+        gs.sensors.IMU(
+            entity_idx=box.idx,
+        ),
+    )
+    imu_file = tmp_path / "imu_data.csv"
+    imu.start_recording(gs.recorders.CSVFile(filename=imu_file))
+
     csv_array_file = tmp_path / "array_data.csv"
     scene.add_recorder(
         data_func=lambda: {"batch": np.arange(6).reshape(2, 3)},
@@ -237,6 +245,12 @@ def test_file_writers(tmp_path):
     for _ in range(STEPS):
         scene.step()
 
+    # The physics, the sensor and the recorder phases of the step each took time, and the step held them all
+    timings = scene.timings
+    assert timings["physics"] > 0.0 and timings["recorders"] > 0.0
+    assert timings["sensors"] >= timings[f"sensors/{type(contact_sensor).__name__}"] > 0.0
+    assert timings["total"] >= sum(time for phase, time in timings.items() if phase != "total" and "/" not in phase)
+
     scene.stop_recording()
 
     assert csv_file.exists()
@@ -247,6 +261,11 @@ def test_file_writers(tmp_path):
         assert len(rows) == STEPS + 2  # header, the state before each step and the state the run stopped at
         assert rows[1][1] in ("False", "0")  # not in contact initially
         assert rows[-1][1] in ("True", "1")  # in contact after falling
+
+    with open(imu_file, "r") as f:
+        rows = list(csv.reader(f))
+        assert len(rows) == STEPS + 2
+        assert rows[0] == ["timestamp", *(f"{name}_{i}" for name in ("lin_acc", "ang_vel", "mag") for i in range(3))]
 
     assert csv_array_file.exists()
     with open(csv_array_file, "r") as f:

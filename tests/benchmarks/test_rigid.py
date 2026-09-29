@@ -802,16 +802,39 @@ def make_nonconvex_spacecraft(n_envs, solver=None, gjk=None, **scene_kwargs):
     )
 
 
-def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
-    # Table-bussing digital twin: a fixed 18-DOF bimanual robot posed over a work table, with a clutter of dining
-    # objects dropped and settling on the tabletop -- a contact-rich mesh-collision workload with a high-DOF
-    # articulated system held in place. Every asset is already on the pinned HF dataset (dual_arms_primitives is the
-    # all-primitive, mesh-free stand-in robot; work_table.glb and the mug/cup/apple/donut clutter are public), so
-    # this benchmark needs no additional asset upload.
+def _build_table_bussing_scene(n_envs, solver=None, gjk=None, **scene_kwargs):
+    # Table-bussing digital twin: a fixed 18-DOF bimanual robot posed over a work table, with realistic dining
+    # clutter (plates, bowls, a dish tray, cutlery, food and recycling bins) dropped and settling on the tabletop --
+    # a contact-rich mesh-collision workload with a high-DOF articulated system held in place. Ported from the
+    # internal 'table_bussing' digital-twin scene: the proprietary Marvin bimanual robot is stood in for by the
+    # all-primitive 'dual_arms_primitives' URDF, but every other object is the original asset. All are on the pinned
+    # public HF dataset, so this benchmark needs no additional asset upload.
     STEP_DT = 1.0 / 30.0
-    # work_table.glb sits with its top face ~0.54 above the mesh origin at the default scale (cf. test_mesh_repair,
-    # which places the table at z=-0.54 so its top lands at z~0), so at pos z=0 the tabletop is at z~0.54.
-    TABLE_TOP_Z = 0.54
+    # Objects drop from just above the (scaled) tabletop; the per-object stagger keeps them from overlapping at
+    # spawn (several share xy, e.g. the dish tray body and side), which would explode the loose solver on contact.
+    DROP_Z = 0.80
+
+    # (kind, path under 'table_bussing/', euler, spot). A 3-tuple spot is a fixed 3D pose (the bins); a 2-tuple gets
+    # 'DROP_Z + stagger' appended.
+    OBJECTS = (
+        ("urdf", "gray_recycle_bin/gray_recycle_bin.urdf", (90.0, 0.0, 0.0), (0.85, -0.45, 1.05)),
+        ("urdf", "green_trash_bin/green_trash_bin.urdf", (90.0, 0.0, 0.0), (0.85, 0.45, 1.05)),
+        ("mesh", "plate/teal_plate.glb", (90.0, 0.0, 0.0), (0.45, -0.35)),
+        ("mesh", "plate/sage_plate.glb", (90.0, 0.0, 0.0), (0.45, 0.35)),
+        ("urdf", "yellow_plastic_bowl/yellow_plastic_bowl.urdf", (90.0, 0.0, 0.0), (0.60, -0.20)),
+        ("urdf", "yellow_plastic_bowl/yellow_plastic_bowl.urdf", (90.0, 0.0, 0.0), (0.60, 0.0)),
+        ("urdf", "yellow_plastic_bowl/yellow_plastic_bowl.urdf", (90.0, 0.0, 0.0), (0.60, 0.20)),
+        ("mesh", "bread/bread.glb", (90.0, 0.0, 0.0), (0.35, -0.15)),
+        ("urdf", "coffee_jar/coffee_jar.urdf", (90.0, 0.0, 0.0), (0.80, 0.0)),
+        ("urdf", "coffee_bean/coffee_bean_simple.urdf", (0.0, 0.0, 0.0), (0.75, 0.15)),
+        ("urdf", "white_dish_tray_thick/dish_tray_body.urdf", (90.0, 0.0, -90.0), (0.45, 0.0)),
+        ("urdf", "white_dish_tray_thick/dish_tray_side_120.urdf", (90.0, 0.0, 0.0), (0.45, 0.0)),
+        ("urdf", "fork/fork.urdf", (90.0, 0.0, -90.0), (0.30, 0.10)),
+        ("urdf", "spoon/spoon.urdf", (90.0, 0.0, -90.0), (0.30, 0.25)),
+        ("urdf", "tomato/tomato.urdf", (90.0, 0.0, 0.0), (0.70, -0.35)),
+        ("urdf", "crumpled_paper/crumpled_paper.urdf", (0.0, 0.0, 0.0), (0.70, 0.35)),
+        ("mesh", "board_eraser/board_eraser.glb", (90.0, 0.0, 0.0), (0.30, -0.30)),
+    )
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=STEP_DT, substeps=10),
@@ -827,42 +850,74 @@ def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
 
     scene.add_entity(gs.morphs.Plane())
 
+    # work_table.glb bakes its part layout into glTF node transforms; the non-uniform scale (matching the original
+    # digital twin) is applied by the mesh morph, lifting the tabletop well above the plane so the clutter settles.
     table_path = get_hf_dataset(pattern="work_table.glb")
     scene.add_entity(
-        gs.morphs.Mesh(file=f"{table_path}/work_table.glb", pos=(0.5, 0.0, 0.0), fixed=True),
+        gs.morphs.Mesh(
+            file=f"{table_path}/work_table.glb", scale=(1.14, 1.0, 1.445), pos=(0.597, 0.0, 0.0), fixed=True
+        ),
         vis_mode="collision",
     )
 
     robot_path = get_hf_dataset(pattern="dual_arms_primitives.urdf")
     robot = scene.add_entity(
-        gs.morphs.URDF(file=f"{robot_path}/dual_arms_primitives.urdf", pos=(0.0, 0.0, TABLE_TOP_Z + 0.5), fixed=True),
+        gs.morphs.URDF(file=f"{robot_path}/dual_arms_primitives.urdf", pos=(0.0, 0.0, 1.13), fixed=True),
     )
 
-    # Dining clutter to bus off the table: auto-decomposed (CoACD) mug/cup/apple/donut in a 4x4 grid in front of the
-    # robot, staggered in height so none overlap at spawn, then dropped so they settle on the tabletop.
-    assets = (("mug_1", "output.xml"), ("cup_2", "model.xml"), ("apple_15", "model.xml"), ("donut_0", "output.xml"))
-    asset_files = {name: f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in assets}
-    for i in range(16):
-        gx, gy = i % 4, i // 4
-        name = assets[(gx + gy) % len(assets)][0]
-        scene.add_entity(
-            gs.morphs.MJCF(
-                file=asset_files[name],
-                pos=(0.30 + 0.11 * gx, -0.17 + 0.11 * gy, TABLE_TOP_Z + 0.06 + 0.02 * i),
-                euler=(90.0, 0.0, 0.0),
-            ),
-            vis_mode="collision",
-        )
+    twin_path = get_hf_dataset(pattern="table_bussing/**/*")
+    for k, (kind, rel, euler, spot) in enumerate(OBJECTS):
+        pos = spot if len(spot) == 3 else (*spot, DROP_Z + 0.04 * k)
+        morph = gs.morphs.URDF if kind == "urdf" else gs.morphs.Mesh
+        scene.add_entity(morph(file=f"{twin_path}/table_bussing/{rel}", pos=pos, euler=euler), vis_mode="collision")
 
     time_start = time.time()
     scene.build(n_envs=n_envs)
     compile_time = time.time() - time_start
 
-    # Hold every actuated DOF at its initial pose so the arms stay posed over the table instead of collapsing.
+    # Fold both arms forward and down so the bimanual robot reaches over the tabletop; its rest pose sticks the
+    # arms straight out sideways (a floating bar), which does not read as a robot working over the table. Only the
+    # shoulder/elbow angles matter (dof layout: right arm 0..8, left arm 9..17; the last two dofs per arm are the
+    # gripper fingers, left open). The left arm mirrors the right with the elbow sign flipped for its chirality.
+    arm_pose = np.zeros(robot.n_dofs, dtype=np.float32)
+    arm_pose[[1, 2, 3]] = (-1.5708, 1.5708, 1.0)
+    arm_pose[[10, 11, 12]] = (-1.5708, 1.5708, -1.0)
+    arm_pose = torch.tensor(arm_pose, dtype=gs.tc_float, device=gs.device).repeat(n_envs, 1)
     robot.set_dofs_kp(np.full((robot.n_dofs,), 100.0, dtype=np.float32))
-    robot.control_dofs_position(torch.zeros((n_envs, robot.n_dofs), dtype=gs.tc_float, device=gs.device))
+    robot.set_dofs_position(arm_pose)
+    robot.control_dofs_position(arm_pose)
+
+    return scene, robot, STEP_DT, compile_time, arm_pose
+
+
+def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
+    # Reset each env independently to its spawn state so the clutter repeatedly drops and settles. Staggered reset
+    # times keep the batch a mix of active and settled envs rather than letting all envs settle together.
+    scene, robot, step_dt, compile_time, arm_pose = _build_table_bussing_scene(
+        n_envs, solver=solver, gjk=gjk, **scene_kwargs
+    )
+
+    # get_state()/set_state() carry the full rigid state and, under hibernation, set_state also wakes the reset envs'
+    # bodies -- a bare pose write would leave a hibernated body frozen.
+    init_state = scene.get_state()
+
+    reset_steps_max = max(1, round(2.0 / step_dt))  # 2 s of sim time == 60 steps at dt = 1/30
+    rng = np.random.default_rng(0)
+    # Per-env countdown to the next reset, staggered from step 0 so the envs start decorrelated rather than all
+    # firing together. Kept host-side (one int per env) so the schedule costs no device sync; only the small list of
+    # due-env indices crosses to the GPU each step it fires.
+    countdown = rng.integers(1, reset_steps_max + 1, size=n_envs)
 
     def step():
+        countdown[:] -= 1  # in-place (slice store), so 'countdown' stays a free var, not a step()-local
+        due = np.nonzero(countdown <= 0)[0]
+        if due.size:
+            envs_idx = torch.as_tensor(due, dtype=gs.tc_int, device=gs.device)
+            scene.reset(init_state, envs_idx=envs_idx)
+            # set_state zeros ctrl_force and flips ctrl_mode to FORCE on the reset envs, so re-arm the PD position
+            # hold (at the folded arm pose) there or the freshly reset arms would go limp and collapse.
+            robot.control_dofs_position(arm_pose[: due.size], envs_idx=envs_idx)
+            countdown[due] = rng.integers(1, reset_steps_max + 1, size=due.size)
         scene.step()
 
     return (
@@ -870,7 +925,7 @@ def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
         step,
         SceneMeta(
             compile_time=compile_time,
-            step_dt=STEP_DT,
+            step_dt=step_dt,
             duration_warmup=20.0,
             duration_record=5.0,
         ),

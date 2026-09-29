@@ -639,6 +639,32 @@ def gjk_collision(request):
 
 
 @pytest.fixture
+def enable_collision(request):
+    enable_collision = None
+    for mark in request.node.iter_markers("enable_collision"):
+        if mark.args:
+            if enable_collision is not None:
+                pytest.fail("'enable_collision' can only be specified once.")
+            (enable_collision,) = mark.args
+    if enable_collision is None:
+        enable_collision = True
+    return enable_collision
+
+
+@pytest.fixture
+def disable_constraint(request):
+    disable_constraint = None
+    for mark in request.node.iter_markers("disable_constraint"):
+        if mark.args:
+            if disable_constraint is not None:
+                pytest.fail("'disable_constraint' can only be specified once.")
+            (disable_constraint,) = mark.args
+    if disable_constraint is None:
+        disable_constraint = False
+    return disable_constraint
+
+
+@pytest.fixture
 def friction_torsional(request):
     friction_torsional = None
     for mark in request.node.iter_markers("friction_torsional"):
@@ -869,6 +895,8 @@ def gs_sim(
     mujoco_compatibility,
     adjacent_collision,
     gjk_collision,
+    enable_collision,
+    disable_constraint,
     friction_cone,
     friction_torsional,
     friction_rolling,
@@ -888,6 +916,8 @@ def gs_sim(
         gjk_collision,
         show_viewer,
         mj_sim,
+        enable_collision=enable_collision,
+        disable_constraint=disable_constraint,
         friction_cone=friction_cone,
         friction_torsional=friction_torsional,
         friction_rolling=friction_rolling,

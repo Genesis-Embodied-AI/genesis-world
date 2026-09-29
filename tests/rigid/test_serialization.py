@@ -158,6 +158,11 @@ def test_export_and_load_rigid(
             euler=(0.0, 0.0, 30.0),
             align=True,
         ),
+        surface=gs.surfaces.Default(
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path="textures/checker.png",
+            ),
+        ),
     )
     # A height field, coefficients only the asset states, and a variant per environment, none of it held by a link.
     # Placed away from the rest so none of them ever meets another.
@@ -320,6 +325,10 @@ def test_export_and_load_rigid(
     # A texture holding a path rather than pixels stands for nothing, in the surface and in the meshes drawn with it
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None
+    # A mesh holding uvs is drawn with its texture, laid out as the authored one
+    restored_visual = restored.entities[6].vgeoms[0].get_trimesh().visual
+    assert restored_visual.kind == "texture"
+    assert_equal(restored_visual.uv, anchored.vgeoms[0].get_trimesh().visual.uv)
     # A morph names the asset it was created from, since the description stands for what was parsed out of it
     assert restored.entities[15].morph.file == "two_link.urdf.xacro"
     # A mesh states the asset it was read from by name, wherever that asset stood
@@ -427,11 +436,22 @@ def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
     assert pickle.loads(pickle.dumps(scene.options.rigid)) == scene.options.rigid
     scene.build(n_envs=n_envs)
 
-    # A file states no environment layout, so whoever opens one builds it with the layout they ask for. The visualizer
-    # options are replaced at load and the physics options stand as recorded.
-    restored = gs.Scene.load(exported, vis_options=gs.options.VisOptions(show_world_frame=False))
+    # A file states no environment layout, so whoever opens one builds it with the layout they ask for. The viewer and
+    # visualizer options given at load override the recorded ones for the fields they set, and the physics options
+    # stand as recorded.
+    restored = gs.Scene.load(
+        exported,
+        viewer_options=gs.options.ViewerOptions(
+            camera_fov=60,
+        ),
+        vis_options=gs.options.VisOptions(
+            show_world_frame=False,
+        ),
+    )
     assert not restored.is_built
     assert not restored.options.vis.show_world_frame
+    assert_equal(restored.options.viewer.camera_fov, 60)
+    assert_equal(restored.options.viewer.camera_pos, scene.options.viewer.camera_pos)
     # The viewer options are recorded as authored, whatever display and platform the scene was viewed with
     assert restored.options.viewer.res is None
     assert restored.options.viewer.run_in_thread is None

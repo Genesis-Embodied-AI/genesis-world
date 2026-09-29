@@ -10,7 +10,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
-from genesis.engine.bvh import STACK_SIZE as _BVH_STACK_SIZE
 from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
@@ -409,7 +408,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
         use_noised_radius = probe_radius_noise > eps
         R_m = R_gt
         if use_noised_radius:
-            R_m = func_noised_probe_radius(R_gt, probe_radius_noise)
+            R_m = func_noised_probe_radius(R_gt, probe_radius_noise, eps)
         R_m_sq = R_m * R_m
         # Conservative traversal radius covers both branches; exact tests run per leaf candidate.
         R_query = qd.max(R_gt, R_m)
@@ -1071,10 +1070,9 @@ def _func_elastomer_min_signed_dist_bvh(
     i_b: int,
     i_s: int,
     probe_world: qd.types.vector(3),
-    bvh_nodes: qd.template(),
-    bvh_morton_codes: qd.template(),
     track_geom_mask: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    bvh_tree_state: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
     max_query_dist: float,
 ) -> float:
@@ -1090,26 +1088,30 @@ def _func_elastomer_min_signed_dist_bvh(
     treated as fully outside (returns ``+max_query_dist``), which downstream maps to depth = 0.
     """
     # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
-    n_triangles = bvh_morton_codes.shape[1]
+    n_triangles = bvh_tree_state.leaves_idx.shape[1]
     best_dist = max_query_dist
     best_dist_sq = best_dist * best_dist
     best_signed = max_query_dist
 
-    node_stack = qd.Vector.zero(gs.qd_int, qd.static(_BVH_STACK_SIZE))
+    # Stack depth, see func_bvh_query_aabb in genesis.engine.bvh
+    STACK_SIZE = qd.static(64)
+    node_stack = qd.Vector.zero(gs.qd_int, STACK_SIZE)
     node_stack[0] = 0
     stack_idx = 1
 
     while stack_idx > 0:
         stack_idx -= 1
         node_idx = node_stack[stack_idx]
-        node = bvh_nodes[i_t, node_idx]
 
-        if not func_sphere_intersects_aabb(probe_world, best_dist_sq, node.bound.min, node.bound.max):
+        if not func_sphere_intersects_aabb(
+            probe_world, best_dist_sq, bvh_tree_state.nodes_min[i_t, node_idx], bvh_tree_state.nodes_max[i_t, node_idx]
+        ):
             continue
 
-        if node.left == -1:
+        i_left = bvh_tree_state.nodes_left[i_t, node_idx]
+        if i_left == -1:
             sorted_leaf_idx = node_idx - (n_triangles - 1)
-            i_f = qd.cast(bvh_morton_codes[i_t, sorted_leaf_idx][1], gs.qd_int)
+            i_f = bvh_tree_state.leaves_idx[i_t, sorted_leaf_idx]
             i_g = dyn_info.faces.geom_idx[i_f]
             if not track_geom_mask[i_b, i_s, i_g]:
                 continue
@@ -1130,15 +1132,15 @@ def _func_elastomer_min_signed_dist_bvh(
                 best_dist = d
                 best_dist_sq = d_sq
         else:
-            if stack_idx < qd.static(_BVH_STACK_SIZE - 2):
-                node_stack[stack_idx] = node.left
-                node_stack[stack_idx + 1] = node.right
+            if stack_idx < STACK_SIZE - 2:
+                node_stack[stack_idx] = i_left
+                node_stack[stack_idx + 1] = bvh_tree_state.nodes_right[i_t, node_idx]
                 stack_idx += 2
 
     return best_signed
 
 
-@qd.kernel(fastcache=False)
+@qd.kernel(fastcache=True)
 def _kernel_elastomer_probe_depth_bvh(
     probe_sensor_idx: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),
@@ -1147,12 +1149,10 @@ def _kernel_elastomer_probe_depth_bvh(
     probe_positions_local: qd.types.ndarray(),
     probe_radii: qd.types.ndarray(),
     track_geom_mask: qd.types.ndarray(),
-    bvh_nodes_a: qd.template(),
-    bvh_morton_codes_a: qd.template(),
-    bvh_nodes_b: qd.template(),
-    bvh_morton_codes_b: qd.template(),
     probe_depth_buf: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    bvh_tree_state_a: array_class.BVHTreeState,
+    bvh_tree_state_b: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
     max_query_dist: float,
     is_split: qd.template(),
@@ -1183,10 +1183,9 @@ def _kernel_elastomer_probe_depth_bvh(
             i_b,
             i_s,
             probe_world,
-            bvh_nodes_a,
-            bvh_morton_codes_a,
             track_geom_mask,
             dyn_state,
+            bvh_tree_state_a,
             dyn_info,
             max_query_dist,
         )
@@ -1198,10 +1197,9 @@ def _kernel_elastomer_probe_depth_bvh(
                 i_b,
                 i_s,
                 probe_world,
-                bvh_nodes_b,
-                bvh_morton_codes_b,
                 track_geom_mask,
                 dyn_state,
+                bvh_tree_state_b,
                 dyn_info,
                 max_query_dist,
             )
@@ -1493,7 +1491,7 @@ def _kernel_elastomer_surface_state_bvh(
                     stack_idx += 2
 
 
-@qd.kernel(fastcache=False)
+@qd.kernel(fastcache=True)
 def _kernel_elastomer_surface_state_via_global_bvh(
     links_idx: qd.types.ndarray(),
     env_bvh_idx_a: qd.types.ndarray(),
@@ -1509,19 +1507,18 @@ def _kernel_elastomer_surface_state_via_global_bvh(
     pc_active_envs_mask: qd.types.ndarray(),
     sdf_enter: qd.types.ndarray(),
     sdf_exit: qd.types.ndarray(),
-    global_bvh_nodes_a: qd.template(),
-    global_bvh_morton_codes_a: qd.template(),
-    global_bvh_nodes_b: qd.template(),
-    global_bvh_morton_codes_b: qd.template(),
     surface_pos_sensor_buf: qd.types.ndarray(),
     surface_entry_pos_sensor_buf: qd.types.ndarray(),
     surface_depth_buf: qd.types.ndarray(),
     surface_initialized_buf: qd.types.ndarray(),
     surface_candidate_buf: qd.types.ndarray(),
     dyn_state: array_class.DynState,
+    global_bvh_tree_a: array_class.BVHTreeState,
+    global_bvh_tree_b: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
     aabb_margin: float,
     max_query_dist: float,
+    bvh_stack_size: qd.template(),
     is_split: qd.template(),
 ):
     """
@@ -1591,7 +1588,7 @@ def _kernel_elastomer_surface_state_via_global_bvh(
         sensor_pos = dyn_state.links.pos[sensor_link_idx, i_b]
         sensor_quat = dyn_state.links.quat[sensor_link_idx, i_b]
 
-        stack = qd.Vector.zero(gs.qd_int, qd.static(BVH_STACK_SIZE))
+        stack = qd.Vector.zero(gs.qd_int, qd.static(bvh_stack_size))
         stack[0] = bvh.chunk_node_start[i_c]
         stack_idx = 1
 
@@ -1623,10 +1620,9 @@ def _kernel_elastomer_surface_state_via_global_bvh(
                         i_b,
                         i_s,
                         point_world,
-                        global_bvh_nodes_a,
-                        global_bvh_morton_codes_a,
                         elastomer_candidate_geom_mask,
                         dyn_state,
+                        global_bvh_tree_a,
                         dyn_info,
                         max_query_dist,
                     )
@@ -1637,10 +1633,9 @@ def _kernel_elastomer_surface_state_via_global_bvh(
                             i_b,
                             i_s,
                             point_world,
-                            global_bvh_nodes_b,
-                            global_bvh_morton_codes_b,
                             elastomer_candidate_geom_mask,
                             dyn_state,
+                            global_bvh_tree_b,
                             dyn_info,
                             max_query_dist,
                         )
@@ -1663,7 +1658,7 @@ def _kernel_elastomer_surface_state_via_global_bvh(
                 right = bvh.node_right[n]
                 # Median split bounds depth at log2(N / leaf_size) << BVH_STACK_SIZE; the guard mirrors the
                 # global rigid-BVH kernel so a future build strategy can't silently overflow the stack.
-                if stack_idx < qd.static(BVH_STACK_SIZE - 2):
+                if stack_idx < qd.static(bvh_stack_size - 2):
                     stack[stack_idx] = left
                     stack[stack_idx + 1] = right
                     stack_idx += 2
@@ -2266,12 +2261,10 @@ class ElastomerTaxelSensor(
                 shared_metadata.probe_positions,
                 shared_metadata.probe_radii,
                 shared_metadata.sensor_candidate_geom_mask,
-                entry_a.bvh.nodes,
-                entry_a.bvh.morton_codes,
-                entry_b.bvh.nodes,
-                entry_b.bvh.morton_codes,
                 shared_metadata.probe_depth_buf,
                 solver.dyn_state,
+                entry_a.bvh_state.tree,
+                entry_b.bvh_state.tree,
                 solver.dyn_info,
                 _ELASTOMER_RAYCAST_QUERY_DIST,
                 is_split=entry_b is not entry_a,
@@ -2354,19 +2347,18 @@ class ElastomerTaxelSensor(
                     shared_metadata.pc_active_envs_mask,
                     shared_metadata.shear_anchor_sd_enter,
                     shared_metadata.shear_anchor_sd_exit,
-                    entry_a.bvh.nodes,
-                    entry_a.bvh.morton_codes,
-                    entry_b.bvh.nodes,
-                    entry_b.bvh.morton_codes,
                     shared_metadata.surface_pos_sensor_buf,
                     shared_metadata.surface_entry_pos_sensor_buf,
                     shared_metadata.surface_depth_buf,
                     shared_metadata.surface_initialized_buf,
                     shared_metadata.surface_candidate_buf,
                     solver.dyn_state,
+                    entry_a.bvh_state.tree,
+                    entry_b.bvh_state.tree,
                     solver.dyn_info,
                     _ELASTOMER_QUERY_AABB_MARGIN,
                     _ELASTOMER_RAYCAST_QUERY_DIST,
+                    BVH_STACK_SIZE,
                     is_split=entry_b is not entry_a,
                 )
             # Invalidate stale surface state for points the BVH did not visit. surface_initialized

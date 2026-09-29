@@ -491,8 +491,9 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         Constraint solver type. Current supported constraint solvers are 'gs.constraint_solver.CG' (conjugate gradient)
         and 'gs.constraint_solver.Newton' (Newton's method). Defaults to 'Newton'.
     iterations : int, optional
-        Maximum number of iterations for the constraint solver; the solve exits early once its convergence tolerance
-        is met, so this bound only binds on hard steps. Defaults to 50.
+        Maximum number of iterations of the constraint solver, which exits early once its tolerance is met. A batch of
+        parallel environments waits for its slowest one on every step, so raising the bound buys accuracy on the steps
+        whose hardest contacts never converge at the price of every such step. Defaults to 25.
     tolerance : float, optional
         Tolerance for the constraint solver. If None, resolved based on the floating-point precision selected via
         `gs.init(precision=...)`: 1e-5 for single precision ("32") and 1e-8 for double precision ("64"). Defaults
@@ -581,8 +582,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         otherwise. Defaults to None.
     broadphase_traversal : gs.broadphase_traversal, optional
         Broadphase traversal strategy. ``SAP`` (sweep-and-prune) or ``ALL_VS_ALL`` (parallel pair iteration). Defaults
-        to ``None`` (auto: ``SAP`` on CPU or when hibernation/heterogeneous entities are enabled, ``ALL_VS_ALL`` on GPU
-        otherwise). See ``gs.broadphase_traversal`` for details on each strategy.
+        to ``None`` (auto: ``SAP`` on CPU or with heterogeneous entities, ``ALL_VS_ALL`` on GPU otherwise). See
+        ``gs.broadphase_traversal`` for details on each strategy.
 
     Warning
     -------
@@ -608,7 +609,7 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
 
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton
-    iterations: PositiveInt = 50
+    iterations: PositiveInt = 25
     tolerance: PositiveFloat | None = None
     ls_iterations: PositiveInt = 50
     ls_tolerance: PositiveFloat = 1e-2

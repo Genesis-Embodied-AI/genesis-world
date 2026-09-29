@@ -535,25 +535,25 @@ class TemperatureGridSensor(
             self._shared_metadata.link_to_material_idx = torch.full(
                 (solver.n_links,), -1, dtype=gs.tc_int, device=gs.device
             )
+        # Rebuild the merged material properties dict.
         self._shared_metadata.properties_dict.update(self._options.properties_dict)
-        if len(self._shared_metadata.properties_dict) > len(self._shared_metadata.link_material_properties):
-            self._shared_metadata.link_material_properties = torch.empty(
-                (len(_PropIdx), len(self._shared_metadata.properties_dict)), dtype=gs.tc_float, device=gs.device
+        self._shared_metadata.link_material_properties = torch.empty(
+            (len(_PropIdx), len(self._shared_metadata.properties_dict)), dtype=gs.tc_float, device=gs.device
+        )
+        # -1 in link_to_material_idx means invalid, 0 uses the default properties
+        self._shared_metadata.link_to_material_idx[:] = 0 if -1 in self._shared_metadata.properties_dict else -1
+        # sort properties_dict by link index to ensure default properties are at index 0
+        for i, (prop_idx, props) in enumerate(
+            sorted(self._shared_metadata.properties_dict.items(), key=lambda x: x[0])
+        ):
+            self._shared_metadata.link_material_properties[:, i] = torch.tensor(
+                # order should match _PropIdx
+                [props.base_temperature, props.conductivity, props.emissivity, props.density * props.specific_heat],
+                dtype=gs.tc_float,
+                device=gs.device,
             )
-            # -1 in link_to_material_idx means invalid, 0 uses the default properties
-            self._shared_metadata.link_to_material_idx[:] = 0 if -1 in self._shared_metadata.properties_dict else -1
-            # sort properties_dict by link index to ensure default properties are at index 0
-            for i, (prop_idx, props) in enumerate(
-                sorted(self._shared_metadata.properties_dict.items(), key=lambda x: x[0])
-            ):
-                self._shared_metadata.link_material_properties[:, i] = torch.tensor(
-                    # order should match _PropIdx
-                    [props.base_temperature, props.conductivity, props.emissivity, props.density * props.specific_heat],
-                    dtype=gs.tc_float,
-                    device=gs.device,
-                )
-                if prop_idx >= 0:
-                    self._shared_metadata.link_to_material_idx[prop_idx] = i
+            if prop_idx >= 0:
+                self._shared_metadata.link_to_material_idx[prop_idx] = i
         assert self._link.idx in self._shared_metadata.properties_dict or -1 in self._shared_metadata.properties_dict, (
             f"Temperature properties for the attached link index {self._link.idx} should be provided"
             " in properties_dict, or use key -1 for default properties for all links."

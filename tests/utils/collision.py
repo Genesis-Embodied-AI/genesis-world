@@ -121,15 +121,16 @@ def get_genuine_interpenetration(links, cross_tol=1e-3, n_dir=40, n_bisect=9, is
             va, fa = merged[i_la]
             vb, fb = merged[i_lb]
 
-            # Incursion magnitudes from unsigned distances gated by winding-number insideness: the
-            # pseudonormal sign of igl.signed_distance is unreliable on the overlapping closed components of
-            # convex decompositions, while the generalized winding number stays exact.
+            # Incursion magnitudes from unsigned point-mesh distances gated by winding-number insideness. The
+            # pseudonormal sign of igl.signed_distance is unreliable on the overlapping closed components of convex
+            # decompositions, and for rare points its magnitude depends on the libc rand() state, which whatever ran
+            # earlier in the process has advanced.
             is_inside_a0 = inside_of(va, vb, fb, lo_b, hi_b, is_exact=is_exact)
             is_inside_b0 = inside_of(vb, va, fa, lo_a, hi_a, is_exact=is_exact)
-            dist_a0, faces_near_a = igl.signed_distance(va, vb, fb)[:2]
-            dist_b0, faces_near_b = igl.signed_distance(vb, va, fa)[:2]
-            dist_a0 = np.abs(dist_a0)
-            dist_b0 = np.abs(dist_b0)
+            sq_dist_a0, faces_near_a = igl.point_mesh_squared_distance(va, vb, fb)[:2]
+            sq_dist_b0, faces_near_b = igl.point_mesh_squared_distance(vb, va, fa)[:2]
+            dist_a0 = np.sqrt(sq_dist_a0)
+            dist_b0 = np.sqrt(sq_dist_b0)
             depth_a0 = np.where(is_inside_a0, dist_a0, 0.0)
             depth_b0 = np.where(is_inside_b0, dist_b0, 0.0)
             overlap = max(depth_a0.max(), depth_b0.max())

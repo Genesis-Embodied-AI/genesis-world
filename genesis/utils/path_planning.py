@@ -436,8 +436,11 @@ class RRT(PathPlanner):
                     # set the steer result and collision check for i_b
                     for i_q in range(self._entity.n_qs):
                         self._solver.qpos[i_q + self._entity._q_start, i_b] = steer_result[i_q]
-                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_entity(
-                        self._entity._idx_in_solver,
+                    i_l_base = dyn_info.entities.link_start[self._entity._idx_in_solver]
+                    I_l_base = [i_l_base, i_b] if qd.static(self._solver.rigid_config.batch_links_info) else i_l_base
+                    i_l_root = dyn_info.links.root_idx[I_l_base]
+                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_root(
+                        i_l_root,
                         i_b,
                         rigid_info.qpos,
                         dyn_state,
@@ -446,15 +449,18 @@ class RRT(PathPlanner):
                         self._solver.rigid_config,
                         is_backward=False,
                     )
-                    gs.engine.solvers.rigid.rigid_solver.func_update_geoms_batch(
-                        i_b,
-                        dyn_state,
-                        dyn_info,
-                        rigid_info,
-                        self._solver.rigid_config,
-                        force_update_fixed_geoms=False,
-                        is_backward=False,
-                    )
+                    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+                        i_l_root = rigid_info.roots_link_idx[i_r]
+                        gs.engine.solvers.rigid.rigid_solver.func_update_geoms_root(
+                            i_l_root,
+                            i_b,
+                            dyn_state,
+                            dyn_info,
+                            rigid_info,
+                            self._solver.rigid_config,
+                            force_update_all_geoms=False,
+                            is_backward=False,
+                        )
 
     @qd.kernel
     def _kernel_rrt_step2(
@@ -796,8 +802,11 @@ class RRTConnect(PathPlanner):
                     # set the steer result and collision check for i_b
                     for i_q in range(self._entity.n_qs):
                         qpos[i_q + self._entity._q_start, i_b] = steer_result[i_q]
-                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_entity(
-                        self._entity._idx_in_solver,
+                    i_l_base = dyn_info.entities.link_start[self._entity._idx_in_solver]
+                    I_l_base = [i_l_base, i_b] if qd.static(self._solver.rigid_config.batch_links_info) else i_l_base
+                    i_l_root = dyn_info.links.root_idx[I_l_base]
+                    gs.engine.solvers.rigid.rigid_solver.func_forward_kinematics_root(
+                        i_l_root,
                         i_b,
                         rigid_info.qpos,
                         dyn_state,
@@ -806,15 +815,18 @@ class RRTConnect(PathPlanner):
                         self._solver.rigid_config,
                         is_backward=False,
                     )
-                    gs.engine.solvers.rigid.rigid_solver.func_update_geoms_batch(
-                        i_b,
-                        dyn_state,
-                        dyn_info,
-                        rigid_info,
-                        self._solver.rigid_config,
-                        force_update_fixed_geoms=False,
-                        is_backward=False,
-                    )
+                    for i_r in range(rigid_info.roots_link_idx.shape[0]):
+                        i_l_root = rigid_info.roots_link_idx[i_r]
+                        gs.engine.solvers.rigid.rigid_solver.func_update_geoms_root(
+                            i_l_root,
+                            i_b,
+                            dyn_state,
+                            dyn_info,
+                            rigid_info,
+                            self._solver.rigid_config,
+                            force_update_all_geoms=False,
+                            is_backward=False,
+                        )
 
     @qd.kernel
     def _kernel_rrt_connect_step2(

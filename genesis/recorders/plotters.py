@@ -123,6 +123,7 @@ class LinePlotHelper:
         self.x_data: list[float] = []
         self.y_data: defaultdict[str, defaultdict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
         self._history_length = options.history_length
+        self._y_log_scale = options.y_log_scale
 
         # Note that these attributes will be set during first data processing or initialization
         self._is_dict_data: bool | None = None
@@ -208,6 +209,12 @@ class LinePlotHelper:
                         self.y_data[subplot_key][channel_label].pop(0)
                     except IndexError:
                         break  # empty, nothing to do.
+
+    def is_log_scale(self, subplot_key):
+        """Whether the vertical axis of the subplot is logarithmic (see y_log_scale in LinePlotterMixinOptions)."""
+        if isinstance(self._y_log_scale, bool):
+            return self._y_log_scale
+        return subplot_key in self._y_log_scale
 
     @property
     def history_length(self):
@@ -305,6 +312,7 @@ class PyQtLinePlotter(BasePyQtPlotter):
             plot_widget = self.widget.addPlot(title=subplot_key if self.line_plot.is_dict_data else self._options.title)
             plot_widget.setLabel("bottom", self._options.x_label)
             plot_widget.setLabel("left", self._options.y_label)
+            plot_widget.setLogMode(y=self.line_plot.is_log_scale(subplot_key))
             plot_widget.showGrid(x=True, y=True, alpha=0.3)
             plot_widget.addLegend()
 
@@ -491,6 +499,7 @@ class MPLLinePlotter(BaseMPLPlotter):
         self.line_plot = LinePlotHelper(options=self._options, data=data_to_array(self._data_func()))
 
         import matplotlib.pyplot as plt
+        from matplotlib import ticker
 
         self.axes: list[plt.Axes] = []
         self.lines: dict[str, list[plt.Line2D]] = {}
@@ -514,6 +523,22 @@ class MPLLinePlotter(BaseMPLPlotter):
             ax.set_xlabel(self._options.x_label)
             ax.set_ylabel(self._options.y_label)
             ax.grid(True, alpha=0.3)
+            if self.line_plot.is_log_scale(subplot_key):
+                # A dashed grid line at every integer multiple within each decade, the ones at 2 and 5 labelled, so a
+                # value reads off the axis whatever the span of the data
+                ax.set_yscale("log")
+                ax.yaxis.set_minor_locator(ticker.LogLocator(subs=np.arange(2, 10)))
+                minor_formatter = ticker.LogFormatterSciNotation(
+                    labelOnlyBase=False, minor_thresholds=(math.inf, math.inf)
+                )
+                ax.yaxis.set_minor_formatter(
+                    ticker.FuncFormatter(
+                        lambda y, pos: minor_formatter(y, pos)
+                        if round(y / 10 ** math.floor(math.log10(y))) in (2, 5)
+                        else ""
+                    )
+                )
+                ax.grid(True, which="minor", alpha=0.3, linestyle="--")
 
             if self.line_plot.is_dict_data and n_subplots > 1:
                 ax.set_title(subplot_key)
@@ -549,8 +574,15 @@ class MPLLinePlotter(BaseMPLPlotter):
             for ax, subplot_key in zip(self.axes, self.lines.keys()):
                 subplot_y_data = self.line_plot.y_data[subplot_key]
                 subplot_ylim_data = None
-                if subplot_y_data:
-                    all_y_values = list(itertools.chain.from_iterable(subplot_y_data.values()))
+                # A value not available yet reads nan and leaves the limits alone, as does a value a logarithmic axis
+                # cannot show
+                is_log_scale = self.line_plot.is_log_scale(subplot_key)
+                all_y_values = [
+                    y
+                    for y in itertools.chain.from_iterable(subplot_y_data.values())
+                    if math.isfinite(y) and (y > 0.0 or not is_log_scale)
+                ]
+                if all_y_values:
                     subplot_ylim_data = y_min_data, y_max_data = min(all_y_values), max(all_y_values)
                     y_min_plot, y_max_plot = ax.get_ylim()
                     if y_min_data < y_min_plot or y_max_plot < y_max_data:
@@ -572,12 +604,17 @@ class MPLLinePlotter(BaseMPLPlotter):
 
             # Finally, adjust the limits on y-axis if either x- or y-axis must be extended
             if x_limits_changed or must_update_limit_y:
-                for ax, subplot_ylim_data in zip(self.axes, subplots_ylim_data):
+                for ax, subplot_key, subplot_ylim_data in zip(self.axes, self.lines.keys(), subplots_ylim_data):
                     if subplot_ylim_data is not None:
                         y_min_data, y_max_data = subplot_ylim_data
-                        y_min_plot = y_min_data - MPL_PLOTTER_RESCALE_RATIO_Y * (y_max_data - y_min_data)
-                        y_max_plot = y_max_data + MPL_PLOTTER_RESCALE_RATIO_Y * (y_max_data - y_min_data)
-                        ax.set_ylim((y_min_plot - gs.EPS, y_max_plot + gs.EPS))
+                        if self.line_plot.is_log_scale(subplot_key):
+                            # Padded in log space, which keeps the lower limit positive
+                            y_pad = (y_max_data / y_min_data) ** MPL_PLOTTER_RESCALE_RATIO_Y
+                            ax.set_ylim((y_min_data / y_pad / (1.0 + gs.EPS), y_max_data * y_pad * (1.0 + gs.EPS)))
+                        else:
+                            y_min_plot = y_min_data - MPL_PLOTTER_RESCALE_RATIO_Y * (y_max_data - y_min_data)
+                            y_max_plot = y_max_data + MPL_PLOTTER_RESCALE_RATIO_Y * (y_max_data - y_min_data)
+                            ax.set_ylim((y_min_plot - gs.EPS, y_max_plot + gs.EPS))
                 limits_changed = True
 
         # Must redraw the entire figure if the limits have changed

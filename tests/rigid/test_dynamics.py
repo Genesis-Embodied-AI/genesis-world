@@ -8,7 +8,6 @@ from quadrants.lang._perf_dispatch import PerformanceDispatcher
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
-from genesis.engine.solvers.rigid.constraint.solver import ConstraintSolver
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -300,7 +299,8 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
 
     # A local force and a local application point are both expressed in the frame that 'ref' designates, which only
-    # shows on a link whose inertial frame is rotated with respect to its own frame.
+    # shows on a link whose inertial frame is rotated with respect to its own frame. The kernel rotates by quaternion
+    # where the reference multiplies by the rotation matrix, two fp32 formulas a few ulps apart.
     base_link = robot.get_link("base")
     with pytest.raises(AssertionError):
         assert_allclose(base_link.desc.inertial_quat, gu.identity_quat(), tol=gs.EPS)
@@ -320,21 +320,21 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
     force_world = base_link_R @ force_local
     point_world = base_link_pos + base_link_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     # A world application point locates the point on its own, so it reproduces the local one it is derived from.
     rigid_solver.clear_external_force()
     base_link.apply_external_force(force_world, pos=point_world)
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     rigid_solver.clear_external_force()
@@ -343,11 +343,11 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     )
     force_world = base_inertial_R @ force_local
     point_world = base_link_COM + base_inertial_R @ lever_arm
-    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=gs.EPS)
+    assert_allclose(rigid_solver.dyn_state.links.cfrc_applied_vel[base_link.idx, 0], -force_world, tol=5e-7)
     assert_allclose(
         rigid_solver.dyn_state.links.cfrc_applied_ang[base_link.idx, 0],
         -torch.linalg.cross(point_world - base_root_COM, force_world),
-        tol=gs.EPS,
+        tol=5e-7,
     )
 
     with pytest.raises(gs.GenesisException, match="'ref' must be one of"):
@@ -568,6 +568,242 @@ def test_energy_analytical_and_conservation(
     ke_rot = torch.stack(ke_tumblers) - 0.5 * tumblers_mass * vel_tumblers[1:].square().sum(dim=-1)
     if integrator != gs.integrator.Euler:
         assert_allclose(ke_rot, ke_rot[0], tol=10.0 * tol)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            integrator=integrator,
+            # A single Newton iteration leaves the impact solve short of its fixed point, so the constraint force
+            # disagrees with the solver's acceleration by a residual the flap's inertia would magnify.
+            iterations=1,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.35, -0.55, 0.3),
+            camera_lookat=(0.05, 0.0, 0.03),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_flap,
+        ),
+    )
+    scene.build()
+
+    # Swung into the ground at zero restitution, the flap keeps a small fraction of its mechanical energy: the impact
+    # and the joint damping only take energy away, and the impact solve stopping short of its fixed point pumps a
+    # little back in. Integrating the residual of that solve as an impulse would instead throw the flap back up with
+    # half of its energy, or blow it up at a larger step.
+    entity.set_dofs_velocity(5.0)
+    energy_init = tensor_to_array(entity.get_total_energy())
+    for _ in range(20):
+        scene.step()
+    assert_allclose(entity.get_total_energy(), 0.0, atol=2e-2 * energy_init)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer):
+    G = 9.81
+    DT = 0.002
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0, 0, -G),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            # The velocity update is explicit and no DOF is damped, so the velocity difference over a step is the
+            # acceleration the constraint solve returned.
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.12, -0.16, 0.07),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.8, 0.8),
+            smooth=False,
+        ),
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=resting_light_stick,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.9),
+            smooth=False,
+        ),
+    )
+    scene.build()
+
+    for _ in range(50):
+        scene.step()
+
+    # A slow spin of the resting stick puts its rolling friction at its bound, where the solve must still balance.
+    entity.set_dofs_velocity([0.0, 0.0, 0.0, 3.5e-3, -1.75e-3, 0.0])
+
+    weight = entity.get_mass() * G
+    vel = entity.get_dofs_velocity()
+
+    for _ in range(30):
+        scene.step()
+        vel_next = entity.get_dofs_velocity()
+        acc = (vel_next - vel) / DT
+        inertial_force = entity.get_mass_mat() @ acc
+        assert_allclose(
+            inertial_force / weight, entity.get_dofs_force() / weight, atol=2e-6 if gs.np_float == np.float32 else 1e-9
+        )
+        vel = vel_next
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
+    DT = 0.01
+    FORCE_TOL = 2e-4
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.0, 0.8),
+            camera_lookat=(0.0, 0.3, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    hand = scene.add_entity(
+        gs.morphs.URDF(
+            file="urdf/shadow_hand/shadow_hand.urdf",
+            pos=(0.0, 0.0, 0.5),
+            euler=(-90, 0, 0),
+            fixed=True,
+        ),
+    )
+    cube = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.05, 0.05, 0.05),
+            pos=(0.03, 0.33, 0.57),
+        ),
+        material=gs.materials.Rigid(
+            rho=400.0,
+        ),
+    )
+    scene.build()
+    hand.set_dofs_kp(5.0)
+    hand.set_dofs_kv(0.1)
+    hand.set_dofs_force_range(-1.0, 1.0)
+
+    # A grasp caught mid-motion, the cube sliding over the palm under cupped fingers with several friction contacts
+    # near their bound, where the friction disc radii and the normal forces converge together.
+    # fmt: off
+    cube.set_qpos([0.03309, 0.33606, 0.55939, -0.98304, 0.040303, -0.052302, 0.17111])
+    cube.set_dofs_velocity([-0.0012282, 0.091947, -0.14901, -1.6697, -1.3792, -1.3602])
+    hand.set_qpos([
+        8.5606e-05, -0.066072, -0.016745, 0.5127, -0.023948, -0.0022305, 0.91073, -0.036201, 0.79698, 0.56414, 0.82663,
+        0.053306, 0.82552, 0.81338, 0.74415, 0.041697, 0.70966, 0.45989, 0.76522, 0.30411, -0.013719, 1.0085, 1.0936,
+        0.76916,
+    ])
+    hand.set_dofs_velocity([
+        0.0016572, -0.52164, -0.041012, -0.28545, 0.12339, -1.0535, -0.31426, 0.18571, -0.48743, -2.3359, 0.46389,
+        -0.27495, 0.2125, -1.0205, -0.1225, -0.5791, -0.60223, -1.3898, -0.61759, -0.056213, -0.44572, 1.4352, 1.0566,
+        -0.58018,
+    ])
+    hand.control_dofs_position([
+        0.0, 0.0, -0.14992, 0.98554, 0.028118, -0.21302, 1.261, 0.069669, 1.1161, 0.45466, 0.95139, 0.16301, 0.79595,
+        0.59608, 1.241, 0.13232, 0.99815, 0.97538, 0.87434, 0.56709, -0.010879, 0.58655, 1.0439, 0.98966,
+    ])
+    # fmt: on
+
+    vel_prev = [entity.get_dofs_velocity() for entity in (cube, hand)]
+    scene.step()
+    # An unconverged constraint solve leaves the integrated acceleration and the reported forces apart by its residual,
+    # so the step integrates an acceleration its own forces do not produce and the friction law is violated by that
+    # much. The acceleration stays the integrated quantity: re-solving it from the forces would turn the residual into
+    # an impulse, which on a light body injects energy, and correcting the forces instead would break their sum over
+    # the contacts, since admissible contact forces producing the acceleration are the solution of the problem itself.
+    for entity, vel in zip((cube, hand), vel_prev):
+        acc = (entity.get_dofs_velocity() - vel) / DT
+        assert_allclose(acc, entity.get_dofs_acc(), tol=tol)
+        assert_allclose(entity.get_mass_mat() @ acc, entity.get_dofs_force(), tol=FORCE_TOL)
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+def test_static_equilibrium(damped_pendulum_and_tilted_light_capsule, contact_resolution, show_viewer):
+    N_STEPS = 100
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.002,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+            friction_cone=gs.friction_cone.elliptic,
+            enable_torsional_friction=True,
+            enable_rolling_friction=True,
+            contact_resolution=contact_resolution,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.12, -0.16, 0.07),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.8, 0.8),
+            smooth=False,
+        ),
+    )
+    entity = scene.add_entity(
+        gs.morphs.MJCF(
+            file=damped_pendulum_and_tilted_light_capsule,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.2, 0.4, 0.9),
+            smooth=False,
+        ),
+    )
+    scene.build()
+    capsule = entity.get_link("capsule")
+    capsule_dofs_idx = capsule.joints[0].dofs_idx_local
+
+    entity.set_dofs_velocity(2.0, entity.get_joint("shoulder").dofs_idx_local)
+    for _ in range(50):
+        scene.step()
+
+    # The capsule has rocked onto its length and lies still, and a light link at rest must stay at rest
+    for _ in range(N_STEPS):
+        scene.step()
+        vel = entity.get_dofs_velocity(capsule_dofs_idx)
+        assert_allclose(vel[:3], 0.0, atol=2e-5)
+        assert_allclose(vel[3:], 0.0, atol=1e-3)
 
 
 @pytest.mark.slow  # ~250s
@@ -805,13 +1041,18 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
     assert_allclose(reconstructed, mass_mat, tol=tol)
 
     # One step from a nontrivial pose at rest: the post-step velocities (accelerations times dt, from zero) match the
-    # single equivalent entity's, exercising the solve.
+    # single equivalent entity's, exercising the solve. Joint damping on every DOF sends the merged tree through the
+    # implicit damping pass, whose correction spans the attached entities as it spans the single equivalent entity.
+    DAMPING = 0.5
     q = np.linspace(-0.3, 0.3, mono.n_dofs)
     mono.set_dofs_position(q)
+    mono.set_dofs_damping(DAMPING)
     arm.set_dofs_position(q[: arm.n_dofs])
+    arm.set_dofs_damping(DAMPING)
     i_q = arm.n_dofs
     for h in hands:
         h.set_dofs_position(q[i_q : i_q + h.n_dofs])
+        h.set_dofs_damping(DAMPING)
         i_q += h.n_dofs
     scene.step()
 
@@ -944,9 +1185,8 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
     )
 
     accelerations = []
-    resolve_orig = ConstraintSolver.resolve
 
-    def resolve_compared(self):
+    def solve_compared(*args):
         nonlocal selected
         inputs = [qd_to_numpy(tensor, copy=True) for tensor in solve_inputs]
         accelerations.clear()
@@ -954,10 +1194,10 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
         for selected in (1, 0):
             for tensor, value in zip(solve_inputs, inputs):
                 tensor.from_numpy(value)
-            resolve_orig(self)
+            constraint_solver.func_solve_body(*args)
             accelerations.append(qd_to_numpy(constraint_state.qacc, copy=True))
 
-    monkeypatch.setattr(ConstraintSolver, "resolve", resolve_compared)
+    monkeypatch.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_compared)
 
     for i_step in range(N_STEPS):
         scene.step()

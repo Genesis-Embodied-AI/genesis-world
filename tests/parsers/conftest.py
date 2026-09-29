@@ -1,3 +1,4 @@
+import copy
 import io
 import os
 import xml.etree.ElementTree as ET
@@ -499,13 +500,25 @@ def usd_scene(request, model_name, scale, fixed):
     return build_usd_scene(request.getfixturevalue(model_name), scale=scale, fixed=fixed)
 
 
-def _build_textured_triangle_glb(asset_tmp_path, name, first_attribute):
-    """Build a textured triangle with NORMAL or TEXCOORD_0 at accessor zero, returning the glTF document and path."""
+def _build_textured_triangle_glb(
+    asset_tmp_path,
+    name,
+    first_attribute,
+    vertex_normal=(1.0, 0.0, 0.0),
+    node_scale=None,
+    primitive_mode=None,
+    node_count=1,
+):
+    """Build a textured triangle with NORMAL or TEXCOORD_0 at accessor zero, returning the glTF document and path.
+
+    Every vertex carries vertex_normal as its authored shading normal, and the node holding the triangle is scaled by
+    node_scale when one is given. The primitive is declared with primitive_mode when one is given, and node_count nodes
+    hold it, each through a mesh of its own."""
     mesh = trimesh.Trimesh(
         vertices=[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         faces=[[0, 1, 2]],
         # Authored shading normals differ from the triangle's geometric normal
-        vertex_normals=[[1.0, 0.0, 0.0]] * 3,
+        vertex_normals=[list(vertex_normal)] * 3,
         visual=trimesh.visual.TextureVisuals(
             uv=[[0.125, 0.25], [0.375, 0.5], [0.625, 0.75]],
             material=trimesh.visual.material.PBRMaterial(baseColorTexture=Image.new("RGB", (2, 2), "white")),
@@ -515,6 +528,12 @@ def _build_textured_triangle_glb(asset_tmp_path, name, first_attribute):
     path = str(asset_tmp_path / f"{name}.glb")
     mesh.export(path, include_normals=True)
     glb = pygltflib.GLTF2().load(path)
+    # The exported node layout depends on the trimesh version, which may nest the mesh node under a mesh-less root
+    i_mesh_node = next(i_node for i_node, node in enumerate(glb.nodes) if node.mesh == 0)
+    mesh_node = glb.nodes[i_mesh_node]
+    siblings_idx = next((node.children for node in glb.nodes if i_mesh_node in node.children), glb.scenes[0].nodes)
+    if node_scale is not None:
+        mesh_node.scale = list(node_scale)
     primitive = glb.meshes[0].primitives[0]
     attributes = primitive.attributes
     accessor = attributes.NORMAL if first_attribute == "NORMAL" else attributes.TEXCOORD_0
@@ -525,6 +544,15 @@ def _build_textured_triangle_glb(asset_tmp_path, name, first_attribute):
     attributes.NORMAL = order.index(attributes.NORMAL)
     attributes.TEXCOORD_0 = order.index(attributes.TEXCOORD_0)
     primitive.indices = order.index(primitive.indices)
+    if primitive_mode is not None:
+        primitive.mode = primitive_mode
+    for i_node in range(1, node_count):
+        # The same primitive on a mesh and node of its own, ten units further along x
+        glb.meshes.append(pygltflib.Mesh(name=f"{glb.meshes[0].name}_{i_node}", primitives=[copy.deepcopy(primitive)]))
+        siblings_idx.append(len(glb.nodes))
+        glb.nodes.append(
+            pygltflib.Node(mesh=i_node, name=f"{mesh_node.name}_{i_node}", translation=[10.0 * i_node, 0.0, 0.0])
+        )
     return glb, path
 
 
@@ -639,6 +667,39 @@ def emissive_material_variants_glb(asset_tmp_path):
     path = asset_tmp_path / "emissive_material_variants.glb"
     gltf.save_binary(str(path))
     return str(path)
+
+
+@pytest.fixture(scope="session")
+def triangle_strip_nodes_glb(asset_tmp_path):
+    """Path to a GLB with two nodes holding TRIANGLE_STRIP primitives of the same material.
+
+    Sharing the material leaves the node each primitive comes from as the only thing separating the two meshes."""
+    glb, path = _build_textured_triangle_glb(
+        asset_tmp_path,
+        "triangle_strip_nodes",
+        first_attribute="NORMAL",
+        primitive_mode=pygltflib.TRIANGLE_STRIP,
+        node_count=2,
+    )
+    glb.save_binary(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def non_uniform_node_scale_glb(asset_tmp_path):
+    """Path to a GLB whose node scales its triangle by a different factor along each axis.
+
+    The authored normals point diagonally, so the inverse transpose of that scale, which normals map through, tilts
+    them differently than the scale itself would."""
+    glb, path = _build_textured_triangle_glb(
+        asset_tmp_path,
+        "non_uniform_node_scale",
+        first_attribute="NORMAL",
+        vertex_normal=np.full(3, 1.0 / np.sqrt(3.0)),
+        node_scale=(2.0, 0.5, 0.5),
+    )
+    glb.save_binary(path)
+    return path
 
 
 @pytest.fixture
@@ -778,6 +839,16 @@ def textured_mjcf():
     ET.SubElement(worldbody, "geom", name="capsule_repeated", type="capsule", size="2 3", material="repeated")
     ET.SubElement(worldbody, "geom", name="cylinder_repeated", type="cylinder", size="2 3", material="repeated")
     ET.SubElement(worldbody, "geom", name="box_uniform", type="box", size="2 3 4", material="uniform")
+    ET.SubElement(
+        worldbody,
+        "geom",
+        name="box_uniform_collision",
+        type="box",
+        size="2 3 4",
+        material="uniform",
+        contype="1",
+        conaffinity="1",
+    )
     ET.SubElement(worldbody, "geom", name="mesh_generated", type="mesh", mesh="plain_mesh", material="repeated")
     ET.SubElement(
         worldbody,

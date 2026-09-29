@@ -63,13 +63,13 @@ def func_copy_next_to_curr_grad(
     n_qs = rigid_info.qpos.shape[0]
     _B = dyn_state.dofs.vel.shape[1]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         dyn_state.dofs.vel_next.grad[i_d, i_b] = dyn_state.dofs.vel.grad[i_d, i_b]
         dyn_state.dofs.vel.grad[i_d, i_b] = 0.0
         dyn_state.dofs.vel[i_d, i_b] = rigid_adjoint_cache.dofs_vel[f, i_d, i_b]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q, i_b in qd.ndrange(n_qs, _B):
         rigid_info.qpos_next.grad[i_q, i_b] = rigid_info.qpos.grad[i_q, i_b]
         rigid_info.qpos.grad[i_q, i_b] = 0.0
@@ -99,12 +99,12 @@ def func_save_adjoint_cache(
     n_qs = rigid_info.qpos.shape[0]
     _B = dyn_state.dofs.vel.shape[1]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         rigid_adjoint_cache.dofs_vel[f, i_d, i_b] = dyn_state.dofs.vel[i_d, i_b]
         rigid_adjoint_cache.dofs_acc[f, i_d, i_b] = dyn_state.dofs.acc[i_d, i_b]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q, i_b in qd.ndrange(n_qs, _B):
         rigid_adjoint_cache.qpos[f, i_q, i_b] = rigid_info.qpos[i_q, i_b]
 
@@ -121,12 +121,12 @@ def func_load_adjoint_cache(
     n_qs = rigid_info.qpos.shape[0]
     _B = dyn_state.dofs.vel.shape[1]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         dyn_state.dofs.vel[i_d, i_b] = rigid_adjoint_cache.dofs_vel[f, i_d, i_b]
         dyn_state.dofs.acc[i_d, i_b] = rigid_adjoint_cache.dofs_acc[f, i_d, i_b]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q, i_b in qd.ndrange(n_qs, _B):
         rigid_info.qpos[i_q, i_b] = rigid_adjoint_cache.qpos[f, i_q, i_b]
 
@@ -148,7 +148,7 @@ def kernel_prepare_backward_substep(
     # because the cartesian space is overwritten later by other kernels if mujoco compatibility was disabled.
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         func_update_cartesian_space(
-            dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=True
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=True
         )
         func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
 
@@ -182,12 +182,12 @@ def kernel_begin_backward_substep(
 @qd.func
 def func_is_grad_valid(dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
     is_valid = True
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for I in qd.grouped(qd.ndrange(*rigid_info.qpos.shape)):
         if qd.math.isnan(rigid_info.qpos.grad[I]):
             is_valid = False
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for I in qd.grouped(qd.ndrange(*dyn_state.dofs.vel.shape)):
         if qd.math.isnan(dyn_state.dofs.vel.grad[I]):
             is_valid = False
@@ -203,22 +203,19 @@ def func_copy_cartesian_space(
     # the outputs that were overwritten if we disabled mujoco compatibility for backward pass.
 
     # dofs state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for I in qd.grouped(qd.ndrange(*dyn_state.dofs.pos.shape)):
-        # pos, cdof_ang, cdof_vel, cdofvel_ang, cdofvel_vel, cdofd_ang, cdofd_vel
+        # pos, cdof_ang, cdof_vel, cdofd_ang, cdofd_vel
         dyn_state_adjoint_cache.dofs.pos[I] = dyn_state.dofs.pos[I]
         dyn_state_adjoint_cache.dofs.cdof_ang[I] = dyn_state.dofs.cdof_ang[I]
         dyn_state_adjoint_cache.dofs.cdof_vel[I] = dyn_state.dofs.cdof_vel[I]
-        dyn_state_adjoint_cache.dofs.cdofvel_ang[I] = dyn_state.dofs.cdofvel_ang[I]
-        dyn_state_adjoint_cache.dofs.cdofvel_vel[I] = dyn_state.dofs.cdofvel_vel[I]
         dyn_state_adjoint_cache.dofs.cdofd_ang[I] = dyn_state.dofs.cdofd_ang[I]
         dyn_state_adjoint_cache.dofs.cdofd_vel[I] = dyn_state.dofs.cdofd_vel[I]
 
     # links state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for I in qd.grouped(qd.ndrange(*dyn_state.links.pos.shape)):
-        # pos, quat, root_COM, mass_sum, i_pos, i_quat, cinr_inertial, cinr_pos, cinr_quat, cinr_mass, j_pos, j_quat,
-        # cd_vel, cd_ang
+        # pos, quat, root_COM, mass_sum, i_pos, i_quat, cinr_inertial, cinr_pos, cinr_quat, cinr_mass, cd_vel, cd_ang
         dyn_state_adjoint_cache.links.pos[I] = dyn_state.links.pos[I]
         dyn_state_adjoint_cache.links.quat[I] = dyn_state.links.quat[I]
         dyn_state_adjoint_cache.links.root_COM[I] = dyn_state.links.root_COM[I]
@@ -229,20 +226,18 @@ def func_copy_cartesian_space(
         dyn_state_adjoint_cache.links.cinr_pos[I] = dyn_state.links.cinr_pos[I]
         dyn_state_adjoint_cache.links.cinr_quat[I] = dyn_state.links.cinr_quat[I]
         dyn_state_adjoint_cache.links.cinr_mass[I] = dyn_state.links.cinr_mass[I]
-        dyn_state_adjoint_cache.links.j_pos[I] = dyn_state.links.j_pos[I]
-        dyn_state_adjoint_cache.links.j_quat[I] = dyn_state.links.j_quat[I]
         dyn_state_adjoint_cache.links.cd_vel[I] = dyn_state.links.cd_vel[I]
         dyn_state_adjoint_cache.links.cd_ang[I] = dyn_state.links.cd_ang[I]
 
     # joints state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for I in qd.grouped(qd.ndrange(*dyn_state.joints.xanchor.shape)):
         # xanchor, xaxis
         dyn_state_adjoint_cache.joints.xanchor[I] = dyn_state.joints.xanchor[I]
         dyn_state_adjoint_cache.joints.xaxis[I] = dyn_state.joints.xaxis[I]
 
     # geoms state
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for I in qd.grouped(qd.ndrange(*dyn_state.geoms.pos.shape)):
         # pos, quat, verts_updated
         dyn_state_adjoint_cache.geoms.pos[I] = dyn_state.geoms.pos[I]
@@ -260,7 +255,7 @@ def kernel_copy_acc(
     n_dofs = dyn_state.dofs.vel.shape[0]
     _B = dyn_state.dofs.vel.shape[1]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         dyn_state.dofs.acc[i_d, i_b] = rigid_adjoint_cache.dofs_acc[f, i_d, i_b]
 
@@ -277,24 +272,24 @@ def kernel_copy_next_to_curr_no_check(
     n_dofs = dyn_state.dofs.vel.shape[0]
     _B = dyn_state.dofs.vel.shape[1]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q, i_b in qd.ndrange(n_qs, _B):
         rigid_info.qpos[i_q, i_b] = rigid_info.qpos_next[i_q, i_b]
 
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
         dyn_state.dofs.vel[i_d, i_b] = dyn_state.dofs.vel_next[i_d, i_b]
 
 
 @qd.func
 def func_integrate_dq_entity(
-    i_e,
-    i_b,
-    dq,
+    i_e: int,
+    i_b: int,
+    dq: qd.Tensor,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    respect_joint_limit,
+    respect_joint_limit: bool,
 ):
     EPS = rigid_info.EPS[None]
 

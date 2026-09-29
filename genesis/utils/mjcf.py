@@ -671,7 +671,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         metadata["mesh_path"], *_ = mj.paths[mesh_path_start:].decode("utf-8").split("\x00")
     else:
         gs.logger.warning(f"Unsupported MJCF geom type '{mj_geom.type}'.")
-        return None
+        return []
 
     if mj_mat is not None:
         if is_2d_texture and not has_explicit_texcoords:
@@ -713,10 +713,6 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         visual=TextureVisuals(uv=uv, material=tmesh_mat),
         process=False,
     )
-    mesh = gs.Mesh.from_trimesh(
-        tmesh, scale=scale, surface=gs.surfaces.Collision() if is_col else surface, metadata=metadata
-    )
-
     info = {
         "type": gs_type,
         "pos": mj_geom.pos * scale,
@@ -733,12 +729,17 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
         "friction_rolling": mj_geom.friction[2] if mj_geom.condim[0] >= 6 else 0.0,
         "sol_params": np.concatenate((mj_geom.solref, mj_geom.solimp)),
     }
+    g_infos = []
     if is_col:
-        info["mesh"] = mesh
-    else:
-        info["vmesh"] = mesh
+        mesh = gs.Mesh.from_trimesh(tmesh, scale=scale, surface=gs.surfaces.Collision(), metadata=metadata.copy())
+        g_infos.append({**info, "mesh": mesh})
 
-    return info
+    # Geometries of visual groups (0, 1 or 2) are rendered in accordance with MuJoCo, collision ones included
+    if not is_col or info["group"] in (0, 1, 2):
+        vmesh = gs.Mesh.from_trimesh(tmesh, scale=scale, surface=surface, metadata=metadata)
+        g_infos.append({**info, "vmesh": vmesh, "contype": 0, "conaffinity": 0})
+
+    return g_infos
 
 
 def parse_geoms(mj, scale, surface, xml_path):
@@ -750,18 +751,16 @@ def parse_geoms(mj, scale, surface, xml_path):
         if mj.geom_bodyid[i_g] < 0:
             continue
 
-        # try parsing a given geometry
-        g_info = parse_geom(mj, i_g, scale, surface, xml_path)
-        if g_info is None:
-            continue
+        # Parse a given geometry as its collision and visual geometries
+        g_infos = parse_geom(mj, i_g, scale, surface, xml_path)
 
         # Ignore world when looking for collision geometries
         if mj.geom_bodyid[i_g] == 0:
-            is_any_col |= g_info["contype"] or g_info["conaffinity"]
+            is_any_col |= any(g_info["contype"] or g_info["conaffinity"] for g_info in g_infos)
 
-        # assign geoms to link
+        # Assign geoms to link
         link_idx = mj.geom_bodyid[i_g]
-        links_g_info[link_idx].append(g_info)
+        links_g_info[link_idx] += g_infos
 
     # Update contype and conaffinity to take into account any additional list of explicitly excluded collision pairs
     if mj.nexclude:
@@ -819,26 +818,6 @@ def parse_geoms(mj, scale, surface, xml_path):
             "Collision meshes are not visualized by default. To visualize them, please use `vis_mode='collision'` "
             "when calling `scene.add_entity`."
         )
-
-    # Parse geometry group if available
-    for link_g_info in links_g_info:
-        for g_info in link_g_info.copy():
-            # Skip visual geometries
-            if not (g_info["contype"] or g_info["conaffinity"]):
-                continue
-
-            # Duplicate collision geometries as visual in accordance with Mujoco logics:
-            # If groups are defined, only create visual for geoms in visual groups (0, 1 or 2).
-            if g_info["group"] in (0, 1, 2):
-                g_info = g_info.copy()
-                mesh = g_info.pop("mesh")
-                vmesh = gs.Mesh.from_trimesh(
-                    mesh=mesh.trimesh,
-                    surface=surface,
-                    metadata=mesh.metadata,
-                )
-                g_info = {**g_info, "vmesh": vmesh, "contype": 0, "conaffinity": 0}
-                link_g_info.append(g_info)
 
     return links_g_info
 

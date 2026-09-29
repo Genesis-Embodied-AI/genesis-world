@@ -9,17 +9,16 @@ Two scenes exercise the same pipeline:
   wave or already fallen behind it. Only the handful of dominoes in the travelling front stay awake.
 
 While a body is awake the full constraint solve runs for its island; once it hibernates that island is skipped by
-forward kinematics, forward dynamics, integration, and the constraint solve. The step rate is streamed to a live plot
-and, with --record, both the scene and the plot are saved to video.
+forward kinematics, forward dynamics, integration, and the constraint solve. The step rate of the physics alone, read
+from the scene's timings, is streamed to a live plot and, with --record, both the scene and the plot are saved to video.
 """
 
 import argparse
+import math
 import os
-import time
 
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy
-from genesis.utils.tools import FPSTracker
 
 
 RECORDING_FPS = 30
@@ -50,6 +49,8 @@ def main():
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
+            # The step rate the plot shows is averaged over a fifth of a simulated second
+            timings_window=round(0.2 / dt),
         ),
         show_viewer=args.vis,
     )
@@ -103,12 +104,10 @@ def main():
 
     # Two correlated signals streamed to a live plot: the step rate climbs as bodies fall asleep, and the number of
     # awake bodies tracks the moving collision front. The second subplot makes the FPS <-> hibernation link explicit.
-    fps_tracker = FPSTracker(n_envs=0, alpha=0.0)
-    step_rate = [0.0]
-    n_awake = [0]
+    plot_values = {"step_rate": [math.nan], "awake_bodies": [0]}
 
     def plot_data():
-        return {"step_rate": [step_rate[0]], "awake_bodies": [n_awake[0]]}
+        return plot_values
 
     scene.add_recorder(
         plot_data,
@@ -117,6 +116,7 @@ def main():
             history_length=10000,
             hz=RECORDING_FPS,
             title="Islands + hibernation",
+            y_log_scale=("step_rate",),
             save_to_filename=f"out/hibernation_{args.scene}_fps.mp4" if args.record else None,
         ),
     )
@@ -124,31 +124,27 @@ def main():
     scene.build(n_envs=1)
 
     n_bodies = sum(1 for link in scene.rigid_solver.links if link.n_dofs > 0)
-    n_awake[0] = n_bodies
+    plot_values["awake_bodies"][0] = n_bodies
 
-    # Recording renders from within 'scene.step', so the reported step rate includes the cost of capturing a frame
-    # every 1 / RECORDING_FPS of simulated time. Compare rates between scenes recorded the same way, or drop
-    # '--record' to read the physics-only rate.
     if args.record:
         camera.start_recording(save_to_filename=f"out/hibernation_{args.scene}.mp4", fps=RECORDING_FPS)
-    sim_clock = 0.0
     # Long enough to show the full settle (ducks) or the whole travelling cascade and its re-sleep (dominos).
     sim_seconds = 7.0 if args.scene == "ducks" else 9.0
     n_steps = int(sim_seconds / dt) if "PYTEST_VERSION" not in os.environ else 5
-    for _ in range(n_steps):
-        tic = time.perf_counter()
+    # The step rate of the physics alone, read once the first step, which carries the kernel compilation, has left
+    # the averaging window
+    n_window = scene.options.profiling.timings_window
+    for i_step in range(n_steps):
         scene.step()
-        sim_clock += time.perf_counter() - tic
-        measured = fps_tracker.step(sim_clock)
-        if measured is not None:
-            step_rate[0] = measured
-        # Read the awake count outside the timed region so it does not enter the reported step rate.
-        n_awake[0] = n_bodies - int(qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated, transpose=True).sum())
+        if i_step >= n_window:
+            plot_values["step_rate"][0] = 1.0 / scene.timings["physics"]
+        plot_values["awake_bodies"][0] = n_bodies - qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated).sum()
     if args.record:
         camera.stop_recording()
 
     gs.logger.info(
-        f"{n_bodies - n_awake[0]}/{n_bodies} bodies hibernated; final step rate {step_rate[0]:,.0f} steps/s."
+        f"{n_bodies - plot_values['awake_bodies'][0]}/{n_bodies} bodies hibernated; "
+        f"final step rate {plot_values['step_rate'][0]:,.0f} steps/s."
     )
 
 

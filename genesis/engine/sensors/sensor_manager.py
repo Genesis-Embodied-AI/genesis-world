@@ -325,7 +325,9 @@ class SensorManager:
         for context in self._shared_contexts.values():
             context.update()
 
+        fps_tracker = self._sim.fps_tracker
         for sensor_cls, sensors in self._sensors_by_type.items():
+            fps_tracker.start_phase(f"sensors/{sensor_cls.__name__}")
             dtype = sensor_cls._get_intermediate_dtype()
             cache_slice = self._cache_slices_by_type[sensor_cls]
             ground_truth_slice = self._ground_truth_intermediate_cache[dtype][cache_slice]
@@ -376,6 +378,8 @@ class SensorManager:
             # `_apply_delay` is an overrideable classmethod on `Sensor` whose default ZOH implementation is dtype-safe
             # for any return space (bool, uint8, quantized float, ...).
             sensor_cls._apply_delay(metadata, measured_return_ring, self._return_cache[sensor_cls])
+
+        fps_tracker.stop_phase()
 
     def draw_debug(self, context: "RasterizerContext"):
         for sensor in self.sensors:

@@ -958,21 +958,11 @@ def test_color_overwrite(overwrite, urdf_with_external_assets, show_viewer):
         assert_equal(color, (255, 0, 0, 255) if overwrite else (51, 51, 51, 255))
 
     for vgeom in humanoid.vgeoms:
-        # FIXME: The original material is lost because the visuals are collision geometries that has been duplicated as
-        # visual to circumvent the lack of dedicated visuals.
-        is_true_visual = vgeom.vmesh.metadata["name"] == "nose"
-        assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite or not is_true_visual
+        assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite
         visual = vgeom.vmesh.trimesh.visual
         assert visual.defined
         color = np.unique(visual.vertex_colors, axis=0)
-        if is_true_visual:
-            if overwrite:
-                assert_equal(color, (255, 0, 0, 255))
-            else:
-                with pytest.raises(AssertionError):
-                    assert_equal(color, (128, 128, 128, 255))
-        else:
-            assert_equal(color, (255, 0, 0, 255) if overwrite else (128, 128, 128, 255))
+        assert_equal(color, (255, 0, 0, 255) if overwrite else (204, 153, 102, 255))
 
     for vgeom in axis.vgeoms:
         assert vgeom.vmesh.metadata["is_visual_overwritten"] == overwrite

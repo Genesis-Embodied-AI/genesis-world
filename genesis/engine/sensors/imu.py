@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
@@ -12,7 +12,7 @@ from genesis.options.sensors import IMU as IMUOptions
 from genesis.options.sensors import CrossCouplingAxisType
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
-from .base_sensor import SimpleSensor, RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensorMetadata
+from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
@@ -87,24 +87,17 @@ def _get_cross_axis_coupling_to_alignment_matrix(
     if out is None:
         out = torch.eye(3, dtype=gs.tc_float, device=gs.device)
 
-    if isinstance(input, float):
-        # set off-diagonal elements to the scalar value
-        torch.diagonal(out)[:] = input
+    coupling = torch.as_tensor(input, dtype=gs.tc_float, device=gs.device)
+    if coupling.shape in ((), (3,)):
+        # set off-diagonal elements to the scalar value, or those of column j to the vector element j
+        out.copy_(coupling.expand(3, 3))
         out.fill_diagonal_(1.0)
-    elif isinstance(input, torch.Tensor):
-        out.copy_(input)
+    elif coupling.shape == (3, 3):
+        out.copy_(coupling)
     else:
-        np_input = np.array(input)
-        if np_input.shape == (3,):
-            # set off-diagonal elements to the vector values
-            out[1, 0] = np_input[0]
-            out[2, 0] = np_input[0]
-            out[0, 1] = np_input[1]
-            out[2, 1] = np_input[1]
-            out[0, 2] = np_input[2]
-            out[1, 2] = np_input[2]
-        elif np_input.shape == (3, 3):
-            out.copy_(torch.tensor(np_input, dtype=gs.tc_float, device=gs.device))
+        gs.raise_exception(
+            f"Cross-axis coupling must be a scalar, a 3-vector or a 3x3 matrix. Got shape {tuple(coupling.shape)}."
+        )
     return out
 
 

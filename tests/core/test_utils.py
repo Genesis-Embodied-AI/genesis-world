@@ -1,4 +1,6 @@
 import math
+import subprocess
+import sys
 from functools import partial
 from unittest.mock import patch
 
@@ -7,9 +9,9 @@ import torch
 
 import igl
 import pytest
+import trimesh
 from scipy.linalg import polar as scipy_polar
 from scipy.spatial.transform import Rotation as R, Slerp
-import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -20,8 +22,8 @@ from genesis.utils.tools import FPSTracker
 from genesis.utils.urdf import compose_inertial_properties
 from genesis.utils.warnings import warn_once
 
-from ..utils.assets import get_hf_dataset
 from ..utils.assertions import assert_allclose, assert_equal
+from ..utils.assets import get_hf_dataset
 from ..utils.collision import display_collision_pairs, get_genuine_interpenetration
 
 
@@ -172,8 +174,10 @@ def test_geom_quadrants_vs_tensor_consistency(batch_shape):
 def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
     for py_func, shapes_in, shapes_out in (
         (gu.slerp, [[4], [4], [1]], [[4]]),
+        (gu.z_up_to_R, [[3]], [[3, 3]]),
         (gu.z_up_to_R, [[3], [3], [3, 3]], [[3, 3]]),
         (gu.pos_lookat_up_to_T, [[3], [3], [3]], [[4, 4]]),
+        (gu.inv_transform_by_T, [[5, 3], [4, 4]], [[5, 3]]),
         (partial(polar, pure_rotation=False, side="left", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
         (partial(polar, pure_rotation=False, side="right", tol=tol), [[3, 3]], [[3, 3], [3, 3]]),
     ):
@@ -182,6 +186,9 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
         np_args, tc_args = [], []
         for i in range(len(shape_args)):
             np_arg = np.random.randn(*batch_shape, *shape_args[i]).clip(-1.0, 1.0).astype(gs.np_float)
+            # Axis-aligned vectors hit the degenerate branches: poles, up colinear with z, coincident pos and lookat
+            if batch_shape and shape_args[i] == [3]:
+                np_arg[..., :6, :] = np.concatenate((np.eye(3), -np.eye(3)))
             tc_arg = torch.as_tensor(np_arg, dtype=gs.tc_float, device=gs.device)
 
             if i < num_inputs:
@@ -954,6 +961,18 @@ def test_fps_tracker():
     fps = tracker.step(current_time=10.45)
     # num envs * [num steps] / (delta time)
     assert math.isclose(fps, n_envs * 4 / 0.14)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_logger_prints_once_with_root_logging(backend):
+    script = (
+        "import logging; logging.basicConfig(level=logging.INFO); "
+        "import genesis as gs; gs.init(backend=gs.cpu); gs.logger.warning('Genesis warning')"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stderr
+    assert (proc.stdout + proc.stderr).count("Genesis warning") == 1
 
 
 @pytest.mark.required

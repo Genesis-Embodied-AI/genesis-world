@@ -53,6 +53,15 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
             magnetic_field=MAG_FIELD,
         )
     )
+    imu_coupled = scene.add_sensor(
+        gs.sensors.IMU(
+            entity_idx=box.idx,
+            acc_cross_axis_coupling=0.1,
+            gyro_cross_axis_coupling=0.1,
+            mag_cross_axis_coupling=0.1,
+            magnetic_field=MAG_FIELD,
+        )
+    )
     imu_noisy = scene.add_sensor(
         gs.sensors.IMU(
             entity_idx=box.idx,
@@ -125,6 +134,23 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
 
     with np.testing.assert_raises(AssertionError, msg="Angular velocity should not be zero due to COM shift"):
         assert_allclose(imu.read_ground_truth().ang_vel, 0.0, tol=tol)
+
+    for data, data_coupled in zip(imu.read(), imu_coupled.read()):
+        assert_allclose(data_coupled - data, 0.1 * (data.sum(dim=-1, keepdim=True) - data), tol=tol)
+
+    envs_idx = [0] if n_envs else None
+    imu_coupled.set_acc_cross_axis_coupling(cross_axis_coupling=0.2, envs_idx=envs_idx)
+    imu_coupled.set_gyro_cross_axis_coupling(cross_axis_coupling=np.array(0.2), envs_idx=envs_idx)
+    imu_coupled.set_mag_cross_axis_coupling(
+        cross_axis_coupling=torch.full((3,), 0.2, dtype=gs.tc_float, device=gs.device), envs_idx=envs_idx
+    )
+    with pytest.raises(gs.GenesisException):
+        imu_coupled.set_acc_cross_axis_coupling(cross_axis_coupling=(0.2, 0.2))
+    scene.step()
+    coupling = torch.full((max(n_envs, 1), 1), 0.1, dtype=gs.tc_float, device=gs.device)
+    coupling[0] = 0.2
+    for data, data_coupled in zip(imu.read(), imu_coupled.read()):
+        assert_allclose(data_coupled - data, coupling * (data.sum(dim=-1, keepdim=True) - data), tol=tol)
 
     with np.testing.assert_raises(AssertionError, msg="Delayed accl data should not be equal to the ground truth data"):
         assert_equal(imu_delayed.read().lin_acc - imu_delayed.read_ground_truth().lin_acc, 0.0)

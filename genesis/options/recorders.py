@@ -206,6 +206,8 @@ class LinePlotterMixinOptions(Options):
         Label for the horizontal axis.
     y_label: str, optional
         Label for the vertical axis.
+    y_log_scale: bool | tuple[str, ...]
+        Whether the vertical axis of every subplot is logarithmic, or the keys of the subplots whose axis is.
     history_length: int
         The maximum number of previous data to store.
     """
@@ -218,6 +220,9 @@ class LinePlotterMixinOptions(Options):
     ] = None
     x_label: str = ""
     y_label: str = ""
+    y_log_scale: Annotated[
+        bool | tuple[str, ...], BeforeValidator(lambda v: v if isinstance(v, bool) else tuple(v))
+    ] = False
     history_length: PositiveInt = 100
 
 
@@ -246,6 +251,8 @@ class PyQtLinePlot(BasePlotterOptions, LinePlotterMixinOptions):
         Label for the horizontal axis.
     y_label: str, optional
         Label for the vertical axis.
+    y_log_scale: bool | tuple[str, ...]
+        Whether the vertical axis of every subplot is logarithmic, or the keys of the subplots whose axis is.
     history_length: int
         The maximum number of previous data to store.
     """
@@ -278,6 +285,8 @@ class MPLLinePlot(BasePlotterOptions, LinePlotterMixinOptions):
         Label for the horizontal axis.
     y_label: str, optional
         Label for the vertical axis.
+    y_log_scale: bool | tuple[str, ...]
+        Whether the vertical axis of every subplot is logarithmic, or the keys of the subplots whose axis is.
     history_length: int
         The maximum number of previous data to store.
     """
