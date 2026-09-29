@@ -272,13 +272,12 @@ def test_ground_sliding(n_envs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
+            substeps=8,
             gravity=GRAVITY,
         ),
         coupler_options=gs.options.IPCCouplerOptions(
             contact_d_hat=0.01,
             enable_rigid_rigid_contact=False,
-            # Disable the semi-implicit early exit to avoid spurious rocking during sliding.
-            newton_semi_implicit_enable=False,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.5, 2.0, 1.5),
