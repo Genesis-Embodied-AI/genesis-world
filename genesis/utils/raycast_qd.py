@@ -41,16 +41,16 @@ def get_triangle_vertices(i_f: int, i_b: int, dyn_state: array_class.DynState, d
 def bvh_ray_cast(
     i_t: int,
     i_b: int,
-    i_s: int,  # sensor index selecting the link_excluded row
+    i_s: int,
     ray_start: qd.types.vector(3),
     ray_dir: qd.types.vector(3),
     max_range: float,
-    link_excluded: qd.template(),  # [n_sensors, n_links] bool - 0 marks an excluded link
+    is_link_excluded: qd.template(),
     dyn_state: array_class.DynState,
     bvh_tree_state: array_class.BVHTreeState,
     dyn_info: array_class.DynInfo,
     eps: float,
-    is_link_excluded: qd.template(),  # compile-time: whether any sensor excludes links
+    exclude_links: qd.template(),
 ):
     """
     Cast a ray through a BVH and find the closest intersection.
@@ -59,8 +59,8 @@ def bvh_ray_cast(
     BVH, while a grouped static BVH shared by several envs routes ``i_t`` through ``env_bvh_idx`` (the routed envs
     have bit-identical verts, so each env reads its own).
 
-    ``i_s`` selects the sensor whose ``link_excluded`` row a leaf is checked against; when ``is_link_excluded``
-    is False (compile time) that check is compiled out, so non-filtering sensors pay no per-leaf cost.
+    With ``exclude_links``, a face whose link is flagged in row ``i_s`` of ``is_link_excluded`` is never hit. Without
+    it, the check is compiled out and ``is_link_excluded`` is never read, so it may be None.
 
     Returns
     -------
@@ -77,9 +77,8 @@ def bvh_ray_cast(
     hit_face = -1
     closest_distance = gs.qd_float(max_range)
     hit_normal = qd.math.vec3(0.0, 0.0, 0.0)
-    # Declared before the compile-time branch: stays 0 (not excluded) when
-    # is_link_excluded is False, keeping that path a no-op.
-    is_excluded = gs.qd_int(0)
+    # Declared before the compile-time branch, whose body is a nested scope in quadrants.
+    is_excluded = False
 
     axes, shear, is_valid_dir = ray_projection(ray_dir, eps)
 
@@ -115,13 +114,12 @@ def bvh_ray_cast(
                 # Perform ray-triangle intersection
                 hit_distance = ray_triangle_intersection(axes, ray_start, shear, v0, v1, v2, eps)
 
-                if qd.static(is_link_excluded):
-                    # A ray must not hit faces owned by this sensor's excluded
-                    # links (e.g. the robot's own links for a terrain scan).
-                    # mask[row, link] == 0 marks an excluded link.
-                    is_excluded = link_excluded[i_s, dyn_info.geoms.link_idx[dyn_info.faces.geom_idx[i_f]]] == 0
+                if qd.static(exclude_links):
+                    i_g = dyn_info.faces.geom_idx[i_f]
+                    i_l = dyn_info.geoms.link_idx[i_g]
+                    is_excluded = is_link_excluded[i_s, i_l]
 
-                if is_excluded == 0 and hit_distance >= 0.0 and hit_distance < closest_distance:
+                if not is_excluded and hit_distance >= 0.0 and hit_distance < closest_distance:
                     closest_distance = hit_distance
                     hit_face = i_f
                     hit_normal = triangle_face_normal(v0, v1, v2)
@@ -677,8 +675,6 @@ def kernel_cast_ray(
                 eps,
             )
         else:
-            # Single-ray (viewer) path: no per-sensor context, so i_s=0, an
-            # empty link_excluded mask and is_link_excluded=False (no filtering).
             cur_hit_face, cur_distance, cur_hit_normal = bvh_ray_cast(
                 i_b,
                 i_b,
@@ -691,9 +687,8 @@ def kernel_cast_ray(
                 bvh_tree_state,
                 dyn_info,
                 eps,
-                False,
+                exclude_links=False,
             )
-
         if cur_hit_face >= 0:
             result.distance[i_b] = cur_distance
             if qd.static(is_visual):
@@ -831,7 +826,7 @@ def kernel_cast_rays(
     sensor_point_offsets: qd.types.ndarray(ndim=1),  # [n_sensors] - point start index for each sensor
     sensor_point_counts: qd.types.ndarray(ndim=1),  # [n_sensors] - number of points for each sensor
     sensor_return_points: qd.types.ndarray(ndim=1),  # [n_sensors] - True to store hit points, False for distances-only
-    link_excluded: qd.types.ndarray(ndim=2),  # [n_sensors, n_links] bool - 0 marks an excluded link's faces
+    is_link_excluded: qd.types.ndarray(ndim=2),  # [n_sensors, n_links] - True where the sensor ignores the link
     output_hits: qd.types.ndarray(ndim=2),  # [total_cache_size, n_env]
     dyn_state: array_class.DynState,
     bvh_tree_state_a: array_class.BVHTreeState,
@@ -842,7 +837,7 @@ def kernel_cast_rays(
     is_last: qd.template(),
     is_env_major: qd.template(),
     is_split: qd.template(),
-    is_link_excluded: qd.template(),
+    exclude_links: qd.template(),
 ):
     """Cast every ray of every env against the collision BVH set of a solver, or against its two sets when its faces
     are split between static and movable links (see RaycastContext.activate), taking the closer hit.
@@ -879,12 +874,12 @@ def kernel_cast_rays(
             ray_start_world,
             ray_direction_world,
             max_ranges[i_s],
-            link_excluded,
+            is_link_excluded,
             dyn_state,
             bvh_tree_state_a,
             dyn_info,
             eps,
-            is_link_excluded,
+            exclude_links,
         )
         if qd.static(is_split):
             hit_range = max_ranges[i_s] if hit_face < 0 else hit_distance
@@ -895,12 +890,12 @@ def kernel_cast_rays(
                 ray_start_world,
                 ray_direction_world,
                 hit_range,
-                link_excluded,
+                is_link_excluded,
                 dyn_state,
                 bvh_tree_state_b,
                 dyn_info,
                 eps,
-                is_link_excluded,
+                exclude_links,
             )
             if hit_face_b >= 0:
                 hit_face = hit_face_b

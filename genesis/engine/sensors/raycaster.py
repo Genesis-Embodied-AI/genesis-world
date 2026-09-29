@@ -12,7 +12,7 @@ from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, kernel_update_all_verts
 from genesis.options.sensors import Raycaster as RaycasterOptions
 from genesis.options.sensors import RaycastPattern
-from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
+from genesis.utils.geom import normalize, quat_to_xyz, transform_by_quat, transform_by_trans_quat, xyz_to_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_numpy, qd_to_torch
 from genesis.utils.raycast_qd import (
     kernel_cast_rays,
@@ -494,13 +494,11 @@ class RaycasterSharedMetadata(KinematicSensorMetadataMixin, SimpleSensorMetadata
     max_ranges: torch.Tensor = make_tensor_field((0,))
     no_hit_values: torch.Tensor = make_tensor_field((0,))
     return_world_frame: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_bool)
-    # Per-sensor ray alignment code (0=base, 1=yaw, 2=world), encoded in build().
-    ray_alignments: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    # Per-sensor bool link-exclusion mask [n_sensors, n_links]; row i is all-ones
-    # (no exclusion) when sensor i filters nothing.
-    link_excluded: torch.Tensor | None = None
-    # Per-sensor excluded link indices (global solver link space), appended in build().
-    exclude_link_indices: list[torch.Tensor] = field(default_factory=list)
+    yaw_aligned_sensors_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    world_aligned_sensors_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    # [n_sensors, n_links] over the rigid links, True where the sensor ignores the faces of that link
+    is_link_excluded: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
+    has_excluded_links: bool = False
 
     patterns: list[RaycastPattern] = field(default_factory=list)
     ray_dirs: torch.Tensor = make_tensor_field((0, 3))
@@ -584,15 +582,21 @@ class RaycasterSensor(
         self._shared_metadata.return_world_frame = concat_with_tensor(
             self._shared_metadata.return_world_frame, self._options.return_world_frame
         )
-        self._shared_metadata.ray_alignments = concat_with_tensor(
-            self._shared_metadata.ray_alignments,
-            {"base": 0, "yaw": 1, "world": 2}[self._options.ray_alignment],
+        if self._options.ray_alignment == "yaw":
+            self._shared_metadata.yaw_aligned_sensors_idx = concat_with_tensor(
+                self._shared_metadata.yaw_aligned_sensors_idx, self._idx
+            )
+        elif self._options.ray_alignment == "world":
+            self._shared_metadata.world_aligned_sensors_idx = concat_with_tensor(
+                self._shared_metadata.world_aligned_sensors_idx, self._idx
+            )
+        is_link_excluded = torch.zeros((1, self._manager._sim.rigid_solver.n_links), dtype=gs.tc_bool, device=gs.device)
+        is_link_excluded[0, self._options.exclude_link_idx] = True
+        self._shared_metadata.is_link_excluded = concat_with_tensor(
+            self._shared_metadata.is_link_excluded, is_link_excluded
         )
-        self._shared_metadata.exclude_link_indices.append(
-            torch.as_tensor(self._options.exclude_link_idx, dtype=gs.tc_int, device=gs.device)
-            if self._options.exclude_link_idx is not None
-            else torch.empty(0, dtype=gs.tc_int, device=gs.device)
-        )
+        if self._options.exclude_link_idx:
+            self._shared_metadata.has_excluded_links = True
         self._shared_metadata.min_ranges = concat_with_tensor(self._shared_metadata.min_ranges, self._options.min_range)
         self._shared_metadata.max_ranges = concat_with_tensor(self._shared_metadata.max_ranges, self._options.max_range)
         self._shared_metadata.no_hit_values = concat_with_tensor(
@@ -637,15 +641,6 @@ class RaycasterSensor(
                 B, shared_metadata.n_sensors, 4, device=gs.device, dtype=gs.tc_float
             )
             shared_metadata.links_quat[:, :, 0] = 1.0
-            # Per-sensor link-exclusion mask, all-ones (no exclusion) rows filled
-            # with zeros at the sensor's excluded link columns. Built once here:
-            # the per-face link mapping is static, so the mask is constant.
-            n_links = bvh_contexts[0].solver.n_links
-            mask = torch.ones(shared_metadata.n_sensors, n_links, dtype=gs.tc_bool, device=gs.device)
-            for s, idx in enumerate(shared_metadata.exclude_link_indices):
-                if idx.numel():
-                    mask[s, idx] = 0
-            shared_metadata.link_excluded = mask
 
         # Gather link poses per sensor. Sensors are pre-bucketed into shared_metadata.solver_groups at build time so
         # this loop issues one bulk get_links_pos / get_links_quat per solver with already-tensor-typed indices.
@@ -660,28 +655,14 @@ class RaycasterSensor(
             links_pos[:, group.sensor_cols, :] = pos
             links_quat[:, group.sensor_cols, :] = quat
 
-        # Apply per-sensor ray alignment: "yaw" keeps only the frame link's yaw
-        # (rays stay horizontal on slopes), "world" fixes rays in the world frame
-        # (identity orientation). Both keep the frame link's position as origin.
-        alignments = shared_metadata.ray_alignments.to(links_quat.device)
-        world_mask = alignments == 2
-        if world_mask.any():
-            links_quat[:, world_mask, :] = 0.0
-            links_quat[:, world_mask, 0] = 1.0
-        yaw_mask = alignments == 1
-        if yaw_mask.any():
-            q = links_quat[:, yaw_mask, :]
-            # Extract the yaw angle from the link quaternion (w,x,y,z order) and
-            # rebuild a pure-yaw quaternion, dropping pitch/roll without a full
-            # euler decomposition.
-            yaw = torch.atan2(
-                2.0 * (q[..., 0] * q[..., 3] + q[..., 1] * q[..., 2]),
-                1.0 - 2.0 * (q[..., 2] * q[..., 2] + q[..., 3] * q[..., 3]),
-            )
-            links_quat[:, yaw_mask, 0] = torch.cos(yaw * 0.5)
-            links_quat[:, yaw_mask, 1] = 0.0
-            links_quat[:, yaw_mask, 2] = 0.0
-            links_quat[:, yaw_mask, 3] = torch.sin(yaw * 0.5)
+        # Ray alignment keeps the link position as the ray origin and replaces the link orientation, by its heading
+        # alone for "yaw" and by the identity for "world"
+        if shared_metadata.yaw_aligned_sensors_idx.numel():
+            links_rpy = quat_to_xyz(links_quat[:, shared_metadata.yaw_aligned_sensors_idx], rpy=True)
+            links_rpy[..., :2] = 0.0
+            links_quat[:, shared_metadata.yaw_aligned_sensors_idx] = xyz_to_quat(links_rpy, rpy=True)
+        if shared_metadata.world_aligned_sensors_idx.numel():
+            links_quat[:, shared_metadata.world_aligned_sensors_idx] = links_quat.new_tensor((1.0, 0.0, 0.0, 0.0))
 
         # The two collision tree sets of a solver cast in one launch, a visual set in one of its own. The launches
         # chain into one output buffer: the first initializes every slot (is_merge=False), each subsequent one merges
@@ -724,7 +705,7 @@ class RaycasterSensor(
                     entry_a.env_bvh_idx,
                     entry_b.env_bvh_idx,
                     *sensor_tables,
-                    shared_metadata.link_excluded,
+                    shared_metadata.is_link_excluded,
                     raw_data_T,
                     solver.dyn_state,
                     entry_a.bvh_state.tree,
@@ -735,11 +716,8 @@ class RaycasterSensor(
                     is_last=is_last,
                     is_env_major=is_env_major,
                     is_split=entry_b is not entry_a,
-                    # Compile-time flag: true if any sensor excludes links. It is
-                    # global across sensors (quadrants template flags cannot vary
-                    # per element), so one filtering sensor makes every ray pay
-                    # the per-leaf mask lookup.
-                    is_link_excluded=any(idx.numel() for idx in shared_metadata.exclude_link_indices),
+                    # One sensor excluding links makes the rays of every sensor pay the per-leaf mask lookup
+                    exclude_links=shared_metadata.has_excluded_links,
                 )
             else:
                 kernel_cast_rays_visual(

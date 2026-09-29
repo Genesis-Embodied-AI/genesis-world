@@ -627,6 +627,15 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
         Whether to return the per-ray hit points. Defaults to True. When False, ``read().points`` is None and only
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
         Pick False for distance-only sensing (e.g. depth images); keep True when the point cloud is needed.
+    ray_alignment : str, optional
+        The orientation the ray pattern follows, its origin always following the sensor link. Defaults to "base", the
+        full link orientation, so the pattern tilts with the link. "yaw" keeps the link heading alone, so the pattern
+        stays level when the link rolls or pitches, as a terrain height scan needs, at the cost of no longer seeing
+        what the link tilts toward. "world" keeps the pattern fixed in the world frame whatever the link orientation.
+    exclude_link_idx : array-like[int], optional
+        The global indices of the rigid links whose collision geometry the rays pass through, typically the robot's
+        own links for a terrain scan. Defaults to none. Excluding any link on any raycaster adds a per-triangle check
+        to the ray casts of every raycaster in the scene.
     debug_sphere_radius: float, optional
         The radius of each debug sphere drawn in the scene. Defaults to 0.02.
     debug_ray_start_color: array-like[float, float, float, float], optional
@@ -642,27 +651,7 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     return_world_frame: StrictBool = False
     return_points: StrictBool = True
     ray_alignment: Literal["base", "yaw", "world"] = "base"
-    """How the ray pattern is oriented relative to the sensor's frame link.
-
-    - ``"base"`` (default): rays follow the link's full orientation; the grid
-      tilts and rotates with the body.
-    - ``"yaw"``: rays follow only the link's yaw (ignores pitch/roll), so the
-      grid stays horizontal on slopes but no longer tilts with the body. Pick
-      for height maps that must stay level on tilted surfaces.
-    - ``"world"``: rays are fixed in the world frame, always pointing the same
-      direction regardless of the link orientation; the grid never follows the
-      body. Pick for scans that must keep a fixed world reference.
-    """
-
     exclude_link_idx: OptionalIArrayType = Field(default_factory=tuple)
-    """Global rigid link indices (solver link space) whose geometry this
-    sensor's rays must ignore.
-
-    A ray that would hit a face owned by one of these links reports no hit, so
-    the scan becomes blind to those links (rays pass through them). Set it to
-    e.g. the robot's own links so a terrain height scan sees the ground instead
-    of the robot's legs.
-    """
 
     debug_sphere_radius: PositiveFloat = 0.02
     debug_ray_start_color: Vec4FType = (0.5, 0.5, 1.0, 1.0)

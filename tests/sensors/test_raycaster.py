@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.viewer_plugins.raycast import Raycaster
 
@@ -982,108 +983,83 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_ray_alignment(show_viewer, n_envs):
-    """ray_alignment: base tilts the ray grid with the carrier, yaw/world keep it level."""
-    PITCH = 30.0
+def test_ray_alignment_and_link_exclusion(show_viewer, n_envs, tol):
+    CARRIER_POS = (0.0, 0.0, 3.0)
+    CARRIER_EULER = (30.0, 0.0, 45.0)
+    CARRIER_HALF_HEIGHT = 0.1
+
     scene = gs.Scene(
-        vis_options=gs.options.VisOptions(rendered_envs_idx=(0,)),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -3.0, 2.0),
-            camera_lookat=(0.0, 0.0, 0.8),
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
         ),
-        profiling_options=gs.options.ProfilingOptions(show_FPS=False),
+        vis_options=gs.options.VisOptions(
+            rendered_envs_idx=(0,),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -5.0, 3.0),
+            camera_lookat=(0.0, 0.0, 1.5),
+        ),
         show_viewer=show_viewer,
     )
     scene.add_entity(gs.morphs.Plane())
-    # A box obstacle (top at z=1.0) under the tilted carrier.
-    scene.add_entity(gs.morphs.Box(size=(1.0, 1.0, 1.0), pos=(0.0, 0.0, 0.5), fixed=True))
+    obstacle = scene.add_entity(
+        gs.morphs.Box(
+            size=(4.0, 4.0, 1.0),
+            pos=(0.0, 0.0, 0.5),
+            fixed=True,
+        ),
+    )
     carrier = scene.add_entity(
-        gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 3.0), fixed=True, euler=(PITCH, 0.0, 0.0))
-    )
-
-    rcs = {}
-    for alignment in ("base", "yaw", "world"):
-        rcs[alignment] = scene.add_sensor(
-            gs.sensors.Raycaster(
-                pattern=gs.sensors.raycaster.GridPattern(resolution=0.5, size=(2.0, 2.0), direction=(0.0, 0.0, -1.0)),
-                entity_idx=carrier.idx,
-                max_range=5.0,
-                ray_alignment=alignment,
-                return_points=True,
-                return_world_frame=True,
-                draw_debug=show_viewer,
-                debug_ray_start_color=(0.0, 0.0, 0.0, 0.0),
-                debug_ray_hit_color=(1.0, 0.0, 0.0, 1.0),
-            )
-        )
-
-    scene.build(n_envs=n_envs)
-    for _ in range(3):
-        scene.step()
-
-    def dist_range(rc):
-        d = rc.read().distances
-        if n_envs == 0:
-            d = d.unsqueeze(0)
-        # Ignore the carrier's own near-zero hits (0.1): base rays tilt and reach
-        # farther ground than the level yaw/world grids, so their distance range
-        # is wider.
-        d = d[d > 0.5]
-        return d.max() - d.min()
-
-    base_range = dist_range(rcs["base"])
-    level_range = dist_range(rcs["yaw"])
-    # base tilts with the carrier, so its rays reach a wider range of hit depths
-    # than the level yaw/world grids.
-    assert base_range > level_range + 0.3
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_exclude_link_idx(show_viewer, n_envs):
-    """exclude_link_idx: a ray passes through an excluded link's geometry."""
-    scene = gs.Scene(
-        vis_options=gs.options.VisOptions(rendered_envs_idx=(0,)),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -3.0, 2.0),
-            camera_lookat=(0.0, 0.0, 0.8),
+        gs.morphs.Box(
+            size=(1.0, 1.0, 2.0 * CARRIER_HALF_HEIGHT),
+            pos=CARRIER_POS,
+            euler=CARRIER_EULER,
         ),
-        profiling_options=gs.options.ProfilingOptions(show_FPS=False),
-        show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
-    # The obstacle (global link idx 1) sits between the carrier and the ground.
-    obstacle = scene.add_entity(gs.morphs.Box(size=(1.0, 1.0, 1.0), pos=(0.0, 0.0, 0.5), fixed=True))
-    carrier = scene.add_entity(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 3.0), fixed=True))
-
-    def make_raycaster(exclude):
-        return scene.add_sensor(
+    # The rays start inside the movable carrier, which sits in a tree set of its own apart from the static obstacle.
+    # Excluding both links lets the rays through to the ground plane.
+    pattern = gs.sensors.raycaster.GridPattern(
+        resolution=0.5,
+        size=(0.5, 0.5),
+        direction=(0.0, 0.0, -1.0),
+    )
+    raycasters = {
+        ray_alignment: scene.add_sensor(
             gs.sensors.Raycaster(
-                pattern=gs.sensors.raycaster.GridPattern(resolution=0.5, size=(2.0, 2.0), direction=(0.0, 0.0, -1.0)),
+                pattern=pattern,
                 entity_idx=carrier.idx,
-                max_range=5.0,
-                ray_alignment="world",
-                exclude_link_idx=exclude,
+                return_world_frame=True,
+                ray_alignment=ray_alignment,
+                exclude_link_idx=(obstacle.base_link_idx, carrier.base_link_idx),
                 draw_debug=show_viewer,
-                debug_ray_start_color=(0.0, 0.0, 0.0, 0.0),
             )
         )
-
-    rc_all = make_raycaster(())
-    rc_excl = make_raycaster([obstacle.links[0].idx])
-
+        for ray_alignment in ("base", "yaw", "world")
+    }
+    raycaster_unexcluded = scene.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=pattern,
+            entity_idx=carrier.idx,
+        )
+    )
     scene.build(n_envs=n_envs)
-    for _ in range(3):
-        scene.step()
+    scene.step()
 
-    all_dist = rc_all.read().distances
-    excl_dist = rc_excl.read().distances
-    if n_envs == 0:
-        all_dist = all_dist.unsqueeze(0)
-        excl_dist = excl_dist.unsqueeze(0)
-    # Center rays hit the obstacle top at ~dist 2.0 unless the obstacle's link
-    # is excluded, in which case they pass through to the ground at ~dist 3.0.
-    obstacle_hit = all_dist[(all_dist > 1.5) & (all_dist < 2.5)]
-    excl_obstacle_hit = excl_dist[(excl_dist > 1.5) & (excl_dist < 2.5)]
-    assert obstacle_hit.numel() > 0
-    assert excl_obstacle_hit.numel() == 0
+    assert_allclose(raycaster_unexcluded.read().distances, CARRIER_HALF_HEIGHT, tol=tol)
+    for ray_alignment, quat in (
+        ("base", carrier.get_quat()),
+        (
+            "yaw",
+            gu.xyz_to_quat(
+                torch.tensor((0.0, 0.0, CARRIER_EULER[2]), dtype=gs.tc_float, device=gs.device), degrees=True
+            ),
+        ),
+        ("world", torch.tensor((1.0, 0.0, 0.0, 0.0), dtype=gs.tc_float, device=gs.device)),
+    ):
+        quat = quat[..., None, None, :]
+        ray_starts = carrier.get_pos()[..., None, None, :] + gu.transform_by_quat(pattern.ray_starts, quat)
+        ray_dirs = gu.transform_by_quat(pattern.ray_dirs, quat)
+        distances = -ray_starts[..., 2] / ray_dirs[..., 2]
+        reading = raycasters[ray_alignment].read()
+        assert_allclose(reading.distances, distances, tol=tol)
+        assert_allclose(reading.points, ray_starts + distances[..., None] * ray_dirs, tol=tol)
