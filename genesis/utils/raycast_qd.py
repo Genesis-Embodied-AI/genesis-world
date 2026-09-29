@@ -733,7 +733,7 @@ def write_ray_hit(
             output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
     elif not is_merge:
         output_hits[i_p_dist, i_b] = max_ranges[i_s]
-    if is_last:
+    if qd.static(is_last):
         hit_distance_best = output_hits[i_p_dist, i_b]
         if hit_distance_best >= max_ranges[i_s] or hit_distance_best < min_ranges[i_s]:
             output_hits[i_p_dist, i_b] = no_hit_values[i_s]
