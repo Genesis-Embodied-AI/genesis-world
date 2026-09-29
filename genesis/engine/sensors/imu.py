@@ -89,7 +89,7 @@ def _get_cross_axis_coupling_to_alignment_matrix(
 
     if isinstance(input, float):
         # set off-diagonal elements to the scalar value
-        torch.diagonal(out)[:] = input
+        out.fill_(input)
         out.fill_diagonal_(1.0)
     elif isinstance(input, torch.Tensor):
         out.copy_(input)
