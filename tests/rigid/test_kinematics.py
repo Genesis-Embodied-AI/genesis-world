@@ -830,6 +830,8 @@ def test_setters(show_viewer, tol):
         (slice(-2, None), (n_dofs - 2, n_dofs - 1)),
         (slice(-1, None, -1), tuple(range(n_dofs - 1, -1, -1))),
         (np.array((False, True, True, True, True, True, False)), (1, 2, 3, 4, 5)),
+        ([False, True, True, True, True, True, False], (1, 2, 3, 4, 5)),
+        ((False, True, True, True, True, True, False), (1, 2, 3, 4, 5)),
         (torch.tensor((False, True, True, True, True, True, False)), (1, 2, 3, 4, 5)),
     )
     box_baseline = torch.arange(ghost_box.n_dofs, device=gs.device) * 0.01 + 0.1
