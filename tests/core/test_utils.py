@@ -927,13 +927,12 @@ def test_genuine_interpenetration(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [None])
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_as_grayscale_image(backend, n_envs, monkeypatch):
-    monkeypatch.setattr(gs, "EPS", np.finfo(np.float32).eps)
-    depth = np.broadcast_to(array=[[1.0, 3.0, 7.0]], shape=(*((n_envs,) if n_envs else ()), 1, 3))
-    for is_black_to_white, depth_expected in ((False, [[255, 127, 0]]), (True, [[0, 127, 255]])):
-        depth_image = as_grayscale_image(depth, enable_log_scale=True, black_to_white=is_black_to_white)
-        assert_equal(depth_image, depth_expected)
+def test_as_grayscale_image():
+    for batch_shape in ((), (2,)):
+        depth = np.broadcast_to(array=[[1.0, 3.0, 7.0]], shape=(*batch_shape, 1, 3))
+        for is_black_to_white, depth_expected in ((False, [[255, 127, 0]]), (True, [[0, 127, 255]])):
+            depth_image = as_grayscale_image(depth, enable_log_scale=True, black_to_white=is_black_to_white)
+            assert_equal(depth_image, depth_expected)
 
 
 @pytest.mark.required
