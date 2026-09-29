@@ -140,8 +140,12 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
 
     envs_idx = [0] if n_envs else None
     imu_coupled.set_acc_cross_axis_coupling(cross_axis_coupling=0.2, envs_idx=envs_idx)
-    imu_coupled.set_gyro_cross_axis_coupling(cross_axis_coupling=0.2, envs_idx=envs_idx)
-    imu_coupled.set_mag_cross_axis_coupling(cross_axis_coupling=0.2, envs_idx=envs_idx)
+    imu_coupled.set_gyro_cross_axis_coupling(cross_axis_coupling=np.array(0.2), envs_idx=envs_idx)
+    imu_coupled.set_mag_cross_axis_coupling(
+        cross_axis_coupling=torch.full((3,), 0.2, dtype=gs.tc_float, device=gs.device), envs_idx=envs_idx
+    )
+    with pytest.raises(gs.GenesisException):
+        imu_coupled.set_acc_cross_axis_coupling(cross_axis_coupling=(0.2, 0.2))
     scene.step()
     coupling = torch.full((max(n_envs, 1), 1), 0.1, dtype=gs.tc_float, device=gs.device)
     coupling[0] = 0.2
