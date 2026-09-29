@@ -23,7 +23,7 @@ from .options import (
     ContactFilterOptionsMixin,
     ProbeSensorOptionsMixin,
     ProbesWithNormalSensorOptionsMixin,
-    RigidSensorOptionsMixin,
+    RigidLinkSensorOptionsMixin,
     SensorOptions,
     SensorT,
     SimpleSensorOptions,
@@ -394,7 +394,7 @@ class KinematicTaxel(
 
 
 class ElastomerTaxel(
-    RigidSensorOptionsMixin["ElastomerTaxelSensor"],
+    RigidLinkSensorOptionsMixin["ElastomerTaxelSensor"],
     SimpleSensorOptions["ElastomerTaxelSensor"],
     PointCloudTactileSensorMixin["ElastomerTaxelSensor"],
     ProbesWithNormalSensorOptionsMixin["ElastomerTaxelSensor"],
@@ -514,7 +514,7 @@ class ElastomerTaxel(
 
 
 class ProximityTaxel(
-    RigidSensorOptionsMixin["ProximityTaxelSensor"],
+    RigidLinkSensorOptionsMixin["ProximityTaxelSensor"],
     SimpleSensorOptions["ProximityTaxelSensor"],
     PointCloudTactileSensorMixin["ProximityTaxelSensor"],
     ProbesWithNormalSensorOptionsMixin["ProximityTaxelSensor"],

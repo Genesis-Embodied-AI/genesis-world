@@ -110,6 +110,8 @@ class SensorOptions(Options, Generic[SensorT]):
         Use pydantic's model_post_init() for validation that does not require scene context.
         """
         assert scene.sim is not None
+        if self.entity_idx >= len(scene.entities):
+            gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
         if self.delay > 0:
             delay_ratio = self.delay / scene.sim.dt
             delay_ts = round(delay_ratio)
@@ -142,8 +144,6 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
 
         super().validate_scene(scene)
         if self.entity_idx >= 0:
-            if self.entity_idx >= len(scene.entities):
-                gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
             entity = scene.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
@@ -167,11 +167,11 @@ class OffsettableSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
     euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
 
-class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
+class RigidEntitySensorOptionsMixin(SensorOptions[SensorT]):
     """
-    Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
+    Options for sensors bound to a RigidEntity, whose output depends on physics quantities (contact pairs, friction,
+    inertial dynamics).
 
-    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs here.
     The attachment is mandatory: entity_idx must refer to an existing RigidEntity, and static sensors are rejected.
     """
 
@@ -185,15 +185,13 @@ class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
             gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
-class RigidEntitySensorOptionsMixin(RigidSensorOptionsMixin[SensorT]):
+class RigidLinkSensorOptionsMixin(RigidEntitySensorOptionsMixin[SensorT], KinematicSensorOptionsMixin[SensorT]):
     """
-    Options for a sensor bound to a whole RigidEntity (e.g. joint-space sensors).
-
-    ``link_idx_local`` is inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
+    Options for sensors mounted on one link of a RigidEntity (e.g. contact, contact force, IMU, tactile).
     """
 
 
-class ContactFilterOptionsMixin(RigidSensorOptionsMixin[SensorT]):
+class ContactFilterOptionsMixin(RigidLinkSensorOptionsMixin[SensorT]):
     """
     Shared options for the contact sensors whose reading can be scoped to ignore contacts with chosen counterpart
     links -- Contact, ContactForce, and the contact-driven tactile probes (ContactProbe, ContactDepthProbe,
@@ -428,7 +426,9 @@ class TemperatureProperties(NamedTuple):
     emissivity: float = 0.9
 
 
-class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]):
+class TemperatureGrid(
+    RigidLinkSensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]
+):
     """
     Sensor that returns the temperature in Celsius of the associated RigidLink in its local frame.
 
@@ -476,7 +476,9 @@ class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSe
 
 
 class IMU(
-    OffsettableSensorOptionsMixin["IMUSensor"], RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
+    OffsettableSensorOptionsMixin["IMUSensor"],
+    RigidLinkSensorOptionsMixin["IMUSensor"],
+    SimpleSensorOptions["IMUSensor"],
 ):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
@@ -575,7 +577,7 @@ class IMU(
 
 
 class SurfaceDistanceProbe(
-    RigidSensorOptionsMixin["SurfaceDistanceProbeSensor"],
+    RigidLinkSensorOptionsMixin["SurfaceDistanceProbeSensor"],
     SimpleSensorOptions["SurfaceDistanceProbeSensor"],
     ProbeSensorOptionsMixin["SurfaceDistanceProbeSensor"],
 ):

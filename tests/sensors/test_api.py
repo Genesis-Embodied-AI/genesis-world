@@ -485,7 +485,7 @@ def test_add_and_read_all_registered_sensors():
         sensor_kwargs = {}
         if issubclass(option_cls, gs.sensors.BaseCameraOptions):
             continue  # skip camera options
-        if issubclass(option_cls, gs.sensors.RigidSensorOptionsMixin):
+        if issubclass(option_cls, gs.sensors.RigidEntitySensorOptionsMixin):
             sensor_kwargs.update(
                 entity_idx=box.idx,
             )
