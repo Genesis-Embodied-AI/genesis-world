@@ -183,6 +183,13 @@ def test_filter_link_idx(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
+    # A non-rigid entity ahead of the rigid ones, so that scene and rigid solver entity indices differ
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(1.0, 0.0, 0.5),
+        ),
+        material=gs.materials.Kinematic(),
+    )
     floor = scene.add_entity(
         morph=gs.morphs.Plane(),
     )
@@ -223,7 +230,7 @@ def test_filter_link_idx(show_viewer, tol):
     scene.build(n_envs=2)
     box.set_pos(
         (
-            (0.0, 0.5, 0.1),  # box not touching box_on_floor
+            (0.0, 0.5, 1.0),  # box falling, touching nothing
             (0.0, 0.0, 0.3),  # box on top of box_on_floor
         )
     )
