@@ -14,8 +14,8 @@ from genesis.utils.raycast_qd import RaycastTarget, RaycastWorldTarget, get_rayc
 from .base_sensor import (
     KinematicSensorMetadataMixin,
     KinematicSensorMixin,
-    OffsetSensorMetadataMixin,
-    OffsetSensorMixin,
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
     SharedSensorContext,
     SimpleSensor,
     SimpleSensorMetadata,
@@ -81,7 +81,7 @@ class RaycastContext(SharedSensorContext):
 
 
 @dataclass
-class RaycasterSharedMetadata(OffsetSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
+class RaycasterSharedMetadata(OffsettableSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
     # The targets cast against each frame live on the shared RaycastContext (see get_raycast_targets), so a Raycaster
     # and a DepthCamera share one set of trees. The casts chain into the output cache (see kernel_cast_rays). The link
     # poses of the sensors are gathered per solver (see KinematicSensorMetadataMixin.solver_groups).
@@ -118,7 +118,7 @@ class RaycasterReturnType(NamedTuple):
 
 
 class RaycasterSensor(
-    OffsetSensorMixin,
+    OffsettableSensorMixin,
     KinematicSensorMixin,
     SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType],
 ):
