@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Any, Generic, NamedTuple, Sequence, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, NamedTuple, Sequence, TypeVar
 
 import numpy as np
 from pydantic import BeforeValidator, Field, StrictBool, StrictInt, field_validator
@@ -641,10 +641,41 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     no_hit_value: float | None = None
     return_world_frame: StrictBool = False
     return_points: StrictBool = True
+    ray_alignment: Literal["base", "yaw", "world"] = "base"
+    """How the ray pattern is oriented relative to the sensor's frame link.
+
+    - ``"base"`` (default): rays follow the link's full orientation; the grid
+      tilts and rotates with the body.
+    - ``"yaw"``: rays follow only the link's yaw (ignores pitch/roll), so the
+      grid stays horizontal on slopes but no longer tilts with the body. Pick
+      for height maps that must stay level on tilted surfaces.
+    - ``"world"``: rays are fixed in the world frame, always pointing the same
+      direction regardless of the link orientation; the grid never follows the
+      body. Pick for scans that must keep a fixed world reference.
+    """
+
+    exclude_link_idx: OptionalIArrayType = Field(default_factory=tuple)
+    """Global rigid link indices (solver link space) whose geometry this
+    sensor's rays must ignore.
+
+    A ray that would hit a face owned by one of these links reports no hit, so
+    the scan becomes blind to those links (rays pass through them). Set it to
+    e.g. the robot's own links so a terrain height scan sees the ground instead
+    of the robot's legs.
+    """
 
     debug_sphere_radius: PositiveFloat = 0.02
     debug_ray_start_color: Vec4FType = (0.5, 0.5, 1.0, 1.0)
     debug_ray_hit_color: Vec4FType = (1.0, 0.5, 0.5, 1.0)
+
+    def validate_scene(self, scene: "Scene"):
+        super().validate_scene(scene)
+        if self.exclude_link_idx:
+            n_links = scene.sim.rigid_solver.n_links
+            if np.any(np.array(self.exclude_link_idx) < 0) or np.any(np.array(self.exclude_link_idx) >= n_links):
+                gs.raise_exception(
+                    f"{type(self).__name__}: exclude_link_idx must be in [0, {n_links}). Got {self.exclude_link_idx}."
+                )
 
     def model_post_init(self, context: Any) -> None:
         if self.no_hit_value is None:
