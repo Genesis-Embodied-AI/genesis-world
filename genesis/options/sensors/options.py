@@ -166,8 +166,7 @@ class RigidSensorOptionsMixin[SensorT: "Sensor"](KinematicSensorOptionsMixin[Sen
     """
     Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
 
-    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs
-    here.
+    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs here.
     """
 
     def _validate(self, sim: "Simulator"):
@@ -188,7 +187,7 @@ class RigidEntitySensorOptionsMixin[SensorT: "Sensor"](RigidSensorOptionsMixin[S
     are the joint-space sensors, bound to a whole entity, and the sensors measuring a quantity of their link (contacts,
     contact force, temperature).
 
-    The link offset parameters are inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
+    ``link_idx_local`` is inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
     """
 
     def _validate(self, sim: "Simulator"):

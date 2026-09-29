@@ -300,7 +300,8 @@ def test_pipeline_contract(tol):
             hardware_imp=tuple(H.tolist()),
         )
     )
-    # Several values ahead of the jittered sensors, so that per-sensor and per-value tables disagree on their column
+    # A three-value sensor ahead of the jittered ones shifts their per-value columns away from their sensor index. With
+    # one value per sensor the two coincide, so a jitter table built per value but read per sensor would go unnoticed.
     s_baseline = scene.add_sensor(FakeSimpleOptions(n_values=3))
     s_history = scene.add_sensor(FakeSimpleOptions(history_length=HISTORY_LEN))
     s_delay = scene.add_sensor(FakeSimpleOptions(delay=DELAY_STEPS * DT))
