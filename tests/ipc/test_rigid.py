@@ -225,7 +225,8 @@ def test_ground_clearance(n_envs, show_viewer):
     )
 
     cubes = []
-    for y, resistance in ((-0.4, 1e2), (-0.2, 1e3), (0.0, 1e4), (0.2, 1e5), (0.4, 1e6)):
+    # Keep the cube-plane pair resistances above libuipc's scene-dependent lower bound so they remain distinct.
+    for y, resistance in ((-0.4, 1e5), (-0.2, 3e5), (0.0, 1e6), (0.2, 3e6), (0.4, 1e7)):
         cube = scene.add_entity(
             gs.morphs.Box(
                 pos=(0.0, y, 0.05),
@@ -276,6 +277,8 @@ def test_ground_sliding(n_envs, show_viewer):
         coupler_options=gs.options.IPCCouplerOptions(
             contact_d_hat=0.01,
             enable_rigid_rigid_contact=False,
+            # Disable the semi-implicit early exit to avoid spurious rocking during sliding.
+            newton_semi_implicit_enable=False,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(3.5, 2.0, 1.5),
