@@ -790,7 +790,7 @@ class TemperatureGridSensor(
 
     def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
         """Make a flat mesh colored by temperature (cool=blue, hot=red), for the first rendered environment."""
-        if 0 not in envs_idx or self._link is None:
+        if 0 not in envs_idx:
             return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
 
