@@ -659,6 +659,7 @@ class Raycaster(OffsetSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions
     debug_ray_hit_color: Vec4FType = (1.0, 0.5, 0.5, 1.0)
 
     def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
         if self.no_hit_value is None:
             self.no_hit_value = self.max_range
         if self.max_range <= self.min_range:
