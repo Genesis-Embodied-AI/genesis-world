@@ -253,6 +253,7 @@ def test_subterrain_parameters(show_viewer):
             subterrain_size=(12.0, 12.0),
             horizontal_scale=0.25,
             subterrain_types="wave_terrain",
+            name="wave_terrain",
         )
     )
 
@@ -265,6 +266,7 @@ def test_subterrain_parameters(show_viewer):
             subterrain_size=(12.0, 12.0),
             horizontal_scale=0.25,
             subterrain_types="wave_terrain",
+            name="wave_terrain",
             subterrain_parameters={"wave_terrain": {"amplitude": 0.2}},
         )
     )
