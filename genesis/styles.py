@@ -1,19 +1,18 @@
+import enum
 import logging
 import re
 
-from genesis.constants import IntEnum
 
-
-class THEME(IntEnum):
+class THEME(str, enum.Enum):
     """Theme of the text Genesis prints.
 
     'dark' and 'light' color the text for a terminal of that background. 'raw' prints plain text with a compact prefix
     and no decoration, for log files, continuous integration and coding agents, at the cost of the visual cues.
     """
 
-    dark = 0
-    light = 1
-    raw = 2
+    dark = "dark"
+    light = "light"
+    raw = "raw"
 
 
 class STYLE:

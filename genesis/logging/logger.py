@@ -53,11 +53,9 @@ class Logger:
             logging_level = logging_level.upper()
 
         # The theme is set before the formatter is created, which reads the colors of its levels once and for all.
-        if isinstance(theme, str):
-            if theme not in THEME.__members__:
-                gs.raise_exception(f"Unsupported theme: ~~<{theme}>~~")
-            theme = THEME[theme]
-        style.theme = theme
+        if theme not in tuple(THEME):
+            gs.raise_exception(f"Unsupported theme: ~~<{theme}>~~")
+        style.theme = THEME(theme)
 
         self._logger = logging.getLogger("genesis")
         self._logger.setLevel(logging_level)
@@ -181,7 +179,7 @@ class Logger:
             f"{f'{emoji} ' if is_decorated else ''}{name}: ~~<{val}>~~"
             for emoji, name, val in (
                 ("🔖", "version", __version__),
-                ("🎨", "theme", style.theme.name),
+                ("🎨", "theme", style.theme.value),
                 ("🌱", "seed", seed),
                 ("🐛", "debug", bool(debug)),
                 ("📏", "precision", precision),
