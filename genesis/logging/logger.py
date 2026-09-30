@@ -132,8 +132,25 @@ class Logger:
         with self.log_wrapper():
             self._logger.critical(message)
 
-    def banner(self):
+    def banner(self, device_name, backend, total_mem, seed, debug, precision, performance_mode):
         """Log the greeting banner of Genesis, followed by the device it runs on and the options it was initialized with.
+
+        Parameters
+        ----------
+        device_name : str
+            The name of the device Genesis runs on.
+        backend : gs.backend
+            The backend Genesis runs on.
+        total_mem : float
+            The memory of the device, in GB.
+        seed : int | None
+            The seed of the random number generators, if any.
+        debug : bool
+            Whether Genesis runs in debug mode.
+        precision : str
+            The floating point precision, either '32' or '64'.
+        performance_mode : bool
+            Whether Genesis runs in performance mode.
 
         The raw theme leaves out the box and the emojis.
         """
@@ -153,20 +170,17 @@ class Logger:
             self.info(f"~<│{wave}>~ ~~~~<Genesis>~~~~ ~<{wave}│>~")
             self.info(f"~<╰{'─' * (bar_width)}╯>~")
 
-        self.info(
-            f"Running on ~<[{gs.device_name}]>~ with backend ~<{gs.backend}>~. "
-            f"Device memory: ~<{gs.device_memory:.2f}>~ GB."
-        )
+        self.info(f"Running on ~<[{device_name}]>~ with backend ~<{backend}>~. Device memory: ~<{total_mem:.2f}>~ GB.")
 
         msg_options = ", ".join(
             f"{f'{emoji} ' if is_decorated else ''}{name}: ~<{val}>~"
             for emoji, name, val in (
                 ("🔖", "version", gs.__version__),
                 ("🎨", "theme", style.theme.name),
-                ("🌱", "seed", gs.SEED),
-                ("🐛", "debug", bool(gs.debug)),
-                ("📏", "precision", gs.precision),
-                ("🔥", "performance", bool(gs.performance_mode)),
+                ("🌱", "seed", seed),
+                ("🐛", "debug", bool(debug)),
+                ("📏", "precision", precision),
+                ("🔥", "performance", bool(performance_mode)),
                 ("💬", "verbose", logging.getLevelName(self.level)),
             )
         )
