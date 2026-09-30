@@ -6,7 +6,6 @@ from contextlib import contextmanager
 
 import genesis as gs
 from genesis.styles import THEME, colors, formats, style
-from genesis.version import __version__
 
 from .time_elapser import TimeElapser
 
@@ -53,9 +52,9 @@ class Logger:
             logging_level = logging_level.upper()
 
         # The theme is set before the formatter is created, which reads the colors of its levels once and for all.
-        if theme not in tuple(THEME):
+        if theme not in THEME.__members__ and theme not in tuple(THEME):
             gs.raise_exception(f"Unsupported theme: ~value<{theme}>~")
-        style.theme = THEME(theme)
+        style.theme = THEME[theme] if isinstance(theme, str) else THEME(theme)
 
         self._logger = logging.getLogger("genesis")
         self._logger.setLevel(logging_level)
@@ -133,25 +132,8 @@ class Logger:
         with self.log_wrapper():
             self._logger.critical(message)
 
-    def banner(self, device_name, backend, total_mem, seed, debug, precision, performance_mode):
+    def banner(self):
         """Log the greeting banner of Genesis, followed by the device it runs on and the options it was initialized with.
-
-        Parameters
-        ----------
-        device_name : str
-            The name of the device Genesis runs on.
-        backend : gs.backend
-            The backend Genesis runs on.
-        total_mem : float
-            The memory of the device, in GB.
-        seed : int | None
-            The seed of the random number generators, if any.
-        debug : bool
-            Whether Genesis runs in debug mode.
-        precision : str
-            The floating point precision, either '32' or '64'.
-        performance_mode : bool
-            Whether Genesis runs in performance mode.
 
         The raw theme leaves out the box and the emojis.
         """
@@ -172,18 +154,19 @@ class Logger:
             self.info(f"~frame<╰{'─' * (bar_width)}╯>~")
 
         self.info(
-            f"Running on ~value<[{device_name}]>~ with backend ~value<{backend}>~. Device memory: ~value<{total_mem:.2f}>~ GB."
+            f"Running on ~value<[{gs.device_name}]>~ with backend ~value<{gs.backend}>~. "
+            f"Device memory: ~value<{gs.device_memory:.2f}>~ GB."
         )
 
         msg_options = ", ".join(
             f"{f'{emoji} ' if is_decorated else ''}{name}: ~value<{val}>~"
             for emoji, name, val in (
-                ("🔖", "version", __version__),
-                ("🎨", "theme", style.theme.value),
-                ("🌱", "seed", seed),
-                ("🐛", "debug", bool(debug)),
-                ("📏", "precision", precision),
-                ("🔥", "performance", bool(performance_mode)),
+                ("🔖", "version", gs.__version__),
+                ("🎨", "theme", style.theme.name),
+                ("🌱", "seed", gs.SEED),
+                ("🐛", "debug", bool(gs.debug)),
+                ("📏", "precision", gs.precision),
+                ("🔥", "performance", bool(gs.performance_mode)),
                 ("💬", "verbose", logging.getLevelName(self.level)),
             )
         )

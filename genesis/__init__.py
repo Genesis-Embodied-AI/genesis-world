@@ -50,6 +50,11 @@ use_ndarray: bool | None = None
 use_zerocopy: bool | None = None
 use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
+precision: str | None = None
+performance_mode: bool | None = None
+SEED: int | None = None
+device_name: str | None = None
+device_memory: float | None = None
 EPS: float | None = None
 
 
@@ -85,7 +90,7 @@ def init(
     logger = Logger(logging_level, logger_verbose_time, theme)
 
     # Get device and backend
-    global device
+    global device, device_name, device_memory
     if backend is None and debug:
         backend_candidates = [_gs_backend.cpu]
     elif backend is None or backend == _gs_backend.gpu:
@@ -97,7 +102,7 @@ def init(
         if os.environ.get(f"QD_ENABLE_{_backend.name.upper()}", "1") == "0":
             continue
         try:
-            device, device_name, total_mem, _backend = get_device(_backend)
+            device, device_name, device_memory, _backend = get_device(_backend)
             if backend == _gs_backend.gpu and _backend == _gs_backend.cpu:
                 logger.warning(f"Backend ~value<{backend}>~ not available on this machine. Falling back to CPU.")
             backend = _backend
@@ -109,7 +114,7 @@ def init(
 
     # Fallback to Torch CPU device if requested
     if backend != _gs_backend.cpu and os.environ.get("GS_TORCH_FORCE_CPU_DEVICE") == "1":
-        device, device_name, total_mem, _backend = get_device(_gs_backend.cpu)
+        device, device_name, device_memory, _backend = get_device(_gs_backend.cpu)
 
     # Configure Quadrants fast cache and array type
     global use_ndarray, use_zerocopy
@@ -146,6 +151,8 @@ def init(
     # (see prefer_decomposed_solver in rigid_solver.py), at the cost of the throughput they were buying, hence opt-in.
     globals()["use_deterministic_algorithms"] = use_deterministic_algorithms
     globals()["debug"] = debug
+    globals()["precision"] = precision
+    globals()["performance_mode"] = performance_mode
 
     # Define the right dtypes in accordance with selected backend and precision
     global qd_float, np_float, tc_float
@@ -236,9 +243,9 @@ def init(
             cpu_max_num_threads=1,
         )
 
+    global SEED
+    SEED = seed
     if seed is not None:
-        global SEED
-        SEED = seed
         set_random_seed(SEED)
         qd_init_kwargs.update(
             random_seed=seed,
@@ -305,7 +312,7 @@ def init(
             "runtime performance: https://pytorch.org/get-started/locally/"
         )
 
-    logger.banner(device_name, backend, total_mem, seed, debug, precision, performance_mode)
+    logger.banner()
 
     if _use_zerocopy is None:
         logger.warning(
@@ -383,8 +390,10 @@ def destroy():
     logger = None
 
     # Clear global state
-    global device, backend, EPS
+    global device, device_name, device_memory, backend, EPS
     device = None
+    device_name = None
+    device_memory = None
     backend = None
     EPS = None
 
