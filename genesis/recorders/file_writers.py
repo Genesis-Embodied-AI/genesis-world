@@ -95,7 +95,7 @@ class CSVFileWriter(BaseFileWriter):
     def _sanitize_to_list(self, value):
         if isinstance(value, np.ndarray):
             return value.reshape((-1,)).tolist()
-        elif isinstance(value, (int, float, bool)):
+        elif isinstance(value, (int, float, bool, np.generic)):
             return [value]
         elif isinstance(value, (list, tuple)):
             return value
@@ -157,7 +157,7 @@ class NPZFileWriter(BaseFileWriter):
         self.all_data["timestamp"].append(cur_time)
         if isinstance(data, dict):
             for key, value in data.items():
-                assert isinstance(value, (int, float, bool, list, tuple, np.ndarray))
+                assert isinstance(value, (int, float, bool, list, tuple, np.ndarray, np.generic))
                 self.all_data[key].append(value)
         else:
             self.all_data["data"].append(np.asarray(data))
