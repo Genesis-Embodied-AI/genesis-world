@@ -81,7 +81,7 @@ def init(
 
     # Make sure that specified arch and precision are supported
     if precision not in ("32", "64"):
-        raise_exception(f"Unsupported precision type: ~value<{precision}>~")
+        raise_exception(f"Unsupported precision type: ~<{precision}>~")
 
     # Initialize the logger
     global logger
@@ -104,12 +104,12 @@ def init(
         try:
             device, device_name, device_memory, _backend = get_device(_backend)
             if backend == _gs_backend.gpu and _backend == _gs_backend.cpu:
-                logger.warning(f"Backend ~value<{backend}>~ not available on this machine. Falling back to CPU.")
+                logger.warning(f"Backend ~<{backend}>~ not available on this machine. Falling back to CPU.")
             backend = _backend
             break
         except GenesisException as e:
             if not backend_candidates:
-                raise_exception_from(f"Backend ~value<{_backend}>~ not available on this machine.", e)
+                raise_exception_from(f"Backend ~<{_backend}>~ not available on this machine.", e)
     globals()["backend"] = backend
 
     # Fallback to Torch CPU device if requested

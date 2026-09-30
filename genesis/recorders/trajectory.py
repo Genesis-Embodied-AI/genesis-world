@@ -347,7 +347,7 @@ class TrajectoryFileWriter(BaseFileWriter):
         if self._fault is not None:
             gs.raise_exception(self._fault)
         (gs.logger or LOGGER).info(
-            f'[TrajectoryFileWriter] Saved {self._n_frames} frames to ~path<"{self._get_filename()}">~.'
+            f'[TrajectoryFileWriter] Saved {self._n_frames} frames to ~<"{self._get_filename()}">~.'
         )
 
     @property

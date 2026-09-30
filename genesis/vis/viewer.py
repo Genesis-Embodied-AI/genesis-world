@@ -174,8 +174,8 @@ class Viewer(RBC):
         # whether the loop is real-time-bounded (X ~ target) or compute-bounded (X < target).
         target = "uncapped" if self._realtime_factor is None else f"{self._realtime_factor / dt:.1f} FPS"
         gs.logger.info(
-            f"Viewer created. Resolution: ~value<{self._res[0]}×{self._res[1]}>~, refresh_rate: ~value<{self._refresh_rate}>~, "
-            f"dt: ~value<{dt}>~s, realtime_factor: ~value<{self._realtime_factor}>~ (real-time target: ~value<{target}>~)."
+            f"Viewer created. Resolution: ~<{self._res[0]}×{self._res[1]}>~, refresh_rate: ~<{self._refresh_rate}>~, "
+            f"dt: ~<{dt}>~s, realtime_factor: ~<{self._realtime_factor}>~ (real-time target: ~<{target}>~)."
         )
 
         self._is_built = True

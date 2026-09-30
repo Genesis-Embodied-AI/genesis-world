@@ -17,8 +17,14 @@ class THEME(IntEnum):
     raw = 2
 
 
-# Non-greedy, so that the text of a markup may end with a '>' of its own (e.g. '~type<<gs.morphs.Box>>~').
-MARKUP_PATTERN = re.compile(r"~(?P<kind>name|uid|idx|value|type|path|title|frame)<(?P<text>.*?)>~")
+# Kinds of markup, in the order of their short forms: '~<...>~' is a value, '~~<...>~~' a name, and so on.
+MARKUP_KINDS = ("value", "name", "uid", "title")
+# Non-greedy, so that the text of a markup may end with a '>' of its own (e.g. '~<<gs.morphs.Box>>~'). A short form
+# closes on as many tildes as it opens with, and no more.
+MARKUP_PATTERN = re.compile(
+    r"~(?P<kind>value|name|uid|title)<(?P<text>.*?)>~|(?P<tildes>~{1,4})<(?P<short_text>.*?)>(?P=tildes)(?!~)",
+    flags=re.DOTALL,
+)
 
 
 class STYLE:
@@ -42,13 +48,20 @@ class STYLE:
     def markup(self, msg, color):
         """Render the markup of a message in the theme, with 'color' the color of the text around it.
 
-        The markup '~kind<...>~' tags the enclosed text with its kind: 'name' for the name of an object, 'uid' for its
-        unique identifier, 'idx' for an index, 'value' for any other value, 'type' for the name of a class, 'path' for a
-        file or a directory, 'title' and 'frame' for the banner. The colored themes highlight the enclosed text, in
-        italic for names and uids and in bold italic for titles. The raw theme quotes names and prints anything else as
-        is.
+        The markup '~kind<...>~' tags the enclosed text with its kind: 'value' for any value, 'name' for the name of an
+        object, 'uid' for its unique identifier and 'title' for a title. Each kind has a short form made of as many
+        tildes as its rank: '~<...>~', '~~<...>~~', '~~~<...>~~~' and '~~~~<...>~~~~' respectively. The colored themes
+        highlight the enclosed text, in italic for names and uids and in bold italic for titles. The raw theme quotes
+        names and prints anything else as is.
         """
-        return MARKUP_PATTERN.sub(lambda match: self.render(match["kind"], match["text"], color), msg)
+        return MARKUP_PATTERN.sub(
+            lambda match: self.render(
+                match["kind"] or MARKUP_KINDS[len(match["tildes"]) - 1],
+                match["text"] if match["kind"] else match["short_text"],
+                color,
+            ),
+            msg,
+        )
 
     def render(self, kind, text, color):
         """Render the text of a given markup kind in the theme, with 'color' the color of the text around it."""

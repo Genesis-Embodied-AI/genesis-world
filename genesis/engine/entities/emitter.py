@@ -29,7 +29,7 @@ class Emitter(RBC):
         self._acc_droplet_len = 0.0  # accumulated droplet length to be emitted
 
         gs.logger.info(
-            f"Creating ~type<{self.__repr_name__()}>~. id: ~uid<{self._uid}>~, max_particles: ~value<{max_particles}>~."
+            f"Creating ~<{self.__repr_name__()}>~. id: ~~~<{self._uid}>~~~, max_particles: ~<{max_particles}>~."
         )
 
     def set_entity(self, entity):
@@ -45,7 +45,7 @@ class Emitter(RBC):
         self._sim = entity.sim
         self._solver = entity.solver
         self._next_particle = 0
-        gs.logger.info(f"~type<{self._repr_briefer()}>~ created using ~type<{entity._repr_briefer()}>~.")
+        gs.logger.info(f"~<{self._repr_briefer()}>~ created using ~<{entity._repr_briefer()}>~.")
 
     def reset(self):
         """

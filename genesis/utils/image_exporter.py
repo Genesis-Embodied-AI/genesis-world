@@ -231,8 +231,8 @@ class FrameImageExporter:
         if exported_types:
             types_str = ", ".join(f"{num} {type}" for num, type in exported_types)
             gs.logger.info(
-                f"Exported ~value<{sum(num for num, _ in exported_types)} frame(s) ({types_str})>~ "
-                f"from camera ~idx<{i_cam}>~ at step ~idx<{i_step}>~ to ~path<{self.export_dir}>~"
+                f"Exported ~<{sum(num for num, _ in exported_types)} frame(s) ({types_str})>~ "
+                f"from camera ~<{i_cam}>~ at step ~<{i_step}>~ to ~<{self.export_dir}>~"
             )
 
         # Shutdown executor if necessary

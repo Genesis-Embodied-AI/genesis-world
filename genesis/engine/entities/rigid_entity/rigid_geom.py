@@ -165,7 +165,7 @@ class RigidGeom(RBC):
                 gs.logger.info("Ignoring corrupted cache.")
 
         if not is_cached_loaded:
-            with gs.logger.timer(f"Preprocessing geom idx ~idx<{self._idx}>~."):
+            with gs.logger.timer(f"Preprocessing geom idx ~<{self._idx}>~."):
                 ######## sdf ########
                 lower = self._init_verts.min(axis=0)
                 upper = self._init_verts.max(axis=0)
