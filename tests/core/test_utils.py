@@ -993,7 +993,7 @@ def test_logger_raw_theme_plain_text(capsys):
             ),
             name="box",
         )
-        gs.logger.warning("Watch ~<this>~.")
+        gs.logger.warning("Watch ~value<this>~.")
     finally:
         gs.destroy()
     out = capsys.readouterr().out

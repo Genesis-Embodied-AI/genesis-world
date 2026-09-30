@@ -15,6 +15,10 @@ class THEME(str, enum.Enum):
     raw = "raw"
 
 
+# Non-greedy, so that the text of a markup may end with a '>' of its own (e.g. '~type<<gs.morphs.Box>>~').
+MARKUP_PATTERN = re.compile(r"~(?P<kind>name|uid|idx|value|type|path|title|frame)<(?P<text>.*?)>~")
+
+
 class STYLE:
     """Theme of the text Genesis prints, set by the logger, and the prefix of the log records it implies."""
 
@@ -34,22 +38,29 @@ class STYLE:
                 return f"{color}[Genesis] [{time}] [{level}] "
 
     def markup(self, msg, color):
-        """Render the emphasis markup of a message in the theme, with 'color' the color of the text around it.
+        """Render the markup of a message in the theme, with 'color' the color of the text around it.
 
-        The markup nests four levels of emphasis, from '~<...>~' to '~~~~<...>~~~~'. The raw theme renders the enclosed
-        text as is.
+        The markup '~kind<...>~' tags the enclosed text with its kind: 'name' for the name of an object, 'uid' for its
+        unique identifier, 'idx' for an index, 'value' for any other value, 'type' for the name of a class, 'path' for a
+        file or a directory, 'title' and 'frame' for the banner. The colored themes highlight the enclosed text, in
+        italic for names and uids and in bold italic for titles. The raw theme quotes names and prints anything else as
+        is.
         """
-        msg = msg.replace("~~~~<", colors.MINT + formats.BOLD + formats.ITALIC)
-        msg = msg.replace("~~~<", colors.MINT + formats.ITALIC)
-        msg = msg.replace("~~<", colors.MINT + formats.UNDERLINE)
-        msg = msg.replace("~<", colors.MINT)
+        return MARKUP_PATTERN.sub(lambda match: self.render(match["kind"], match["text"], color), msg)
 
-        msg = msg.replace(">~~~~", formats.RESET + color)
-        msg = msg.replace(">~~~", formats.RESET + color)
-        msg = msg.replace(">~~", formats.RESET + color)
-        msg = msg.replace(">~", formats.RESET + color)
-
-        return msg
+    def render(self, kind, text, color):
+        """Render the text of a given markup kind in the theme, with 'color' the color of the text around it."""
+        match self.theme, kind:
+            case THEME.raw, "name":
+                return f"'{text}'"
+            case THEME.raw, _:
+                return text
+            case _, "name" | "uid":
+                return f"{colors.MINT}{formats.ITALIC}{text}{formats.RESET}{color}"
+            case _, "title":
+                return f"{colors.MINT}{formats.BOLD}{formats.ITALIC}{text}{formats.RESET}{color}"
+            case _:
+                return f"{colors.MINT}{text}{formats.RESET}{color}"
 
 
 class COLORS:

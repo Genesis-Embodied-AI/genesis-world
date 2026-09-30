@@ -267,7 +267,7 @@ class VideoEncoder:
             self._container.close()
 
             if not is_encoding_lost:
-                (gs.logger or LOGGER).info(f'Video saved to "~<{self._filename}>~".')
+                (gs.logger or LOGGER).info(f'Video saved to "~path<{self._filename}>~".')
 
             self._container = None
             self._stream = None

@@ -59,7 +59,7 @@ def trimesh_to_particles_simple(mesh, p_size, sampler):
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
         return positions
 
-    with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
+    with gs.logger.timer(f"Sampling particles with ~value<{sampler}>~ sampler and generating `.ptc` file:"):
         # sample a cube first
         box_size = mesh.bounds[1] - mesh.bounds[0]
         box_center = (mesh.bounds[1] + mesh.bounds[0]) / 2
@@ -92,7 +92,7 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
     if positions is not None:
         gs.logger.debug("Sampled particles file (`.ptc`) found in cache.")
     else:
-        with gs.logger.timer(f"Sampling particles with ~<{sampler}>~ sampler and generating `.ptc` file:"):
+        with gs.logger.timer(f"Sampling particles with ~value<{sampler}>~ sampler and generating `.ptc` file:"):
             sdf_res = int(sampler.split("-")[-1])
 
             # We scale up a bit the particle size because this method tends to sample denser particles compared to `random` and `regular` samplers.

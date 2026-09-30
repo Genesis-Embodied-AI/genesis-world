@@ -54,7 +54,7 @@ class Logger:
 
         # The theme is set before the formatter is created, which reads the colors of its levels once and for all.
         if theme not in tuple(THEME):
-            gs.raise_exception(f"Unsupported theme: ~~<{theme}>~~")
+            gs.raise_exception(f"Unsupported theme: ~value<{theme}>~")
         style.theme = THEME(theme)
 
         self._logger = logging.getLogger("genesis")
@@ -167,16 +167,16 @@ class Logger:
             wave_width = max(0, min(38, wave_width))
             bar_width = wave_width * 2 + 9
             wave = ("┈┉" * wave_width)[:wave_width]
-            self.info(f"~<╭{'─' * (bar_width)}╮>~")
-            self.info(f"~<│{wave}>~ ~~~~<Genesis>~~~~ ~<{wave}│>~")
-            self.info(f"~<╰{'─' * (bar_width)}╯>~")
+            self.info(f"~frame<╭{'─' * (bar_width)}╮>~")
+            self.info(f"~frame<│{wave}>~ ~title<Genesis>~ ~frame<{wave}│>~")
+            self.info(f"~frame<╰{'─' * (bar_width)}╯>~")
 
         self.info(
-            f"Running on ~~<[{device_name}]>~~ with backend ~~<{backend}>~~. Device memory: ~~<{total_mem:.2f}>~~ GB."
+            f"Running on ~value<[{device_name}]>~ with backend ~value<{backend}>~. Device memory: ~value<{total_mem:.2f}>~ GB."
         )
 
         msg_options = ", ".join(
-            f"{f'{emoji} ' if is_decorated else ''}{name}: ~~<{val}>~~"
+            f"{f'{emoji} ' if is_decorated else ''}{name}: ~value<{val}>~"
             for emoji, name, val in (
                 ("🔖", "version", __version__),
                 ("🎨", "theme", style.theme.value),

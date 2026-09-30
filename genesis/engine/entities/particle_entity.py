@@ -327,7 +327,7 @@ class ParticleEntity(Entity):
         self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(origin)
         self._n_particles = len(self._particles)
 
-        gs.logger.info(f"Sampled ~~<{self._n_particles:,}>~~ particles.")
+        gs.logger.info(f"Sampled ~value<{self._n_particles:,}>~ particles.")
 
     def init_tgt_vars(self):
         """

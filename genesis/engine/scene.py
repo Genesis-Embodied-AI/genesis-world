@@ -267,7 +267,7 @@ class Scene(RBC):
         self._desc_digest: str | None = None
         self._pre_step_callbacks: list = []
 
-        gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
+        gs.logger.info(f"Scene ~uid<{self._uid}>~ created.")
 
     def __del__(self):
         self.destroy()
@@ -863,7 +863,7 @@ class Scene(RBC):
 
         gs._scene_registry.append(weakref.ref(self, _destroy_callback))
 
-        with gs.logger.timer(f"Building scene ~~~<{self._uid}>~~~..."):
+        with gs.logger.timer(f"Building scene ~uid<{self._uid}>~..."):
             self._parallelize(n_envs, env_spacing, n_envs_per_row, center_envs_at_origin)
 
             # simulator
@@ -958,7 +958,7 @@ class Scene(RBC):
         envs_idx : None | array_like, optional
             The indices of the environments. If None, all environments will be considered. Defaults to None.
         """
-        gs.logger.debug(f"Resetting Scene ~~~<{self._uid}>~~~.")
+        gs.logger.debug(f"Resetting Scene ~uid<{self._uid}>~.")
         # The recorders finish the run first: a reset of the whole scene records the state it leaves behind, and a file
         # rotated on reset ends with it.
         if envs_idx is None:
