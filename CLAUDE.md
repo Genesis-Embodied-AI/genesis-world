@@ -195,8 +195,9 @@ checkout's `genesis/`, so engine edits appear to have no effect and every result
 - Path: `/mnt/home/duburcqa/workspace/src/genesis`
 - **Git operations (fetch, checkout, pull) must be done on the login node**, not inside `gs-srun`. The compute node container cannot reach GitHub.
 - **Always use `gs-srun`** (Slurm wrapper) to allocate a GPU node. Never run pytest or python directly on the login node.
+- **Always use the `rtx-mid` partition** (`gs-srun --partition=rtx-mid`). `rtx-high` is forbidden. `rtx-mid` jobs can be preempted, so a long run relaunches a job whose output lacks its end marker, and runs in a tmux session on the login node so it survives a closed laptop.
 - **Never source a venv manually.** The container image already has the correct environment. The `bash -lc` login shell sets everything up automatically.
-- Pattern for git + run: `ssh genesis-coreweave 'bash -lc "cd /mnt/home/duburcqa/workspace/src/genesis && git pull && gs-srun --partition=rtx-high --nodes=1 --gpus=1 bash -ilc \"cd /mnt/home/duburcqa/workspace/src/genesis && pytest -n 10 tests/ipc -v --no-header 2>&1\""'`
+- Pattern for git + run: `ssh genesis-coreweave 'bash -lc "cd /mnt/home/duburcqa/workspace/src/genesis && git pull && gs-srun --partition=rtx-mid --nodes=1 --gpus=1 bash -ilc \"cd /mnt/home/duburcqa/workspace/src/genesis && pytest -n 10 tests/ipc -v --no-header 2>&1\""'`
 - Example tests need `-m examples` to override the default marker filter in `pyproject.toml`.
 - Copy local files to cluster: `scp <local_path> genesis-coreweave:<remote_path>`. Then run with `gs-srun`.
 - **The compute container mounts `/mnt/home`, not the login node's `/tmp`.** A script, patch, or output dir placed under `/tmp` on the login node is invisible under `gs-srun`. Stage everything under `/mnt/home/duburcqa`.
