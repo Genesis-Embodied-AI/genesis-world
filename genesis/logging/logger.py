@@ -1,9 +1,12 @@
-import sys
 import logging
+import os
+import sys
 import threading
 from contextlib import contextmanager
 
-from genesis.styles import colors, formats
+import genesis as gs
+from genesis.styles import THEME, colors, formats, style
+from genesis.version import __version__
 
 from .time_elapser import TimeElapser
 
@@ -35,35 +38,26 @@ class GenesisFormatter(logging.Formatter):
         self.last_output = ""
         self.last_color = ""
 
-    def colored_fmt(self, color):
-        self.last_color = color
-        return f"{color}[Genesis] [{self.TIME}] [{self.LEVEL}] {self.MESSAGE}{formats.RESET}"
-
-    def extra_fmt(self, msg):
-        msg = msg.replace("~~~~<", colors.MINT + formats.BOLD + formats.ITALIC)
-        msg = msg.replace("~~~<", colors.MINT + formats.ITALIC)
-        msg = msg.replace("~~<", colors.MINT + formats.UNDERLINE)
-        msg = msg.replace("~<", colors.MINT)
-
-        msg = msg.replace(">~~~~", formats.RESET + self.last_color)
-        msg = msg.replace(">~~~", formats.RESET + self.last_color)
-        msg = msg.replace(">~~", formats.RESET + self.last_color)
-        msg = msg.replace(">~", formats.RESET + self.last_color)
-
-        return msg
-
     def format(self, record):
-        log_fmt = self.colored_fmt(self.mapping.get(record.levelno))
+        self.last_color = self.mapping.get(record.levelno)
+        log_fmt = f"{style.prefix(self.last_color, self.TIME, self.LEVEL, record.levelno)}{self.MESSAGE}{formats.RESET}"
         formatter = logging.Formatter(log_fmt, datefmt=self.DATE_FORMAT)
-        msg = self.extra_fmt(formatter.format(record))
+        msg = style.markup(formatter.format(record), self.last_color)
         self.last_output = msg
         return msg
 
 
 class Logger:
-    def __init__(self, logging_level, verbose_time):
+    def __init__(self, logging_level, verbose_time, theme):
         if isinstance(logging_level, str):
             logging_level = logging_level.upper()
+
+        # The theme is set before the formatter is created, which reads the colors of its levels once and for all.
+        if isinstance(theme, str):
+            if theme not in THEME.__members__:
+                gs.raise_exception(f"Unsupported theme: ~~<{theme}>~~")
+            theme = THEME[theme]
+        style.theme = theme
 
         self._logger = logging.getLogger("genesis")
         self._logger.setLevel(logging_level)
@@ -141,8 +135,68 @@ class Logger:
         with self.log_wrapper():
             self._logger.critical(message)
 
+    def banner(self, device_name, backend, total_mem, seed, debug, precision, performance_mode):
+        """Log the greeting banner of Genesis, followed by the device it runs on and the options it was initialized with.
+
+        Parameters
+        ----------
+        device_name : str
+            The name of the device Genesis runs on.
+        backend : gs.backend
+            The backend Genesis runs on.
+        total_mem : float
+            The memory of the device, in GB.
+        seed : int | None
+            The seed of the random number generators, if any.
+        debug : bool
+            Whether Genesis runs in debug mode.
+        precision : str
+            The floating point precision, either '32' or '64'.
+        performance_mode : bool
+            Whether Genesis runs in performance mode.
+
+        The raw theme leaves out the box and the emojis.
+        """
+        is_decorated = style.theme is not THEME.raw
+        if is_decorated:
+            try:
+                columns, _lines = os.get_terminal_size()
+            except OSError:
+                columns = 80
+            wave_width = (columns - self.INFO_length - 11) // 2
+            if wave_width % 2 == 0:
+                wave_width -= 1
+            wave_width = max(0, min(38, wave_width))
+            bar_width = wave_width * 2 + 9
+            wave = ("┈┉" * wave_width)[:wave_width]
+            self.info(f"~<╭{'─' * (bar_width)}╮>~")
+            self.info(f"~<│{wave}>~ ~~~~<Genesis>~~~~ ~<{wave}│>~")
+            self.info(f"~<╰{'─' * (bar_width)}╯>~")
+
+        self.info(
+            f"Running on ~~<[{device_name}]>~~ with backend ~~<{backend}>~~. Device memory: ~~<{total_mem:.2f}>~~ GB."
+        )
+
+        msg_options = ", ".join(
+            f"{f'{emoji} ' if is_decorated else ''}{name}: ~~<{val}>~~"
+            for emoji, name, val in (
+                ("🔖", "version", __version__),
+                ("🎨", "theme", style.theme.name),
+                ("🌱", "seed", seed),
+                ("🐛", "debug", bool(debug)),
+                ("📏", "precision", precision),
+                ("🔥", "performance", bool(performance_mode)),
+                ("💬", "verbose", logging.getLevelName(self.level)),
+            )
+        )
+        self.info(f"{'🚀 ' if is_decorated else ''}Genesis initialized. {msg_options}")
+
+    def shutdown(self):
+        """Log the exit line of Genesis."""
+        self.info(f"{'💤 ' if style.theme is not THEME.raw else ''}Exiting Genesis and caching compiled kernels...")
+
     def raw(self, message):
-        self._stream.write(self._formatter.extra_fmt(message))
+        self._stream.write(style.markup(message, self._formatter.last_color))
         self._stream.flush()
         if message.endswith("\n"):
             self._is_new_line = True

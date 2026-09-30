@@ -1,4 +1,5 @@
 import math
+import re
 import subprocess
 import sys
 from functools import partial
@@ -978,6 +979,29 @@ def test_logger_prints_once_with_root_logging(backend):
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, encoding="utf-8")
     assert proc.returncode == 0, proc.stderr
     assert (proc.stdout + proc.stderr).count("Genesis warning") == 1
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [None])
+def test_logger_raw_theme_plain_text(capsys):
+    gs.init(backend=gs.cpu, theme="raw", logging_level="info")
+    try:
+        scene = gs.Scene(show_viewer=False)
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+            name="box",
+        )
+        gs.logger.warning("Watch ~<this>~.")
+    finally:
+        gs.destroy()
+    out = capsys.readouterr().out
+    assert out.isascii() and "\x1b" not in out
+    lines = out.splitlines()
+    assert all(re.match(r"\[Genesis \d{2}:\d{2}:\d{2}( [A-Z]+)?\] ", line) for line in lines)
+    assert any(re.fullmatch(r"\[Genesis \d{2}:\d{2}:\d{2} WARNING\] Watch this\.", line) for line in lines)
+    assert any(re.search(r"\] Adding <gs\.engine\.entities\.RigidEntity> 'box'\. idx: 0, ", line) for line in lines)
 
 
 @pytest.mark.required
