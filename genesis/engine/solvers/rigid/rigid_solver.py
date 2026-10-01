@@ -524,24 +524,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             and self._options.constraint_solver == gs.constraint_solver.Newton
         )
 
-        # The layout-flippable constraint-state tensors are stored batch-first either for the GPU cooperative kernels or
-        # under serialized execution, where the env loop is outermost and per-env rows must be contiguous to avoid
-        # stride-n_envs access. Batched sweeps key their iteration-axis order on the same flag, so that iteration order
-        # always follows the physical layout.
-        #
-        # The tiled per-island seed of the factor (see enable_tiled_island_seed in array_class.py) runs on GPU at any
-        # env count: the scalar per-island seed it replaces is a per-env thread walking O(n^3) dependent loads, which
-        # above the core count costs more than the whole Newton iteration body. The subgroup-cooperative body kernels
-        # (and the batch-first layout they expect, also the layout the decomposed solve arm requires) win when per-env
-        # compute density amortizes the warp-per-env overhead and lose once the env dimension alone saturates the GPU,
-        # so they add the get_gpu_core_count() env bound (the threshold envs_undersaturate uses below), winning from
-        # ~4096 envs at n_dofs >= ~18. Sparse solve is excluded from both (the cooperative qfrc kernel and the
-        # flipped-layout jac readers are dense-only).
-        # Outside performance mode the ndarray kernels already serve every scene shape, so the static config gives up
-        # the specializations whose cost stays small: the dof and env bounds of the GPU regimes, the single-island
-        # shortcut, the register tile following the dof count, and the shared tile sizes, taken from 2 sizes instead of
-        # 8. The island size classes and the factor paths above the last cap still follow the scene, being where the
-        # cost of a generic value is large.
+        # The tiled per-island seed (see enable_tiled_island_seed in array_class.py) replaces a per-env thread walking
+        # O(n^3) dependent loads, slower than the whole Newton iteration above the core count. The cooperative body
+        # kernels win until the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray
+        # kernels serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
         is_generic = gs.use_ndarray
         enable_tiled_island_seed = (
             gs.backend != gs.cpu

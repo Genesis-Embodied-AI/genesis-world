@@ -230,11 +230,10 @@ def get_gpu_cores_per_unit() -> int:
 def get_gpu_core_count() -> int:
     """Return the number of GPU compute cores for the active device.
 
-    This is the env count above which one-thread-per-env already saturates the GPU, so cooperative or tiled kernels
-    stop being worthwhile. Where the driver cannot be queried (Metal, or a GPU without a torch.cuda device) an
-    upper-bound estimate of the compute unit count is used: 40 GPU cores on Apple Silicon, the 256 CUs of an AMD
-    MI350X for other GPU backends (e.g. Vulkan). The CPU backend gets -1, so that no GPU of the machine reaches what
-    the CPU backend compiles.
+    This is the env count above which one-thread-per-env already saturates the GPU, so cooperative or tiled kernels stop
+    being worthwhile. Where the driver cannot be queried (Metal, or a GPU without a torch.cuda device) an upper-bound
+    estimate of the compute unit count is used: 40 GPU cores on Apple Silicon, the 256 CUs of an AMD MI350X for other
+    GPU backends (e.g. Vulkan). The CPU backend gets -1, so no GPU shares its compiled kernels.
     """
     if gs.backend == gs.cpu:
         return -1
@@ -251,15 +250,14 @@ def get_gpu_core_count() -> int:
 def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
 
-    The shared memory of a block only bounds how many blocks a compute unit runs at once. Each candidate size is the
-    largest multiple of 8, which keeps the padded row stride odd, running a given count of resident blocks of one warp.
-    That count follows from the shared memory of a compute unit and of a block, the memory the driver reserves per
-    block, and the warp slots of a compute unit. At most max_n_sizes candidates are kept, the static values of a kernel
-    staying a small fixed set: those minimizing the mean drop in resident blocks that rounding a row count up to the
-    next kept size causes against its tightest candidate, row count n weighing 1 / n so that every doubling of the size
-    counts the same. Where the
-    compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block, which then
-    bounds the resident blocks alone. A row count above the largest size has no shared tile.
+    Each candidate is the largest multiple of 8 (keeping the padded row stride odd) that runs a given count of resident
+    one-warp blocks per compute unit, as bounded by its shared memory, the shared memory of a block, the driver
+    reservation per block and the warp slots. At most max_n_sizes candidates are kept: those minimizing the mean drop in
+    resident blocks caused by rounding a row count n up to the next kept size, weighted by 1 / n so that every doubling
+    of the size counts the same.
+
+    Where the compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block. A row
+    count above the largest size has no shared tile.
     """
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
