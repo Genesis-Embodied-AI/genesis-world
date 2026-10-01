@@ -435,6 +435,8 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
     PRESSED_SPOT = (-3.3, 0.8)
     PRESSED_DEPTH = 0.25 * GEOM_SIZE
 
+    asset_path = get_hf_dataset(pattern="meshes/*_hull.obj")
+
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
@@ -470,6 +472,27 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
         visualize_contact=True,
         vis_mode="collision",
     )
+    # The lamp spans a meter while the finger presses it by less than a millimeter, so the rounding errors of the
+    # Minkowski difference reach the depth convergence tolerance and cut dents into the polytope that refines the depth.
+    # The finger is placed where the search would end on a dent.
+    finger = scene.add_entity(
+        gs.morphs.Mesh(
+            file=f"{asset_path}/meshes/inspire_finger_hull.obj",
+            pos=(0.2282334562357352, -0.24876064442406798, -3.140536243429785),
+            quat=(0.5830528595970937, 0.23922303491173352, -0.7549261541988322, 0.18140618564379823),
+            decimate=False,
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    lamp = scene.add_entity(
+        gs.morphs.Mesh(
+            file=f"{asset_path}/meshes/floor_lamp_hull.obj",
+            pos=(-0.13053986430168152, -0.09062329679727554, -3.08468234539032),
+            quat=(-0.04015674069523811, 0.15293818712234497, 0.14172174036502838, 0.9771961569786072),
+        ),
+        vis_mode="collision",
+    )
     scene.build()
 
     face_offset = 0.5 * (BOX_SIZE + GEOM_SIZE)
@@ -479,14 +502,23 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
         geom.set_pos(gu.transform_by_quat(pos_local, box.get_quat()) + box.get_pos())
         geom.set_quat(box.get_quat())
 
+    # The exact depth of the hull pair is the distance from the origin to the boundary of their Minkowski difference
+    finger_verts = tensor_to_array(finger.geoms[0].get_verts(), dtype=np.float64)
+    lamp_verts = tensor_to_array(lamp.geoms[0].get_verts(), dtype=np.float64)
+    hull_depth = -ConvexHull((finger_verts[:, None] - lamp_verts).reshape((-1, 3))).equations[:, 3].max()
+
     scene.step()
     contacts = scene.rigid_solver.collider.get_contacts()
-    assert_allclose((contacts["normal"] @ face_normal).abs(), 1.0, tol=tol)
+    is_box = contacts["geom_a"] == box.geoms[0].idx
+    assert_allclose((contacts["normal"][is_box] @ face_normal).abs(), 1.0, tol=tol)
     is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
     assert is_pressed.any()
     assert_allclose(contacts["penetration"][is_pressed], PRESSED_DEPTH, tol=tol)
-    assert (contacts["penetration"][~is_pressed] >= 0.0).all()
-    assert (contacts["penetration"][~is_pressed] <= GEOM_SIZE).all()
+    assert (contacts["penetration"][is_box & ~is_pressed] >= 0.0).all()
+    assert (contacts["penetration"][is_box & ~is_pressed] <= GEOM_SIZE).all()
+    is_lamp = contacts["geom_b"] == lamp.geoms[0].idx
+    assert is_lamp.any()
+    assert_allclose(contacts["penetration"][is_lamp].max(), hull_depth, atol=1e-7)
     offset = (geom_grazing.get_pos() - box.get_pos()) @ face_normal
     assert face_offset - tol <= offset <= face_offset + GEOM_SIZE
 

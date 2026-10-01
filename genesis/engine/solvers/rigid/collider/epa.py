@@ -956,7 +956,6 @@ def func_safe_epa(
     upper2 = collider_info.gjk.FLOAT_MAX_SQ[None]
     lower = gs.qd_float(0.0)
     tolerance = collider_info.gjk.tolerance[None]
-    EPS = rigid_info.EPS[None]
 
     # Index of the nearest face
     nearest_i_f = gs.qd_int(-1)
@@ -1095,8 +1094,11 @@ def func_safe_epa(
                 # Unrecoverable numerical issue
                 break
 
+            # The depth bounds only tighten, so a new face closer than the lower bound is a dent that rounding cut into
+            # the polytope, and its witness would extrapolate far outside it. The slack applies to the distance itself,
+            # since a slack on its square grows relative to the depth as the depth shrinks.
             dist2 = gjk_state.polytope_faces.dist2[i_b, gjk_state.polytope.nfaces[i_b] - 1]
-            if (dist2 >= lower2 - EPS) and (dist2 <= upper2 + EPS):
+            if dist2 >= qd.max(lower - tolerance, 0.0) ** 2 and dist2 <= (upper + tolerance) ** 2:
                 # Store face in the map
                 nfaces_map = gjk_state.polytope.nfaces_map[i_b]
                 gjk_state.polytope_faces_map[i_b, nfaces_map] = i_f0
