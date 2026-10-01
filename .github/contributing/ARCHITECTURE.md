@@ -119,6 +119,24 @@ Location: `genesis/options/entities.py`
 
 Location: `genesis/engine/solvers/`
 
+### System data lifecycle
+
+`Simulator` owns an internal `SystemDataArray`. Each record has a concrete type, an owning solver and an owner-local index: 0 for the aggregate record of a solver, the entity index for a per-entity record and the geometry index for a per-geometry record. The owning solver decides whether its record exists, describes it and binds it, and the record lives as long as the scene. Solvers, couplers and entities look records up during build and keep references for runtime access, and a coupler writes into the fields of the records it couples.
+
+The build phases are:
+
+1. `describe()` reads the entity ranges that `add_entity` assigned, resolves the static configuration, and returns the dimensions and inputs of the shared allocation, or None when the solver allocates nothing.
+2. The simulator allocates every description into its data collection.
+3. `register_data()` binds the allocated record and registers the range records that index into it. The simulator calls it only for a solver that allocated a record.
+4. The collection closes registration.
+5. `build()` initializes state and private workspaces.
+
+| Family | Solver description | Record | Range records | Kept by the solver |
+|--------|--------------------|--------|---------------|--------------------|
+| Kinematic, rigid | `ArticulatedDescription` | `ArticulatedData`: dynamic info and state | `LinksData`, `JointsData` per entity, `VisualGeomData` per visual geometry | `RigidInfo`, scratch and adjoint workspaces |
+
+A range record holds the aggregate record it indexes and its ranges into it. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
+
 ## Key Files Reference
 
 | File | Purpose |

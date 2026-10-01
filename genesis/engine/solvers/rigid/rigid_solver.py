@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,6 +13,7 @@ import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.states import RigidSolverState, SolverCheckpoint
+from genesis.engine.system_data.articulated import ArticulatedDescription
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
@@ -307,7 +309,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def init_ckpt(self):
         pass
 
-    def build(self):
+    def describe(self) -> ArticulatedDescription:
         self._n_geoms = self.n_geoms
         self._n_verts = self.n_verts
         self._n_free_verts = self.n_free_verts
@@ -336,6 +338,20 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if not self._enable_mujoco_compatibility:
                 self._options.tolerance *= 0.1
 
+        self._data_description = replace(
+            super().describe(),
+            n_geoms_=self.n_geoms_,
+            n_verts_=self.n_verts_,
+            n_faces_=self.n_faces_,
+            n_edges_=self.n_edges_,
+            n_free_verts_=self.n_free_verts_,
+            n_fixed_verts_=self.n_fixed_verts_,
+            n_candidate_equalities_=self.n_candidate_equalities_,
+            is_dynamic=True,
+        )
+        return self._data_description
+
+    def build(self):
         super().build()
 
         self._init_vert_fields()
@@ -771,8 +787,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self.rigid_info = self.data_manager.rigid_info
         self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
         if self._use_hibernation:
             self.n_awake_dofs = self.rigid_info.n_awake_dofs
