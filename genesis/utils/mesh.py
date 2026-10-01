@@ -190,16 +190,8 @@ def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
 def get_gnd_path(
     name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
 ):
-    # Sorted so that the key does not depend on the order in which the parameters are declared
-    subterrain_params_items = sorted((key, sorted(params.items())) for key, params in subterrain_parameters.items())
     hashkey = get_hashkey(
-        name,
-        subterrain_types,
-        subterrain_size,
-        horizontal_scale,
-        vertical_scale,
-        n_subterrains,
-        subterrain_params_items,
+        name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
     )
     return os.path.join(get_gnd_cache_dir(), f"{hashkey}.gnd")
 
@@ -243,9 +235,17 @@ def get_usd_bake_path(file_path):
     return os.path.join(get_usd_cache_dir(), "bake", hashkey)
 
 
+def _sort_dict_keys(arg):
+    if isinstance(arg, dict):
+        return tuple((key, _sort_dict_keys(value)) for key, value in sorted(arg.items()))
+    return arg
+
+
 def get_hashkey(*args):
     hasher = hashlib.sha256()
     for arg in (*args, gs.__version__.encode()):
+        # Dict items are sorted recursively by key, which makes the hash independent of their insertion order
+        arg = _sort_dict_keys(arg)
         if isinstance(arg, Path):
             file_stats = arg.stat()
             arg = (str(arg).encode(), file_stats.st_size, file_stats.st_mtime)
