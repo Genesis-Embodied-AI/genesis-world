@@ -19,6 +19,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+import genesis.utils.simt as su
 
 from .forward_kinematics import (
     LINK_SWEEP_PASS,
@@ -113,12 +114,24 @@ def func_forward_dynamics(
         qd.static(rigid_config.integrator == gs.integrator.approximate_implicitfast),
         is_backward,
     )
-    func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
+    # The shared-memory mass factor solves the smooth acceleration against the factor it still holds, which needs the
+    # forces first. The force passes never read the factor, so it runs after them. A differentiable scene keeps the
+    # separate solve, which kernel_manual_compute_qacc_bw reverses.
+    is_qacc_fused = qd.static(
+        rigid_config.enable_tiled_cholesky_mass_matrix
+        and rigid_config.mass_matrix_fits_shared
+        and rigid_config.backend != gs.cpu
+        and not rigid_config.requires_grad
+    )
+    if qd.static(not is_qacc_fused):
+        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, solve_acc=False)
     func_torque_and_passive_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
     func_update_force(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_bias_force(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-    func_compute_qacc(dyn_state, dyn_info, rigid_info, rigid_config)
+    if qd.static(is_qacc_fused):
+        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, solve_acc=True)
+    func_compute_qacc(dyn_state, dyn_info, rigid_info, rigid_config, solve_acc=not is_qacc_fused)
 
 
 @qd.kernel(fastcache=True)
@@ -237,6 +250,7 @@ def func_mass_mat_assemble_tree_cooperative(
     i_b: int,
     dyn_state: array_class.DynState,
     rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
     BLOCK_DIM: qd.template(),
 ):
     """Write the share that one warp lane owns of the mass blocks of one kinematic tree.
@@ -245,8 +259,15 @@ def func_mass_mat_assemble_tree_cooperative(
     written to both [i_d, j_d, i_b] and [j_d, i_d, i_b] right away, which saves the upper-triangle dot products that a
     two-pass path computes and then overwrites, and needs no mirror pass at all. Under the flipped mass_mat layout
     (i_d stride-1) the first write coalesces, and the strided second one costs about what the mirror pass it replaces
-    used to cost.
+    used to cost. A block that fits the shared tile stages its spatial vectors in shared memory first: they are laid out
+    env-innermost in global memory, so every lane would read its own memory sector, once per pair the vector enters.
     """
+    MAX_DOFS_PER_BLOCK = qd.static(rigid_config.tiled_n_dofs_per_block)
+    sh_f_ang = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, 3), gs.qd_float)
+    sh_f_vel = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, 3), gs.qd_float)
+    sh_cdof_ang = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, 3), gs.qd_float)
+    sh_cdof_vel = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK, 3), gs.qd_float)
+
     # Assemble each mass block of the tree over its full lower triangle (see dofs_mass_block_start in array_class.py).
     # mass_parent_mask zeroes the within-block ancestor gaps.
     tree_dof_start = rigid_info.trees_dof_start[i_t]
@@ -255,6 +276,21 @@ def func_mass_mat_assemble_tree_cooperative(
         if rigid_info.dofs_mass_block_start[block_start] == block_start:
             block_end = rigid_info.dofs_mass_block_end[block_start]
             n_block_dofs = block_end - block_start
+            if qd.static(rigid_config.mass_matrix_fits_shared):
+                for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                    i_d_ = i_chunk_ * BLOCK_DIM + tid
+                    if i_d_ < n_block_dofs:
+                        f_ang = dyn_state.dofs.f_ang[block_start + i_d_, i_b]
+                        f_vel = dyn_state.dofs.f_vel[block_start + i_d_, i_b]
+                        cdof_ang = dyn_state.dofs.cdof_ang[block_start + i_d_, i_b]
+                        cdof_vel = dyn_state.dofs.cdof_vel[block_start + i_d_, i_b]
+                        for k in qd.static(range(3)):
+                            sh_f_ang[i_d_, k] = f_ang[k]
+                            sh_f_vel[i_d_, k] = f_vel[k]
+                            sh_cdof_ang[i_d_, k] = cdof_ang[k]
+                            sh_cdof_vel[i_d_, k] = cdof_vel[k]
+                qd.simt.block.sync()
+
             n_lower_tri = n_block_dofs * (n_block_dofs + 1) // 2
             for i_chunk_ in range((n_lower_tri + BLOCK_DIM - 1) // BLOCK_DIM):
                 i_pair = i_chunk_ * BLOCK_DIM + tid
@@ -265,13 +301,20 @@ def func_mass_mat_assemble_tree_cooperative(
                     i_d_, j_d_ = linear_to_lower_tri(i_pair)
                     i_d = block_start + i_d_
                     j_d = block_start + j_d_
-                    val = (
-                        dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
-                        + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
-                    ) * rigid_info.mass_parent_mask[i_d, j_d]
+                    val = gs.qd_float(0.0)
+                    if qd.static(rigid_config.mass_matrix_fits_shared):
+                        for k in qd.static(range(3)):
+                            val = val + sh_f_ang[i_d_, k] * sh_cdof_ang[j_d_, k]
+                            val = val + sh_f_vel[i_d_, k] * sh_cdof_vel[j_d_, k]
+                    else:
+                        val = dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
+                        val = val + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
+                    val = val * rigid_info.mass_parent_mask[i_d, j_d]
                     rigid_info.mass_mat[i_d, j_d, i_b] = val
                     if i_d_ != j_d_:
                         rigid_info.mass_mat[j_d, i_d, i_b] = val
+            if qd.static(rigid_config.mass_matrix_fits_shared):
+                qd.simt.block.sync()
 
 
 @qd.func
@@ -344,7 +387,7 @@ def func_compute_mass_matrix(
             i_t = i_tb % n_trees
             i_b = i_tb // n_trees
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
-                func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, BLOCK_DIM)
+                func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, rigid_config, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
@@ -401,7 +444,7 @@ def func_compute_mass_matrix_masked(
             i_t = i_tb % n_trees
             i_b = envs_idx[i_tb // n_trees]
             if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
-                func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, BLOCK_DIM)
+                func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, rigid_config, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_t, i_b_ in qd.ndrange(rigid_info.trees_root_idx.shape[0], envs_idx.shape[0]):
@@ -827,11 +870,17 @@ def func_factor_mass_tree_shared(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     implicit_damping: qd.template(),
+    solve_acc: qd.template(),
     BLOCK_DIM: qd.template(),
 ):
-    """Factor the mass blocks of one kinematic tree in shared memory, one thread's share of it."""
+    """Factor the mass blocks of one kinematic tree in shared memory, one thread's share of it.
+
+    solve_acc also solves the smooth acceleration of the tree from its forces, against the factor still in shared
+    memory, the lanes of the block sharing each row of the substitutions.
+    """
     MAX_DOFS_PER_BLOCK = qd.static(rigid_config.tiled_n_dofs_per_block)
     WARP_SIZE = qd.static(32)
+    LOG2_BLOCK_DIM = qd.static(BLOCK_DIM.bit_length() - 1)
 
     # Under implicit damping only the trees carrying a damping term take a new factor, the others keep the smooth one.
     # One lane reads the dofs of the tree, the whole block takes its answer.
@@ -911,6 +960,46 @@ def func_factor_mass_tree_shared(
                         rigid_info.mass_mat_L[block_start + i_d_, block_start + j_d_, i_b] = mass_mat[i_d_, j_d_]
                 qd.simt.block.sync()
 
+                if qd.static(solve_acc):
+                    # Same substitutions as func_solve_mass_block: L^T w = force, then z = D^-1 w, then L acc = z.
+                    sh_acc = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK,), gs.qd_float)
+                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                        i_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if i_d_ < n_block_dofs:
+                            sh_acc[i_d_] = dyn_state.dofs.force[block_start + i_d_, i_b]
+                    qd.simt.block.sync()
+                    for i_rev in range(n_block_dofs):
+                        i_d_ = n_block_dofs - 1 - i_rev
+                        dot = gs.qd_float(0.0)
+                        for i_chunk_ in range((i_rev + BLOCK_DIM - 1) // BLOCK_DIM):
+                            j_d_ = i_d_ + 1 + i_chunk_ * BLOCK_DIM + tid
+                            if j_d_ < n_block_dofs:
+                                dot = dot + mass_mat[j_d_, i_d_] * sh_acc[j_d_]
+                        dot = su.qd_block_sum(dot, LOG2_BLOCK_DIM)
+                        if tid == 0:
+                            sh_acc[i_d_] = sh_acc[i_d_] - dot
+                        qd.simt.block.sync()
+                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                        i_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if i_d_ < n_block_dofs:
+                            sh_acc[i_d_] = sh_acc[i_d_] / mass_mat[i_d_, i_d_]
+                    qd.simt.block.sync()
+                    for i_d_ in range(n_block_dofs):
+                        dot = gs.qd_float(0.0)
+                        for i_chunk_ in range((i_d_ + BLOCK_DIM - 1) // BLOCK_DIM):
+                            j_d_ = i_chunk_ * BLOCK_DIM + tid
+                            if j_d_ < i_d_:
+                                dot = dot + mass_mat[i_d_, j_d_] * sh_acc[j_d_]
+                        dot = su.qd_block_sum(dot, LOG2_BLOCK_DIM)
+                        if tid == 0:
+                            sh_acc[i_d_] = sh_acc[i_d_] - dot
+                        qd.simt.block.sync()
+                    for i_chunk_ in range((n_block_dofs + BLOCK_DIM - 1) // BLOCK_DIM):
+                        i_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if i_d_ < n_block_dofs:
+                            dyn_state.dofs.acc_smooth[block_start + i_d_, i_b] = sh_acc[i_d_]
+                    qd.simt.block.sync()
+
 
 @qd.func
 def func_factor_mass(
@@ -919,11 +1008,13 @@ def func_factor_mass(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     implicit_damping: qd.template(),
+    solve_acc: qd.template(),
 ):
     """Factor the mass matrix of every environment.
 
     func_factor_mass_masked factors a subset of them instead, out of the same per-tree functions. See
-    func_compute_mass_matrix for why both passes come in two implementations.
+    func_compute_mass_matrix for why both passes come in two implementations. solve_acc also solves the smooth
+    acceleration from the forces against the factor, on the shared-memory path alone (see func_forward_dynamics).
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     _B = rigid_info.mass_mat.shape[2]
@@ -963,7 +1054,7 @@ def func_factor_mass(
             i_t = (i // BLOCK_DIM) % n_trees
             i_b = i // (BLOCK_DIM * n_trees)
             func_factor_mass_tree_shared(
-                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
+                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, solve_acc, BLOCK_DIM
             )
 
 
@@ -1012,7 +1103,16 @@ def func_factor_mass_masked(
             i_t = (i // BLOCK_DIM) % n_trees
             i_b = envs_idx[i // (BLOCK_DIM * n_trees)]
             func_factor_mass_tree_shared(
-                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, BLOCK_DIM
+                tid,
+                i_t,
+                i_b,
+                dyn_state,
+                dyn_info,
+                rigid_info,
+                rigid_config,
+                implicit_damping,
+                solve_acc=False,
+                BLOCK_DIM=BLOCK_DIM,
             )
 
 
@@ -1736,17 +1836,20 @@ def func_compute_qacc(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
+    solve_acc: qd.template(),
 ):
     # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
-    # for what a block is), the blocks of the sleeping dofs left as they are
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d, i_b in qd.ndrange(rigid_info.mass_mat.shape[0], dyn_state.dofs.acc_smooth.shape[1]):
-        is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
-        if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
-            block_end = rigid_info.dofs_mass_block_end[i_d]
-            func_solve_mass_block(
-                i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc_smooth, rigid_info, rigid_config
-            )
+    # for what a block is), the blocks of the sleeping dofs left as they are. A caller whose mass factor already solved
+    # it skips the solve (see func_forward_dynamics).
+    if qd.static(solve_acc):
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+        for i_d, i_b in qd.ndrange(rigid_info.mass_mat.shape[0], dyn_state.dofs.acc_smooth.shape[1]):
+            is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
+            if rigid_info.dofs_mass_block_start[i_d] == i_d and not is_hibernated:
+                block_end = rigid_info.dofs_mass_block_end[i_d]
+                func_solve_mass_block(
+                    i_b, i_d, block_end, dyn_state.dofs.force, dyn_state.dofs.acc_smooth, rigid_info, rigid_config
+                )
 
     # A hibernated tree keeps the acceleration it was put to sleep with
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -2271,7 +2374,7 @@ def func_implicit_damping(
     _B = rigid_info.mass_mat.shape[2]
     n_dofs = dyn_state.dofs.acc.shape[0]
 
-    func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True)
+    func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True, solve_acc=False)
 
     # The correction moves the damped DOFs alone, and a constraint solve short of its fixed point integrates as the
     # bounded step it took. Re-solving from the force balance integrates its residual as M^-1 r, a spurious impulse on
