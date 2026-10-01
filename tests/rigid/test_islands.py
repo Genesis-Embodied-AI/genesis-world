@@ -389,7 +389,8 @@ def test_islands_converge_independently(show_viewer, n_envs):
 
 
 @pytest.mark.required
-# Outside performance mode the cooperative kernels ignore the GPU core count, which the saturation below fakes.
+# Only performance mode turns the cooperative kernels off above the GPU core count, which the faked core count below
+# relies on to reach the monolith seed at 2 envs.
 @pytest.mark.performance_mode(True)
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
