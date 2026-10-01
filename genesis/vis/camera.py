@@ -119,6 +119,7 @@ class Camera(RBC):
         self._batch_renderer = None
 
         self._env_idx = int(env_idx) if env_idx is not None else None
+        self._envs_idx_local = None
         self._envs_offset = None
 
         self._is_recording = False
@@ -177,7 +178,7 @@ class Camera(RBC):
             envs_idx, envs_idx_local = np.unique(self._visualizer._context.rendered_envs_idx, return_index=True)
             envs_idx_lookup = np.full(self._visualizer.scene.n_envs, -1, dtype=gs.np_int)
             envs_idx_lookup[envs_idx] = envs_idx_local
-            self._envs_idx_local = torch.as_tensor(envs_idx_lookup, dtype=torch.int64, device=gs.device)
+            self._envs_idx_local = torch.as_tensor(envs_idx_lookup, device=gs.device)
             batch_size = (len(self._visualizer._context.rendered_envs_idx),)
         else:
             batch_size = ()
@@ -603,7 +604,7 @@ class Camera(RBC):
             isinstance(envs_idx, (int, np.integer))
             or (isinstance(envs_idx, (np.ndarray, torch.Tensor)) and envs_idx.ndim == 0)
         ):
-            envs_idx_local = envs_idx_local.squeeze(0)
+            envs_idx_local = envs_idx_local[0]
         return (envs_idx_local,)
 
     def set_pose(self, transform=None, pos=None, lookat=None, up=None, envs_idx=None):
