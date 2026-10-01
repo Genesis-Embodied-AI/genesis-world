@@ -11,7 +11,7 @@ from ..utils.assets import get_hf_dataset
 
 
 @pytest.mark.required
-def test_physics_parity(show_viewer, tol):
+def test_physics_parity(folding_arm, show_viewer, tol):
     # Uses the fixed-child mesh objects from 'test_convexify' (offset center of mass, distinct mass) so the per-env
     # parity check exercises the inertia alignment, not just trivially-symmetric primitives.
     N_STEPS = 100
@@ -25,6 +25,13 @@ def test_physics_parity(show_viewer, tol):
     # The homogeneous references live in the same scene, offset far enough that no entity ever interacts with
     # another: a single build compiles one kernel set instead of one per scene.
     REFERENCE_OFFSETS = ((10.0, 0.0, 0.0), (20.0, 0.0, 0.0), (30.0, 0.0, 0.0), (40.0, 0.0, 0.0))
+    # Beside the objects, the arm of an articulated heterogeneous entity folds onto its own plate, onto which cubes of a
+    # heterogeneous pool drop. The arm pool is smaller than the cube pool, so that every arm variant meets several cube
+    # variants.
+    PLATE_POS = (1.0, 0.0, 0.05)
+    ARM_LENGTHS = (0.2, 0.3)
+    CUBE_SIZES = (0.04, 0.05, 0.06, 0.07)
+    CUBE_POSITIONS = tuple((1.1, 0.1, PLATE_POS[2] + 0.05 + 0.5 * cube_size) for cube_size in CUBE_SIZES)
 
     asset_files = tuple(f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in VARIANTS)
 
@@ -32,6 +39,48 @@ def test_physics_parity(show_viewer, tol):
     # environment, all in one scene.
     scene = gs.Scene(show_viewer=show_viewer)
     scene.add_entity(gs.morphs.Plane())
+    ref_arms = []
+    for i_ref, offset in enumerate(REFERENCE_OFFSETS):
+        ref_arms.append(
+            scene.add_entity(
+                gs.morphs.URDF(
+                    file=folding_arm(ARM_LENGTHS[i_ref % len(ARM_LENGTHS)]),
+                    pos=(PLATE_POS[0] + offset[0], PLATE_POS[1] + offset[1], PLATE_POS[2] + offset[2]),
+                    fixed=True,
+                    links_to_keep=("post",),
+                ),
+            )
+        )
+    het_arm = scene.add_entity(
+        morph=tuple(
+            gs.morphs.URDF(
+                file=folding_arm(arm_length),
+                pos=PLATE_POS,
+                fixed=True,
+                links_to_keep=("post",),
+            )
+            for arm_length in ARM_LENGTHS
+        )
+    )
+    ref_cubes = []
+    for cube_size, pos, offset in zip(CUBE_SIZES, CUBE_POSITIONS, REFERENCE_OFFSETS):
+        ref_cubes.append(
+            scene.add_entity(
+                gs.morphs.Box(
+                    size=(cube_size, cube_size, cube_size),
+                    pos=(pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]),
+                ),
+            )
+        )
+    het_cube = scene.add_entity(
+        morph=tuple(
+            gs.morphs.Box(
+                size=(cube_size, cube_size, cube_size),
+                pos=pos,
+            )
+            for cube_size, pos in zip(CUBE_SIZES, CUBE_POSITIONS)
+        )
+    )
     ref_objs = []
     for file, pos, offset_euler, offset in zip(asset_files, POSITIONS, OFFSET_EULERS, REFERENCE_OFFSETS):
         ref_objs.append(
@@ -78,6 +127,17 @@ def test_physics_parity(show_viewer, tol):
     assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
     assert_allclose(het_obj.get_vel(), ref_vel, tol=2e-4)
     assert_allclose(het_obj.get_mass(), torch.cat([ref_obj.get_mass(envs_idx=0) for ref_obj in ref_objs]), tol=tol)
+
+    # The arm rests on its plate instead of swinging through it, as the reference of the variant of each environment
+    # does. The reference 'i_ref' holds the arm variant 'i_ref % len(ARM_LENGTHS)' in the environment 'i_ref'.
+    ref_arm_qpos = torch.cat([ref_arms[i_v].get_qpos(envs_idx=[i_v]) for i_v in het_arm.envs_variant_idx])
+    assert_allclose(het_arm.get_qpos(), ref_arm_qpos, tol=1e-5)
+    assert ((0.0 < het_arm.get_qpos()) & (het_arm.get_qpos() < 0.5)).all()
+
+    # Each cube rests on the plate of the arm variant its environment carries, as its reference does
+    ref_cube_pos = torch.cat([ref_cube.get_pos(envs_idx=[i_env]) for i_env, ref_cube in enumerate(ref_cubes)])
+    assert_allclose(ref_cube_pos - het_cube.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
+    assert_allclose(het_cube.get_pos()[:, 2], PLATE_POS[2] + 0.5 * np.array(CUBE_SIZES), tol=2e-4)
 
     # The variants are genuinely distinct: their masses are not all equal.
     with pytest.raises(AssertionError):
@@ -199,6 +259,10 @@ def test_aabb(tol):
     aabb_size_sphere = aabb[2, 1] - aabb[2, 0]
     vaabb_size_sphere = vaabb[2, 1] - vaabb[2, 0]
     assert_allclose(aabb_size_sphere, vaabb_size_sphere, tol=1e-3)  # Allow small tolerance for decimation
+
+    # The AABBs maintained by the collision detection bound the variant each environment carries alone
+    scene.step()
+    assert_allclose(het_obj.get_AABB(allow_fast_approx=True), het_obj.get_AABB(), tol=1e-3)
 
 
 # 30s

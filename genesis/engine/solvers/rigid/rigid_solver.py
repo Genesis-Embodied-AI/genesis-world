@@ -31,7 +31,6 @@ from genesis.utils.misc import (
 from ..base_solver import GravityMixin, MutatedLinks, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
-    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
@@ -379,9 +378,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
             if entity.desc.variants:
                 variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
+                envs_default = variants_default[entity.envs_variant_idx]
             else:
-                variants_default = np.array([entity.main_morph.default_armature or 0.0])
-            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
+                envs_default = np.full((self._B,), entity.main_morph.default_armature or 0.0)
             if (envs_default <= 0.0).all():
                 continue
             dofs_idx.extend(link.dof_start for link in rotor_links)
@@ -459,13 +458,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def _resolve_broadphase_traversal(self):
         if self._options.broadphase_traversal is not None:
             return self._options.broadphase_traversal
-        # For heterogeneous, the valid_collision_pairs array is built once at init from the global geom pair
-        # matrix, but with heterogeneous entities different batch elements have different geoms (different geom_start/
-        # geom_end per link per batch), so a pair (ga, gb) might be valid in batch 0 but not exist in batch 3. To
-        # support this we'd either need per-batch valid pair lists or runtime filtering that checks both geoms exist
-        # in the current batch element. Per-batch lists multiply the memory footprint by the batch size, increasing
-        # memory usage, and increasing L1/L2 cache contention. Runtime filtering keeps the single list, but it will
-        # no longer be compact, and we will have thread divergence.
+        # The valid pairs are shared by every environment, while a heterogeneous environment carries one variant of each
+        # entity. ALL_VS_ALL tests the pairs of every variant in every environment, those of the variants it does not
+        # carry failing on their empty AABB (see func_update_geom_aabbs), whereas SAP sweeps the geoms it carries.
         if gs.backend == gs.cpu or self._enable_heterogeneous:
             return gs.broadphase_traversal.SAP
         return gs.broadphase_traversal.ALL_VS_ALL
@@ -1024,8 +1019,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if link._variant_vgeom_ranges is None:
                 continue
 
-            n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
+            variant_idx = link.entity.envs_variant_idx
 
             # Build per-env arrays from link's variant data
             geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
