@@ -389,8 +389,7 @@ def test_islands_converge_independently(show_viewer, n_envs):
 
 
 @pytest.mark.required
-# Only performance mode turns the cooperative kernels off above the GPU core count, which the faked core count below
-# relies on to reach the monolith seed at 2 envs.
+# Outside performance mode the decomposed solver is enforced on GPU, which leaves the monolith untestable.
 @pytest.mark.performance_mode(True)
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
