@@ -1,10 +1,10 @@
-import sys
+import torch
 
-import numpy as np
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+from genesis.utils.misc import qd_to_torch
 from . import linesearch
 from . import solver
 
@@ -336,5 +336,11 @@ def func_solve_decomposed(dyn_state, constraint_state, dyn_info, rigid_info, rig
     solver.func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=False)
     if _n_iterations <= 0:
         return
-    constraint_state.graph_counter.from_numpy(np.array(_n_iterations, dtype=np.int32))
+    if gs.use_zerocopy:
+        graph_counter = qd_to_torch(constraint_state.graph_counter, copy=False)
+        graph_counter.fill_(_n_iterations)
+        if gs.backend == gs.metal:
+            torch.mps.synchronize()
+    else:
+        constraint_state.graph_counter.fill(_n_iterations)
     _kernel_solve_graph(constraint_state.graph_counter, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
