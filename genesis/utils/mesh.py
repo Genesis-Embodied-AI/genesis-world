@@ -3,13 +3,15 @@ import marshal
 import math
 import os
 import pickle as pkl
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
+
+import numpy as np
 
 import coacd
 import igl
 import Imath
-import numpy as np
 import OpenEXR
 import tetgen
 import trimesh
@@ -235,17 +237,26 @@ def get_usd_bake_path(file_path):
     return os.path.join(get_usd_cache_dir(), "bake", hashkey)
 
 
-def _sort_dict_keys(arg):
-    if isinstance(arg, dict):
-        return tuple((key, _sort_dict_keys(value)) for key, value in sorted(arg.items()))
-    return arg
-
-
 def get_hashkey(*args):
+    # Containers are replaced by the tuples of their items, sorted for sets and for dicts other than OrderedDict since
+    # equal ones may iterate in different orders (string hashes are salted per process). Items are replaced before their
+    # container, so that sorting compares canonical representations, which order items of any type.
+    values, nodes = [], [(args, False)]
+    while nodes:
+        node, is_expanded = nodes.pop()
+        if is_expanded:
+            items = [values.pop() for _ in range(len(node))]
+            if isinstance(node, (set, frozenset)) or (isinstance(node, dict) and not isinstance(node, OrderedDict)):
+                items.sort(key=repr)
+            values.append(tuple(items))
+        elif isinstance(node, (dict, list, tuple, set, frozenset)):
+            nodes.append((node, True))
+            nodes.extend((item, False) for item in (node.items() if isinstance(node, dict) else node))
+        else:
+            values.append(node)
+
     hasher = hashlib.sha256()
-    for arg in (*args, gs.__version__.encode()):
-        # Dict items are sorted recursively by key, which makes the hash independent of their insertion order
-        arg = _sort_dict_keys(arg)
+    for arg in (*values[0], gs.__version__.encode()):
         if isinstance(arg, Path):
             file_stats = arg.stat()
             arg = (str(arg).encode(), file_stats.st_size, file_stats.st_mtime)
