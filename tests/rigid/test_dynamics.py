@@ -1227,21 +1227,21 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
     if max_shared_mem <= 49152:
         pytest.skip("GPU does not support opt-in shared memory beyond the default 48kB")
 
-    # Stack 17 free boxes (6 DOFs each = 102 total) to exceed the default 48kB tiling limit of 96 DOFs for f32
+    # Stack 19 free boxes (6 DOFs each = 114 total) to exceed the default 48kB tiling limit of 110 DOFs for f32
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             constraint_solver=gs.constraint_solver.Newton,
             sparse_solve=False,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, 1.0, 2.5),
-            camera_lookat=(0.0, 0.0, 1.2),
+            camera_pos=(2.5, 1.7, 3.0),
+            camera_lookat=(0.0, 0.0, 1.7),
         ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
     scene.add_entity(gs.morphs.Plane())
-    for i in range(17):
+    for i in range(19):
         scene.add_entity(
             gs.morphs.Box(
                 size=(0.1, 0.1, 0.1),
@@ -1250,8 +1250,8 @@ def test_cholesky_tiling_large_shared_memory(show_viewer):
         )
     scene.build(n_envs=2)
 
-    assert scene.rigid_solver.n_dofs == 102
-    assert scene.rigid_solver.rigid_config.island_tile_cap_last == 128
+    assert scene.rigid_solver.n_dofs == 114
+    assert scene.rigid_solver.rigid_config.island_tile_cap_last >= 114
 
     scene.step()
     assert not scene.rigid_solver.get_error_envs_mask().any()

@@ -1,4 +1,3 @@
-import math
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -20,8 +19,8 @@ from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
     broadcast_tensor,
-    fits_in_gpu_shared_memory,
     get_gpu_core_count,
+    get_gpu_shared_tile_sizes,
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
@@ -663,27 +662,32 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 # Register tile of the mass-matrix Cholesky kernels and unit of the island tile caps, see
                 # cholesky_tile_size_for in array_class.py.
                 cholesky_tile_size = array_class.cholesky_tile_size_for(self.n_dofs)
-                tiled_n_dofs = max(math.ceil(self.n_dofs / cholesky_tile_size), 1) * cholesky_tile_size
-                tiled_n_dofs_per_block = max(math.ceil(max_block_dofs / 32), 1) * 32
+
+                # A shared tile holds the dofs it factors rounded up to the next size of get_gpu_shared_tile_sizes,
+                # which bounds the sizes compiled while keeping the occupancy of the tightest fit. A mass block above
+                # the largest size factors outside the shared tile, which leaves the tile size unused.
+                shared_tile_sizes = get_gpu_shared_tile_sizes()
+                mass_matrix_fits_shared = max_block_dofs <= shared_tile_sizes[-1]
+                tiled_n_dofs_per_block = min(
+                    (size for size in shared_tile_sizes if size >= max_block_dofs), default=shared_tile_sizes[-1]
+                )
 
                 # The cooperative per-island solve stages one island's tile in shared memory, in size classes (see
-                # island_tile_cap_first in array_class.py): the last cap is the largest tile-size multiple that fits in
-                # GPU shared memory (precision-aware), no larger than tiled_n_dofs. An island holds at least one
-                # tree, so a class below the smallest tree never holds an island: the first cap starts at that tree.
-                island_tile_cap_last = tiled_n_dofs
-                while island_tile_cap_last > cholesky_tile_size and not fits_in_gpu_shared_memory(
-                    island_tile_cap_last, island_tile_cap_last + 1
-                ):
-                    island_tile_cap_last -= cholesky_tile_size
+                # island_tile_cap_first in array_class.py): the last cap is the shared tile of the dof count, or the
+                # largest one where the dofs exceed it. An island holds at least one tree, so a class below the
+                # smallest tree never holds an island: the first cap starts at that tree.
+                island_tile_cap_last = min(
+                    (size for size in shared_tile_sizes if size >= self.n_dofs), default=shared_tile_sizes[-1]
+                )
                 min_tree_dofs = trees_n_dofs[trees_n_dofs > 0].min() if self.n_dofs else 0
                 island_tile_cap_first = cholesky_tile_size
-                while island_tile_cap_first < min_tree_dofs:
+                while island_tile_cap_first < min(min_tree_dofs, island_tile_cap_last):
                     island_tile_cap_first *= 2
+                island_tile_cap_first = min(island_tile_cap_first, island_tile_cap_last)
 
                 # The cooperative in-place LDL^T has no cap; the shared-memory tile is faster but capped. Same env logic
                 # as the Hessian: tile from the largest block >= 8 DOFs, drop the env guard above the cap where the
                 # scalar O(n_block_dofs^3) per-(block, env) factor is always worse.
-                mass_matrix_fits_shared = fits_in_gpu_shared_memory(tiled_n_dofs_per_block, tiled_n_dofs_per_block + 1)
                 enable_tiled_cholesky_mass_matrix = max_block_dofs >= 8 and (
                     not mass_matrix_fits_shared or envs_undersaturate
                 )

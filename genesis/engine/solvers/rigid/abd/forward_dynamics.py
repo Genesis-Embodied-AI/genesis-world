@@ -680,13 +680,10 @@ def func_factor_mass_tree_global(
 ):
     """Factor the mass blocks of one kinematic tree in place in global memory, one thread's share of it.
 
-    Each elimination step snapshots the pivot row into a small shared vector, O(n_dofs) rather than O(n_dofs^2),
-    before the trailing submatrix is updated, so the parallel per-row updates only ever read the pivot row and the
-    result holds whatever the scheduling. Gives the same numbers as func_factor_mass_tree, which runs the same
-    elimination on a single thread.
+    Each elimination step updates the trailing submatrix from the pivot row, then scales the pivot row once every lane
+    is done reading it, so the parallel per-row updates only ever read it and the result holds whatever the scheduling.
+    Gives the same numbers as func_factor_mass_tree, which runs the same elimination on a single thread.
     """
-    MAX_DOFS_PER_BLOCK = qd.static(rigid_config.tiled_n_dofs_per_block)
-
     # Under implicit damping only the trees carrying a damping term take a new factor, the others keep the smooth one.
     # One lane reads the dofs of the tree, the whole block takes its answer.
     is_factored = func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
@@ -697,8 +694,6 @@ def func_factor_mass_tree_global(
                 has_damping = 1
         is_factored = qd.simt.subgroup.broadcast(has_damping, qd.u32(0)) != 0
     if is_factored:
-        pivot_row = qd.simt.block.SharedArray((MAX_DOFS_PER_BLOCK,), gs.qd_float)
-
         # Factor each mass block of the tree in place in global memory, block-relative so shared indices stay >= 0
         tree_dof_start = rigid_info.trees_dof_start[i_t]
         tree_dof_end = tree_dof_start + rigid_info.trees_n_dofs[i_t]
@@ -738,26 +733,28 @@ def func_factor_mass_tree_global(
                     if tid == 0:
                         rigid_info.mass_mat_D_inv[i_d, i_b] = D_inv
 
-                    # Phase A: snapshot the (Schur-updated) pivot-row entries below the diagonal into shared.
+                    # Phase A: each lane eliminates one column j_d, updating its own row j_d of the trailing submatrix
+                    # from the (Schur-updated) pivot row. Distinct rows per lane => no write conflicts, and the pivot
+                    # row is only read in this phase => no read/write race on row i_d.
                     for i_chunk_ in range((i_d_local + BLOCK_DIM - 1) // BLOCK_DIM):
                         j_d_ = i_chunk_ * BLOCK_DIM + tid
                         if j_d_ < i_d_local:
-                            pivot_row[j_d_] = rigid_info.mass_mat_L[i_d, block_start + j_d_, i_b]
-                    qd.simt.block.sync()
-
-                    # Phase B: each lane eliminates one column j_d, updating its own row j_d of the trailing submatrix
-                    # from the read-only snapshot. Distinct rows per lane => no write conflicts, and the pivot row is
-                    # only read (from shared) => no read/write race on row i_d.
-                    for i_chunk_ in range((i_d_local + BLOCK_DIM - 1) // BLOCK_DIM):
-                        j_d_ = i_chunk_ * BLOCK_DIM + tid
-                        if j_d_ < i_d_local:
-                            a = pivot_row[j_d_] * D_inv
+                            a = rigid_info.mass_mat_L[i_d, block_start + j_d_, i_b] * D_inv
                             j_d = block_start + j_d_
                             for k_d_ in range(j_d_ + 1):
                                 rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b] = (
-                                    rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b] - a * pivot_row[k_d_]
+                                    rigid_info.mass_mat_L[j_d, block_start + k_d_, i_b]
+                                    - a * rigid_info.mass_mat_L[i_d, block_start + k_d_, i_b]
                                 )
-                            rigid_info.mass_mat_L[i_d, j_d, i_b] = a
+                    qd.simt.block.sync()
+
+                    # Phase B: scale the pivot row into the row of L, once every lane is done reading it.
+                    for i_chunk_ in range((i_d_local + BLOCK_DIM - 1) // BLOCK_DIM):
+                        j_d_ = i_chunk_ * BLOCK_DIM + tid
+                        if j_d_ < i_d_local:
+                            rigid_info.mass_mat_L[i_d, block_start + j_d_, i_b] = (
+                                rigid_info.mass_mat_L[i_d, block_start + j_d_, i_b] * D_inv
+                            )
                     qd.simt.block.sync()
 
                     # Diagonal coeffs of L are ignored downstream, and set to 1.0 to match the other paths.

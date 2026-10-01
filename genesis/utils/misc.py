@@ -16,13 +16,14 @@ from importlib import import_module
 from itertools import combinations
 from typing import Any, NoReturn, Optional, Sequence
 
-import cpuinfo
-import quadrants as qd
 import numpy as np
-import psutil
-import pyglet
 import torch
 
+import cpuinfo
+import psutil
+import pyglet
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.typing import is_sequence
@@ -242,12 +243,76 @@ def get_gpu_core_count() -> int:
     return 256 * cores_per_unit
 
 
-def fits_in_gpu_shared_memory(*dims: int) -> bool:
-    """Whether a dense ``gs.qd_float`` array of shape ``dims`` fits in one block's GPU shared memory."""
+def get_gpu_shared_tile_sizes() -> tuple[int, ...]:
+    """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
+
+    The shared memory of a block only bounds how many blocks a compute unit runs at once. Each candidate size is the
+    largest multiple of 8, which keeps the padded row stride odd, running a given count of resident blocks of one warp.
+    That count follows from the shared memory of a compute unit and of a block, the memory the driver reserves per
+    block, and the warp slots of a compute unit. At most 8 candidates are kept, the static values of a kernel staying a small fixed set:
+    those minimizing the mean drop in resident blocks that rounding a row count up to the next kept size causes against
+    its tightest candidate, row count n weighing 1 / n so that every doubling of the size counts the same. Where the
+    compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block, which then
+    bounds the resident blocks alone. A row count above the largest size has no shared tile.
+    """
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
     itemsize = 4 if gs.qd_float == qd.f32 else 8
-    return math.prod(dims) * itemsize <= qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
+    block_bytes = qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
+    unit_bytes, reserved_bytes, max_blocks = block_bytes, 0, block_bytes // (8 * 9 * itemsize)
+    if torch.cuda.is_available():
+        # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), so the warp slots bound the resident
+        # blocks, and the driver reserves the shared memory of a compute unit beyond what one block may opt in to.
+        device_property = torch.cuda.get_device_properties(torch.cuda.current_device())
+        unit_bytes = device_property.shared_memory_per_multiprocessor
+        reserved_bytes = max(unit_bytes - device_property.shared_memory_per_block_optin, 0)
+        max_blocks = device_property.max_threads_per_multi_processor // device_property.warp_size
+        if not torch.version.hip:
+            # FIXME: torch exposes no cap on the resident blocks of a streaming multiprocessor, which NVIDIA sets per
+            # compute capability below the warp slots (see the CUDA C++ programming guide).
+            compute_capability = (device_property.major, device_property.minor)
+            if compute_capability in ((7, 5), (8, 6), (8, 7), (10, 7)):
+                max_blocks = min(max_blocks, 16)
+            elif compute_capability in ((8, 9), (11, 0)) or device_property.major == 12:
+                max_blocks = min(max_blocks, 24)
+            else:
+                max_blocks = min(max_blocks, 32)
+
+    # The largest count of resident blocks of each candidate size
+    resident_blocks: dict[int, int] = {}
+    for n_blocks in range(1, max_blocks + 1):
+        n_bytes = min(unit_bytes // n_blocks - reserved_bytes, block_bytes)
+        tile_size = int((math.sqrt(1.0 + 4.0 * n_bytes / itemsize) - 1.0) / 2.0) // 8 * 8
+        if tile_size >= 8:
+            resident_blocks[tile_size] = max(resident_blocks.get(tile_size, 0), n_blocks)
+    tile_sizes = sorted(resident_blocks)
+
+    # Selection ending on the largest size, by dynamic programming over the candidates: the row counts a kept size
+    # takes over from the kept size below it add their weighted drops, a row count dropping by its tightest candidate.
+    n_sizes = len(tile_sizes)
+    size_drops = []
+    for j in range(n_sizes):
+        size_drops.append([0.0] * (n_sizes + 1))
+        for i in range(-1, j):
+            row_start = tile_sizes[i] + 1 if i >= 0 else 1
+            drop = 0.0
+            for i_c in range(i + 1, j + 1):
+                rows = range(max(row_start, tile_sizes[i_c - 1] + 1 if i_c > 0 else 1), tile_sizes[i_c] + 1)
+                drop += sum(1.0 / n for n in rows) * resident_blocks[tile_sizes[i_c]] / resident_blocks[tile_sizes[j]]
+            size_drops[j][i + 1] = drop
+    total_drops = [size_drops[j][0] for j in range(n_sizes)]
+    kept_sizes_idx = [[j] for j in range(n_sizes)]
+    for _ in range(min(8, n_sizes) - 1):
+        total_drops_next = list(total_drops)
+        kept_sizes_idx_next = [list(kept) for kept in kept_sizes_idx]
+        for j in range(n_sizes):
+            for i in range(j):
+                drop = total_drops[i] + size_drops[j][i + 1]
+                if drop < total_drops_next[j]:
+                    total_drops_next[j] = drop
+                    kept_sizes_idx_next[j] = kept_sizes_idx[i] + [j]
+        total_drops, kept_sizes_idx = total_drops_next, kept_sizes_idx_next
+    return tuple(tile_sizes[j] for j in kept_sizes_idx[-1])
 
 
 def get_entry_point_name():
