@@ -579,6 +579,29 @@ class Camera(RBC):
         point_cloud = point_cloud[..., :3].reshape((*depth_arr.shape, 3))
         return point_cloud, mask
 
+    def _sanitize_envs_idx(self, envs_idx, *, keepdim=False) -> tuple[int | list[int], ...]:
+        """Map selected scene environments to a camera pose indexing tuple."""
+        if envs_idx is None:
+            return ()
+        if not self._is_batched:
+            gs.raise_exception("Camera does not support batching. Impossible to specify 'envs_idx'.")
+        if self._env_idx is not None:
+            gs.raise_exception("Camera already bound to a specific environment. Impossible to specify 'envs_idx'.")
+
+        rendered_envs_idx = self._visualizer._context.rendered_envs_idx
+        try:
+            envs_idx_local = [
+                rendered_envs_idx.index(i_b) for i_b in self._visualizer._scene._sanitize_envs_idx(envs_idx).tolist()
+            ]
+        except ValueError as e:
+            gs.raise_exception_from("Environment index not in 'VisOptions.rendered_envs_idx'.", cause=e)
+        if not keepdim and (
+            isinstance(envs_idx, (int, np.integer))
+            or (isinstance(envs_idx, (np.ndarray, torch.Tensor)) and envs_idx.ndim == 0)
+        ):
+            return (envs_idx_local[0],)
+        return (envs_idx_local,)
+
     def set_pose(self, transform=None, pos=None, lookat=None, up=None, envs_idx=None):
         """
         Set the pose of the camera.
@@ -596,31 +619,23 @@ class Camera(RBC):
             The lookat point of the camera.
         up : array-like, shape (3,) or (N, 3), optional
             The up vector of the camera.
-        envs_idx : array of indices in integers, optional
+        envs_idx : int or array of int, optional
             The environment indices for which to update the pose. If not provided, the camera pose will be set for the
-            specific environment bound to the camera if any, all the environments otherwise.
+            specific environment bound to the camera if any, all the rendered environments otherwise.
+            Batched input poses follow the selection order, or `VisOptions.rendered_envs_idx` order if not provided.
         """
         # Early return if nothing to do
         if pos is None and lookat is None and up is None and transform is None:
             return
 
         # Sanitize 'envs_idx' input argument
-        if envs_idx is not None:
-            if not self._is_batched:
-                gs.raise_exception("Camera does not support batching. Impossible to specify 'envs_idx'.")
-            if self._env_idx is not None:
-                gs.raise_exception("Camera already bound to a specific environment. Impossible to specify 'envs_idx'.")
-        if self._is_batched:
-            if envs_idx is None:
-                envs_idx = (self._env_idx,) if self._env_idx is not None else ()
-                n_envs = len(self._visualizer._context.rendered_envs_idx)
-            else:
-                envs_idx = self._visualizer._scene._sanitize_envs_idx(envs_idx)
-                if set(envs_idx).issubset(self._visualizer._context.rendered_envs_idx):
-                    gs.raise_exception("Environment index not in 'VisOptions.rendered_envs_idx'.")
-                n_envs = len(envs_idx)
+        if self._is_batched and envs_idx is None:
+            envs_idx = (self._env_idx,) if self._env_idx is not None else ()
+            n_envs = len(self._visualizer._context.rendered_envs_idx)
         else:
-            envs_idx = ()
+            envs_idx = self._sanitize_envs_idx(envs_idx, keepdim=True)
+            if self._is_batched:
+                n_envs = len(envs_idx[0])
 
         # Sanitize 'pos', 'lookat', 'up', 'transform' input arguments
         if pos is not None:
@@ -825,41 +840,84 @@ class Camera(RBC):
             raise error
 
     def get_pos(self, envs_idx=None):
-        """The current position of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
+        """
+        The current position of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices to select. If None, return the camera's pose or all batched poses in
+            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
+            Explicit selections require an unbound batched camera and rendered environments; otherwise a
+            `GenesisException` is raised.
+        """
+        envs_idx = self._sanitize_envs_idx(envs_idx)
         pos = self._pos[envs_idx]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             pos = pos + self._envs_offset[envs_idx]
         return pos
 
     def get_lookat(self, envs_idx=None):
-        """The current lookat point of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
+        """
+        The current lookat point of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices to select. If None, return the camera's pose or all batched poses in
+            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
+            Explicit selections require an unbound batched camera and rendered environments; otherwise a
+            `GenesisException` is raised.
+        """
+        envs_idx = self._sanitize_envs_idx(envs_idx)
         lookat = self._lookat[envs_idx]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             lookat = lookat + self._envs_offset[envs_idx]
         return lookat
 
     def get_up(self, envs_idx=None):
-        """The current up vector of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
+        """
+        The current up vector of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices to select. If None, return the camera's pose or all batched poses in
+            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
+            Explicit selections require an unbound batched camera and rendered environments; otherwise a
+            `GenesisException` is raised.
+        """
+        envs_idx = self._sanitize_envs_idx(envs_idx)
         return self._up[envs_idx]
 
     def get_quat(self, envs_idx=None):
-        """The current quaternion of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
+        """
+        The current quaternion of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices to select. If None, return the camera's pose or all batched poses in
+            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
+            Explicit selections require an unbound batched camera and rendered environments; otherwise a
+            `GenesisException` is raised.
+        """
+        envs_idx = self._sanitize_envs_idx(envs_idx)
         return self._quat[envs_idx]
 
     def get_transform(self, envs_idx=None):
         """
         The current transform matrix of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices to select. If None, return the camera's pose or all batched poses in
+            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
+            Explicit selections require an unbound batched camera and rendered environments; otherwise a
+            `GenesisException` is raised.
         """
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
+        envs_idx = self._sanitize_envs_idx(envs_idx)
         transform = self._transform[envs_idx]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             transform = transform.clone()
