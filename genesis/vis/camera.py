@@ -174,6 +174,10 @@ class Camera(RBC):
                 assert self._env_idx is None
 
         if self._is_batched and self._env_idx is None:
+            envs_idx, envs_idx_local = np.unique(self._visualizer._context.rendered_envs_idx, return_index=True)
+            envs_idx_lookup = np.full(self._visualizer.scene.n_envs, -1, dtype=gs.np_int)
+            envs_idx_lookup[envs_idx] = envs_idx_local
+            self._envs_idx_local = torch.as_tensor(envs_idx_lookup, dtype=torch.int64, device=gs.device)
             batch_size = (len(self._visualizer._context.rendered_envs_idx),)
         else:
             batch_size = ()
@@ -583,7 +587,7 @@ class Camera(RBC):
         point_cloud = point_cloud[..., :3].reshape((*depth_arr.shape, 3))
         return point_cloud, mask
 
-    def _sanitize_envs_idx(self, envs_idx, *, keepdim=False) -> tuple[int | list[int], ...]:
+    def _map_pose_envs_idx(self, envs_idx, *, keepdim=False) -> tuple[torch.Tensor, ...]:
         """Map selected scene environments to a camera pose indexing tuple."""
         if envs_idx is None:
             return ()
@@ -592,18 +596,14 @@ class Camera(RBC):
         if self._env_idx is not None:
             gs.raise_exception("Camera already bound to a specific environment. Impossible to specify 'envs_idx'.")
 
-        rendered_envs_idx = self._visualizer._context.rendered_envs_idx
-        try:
-            envs_idx_local = [
-                rendered_envs_idx.index(i_b) for i_b in self._visualizer._scene._sanitize_envs_idx(envs_idx).tolist()
-            ]
-        except ValueError as e:
-            gs.raise_exception_from("Environment index not in 'VisOptions.rendered_envs_idx'.", cause=e)
+        envs_idx_local = self._envs_idx_local[self._visualizer._scene._sanitize_envs_idx(envs_idx)]
+        if (envs_idx_local < 0).any():
+            gs.raise_exception("Environment index not in 'VisOptions.rendered_envs_idx'.")
         if not keepdim and (
             isinstance(envs_idx, (int, np.integer))
             or (isinstance(envs_idx, (np.ndarray, torch.Tensor)) and envs_idx.ndim == 0)
         ):
-            return (envs_idx_local[0],)
+            envs_idx_local = envs_idx_local.squeeze(0)
         return (envs_idx_local,)
 
     def set_pose(self, transform=None, pos=None, lookat=None, up=None, envs_idx=None):
@@ -637,7 +637,7 @@ class Camera(RBC):
             envs_idx = (self._env_idx,) if self._env_idx is not None else ()
             n_envs = len(self._visualizer._context.rendered_envs_idx)
         else:
-            envs_idx = self._sanitize_envs_idx(envs_idx, keepdim=True)
+            envs_idx = self._map_pose_envs_idx(envs_idx, keepdim=True)
             if self._is_batched:
                 n_envs = len(envs_idx[0])
 
@@ -850,12 +850,10 @@ class Camera(RBC):
         Parameters
         ----------
         envs_idx : int or array of int, optional
-            Scene environment indices to select. If None, return the camera's pose or all batched poses in
-            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
-            Explicit selections require an unbound batched camera and rendered environments; otherwise a
-            `GenesisException` is raised.
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
         """
-        envs_idx = self._sanitize_envs_idx(envs_idx)
+        envs_idx = self._map_pose_envs_idx(envs_idx)
         pos = self._pos[envs_idx]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             pos = pos + self._envs_offset[envs_idx]
@@ -868,12 +866,10 @@ class Camera(RBC):
         Parameters
         ----------
         envs_idx : int or array of int, optional
-            Scene environment indices to select. If None, return the camera's pose or all batched poses in
-            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
-            Explicit selections require an unbound batched camera and rendered environments; otherwise a
-            `GenesisException` is raised.
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
         """
-        envs_idx = self._sanitize_envs_idx(envs_idx)
+        envs_idx = self._map_pose_envs_idx(envs_idx)
         lookat = self._lookat[envs_idx]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             lookat = lookat + self._envs_offset[envs_idx]
@@ -886,12 +882,10 @@ class Camera(RBC):
         Parameters
         ----------
         envs_idx : int or array of int, optional
-            Scene environment indices to select. If None, return the camera's pose or all batched poses in
-            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
-            Explicit selections require an unbound batched camera and rendered environments; otherwise a
-            `GenesisException` is raised.
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
         """
-        envs_idx = self._sanitize_envs_idx(envs_idx)
+        envs_idx = self._map_pose_envs_idx(envs_idx)
         return self._up[envs_idx]
 
     def get_quat(self, envs_idx=None):
@@ -901,12 +895,10 @@ class Camera(RBC):
         Parameters
         ----------
         envs_idx : int or array of int, optional
-            Scene environment indices to select. If None, return the camera's pose or all batched poses in
-            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
-            Explicit selections require an unbound batched camera and rendered environments; otherwise a
-            `GenesisException` is raised.
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
         """
-        envs_idx = self._sanitize_envs_idx(envs_idx)
+        envs_idx = self._map_pose_envs_idx(envs_idx)
         return self._quat[envs_idx]
 
     def get_transform(self, envs_idx=None):
@@ -916,12 +908,10 @@ class Camera(RBC):
         Parameters
         ----------
         envs_idx : int or array of int, optional
-            Scene environment indices to select. If None, return the camera's pose or all batched poses in
-            `VisOptions.rendered_envs_idx` order. A scalar selection removes the batch dimension; a collection keeps it.
-            Explicit selections require an unbound batched camera and rendered environments; otherwise a
-            `GenesisException` is raised.
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
         """
-        envs_idx = self._sanitize_envs_idx(envs_idx)
+        envs_idx = self._map_pose_envs_idx(envs_idx)
         transform = self._transform[envs_idx]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             transform = transform.clone()

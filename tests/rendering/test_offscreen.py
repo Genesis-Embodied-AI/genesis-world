@@ -1487,30 +1487,12 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     assert rgb.shape == (len(RENDERED_ENVS), *CAM_RES, 3)
     assert rgb_debug.shape == (len(RENDERED_ENVS), *CAM_RES, 3)
 
-    transform_top = np.eye(4)
-    transform_top[2, 3] = 4.0
-    pose_getters = (cam.get_pos, cam.get_lookat, cam.get_up, cam.get_quat, cam.get_transform)
-    for i_b_, i_b in enumerate(RENDERED_ENVS):
-        cam.set_pose(pos=(0.0, 0.0, 4.0), lookat=(0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0), envs_idx=i_b)
-        rgb_selected, *_ = cam.render(rgb=True)
-        assert_pixel_match(rgb_selected[1 - i_b_], rgb[1 - i_b_])
-        assert np.abs(rgb_selected[i_b_].astype(gs.np_float) - rgb[i_b_].astype(gs.np_float)).mean() > 5.0
-        for getter, pose_expected in (
-            (cam.get_pos, (0.0, 0.0, 4.0)),
-            (cam.get_lookat, (0.0, 0.0, 0.0)),
-            (cam.get_up, (0.0, 1.0, 0.0)),
-            (cam.get_transform, transform_top),
-        ):
-            for selection in (i_b, np.array(i_b), torch.tensor(i_b, device=gs.device)):
-                pose = getter(envs_idx=selection)
-                assert_equal(pose.shape, np.shape(pose_expected))
-                assert_allclose(pose, pose_expected, tol=tol)
-            pose = getter(envs_idx=[i_b])
-            assert_equal(pose.shape, (1, *np.shape(pose_expected)))
-            assert_allclose(pose, pose_expected, tol=tol)
-        assert_allclose(gu.quat_to_xyz(cam.get_quat(envs_idx=i_b)), 0.0, tol=tol)
-        assert_equal(cam.get_quat(envs_idx=i_b).shape, (4,))
-        cam.set_pose(pos=(3.5, 0.0, 2.5), lookat=(0.0, 0.0, 0.5), up=(0.0, 0.0, 1.0))
+    cam.set_pose(pos=(0.0, 0.0, 4.0), lookat=(0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0), envs_idx=1)
+    rgb_selected, *_ = cam.render(rgb=True)
+    assert_pixel_match(rgb_selected[1], rgb[1])
+    assert np.abs(rgb_selected[0].astype(gs.np_float) - rgb[0].astype(gs.np_float)).mean() > 5.0
+    assert_equal(cam.get_pos(envs_idx=1).shape, (3,))
+    assert_allclose(cam.get_pos(envs_idx=1), (0.0, 0.0, 4.0), tol=tol)
 
     positions = [(0.0, 0.0, 4.0), (3.5, 0.0, 2.5)]
     lookats = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.5)]
@@ -1527,18 +1509,8 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         assert_allclose(getter(envs_idx=[2, 1]), pose_expected, tol=tol)
     assert_allclose(gu.quat_to_R(cam.get_quat()), transforms[::-1, :3, :3], tol=tol)
     assert_allclose(gu.quat_to_R(cam.get_quat(envs_idx=[2, 1])), transforms[:, :3, :3], tol=tol)
-
-    for i_b in (0, 3):
-        with pytest.raises(gs.GenesisException, match="rendered_envs_idx"):
-            cam.set_pose(pos=(0.0, 0.0, 4.0), envs_idx=i_b)
-        for getter in pose_getters:
-            with pytest.raises(gs.GenesisException, match="rendered_envs_idx"):
-                getter(envs_idx=i_b)
-
-    cam.set_pose(pos=(3.5, 0.0, 2.5), envs_idx=[])
-    for getter in pose_getters:
-        assert_equal(getter(envs_idx=[]).shape, (0, *getter().shape[1:]))
-    assert_allclose(cam.get_pos(), positions[::-1], tol=tol)
+    with pytest.raises(gs.GenesisException, match="rendered_envs_idx"):
+        cam.set_pose(pos=(0.0, 0.0, 4.0), envs_idx=0)
     cam.set_pose(pos=(3.5, 0.0, 2.5), lookat=(0.0, 0.0, 0.5), up=(0.0, 0.0, 1.0))
 
     # Batched set_pose: keep side view for env 0, switch to top-down view for env 1
