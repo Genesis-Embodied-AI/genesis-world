@@ -250,14 +250,16 @@ def get_gpu_core_count() -> int:
 def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
 
-    Each candidate is the largest multiple of 8 (keeping the padded row stride odd) that runs a given count of resident
-    one-warp blocks per compute unit, as bounded by its shared memory, the shared memory of a block, the driver
-    reservation per block and the warp slots. At most max_n_sizes candidates are kept: those minimizing the mean drop in
-    resident blocks caused by rounding a row count n up to the next kept size, weighted by 1 / n so that every doubling
-    of the size counts the same.
+    The shared memory of a block only bounds how many blocks a compute unit runs at once. Each candidate is the largest
+    multiple of 8 (keeping the padded row stride odd) that runs a given count of resident one-warp blocks, as bounded by
+    the shared memory of a compute unit and of a block, the driver reservation per block and the warp slots.
 
-    Where the compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block. A row
-    count above the largest size has no shared tile.
+    At most max_n_sizes candidates are kept, so that the static values of a kernel stay a small fixed set: those
+    minimizing the mean drop in resident blocks that rounding a row count n up to the next kept size causes against its
+    tightest candidate, weighted by 1 / n so that every doubling of the size counts the same.
+
+    Where the compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block, which
+    then bounds the resident blocks alone. A row count above the largest size has no shared tile.
     """
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
