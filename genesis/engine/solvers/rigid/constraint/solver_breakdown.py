@@ -61,6 +61,19 @@ def _func_update_constraint_forces_body(
 
 
 @qd.func
+def _func_update_constraint_forces_row(
+    i_c: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+):
+    """Update the active flag and the force of one row of an iterating env, a row standing still keeping both."""
+    if solver.func_is_row_moving(i_c, i_b, constraint_state, skip_settled_islands=True):
+        _func_update_constraint_forces_body(i_c, i_b, constraint_state, rigid_config)
+    elif qd.static(
+        rigid_config.solver_type == gs.constraint_solver.Newton and not rigid_config.enable_elliptic_friction
+    ):
+        constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
+
+
+@qd.func
 def _func_update_constraint_forces(constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
     """Compute active flags and efc_force, parallelized over (constraint, env).
 
@@ -84,18 +97,25 @@ def _func_update_constraint_forces(constraint_state: array_class.ConstraintState
                 constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
 
     # A row of an island standing still keeps its values and shows no flip to the incremental factor, see
-    # func_update_constraint_batch.
-    qd.loop_config(name="update_constraint_forces", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(
-        len_constraints, _B, axes=qd.static((1, 0) if rigid_config.enable_cooperative_constraint_kernels else None)
-    ):
-        if i_c < constraint_state.n_constraints[i_b] and constraint_state.improved[i_b]:
-            if solver.func_is_row_moving(i_c, i_b, constraint_state, skip_settled_islands=True):
-                _func_update_constraint_forces_body(i_c, i_b, constraint_state, rigid_config)
-            elif qd.static(
-                rigid_config.solver_type == gs.constraint_solver.Newton and not rigid_config.enable_elliptic_friction
-            ):
-                constraint_state.prev_active[i_c, i_b] = constraint_state.active[i_c, i_b]
+    # func_update_constraint_batch. On the cooperative path, one block per env strides its rows: an env fills a small
+    # share of the constraint capacity, so a thread per (row, env) of the capacity would mostly exit at once.
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+        BLOCK_DIM = qd.static(32)
+        qd.loop_config(name="update_constraint_forces", block_dim=BLOCK_DIM)
+        for i_flat in range(_B * BLOCK_DIM):
+            tid = i_flat % BLOCK_DIM
+            i_b = i_flat // BLOCK_DIM
+            if constraint_state.improved[i_b]:
+                n_con = constraint_state.n_constraints[i_b]
+                for i_chunk_ in range((n_con + BLOCK_DIM - 1) // BLOCK_DIM):
+                    i_c = i_chunk_ * BLOCK_DIM + tid
+                    if i_c < n_con:
+                        _func_update_constraint_forces_row(i_c, i_b, constraint_state, rigid_config)
+    else:
+        qd.loop_config(name="update_constraint_forces", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+        for i_c, i_b in qd.ndrange(len_constraints, _B):
+            if i_c < constraint_state.n_constraints[i_b] and constraint_state.improved[i_b]:
+                _func_update_constraint_forces_row(i_c, i_b, constraint_state, rigid_config)
 
 
 @qd.func
