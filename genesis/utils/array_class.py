@@ -3000,6 +3000,10 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # single mass block (the common case: one kinematic tree). The tile width is always 32: the path is only taken
     # when the per-entity block exceeds shared memory, which on any real GPU means well over 48 DOFs.
     enable_register_tiled_mass: bool = False
+    # When True, the shared-memory mass factor also solves the smooth acceleration from the forces against the factor it
+    # holds, which runs it after the force passes, and func_compute_qacc skips its own solve. See the rigid solver's
+    # resolution for the gating.
+    enable_fused_smooth_acc_solve: bool = False
     # When True, func_solve_init seeds every island's factor with the tiled per-island kernels at any env count. The
     # monolith self-seeds with the scalar per-island factor otherwise. See the rigid solver's resolution for the gating.
     enable_tiled_island_seed: bool = False

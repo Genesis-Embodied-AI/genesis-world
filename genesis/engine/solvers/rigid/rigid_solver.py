@@ -699,10 +699,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     enable_tiled_cholesky_mass_matrix and not mass_matrix_fits_shared and not self._requires_grad
                 )
 
+                # The shared-memory mass factor solves the smooth acceleration while it still holds the factor. A
+                # differentiable scene keeps the separate solve, which kernel_manual_compute_qacc_bw reverses.
+                enable_fused_smooth_acc_solve = (
+                    enable_tiled_cholesky_mass_matrix and mass_matrix_fits_shared and not self._requires_grad
+                )
+
                 rigid_config.update(
                     enable_tiled_cholesky_mass_matrix=enable_tiled_cholesky_mass_matrix,
                     mass_matrix_fits_shared=mass_matrix_fits_shared,
                     enable_register_tiled_mass=enable_register_tiled_mass,
+                    enable_fused_smooth_acc_solve=enable_fused_smooth_acc_solve,
                     cholesky_tile_size=cholesky_tile_size,
                     tiled_n_dofs_per_block=tiled_n_dofs_per_block,
                     island_tile_cap_first=island_tile_cap_first,

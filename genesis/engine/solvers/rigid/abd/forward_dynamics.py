@@ -114,24 +114,22 @@ def func_forward_dynamics(
         qd.static(rigid_config.integrator == gs.integrator.approximate_implicitfast),
         is_backward,
     )
-    # The shared-memory mass factor solves the smooth acceleration against the factor it still holds, which needs the
-    # forces first. The force passes never read the factor, so it runs after them. A differentiable scene keeps the
-    # separate solve, which kernel_manual_compute_qacc_bw reverses.
-    is_qacc_fused = qd.static(
-        rigid_config.enable_tiled_cholesky_mass_matrix
-        and rigid_config.mass_matrix_fits_shared
-        and rigid_config.backend != gs.cpu
-        and not rigid_config.requires_grad
-    )
-    if qd.static(not is_qacc_fused):
+    # The fused solve needs the forces, and the force passes never read the factor, so it runs after them
+    if qd.static(not rigid_config.enable_fused_smooth_acc_solve):
         func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, solve_acc=False)
     func_torque_and_passive_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
     func_update_force(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_bias_force(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-    if qd.static(is_qacc_fused):
+    if qd.static(rigid_config.enable_fused_smooth_acc_solve):
         func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, solve_acc=True)
-    func_compute_qacc(dyn_state, dyn_info, rigid_info, rigid_config, solve_acc=not is_qacc_fused)
+    func_compute_qacc(
+        dyn_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+        solve_acc=qd.static(not rigid_config.enable_fused_smooth_acc_solve),
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -1014,7 +1012,8 @@ def func_factor_mass(
 
     func_factor_mass_masked factors a subset of them instead, out of the same per-tree functions. See
     func_compute_mass_matrix for why both passes come in two implementations. solve_acc also solves the smooth
-    acceleration from the forces against the factor, on the shared-memory path alone (see func_forward_dynamics).
+    acceleration from the forces against the factor, on the shared-memory path alone (see enable_fused_smooth_acc_solve
+    in array_class.py).
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     _B = rigid_info.mass_mat.shape[2]
@@ -1840,7 +1839,7 @@ def func_compute_qacc(
 ):
     # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
     # for what a block is), the blocks of the sleeping dofs left as they are. A caller whose mass factor already solved
-    # it skips the solve (see func_forward_dynamics).
+    # it skips the solve (see enable_fused_smooth_acc_solve in array_class.py).
     if qd.static(solve_acc):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_d, i_b in qd.ndrange(rigid_info.mass_mat.shape[0], dyn_state.dofs.acc_smooth.shape[1]):

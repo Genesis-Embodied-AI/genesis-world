@@ -1082,6 +1082,7 @@ def test_cholesky_tiling(monkeypatch, tol):
 
             rigid_solver_build_orig(self)
             self.rigid_config.enable_tiled_cholesky_mass_matrix = enable_tiled_cholesky
+            self.rigid_config.enable_fused_smooth_acc_solve &= enable_tiled_cholesky
             if enable_tiled_cholesky:
                 self.rigid_config.tiled_n_dofs_per_entity = 32
 
