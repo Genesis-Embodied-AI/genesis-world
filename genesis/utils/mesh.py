@@ -3,13 +3,15 @@ import marshal
 import math
 import os
 import pickle as pkl
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
+
+import numpy as np
 
 import coacd
 import igl
 import Imath
-import numpy as np
 import OpenEXR
 import tetgen
 import trimesh
@@ -187,8 +189,12 @@ def get_gsd_path(verts, faces, sdf_res, sdf_cell_size):
     return os.path.join(get_gsd_cache_dir(), f"{hashkey}.gsd")
 
 
-def get_gnd_path(name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains):
-    hashkey = get_hashkey(name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains)
+def get_gnd_path(
+    name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
+):
+    hashkey = get_hashkey(
+        name, subterrain_types, subterrain_size, horizontal_scale, vertical_scale, n_subterrains, subterrain_parameters
+    )
     return os.path.join(get_gnd_cache_dir(), f"{hashkey}.gnd")
 
 
@@ -232,8 +238,25 @@ def get_usd_bake_path(file_path):
 
 
 def get_hashkey(*args):
+    # Containers are replaced by the tuples of their items, sorted for sets and for dicts other than OrderedDict since
+    # equal ones may iterate in different orders (string hashes are salted per process). Items are replaced before their
+    # container, so that sorting compares canonical representations, which order items of any type.
+    values, nodes = [], [(args, False)]
+    while nodes:
+        node, is_expanded = nodes.pop()
+        if is_expanded:
+            items = [values.pop() for _ in range(len(node))]
+            if isinstance(node, (set, frozenset)) or (isinstance(node, dict) and not isinstance(node, OrderedDict)):
+                items.sort(key=repr)
+            values.append(tuple(items))
+        elif isinstance(node, (dict, list, tuple, set, frozenset)):
+            nodes.append((node, True))
+            nodes.extend((item, False) for item in (node.items() if isinstance(node, dict) else node))
+        else:
+            values.append(node)
+
     hasher = hashlib.sha256()
-    for arg in (*args, gs.__version__.encode()):
+    for arg in (*values[0], gs.__version__.encode()):
         if isinstance(arg, Path):
             file_stats = arg.stat()
             arg = (str(arg).encode(), file_stats.st_size, file_stats.st_mtime)

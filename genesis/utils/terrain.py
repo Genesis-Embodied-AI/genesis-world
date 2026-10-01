@@ -47,6 +47,7 @@ def parse_terrain(morph: Terrain, surface):
                 morph.horizontal_scale,
                 morph.vertical_scale,
                 morph.n_subterrains,
+                morph.subterrain_parameters,
             )
         )
 
