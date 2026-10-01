@@ -37,6 +37,21 @@ def qd_block_max(value):
 
 
 @qd.func
+def qd_lane_vector_get(v, i, block_dim: qd.template()):
+    """Read entry i of a vector spread over the lanes of a block, every lane receiving it.
+
+    Lane tid holds entries tid + k * block_dim of the vector in v[k], so the entry is broadcast from lane
+    i % block_dim, which reads it from its register v[i // block_dim].
+    """
+    k_owner = i // block_dim
+    v_owner = v[0]
+    for k in qd.static(range(1, v.n)):
+        if k == k_owner:
+            v_owner = v[k]
+    return qd.simt.subgroup.broadcast(v_owner, qd.u32(i - k_owner * block_dim))
+
+
+@qd.func
 def qd_slot_neighbors(tid, i_slot):
     """Slots of the two neighboring lanes of a 32-lane chunk, the inputs of qd_segment_bounds."""
     i_slot_prev = qd.simt.subgroup.shuffle_up(i_slot, qd.u32(1))

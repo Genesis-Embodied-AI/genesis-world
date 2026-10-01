@@ -2673,12 +2673,7 @@ def func_island_assemble_factor_solve_tiled(
         for i_step in range(2 * n):
             is_forward = i_step < n
             j_d_local = qd.select(is_forward, i_step, 2 * n - 1 - i_step)
-            k_owner = j_d_local // T
-            v_owner = gs.qd_float(0.0)
-            for k in qd.static(range(N_ROWS_PER_LANE)):
-                if k == k_owner:
-                    v_owner = v[k]
-            x_j = qd.simt.subgroup.broadcast(v_owner / sh_L[j_d_local, j_d_local], qd.u32(j_d_local - k_owner * T))
+            x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_d_local, j_d_local]
             for k in qd.static(range(N_ROWS_PER_LANE)):
                 i_d_local = k * T + tid
                 if i_d_local == j_d_local:
