@@ -1524,7 +1524,12 @@ def func_set_upstream_grad(
     _B = dL_dposition.shape[0]
     _C = dL_dposition.shape[1]
     for i_b, i_c in qd.ndrange(_B, _C):
+        # The upstream gradients follow the logical order of the contacts that get_contacts returns, which
+        # contact_sort_idx maps to the physical slots of contact_data.
+        i_col = i_c
+        if i_c < collider_state.n_contacts[i_b]:
+            i_col = collider_state.contact_sort_idx[i_c, i_b]
         for j in qd.static(range(3)):
-            collider_state.contact_data.pos.grad[i_c, i_b][j] = dL_dposition[i_b, i_c, j]
-            collider_state.contact_data.normal.grad[i_c, i_b][j] = dL_dnormal[i_b, i_c, j]
-        collider_state.contact_data.penetration.grad[i_c, i_b] = dL_dpenetration[i_b, i_c]
+            collider_state.contact_data.pos.grad[i_col, i_b][j] = dL_dposition[i_b, i_c, j]
+            collider_state.contact_data.normal.grad[i_col, i_b][j] = dL_dnormal[i_b, i_c, j]
+        collider_state.contact_data.penetration.grad[i_col, i_b] = dL_dpenetration[i_b, i_c]

@@ -1455,17 +1455,13 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     # func_narrow_phase_convex_specializations (box-box, plane-box). Computed once
     # at scene build time by iterating all geom pairs in collider._init_static_config().
     # On GPU, the split narrowphase path runs (contact0 + multicontact + sort).
-    # On CPU, falls back to the monolithic func_narrow_phase_convex_vs_convex.
+    # On CPU, falls back to the monolithic func_narrow_phase_convex_vs_convex. Also gates the deterministic contact sort
+    # (see func_sort_contacts), which orders the contacts independently of the racy narrowphase layout.
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
     # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
-    # True when contacts are ordered deterministically by position in add_inequality_constraints, making the contact
-    # order independent of the racy atomic_add narrowphase layout. Only meaningful when has_non_box_plane_convex_convex
-    # on GPU; disabled in autodiff (the gradient writeback indexes contacts by physical layout, so a non-identity
-    # permutation would misattach gradients).
-    spatial_sort_supported: bool
     # maximum number of contact pairs per collision pair
     n_contacts_per_convex_pair: int
     # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair

@@ -235,27 +235,20 @@ class Collider:
             links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
             has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
-        # The sort writes a deterministic permutation into contact_sort_idx that every downstream consumer - including
-        # the island construction - reads through. It runs on every backend: the physical layout is racy on GPU
-        # (slots reserved via atomic_add), and a serial narrowphase enumerates pairs in broadphase sweep order along
-        # a fixed world axis, so a rigidly rotated copy of a scene would otherwise see a pair's contacts reordered.
-        # Disabled only in autodiff mode: func_set_upstream_grad writes upstream gradients back by physical index, so
-        # a non-identity permutation would attach them to the wrong contacts.
-        spatial_sort_supported = has_non_box_plane_convex_convex and not self._solver._requires_grad
-
         # Initialize the static config, which stores every data that are compile-time constants.
         # Note that updating any of them will trigger recompilation.
         self.collider_config = array_class.ColliderStaticConfig(
             gpu_cores=get_gpu_core_count(),
             gpu_cores_per_unit=get_gpu_cores_per_unit(),
             has_terrain=has_terrain,
-            has_non_box_plane_convex_convex=has_non_box_plane_convex_convex,
+            # Outside performance mode the convex narrowphase and the contact sort it gates are always compiled in, the
+            # narrowphase finding nothing in a scene whose convex pairs all take a box specialization.
+            has_non_box_plane_convex_convex=has_non_box_plane_convex_convex or gs.use_ndarray,
             # Outside performance mode the box specializations are always compiled in, their pass finding nothing in a
             # scene without box pairs, which every other path leaves to it by geom type.
             has_convex_specialization=has_convex_specialization or gs.use_ndarray,
             has_nonconvex_nonterrain=has_nonconvex_nonterrain,
             has_prunable_contacts=has_prunable_contacts,
-            spatial_sort_supported=spatial_sort_supported,
             n_contacts_per_convex_pair=n_contacts_per_convex_pair,
             n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
             ccd_algorithm=ccd_algorithm,
@@ -883,7 +876,7 @@ class Collider:
         # views, then materialize each field via a single torch.gather along the contact axis. This still avoids the
         # Quadrants gather kernel and produces a contiguous output suitable for downstream consumers.
         zerocopy_aligned = (
-            not self.collider_config.has_prunable_contacts and not self.collider_config.spatial_sort_supported
+            not self.collider_config.has_prunable_contacts and not self.collider_config.has_non_box_plane_convex_convex
         )
         if gs.use_zerocopy and self._contact_data is not None:
             n_contacts = qd_to_torch(self.collider_state.n_contacts, copy=False)

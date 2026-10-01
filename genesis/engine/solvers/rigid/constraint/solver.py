@@ -1448,7 +1448,7 @@ def _sort_contacts_and_build_islands(
                 func_build_islands_coop(
                     i_b, tid, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config
                 )
-            if qd.static(collider_static_config.spatial_sort_supported):
+            if qd.static(collider_static_config.has_non_box_plane_convex_convex):
                 qd.simt.block.sync()
                 func_sort_contacts_coop(i_b, tid, dyn_state, collider_state, constraint_state)
                 qd.simt.block.sync()
@@ -1475,7 +1475,7 @@ def _sort_contacts_and_build_islands(
                         )
             else:
                 func_build_islands(i_b, dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
-            if qd.static(collider_static_config.spatial_sort_supported):
+            if qd.static(collider_static_config.has_non_box_plane_convex_convex):
                 func_sort_contacts(
                     i_b,
                     collider_state.n_contacts_hibernated[i_b],
