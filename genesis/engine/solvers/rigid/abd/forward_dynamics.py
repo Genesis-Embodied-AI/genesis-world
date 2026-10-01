@@ -116,20 +116,14 @@ def func_forward_dynamics(
     )
     # The fused solve needs the forces, and the force passes never read the factor, so it runs after them
     if qd.static(not rigid_config.enable_fused_smooth_acc_solve):
-        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, solve_acc=False)
+        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
     func_torque_and_passive_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
     func_update_force(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_bias_force(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
     if qd.static(rigid_config.enable_fused_smooth_acc_solve):
-        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False, solve_acc=True)
-    func_compute_qacc(
-        dyn_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        solve_acc=qd.static(not rigid_config.enable_fused_smooth_acc_solve),
-    )
+        func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
+    func_compute_qacc(dyn_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)
@@ -1006,14 +1000,12 @@ def func_factor_mass(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     implicit_damping: qd.template(),
-    solve_acc: qd.template(),
 ):
     """Factor the mass matrix of every environment.
 
     func_factor_mass_masked factors a subset of them instead, out of the same per-tree functions. See
-    func_compute_mass_matrix for why both passes come in two implementations. solve_acc also solves the smooth
-    acceleration from the forces against the factor, on the shared-memory path alone (see enable_fused_smooth_acc_solve
-    in array_class.py).
+    func_compute_mass_matrix for why both passes come in two implementations. The smooth factor also solves the smooth
+    acceleration from the forces where enable_fused_smooth_acc_solve holds (see array_class.py).
     """
     n_trees = rigid_info.trees_root_idx.shape[0]
     _B = rigid_info.mass_mat.shape[2]
@@ -1053,7 +1045,16 @@ def func_factor_mass(
             i_t = (i // BLOCK_DIM) % n_trees
             i_b = i // (BLOCK_DIM * n_trees)
             func_factor_mass_tree_shared(
-                tid, i_t, i_b, dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping, solve_acc, BLOCK_DIM
+                tid,
+                i_t,
+                i_b,
+                dyn_state,
+                dyn_info,
+                rigid_info,
+                rigid_config,
+                implicit_damping,
+                solve_acc=qd.static(rigid_config.enable_fused_smooth_acc_solve and not implicit_damping),
+                BLOCK_DIM=BLOCK_DIM,
             )
 
 
@@ -1835,12 +1836,11 @@ def func_compute_qacc(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    solve_acc: qd.template(),
 ):
     # The smooth acceleration, one block of the mass matrix at a time over every environment (see func_solve_mass_batch
-    # for what a block is), the blocks of the sleeping dofs left as they are. A caller whose mass factor already solved
-    # it skips the solve (see enable_fused_smooth_acc_solve in array_class.py).
-    if qd.static(solve_acc):
+    # for what a block is), the blocks of the sleeping dofs left as they are. The fused mass factor solves it already
+    # where enable_fused_smooth_acc_solve holds (see array_class.py).
+    if qd.static(not rigid_config.enable_fused_smooth_acc_solve):
         qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
         for i_d, i_b in qd.ndrange(rigid_info.mass_mat.shape[0], dyn_state.dofs.acc_smooth.shape[1]):
             is_hibernated = dyn_state.dofs.is_hibernated[i_d, i_b] if qd.static(rigid_config.use_hibernation) else False
@@ -2373,7 +2373,7 @@ def func_implicit_damping(
     _B = rigid_info.mass_mat.shape[2]
     n_dofs = dyn_state.dofs.acc.shape[0]
 
-    func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True, solve_acc=False)
+    func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=True)
 
     # The correction moves the damped DOFs alone, and a constraint solve short of its fixed point integrates as the
     # bounded step it took. Re-solving from the force balance integrates its residual as M^-1 r, a spurious impulse on
