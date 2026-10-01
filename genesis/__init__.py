@@ -65,7 +65,7 @@ def init(
     theme="dark",
     logger_verbose_time=False,
     performance_mode=False,
-    use_deterministic_algorithms=False,
+    use_deterministic_algorithms=None,
 ):
     global _initialized
     if _initialized:
@@ -143,7 +143,10 @@ def init(
     use_zerocopy = bool(_use_zerocopy)
 
     # Reproducing a rollout means settling the runtime-measured choices the simulation would otherwise keep revisiting
-    # (see prefer_decomposed_solver in rigid_solver.py), at the cost of the throughput they were buying, hence opt-in.
+    # (see prefer_decomposed_solver in rigid_solver.py), at the cost of the throughput they were buying. If None, it is
+    # resolved from the array mode: disabled in performance mode (static arrays), enabled otherwise.
+    if use_deterministic_algorithms is None:
+        use_deterministic_algorithms = _use_ndarray
     globals()["use_deterministic_algorithms"] = use_deterministic_algorithms
     globals()["debug"] = debug
 

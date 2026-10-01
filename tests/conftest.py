@@ -833,9 +833,10 @@ def initialize_genesis(
         gs.init(
             backend=backend,
             precision=precision,
+            logging_level=logging_level,
             debug=debug,
             seed=0,
-            logging_level=logging_level,
+            theme="raw",
             performance_mode=performance_mode,
             use_deterministic_algorithms=use_deterministic_algorithms,
         )

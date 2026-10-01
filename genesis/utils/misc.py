@@ -212,11 +212,13 @@ def get_device(backend: gs.constants.backend, device_idx: Optional[int] = None):
 
 
 def get_gpu_cores_per_unit() -> int:
-    """Return the number of compute cores per compute unit of the active GPU.
+    """Return the number of compute cores per compute unit of the active GPU, -1 on the CPU backend.
 
     NVIDIA packs 128 CUDA cores per streaming multiprocessor (SM) and AMD/ROCm 64 stream processors per compute unit
     (CU); Apple Silicon 128 ALUs per GPU core. Other GPU backends (e.g. Vulkan) take the AMD MI350X as a baseline.
     """
+    if gs.backend == gs.cpu:
+        return -1
     # FIXME: quadrants should expose a query of the GPU core count and layout for every backend.
     if torch.cuda.is_available():
         return 64 if torch.version.hip else 128
@@ -231,8 +233,11 @@ def get_gpu_core_count() -> int:
     This is the env count above which one-thread-per-env already saturates the GPU, so cooperative or tiled kernels
     stop being worthwhile. Where the driver cannot be queried (Metal, or a GPU without a torch.cuda device) an
     upper-bound estimate of the compute unit count is used: 40 GPU cores on Apple Silicon, the 256 CUs of an AMD
-    MI350X for other GPU backends (e.g. Vulkan).
+    MI350X for other GPU backends (e.g. Vulkan). The CPU backend gets -1, so that no GPU of the machine reaches what
+    the CPU backend compiles.
     """
+    if gs.backend == gs.cpu:
+        return -1
     cores_per_unit = get_gpu_cores_per_unit()
     if torch.cuda.is_available():
         return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count * cores_per_unit
@@ -243,15 +248,16 @@ def get_gpu_core_count() -> int:
     return 256 * cores_per_unit
 
 
-def get_gpu_shared_tile_sizes() -> tuple[int, ...]:
+def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     """Return the ascending sizes s worth compiling for a shared tile of s x (s + 1) ``gs.qd_float`` on the active GPU.
 
     The shared memory of a block only bounds how many blocks a compute unit runs at once. Each candidate size is the
     largest multiple of 8, which keeps the padded row stride odd, running a given count of resident blocks of one warp.
     That count follows from the shared memory of a compute unit and of a block, the memory the driver reserves per
-    block, and the warp slots of a compute unit. At most 8 candidates are kept, the static values of a kernel staying a small fixed set:
-    those minimizing the mean drop in resident blocks that rounding a row count up to the next kept size causes against
-    its tightest candidate, row count n weighing 1 / n so that every doubling of the size counts the same. Where the
+    block, and the warp slots of a compute unit. At most max_n_sizes candidates are kept, the static values of a kernel
+    staying a small fixed set: those minimizing the mean drop in resident blocks that rounding a row count up to the
+    next kept size causes against its tightest candidate, row count n weighing 1 / n so that every doubling of the size
+    counts the same. Where the
     compute unit cannot be queried (Metal, Vulkan), it is taken to hold the shared memory of one block, which then
     bounds the resident blocks alone. A row count above the largest size has no shared tile.
     """
@@ -302,7 +308,7 @@ def get_gpu_shared_tile_sizes() -> tuple[int, ...]:
             size_drops[j][i + 1] = drop
     total_drops = [size_drops[j][0] for j in range(n_sizes)]
     kept_sizes_idx = [[j] for j in range(n_sizes)]
-    for _ in range(min(8, n_sizes) - 1):
+    for _ in range(min(max_n_sizes, n_sizes) - 1):
         total_drops_next = list(total_drops)
         kept_sizes_idx_next = [list(kept) for kept in kept_sizes_idx]
         for j in range(n_sizes):
