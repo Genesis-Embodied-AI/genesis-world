@@ -1451,12 +1451,10 @@ def get_verts_spatial_grid(solver):
 @qd.data_oriented
 class ColliderStaticConfig(metaclass=AutoInitMeta):
     has_terrain: bool
-    # True when the scene has convex-convex collision pairs not handled by
-    # func_narrow_phase_convex_specializations (box-box, plane-box). Computed once
-    # at scene build time by iterating all geom pairs in collider._init_static_config().
-    # On GPU, the split narrowphase path runs (contact0 + multicontact + sort).
-    # On CPU, falls back to the monolithic func_narrow_phase_convex_vs_convex. Also gates the deterministic contact sort
-    # (see func_sort_contacts), which orders the contacts independently of the racy narrowphase layout.
+    # True when a convex-convex pair escapes func_narrow_phase_convex_specializations (box-box, plane-box) and reaches
+    # the general narrowphase: the split narrowphase on GPU (contact0 + multicontact + sort), the monolithic
+    # func_narrow_phase_convex_vs_convex on CPU. Also gates the deterministic contact sort (see func_sort_contacts),
+    # which orders the contacts independently of the racy narrowphase layout. See its resolution in collider.py.
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
