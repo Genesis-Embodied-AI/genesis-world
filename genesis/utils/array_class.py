@@ -1459,11 +1459,7 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
-    # True when link-pair contact pruning can ever do useful work. False when every link has at most one convex geom and
-    # no terrain is present (each (link_a, link_b) bucket then holds at most one geom-pair's contacts, capped at
-    # n_contacts_per_convex_pair, so the 2D hull is at best a marginal reduction). Lets us skip the pruning kernel call
-    # and its scratch buffers entirely. Composes with contact islands: pruning writes a logical permutation into
-    # contact_sort_idx and the island construction reads contacts through it, so pruning collapses the contacts first.
+    # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
     # True when contacts are ordered deterministically by position in add_inequality_constraints, making the contact
     # order independent of the racy atomic_add narrowphase layout. Only meaningful when has_non_box_plane_convex_convex

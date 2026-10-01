@@ -214,31 +214,26 @@ class Collider:
             self._large_contact_pair_mask,
         ) = self._compute_collision_pair_idx()
 
-        # Link-pair pruning does useful work whenever a (link_a, link_b) bucket can hold a point interior to the hull of
-        # the others, which the hull prune drops. Nonconvex geoms and terrain reach that through a vertex-based
-        # narrowphase emitting many contacts per pair, and multi-contact detection reaches it from a single convex pair,
-        # whose perturbed points bound a patch that the unperturbed one may land inside of. One geom per link therefore
-        # suffices. A compound or decomposed link reaches it through geom count alone, each of its geoms landing at
-        # least one point in the bucket, so enough of them fill it past the pruned support polygon whatever the
-        # detection mode. Composes with contact islands: pruning writes a logical permutation into contact_sort_idx,
-        # and the island construction reads contacts through that permutation, so pruning collapses the contacts before
-        # islands partition the (smaller) solve.
-        has_prunable_contacts = has_nonconvex_nonterrain or has_terrain
-        if not has_prunable_contacts:
-            has_prunable_contacts = any(
-                geom_end - geom_start >= 5
-                for link in self._solver.links
-                for geom_start, geom_end in (link._variant_geom_ranges or ((link.geom_start, link.geom_end),))
+        # The hull prune drops a contact only from a (link_a, link_b) bucket of at least 3 contacts, the middle one of 3
+        # collinear points being the smallest case, so the pass is compiled in whenever some pair of links can emit 3
+        # contacts, and leaves every contact as it is otherwise. Nonconvex geoms and terrain emit many contacts per pair
+        # through their vertex-based narrowphase. A convex pair emits several through multi-contact detection or a box
+        # specialization, unless it holds a sphere or an ellipsoid, which leaves it a single point. Outside performance
+        # mode the pass is always compiled in, being a no-op wherever it would be left out. Composes with contact
+        # islands: pruning writes a logical permutation into contact_sort_idx, which the island construction reads.
+        has_prunable_contacts = gs.use_ndarray or has_nonconvex_nonterrain or has_terrain
+        if not has_prunable_contacts and len(self._valid_collision_pairs):
+            geoms_type = np.array([geom.type for geom in self._solver.geoms])
+            geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms])
+            pairs_type = geoms_type[self._valid_collision_pairs]
+            pairs_link_idx = np.sort(geoms_link_idx[self._valid_collision_pairs], axis=1)
+            is_point_pair = np.isin(pairs_type, (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)).any(axis=1)
+            is_multi_point_pair = ~is_point_pair & (
+                self._solver._options.enable_multi_contact | (pairs_type == gs.GEOM_TYPE.BOX).any(axis=1)
             )
-        if not has_prunable_contacts and self._solver._options.enable_multi_contact:
-            # Multi-contact is declined for a pair holding a sphere or an ellipsoid, which leaves it a single point, so
-            # what earns the pass is a pair where neither geom is one of those.
-            geoms_type = [geom.type for geom in self._solver.geoms]
-            has_prunable_contacts = any(
-                geoms_type[i_ga] not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)
-                and geoms_type[i_gb] not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.ELLIPSOID)
-                for i_ga, i_gb in self._valid_collision_pairs
-            )
+            _, links_pair_idx = np.unique(pairs_link_idx, axis=0, return_inverse=True)
+            links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
+            has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
         # The sort writes a deterministic permutation into contact_sort_idx that every downstream consumer - including
         # the island construction - reads through. It runs on every backend: the physical layout is racy on GPU
@@ -255,7 +250,9 @@ class Collider:
             gpu_cores_per_unit=get_gpu_cores_per_unit(),
             has_terrain=has_terrain,
             has_non_box_plane_convex_convex=has_non_box_plane_convex_convex,
-            has_convex_specialization=has_convex_specialization,
+            # Outside performance mode the box specializations are always compiled in, their pass finding nothing in a
+            # scene without box pairs, which every other path leaves to it by geom type.
+            has_convex_specialization=has_convex_specialization or gs.use_ndarray,
             has_nonconvex_nonterrain=has_nonconvex_nonterrain,
             has_prunable_contacts=has_prunable_contacts,
             spatial_sort_supported=spatial_sort_supported,
