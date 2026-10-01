@@ -687,9 +687,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
                 # The cooperative in-place LDL^T has no cap; the shared-memory tile is faster but capped. Same env logic
                 # as the Hessian: tile from the largest block >= 8 DOFs, drop the env guard above the cap where the
-                # scalar O(n_block_dofs^3) per-(block, env) factor is always worse.
-                enable_tiled_cholesky_mass_matrix = max_block_dofs >= 8 and (
-                    not mass_matrix_fits_shared or envs_undersaturate
+                # scalar O(n_block_dofs^3) per-(block, env) factor is always worse. Outside performance mode every scene
+                # holding dofs takes the tiled factor, whatever its block size and env count.
+                enable_tiled_cholesky_mass_matrix = (
+                    max_block_dofs > 0
+                    if is_generic
+                    else max_block_dofs >= 8 and (not mass_matrix_fits_shared or envs_undersaturate)
                 )
 
                 # Register-streaming tiled mass factor for the >shared-cap forward GPU path: factors each mass
