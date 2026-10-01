@@ -557,6 +557,16 @@ def asset_tmp_path(tmp_path_factory):
 
 
 @pytest.fixture
+def caplog(caplog):
+    # The genesis logger keeps its records from propagating to the root logger, so that they are never printed twice.
+    # The handler of the fixture therefore has to sit on it directly.
+    logger = logging.getLogger("genesis")
+    logger.addHandler(caplog.handler)
+    yield caplog
+    logger.removeHandler(caplog.handler)
+
+
+@pytest.fixture
 def tol():
     import numpy as np
     import genesis as gs
