@@ -82,7 +82,7 @@ class ToolSolver(TimeBasedMixin, Solver):
         if state is not None:
             assert len(state) == len(self._entities)
             for i, entity in enumerate(self._entities):
-                entity.set_state(f, state[i])
+                entity.set_state(f, state[i], envs_idx)
 
     def process_input(self, in_backward=False):
         for entity in self._entities:

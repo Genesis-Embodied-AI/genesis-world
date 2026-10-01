@@ -1,10 +1,161 @@
 import numpy as np
 import pytest
+import torch
 
 import genesis as gs
+from genesis.engine.states.solvers import MPMSolverState, PBDSolverState, RigidSolverState, ToolSolverState
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize(
+    "material_type, is_cpic_enabled, requires_grad",
+    [
+        pytest.param(gs.materials.MPM.Elastic, False, False, id="mpm"),
+        pytest.param(gs.materials.MPM.Elastic, False, True, id="mpm_grad"),
+        pytest.param(gs.materials.PBD.Liquid, False, False, id="pbd"),
+        pytest.param(gs.materials.PBD.Liquid, False, True, id="pbd_grad"),
+        pytest.param(gs.materials.SPH.Liquid, False, False, id="sph"),
+        pytest.param(gs.materials.SPH.Liquid, False, True, id="sph_grad"),
+        pytest.param(gs.materials.FEM.Elastic, False, False, id="fem"),
+        pytest.param(gs.materials.FEM.Elastic, False, True, id="fem_grad"),
+        pytest.param(gs.materials.Tool, False, False, id="tool"),
+        pytest.param(gs.materials.Tool, False, True, id="tool_grad"),
+        pytest.param(gs.materials.MPM.Elastic, True, False, id="mpm_cpic"),
+    ],
+)
+def test_reset(material_type, is_cpic_enabled, requires_grad, n_envs, show_viewer, tol):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.002,
+            substeps=2,
+            substeps_local=8 if requires_grad else None,
+            requires_grad=requires_grad,
+        ),
+        mpm_options=gs.options.MPMOptions(
+            grid_density=32,
+            lower_bound=(-0.25, -0.25, 0.0),
+            upper_bound=(0.25, 0.25, 1.0),
+            enable_CPIC=is_cpic_enabled,
+        ),
+        sph_options=gs.options.SPHOptions(
+            particle_size=0.025,
+            lower_bound=(-0.25, -0.25, 0.0),
+            upper_bound=(0.25, 0.25, 1.0),
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.025,
+            lower_bound=(-0.25, -0.25, 0.0),
+            upper_bound=(0.25, 0.25, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    if material_type is gs.materials.Tool:
+        morph = gs.morphs.Mesh(
+            pos=(0.0, 0.0, 0.4),
+            file="meshes/stirrer.obj",
+            scale=0.05,
+        )
+        material = material_type(
+            collision=False,
+        )
+    else:
+        morph = gs.morphs.Box(
+            pos=(0.0, 0.0, 0.4),
+            size=(0.075, 0.075, 0.075),
+        )
+        if material_type is gs.materials.FEM.Elastic:
+            material = material_type()
+        else:
+            material = material_type(
+                sampler="regular",
+            )
+    entity = scene.add_entity(
+        morph=morph,
+        material=material,
+    )
+    if material_type is gs.materials.SPH.Liquid or is_cpic_enabled:
+        scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+    scene.build(n_envs=n_envs)
+    snapshot_initial = scene.get_state()
+    if material_type is gs.materials.Tool:
+        entity.set_velocity(vel=[[0.0, 0.0, -0.1]] * max(n_envs, 1), ang=[[0.0, 0.2, 0.0]] * max(n_envs, 1))
+    scene.step()
+    snapshot_first = scene.get_state()
+    scene.step()
+    snapshot_second = scene.get_state()
+    scene.step()
+    snapshot_third = scene.get_state()
+
+    selections = (None,)
+    if n_envs:
+        selections += ([1], -1, slice(1, 2), torch.tensor([False, True], device=gs.device), [])
+    for envs_idx in selections:
+        scene.reset(state=snapshot_first)
+        scene.step()
+        snapshot_before = scene.get_state()
+        scene.reset(state=snapshot_initial, envs_idx=envs_idx)
+        snapshot_after = scene.get_state()
+        mask = torch.zeros(max(n_envs, 1), dtype=gs.tc_bool, device=gs.device)
+        mask[envs_idx if envs_idx is not None else slice(None)] = True
+        for state_initial, state_first, state_second, state_before, state_after in zip(
+            snapshot_initial, snapshot_first, snapshot_second, snapshot_before, snapshot_after
+        ):
+            if state_initial is None or isinstance(state_initial, RigidSolverState):
+                continue
+            if isinstance(state_initial, ToolSolverState):
+                state_initial, state_first, state_second, state_before, state_after = (
+                    state.entities[0] for state in (state_initial, state_first, state_second, state_before, state_after)
+                )
+                fields = (
+                    (state_after.quat, state_initial.quat, state_before.quat),
+                    (state_after.ang, state_initial.ang, state_before.ang),
+                )
+            elif isinstance(state_initial, MPMSolverState):
+                fields = (
+                    (state_after.C, state_initial.C, state_before.C),
+                    (state_after.F, state_initial.F, state_before.F),
+                    (state_after.Jp, state_initial.Jp, state_before.Jp),
+                    (state_after.active, state_initial.active, state_before.active),
+                )
+            elif isinstance(state_initial, PBDSolverState):
+                fields = ((state_after.free, state_initial.free, state_before.free),)
+            else:
+                fields = ((state_after.active, state_initial.active, state_before.active),)
+            assert (state_first.pos[..., 2] < state_initial.pos[..., 2]).all()
+            for actual, reference in ((state_before.pos, state_second.pos), (state_before.vel, state_second.vel)):
+                assert_allclose(actual, reference, tol=tol)
+            for actual, selected, unselected in (
+                (state_after.pos, state_initial.pos, state_before.pos),
+                (state_after.vel, state_initial.vel, state_before.vel),
+                *fields,
+            ):
+                assert_equal(actual[mask], selected[mask])
+                assert_equal(actual[~mask], unselected[~mask])
+
+        scene.step()
+        for state_initial, state_first, state_third, state_after in zip(
+            snapshot_initial, snapshot_first, snapshot_third, scene.get_state()
+        ):
+            if state_first is None or isinstance(state_first, RigidSolverState):
+                continue
+            if isinstance(state_first, ToolSolverState):
+                state_first, state_third, state_after = (
+                    state_initial.entities[0],
+                    state_third.entities[0],
+                    state_after.entities[0],
+                )
+            for actual, selected, unselected in (
+                (state_after.pos, state_first.pos, state_third.pos),
+                (state_after.vel, state_first.vel, state_third.vel),
+            ):
+                assert_allclose(actual[mask], selected[mask], tol=tol)
+                assert_allclose(actual[~mask], unselected[~mask], tol=tol)
 
 
 @pytest.mark.slow("gpu")  # gpu ~250s
