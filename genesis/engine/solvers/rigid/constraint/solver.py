@@ -2669,24 +2669,25 @@ def func_island_assemble_factor_solve_tiled(
                     v[k] = v[k] * constraint_state.nt_jacobi[i_d, i_b]
         # The substitutions read rows of sh_L the factor wrote from other lanes
         qd.simt.block.sync()
-        # Two loops rather than one over 2n steps: a runtime direction flag would leave every step with both updates.
-        for j_d_local in range(n):
-            x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_d_local, j_d_local]
-            for k in qd.static(range(N_ROWS_PER_LANE)):
-                i_d_local = k * T + tid
-                if i_d_local == j_d_local:
-                    v[k] = x_j
-                elif j_d_local < i_d_local and i_d_local < n:
-                    v[k] = v[k] - sh_L[i_d_local, j_d_local] * x_j
-        for j_rev in range(n):
-            j_d_local = n - 1 - j_rev
-            x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_d_local, j_d_local]
-            for k in qd.static(range(N_ROWS_PER_LANE)):
-                i_d_local = k * T + tid
-                if i_d_local == j_d_local:
-                    v[k] = x_j
-                elif i_d_local < j_d_local:
-                    v[k] = v[k] - sh_L[j_d_local, i_d_local] * x_j
+        # Forward substitution L y = grad, then backward substitution L^T x = y, the direction resolved at compile time
+        # so that each step carries a single update.
+        for i_pass in qd.static(range(2)):
+            for j_step in range(n):
+                j_d_local = j_step
+                if qd.static(i_pass == 1):
+                    j_d_local = n - 1 - j_step
+                x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_d_local, j_d_local]
+                for k in qd.static(range(N_ROWS_PER_LANE)):
+                    i_d_local = k * T + tid
+                    if i_d_local == j_d_local:
+                        v[k] = x_j
+                    else:
+                        if qd.static(i_pass == 0):
+                            if j_d_local < i_d_local and i_d_local < n:
+                                v[k] = v[k] - sh_L[i_d_local, j_d_local] * x_j
+                        else:
+                            if i_d_local < j_d_local:
+                                v[k] = v[k] - sh_L[j_d_local, i_d_local] * x_j
 
         # Write the solved Mgrad back to global memory (local registers -> global through dof_id)
         for k in qd.static(range(N_ROWS_PER_LANE)):
