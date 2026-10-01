@@ -526,8 +526,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         # The tiled per-island seed (see enable_tiled_island_seed in array_class.py) replaces a per-env thread walking
         # O(n^3) dependent loads, slower than the whole Newton iteration above the core count. The cooperative body
-        # kernels win until the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray
-        # kernels serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
+        # kernels run one warp per env, which pays off once an env carries enough dofs to keep its lanes busy, and stops
+        # paying once the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray kernels
+        # serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
         is_generic = gs.use_ndarray
         enable_tiled_island_seed = (
             gs.backend != gs.cpu
