@@ -255,8 +255,9 @@ def _get_core_count(logical):
     cores it may use below those of the machine.
     """
     core_count = psutil.cpu_count(logical=logical)
-    if sys.platform.startswith("linux"):
-        n_cpus_allowed = len(os.sched_getaffinity(0))
+    # The CPU affinity of a process is not exposed on macOS
+    if sys.platform != "darwin":
+        n_cpus_allowed = len(psutil.Process().cpu_affinity())
         if not logical:
             n_cpus_allowed = max(n_cpus_allowed * core_count // psutil.cpu_count(logical=True), 1)
         core_count = min(core_count, n_cpus_allowed)
@@ -346,7 +347,7 @@ def pytest_xdist_auto_num_workers(config):
     # Get available memory (RAM & VRAM) and number of cores
     physical_core_count = _get_core_count(config.option.logical)
     ram_memory = psutil.virtual_memory().total / 1024**3
-    # A job scheduler or a container also caps the memory of the process below that of the machine (cgroup v2)
+    # A job scheduler or a container also caps the memory of the process below that of the machine (Linux cgroup v2)
     cgroup_memory_max = Path("/sys/fs/cgroup/memory.max")
     if cgroup_memory_max.exists() and (memory_max := cgroup_memory_max.read_text().strip()) != "max":
         ram_memory = min(ram_memory, int(memory_max) / 1024**3)
