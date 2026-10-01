@@ -1268,7 +1268,7 @@ class ContactCache:
 
 def get_contact_cache(solver, n_possible_pairs, active):
     # Only the convex-convex detection reads the cache, so the other scenes keep it empty
-    shape = maybe_shape((n_possible_pairs, solver._B), active)
+    shape = maybe_shape((max(n_possible_pairs, 1), solver._B), active)
     return ContactCache(
         normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
         penetration=V(dtype=gs.qd_float, shape=shape),
@@ -1412,7 +1412,7 @@ def get_collider_state(
         # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its
         # first contact alone under the contact patch (see NarrowphaseWorkQueues)
         narrowphase_work_queues=get_narrowphase_work_queues(
-            max_collision_pairs_broad * _B, 1 if solver._options.enable_contact_patch else 5, split_narrowphase
+            max(max_collision_pairs_broad, 1) * _B, 1 if solver._options.enable_contact_patch else 5, split_narrowphase
         ),
         contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
