@@ -1,31 +1,23 @@
 import os
 from itertools import chain
-from typing import Any, NamedTuple
+from typing import Any
+
+import numpy as np
 
 import fast_simplification
-import numpy as np
-import trimesh
 from scipy.spatial import QhullError
+import trimesh
 
 import genesis as gs
 import genesis.utils.gltf as gltf_utils
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
-from genesis.constants import GLTF_FORMATS, MESH_FORMATS
 import genesis.utils.point_cloud as pc
+from genesis.constants import GLTF_FORMATS, MESH_FORMATS
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
-from genesis.typing import Matrix3x3Type, Vec3FType
 from genesis.utils import serialization
 from genesis.utils.misc import redirect_libc_stderr
-
-
-class InertialProperties(NamedTuple):
-    """A rigid body's intrinsic inertial: mass, center of mass 'com', and inertia tensor 'i' about that COM."""
-
-    mass: float
-    com: Vec3FType
-    i: Matrix3x3Type
 
 
 class Mesh(RBC, serialization.SerializationMixin):
@@ -83,9 +75,10 @@ class Mesh(RBC, serialization.SerializationMixin):
         self._unique_edges: "np.ndarray | None" = None
         self._vert_adjacency: "tuple[np.ndarray, np.ndarray, np.ndarray] | None" = None
         self._is_convex: "bool | None" = None
-        self._inertial: "InertialProperties | None" = None
+        self._inertial: "mu.InertialProperties | None" = None
+        self._enclosed_inertial: "mu.InertialProperties | None" = None
         # A mesh sharing another's processed geometry (a cached collision template) delegates its inertia query to that
-        # source, so the (convex-hull) mass-property computation runs at most once per geometry and only when an entity
+        # source, so the mass-property computation runs at most once per geometry and only when an entity
         # actually needs it - never eagerly for e.g. fixed or articulated assets whose link frames are not aligned.
         self._inertial_source: "Mesh | None" = None
 
@@ -262,6 +255,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         self._vert_adjacency = None
         self._is_convex = None
         self._inertial = None
+        self._enclosed_inertial = None
         self._inertial_source = None
 
     def get_unique_edges(self):
@@ -315,10 +309,25 @@ class Mesh(RBC, serialization.SerializationMixin):
                 except QhullError:
                     volume, center_mass = 0.0, None
                 if volume > 0.0 and np.all(np.isfinite(center_mass)):
-                    self._inertial = InertialProperties(tmesh.mass, center_mass, tmesh.moment_inertia)
+                    self._inertial = mu.InertialProperties(tmesh.mass, center_mass, tmesh.moment_inertia)
                 else:
-                    self._inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+                    self._inertial = mu.InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
         return self._inertial
+
+    @property
+    def enclosed_inertial(self):
+        """
+        Mass, center of mass and inertia tensor of the volume the surface encloses, in its own frame, at unit density.
+
+        An open or double-sided surface is estimated by the volume it encloses rather than its convex hull (see
+        'inertial_from_surface'), at a load time growing with its vertex count. The result is memoized and shared by
+        reference across entities backed by the same geometry.
+        """
+        if self._inertial_source is not None:
+            return self._inertial_source.enclosed_inertial
+        if self._enclosed_inertial is None:
+            self._enclosed_inertial = mu.inertial_from_surface(self._mesh.vertices, self._mesh.faces)
+        return self._enclosed_inertial
 
     def get_vert_adjacency(self):
         """
