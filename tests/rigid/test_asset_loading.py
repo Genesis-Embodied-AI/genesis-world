@@ -3,9 +3,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import pytest
 import torch
+
 from PIL import Image
+import pytest
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -220,6 +221,78 @@ def test_urdf_parsing(show_viewer, tol):
     _check_entity_positions(POS_OFFSET, tol=2e-3)
 
 
+@pytest.mark.required
+def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_defaults, show_viewer):
+    VOLUME = 0.2**3
+
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=authored_geom_density_mjcf,
+            recompute_inertia=True,
+            convexify=False,
+        ),
+        vis_mode="collision",
+    )
+    entity_scaled = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=authored_geom_density_mjcf,
+            scale=2.0,
+            recompute_inertia=True,
+            inertia_from_visual=True,
+        ),
+        vis_mode="collision",
+    )
+    entities_mounted = []
+    for xml, root_density, material_density in mjcf_geom_density_defaults:
+        entity_mounted = scene.add_entity(
+            morph=gs.morphs.MJCF(
+                file=xml,
+                batch_fixed_verts=True,
+            ),
+            material=gs.materials.Rigid(
+                rho=material_density,
+            ),
+            vis_mode="collision",
+        )
+        entity_mounted.attach(entity_scaled, parent_link_name="weightless")
+        entities_mounted.append(entity_mounted)
+    scene.build()
+
+    masses = {link.name: link.get_mass() for link in entity.links}
+    assert_allclose(masses["on_geom"], 250.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_default"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["unstated"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], (250.0 + 1000.0) * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
+    assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
+    assert_equal(entity.get_link("weightless").desc.inertia, 0.0)
+
+    assert_allclose(entity.get_link("mixed").get_pos(relative=False), (0.18, 0.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity.get_link("fused").get_pos(relative=False), (0.12, 0.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * VOLUME * 0.2**2 / 6.0, tol=gs.EPS)
+
+    for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused"):
+        link = entity.get_link(name)
+        scaled_link = entity_scaled.get_link(name)
+        assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, rtol=1e-6, err_msg=name)
+        assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=1e-6, err_msg=name)
+        assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, rtol=1e-6, err_msg=name)
+
+    for entity_mounted, (_, root_density, _) in zip(entities_mounted, mjcf_geom_density_defaults):
+        density = 1000.0 if root_density is None else root_density
+        masses = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * VOLUME
+        center = np.dot(masses, np.arange(7)) / masses.sum()
+        inertia = np.eye(3) * masses.sum() * 0.2**2 / 6.0
+        inertia[1, 1] += np.dot(masses, (np.arange(7) - center) ** 2)
+        inertia[2, 2] = inertia[1, 1]
+        assert_allclose(entity_mounted.base_link.get_mass(), masses.sum(), tol=1e-6)
+        assert_allclose(entity_mounted.base_link.desc.inertia, inertia, rtol=1e-6)
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_parsing_inertia_defaults(
@@ -228,6 +301,7 @@ def test_parsing_inertia_defaults(
     degenerate_inertials,
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
+    visual_collision_inertia,
     show_viewer,
     tol,
     caplog,
@@ -470,6 +544,56 @@ def test_parsing_inertia_defaults(
     # Only the link whose geometry is offset qualifies, once per copy of the robot.
     dubious_com_records = [record for record in caplog.records if "dubious center of mass" in record.getMessage()]
     assert len(dubious_com_records) == 3
+
+    inertia_scene = gs.Scene()
+    for is_from_visual, is_aligned, has_collision, has_visual, has_inertial, is_recomputed in (
+        (False, False, True, True, False, False),
+        (True, False, True, True, False, False),
+        (True, True, True, True, False, False),
+        (True, False, False, True, False, False),
+        (False, False, False, True, False, False),
+        (True, False, True, False, False, False),
+        (True, False, True, True, True, False),
+        (True, False, True, True, True, True),
+    ):
+        entity_inertia = inertia_scene.add_entity(
+            morph=gs.morphs.URDF(
+                file=visual_collision_inertia[has_inertial],
+                visualization=has_visual,
+                collision=has_collision,
+                recompute_inertia=is_recomputed,
+                inertia_from_visual=is_from_visual,
+                align=is_aligned,
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
+        )
+        if has_inertial and not is_recomputed:
+            mass, com, inertia = 2.0, (0.0, 0.0, 0.0), (0.01, 0.02, 0.025)
+        elif has_visual and (is_from_visual or not has_collision):
+            mass, com, inertia = 48.0, (0.2, 0.0, 0.0), (2.08, 1.6, 0.8)
+        else:
+            mass, com, inertia = 1.0, (0.0, 0.0, 0.0), (1.0 / 600.0,) * 3
+        link = entity_inertia.base_link
+        assert_allclose(link.desc.mass, mass, rtol=1e-6)
+        assert_allclose(link.desc.inertial_pos, 0.0 if is_aligned else com, atol=1e-7)
+        assert_allclose(np.linalg.eigvalsh(link.desc.inertia), sorted(inertia), rtol=1e-6)
+        if is_aligned:
+            assert_allclose(link.desc.offset_pos, com, atol=1e-7)
+
+    entity_variants = inertia_scene.add_entity(
+        morph=(
+            gs.morphs.URDF(file=visual_collision_inertia[0], align=False),
+            gs.morphs.URDF(file=visual_collision_inertia[0], inertia_from_visual=True, align=False),
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
+    assert_allclose(entity_variants.desc.variants[1].links[0].mass, 48.0, rtol=1e-6)
+    assert_allclose(entity_variants.desc.variants[1].links[0].inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
+    assert_allclose(np.linalg.eigvalsh(entity_variants.desc.variants[1].links[0].inertia), (0.8, 1.6, 2.08), rtol=1e-6)
 
     # Every link of an aligned free body keeps its own mass, so each link reads its authored mass. The two totals are
     # accumulated by independent code paths, so their agreement is bounded by that cross-path floor.
