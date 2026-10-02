@@ -104,7 +104,6 @@ def parse_glb_material(glb, material_index, surface):
     normal_texture = None
     emissive_texture = None
 
-    alpha_cutoff = None
     double_sided = None
     ior = None
     uvs_used = 0
@@ -131,7 +130,7 @@ def parse_glb_material(glb, material_index, surface):
             occlusion_texture = mu.create_texture(occlusion_image, None, "linear")
 
     # parse alpha mode
-    alpha_cutoff = mu.adjust_alpha_cutoff(alpha_cutoff, alpha_modes[material.alphaMode])
+    alpha_cutoff = mu.adjust_alpha_cutoff(material.alphaCutoff, alpha_modes[material.alphaMode])
 
     # parse pbr roughness and metallic
     if material.pbrMetallicRoughness is not None:
