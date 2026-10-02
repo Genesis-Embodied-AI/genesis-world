@@ -507,17 +507,22 @@ def to_gs_tensor(x, dtype: torch.dtype | None = None):
 
 @functools.cache
 def _is_torch_compile_supported(device_type: str) -> bool:
-    """Whether TorchInductor can generate kernels for tensors of the given torch device type on this machine.
+    """Whether TorchInductor can build kernels for tensors of the given torch device type on this machine.
 
-    Kernels for CPU tensors are built by a C++ compiler, which minimal containers and Windows machines without an
-    activated MSVC environment lack. Kernels for CUDA tensors are built by Triton, which is optional on Windows.
+    Kernels for CPU tensors are built by the C++ toolchain of the host, through the torch extension builder: minimal
+    containers and Windows machines without an activated MSVC environment have no compiler, and a host whose Python
+    loaded the standard-library distutils before setuptools fails to import the builder at all. Kernels for CUDA tensors
+    are built by Triton, which is optional on Windows. The answer is cached, since a failing probe spawns the compiler
+    subprocesses again at every call.
     """
     if not torch._dynamo.is_dynamo_supported():
         return False
     if device_type == "cpu":
         try:
             get_cpp_compiler()
-        except RuntimeError:
+            # The import is the probe: it fails exactly where the builder TorchInductor relies on cannot be loaded
+            import_module("torch.utils.cpp_extension")
+        except (RuntimeError, ImportError, AssertionError):
             return False
         return True
     if device_type == "cuda":
@@ -526,7 +531,7 @@ def _is_torch_compile_supported(device_type: str) -> bool:
 
 
 def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callable]:
-    """Compile a batched torch function into fused kernels, running it eagerly where compilation does not pay off.
+    """Compile a batched torch function into fused kernels, running it eagerly where TorchInductor cannot build them.
 
     The leading positional arguments of the decorated function are tensors (or None), the i-th one made of a batch of
     elements whose last `elems_ndim[i]` dimensions hold one element. Their batch dimensions are broadcast together and
@@ -536,9 +541,9 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
     values of non-tensor arguments), and on CPU once more for batches of 16384 elements or more. It must trace as a
     single graph, so data-dependent control flow and `out=` arguments are prohibited.
 
-    The function runs eagerly on devices that TorchInductor cannot target, and when an input requires gradient, which
-    would double the traced graphs for a backward pass that is never on a hot path. A compiled kernel returns the same
-    bits on every call for the same inputs, which may differ from the eager result by rounding.
+    The function runs eagerly on devices that TorchInductor cannot target on this machine, and when an input requires
+    gradient, which would double the traced graphs for a backward pass that is never on a hot path. A compiled kernel
+    returns the same bits on every call for the same inputs, which may differ from the eager result by rounding.
     """
 
     def decorator(fn: Callable) -> Callable:
@@ -573,8 +578,8 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
                     elem_shape = tensor.shape[tensor.ndim - n :]
                     if tensor.shape[: tensor.ndim - n] != batch_shape:
                         tensor = tensor.expand((*batch_shape, *elem_shape))
-                    # Broadcast inputs and views of a larger tensor would otherwise key graphs by their strides, including
-                    # the stride of a single-element batch, which reshaping normalizes and contiguity checks ignore.
+                    # Broadcast inputs and views of a larger tensor would otherwise key graphs by their strides,
+                    # including the stride of a single-element batch, which reshaping normalizes and contiguity ignores.
                     tensor = tensor.reshape((n_elems, *elem_shape)).contiguous()
                     if tensor.requires_grad:
                         is_compiled = False
