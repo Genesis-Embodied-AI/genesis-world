@@ -70,9 +70,9 @@ class SensorOptions(Options, Generic[SensorT]):
     """
     Base class for all sensor options.
 
-    Each sensor should have their own options class that inherits from this class.
-    The associated sensor class registers itself via ``Sensor.__init_subclass__`` when parameterized
-    with this options class, e.g. ``class MySensor(Sensor[MyOptions, MyMetadata, MyData]): ...``
+    Each sensor type has its own options class that inherits from this class. The sensor handle class registers
+    itself via ``Sensor.__init_subclass__`` when parameterized with this options class and its array, e.g.
+    ``class MySensor(Sensor[MyOptions, MySensorArray]): ...``
 
     Parameters
     ----------

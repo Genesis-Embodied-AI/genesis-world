@@ -47,40 +47,25 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
     (pkg_dir / "sensor.py").write_text(
         textwrap.dedent(
             """\
-        from dataclasses import dataclass
-
         import genesis as gs
-        import torch
-        from genesis.engine.sensors.base_sensor import Sensor, SharedSensorMetadata
+        from genesis.engine.sensors.base_sensor import Sensor, SensorArray
 
         from .options import FakeSensorOptions
 
 
-        @dataclass
-        class FakeSensorMetadata(SharedSensorMetadata):
-            pass
-
-
-        class FakeSensor(Sensor[FakeSensorOptions, None, FakeSensorMetadata]):
-            def _get_return_format(self):
+        class FakeSensorArray(SensorArray):
+            def _get_return_format(self, options):
                 return (1,)
 
-            @classmethod
-            def _get_cache_dtype(cls):
+            def _get_cache_dtype(self):
                 return gs.tc_float
 
-            @classmethod
-            def _update_shared_cache(
-                cls, context, metadata, gt_cache, ground_truth_data_timeline, measured_data_timeline, intermediate_cache,
-            ):
+            def _update_cache(self):
                 pass
 
-            @classmethod
-            def reset(cls, metadata, shared_ground_truth_cache, envs_idx):
-                pass
 
-            def build(self):
-                pass
+        class FakeSensor(Sensor[FakeSensorOptions, FakeSensorArray]):
+            pass
         """
         )
     )
@@ -118,32 +103,6 @@ def test_lazy_sensor_discovery(show_viewer, tmp_path):
 
 
 @pytest.mark.required
-def test_post_process_requires_intermediate_override():
-    # Strict-override rule: a subclass overriding `_post_process` without also overriding `_get_intermediate_format`
-    # or `_get_intermediate_dtype` must raise TypeError at class-definition time. The intermediate buffer is
-    # structurally distinct from the return buffer (timeline ring is in intermediate space); the explicit override
-    # forces the author to declare it - even a no-op override is acceptable when shape/dtype coincide with return.
-    # Local import: importing `genesis.engine.sensors.base_sensor` at module top triggers the sensors package
-    # `__init__.py`, which transitively loads `genesis.utils.sdf` and dereferences `gs.qd_float`. That attribute is
-    # only set by `gs.init(...)`, which runs in the autouse conftest fixture after pytest collection. Defer here.
-    from genesis.engine.sensors.base_sensor import Sensor
-
-    with pytest.raises(TypeError, match="_get_intermediate"):
-
-        class BadSensor(Sensor):
-            def _get_return_format(self):
-                return (1,)
-
-            @classmethod
-            def _get_cache_dtype(cls):
-                return gs.tc_float
-
-            @classmethod
-            def _post_process(cls, shared_metadata, tensor):
-                return tensor * 2
-
-
-@pytest.mark.required
 def test_pipeline_contract(tol):
     # Two synthetic sensor families share a single scene/build:
     #   * `FakePipelineSensor` is a vector sensor whose components each take a different
@@ -152,21 +111,10 @@ def test_pipeline_contract(tol):
     #     compounding are all verified in one batched pass.
     #   * `FakeSimpleSensor` instances cover the return-space ring allocation paths: no-ring (delay=0,
     #     history=0), history-only ring, delay+history ring, sub-step delay, and jitter declared at build or
-    #     enabled afterwards. Every instance shares the same per-class step counter, so they all see the same
+    #     enabled afterwards. Every instance shares the same per-type step counter, so they all see the same
     #     raw value at each step and the expected outputs are simple shifts / windows of that sequence.
-    from dataclasses import dataclass
-
-    from genesis.engine.sensors.base_sensor import SimpleSensor, SimpleSensorMetadata
+    from genesis.engine.sensors.base_sensor import SimpleSensor, SimpleSensorArray
     from genesis.options.sensors.options import SimpleSensorOptions
-
-    @dataclass
-    class FakeMetadata(SimpleSensorMetadata):
-        # Per-component knob vectors, shape `(1, vec_size)` so they broadcast over the batch dim of slot 0.
-        step_counter: int = 0
-        physics_imp: torch.Tensor = None
-        measured_only_imp: torch.Tensor = None
-        transform_alpha: torch.Tensor = None
-        hardware_imp: torch.Tensor = None
 
     class FakeOptions(SimpleSensorOptions["FakePipelineSensor"]):
         physics_imp: tuple[float, ...] = (0.0,)
@@ -174,57 +122,49 @@ def test_pipeline_contract(tol):
         transform_alpha: tuple[float, ...] = (0.0,)
         hardware_imp: tuple[float, ...] = (0.0,)
 
-    class FakePipelineSensor(SimpleSensor[FakeOptions, None, FakeMetadata]):
-        def _get_return_format(self):
-            return (len(self._options.physics_imp),)
+    class FakePipelineSensorArray(SimpleSensorArray):
+        def _get_return_format(self, options):
+            return (len(options.physics_imp),)
 
-        @classmethod
-        def _get_cache_dtype(cls):
+        def _get_cache_dtype(self):
             return gs.tc_float
 
         def build(self):
             super().build()
-            self._shared_metadata.physics_imp = torch.tensor(
-                [self._options.physics_imp], device=gs.device, dtype=gs.tc_float
-            )
-            self._shared_metadata.measured_only_imp = torch.tensor(
-                [self._options.measured_only_imp], device=gs.device, dtype=gs.tc_float
-            )
-            self._shared_metadata.transform_alpha = torch.tensor(
-                [self._options.transform_alpha], device=gs.device, dtype=gs.tc_float
-            )
-            self._shared_metadata.hardware_imp = torch.tensor(
-                [self._options.hardware_imp], device=gs.device, dtype=gs.tc_float
-            )
+            # The per-component knob vectors of the sensors laid end to end, shape `(1, cols)` so they broadcast over
+            # the batch dim of slot 0
+            options = [sensor.options for sensor in self._sensors]
+            for name in ("physics_imp", "measured_only_imp", "transform_alpha", "hardware_imp"):
+                values = [value for o in options for value in getattr(o, name)]
+                setattr(self, name, torch.tensor([values], device=gs.device, dtype=gs.tc_float))
+            self.step_counter = 0
 
-        @classmethod
-        def reset(cls, shared_metadata, ground_truth_cache, envs_idx):
-            super().reset(shared_metadata, ground_truth_cache, envs_idx)
-            shared_metadata.step_counter = 0
+        def reset(self, envs_idx):
+            super().reset(envs_idx)
+            self.step_counter = 0
 
-        @classmethod
-        def _update_raw_data(cls, context, metadata, raw_data_T):
+        def _update_raw_data(self, raw_data):
             # Same scalar raw value across all components and envs; per-component divergence is introduced by the
             # downstream hook vectors. 1-indexed step.
-            metadata.step_counter += 1
-            raw_data_T.fill_(float(metadata.step_counter))
+            self.step_counter += 1
+            raw_data.fill_(float(self.step_counter))
 
-        @classmethod
-        def _apply_physics_imperfections(cls, metadata, slot_0, timeline):
-            slot_0.add_(metadata.physics_imp)
+        def _apply_physics_imperfections(self, slot_0, timeline):
+            slot_0.add_(self.physics_imp)
 
-        @classmethod
-        def _apply_transform(cls, metadata, data, timeline, *, is_measured):
+        def _apply_transform(self, data, timeline, *, is_measured):
             # Measured-only pre-acquisition contribution: exercises the `is_measured` gate.
             if is_measured:
-                data.add_(metadata.measured_only_imp)
+                data.add_(self.measured_only_imp)
             # Stateful linear recurrence per component, branch-symmetric. `timeline.at(1)` is the previous step's
             # post-transform value on this branch (clean of hardware noise - the load-bearing invariant under test).
-            data.add_(timeline.at(1) * metadata.transform_alpha)
+            data.add_(timeline.at(1) * self.transform_alpha)
 
-        @classmethod
-        def _apply_hardware_imperfections(cls, metadata, working_buf):
-            working_buf.add_(metadata.hardware_imp)
+        def _apply_hardware_imperfections(self, working_buf):
+            working_buf.add_(self.hardware_imp)
+
+    class FakePipelineSensor(SimpleSensor[FakeOptions, FakePipelineSensorArray]):
+        pass
 
     # Each row is one (physics_imp, measured_only_imp, transform_alpha, hardware_imp) tuple. Components are
     # independent.
@@ -245,30 +185,30 @@ def test_pipeline_contract(tol):
 
     # Companion simple sensor for the ring-allocation paths. No knobs, no overrides beyond raw write - the read
     # just echoes the shared per-class step counter.
-    @dataclass
-    class FakeSimpleMetadata(SimpleSensorMetadata):
-        step_counter: int = 0
-
     class FakeSimpleOptions(SimpleSensorOptions["FakeSimpleSensor"]):
         pass
 
-    class FakeSimpleSensor(SimpleSensor[FakeSimpleOptions, None, FakeSimpleMetadata]):
-        def _get_return_format(self):
+    class FakeSimpleSensorArray(SimpleSensorArray):
+        def _get_return_format(self, options):
             return (1,)
 
-        @classmethod
-        def _get_cache_dtype(cls):
+        def _get_cache_dtype(self):
             return gs.tc_float
 
-        @classmethod
-        def reset(cls, shared_metadata, ground_truth_cache, envs_idx):
-            super().reset(shared_metadata, ground_truth_cache, envs_idx)
-            shared_metadata.step_counter = 0
+        def build(self):
+            super().build()
+            self.step_counter = 0
 
-        @classmethod
-        def _update_raw_data(cls, context, metadata, raw_data_T):
-            metadata.step_counter += 1
-            raw_data_T.fill_(float(metadata.step_counter))
+        def reset(self, envs_idx):
+            super().reset(envs_idx)
+            self.step_counter = 0
+
+        def _update_raw_data(self, raw_data):
+            self.step_counter += 1
+            raw_data.fill_(float(self.step_counter))
+
+    class FakeSimpleSensor(SimpleSensor[FakeSimpleOptions, FakeSimpleSensorArray]):
+        pass
 
     DT = 1e-2
     DELAY_STEPS = 2
@@ -299,7 +239,7 @@ def test_pipeline_contract(tol):
     scene.build()
     scene.reset()  # zero the build-warmup counter increment so step 1 sees raw = 1.
     # `set_jitter` enables jitter on a sensor built without it, so the ring reservation keys off the delay.
-    # `s_late_jitter` holds the class's deepest delay, so its sampling is what wraps if the extra slot is missing.
+    # `s_late_jitter` holds the type's deepest delay, so its sampling is what wraps if the extra slot is missing.
     s_late_jitter.set_jitter(DT)
     with pytest.raises(Exception, match="read delay"):
         s_baseline.set_jitter(DT)
@@ -379,46 +319,42 @@ def test_pipeline_contract(tol):
 @pytest.mark.required
 def test_pipeline_contract_uint8_delay(tol):
     # ZOH delay sampling must work on non-float return dtypes. A sensor whose `_post_process` casts a float
-    # intermediate to a `uint8` return stores `uint8` snapshots in the per-class return-space ring; delay
+    # intermediate to a `uint8` return stores `uint8` snapshots in the type's return-space ring; delay
     # sampling reads those slots verbatim (the dtype-safe ZOH default). Verifies the slot is correctly typed
     # and the delayed values match the cast of `raw[k - delay]`.
-    from dataclasses import dataclass
-
-    from genesis.engine.sensors.base_sensor import SimpleSensor, SimpleSensorMetadata
+    from genesis.engine.sensors.base_sensor import SimpleSensor, SimpleSensorArray
     from genesis.options.sensors.options import SimpleSensorOptions
-
-    @dataclass
-    class FakeQuantizedMetadata(SimpleSensorMetadata):
-        step_counter: int = 0
 
     class FakeQuantizedOptions(SimpleSensorOptions["FakeQuantizedSensor"]):
         pass
 
-    class FakeQuantizedSensor(SimpleSensor[FakeQuantizedOptions, None, FakeQuantizedMetadata]):
-        def _get_return_format(self):
+    class FakeQuantizedSensorArray(SimpleSensorArray):
+        def _get_return_format(self, options):
             return (1,)
 
-        @classmethod
-        def _get_cache_dtype(cls):
+        def _get_cache_dtype(self):
             return torch.uint8
 
-        @classmethod
-        def _get_intermediate_dtype(cls):
+        def _get_intermediate_dtype(self):
             return gs.tc_float
 
-        @classmethod
-        def reset(cls, shared_metadata, ground_truth_cache, envs_idx):
-            super().reset(shared_metadata, ground_truth_cache, envs_idx)
-            shared_metadata.step_counter = 0
+        def build(self):
+            super().build()
+            self.step_counter = 0
 
-        @classmethod
-        def _update_raw_data(cls, context, metadata, raw_data_T):
-            metadata.step_counter += 1
-            raw_data_T.fill_(float(metadata.step_counter))
+        def reset(self, envs_idx):
+            super().reset(envs_idx)
+            self.step_counter = 0
 
-        @classmethod
-        def _post_process(cls, shared_metadata, tensor, timeline, *, is_measured):
+        def _update_raw_data(self, raw_data):
+            self.step_counter += 1
+            raw_data.fill_(float(self.step_counter))
+
+        def _post_process(self, tensor, timeline, *, is_measured):
             return tensor.clamp(0, 255).to(torch.uint8)
+
+    class FakeQuantizedSensor(SimpleSensor[FakeQuantizedOptions, FakeQuantizedSensorArray]):
+        pass
 
     DT = 1e-2
     DELAY_STEPS = 2
@@ -586,9 +522,7 @@ def test_sensor_history_length_contact_and_imu(show_viewer, tol, n_envs):
 def test_shared_context(show_viewer):
     # Raycaster and DepthCamera are distinct sensor types that both cast against the scene geometry; they must share
     # one RaycastContext (a single BVH set) instead of each building its own. A sensor type declaring no context (IMU)
-    # must resolve to None.
-    from genesis.engine.sensors.raycaster import RaycastContext
-
+    # takes none.
     scene = gs.Scene(show_viewer=show_viewer)
     scene.add_entity(gs.morphs.Plane())
     box = scene.add_entity(
@@ -613,25 +547,15 @@ def test_shared_context(show_viewer):
     imu = scene.add_sensor(gs.sensors.IMU(entity_idx=box.idx))
     scene.build()
 
-    contexts = list(raycaster._manager._shared_contexts.values())
-    # Exactly one shared context instance, of type RaycastContext.
-    assert len(contexts) == 1
-    assert isinstance(contexts[0], RaycastContext)
-    # Both raycast-casting sensor types resolve to that single instance, so they cast against the very same BVH list
-    # instead of one built per sensor type.
-    assert raycaster._shared_context is contexts[0]
-    assert depth_camera._shared_context is contexts[0]
-    assert raycaster._shared_context.bvh_contexts is depth_camera._shared_context.bvh_contexts
-    # The plane+box scene mixes static and dynamic collision faces, so the shared collision mesh is split into a
-    # static and a dynamic BVH - two entries, both shared by the two sensor types.
-    assert len(raycaster._shared_context.bvh_contexts) == 2
-    # A sensor type that declares no context resolves to None.
-    assert imu._shared_context is None
-
-    # Functional smoke: both casters return finite hit distances after a step.
+    # Both casting types read against the one tree set of the scene (see RaycastContext)
     scene.step()
     assert torch.isfinite(raycaster.read().distances).all()
     assert torch.isfinite(depth_camera.read_image()).all()
+    # The two types share only the BVHs: the bulk read keeps one entry per type, with the distances last
+    data = scene.read_sensors()
+    assert set(data) == {gs.sensors.types.Raycaster, gs.sensors.types.DepthCamera, gs.sensors.types.IMU}
+    image = depth_camera.read_image().reshape(-1)
+    assert_equal(data[gs.sensors.types.DepthCamera][-image.numel() :], image)
 
 
 @pytest.mark.required
@@ -779,9 +703,13 @@ def test_read_sensors_bulk_api(show_viewer, n_envs):
             assert_equal(scene.read_sensors()[gs.sensors.types.IMU][env_idx, 0:3], imu_a1.read().lin_acc[env_idx])
             assert_equal(scene.read_sensors()[gs.sensors.types.Contact][env_idx, 0:1], contact_a.read()[env_idx])
 
-        # A boolean mask, numpy or torch, selects the environments it flags
+        # A boolean mask, numpy or torch, selects the environments it flags, on reads and on a reset alike
         mask = np.zeros(n_envs, dtype=bool)
         mask[-1] = True
         imu_data = scene.read_sensors()[gs.sensors.types.IMU]
         assert_equal(scene.read_sensors(envs_idx=mask)[gs.sensors.types.IMU], imu_data[-1:])
         assert_equal(imu_a1.read(envs_idx=torch.as_tensor(mask, device=gs.device)).lin_acc, imu_a1.read().lin_acc[-1:])
+        scene.reset(envs_idx=mask)
+        imu_data_reset = scene.read_sensors()[gs.sensors.types.IMU]
+        assert_equal(imu_data_reset[:-1], imu_data[:-1])
+        assert_equal(imu_data_reset[-1], 0.0)

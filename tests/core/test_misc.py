@@ -1,6 +1,8 @@
 """Tests for the entity naming system."""
 
+import gc
 import os
+import weakref
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -54,64 +56,57 @@ def test_scene_destroy_idempotent():
 @pytest.mark.required
 @pytest.mark.parametrize("raise_before_build", [True, False])
 def test_destroy_after_aborted_camera_build(monkeypatch, raise_before_build):
-    from genesis.engine.sensors.camera import RasterizerCameraSensor
+    from genesis.engine.sensors.camera import RasterizerCameraSensorArray
 
     scene = gs.Scene(show_viewer=False)
+    # An entity activates the rigid solver, which the camera array subscribes to at build
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
     camera = scene.add_sensor(
         gs.sensors.RasterizerCameraOptions(
             res=(64, 64),
         )
     )
 
-    # Capture the shared metadata reference now; SensorManager.destroy() drops its dict entry,
-    # but the dataclass instance itself stays alive through our local reference so we can
-    # inspect its fields after teardown.
-    shared_metadata = camera._shared_metadata
+    # Capture the array now; SensorManager.destroy() drops its dict entry, but the instance stays alive through this
+    # local reference so its fields can be inspected after teardown.
+    array = camera._array
 
-    # Inject a bug either at build entry (no metadata population) or after the original build
-    # has populated renderer / context / sensors / image_cache.
-    original_build = RasterizerCameraSensor.build
+    # Inject a bug either at the entry of the array build (no renderer yet) or after the original one has populated
+    # renderer / context.
+    original_build = RasterizerCameraSensorArray.build
 
     def buggy_build(self):
         if not raise_before_build:
             original_build(self)
         raise RuntimeError("injected camera build failure")
 
-    monkeypatch.setattr(RasterizerCameraSensor, "build", buggy_build)
+    monkeypatch.setattr(RasterizerCameraSensorArray, "build", buggy_build)
 
     with pytest.raises(RuntimeError, match="injected camera build failure"):
         scene.build()
 
     if raise_before_build:
-        assert shared_metadata.renderer is None
+        assert array.renderer is None
     else:
-        assert shared_metadata.renderer is not None
-        assert shared_metadata.context is not None
-        assert shared_metadata.sensors is not None
-        assert shared_metadata.image_cache is not None
+        assert array.renderer is not None
+        assert array.context is not None
 
-    # Track shared_metadata.destroy() invocations via instance-level shadow. Assigning to the
-    # instance __dict__ takes precedence over class-level lookup for this instance only, so
-    # neither the class nor any other metadata instance is affected. The `del` reverts the
-    # instance to plain class-level lookup before any finalizer can fire.
-    original_destroy = shared_metadata.destroy
-    destroy_call_count = [0]
+    # The renderer and context the aborted build left behind die with the scene
+    resource_refs = [weakref.ref(resource) for resource in (array.renderer, array.context) if resource is not None]
+    solvers = list(scene.sim.active_solvers)
+    scene.destroy()
+    gc.collect()
+    assert all(resource_ref() is None for resource_ref in resource_refs)
 
-    def tracked_destroy():
-        destroy_call_count[0] += 1
-        original_destroy()
-
-    shared_metadata.destroy = tracked_destroy
-    try:
-        scene.destroy()
-    finally:
-        del shared_metadata.destroy
-
-    assert destroy_call_count[0] == 1
-    assert shared_metadata.renderer is None
-    assert shared_metadata.context is None
-    assert shared_metadata.sensors is None
-    assert shared_metadata.image_cache is None
+    # The solvers outlive the scene here, and nothing they hold keeps the array and its frames alive once the handle
+    # is gone
+    array_ref = weakref.ref(array)
+    array = camera = None
+    gc.collect()
+    assert array_ref() is None
+    assert solvers
 
 
 @pytest.mark.required
