@@ -751,6 +751,9 @@ def indices_to_mask(
             else:  # np.ndarray, torch.tensor, list, tuple, np.int32...
                 try:
                     is_torch_, is_numpy_ = False, False
+                    # A boolean array is a mask like a boolean tensor; converted here, it takes the tensor path
+                    if isinstance(arg, np.ndarray) and arg.dtype == np.bool_:
+                        arg = torch.as_tensor(arg, device=gs.device)
                     if isinstance(arg, torch.Tensor):
                         if not boolean_mask and arg.dtype == torch.bool:
                             arg = arg.nonzero()[:, 0]

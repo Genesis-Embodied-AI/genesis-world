@@ -218,3 +218,7 @@ else:
     FGridArrayType = Annotated[NDArrayType, BeforeValidator(_to_float_grid)]
     PathType = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, PurePath) else v)]
     FrozenDictType = Annotated[frozendict[_K, _V], _FrozenDictValidator]
+
+# The environments a runtime getter or setter addresses: one index, a slice or range, a sequence of indices, or an
+# index array or tensor, a boolean tensor being a mask (see indices_to_mask in genesis.utils.misc).
+EnvsIdxType = int | slice | range | Sequence[int] | np.ndarray | torch.Tensor

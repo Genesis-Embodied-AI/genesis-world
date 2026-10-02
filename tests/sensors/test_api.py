@@ -778,3 +778,10 @@ def test_read_sensors_bulk_api(show_viewer, n_envs):
         for env_idx in range(n_envs):
             assert_equal(scene.read_sensors()[gs.sensors.types.IMU][env_idx, 0:3], imu_a1.read().lin_acc[env_idx])
             assert_equal(scene.read_sensors()[gs.sensors.types.Contact][env_idx, 0:1], contact_a.read()[env_idx])
+
+        # A boolean mask, numpy or torch, selects the environments it flags
+        mask = np.zeros(n_envs, dtype=bool)
+        mask[-1] = True
+        imu_data = scene.read_sensors()[gs.sensors.types.IMU]
+        assert_equal(scene.read_sensors(envs_idx=mask)[gs.sensors.types.IMU], imu_data[-1:])
+        assert_equal(imu_a1.read(envs_idx=torch.as_tensor(mask, device=gs.device)).lin_acc, imu_a1.read().lin_acc[-1:])
