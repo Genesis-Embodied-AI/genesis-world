@@ -5,17 +5,21 @@ import os
 import pickle as pkl
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
+
+import numpy as np
 
 import coacd
 import igl
 import Imath
-import numpy as np
 import OpenEXR
+from PIL import Image
+from scipy.spatial import Delaunay, QhullError
 import tetgen
 import trimesh
-from PIL import Image
 
 import genesis as gs
+from genesis.typing import Matrix3x3Type, Vec3FType
 
 from . import geom as gu
 from .misc import (
@@ -463,6 +467,121 @@ def convex_decompose(mesh, coacd_options):
             cache.save({"mesh_parts": mesh_parts, "mesh_scale": mesh_scale})
 
     return mesh_parts
+
+
+# Surface mass properties, shared by the meshes an asset repeats (one per leg or finger) and keyed by their geometry. A
+# value is a few hundred bytes, so the entry count is the bound that matters.
+_INERTIAL_CACHE = SizeCappedCache(max_bytes=1024 * 1024, max_entries=4096)
+
+# Fraction of the convex hull below which the volume an open surface encloses counts as none. A surface that spans no
+# volume, or whose faces are wound against each other, encloses a few slivers, far below the thinnest solid it could be
+# the surface of.
+_WINDING_NUMBER_MIN_HULL_FRACTION = 1e-3
+
+
+class InertialProperties(NamedTuple):
+    """A rigid body's intrinsic inertial: mass, center of mass 'com', and inertia tensor 'i' about that COM."""
+
+    mass: float
+    com: Vec3FType
+    i: Matrix3x3Type
+
+
+def inertial_from_surface(verts, faces) -> InertialProperties:
+    """Unit-density mass properties of the volume a triangle surface encloses, whether closed, open or double-sided.
+
+    The surface is first rebuilt so that its duplication does not matter: vertices are welded by position, the faces
+    sharing a vertex set (such as the two copies of a double-sided face) collapse to one, and each connected component
+    is wound consistently. On a closed surface, each component is taken as the solid it bounds whichever way it is
+    wound, and as a cavity where an odd number of the others enclose it, so a shell drawn with an inner surface is
+    hollow.
+
+    A closed surface is integrated exactly. The volume an open one encloses is estimated by splitting the convex hull of
+    its vertices into the tetrahedra of their Delaunay triangulation, a tetrahedron being interior where the generalized
+    winding number of the surface at its centroid exceeds one half in magnitude. The interior tetrahedra are integrated
+    exactly, so the estimate is exact where the surface lies on tetrahedron faces, and its error elsewhere comes from
+    the tetrahedra the surface cuts through. A single-sided surface enclosing a cavity is filled. An open surface
+    enclosing less than a small fraction of its convex hull (a flat sheet, a lone disc) spans no volume, and carries
+    no mass.
+    """
+    verts = np.ascontiguousarray(verts, dtype=np.float64)
+    faces = np.ascontiguousarray(faces, dtype=np.int64)
+    key = get_hashkey(verts, faces)
+    inertial = _INERTIAL_CACHE.get(key)
+    if inertial is not None:
+        return inertial
+
+    tmesh = trimesh.Trimesh(verts, faces, process=False)
+    tmesh.merge_vertices(merge_tex=True, merge_norm=True)
+    tmesh.update_faces(tmesh.nondegenerate_faces())
+    tmesh.update_faces(tmesh.unique_faces())
+    trimesh.repair.fix_winding(tmesh)
+
+    inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+    if tmesh.is_watertight:
+        # Inward winding gives a negative volume and inverted mass properties. Nesting rather than winding tells a
+        # cavity, since an exported part is wound inward whenever its transform mirrors it. A part counts as nested in
+        # another only if all its vertices lie inside it, so overlapping parts add up whichever vertex comes first.
+        components = tmesh.split(only_watertight=False)
+        for component in components:
+            if component.volume < 0.0:
+                component.invert()
+        components_bounds = np.stack([component.bounds for component in components])
+        components_n_enclosing = np.zeros(len(components), dtype=gs.np_int)
+        for i_c, container in enumerate(components):
+            bounds_min, bounds_max = components_bounds[i_c]
+            is_candidate = np.all(
+                (components_bounds[:, 0] >= bounds_min) & (components_bounds[:, 1] <= bounds_max), axis=-1
+            )
+            is_candidate[i_c] = False
+            candidates_idx = np.flatnonzero(is_candidate)
+            if len(candidates_idx) > 0:
+                points = np.concatenate([components[i].vertices for i in candidates_idx])
+                is_inside = np.abs(igl.fast_winding_number(container.vertices, container.faces, points)) > 0.5
+                n_points = np.array([len(components[i].vertices) for i in candidates_idx])
+                components_n_enclosing[candidates_idx] += np.logical_and.reduceat(
+                    is_inside, np.cumsum(n_points) - n_points
+                )
+        for component, n_enclosing in zip(components, components_n_enclosing):
+            if n_enclosing % 2 == 1:
+                component.invert()
+        tmesh = trimesh.util.concatenate(components)
+        # A degenerate geometry (zero volume) makes the mass-property integral divide by zero, yielding a non-finite
+        # center of mass
+        with np.errstate(invalid="ignore", divide="ignore"):
+            center_mass = tmesh.center_mass
+        if tmesh.volume > 0.0 and np.all(np.isfinite(center_mass)):
+            inertial = InertialProperties(tmesh.mass, center_mass, tmesh.moment_inertia)
+        _INERTIAL_CACHE.put(key, inertial, inertial.com.nbytes + inertial.i.nbytes + 8)
+        return inertial
+
+    verts, faces = np.ascontiguousarray(tmesh.vertices), np.ascontiguousarray(tmesh.faces)
+    try:
+        # Joggled input keeps the triangulation of vertices lying on a common sphere (a dome, a tube) from degenerating
+        # into super-quadratic time
+        tets = verts[Delaunay(verts, qhull_options="QJ").simplices]
+    except QhullError:
+        # Fewer than four non-coplanar vertices
+        tets = np.zeros((0, 4, 3))
+    if len(tets) > 0 and len(faces) > 0:
+        tets_volume = np.abs(np.linalg.det(tets[:, 1:] - tets[:, :1])) / 6.0
+        # The Delaunay tetrahedra tile the convex hull
+        hull_volume = tets_volume.sum()
+        is_tet_interior = np.abs(igl.fast_winding_number(verts, faces, tets.mean(axis=1))) > 0.5
+        tets, tets_volume = tets[is_tet_interior], tets_volume[is_tet_interior]
+        volume = tets_volume.sum()
+        if volume > _WINDING_NUMBER_MIN_HULL_FRACTION * hull_volume:
+            com = tets_volume @ tets.mean(axis=1) / volume
+            tets_rel_pos = tets - com
+            tets_rel_pos_sum = tets_rel_pos.sum(axis=1)
+            # Second moment of a tetrahedron of volume V: V / 20 * (sum_i v_i v_i^T + s s^T), with s = sum_i v_i
+            second_moment = (
+                np.einsum("t,tij,tik->jk", tets_volume, tets_rel_pos, tets_rel_pos)
+                + np.einsum("t,tj,tk->jk", tets_volume, tets_rel_pos_sum, tets_rel_pos_sum)
+            ) / 20.0
+            inertial = InertialProperties(volume, com, np.eye(3) * np.trace(second_moment) - second_moment)
+    _INERTIAL_CACHE.put(key, inertial, inertial.com.nbytes + inertial.i.nbytes + 8)
+    return inertial
 
 
 # 512 MiB of processed collision geometry. Sized by the geometry footprint actually retained (vertices and faces of
