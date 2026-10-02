@@ -83,7 +83,7 @@ def _check_expected_values(contacts, description, exp_pen, exp_normal, method_na
 
     if exp_normal is not None:
         normal = np.array(contacts["normal"][0])
-        exp_n = np.array(exp_normal, dtype=float)
+        exp_n = np.array(exp_normal, dtype=gs.np_float)
         exp_n_len = np.linalg.norm(exp_n)
         assert gs.EPS is not None
         if exp_n_len > gs.EPS:

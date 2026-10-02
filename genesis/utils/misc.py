@@ -18,6 +18,9 @@ from typing import Any, NoReturn, Optional, Sequence
 
 import numpy as np
 import torch
+import torch._dynamo
+from torch._inductor.cpp_builder import get_cpp_compiler
+from torch.utils._triton import has_triton
 
 import cpuinfo
 import psutil
@@ -500,6 +503,110 @@ def to_gs_tensor(x, dtype: torch.dtype | None = None):
     else:
         tensor = gs.from_numpy(np.asarray(x))
     return tensor.to(dtype=dtype, device=gs.device)
+
+
+@functools.cache
+def _is_torch_compile_supported(device_type: str) -> bool:
+    """Whether TorchInductor can build kernels for tensors of the given torch device type on this machine.
+
+    Kernels for CPU tensors are built by the C++ toolchain of the host, through the torch extension builder: minimal
+    containers and Windows machines without an activated MSVC environment have no compiler, and a host whose Python
+    loaded the standard-library distutils before setuptools fails to import the builder at all. Kernels for CUDA tensors
+    are built by Triton, which is optional on Windows. The answer is cached, since a failing probe spawns the compiler
+    subprocesses again at every call.
+    """
+    if not torch._dynamo.is_dynamo_supported():
+        return False
+    if device_type == "cpu":
+        try:
+            get_cpp_compiler()
+            # The import is the probe: it fails exactly where the builder TorchInductor relies on cannot be loaded
+            import_module("torch.utils.cpp_extension")
+        except (RuntimeError, ImportError, AssertionError):
+            return False
+        return True
+    if device_type == "cuda":
+        return has_triton()
+    return device_type == "mps"
+
+
+def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callable]:
+    """Compile a batched torch function into fused kernels, running it eagerly where TorchInductor cannot build them.
+
+    The leading positional arguments of the decorated function are tensors (or None), the i-th one made of a batch of
+    elements whose last `elems_ndim[i]` dimensions hold one element. Their batch dimensions are broadcast together and
+    collapsed into a single contiguous one of symbolic size before the call, and the batch dimensions of the returned
+    tensor are restored after it. The function is thereby traced once whatever the shape and memory layout of its
+    inputs, then once more for single-element batches and for every new combination of its static inputs (None tensors,
+    values of non-tensor arguments), and on CPU once more for batches of 16384 elements or more. It must trace as a
+    single graph, so data-dependent control flow and `out=` arguments are prohibited.
+
+    The function runs eagerly on devices that TorchInductor cannot target on this machine, and when an input requires
+    gradient, which would double the traced graphs for a backward pass that is never on a hot path. A compiled kernel
+    returns the same bits on every call for the same inputs, which may differ from the eager result by rounding.
+    """
+
+    def decorator(fn: Callable) -> Callable:
+        # Launching a kernel costs more host time than recomputing the intermediates that several outputs share, so
+        # every intermediate is inlined and the whole function lowers to a single kernel.
+        fn_compiled = torch.compile(
+            fn,
+            fullgraph=True,
+            dynamic=True,
+            options={
+                "realize_reads_threshold": sys.maxsize,
+                "realize_opcount_threshold": sys.maxsize,
+                "realize_acc_reads_threshold": sys.maxsize,
+            },
+        )
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            tensors, args = args[: len(elems_ndim)], args[len(elems_ndim) :]
+            batch_shapes = [
+                tensor.shape[: tensor.ndim - n] for tensor, n in zip(tensors, elems_ndim) if tensor is not None
+            ]
+            batch_shape = batch_shapes[0]
+            # Broadcasting is rare enough for its slow shape inference to be worth skipping when all shapes agree
+            if any(shape != batch_shape for shape in batch_shapes[1:]):
+                batch_shape = torch.broadcast_shapes(*batch_shapes)
+            n_elems = math.prod(batch_shape)
+            is_compiled = _is_torch_compile_supported(tensors[0].device.type)
+            tensors_flat = []
+            for tensor, n in zip(tensors, elems_ndim):
+                if tensor is not None:
+                    elem_shape = tensor.shape[tensor.ndim - n :]
+                    if tensor.shape[: tensor.ndim - n] != batch_shape:
+                        tensor = tensor.expand((*batch_shape, *elem_shape))
+                    # Broadcast inputs and views of a larger tensor would otherwise key graphs by their strides,
+                    # including the stride of a single-element batch, which reshaping normalizes and contiguity ignores.
+                    tensor = tensor.reshape((n_elems, *elem_shape)).contiguous()
+                    if tensor.requires_grad:
+                        is_compiled = False
+                    else:
+                        # A view is traced along with its base, whose shape would then key the compiled graphs too.
+                        # Detaching drops the base without copying.
+                        tensor = tensor.detach()
+                    # The sizes of an element are constants that let the elementwise operations unroll and vectorize
+                    if n > 0:
+                        torch._dynamo.mark_static(tensor, tuple(range(1, tensor.ndim)))
+                tensors_flat.append(tensor)
+            # A CPU kernel traced for a small batch runs on a single thread whatever the batch size it is later called
+            # with. Bounding the batch size gives small and large batches graphs of their own, each traced for a batch
+            # of its class. Other devices tune their kernels independently of the batch size they are traced with.
+            if is_compiled and tensors[0].device.type == "cpu" and n_elems > 1:
+                if n_elems < 16384:
+                    torch._dynamo.mark_dynamic(tensors_flat[0], 0, min=2, max=16383)
+                else:
+                    torch._dynamo.mark_dynamic(tensors_flat[0], 0, min=16384, max=sys.maxsize)
+            out = (fn_compiled if is_compiled else fn)(*tensors_flat, *args, **kwargs)
+            if len(batch_shape) == 1:
+                return out
+            return out.reshape((*batch_shape, *out.shape[1:]))
+
+        return wrapper
+
+    return decorator
 
 
 def tensor_to_cpu(x):
