@@ -596,7 +596,7 @@ class KinematicEntity(Entity):
                 )
             if isinstance(idx_global, range) and idx_global.step < 0:
                 idx_global = tuple(idx_global)
-        elif isinstance(idx_local, (list, tuple)):
+        elif isinstance(idx_local, (list, tuple)) and (not idx_local or not isinstance(idx_local[0], (bool, np.bool_))):
             try:
                 idx_global = [
                     i + idx_global_start + (idx_local_max if -idx_local_max <= i < 0 else 0) for i in idx_local
@@ -604,6 +604,8 @@ class KinematicEntity(Entity):
             except TypeError:
                 gs.raise_exception("Expecting a sequence of integers for `idx_local`.")
         else:
+            if isinstance(idx_local, (list, tuple)):
+                idx_local = np.asarray(idx_local)
             if isinstance(idx_local, torch.Tensor):
                 if idx_local.dtype == torch.bool:
                     if idx_local.shape != (idx_local_max,):

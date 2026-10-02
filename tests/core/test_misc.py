@@ -301,6 +301,8 @@ def test_coacd_options_pca_validation():
         (slice(-2, None), (2, 3)),
         (slice(-1, None, -1), (3, 2, 1, 0)),
         (np.array((False, True, False, True)), (1, 3)),
+        ([False, True, False, True], (1, 3)),
+        ((False, True, False, True), (1, 3)),
         (torch.tensor((False, True, False, True)), (1, 3)),
     ),
 )
@@ -316,6 +318,8 @@ def test_sanitize_index(index, expected):
         [[0, 1]],
         ["a"],
         np.array((True,), dtype=bool),
+        [True],
+        (True,),
         torch.tensor((True,), dtype=torch.bool),
     ),
 )
@@ -326,19 +330,34 @@ def test_sanitize_index_rejects_invalid_collections(index):
 
 @pytest.mark.required
 @pytest.mark.parametrize("as_boolean", (False, True))
-def test_indices_to_mask_selects_the_cross_product(as_boolean):
-    buf = torch.arange(20, dtype=torch.int32).reshape((4, 5))
+@pytest.mark.parametrize("array_type", (list, tuple, np.array, torch.tensor))
+def test_indices_to_mask_selects_the_cross_product(as_boolean, array_type):
+    buf = torch.arange(20, dtype=torch.int32, device=gs.device).reshape((4, 5))
     if as_boolean:
-        envs_idx = torch.tensor((False, True, False, True))
-        dofs_idx = torch.tensor((True, False, True, False, False))
+        envs_idx = array_type((False, True, False, True))
+        dofs_idx = array_type((True, False, True, False, False))
     else:
-        envs_idx = torch.tensor((1, 3), dtype=torch.int32)
-        dofs_idx = torch.tensor((0, 2), dtype=torch.int32)
+        envs_idx = array_type((1, 3))
+        dofs_idx = array_type((0, 2))
+        if array_type is torch.tensor:
+            envs_idx = envs_idx.to(dtype=torch.int32)
+            dofs_idx = dofs_idx.to(dtype=torch.int32)
 
     # Selecting on two axes takes every combination, rather than pairing the two selections elementwise, which for
     # these inputs would give the two values on the diagonal.
     assert_equal(buf[indices_to_mask(envs_idx, dofs_idx)], torch.tensor(((5, 7), (15, 17)), dtype=torch.int32))
     assert_equal(buf[indices_to_mask(envs_idx)], buf[torch.tensor((1, 3))])
+    assert_equal(buf[indices_to_mask(envs_idx, boolean_mask=False)], buf[torch.tensor((1, 3))])
+    assert_equal(buf[indices_to_mask(np.int32(1), keepdim=False)], buf[1])
+    if array_type is not torch.tensor:
+        assert_equal(
+            np.arange(20).reshape((4, 5))[indices_to_mask(envs_idx, dofs_idx, to_torch=False)], ((5, 7), (15, 17))
+        )
+    if as_boolean:
+        for is_selected in (False, True):
+            mask = array_type((is_selected,))
+            assert_equal(buf[:1][indices_to_mask(mask)], buf[: int(is_selected)])
+            assert_equal(buf[:1][indices_to_mask(mask, boolean_mask=False)], buf[: int(is_selected)])
 
 
 @pytest.mark.required
@@ -636,7 +655,7 @@ def test_per_env_time(show_viewer, n_envs, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
+    sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, 1.0),
         ),
@@ -668,10 +687,20 @@ def test_per_env_time(show_viewer, n_envs, tol):
     scene.reset(envs_idx=(0, 2))
     assert_allclose(scene.get_time(), [0.0, N_MORE_STEPS * DT, 0.0], tol=tol)
 
-    for _ in range(N_MORE_STEPS):
-        scene.step()
-    scene.reset(envs_idx=torch.tensor((False, True, False), device=gs.device))
-    assert_allclose(scene.get_time(), [N_MORE_STEPS * DT, 0.0, N_MORE_STEPS * DT], tol=tol)
+    for array_type in (torch.tensor, np.array, list, tuple):
+        for _ in range(N_MORE_STEPS):
+            scene.step()
+        time_before_reset = scene.get_time().clone()
+        pos_before_reset = sphere.get_pos().clone()
+        envs_idx = array_type((False, True, False))
+        if array_type is torch.tensor:
+            envs_idx = envs_idx.to(device=gs.device)
+        scene.reset(envs_idx=envs_idx)
+        time_before_reset[1] = 0.0
+        pos_before_reset[1] = torch.tensor((0.0, 0.0, 1.0), device=gs.device)
+        assert_allclose(scene.get_time(), time_before_reset, tol=tol)
+        assert_allclose(scene.get_time(envs_idx=envs_idx), 0.0, tol=tol)
+        assert_allclose(sphere.get_pos(), pos_before_reset, tol=tol)
 
 
 @pytest.mark.required

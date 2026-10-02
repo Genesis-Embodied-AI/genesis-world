@@ -756,8 +756,11 @@ def indices_to_mask(
                             arg = arg.nonzero()[:, 0]
                         is_scalar_ = arg.dtype != torch.bool and arg.numel() == 1
                         is_torch_ = True
-                    elif isinstance(arg, np.ndarray):
-                        is_scalar_ = arg.size == 1
+                    elif isinstance(arg, (np.ndarray, list, tuple)):
+                        arg = np.asarray(arg)
+                        if not boolean_mask and arg.dtype == bool:
+                            arg = arg.nonzero()[0]
+                        is_scalar_ = arg.dtype != bool and arg.size == 1
                         is_numpy_ = True
                     else:
                         is_scalar_ = len(arg) == 1
@@ -773,7 +776,11 @@ def indices_to_mask(
                             # int64 is what torch indexes with: a narrower index is widened on every use, and the
                             # in-place fills these masks feed take no other width. A caller that goes on to hand its
                             # mask to a kernel pays for a second instantiation of it, this width beside the solver's.
-                            arg = torch.tensor(arg, dtype=torch.int64, device=gs.device)
+                            arg = torch.tensor(
+                                arg,
+                                dtype=torch.bool if is_numpy_ and arg.dtype == bool else torch.int64,
+                                device=gs.device,
+                            )
                         is_tensor[i] = True
                         num_tensors += 1
                 except TypeError:
@@ -795,6 +802,8 @@ def indices_to_mask(
                 # the only place where combining axes makes that necessary.
                 if isinstance(mask[i], torch.Tensor) and mask[i].dtype == torch.bool:
                     mask[i] = mask[i].nonzero()[:, 0]
+                elif isinstance(mask[i], np.ndarray) and mask[i].dtype == bool:
+                    mask[i] = mask[i].nonzero()[0]
                 shape = [1] * num_tensors
                 shape[tensor_idx] = -1
                 mask[i] = mask[i].reshape(shape)
@@ -1029,6 +1038,8 @@ def sanitize_index(
                 index = tuple(index)
                 is_negative_wrap_required = True
     elif isinstance(index, (list, tuple, torch.Tensor, np.ndarray)):
+        if isinstance(index, (list, tuple)):
+            index = np.asarray(index)
         is_bool_mask = (isinstance(index, torch.Tensor) and index.dtype == torch.bool) or (
             isinstance(index, np.ndarray) and np.issubdtype(index.dtype, np.bool_)
         )
