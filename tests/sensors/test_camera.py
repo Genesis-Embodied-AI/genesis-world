@@ -171,14 +171,17 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
         assert 1.0 < mean < 254.0
         variance = np.var(rgb_np)
         assert variance > 1.0
+
+    # A read is a snapshot: writing into it leaves the frames the next read serves intact
+    rgb_cam0 = data_cam0.rgb.clone()
+    data_cam0.rgb.zero_()
+    assert_equal(raster_cam0.read().rgb, rgb_cam0)
     data_env0 = raster_cam0.read(envs_idx=0)
     assert data_env0.rgb.shape == (512, 512, 3)
 
     def _get_camera_world_pos(sensor):
-        renderer = sensor._shared_metadata.renderer
-        context = sensor._shared_metadata.context
-        node = renderer._camera_nodes[sensor._idx]
-        pose = context._scene.get_pose(node)
+        node = sensor._array.renderer._camera_nodes[sensor._idx]
+        pose = sensor._array.context._scene.get_pose(node)
         if pose.ndim == 3:
             pose = pose[0]
         return pose[:3, 3].copy()
@@ -250,7 +253,7 @@ def test_rasterizer_batched(show_viewer, png_snapshot):
     scene.build(n_envs=2)
 
     # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-    camera._shared_metadata.context.shadow = False
+    camera._array.context.shadow = False
     # Small discrepancy on apple software renderer
     if sys.platform == "darwin" and scene.visualizer.is_software:
         png_snapshot.extension._std_err_threshold = 2.0
@@ -315,7 +318,7 @@ def test_rasterizer_attached_batched(show_viewer, png_snapshot, tol):
     scene.build(n_envs=2)
 
     # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
-    camera._shared_metadata.context.shadow = False
+    camera._array.context.shadow = False
 
     sphere.set_pos([[0.0, 0.0, 1.0], [0.2, 0.0, 0.5]])
     # 45° around Z for env 0, 30° around X for env 1
@@ -344,8 +347,8 @@ def test_rasterizer_attached_batched(show_viewer, png_snapshot, tol):
     link_T = trans_quat_to_T(sphere_pos, sphere_quat)
     expected_T = link_T @ offset_T
 
-    camera_node = camera._shared_metadata.renderer._camera_nodes[camera._idx]
-    actual_pose = camera._shared_metadata.context._scene.get_pose(camera_node)
+    camera_node = camera._array.renderer._camera_nodes[camera._idx]
+    actual_pose = camera._array.context._scene.get_pose(camera_node)
     assert_allclose(actual_pose, expected_T, tol=tol)
 
     for i in range(scene.n_envs):
@@ -367,7 +370,7 @@ def test_rasterizer_destroy():
     cam1.read()
     cam2.read()
 
-    offscreen_renderer_ref = weakref.ref(cam1._shared_metadata.renderer._renderer)
+    offscreen_renderer_ref = weakref.ref(cam1._array.renderer._renderer)
     scene.destroy()
     gc.collect()
 
@@ -449,15 +452,14 @@ def test_batch_renderer_destroy():
     cam1.read()
     cam2.read()
 
-    shared_metadata = cam1._shared_metadata
-    assert cam1._shared_metadata is cam2._shared_metadata
-    assert len(shared_metadata.sensors) == 2
-    assert shared_metadata.renderer is not None
-
+    # The renderer and the frames die with the scene, whatever handle survives it
+    renderer_ref = weakref.ref(cam1._array.renderer)
+    image_ref = weakref.ref(cam1._array.images[0])
     scene.destroy()
+    gc.collect()
 
-    assert shared_metadata.sensors is None
-    assert shared_metadata.renderer is None
+    assert renderer_ref() is None
+    assert image_ref() is None
 
 
 @pytest.mark.required
@@ -623,15 +625,12 @@ def test_raytracer_destroy():
     cam1.read()
     cam2.read()
 
-    shared_metadata = cam1._shared_metadata
-    assert cam1._shared_metadata is cam2._shared_metadata
-    assert len(shared_metadata.sensors) == 2
-    assert shared_metadata.renderer is not None
-
+    # The frames die with the scene, whatever handle survives it
+    image_ref = weakref.ref(cam1._array.images[0])
     scene.destroy()
+    gc.collect()
 
-    assert shared_metadata.sensors is None
-    assert shared_metadata.renderer is None
+    assert image_ref() is None
 
 
 @pytest.mark.slow  # ~250s
@@ -690,7 +689,7 @@ def test_lookat_entity(show_viewer, png_snapshot):
 
     # Disable shadows systematically for Rasterizer because they are forcibly disabled on CPU backend anyway
     for camera in cameras:
-        camera._shared_metadata.context.shadow = False
+        camera._array.context.shadow = False
 
     # Snapshot check for every camera
     for camera in cameras:

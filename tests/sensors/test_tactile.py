@@ -402,7 +402,7 @@ def test_raycast_probe_on_fully_fixed_solver(show_viewer):
     scene.build(n_envs=2)
     scene.step()
 
-    (collision_bvh,) = probe._shared_context.collision_bvh_contexts
+    (collision_bvh,) = probe._array._raycast.collision_bvh_contexts
     assert collision_bvh.maybe_static
     assert collision_bvh.n_trees == 1
     assert_equal(probe.read_ground_truth(), 0.0)
@@ -736,8 +736,11 @@ def test_filler_probes_radius_zero(show_viewer, tol, n_envs):
             **kinematic_kwargs,
         )
     )
-    assert elastomer_grid._use_grid_fft
+
     scene.build(n_envs=n_envs)
+
+    assert elastomer_grid._array.use_grid_fft[elastomer_grid.idx]
+
     scene.step()
 
     # ElastomerTaxel (FFT dilation): filler probes read 0; active probes match a sensor built from only the
@@ -873,16 +876,17 @@ def test_contact_depth_query_sdf_vs_raycast_parity(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_filtered_contact_survives_prefilter_cap(show_viewer, monkeypatch, n_envs):
+    BOX_SIZE = 0.2
+    SPHERE_RADIUS = 0.1
+    PENETRATION = 0.02
+    PROBE_RADIUS = 0.05
+
     # The raycast contact-depth path prefilters the sensor link's contacts into a capped per-sensor list before
     # querying depth. The counterpart filter must run before that cap: otherwise a filtered manifold can fill the
     # list and starve an allowed contact. Shrink the cap to 1 so a single filtered contact would exhaust it, then
     # filter the sphere (whose contact is enumerated before the ground manifold). The allowed ground contact must
     # still reach the bottom probe -- with the filter applied too late, both probes read zero.
-    monkeypatch.setattr("genesis.engine.sensors.kinematic_tactile._MAX_CONTACTS_PER_SENSOR", 1)
-    BOX_SIZE = 0.2
-    SPHERE_RADIUS = 0.1
-    PENETRATION = 0.02
-    PROBE_RADIUS = 0.05
+    monkeypatch.setattr("genesis.engine.sensors.tactile_shared.MAX_CONTACTS_PER_SENSOR", 1)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1448,9 +1452,11 @@ def test_elastomer_sensor_sphere_ground_dilate_shear(show_viewer, tol, n_envs):
             **sensor_kwargs,
         )
     )
-    assert not dilate_sensor._is_grid and not dilate_sensor._use_grid_fft
 
     scene.build(n_envs=n_envs)
+
+    assert not dilate_sensor._array.use_grid_fft[dilate_sensor.idx]
+
     scene.step()
 
     dilate_data = dilate_sensor.read_ground_truth()
@@ -1628,11 +1634,13 @@ def test_elastomer_sensor_grid_box_sphere(show_viewer, tol, n_envs):
             **sensor_kwargs,
         )
     )
-    assert elastomer_grid_sensor._is_grid and elastomer_grid_sensor._use_grid_fft
-    assert not elastomer_sensor._is_grid and not elastomer_sensor._use_grid_fft
-    assert_allclose(elastomer_sensor.probe_local_pos, elastomer_grid_sensor.probe_local_pos, tol=gs.EPS)
 
     scene.build(n_envs=n_envs)
+
+    assert elastomer_grid_sensor._array.use_grid_fft[elastomer_grid_sensor.idx]
+    assert not elastomer_sensor._array.use_grid_fft[elastomer_sensor.idx]
+    assert_allclose(elastomer_sensor.probe_local_pos, elastomer_grid_sensor.probe_local_pos, tol=gs.EPS)
+
     scene.step()
 
     # Test dilate displacement: grid sensor should match the flat-layout sensor and detect contact magnitude.
@@ -1808,10 +1816,7 @@ def test_heterogeneous_object(show_viewer, tol):
     # Per-variant sampling: each heterogeneous variant must receive the full n_sample_points budget so
     # every parallel env sees the requested point count regardless of which variant is active there.
     for pc_sensor, n_requested in ((proximity_taxel, 800), (elastomer_taxel, 800)):
-        meta = pc_sensor._shared_metadata
-        pc_start = int(meta.sensor_pc_start[pc_sensor._idx].item())
-        pc_end = pc_start + int(meta.sensor_pc_n[pc_sensor._idx].item())
-        per_env_active = meta.pc_active_envs_mask[pc_start:pc_end].sum(dim=0)
+        per_env_active = pc_sensor._array.pc_active_envs_mask[pc_sensor._array._pc_slice(pc_sensor.idx)].sum(dim=0)
         assert_equal(per_env_active, torch.full_like(per_env_active, n_requested))
 
     obj.set_pos(

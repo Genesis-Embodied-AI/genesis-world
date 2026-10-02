@@ -230,10 +230,6 @@ class GraspEnv:
             self.episode_length_buf.masked_fill_(envs_idx, 0)
             self.reset_buf.masked_fill_(envs_idx, True)
 
-        # Invalidate camera caches after state change
-        self.left_cam._stale = True
-        self.right_cam._stale = True
-
         # Fill extras
         n_envs = envs_idx.sum() if envs_idx is not None else self.num_envs
         self.extras["episode"] = {}
