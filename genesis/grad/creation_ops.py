@@ -1,3 +1,4 @@
+import builtins
 import sys
 from functools import wraps
 
@@ -42,6 +43,18 @@ _torch_ops = (
 )
 
 
+def _to_gs_dtype(dtype):
+    """Map a Python or torch scalar type to the torch dtype that Genesis uses for this kind of scalar."""
+    match dtype:
+        case builtins.float | torch.float32 | torch.float64:
+            return gs.tc_float
+        case builtins.int | torch.int32 | torch.int64:
+            return gs.tc_int
+        case builtins.bool | torch.bool:
+            return torch.bool
+    gs.raise_exception(f"Unsupported dtype: {dtype}")
+
+
 def torch_op_wrapper(torch_op):
     @wraps(torch_op)
     def _wrapper(*args, dtype=None, requires_grad=False, scene=None, **kwargs):
@@ -50,6 +63,10 @@ def torch_op_wrapper(torch_op):
 
         if not gs._initialized:
             gs.raise_exception("Genesis not initialized yet.")
+
+        # Allocating at the requested scalar type before conversion would fail for float64 on devices lacking it (MPS)
+        if dtype is not None:
+            dtype = _to_gs_dtype(dtype)
 
         if torch_op is torch.from_numpy:
             torch_tensor = torch_op(*args)
@@ -73,16 +90,7 @@ def from_torch(torch_tensor, dtype=None, requires_grad=False, detach=True, scene
     """
     By default, detach is True, meaning that this function returns a new leaf tensor which is not connected to torch_tensor's computation gragh.
     """
-    if dtype is None:
-        dtype = torch_tensor.dtype
-    if dtype in (float, torch.float32, torch.float64):
-        dtype = gs.tc_float
-    elif dtype in (int, torch.int32, torch.int64):
-        dtype = gs.tc_int
-    elif dtype in (bool, torch.bool):
-        dtype = torch.bool
-    else:
-        gs.raise_exception(f"Unsupported dtype: {dtype}")
+    dtype = _to_gs_dtype(torch_tensor.dtype if dtype is None else dtype)
 
     if torch_tensor.requires_grad and (not detach) and (not requires_grad):
         gs.logger.warning(
