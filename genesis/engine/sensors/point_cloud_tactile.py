@@ -955,7 +955,6 @@ _LAYER_Q_MIN: Final[float] = 1e-3
 _LAYER_Q_MAX: Final[float] = 30.0
 
 
-@torch.jit.script
 def _bonded_layer_transfer(q: torch.Tensor, q_min: float = _LAYER_Q_MIN, q_max: float = _LAYER_Q_MAX) -> torch.Tensor:
     """In-plane transfer ``S(q)`` of an incompressible elastic layer of thickness ``h`` bonded to a rigid base,
     with a shear-free top surface of prescribed normal displacement. For dimensionless wavenumber ``q = |k| * h``,
@@ -978,7 +977,6 @@ def _bonded_layer_transfer(q: torch.Tensor, q_min: float = _LAYER_Q_MIN, q_max: 
     return 2.0 * q * q / denom
 
 
-@torch.jit.script
 def _precompute_hydroshear_dilate_kernel_fft(
     lambda_d: float,
     grid_spacing: tuple[float, float],
@@ -1790,7 +1788,6 @@ def _build_shear_active_pc_index(
             active_pc_idx[bs, pc_start + write_pos[bs, js]] = (pc_start + js).to(idx_dtype)
 
 
-@torch.jit.script
 def _elastomer_taxel_grid_fft_dilate(
     grid_fft_meta: list[GridFFTMeta],
     grid_fft_kernels_stacked: torch.Tensor,

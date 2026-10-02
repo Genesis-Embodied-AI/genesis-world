@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import genesis as gs
 from genesis.typing import Vec3FType
+from genesis.utils.misc import torch_compile
 
 # ------------------------------------------------------------------------------------
 # ------------------------------------- Quadrants ----------------------------------------
@@ -825,23 +826,23 @@ def _np_xyz_to_quat(xyz: np.ndarray, rpy: bool = False, out: np.ndarray | None =
     return out_
 
 
-@torch.jit.script
-def _tc_xyz_to_quat(xyz: torch.Tensor, rpy: bool = False, out: torch.Tensor | None = None) -> torch.Tensor:
-    if out is None:
-        out = torch.empty(xyz.shape[:-1] + (4,), dtype=xyz.dtype, device=xyz.device)
-
+@torch_compile(elems_ndim=(1,))
+def _tc_xyz_to_quat(xyz: torch.Tensor, rpy: bool = False) -> torch.Tensor:
     roll2, pitch2, yaw2 = (0.5 * xyz).unbind(-1)
     cosr, sinr = roll2.cos(), roll2.sin()
     cosp, sinp = pitch2.cos(), pitch2.sin()
     cosy, siny = yaw2.cos(), yaw2.sin()
     sign = 1.0 if rpy else -1.0
 
-    out[..., 0] = cosr * cosp * cosy + sign * sinr * sinp * siny
-    out[..., 1] = sinr * cosp * cosy - sign * cosr * sinp * siny
-    out[..., 2] = cosr * sinp * cosy + sign * sinr * cosp * siny
-    out[..., 3] = cosr * cosp * siny - sign * sinr * sinp * cosy
-
-    return out
+    return torch.stack(
+        (
+            cosr * cosp * cosy + sign * sinr * sinp * siny,
+            sinr * cosp * cosy - sign * cosr * sinp * siny,
+            cosr * sinp * cosy + sign * sinr * cosp * siny,
+            cosr * cosp * siny - sign * sinr * sinp * cosy,
+        ),
+        dim=-1,
+    )
 
 
 def xyz_to_quat(xyz, rpy=False, degrees=False):
@@ -893,14 +894,8 @@ def _np_quat_to_R(quat: np.ndarray, out: np.ndarray | None = None) -> np.ndarray
     return out_
 
 
-@torch.jit.script
-def _tc_quat_to_R(quat, out: torch.Tensor | None = None):
-    if out is None:
-        R = torch.empty(quat.shape[:-1] + (3, 3), dtype=quat.dtype, device=quat.device)
-    else:
-        assert out.shape == quat.shape[:-1] + (3, 3)
-        R = out
-
+@torch_compile(elems_ndim=(1,))
+def _tc_quat_to_R(quat: torch.Tensor) -> torch.Tensor:
     s = 2 / (quat**2).sum(dim=-1, keepdim=True)
     q_vec_s = s * quat[..., 1:]
 
@@ -911,24 +906,31 @@ def _tc_quat_to_R(quat, out: torch.Tensor | None = None):
     q_yy, q_yz = q_y * q_sy, q_y * q_sz
     q_zz = q_z * q_sz
 
-    R[..., 0, 0] = 1.0 - (q_yy + q_zz)
-    R[..., 0, 1] = q_xy - q_wz
-    R[..., 0, 2] = q_xz + q_wy
-    R[..., 1, 0] = q_xy + q_wz
-    R[..., 1, 1] = 1.0 - (q_xx + q_zz)
-    R[..., 1, 2] = q_yz - q_wx
-    R[..., 2, 0] = q_xz - q_wy
-    R[..., 2, 1] = q_yz + q_wx
-    R[..., 2, 2] = 1.0 - (q_xx + q_yy)
-
-    return R
+    R = torch.stack(
+        (
+            1.0 - (q_yy + q_zz),
+            q_xy - q_wz,
+            q_xz + q_wy,
+            q_xy + q_wz,
+            1.0 - (q_xx + q_zz),
+            q_yz - q_wx,
+            q_xz - q_wy,
+            q_yz + q_wx,
+            1.0 - (q_xx + q_yy),
+        ),
+        dim=-1,
+    )
+    return R.unflatten(-1, (3, 3))
 
 
 def quat_to_R(quat, *, out=None):
     # NOTE: Ignore zero-norm quaternion for efficiency
 
     if all(isinstance(e, torch.Tensor) for e in (quat, out) if e is not None):
-        return _tc_quat_to_R(quat, out=out)
+        R = _tc_quat_to_R(quat)
+        if out is None:
+            return R
+        return out.copy_(R)
     elif all(isinstance(e, np.ndarray) for e in (quat, out) if e is not None):
         return _np_quat_to_R(quat, out=out)
     else:
@@ -991,12 +993,9 @@ def _np_quat_to_xyz(quat, rpy=False, out=None):
     return out_
 
 
-@torch.jit.script
-def _tc_quat_to_xyz(quat, eps: float, rpy: bool = False):
-    xyz = torch.empty(quat.shape[:-1] + (3,), dtype=quat.dtype, device=quat.device)
-    x, y, z = xyz[..., :1], xyz[..., 1:2], xyz[..., 2:]
-
-    q_w, q_x, q_y, q_z = quat[..., :1], quat[..., 1:2], quat[..., 2:3], quat[..., 3:]
+@torch_compile(elems_ndim=(1,))
+def _tc_quat_to_xyz(quat: torch.Tensor, eps: float, rpy: bool = False) -> torch.Tensor:
+    q_w, q_x, q_y, q_z = quat.unbind(-1)
     q_ww, q_wx, q_wy, q_wz = q_w * q_w, q_w * q_x, q_w * q_y, q_w * q_z
     q_xx, q_xy, q_xz = q_x * q_x, q_x * q_y, q_x * q_z
     q_yy, q_yz = q_y * q_y, q_y * q_z
@@ -1017,15 +1016,6 @@ def _tc_quat_to_xyz(quat, eps: float, rpy: bool = False):
     cosycosp = (q_ww + q_xx - q_yy - q_zz) / 2
     cosp = torch.sqrt(cosycosp**2 + sinycosp**2)
 
-    # Roll (x-axis rotation)
-    torch.atan2(sinrcosp, cosrcosp, out=x)
-
-    # Pitch (y-axis rotation)
-    torch.atan2(sinp, cosp, out=y)
-
-    # Yaw (z-axis rotation)
-    torch.atan2(sinycosp, cosycosp, out=z)
-
     # Special treatment of nearly singular rotations
     cosp_mask = cosp < eps
     if rpy:
@@ -1033,10 +1023,15 @@ def _tc_quat_to_xyz(quat, eps: float, rpy: bool = False):
     else:
         sinycosp_sinrsinpcosy = q_wz + q_xy
     cospcosy_sinrsinpsiny = (q_ww - q_xx + q_yy - q_zz) / 2
-    x.masked_fill_(cosp_mask, 0.0)
-    torch.where(cosp_mask, torch.arctan2(sinycosp_sinrsinpcosy, cospcosy_sinrsinpsiny), z, out=z)
 
-    return xyz
+    # Roll (x-axis rotation), pitch (y-axis rotation) and yaw (z-axis rotation)
+    x = torch.where(cosp_mask, 0.0, torch.atan2(sinrcosp, cosrcosp))
+    y = torch.atan2(sinp, cosp)
+    z = torch.where(
+        cosp_mask, torch.atan2(sinycosp_sinrsinpcosy, cospcosy_sinrsinpsiny), torch.atan2(sinycosp, cosycosp)
+    )
+
+    return torch.stack((x, y, z), dim=-1)
 
 
 def quat_to_xyz(quat, rpy=False, degrees=False):
@@ -1098,14 +1093,8 @@ def _np_R_to_quat(R, out=None):
     return out_
 
 
-@torch.jit.script
-def _tc_R_to_quat(R, out=None):
-    if out is None:
-        quat = torch.zeros(R.shape[:-2] + (4,), dtype=R.dtype, device=R.device)
-    else:
-        # assert out.shape == R.shape[:-2] + (4,)
-        quat = out
-
+@torch_compile(elems_ndim=(2,))
+def _tc_R_to_quat(R: torch.Tensor) -> torch.Tensor:
     r11, r12, r13 = R[..., 0, 0], R[..., 0, 1], R[..., 0, 2]
     r21, r22, r23 = R[..., 1, 0], R[..., 1, 1], R[..., 1, 2]
     r31, r32, r33 = R[..., 2, 0], R[..., 2, 1], R[..., 2, 2]
@@ -1140,12 +1129,13 @@ def _tc_R_to_quat(R, out=None):
         ),
     )
 
-    return quat
-
 
 def R_to_quat(R, *, out=None):
     if all(isinstance(e, torch.Tensor) for e in (R, out) if e is not None):
-        return _tc_R_to_quat(R, out=out)
+        quat = _tc_R_to_quat(R)
+        if out is None:
+            return quat
+        return out.copy_(quat)
     elif all(isinstance(e, np.ndarray) for e in (R, out) if e is not None):
         return _np_R_to_quat(R, out=out)
     else:
@@ -1271,8 +1261,8 @@ def _np_quat_mul(u, v, out=None):
     return out_.reshape(u.shape)
 
 
-@torch.jit.script
-def _tc_quat_mul(u, v):
+@torch_compile(elems_ndim=(1, 1))
+def _tc_quat_mul(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     w1, x1, y1, z1 = u[..., 0], u[..., 1], u[..., 2], u[..., 3]
     w2, x2, y2, z2 = v[..., 0], v[..., 1], v[..., 2], v[..., 3]
     ww = (z1 + x1) * (x2 + y2)
@@ -1281,14 +1271,16 @@ def _tc_quat_mul(u, v):
     xx = ww + yy + zz
     qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
 
-    out = torch.empty(qq.shape + (4,), dtype=qq.dtype, device=qq.device)
-    out[..., 0] = qq - ww + (z1 - y1) * (y2 - z2)
-    out[..., 1] = qq - xx + (x1 + w1) * (x2 + w2)
-    out[..., 2] = qq - yy + (w1 - x1) * (y2 + z2)
-    out[..., 3] = qq - zz + (z1 + y1) * (w2 - x2)
-
-    out /= torch.linalg.vector_norm(out, ord=2, dim=-1, keepdim=True)
-    return out
+    quat = torch.stack(
+        (
+            qq - ww + (z1 - y1) * (y2 - z2),
+            qq - xx + (x1 + w1) * (x2 + w2),
+            qq - yy + (w1 - x1) * (y2 + z2),
+            qq - zz + (z1 + y1) * (w2 - x2),
+        ),
+        dim=-1,
+    )
+    return quat / torch.linalg.vector_norm(quat, ord=2, dim=-1, keepdim=True)
 
 
 def transform_quat_by_quat(v, u):
@@ -1333,26 +1325,24 @@ def _np_transform_by_quat(v, quat, out=None):
     return out_
 
 
-@torch.jit.script
-def _tc_transform_by_quat(v, quat, out: torch.Tensor | None = None):
-    q_w, q_x, q_y, q_z = quat[..., :1], quat[..., 1:2], quat[..., 2:3], quat[..., 3:]
+@torch_compile(elems_ndim=(1, 1))
+def _tc_transform_by_quat(v: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    q_w, q_x, q_y, q_z = quat.unbind(-1)
     q_ww, q_wx, q_wy, q_wz = q_w * q_w, q_w * q_x, q_w * q_y, q_w * q_z
     q_xx, q_xy, q_xz = q_x * q_x, q_x * q_y, q_x * q_z
     q_yy, q_yz = q_y * q_y, q_y * q_z
     q_zz = q_z**2
 
-    vs = v / (q_ww + q_xx + q_yy + q_zz)
-    v_x, v_y, v_z = vs[..., :1], vs[..., 1:2], vs[..., 2:]
+    v_x, v_y, v_z = (v / (q_ww + q_xx + q_yy + q_zz)[..., None]).unbind(-1)
 
-    if out is None:
-        out = torch.empty(vs.shape, dtype=vs.dtype, device=vs.device)
-    u_x, u_y, u_z = out[..., :1], out[..., 1:2], out[..., 2:]
-
-    u_x.copy_(v_x * (q_xx + q_ww - q_yy - q_zz) + v_y * (2.0 * q_xy - 2.0 * q_wz) + v_z * (2.0 * q_xz + 2.0 * q_wy))
-    u_y.copy_(v_x * (2.0 * q_wz + 2.0 * q_xy) + v_y * (q_ww - q_xx + q_yy - q_zz) + v_z * (2.0 * q_yz - 2.0 * q_wx))
-    u_z.copy_(v_x * (2.0 * q_xz - 2.0 * q_wy) + v_y * (2.0 * q_wx + 2.0 * q_yz) + v_z * (q_ww - q_xx - q_yy + q_zz))
-
-    return out
+    return torch.stack(
+        (
+            v_x * (q_xx + q_ww - q_yy - q_zz) + v_y * (2.0 * q_xy - 2.0 * q_wz) + v_z * (2.0 * q_xz + 2.0 * q_wy),
+            v_x * (2.0 * q_wz + 2.0 * q_xy) + v_y * (q_ww - q_xx + q_yy - q_zz) + v_z * (2.0 * q_yz - 2.0 * q_wx),
+            v_x * (2.0 * q_xz - 2.0 * q_wy) + v_y * (2.0 * q_wx + 2.0 * q_yz) + v_z * (q_ww - q_xx - q_yy + q_zz),
+        ),
+        dim=-1,
+    )
 
 
 def transform_by_quat(v, quat):
@@ -1784,8 +1774,8 @@ def _np_slerp(q0, q1, t):
     return s0 * q0 + s1 * q1
 
 
-@torch.jit.script
-def _tc_slerp(q0, q1, t, eps: float):
+@torch_compile(elems_ndim=(1, 1, 0))
+def _tc_slerp(q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float) -> torch.Tensor:
     q0 = q0 / torch.linalg.norm(q0, dim=-1, keepdim=True)
     q1 = q1 / torch.linalg.norm(q1, dim=-1, keepdim=True)
 
@@ -1823,7 +1813,8 @@ def slerp(q0, q1, t):
     if isinstance(q0, np.ndarray):
         return _np_slerp(q0, q1, t)
     if isinstance(q0, torch.Tensor):
-        return _tc_slerp(q0, q1, torch.as_tensor(t, dtype=gs.tc_float, device=q0.device), gs.EPS)
+        t = torch.as_tensor(t, dtype=gs.tc_float, device=q0.device).reshape(q0.shape[:-1])
+        return _tc_slerp(q0, q1, t, gs.EPS)
     gs.raise_exception(f"the input must be either torch.Tensor or np.ndarray. got: {type(q0)=}")
 
 
@@ -1888,59 +1879,48 @@ def _np_z_up_to_R(z, up=None, out=None):
     return out_
 
 
-@torch.jit.script
-def _tc_z_up_to_R(z, eps: float, up: torch.Tensor | None = None, out: torch.Tensor | None = None):
-    if out is None:
-        R = torch.empty(z.shape[:-1] + (3, 3), dtype=z.dtype, device=z.device)
-    else:
-        # assert out.shape == z.shape[:-1] + (3, 3)
-        R = out
-
-    # Set z as the third column of rotation matrix
-    R[..., 2] = z
-
-    # Handle batch dimension properly
-    x, y, z = R[..., 0], R[..., 1], R[..., 2]
-
-    # Normalize z vectors
+@torch_compile(elems_ndim=(1, 1))
+def _tc_z_up_to_R(z: torch.Tensor, up: torch.Tensor | None, eps: float) -> torch.Tensor:
+    # Normalize z vectors, falling back to a fixed direction for zero-norm ones
     z_norm = torch.linalg.vector_norm(z, ord=2, dim=-1, keepdim=True)
-    z /= z_norm.clamp(min=eps)
-
-    # Handle zero norm cases
+    z = z / z_norm.clamp(min=eps)
     zero_mask = z_norm < eps
+    e_y = torch.tensor((0.0, 1.0, 0.0), device=z.device, dtype=z.dtype)
     if up is None:
-        torch.where(zero_mask, torch.tensor((0.0, 1.0, 0.0), device=z.device, dtype=z.dtype), z, out=z)
+        z = torch.where(zero_mask, e_y, z)
     else:
+        e_z = torch.tensor((0.0, 0.0, 1.0), device=z.device, dtype=z.dtype)
         up_mask = up[..., 1:2].abs() < 0.5
-        torch.where(zero_mask & up_mask, torch.tensor((0.0, 1.0, 0.0), device=z.device, dtype=z.dtype), z, out=z)
-        torch.where(zero_mask & ~up_mask, torch.tensor((0.0, 0.0, 1.0), device=z.device, dtype=z.dtype), z, out=z)
+        z = torch.where(zero_mask & up_mask, e_y, z)
+        z = torch.where(zero_mask & ~up_mask, e_z, z)
 
     # Compute x vectors (first column)
     if up is not None:
-        x[:] = torch.cross(torch.broadcast_to(up, z.shape), z, dim=-1)
+        x = torch.cross(torch.broadcast_to(up, z.shape), z, dim=-1)
     else:
         up_mask = z[..., 2].abs() < 1.0 - eps
-        torch.where(up_mask, z[..., 1], z[..., 2], out=x[..., 0])
-        x[..., 1] = torch.where(up_mask, -z[..., 0], 0.0)
-        x[..., 2] = torch.where(up_mask, 0.0, -z[..., 0])
-
-    # Normalize x vectors
+        x = torch.stack(
+            (
+                torch.where(up_mask, z[..., 1], z[..., 2]),
+                torch.where(up_mask, -z[..., 0], 0.0),
+                torch.where(up_mask, 0.0, -z[..., 0]),
+            ),
+            dim=-1,
+        )
     x_norm = torch.linalg.vector_norm(x, ord=2, dim=-1, keepdim=True)
-    x /= x_norm.clamp(min=eps)
+    x = x / x_norm.clamp(min=eps)
 
-    # Handle zero x norm cases
-    zero_x_mask = x_norm < eps
-    # For zero x norm, set identity matrix
-    torch.where(zero_x_mask[..., None], torch.eye(3, device=z.device, dtype=z.dtype), R, out=R)
-    # Continue with non-zero cases
-    torch.where(~zero_x_mask, torch.cross(z, x, dim=-1), y, out=y)
-
-    return R
+    # Fall back to identity for zero-norm x vectors
+    R = torch.stack((x, torch.cross(z, x, dim=-1), z), dim=-1)
+    return torch.where(x_norm[..., None] < eps, torch.eye(3, device=z.device, dtype=z.dtype), R)
 
 
 def z_up_to_R(z, up=None, out=None):
     if isinstance(z, torch.Tensor):
-        return _tc_z_up_to_R(z, gs.EPS, up, out)
+        R = _tc_z_up_to_R(z, up, gs.EPS)
+        if out is None:
+            return R
+        return out.copy_(R)
     else:
         return _np_z_up_to_R(z, up, out)
 

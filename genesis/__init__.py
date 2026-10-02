@@ -195,12 +195,6 @@ def init(
     qd_ivec3 = qd.types.vector(3, qd_int)
     qd_ivec4 = qd.types.vector(4, qd_int)
 
-    if use_deterministic_algorithms:
-        # TorchScript profiles the first calls of a scripted function unfused, then compiles a fused kernel whose
-        # contracted arithmetic rounds differently, so a getter built on one returns different bits for the same state
-        # depending on how many times it has run. With no fused specialization allowed, every call runs unfused.
-        torch.jit.set_fusion_strategy([("STATIC", 0), ("DYNAMIC", 0)])
-
     # Define smallest float that is considered non-zero
     global EPS
     EPS = float(max(eps, np.finfo(np_float).eps))
