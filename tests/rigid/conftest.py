@@ -2,9 +2,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+from PIL import Image
 import pytest
 import trimesh
-from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
 
@@ -654,6 +655,21 @@ def undefined_inertia():
     urdf = ET.Element("robot", name="undefined_inertia")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.09")
     return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def visual_collision_inertia():
+    urdf = ET.Element("robot", name="visual_collision_inertia")
+    link = ET.SubElement(urdf, "link", name="base_link")
+    for tag, size, pos in (("visual", "0.2 0.4 0.6", "0.2 0.0 0.0"), ("collision", "0.1 0.1 0.1", "0.0 0.0 0.0")):
+        geom = ET.SubElement(link, tag)
+        ET.SubElement(geom, "origin", xyz=pos)
+        ET.SubElement(ET.SubElement(geom, "geometry"), "box", size=size)
+    missing = ET.tostring(urdf, encoding="unicode")
+    inertial = ET.SubElement(link, "inertial")
+    ET.SubElement(inertial, "mass", value="2.0")
+    ET.SubElement(inertial, "inertia", ixx="0.01", iyy="0.02", izz="0.025", ixy="0", ixz="0", iyz="0")
+    return missing, ET.tostring(urdf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")

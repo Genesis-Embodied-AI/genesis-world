@@ -3,9 +3,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import pytest
 import torch
+
 from PIL import Image
+import pytest
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -228,6 +229,7 @@ def test_parsing_inertia_defaults(
     degenerate_inertials,
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
+    visual_collision_inertia,
     show_viewer,
     tol,
     caplog,
@@ -470,6 +472,56 @@ def test_parsing_inertia_defaults(
     # Only the link whose geometry is offset qualifies, once per copy of the robot.
     dubious_com_records = [record for record in caplog.records if "dubious center of mass" in record.getMessage()]
     assert len(dubious_com_records) == 3
+
+    inertia_scene = gs.Scene()
+    for is_from_visual, is_aligned, has_collision, has_visual, has_inertial, is_recomputed in (
+        (False, False, True, True, False, False),
+        (True, False, True, True, False, False),
+        (True, True, True, True, False, False),
+        (True, False, False, True, False, False),
+        (False, False, False, True, False, False),
+        (True, False, True, False, False, False),
+        (True, False, True, True, True, False),
+        (True, False, True, True, True, True),
+    ):
+        entity_inertia = inertia_scene.add_entity(
+            morph=gs.morphs.URDF(
+                file=visual_collision_inertia[has_inertial],
+                visualization=has_visual,
+                collision=has_collision,
+                recompute_inertia=is_recomputed,
+                inertia_from_visual=is_from_visual,
+                align=is_aligned,
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
+        )
+        if has_inertial and not is_recomputed:
+            mass, com, inertia = 2.0, (0.0, 0.0, 0.0), (0.01, 0.02, 0.025)
+        elif has_visual and (is_from_visual or not has_collision):
+            mass, com, inertia = 48.0, (0.2, 0.0, 0.0), (2.08, 1.6, 0.8)
+        else:
+            mass, com, inertia = 1.0, (0.0, 0.0, 0.0), (1.0 / 600.0,) * 3
+        link = entity_inertia.base_link
+        assert_allclose(link.desc.mass, mass, rtol=1e-6)
+        assert_allclose(link.desc.inertial_pos, 0.0 if is_aligned else com, atol=1e-7)
+        assert_allclose(np.linalg.eigvalsh(link.desc.inertia), sorted(inertia), rtol=1e-6)
+        if is_aligned:
+            assert_allclose(link.desc.offset_pos, com, atol=1e-7)
+
+    entity_variants = inertia_scene.add_entity(
+        morph=(
+            gs.morphs.URDF(file=visual_collision_inertia[0], align=False),
+            gs.morphs.URDF(file=visual_collision_inertia[0], inertia_from_visual=True, align=False),
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
+    assert_allclose(entity_variants.desc.variants[1].links[0].mass, 48.0, rtol=1e-6)
+    assert_allclose(entity_variants.desc.variants[1].links[0].inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
+    assert_allclose(np.linalg.eigvalsh(entity_variants.desc.variants[1].links[0].inertia), (0.8, 1.6, 2.08), rtol=1e-6)
 
     # Every link of an aligned free body keeps its own mass, so each link reads its authored mass. The two totals are
     # accumulated by independent code paths, so their agreement is bounded by that cross-path floor.
