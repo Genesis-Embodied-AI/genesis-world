@@ -9,6 +9,8 @@ from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import SPHEntity
 from genesis.engine.materials import SPH
 from genesis.engine.states.solvers import SPHSolverState
+from genesis.utils import array_class
+from genesis.utils.geom import qd_transform_by_trans_quat
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -48,11 +50,17 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             cell_size=options.hash_grid_cell_size,
             grid_res=options._hash_grid_res,
         )
+        self.akinci_boundary_sh = gu.SpatialHasher(
+            cell_size=options.hash_grid_cell_size,
+            grid_res=options._hash_grid_res,
+        )
         # boundary
         self.setup_boundary()
 
         # Coefficient for computing stable timestep
         self._stable_dt_coef = 1.0
+        self._akinci_boundary = False
+        self._akinci_boundary_n_particles = 0
 
     def setup_boundary(self):
         self.boundary = CubeBoundary(
@@ -159,9 +167,141 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
 
             # TODO: Support per-particle density
             self._density0 = self.particles_info[0].rho
+            self._akinci_boundary = bool(
+                self._coupler.options.sph_akinci_boundary
+                and self._coupler.options.rigid_sph
+                and self._coupler.rigid_solver.is_active
+            )
+            if self._akinci_boundary:
+                self.akinci_boundary_sh.build(self._B)
+                self._build_akinci_boundary_particles()
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
         self._build_gravity(as_field=True)
+
+    def _cubic_kernel_np(self, r_norm):
+        res = 0.0
+        h = self._support_radius
+        q = r_norm / h
+        if q <= 1.0:
+            k = 8.0 / np.pi / h**3
+            if q <= 0.5:
+                res = k * (6.0 * q**3 - 6.0 * q**2 + 1.0)
+            else:
+                res = 2.0 * k * (1.0 - q) ** 3
+        return res
+
+    def _sample_akinci_box_surface(self, geom):
+        size = np.asarray(geom.data[:3], dtype=gs.np_float)
+        half = 0.5 * size
+        dx = float(self._particle_size)
+        points = []
+        axes = []
+        for axis in range(3):
+            ratio = float(size[axis]) / dx
+            n = max(2, (int(np.round(ratio)) if abs(ratio - np.round(ratio)) < 1e-4 else int(np.ceil(ratio))) + 1)
+            axes.append(np.linspace(-half[axis], half[axis], n, endpoint=True, dtype=gs.np_float))
+        for x in axes[0]:
+            for y in axes[1]:
+                for z in axes[2]:
+                    if (
+                        abs(abs(float(x)) - float(half[0])) < 1e-6
+                        or abs(abs(float(y)) - float(half[1])) < 1e-6
+                        or abs(abs(float(z)) - float(half[2])) < 1e-6
+                    ):
+                        points.append(np.array([x, y, z], dtype=gs.np_float))
+        return np.asarray(points, dtype=gs.np_float)
+
+    def _sample_akinci_mesh_surface(self, geom):
+        # Sample boundary particles over the geom's triangle surface (init_verts/init_faces are in the
+        # same geom-local frame that geoms_state.pos/quat transform to world). Works for any geom with a
+        # mesh representation (mesh, sphere, cylinder, capsule, convex). Each triangle is filled on a
+        # barycentric lattice at ~particle_size spacing; near-duplicate samples on shared edges/vertices
+        # are collapsed onto a half-particle grid. The Akinci boundary volume (1 / sum W) then corrects
+        # for any residual non-uniformity, so exact uniform sampling is not required.
+        verts = np.asarray(geom.init_verts, dtype=gs.np_float).reshape(-1, 3)
+        faces = np.asarray(geom.init_faces).reshape(-1, 3).astype(np.int64)
+        if verts.size == 0 or faces.size == 0:
+            return np.zeros((0, 3), dtype=gs.np_float)
+        dx = float(self._particle_size)
+        points = []
+        for f in faces:
+            a = verts[f[0]]
+            b = verts[f[1]]
+            c = verts[f[2]]
+            edge = max(
+                float(np.linalg.norm(b - a)),
+                float(np.linalg.norm(c - a)),
+                float(np.linalg.norm(c - b)),
+            )
+            n = max(1, int(np.ceil(edge / dx)))
+            for i in range(n + 1):
+                for j in range(n + 1 - i):
+                    u = i / n
+                    v = j / n
+                    points.append((1.0 - u - v) * a + u * b + v * c)
+        pts = np.asarray(points, dtype=gs.np_float)
+        if pts.shape[0] == 0:
+            return pts
+        keys = np.round(pts / (0.5 * dx)).astype(np.int64)
+        _, keep = np.unique(keys, axis=0, return_index=True)
+        return pts[np.sort(keep)].astype(gs.np_float, copy=False)
+
+    def _build_akinci_boundary_particles(self):
+        local_pos = []
+        geom_idx = []
+        h = float(self._support_radius)
+
+        for geom in self._coupler.rigid_solver.geoms:
+            if not geom.needs_coup or geom.is_fixed or geom.type == gs.GEOM_TYPE.PLANE:
+                continue
+            if geom.type == gs.GEOM_TYPE.BOX:
+                samples = self._sample_akinci_box_surface(geom)
+            else:
+                samples = self._sample_akinci_mesh_surface(geom)
+            if samples.size == 0:
+                gs.logger.warning(
+                    f"Akinci SPH boundary: no surface samples for geom {geom.idx} type {geom.type}; skipping."
+                )
+                continue
+            local_pos.append(samples)
+            geom_idx.append(np.full(samples.shape[0], geom.idx, dtype=gs.np_int))
+
+        if local_pos:
+            local_pos_np = np.concatenate(local_pos, axis=0).astype(gs.np_float, copy=False)
+            geom_idx_np = np.concatenate(geom_idx, axis=0).astype(gs.np_int, copy=False)
+        else:
+            local_pos_np = np.zeros((0, 3), dtype=gs.np_float)
+            geom_idx_np = np.zeros((0,), dtype=gs.np_int)
+
+        # Akinci et al. 2012 boundary volume: V_b = 1 / (W(0) + sum_k W(x_b - x_k)).
+        volume_np = np.zeros((local_pos_np.shape[0],), dtype=gs.np_float)
+        for i, pos_i in enumerate(local_pos_np):
+            same_geom = geom_idx_np == geom_idx_np[i]
+            diff = local_pos_np[same_geom] - pos_i
+            dist = np.linalg.norm(diff, axis=1)
+            near = dist <= h
+            denom = float(np.sum([self._cubic_kernel_np(float(d)) for d in dist[near]]))
+            volume_np[i] = gs.np_float(1.0 / denom) if denom > 0.0 else gs.np_float(0.0)
+
+        self._akinci_boundary_n_particles = int(local_pos_np.shape[0])
+        static_shape = (max(self._akinci_boundary_n_particles, 1),)
+        batched_shape = (max(self._akinci_boundary_n_particles, 1), self._B)
+        self.akinci_boundary_pos0 = qd.Vector.field(3, dtype=gs.qd_float, shape=static_shape)
+        self.akinci_boundary_volume = qd.field(dtype=gs.qd_float, shape=static_shape)
+        self.akinci_boundary_geom_idx = qd.field(dtype=gs.qd_int, shape=static_shape)
+        self.akinci_boundary_pos = qd.Vector.field(3, dtype=gs.qd_float, shape=batched_shape)
+        self.akinci_boundary_pos_reordered = qd.Vector.field(3, dtype=gs.qd_float, shape=batched_shape)
+        self.akinci_boundary_volume_reordered = qd.field(dtype=gs.qd_float, shape=batched_shape)
+        self.akinci_boundary_geom_idx_reordered = qd.field(dtype=gs.qd_int, shape=batched_shape)
+        self.akinci_boundary_active = qd.field(dtype=gs.qd_int, shape=batched_shape)
+        self.akinci_boundary_active_reordered = qd.field(dtype=gs.qd_int, shape=batched_shape)
+        self.akinci_boundary_reordered_idx = qd.field(dtype=gs.qd_int, shape=batched_shape)
+
+        if self._akinci_boundary_n_particles > 0:
+            self.akinci_boundary_pos0.from_numpy(local_pos_np)
+            self.akinci_boundary_volume.from_numpy(volume_np)
+            self.akinci_boundary_geom_idx.from_numpy(geom_idx_np)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -251,6 +391,75 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.particles_reordered[i_p, i_b].rho += den
 
                 self.particles_reordered[i_p, i_b].rho *= self.particles_info_reordered[i_p, i_b].rho
+
+    @qd.func
+    def _func_akinci_boundary_world_pos(self, i_bp, i_b, geoms_state: array_class.GeomsState):
+        i_g = self.akinci_boundary_geom_idx[i_bp]
+        return qd_transform_by_trans_quat(
+            self.akinci_boundary_pos0[i_bp],
+            geoms_state.pos[i_g, i_b],
+            geoms_state.quat[i_g, i_b],
+        )
+
+    @qd.kernel
+    def _kernel_update_akinci_boundary_particles(
+        self,
+        geoms_state: array_class.GeomsState,
+        geoms_info: array_class.GeomsInfo,
+    ):
+        for i_bp, i_b in qd.ndrange(self._akinci_boundary_n_particles, self._B):
+            i_g = self.akinci_boundary_geom_idx[i_bp]
+            active = (
+                geoms_info.needs_coup[i_g]
+                and not geoms_info.is_fixed[i_g]
+                and geoms_info.type[i_g] != gs.GEOM_TYPE.PLANE
+            )
+            self.akinci_boundary_active[i_bp, i_b] = active
+            if active:
+                self.akinci_boundary_pos[i_bp, i_b] = self._func_akinci_boundary_world_pos(i_bp, i_b, geoms_state)
+            else:
+                self.akinci_boundary_pos[i_bp, i_b] = gu.qd_nowhere()
+
+        self.akinci_boundary_sh.compute_reordered_idx(
+            self._akinci_boundary_n_particles,
+            self.akinci_boundary_pos,
+            self.akinci_boundary_active,
+            self.akinci_boundary_reordered_idx,
+        )
+
+        self.akinci_boundary_active_reordered.fill(0)
+        for i_bp, i_b in qd.ndrange(self._akinci_boundary_n_particles, self._B):
+            if self.akinci_boundary_active[i_bp, i_b]:
+                reordered_idx = self.akinci_boundary_reordered_idx[i_bp, i_b]
+                self.akinci_boundary_pos_reordered[reordered_idx, i_b] = self.akinci_boundary_pos[i_bp, i_b]
+                self.akinci_boundary_volume_reordered[reordered_idx, i_b] = self.akinci_boundary_volume[i_bp]
+                self.akinci_boundary_geom_idx_reordered[reordered_idx, i_b] = self.akinci_boundary_geom_idx[i_bp]
+                self.akinci_boundary_active_reordered[reordered_idx, i_b] = 1
+
+    @qd.kernel
+    def _kernel_compute_rho_boundary(
+        self,
+        f: qd.i32,
+    ):
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles_ng_reordered[i_p, i_b].active and qd.static(self._akinci_boundary):
+                pos = self.particles_reordered[i_p, i_b].pos
+                den = gs.qd_float(0.0)
+                rho0 = self.particles_info_reordered[i_p, i_b].rho
+                base = self.akinci_boundary_sh.pos_to_grid(pos)
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    slot_idx = self.akinci_boundary_sh.grid_to_slot(base + offset)
+                    for i_bp in range(
+                        self.akinci_boundary_sh.slot_start[slot_idx, i_b],
+                        self.akinci_boundary_sh.slot_size[slot_idx, i_b]
+                        + self.akinci_boundary_sh.slot_start[slot_idx, i_b],
+                    ):
+                        if self.akinci_boundary_active_reordered[i_bp, i_b]:
+                            xb = self.akinci_boundary_pos_reordered[i_bp, i_b]
+                            dist = (pos - xb).norm()
+                            if dist <= self._support_radius:
+                                den += rho0 * self.akinci_boundary_volume_reordered[i_bp, i_b] * self.cubic_kernel(dist)
+                self.particles_reordered[i_p, i_b].rho += den
 
     @qd.func
     def _task_compute_non_pressure_forces(self, i, j, ret: qd.template(), i_b: qd.i32):
@@ -357,6 +566,53 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                     self._task_compute_pressure_forces,
                     i_b,
                 )
+                self.particles_reordered[i_p, i_b].acc += acc
+
+    @qd.kernel
+    def _kernel_compute_pressure_boundary_forces(
+        self,
+        f: qd.i32,
+        geoms_info: array_class.GeomsInfo,
+        links_state: array_class.LinksState,
+    ):
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles_ng_reordered[i_p, i_b].active and qd.static(self._akinci_boundary):
+                xi = self.particles_reordered[i_p, i_b].pos
+                rho0 = self.particles_info_reordered[i_p, i_b].rho
+                rho_i = self.particles_reordered[i_p, i_b].rho
+                p_i = self.particles_reordered[i_p, i_b].p
+                dp_i = p_i / (rho_i * rho_i)
+                dp_j = p_i / (rho0 * rho0)
+                mass_i = self.particles_info_reordered[i_p, i_b].mass
+                acc = qd.Vector.zero(gs.qd_float, 3)
+                base = self.akinci_boundary_sh.pos_to_grid(xi)
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    slot_idx = self.akinci_boundary_sh.grid_to_slot(base + offset)
+                    for i_bp in range(
+                        self.akinci_boundary_sh.slot_start[slot_idx, i_b],
+                        self.akinci_boundary_sh.slot_size[slot_idx, i_b]
+                        + self.akinci_boundary_sh.slot_start[slot_idx, i_b],
+                    ):
+                        if self.akinci_boundary_active_reordered[i_bp, i_b]:
+                            xb = self.akinci_boundary_pos_reordered[i_bp, i_b]
+                            d_ib = xi - xb
+                            if d_ib.norm() <= self._support_radius:
+                                # Akinci et al. 2012 boundary pressure force.
+                                a = (
+                                    rho0
+                                    * self.akinci_boundary_volume_reordered[i_bp, i_b]
+                                    * (dp_i + dp_j)
+                                    * self.cubic_kernel_derivative(d_ib)
+                                )
+                                acc -= a
+                                i_g = self.akinci_boundary_geom_idx_reordered[i_bp, i_b]
+                                self._coupler.rigid_solver._func_apply_coupling_force(
+                                    geoms_info.link_idx[i_g],
+                                    i_b,
+                                    xb,
+                                    mass_i * a,
+                                    links_state,
+                                )
                 self.particles_reordered[i_p, i_b].acc += acc
 
     @qd.kernel
@@ -725,9 +981,22 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.is_active:
             self._kernel_reorder_particles(f)
             if self._pressure_solver == "WCSPH":
+                if self._akinci_boundary and self._akinci_boundary_n_particles > 0:
+                    self._kernel_update_akinci_boundary_particles(
+                        self._coupler.rigid_solver.dyn_state.geoms,
+                        self._coupler.rigid_solver.dyn_info.geoms,
+                    )
                 self._kernel_compute_rho(f)
+                if self._akinci_boundary and self._akinci_boundary_n_particles > 0:
+                    self._kernel_compute_rho_boundary(f)
                 self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
                 self._kernel_compute_pressure_forces(f)
+                if self._akinci_boundary and self._akinci_boundary_n_particles > 0:
+                    self._kernel_compute_pressure_boundary_forces(
+                        f,
+                        self._coupler.rigid_solver.dyn_info.geoms,
+                        self._coupler.rigid_solver.dyn_state.links,
+                    )
                 self._kernel_advect_velocity(f)
             elif self._pressure_solver == "DFSPH":
                 self._kernel_compute_rho(f)
