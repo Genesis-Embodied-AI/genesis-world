@@ -221,8 +221,9 @@ class SimpleSensorOptions(SensorOptions[SensorT]):
     Options carrying SimpleSensor's imperfection parameters.
 
     Interpreted by ``_apply_hardware_imperfections`` as perturbations introduced by the embedded sampler when it
-    snapshots the sensor into shared memory. Inherited by every ``SimpleSensor``-derived options class; Camera
-    (deriving from ``Sensor`` directly) stays on plain ``SensorOptions``.
+    snapshots the sensor into shared memory. Inherited by every ``SimpleSensor``-derived options class but the IMU,
+    which derives them from those of its instruments; Camera (deriving from ``Sensor`` directly) stays on plain
+    ``SensorOptions``.
 
     Parameters
     ----------
@@ -471,7 +472,7 @@ class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSe
     debug_temperature_range: Vec2FType = (0.0, 100.0)
 
 
-class IMU(RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]):
+class IMU(RigidSensorOptionsMixin["IMUSensor"], SensorOptions["IMUSensor"]):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
     of the associated entity link.
@@ -558,14 +559,22 @@ class IMU(RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
     debug_mag_color: UnitIntervalVec4Type = (0.0, 0.0, 1.0, 0.6)
     debug_mag_scale: PositiveFloat = 0.5
 
-    def model_post_init(self, context: Any) -> None:
-        super().model_post_init(context)
+    # The imperfections of the measurement are those of its instruments, laid in the order of the triplets
+    @property
+    def resolution(self) -> tuple[float, ...]:
+        return self.acc_resolution + self.gyro_resolution + self.mag_resolution
 
-        # FIXME: Resolution should be made private or converted to properties in mixin to prevent setting them directly
-        self.resolution = self.acc_resolution + self.gyro_resolution + self.mag_resolution
-        self.bias = self.acc_bias + self.gyro_bias + self.mag_bias
-        self.random_walk = self.acc_random_walk + self.gyro_random_walk + self.mag_random_walk
-        self.noise = self.acc_noise + self.gyro_noise + self.mag_noise
+    @property
+    def bias(self) -> tuple[float, ...]:
+        return self.acc_bias + self.gyro_bias + self.mag_bias
+
+    @property
+    def noise(self) -> tuple[float, ...]:
+        return self.acc_noise + self.gyro_noise + self.mag_noise
+
+    @property
+    def random_walk(self) -> tuple[float, ...]:
+        return self.acc_random_walk + self.gyro_random_walk + self.mag_random_walk
 
 
 class SurfaceDistanceProbe(

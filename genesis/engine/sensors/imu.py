@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
@@ -20,6 +21,13 @@ if TYPE_CHECKING:
     from genesis.vis.rasterizer_context import RasterizerContext
 
     from .sensor_manager import SensorManager
+
+
+# The instruments of an IMU, in the order their triplets take in its measurement
+class _Instrument(IntEnum):
+    ACCELEROMETER = 0
+    GYROSCOPE = 1
+    MAGNETOMETER = 2
 
 
 @qd.kernel(fastcache=True)
@@ -129,12 +137,6 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
         shared_metadata: IMUSharedMetadata,
         manager: "SensorManager",
     ):
-        # FIXME: Resolution should be made private in mixin, so that it cannot be set by the user directly.
-        options.resolution = options.acc_resolution + options.gyro_resolution + options.mag_resolution
-        options.bias = options.acc_bias + options.gyro_bias + options.mag_bias
-        options.random_walk = options.acc_random_walk + options.gyro_random_walk + options.mag_random_walk
-        options.noise = options.acc_noise + options.gyro_noise + options.mag_noise
-
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
         self.debug_objects: list["Mesh"] = []
@@ -145,19 +147,23 @@ class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, No
     def set_acc_cross_axis_coupling(self, cross_axis_coupling: CrossCouplingAxisType, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
         rot_matrix = _get_cross_axis_coupling_to_alignment_matrix(cross_axis_coupling)
-        self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3, :, :] = rot_matrix
+        self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + _Instrument.ACCELEROMETER, :, :] = (
+            rot_matrix
+        )
 
     @gs.assert_built
     def set_gyro_cross_axis_coupling(self, cross_axis_coupling: CrossCouplingAxisType, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
         rot_matrix = _get_cross_axis_coupling_to_alignment_matrix(cross_axis_coupling)
-        self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + 1, :, :] = rot_matrix
+        self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + _Instrument.GYROSCOPE, :, :] = rot_matrix
 
     @gs.assert_built
     def set_mag_cross_axis_coupling(self, cross_axis_coupling: CrossCouplingAxisType, envs_idx=None):
         envs_idx = self._sanitize_envs_idx(envs_idx)
         rot_matrix = _get_cross_axis_coupling_to_alignment_matrix(cross_axis_coupling)
-        self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + 2, :, :] = rot_matrix
+        self._shared_metadata.alignment_rot_matrix[envs_idx, self._idx * 3 + _Instrument.MAGNETOMETER, :, :] = (
+            rot_matrix
+        )
 
     # ================================ internal methods ================================
 
