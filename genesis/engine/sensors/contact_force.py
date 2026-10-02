@@ -163,7 +163,7 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
         if self._shared_metadata.solver is None:
             self._shared_metadata.solver = self._manager._sim.rigid_solver
 
-        entity = self._shared_metadata.solver.entities[self._options.entity_idx]
+        entity = self._manager._sim.entities[self._options.entity_idx]
         link_idx = self._options.link_idx_local + entity.link_start
         self._link = entity.links[self._options.link_idx_local]
 

@@ -193,10 +193,13 @@ def test_sensor(free_box, show_viewer, tol, n_envs):
     assert_allclose(imu_noisy.read().ang_vel, 0.0, tol=gs.EPS)
     assert_allclose(imu_noisy.read().mag, 0.0, tol=gs.EPS)  # biased
 
-    imu.set_bias(BIAS + 2 * (0.0, 0.0, 0.0))
+    envs_idx = [1] if n_envs > 0 else None
+    imu.set_bias(BIAS + 2 * (0.0, 0.0, 0.0), envs_idx=envs_idx)
     scene.step()
-    assert_allclose(imu.read().lin_acc, BIAS, tol=tol)
+    assert_allclose(imu.read(envs_idx).lin_acc, BIAS, tol=tol)
     assert_allclose(imu.read().mag, MAG_FIELD, tol=tol)
+    if n_envs > 0:
+        assert_allclose(imu.read(0).lin_acc, 0.0, tol=tol)
 
 
 @pytest.mark.required

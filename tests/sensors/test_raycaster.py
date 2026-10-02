@@ -75,13 +75,14 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     )
     grid_res = RAYCAST_GRID_SIZE_X / (NUM_RAYS_XY[0] - 1)
     grid_size_y = grid_res * (NUM_RAYS_XY[1] - 1)
+    grid_pattern = gs.sensors.raycaster.GridPattern(
+        resolution=grid_res,
+        size=(RAYCAST_GRID_SIZE_X, grid_size_y),
+        direction=(0.0, 0.0, -1.0),  # pointing downwards to ground
+    )
     grid_raycaster = scene.add_sensor(
         gs.sensors.Raycaster(
-            pattern=gs.sensors.raycaster.GridPattern(
-                resolution=grid_res,
-                size=(RAYCAST_GRID_SIZE_X, grid_size_y),
-                direction=(0.0, 0.0, -1.0),  # pointing downwards to ground
-            ),
+            pattern=grid_pattern,
             entity_idx=grid_sensor.idx,
             pos_offset=(0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE),
             return_world_frame=True,
@@ -90,6 +91,19 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
             debug_ray_hit_color=(0.0, 1.0, 0.0, 1.0),
         )
     )
+    # The obstacle top is closer than min_range while the ground is farther
+    grid_raycaster_min_range = scene.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=grid_pattern,
+            entity_idx=grid_sensor.idx,
+            pos_offset=(0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE),
+            min_range=RAYCAST_HEIGHT - 0.5 * BOX_SIZE,
+            no_hit_value=-1.0,
+            return_points=False,
+        )
+    )
+    with pytest.raises(gs.GenesisException, match="Jitter"):
+        gs.sensors.Raycaster(pattern=gs.sensors.raycaster.GridPattern(), jitter=0.01)
     depth_camera = scene.add_sensor(
         gs.sensors.DepthCamera(
             pattern=gs.sensors.raycaster.DepthCameraPattern(
@@ -205,6 +219,17 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
         grid_distances_ref[(..., *hit_ij)] = RAYCAST_HEIGHT - obstacle_pos[..., 2] - 0.5 * BOX_SIZE
         assert_allclose(grid_distances, grid_distances_ref, tol=gs.EPS)
 
+        # A hit closer than min_range reads as a miss, and still hides the ground behind it
+        grid_distances_ref[(..., *hit_ij)] = -1.0
+        assert_allclose(grid_raycaster_min_range.read().distances, grid_distances_ref, tol=gs.EPS)
+
+    grid_distances_ref = grid_raycaster.read().distances.clone()
+    grid_distances_ref.reshape((-1, *NUM_RAYS_XY))[-1] -= 0.1
+    grid_raycaster.set_pos_offset((0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE - 0.1), envs_idx=[1] if n_envs > 0 else None)
+    scene.sim._sensor_manager.step()
+    assert_allclose(grid_raycaster.read().distances, grid_distances_ref, tol=gs.EPS)
+    grid_raycaster.set_pos_offset((0.0, 0.0, -0.5 * RAYCAST_BOX_SIZE))
+
     assert_allclose(graze_raycaster.read().distances, GRAZE_RANGE, tol=gs.EPS)
 
     # Validate spherical raycast
@@ -222,6 +247,10 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     for angles, n_points in zip(full_rotation_angles, NUM_RAYS_XY):
         angles_ref = torch.deg2rad(torch.linspace(-180.0, 180.0, n_points + 1, dtype=gs.tc_float)[:-1])
         assert_allclose(angles, angles_ref, tol=tol)
+    depth_pattern = gs.sensors.raycaster.DepthCameraPattern(res=(8, 6), fx=5.0)
+    assert_allclose((depth_pattern.fx, depth_pattern.fy), (5.0, 4.0), tol=gs.EPS)
+    depth_pattern = gs.sensors.raycaster.DepthCameraPattern(res=(8, 6), fov_vertical=90.0)
+    assert_allclose((depth_pattern.fx, depth_pattern.fy), 3.0, tol=gs.EPS)
 
     # Check that we can read image from depth camera
     assert_equal(depth_camera.read_image().shape, batch_shape + NUM_RAYS_XY)

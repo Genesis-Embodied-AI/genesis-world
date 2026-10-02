@@ -86,6 +86,8 @@ def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
             entity_idx=pendulums.idx,
         ),
     )
+    with pytest.raises(gs.GenesisException, match="link_idx_local"):
+        gs.sensors.JointTorque(entity_idx=pendulums.idx, link_idx_local=0)
     scene.build(n_envs=n_envs)
 
     armature = pendulums.get_dofs_armature()

@@ -799,8 +799,6 @@ class TemperatureGridSensor(
         Only draws for the first rendered environment.
         """
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
-        if self._link is None:
-            return
 
         for obj in self._debug_objects:
             if obj is not None:
