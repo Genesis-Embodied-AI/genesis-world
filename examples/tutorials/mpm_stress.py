@@ -30,7 +30,7 @@ def main():
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=32,
-            lower_bound=(-0.3, -0.3, 0.0),
+            lower_bound=(-0.3, -0.3, -0.2),
             upper_bound=(0.3, 0.3, 0.6),
         ),
         viewer_options=gs.options.ViewerOptions(
