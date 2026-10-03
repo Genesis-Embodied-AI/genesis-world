@@ -422,8 +422,134 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-@pytest.mark.parametrize("gjk_collision", [True, False])
-def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
+@pytest.mark.parametrize("box_box_detection", [False, True])
+def test_box_stacks_stability(box_box_detection, show_viewer, tol):
+    # Piles of boxes of random shapes, each lying on a random face at a random yaw near the axis of its pile, on fixed
+    # bases at several scales, restacked in a new order and pose after every reset.
+    N_ENVS = 16
+    N_PHASES = 3
+    N_STEPS = 50
+    GRAVITY = 9.81
+    TILT = 0.05
+    SCALES = (0.1, 0.4, 2.0)
+    N_PILES_PER_SCALE = 2
+    BASE_SIZE = np.array((2.0, 2.0, 1.0))
+    BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.2, 0.1), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
+    PILE_SPACING = 1.5 * BASE_SIZE[0] * max(SCALES)
+    BOX_EULER_ROTS = np.array(
+        (
+            (0.0, 0.0, 0.0),
+            (180.0, 0.0, 0.0),
+            (90.0, 0.0, 0.0),
+            (-90.0, 0.0, 0.0),
+            (0.0, -90.0, 0.0),
+            (0.0, 90.0, 0.0),
+        )
+    )
+    BOX_UP_AXES = np.array((2, 2, 1, 1, 0, 0))
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=2,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            box_box_detection=box_box_detection,
+            use_hibernation=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(15.5, -5.5, 11.0),
+            camera_lookat=(0.1, 1.2, 0.6),
+        ),
+        show_viewer=show_viewer,
+    )
+    piles = []
+    for (i_s, scale), i_p in product(enumerate(SCALES), range(N_PILES_PER_SCALE)):
+        pile_pos = (PILE_SPACING * (i_p - 0.5), PILE_SPACING * (i_s - 1), scale * BASE_SIZE[2])
+        scene.add_entity(
+            gs.morphs.Box(
+                pos=(pile_pos[0], pile_pos[1], 0.5 * pile_pos[2]),
+                size=scale * BASE_SIZE,
+                fixed=True,
+            ),
+        )
+        # Every box takes each shape in some environments, in an order shuffled per box.
+        # The boxes are built apart, as the contacts of boxes overlapping at build time overflow the contact budget.
+        boxes = [
+            scene.add_entity(
+                morph=[
+                    gs.morphs.Box(
+                        pos=(pile_pos[0], pile_pos[1], pile_pos[2] + (i_b + 1) * scale),
+                        size=scale * box_size,
+                    )
+                    for box_size in np.random.permutation(BOXES_SIZE)
+                ],
+            )
+            for i_b in range(len(BOXES_SIZE))
+        ]
+        piles.append((scale, pile_pos, boxes))
+    scene.build(n_envs=N_ENVS)
+
+    # The boxes are built axis-aligned, so their bounding boxes give the size each environment simulates
+    piles_boxes_size = []
+    for scale, pile_pos, boxes in piles:
+        aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
+        piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])
+
+    envs_tilt = TILT * (np.arange(N_ENVS) % 2)
+    for i_phase in range(N_PHASES):
+        if i_phase > 0:
+            scene.reset()
+        for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
+            n_boxes = len(boxes)
+            # Create stable box stacks which should not tip over.
+            is_up_axis = np.arange(3) == BOX_UP_AXES[:, None]
+            faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
+            faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
+            faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*faces_height.shape), -1.0), axis=-1)
+            boxes_height = np.take_along_axis(faces_height, faces[..., None], axis=-1)[..., 0]
+            boxes_width = np.take_along_axis(faces_width, faces[..., None], axis=-1)[..., 0]
+            levels = np.argsort(np.random.rand(n_boxes, N_ENVS), axis=0)
+            boxes_top = np.empty_like(boxes_height)
+            np.put_along_axis(boxes_top, levels, np.cumsum(np.take_along_axis(boxes_height, levels, axis=0), axis=0), 0)
+            boxes_pos = np.empty((n_boxes, N_ENVS, 3))
+            boxes_offset = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2))
+            boxes_pos[..., :2] = pile_pos[:2] + 0.08 * boxes_width.min(axis=0)[:, None] * boxes_offset
+            boxes_pos[..., 2] = pile_pos[2] + boxes_top - 0.5 * boxes_height
+            angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * envs_tilt[:, None]
+            angle_yaw = np.random.uniform(low=-180.0, high=180.0, size=(n_boxes, N_ENVS, 1))
+            quat_face = gu.euler_to_quat(BOX_EULER_ROTS[faces])
+            quat_pose = gu.euler_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1))
+            boxes_quat = gu.transform_quat_by_quat(quat_face, quat_pose)
+            for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
+                box.set_pos(pos)
+                box.set_quat(quat)
+
+        # Gravity and contacts alone act on the boxes, so the mechanical energy of a pile can only decrease.
+        piles_links_idx = [range(boxes[0].link_start, boxes[-1].link_end) for scale, pile_pos, boxes in piles]
+        piles_dofs_idx = [range(boxes[0].dof_start, boxes[-1].dof_end) for scale, pile_pos, boxes in piles]
+        piles_energy_unit = [sum(box.get_mass() for box in boxes) * GRAVITY * scale for scale, pile_pos, boxes in piles]
+        piles_energy_0 = []
+        for i_step in range(N_STEPS + 1):
+            if i_step > 0:
+                scene.step()
+            for i_p, (links_idx, dofs_idx) in enumerate(zip(piles_links_idx, piles_dofs_idx)):
+                energy = scene.rigid_solver.get_kinetic_energy(links_idx, dofs_idx)
+                energy += scene.rigid_solver.get_potential_energy(links_idx, dofs_idx)
+                if i_step == 0:
+                    piles_energy_0.append(energy)
+                assert ((energy - piles_energy_0[i_p]) / piles_energy_unit[i_p] <= tol).all()
+
+        # Every pile has come to rest by the end of the phase
+        for links_idx, dofs_idx, energy_unit in zip(piles_links_idx, piles_dofs_idx, piles_energy_unit):
+            assert (scene.rigid_solver.get_kinetic_energy(links_idx, dofs_idx) / energy_unit <= tol).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("precision", ["32"])
+@pytest.mark.parametrize("gjk_collision, box_box_detection", [(True, False), (False, False), (False, True)])
+def test_convex_collision_across_geom_scales(gjk_collision, box_box_detection, show_viewer, tol):
     YAW = 1.1
     BOX_SIZE = 16.0
     GEOM_SIZE = 0.016
@@ -440,6 +566,7 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
+            box_box_detection=box_box_detection,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(6.6, 5.74, 8.85),
@@ -514,6 +641,7 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
     is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
     assert is_pressed.any()
     assert_allclose(contacts["penetration"][is_pressed], PRESSED_DEPTH, tol=tol)
+    assert ((contacts["position"][is_pressed] - geom_pressed.get_pos()).norm(dim=-1) <= GEOM_SIZE).all()
     assert (contacts["penetration"][is_box & ~is_pressed] >= 0.0).all()
     assert (contacts["penetration"][is_box & ~is_pressed] <= GEOM_SIZE).all()
     is_lamp = contacts["geom_b"] == lamp.geoms[0].idx

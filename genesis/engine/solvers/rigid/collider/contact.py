@@ -567,6 +567,30 @@ def func_compute_mc_tolerance(
 
 
 @qd.func
+def func_compute_mc_perturbation(
+    i_ga: int,
+    i_gb: int,
+    penetration: float,
+    geom_pair_scale: float,
+    dyn_info: array_class.DynInfo,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+):
+    """Rotation angle of the perturbed multi-contact detections of a geom pair, given the depth of its first contact.
+
+    Each perturbed detection tilts the pair to find another corner of the contact patch. When two box faces already lean
+    against each other by more than the fixed angle, every tilt finds the same deepest corner and the patch shrinks to
+    one edge. Box pairs therefore tilt by up to the penetration over twice the pair scale, the steepest lean at which
+    their faces still touch everywhere. Other pairs, and every pair under MuJoCo compatibility, keep the fixed angle.
+    """
+    perturbation = collider_info.mc_perturbation[None]
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.BOX and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
+            perturbation = qd.max(perturbation, 0.5 * penetration / geom_pair_scale)
+    return perturbation
+
+
+@qd.func
 def func_contact_orthogonals(
     i_ga: int,
     i_gb: int,

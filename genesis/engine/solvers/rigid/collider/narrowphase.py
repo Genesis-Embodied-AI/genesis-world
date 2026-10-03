@@ -20,6 +20,7 @@ from .contact import (
     func_add_diff_contact_input,
     func_apply_smooth_refinement,
     func_compute_geom_pair_scale,
+    func_compute_mc_perturbation,
     func_compute_mc_tolerance,
     func_contact_orthogonals,
     func_rotate_frame,
@@ -1549,6 +1550,7 @@ def func_recompute_perturbed_contact(
     normal_0: qd.types.vector(3),
     contact_pos_0: qd.types.vector(3),
     qrot: qd.types.vector(4),
+    perturbation: float,
     ga_pos_original: qd.types.vector(3),
     ga_quat_original: qd.types.vector(4),
     gb_pos_original: qd.types.vector(3),
@@ -1557,7 +1559,6 @@ def func_recompute_perturbed_contact(
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     used_gjk: bool,
 ):
@@ -1658,8 +1659,7 @@ def func_recompute_perturbed_contact(
     # Single first-order fallback for every case that could not recover an exact normal (analytic capsule-capsule,
     # degenerate MPR, near-collinear portal). Computed once, and only when actually needed.
     if needs_twist:
-        mc_perturbation = collider_info.mc_perturbation[None]
-        twist_rotvec = qd.math.clamp(normal.cross(normal_0), -mc_perturbation, mc_perturbation)
+        twist_rotvec = qd.math.clamp(normal.cross(normal_0), -perturbation, perturbation)
         normal = normal + twist_rotvec.cross(normal)
     if not is_exact:
         penetration = normal.dot(contact_point_b - contact_point_a)
@@ -1806,6 +1806,7 @@ def func_convex_convex_contact(
         axis_0 = qd.Vector.zero(gs.qd_float, 3)
         axis_1 = qd.Vector.zero(gs.qd_float, 3)
         qrot = qd.Vector.zero(gs.qd_float, 4)
+        perturbation = gs.qd_float(0.0)
 
         i_pair = collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
         for i_detection in range(5):
@@ -1822,12 +1823,12 @@ def func_convex_convex_contact(
                     axis_idx = (i_detection - 1) // 2
                     angle_sign = 2 * ((i_detection - 1) % 2) - 1
                     axis = axis_0 if axis_idx == 0 else axis_1
-                    qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+                    qrot = gu.qd_rotvec_to_quat(angle_sign * perturbation * axis, EPS)
                 else:
                     # Perturbation axis must not be aligned with the principal axes of inertia of the geometry,
                     # otherwise it would be more sensitive to ill-conditioning.
                     axis = (2 * (i_detection % 2) - 1) * axis_0 + (1 - 2 * ((i_detection // 2) % 2)) * axis_1
-                    qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
+                    qrot = gu.qd_rotvec_to_quat(perturbation * axis, EPS)
 
                 # Apply perturbation starting from original state
                 ga_pos_current, ga_quat_current = func_rotate_frame(
@@ -2124,6 +2125,9 @@ def func_convex_convex_contact(
                         axis_0, axis_1 = func_contact_orthogonals(
                             i_ga, i_gb, i_b, normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
                         )
+                        perturbation = func_compute_mc_perturbation(
+                            i_ga, i_gb, penetration_0, geom_pair_scale, dyn_info, collider_info, rigid_config
+                        )
                         n_con = 1
 
                     if qd.static(
@@ -2156,6 +2160,7 @@ def func_convex_convex_contact(
                         normal_0,
                         contact_pos_0,
                         qrot,
+                        perturbation,
                         ga_pos_original,
                         ga_quat_original,
                         gb_pos_original,
@@ -2164,7 +2169,6 @@ def func_convex_convex_contact(
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         rigid_config,
                         _used_gjk,
                     )
@@ -2423,6 +2427,7 @@ def _func_multicontact_detect(
 
     contact0_normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
     contact0_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
+    contact0_penetration = collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0]
     has_contact0 = not is_gjk_preferred_0
     is_gjk_multi_done = False
     n_con = gs.qd_int(0)
@@ -2433,6 +2438,7 @@ def _func_multicontact_detect(
     # One runtime loop drives every detection of the call, so the detection pipeline is inlined once in the kernel
     axis_0 = qd.Vector.zero(gs.qd_float, 3)
     axis_1 = qd.Vector.zero(gs.qd_float, 3)
+    perturbation = gs.qd_float(0.0)
     is_axes_computed = False
     for i_det in range(i_det_start, i_det_end):
         is_initial_detection = i_det == 0
@@ -2459,6 +2465,9 @@ def _func_multicontact_detect(
                 axis_0, axis_1 = func_contact_orthogonals(
                     i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
                 )
+                perturbation = func_compute_mc_perturbation(
+                    i_ga, i_gb, contact0_penetration, geom_pair_scale, dyn_info, collider_info, rigid_config
+                )
                 is_axes_computed = True
             # Declared ahead of the branches that assign them, as quadrants scoping requires.
             qrot = qd.Vector.zero(gs.qd_float, 4)
@@ -2472,11 +2481,11 @@ def _func_multicontact_detect(
                     axis_idx = (i_det - 1) // 2
                     angle_sign = 2 * ((i_det - 1) % 2) - 1
                     axis = axis_0 if axis_idx == 0 else axis_1
-                    qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+                    qrot = gu.qd_rotvec_to_quat(angle_sign * perturbation * axis, EPS)
                 else:
                     # Combined-axes perturbation: see the twin loop in func_convex_convex_contact.
                     axis = (2 * (i_det % 2) - 1) * axis_0 + (1 - 2 * ((i_det // 2) % 2)) * axis_1
-                    qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
+                    qrot = gu.qd_rotvec_to_quat(perturbation * axis, EPS)
                 ga_pos_current, ga_quat_current = func_rotate_frame(
                     ga_pos_original, ga_quat_original, contact0_pos, qrot
                 )
@@ -2590,6 +2599,7 @@ def _func_multicontact_detect(
                         )
                         contact0_normal = normal
                         contact0_pos = contact_pos
+                        contact0_penetration = penetration
                         slot_status = MULTICONTACT_SLOT.BASE
                         slot_normal = normal
                         slot_pos = contact_pos
@@ -2615,6 +2625,7 @@ def _func_multicontact_detect(
                         contact0_normal,
                         contact0_pos,
                         qrot,
+                        perturbation,
                         ga_pos_original,
                         ga_quat_original,
                         gb_pos_original,
@@ -2623,7 +2634,6 @@ def _func_multicontact_detect(
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         rigid_config,
                         is_gjk_used,
                     )

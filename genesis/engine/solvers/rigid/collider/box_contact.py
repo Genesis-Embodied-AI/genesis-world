@@ -273,6 +273,9 @@ def func_box_box_contact(
             penetration = c2
             code = i + 3 * (pos12[i] < 0) + 6
     clnorm = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
+    # Keep the face axis unless an edge-edge axis has a smaller penetration by more than rounding error.
+    # That error scales with the box sizes, since each penetration sums terms bounded by the half-sizes.
+    tol_edge = EPS * (size1.sum() + size2.sum())
     for i, j in qd.static(qd.ndrange(3, 3)):
         rj0 = rott[j, 0]
         rj1 = rott[j, 1]
@@ -309,7 +312,7 @@ def func_box_box_contact(
             if c3 < -margin:
                 is_return = True
 
-            if c3 < penetration * (1.0 - 1e-12):
+            if c3 < penetration - tol_edge:
                 penetration = c3
                 cle1 = 0
                 for k in qd.static(range(3)):
@@ -497,9 +500,11 @@ def func_box_box_contact(
                         )
                         n = n + 1
 
+            # Keep the incident face corners lying on the reference face. When the incident box touches it with a single
+            # corner, that corner is the whole contact and is kept wherever it lies.
             for i in range(1 << (m - 1)):
                 tmp1 = collider_state.box_pts[0 if i == 0 else i + 2, i_b]
-                if not (i and (tmp1[0] <= -lx or tmp1[0] >= lx or tmp1[1] <= -ly or tmp1[1] >= ly)):
+                if m == 1 or not (tmp1[0] <= -lx or tmp1[0] >= lx or tmp1[1] <= -ly or tmp1[1] >= ly):
                     collider_state.box_points[n, i_b] = tmp1
                     n = n + 1
             m = n
@@ -522,7 +527,7 @@ def func_box_box_contact(
             n_start = collider_state.n_contacts[i_b]
             for i in range(n):
                 if n_added < qd.static(collider_static_config.n_contacts_per_nonconvex_pair):
-                    dist = collider_state.box_points[i, i_b][2]
+                    dist = collider_state.box_depth[i, i_b]
                     collider_state.box_points[i, i_b][2] = collider_state.box_points[i, i_b][2] + hz
                     contact_pos = p + r @ collider_state.box_points[i, i_b]
 
@@ -805,10 +810,9 @@ def func_box_box_contact(
                 for i in range(4):
                     x, y = collider_state.box_ppts2[i, 0, i_b], collider_state.box_ppts2[i, 1, i_b]
 
-                    if nl == 0:
-                        if (nf != 0) and (x < -lx or x > lx) and (y < -ly or y > ly):
-                            continue
-                    elif x < -lx or x > lx or y < -ly or y > ly:
+                    # Skip an incident corner outside the reference face, which would report its offset as penetration.
+                    # Without edge crossings or reference corners the incident face lies within it, so none is skipped.
+                    if (nl != 0 or nf != 0) and (x < -lx or x > lx or y < -ly or y > ly):
                         continue
 
                     c1 = 0
