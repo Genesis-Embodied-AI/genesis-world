@@ -2525,7 +2525,13 @@ def _func_multicontact_detect(
                     if qd.static(collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.MPR):
                         # When the refinement is called for it applies to this perturbed contact only, rather than
                         # upgrading the whole pair, which keeps the MPR-first model.
-                        if not is_initial_detection and is_col and not use_gjk:
+                        # Plane contacts are analytic: retrying with use_gjk repeats the same detection, not GJK.
+                        if (
+                            not is_initial_detection
+                            and is_col
+                            and not use_gjk
+                            and dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE
+                        ):
                             is_gjk_preferred = func_prefer_gjk_refinement(
                                 i_pair,
                                 i_b,

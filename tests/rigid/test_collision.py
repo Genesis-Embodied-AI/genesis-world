@@ -160,6 +160,7 @@ def test_ellipsoid(xml_path, show_viewer):
         ("sphere", "prim", "terrain"),
         ("sphere", "prim", "nonconvex"),
         ("sphere", "mesh", "mesh"),
+        pytest.param("sphere", "mesh", "plane", marks=pytest.mark.required),
         ("sphere", "nonconvex", "prim"),
         ("sphere", "nonconvex", "nonconvex"),
         ("sphere", "nonconvex", "plane"),

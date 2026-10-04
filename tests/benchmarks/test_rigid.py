@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+import trimesh
 
 import genesis as gs
 
@@ -213,6 +214,31 @@ def get_file_morph_options(**kwargs):
 # **scene_kwargs are forwarded to gs.Scene(), allowing callers to control
 # show_viewer, vis_options, etc. without modifying these factories.
 # ---------------------------------------------------------------------------
+
+
+def make_plane_collision(n_envs, solver=None, gjk=None, **scene_kwargs):
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            max_contacts=8,
+            max_collision_pairs=1,
+            **(dict(constraint_solver=solver) if solver is not None else {}),
+            **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
+        ),
+        **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
+    )
+    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(
+        gs.morphs.MeshSet(
+            files=(trimesh.creation.box(extents=(0.1, 0.1, 0.1)),),
+            pos=(0.0, 0.0, 0.02),
+        ),
+        vis_mode="collision",
+    )
+    time_start = time.time()
+    scene.build(n_envs=n_envs)
+    compile_time = time.time() - time_start
+    # Time collision queries at fixed poses so integration and constraints do not hide detection costs.
+    return scene, scene.rigid_solver.collider.detection, SceneMeta(compile_time=compile_time)
 
 
 def make_go2(n_envs, solver=None, gjk=None, **scene_kwargs):
@@ -1050,6 +1076,21 @@ def factory_logger(stream_writers):
 
 
 @pytest.fixture
+def plane_collision(solver, n_envs, gjk):
+    scene, step_fn, meta = make_plane_collision(n_envs, solver=solver, gjk=gjk)
+    result = run_benchmark(step_fn, n_envs=n_envs, meta=meta)
+    contacts = scene.entities[1].get_contacts()
+    assert torch.all(contacts["valid_mask"].sum(dim=1) == 4)
+    torch.testing.assert_close(
+        contacts["position"][..., 2],
+        torch.full_like(contacts["position"][..., 2], -0.015),
+        atol=1e-6,
+        rtol=0.0,
+    )
+    return result
+
+
+@pytest.fixture
 def go2(solver, n_envs, gjk):
     _, step_fn, meta = make_go2(n_envs, solver=solver, gjk=gjk)
     return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
@@ -1117,6 +1158,7 @@ def table_bussing(solver, n_envs, gjk):
 
 # Full benchmark suite (one instance of each, solver/gjk left at their defaults), run on the 'field' dtype.
 BENCHMARKS_FIELD = [
+    ("plane_collision", None, None, 65536, gs.gpu),
     ("go2", None, None, 4096, gs.gpu),
     ("anymal_random", None, None, 20000, gs.gpu),
     ("g1_fall", None, None, 4096, gs.gpu),
