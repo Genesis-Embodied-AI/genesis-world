@@ -238,6 +238,7 @@ class Collider:
         # Initialize the static config, which stores every data that are compile-time constants.
         # Note that updating any of them will trigger recompilation.
         self.collider_config = array_class.ColliderStaticConfig(
+            has_wide_contact_keys=self._solver.n_links > 46340,
             gpu_cores=get_gpu_core_count(),
             gpu_cores_per_unit=get_gpu_cores_per_unit(),
             has_terrain=has_terrain,
@@ -1192,7 +1193,9 @@ def func_detection(
                 errno,
             )
         if qd.static(coop_dedup):
-            func_clamp_prune_contacts_coop(dyn_state, collider_state, rigid_info, collider_info, errno)
+            func_clamp_prune_contacts_coop(
+                dyn_state, collider_state, rigid_info, collider_info, collider_static_config, errno
+            )
         else:
             func_clamp_prune_contacts(
                 dyn_state, collider_state, rigid_info, collider_info, rigid_config, collider_static_config, errno

@@ -1353,7 +1353,7 @@ class ColliderState:
     contact_proj_v: qd.Tensor
     contact_keep: qd.Tensor
     contact_hull_stack: qd.Tensor
-    # Per-bucket lex sort permutation used by the cooperative dedup kernel
+    # Integer link-pair keys during grouping, then the per-bucket lex sort permutation of the cooperative dedup kernel
     # (func_clamp_prune_contacts_coop) for the phase-3 (u, v) lex sort. Sized to max_candidate_contacts because
     # each env writes its own permutation.
     contact_lex_idx: qd.Tensor
@@ -1450,6 +1450,8 @@ def get_verts_spatial_grid(solver):
 
 @qd.data_oriented
 class ColliderStaticConfig(metaclass=AutoInitMeta):
+    # Whether canonical contact pruning keys exceed the signed 32-bit scratch range.
+    has_wide_contact_keys: bool
     has_terrain: bool
     # True when a convex-convex pair escapes func_narrow_phase_convex_specializations (box-box, plane-box) and reaches
     # the general narrowphase: the split narrowphase on GPU (contact0 + multicontact + sort), the monolithic

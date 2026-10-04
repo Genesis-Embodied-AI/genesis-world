@@ -654,6 +654,22 @@ def func_contact_order_key(pos: qd.types.vector(3)):
 
 
 @qd.func
+def func_contact_link_pair_key(
+    i_c: int,
+    i_b: int,
+    n_links: int,
+    collider_state: array_class.ColliderState,
+    collider_static_config: qd.template(),
+):
+    i_la = collider_state.contact_data.link_a[i_c, i_b]
+    i_lb = collider_state.contact_data.link_b[i_c, i_b]
+    # Float keys merge distinct link pairs once the product exceeds their exact-integer range.
+    # Up to 46340 links, n_links**2 - 1 fits in the signed 32-bit scratch used by the later lex permutation.
+    key_dtype = qd.i64 if qd.static(collider_static_config.has_wide_contact_keys) else qd.i32
+    return qd.cast(qd.min(i_la, i_lb), key_dtype) * n_links + qd.cast(qd.max(i_la, i_lb), key_dtype)
+
+
+@qd.func
 def func_clamp_prune_contacts(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -705,7 +721,8 @@ def func_clamp_prune_contacts(
     max_contacts = collider_info.max_contacts[None]
     tol = collider_info.contact_pruning_tolerance[None]
     prune_deep_penetration_ratio = collider_info.prune_deep_penetration_ratio[None]
-    LP_KEY_STRIDE = gs.qd_float(1.0e7)
+    n_links = dyn_state.links.pos.shape[0]
+    key_dtype = qd.i64 if qd.static(collider_static_config.has_wide_contact_keys) else qd.i32
     EPS = rigid_info.EPS[None]
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
@@ -726,30 +743,34 @@ def func_clamp_prune_contacts(
         # when contact_pruning_tolerance is 0.
         if qd.static(collider_static_config.has_prunable_contacts and not rigid_config.requires_grad):
             if n_con - n_hib >= 3 and tol > gs.qd_float(0.0):
-                # Phase 1: insertion-sort contact_sort_idx by canonical (min_link, max_link) key. The sort_idx
-                # already holds the identity from the unconditional init above, so the initial key read is direct.
-                for i_c in range(n_hib, n_con):
-                    i_la = collider_state.contact_data.link_a[i_c, i_b]
-                    i_lb = collider_state.contact_data.link_b[i_c, i_b]
-                    i_l_min = qd.min(i_la, i_lb)
-                    i_l_max = qd.max(i_la, i_lb)
-                    collider_state.contact_sort_key[i_c, i_b] = qd.cast(i_l_min, gs.qd_float) * LP_KEY_STRIDE + qd.cast(
-                        i_l_max, gs.qd_float
-                    )
-
+                # Phase 1: insertion-sort contact_sort_idx by the exact canonical (min_link, max_link) key.
+                # The lex permutation is unused until projection, so it can hold integer pair keys during grouping.
+                if qd.static(not collider_static_config.has_wide_contact_keys):
+                    for i_c in range(n_hib, n_con):
+                        collider_state.contact_lex_idx[i_c, i_b] = func_contact_link_pair_key(
+                            i_c, i_b, n_links, collider_state, collider_static_config
+                        )
                 for i_c in range(n_hib + 1, n_con):
-                    key_p = collider_state.contact_sort_key[i_c, i_b]
-                    if collider_state.contact_sort_key[i_c - 1, i_b] <= key_p:
-                        continue
                     i_p = collider_state.contact_sort_idx[i_c, i_b]
+                    key_p = key_dtype(0)
+                    if qd.static(not collider_static_config.has_wide_contact_keys):
+                        key_p = collider_state.contact_lex_idx[i_p, i_b]
+                    else:
+                        key_p = func_contact_link_pair_key(i_p, i_b, n_links, collider_state, collider_static_config)
                     j_c = i_c - 1
                     while j_c >= n_hib:
-                        if collider_state.contact_sort_key[j_c, i_b] <= key_p:
+                        i_q = collider_state.contact_sort_idx[j_c, i_b]
+                        key_q = key_dtype(0)
+                        if qd.static(not collider_static_config.has_wide_contact_keys):
+                            key_q = collider_state.contact_lex_idx[i_q, i_b]
+                        else:
+                            key_q = func_contact_link_pair_key(
+                                i_q, i_b, n_links, collider_state, collider_static_config
+                            )
+                        if key_q <= key_p:
                             break
-                        collider_state.contact_sort_key[j_c + 1, i_b] = collider_state.contact_sort_key[j_c, i_b]
-                        collider_state.contact_sort_idx[j_c + 1, i_b] = collider_state.contact_sort_idx[j_c, i_b]
+                        collider_state.contact_sort_idx[j_c + 1, i_b] = i_q
                         j_c = j_c - 1
-                    collider_state.contact_sort_key[j_c + 1, i_b] = key_p
                     collider_state.contact_sort_idx[j_c + 1, i_b] = i_p
 
                 # Default: keep everything. Buckets that pass the gates flip their entries to drop and then mark
@@ -1088,6 +1109,7 @@ def func_clamp_prune_contacts_coop(
     collider_state: array_class.ColliderState,
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
+    collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
     """GPU-only cooperative warp-per-env variant of func_clamp_prune_contacts.
@@ -1107,7 +1129,8 @@ def func_clamp_prune_contacts_coop(
     max_contacts = collider_info.max_contacts[None]
     tol = collider_info.contact_pruning_tolerance[None]
     prune_deep_penetration_ratio = collider_info.prune_deep_penetration_ratio[None]
-    LP_KEY_STRIDE = gs.qd_float(1.0e7)
+    n_links = dyn_state.links.pos.shape[0]
+    key_dtype = qd.i64 if qd.static(collider_static_config.has_wide_contact_keys) else qd.i32
     EPS = rigid_info.EPS[None]
 
     _K = qd.static(32)
@@ -1134,52 +1157,54 @@ def func_clamp_prune_contacts_coop(
             i_c_ += _K
 
         if n_con - n_hib >= 3:
-            # PARALLEL: phase 1a key init, 32 lanes stride over the live contacts (see func_clamp_prune_contacts).
-            # contact_sort_idx identity was already written in the unconditional init block above so the phase-1a
-            # sort can read+sort it in place.
-            i_c_ = n_hib + tid
-            while i_c_ < n_con:
-                i_la = collider_state.contact_data.link_a[i_c_, i_b]
-                i_lb = collider_state.contact_data.link_b[i_c_, i_b]
-                i_l_min = qd.min(i_la, i_lb)
-                i_l_max = qd.max(i_la, i_lb)
-                collider_state.contact_sort_key[i_c_, i_b] = qd.cast(i_l_min, gs.qd_float) * LP_KEY_STRIDE + qd.cast(
-                    i_l_max, gs.qd_float
-                )
-                i_c_ += _K
-
             # Phase 1a sort: bitonic sort across _K lanes when n_con <= _K, serial-on-lane-0 insertion sort
             # otherwise.
             if n_con - n_hib <= _K:
                 # Load with sentinel for out-of-range lanes (pushes them to the end of ascending sort).
-                my_key = qd.cast(gs.qd_float(1.0e30), gs.qd_float)
+                my_key = key_dtype(0)
+                if qd.static(not collider_static_config.has_wide_contact_keys):
+                    my_key = qd.i32(0x7FFFFFFF)
+                else:
+                    my_key = qd.i64(0x7FFFFFFFFFFFFFFF)
                 my_idx = qd.i32(-1)
                 i_c_lane = n_hib + tid
                 if i_c_lane < n_con:
-                    my_key = collider_state.contact_sort_key[i_c_lane, i_b]
                     my_idx = collider_state.contact_sort_idx[i_c_lane, i_b]
+                    my_key = func_contact_link_pair_key(my_idx, i_b, n_links, collider_state, collider_static_config)
 
                 my_key, my_idx = qd.simt.subgroup.bitonic_sort_kv_tiled(my_key, my_idx, _LOG2_K)
 
                 # Write back the sorted values for the real range.
                 if i_c_lane < n_con:
-                    collider_state.contact_sort_key[i_c_lane, i_b] = my_key
                     collider_state.contact_sort_idx[i_c_lane, i_b] = my_idx
             elif tid == 0:
                 # Serial fallback: insertion sort on lane 0 for n_con > 32.
+                if qd.static(not collider_static_config.has_wide_contact_keys):
+                    for i_c in range(n_hib, n_con):
+                        collider_state.contact_lex_idx[i_c, i_b] = func_contact_link_pair_key(
+                            i_c, i_b, n_links, collider_state, collider_static_config
+                        )
                 for i_c in range(n_hib + 1, n_con):
-                    key_p = collider_state.contact_sort_key[i_c, i_b]
-                    if collider_state.contact_sort_key[i_c - 1, i_b] <= key_p:
-                        continue
                     i_p = collider_state.contact_sort_idx[i_c, i_b]
+                    key_p = key_dtype(0)
+                    if qd.static(not collider_static_config.has_wide_contact_keys):
+                        key_p = collider_state.contact_lex_idx[i_p, i_b]
+                    else:
+                        key_p = func_contact_link_pair_key(i_p, i_b, n_links, collider_state, collider_static_config)
                     j_c = i_c - 1
                     while j_c >= n_hib:
-                        if collider_state.contact_sort_key[j_c, i_b] <= key_p:
+                        i_q = collider_state.contact_sort_idx[j_c, i_b]
+                        key_q = key_dtype(0)
+                        if qd.static(not collider_static_config.has_wide_contact_keys):
+                            key_q = collider_state.contact_lex_idx[i_q, i_b]
+                        else:
+                            key_q = func_contact_link_pair_key(
+                                i_q, i_b, n_links, collider_state, collider_static_config
+                            )
+                        if key_q <= key_p:
                             break
-                        collider_state.contact_sort_key[j_c + 1, i_b] = collider_state.contact_sort_key[j_c, i_b]
-                        collider_state.contact_sort_idx[j_c + 1, i_b] = collider_state.contact_sort_idx[j_c, i_b]
+                        collider_state.contact_sort_idx[j_c + 1, i_b] = i_q
                         j_c = j_c - 1
-                    collider_state.contact_sort_key[j_c + 1, i_b] = key_p
                     collider_state.contact_sort_idx[j_c + 1, i_b] = i_p
 
             qd.simt.subgroup.sync()

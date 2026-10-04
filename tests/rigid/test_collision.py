@@ -724,7 +724,65 @@ def test_contact_dedup(surface_kind, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("gjk_collision", [True, False])
-def test_contact_pruning(gjk_collision, show_viewer):
+@pytest.mark.parametrize(
+    "contact_layout, n_envs",
+    [
+        ("corner", 2),
+        pytest.param("collinear_pairs", 0, marks=pytest.mark.precision("32")),
+        pytest.param("collinear_pairs", 2, marks=pytest.mark.precision("32")),
+    ],
+)
+def test_contact_pruning(gjk_collision, contact_layout, n_envs, collinear_contact_pairs_mjcf, show_viewer):
+    if contact_layout == "collinear_pairs":
+        scene = gs.Scene(
+            rigid_options=gs.options.RigidOptions(
+                use_gjk_collision=gjk_collision,
+            ),
+            show_viewer=show_viewer,
+        )
+        # Keep the shared link at index 4 and the supports at 9 and 10: pair grouping must distinguish adjacent
+        # supports even when the shared link has a nonzero index. The remote spheres do not touch this contact patch.
+        for i in range(4):
+            scene.add_entity(
+                morph=gs.morphs.Sphere(
+                    pos=(10.0 + i, 0.0, 10.0),
+                    radius=0.01,
+                ),
+                vis_mode="collision",
+            )
+        entity = scene.add_entity(
+            morph=gs.morphs.MJCF(
+                file=collinear_contact_pairs_mjcf,
+            ),
+            vis_mode="collision",
+        )
+        for i in range(4):
+            scene.add_entity(
+                morph=gs.morphs.Sphere(
+                    pos=(14.0 + i, 0.0, 10.0),
+                    radius=0.01,
+                ),
+                vis_mode="collision",
+            )
+        for pos, size in (((0.0, 0.0, 0.1), (4.0, 1.0, 0.2)), ((0.0, 2.0, 0.1), (1.0, 1.0, 0.2))):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=pos,
+                    size=size,
+                    fixed=True,
+                ),
+                vis_mode="collision",
+            )
+        scene.build(n_envs=n_envs)
+        scene.step()
+        contacts = entity.get_contacts()
+        # The collinear patch contributes its two endpoints, and the second support contributes one contact.
+        for positions in contacts["position"].reshape(max(n_envs, 1), -1, 3):
+            assert_equal(len(positions), 3)
+            positions = positions[positions[:, 0].argsort()]
+            assert_allclose(positions, ((-1.0, 0.0, 0.1995), (0.0, 2.0, 0.1995), (1.0, 0.0, 0.1995)), atol=1e-6)
+        return
+
     GEOM_HALF_SIZE = 0.1
     MARGIN = 1e-4
 
@@ -793,7 +851,7 @@ def test_contact_pruning(gjk_collision, show_viewer):
         visualize_contact=True,
         vis_mode="collision",
     )
-    scene.build(n_envs=2)
+    scene.build(n_envs=n_envs)
 
     for step_idx in range(200):
         scene.step()

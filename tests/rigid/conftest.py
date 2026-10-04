@@ -10,6 +10,16 @@ from genesis.utils.misc import get_assets_dir
 
 
 @pytest.fixture
+def collinear_contact_pairs_mjcf():
+    mjcf = ET.Element("mujoco")
+    link = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body")
+    ET.SubElement(link, "freejoint")
+    for pos in ((-1.0, 0.0, 0.299), (0.0, 2.0, 0.299), (0.0, 0.0, 0.299), (1.0, 0.0, 0.299)):
+        ET.SubElement(link, "geom", type="sphere", size="0.1", pos=" ".join(map(str, pos)))
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture
 def xml_path(request, tmp_path, model_name):
     """The model Mujoco is built from, which holds every subtree, however Genesis groups them into entities."""
     # An asset-relative path passes through to the asset resolver; a bare name is the fixture generating the model.
