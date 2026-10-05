@@ -752,20 +752,10 @@ def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
         pos=(1.0, 0.0, 0.0),
         default_armature=None,
     )
-    # One variant per environment, each weighing differently and asking its own default.
+    # One variant per environment, each asking its own default.
     morphs_heterogeneous = [
-        morph_class(
-            file=xml_path,
-            pos=(2.0, 0.0, 0.0),
-            scale=1.0,
-            default_armature=DEFAULT_ARMATURE,
-        ),
-        morph_class(
-            file=xml_path,
-            pos=(2.0, 0.0, 0.0),
-            scale=2.0,
-            default_armature=None,
-        ),
+        morph_class(file=xml_path, pos=(2.0, 0.0, 0.0), default_armature=DEFAULT_ARMATURE),
+        morph_class(file=xml_path, pos=(2.0, 0.0, 0.0), default_armature=None),
     ]
 
     # An attached pair is one kinematic tree spanning two entities, only the mounted one asking a default, beside the

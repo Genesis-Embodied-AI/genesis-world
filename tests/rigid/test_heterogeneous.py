@@ -445,9 +445,10 @@ def test_morph_property_raises():
 
 
 @pytest.mark.required
-def test_articulated_structure_mismatch():
+def test_articulated_structure_mismatch(
+    fixed_base_dual_arm, fixed_base_dual_arm_high_damping, fixed_base_dual_arm_chained
+):
     scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
 
     # two_cube_revolute has 1 revolute joint; two_link_arm has 2 continuous joints
     with pytest.raises(gs.GenesisException):
@@ -455,5 +456,42 @@ def test_articulated_structure_mismatch():
             morph=[
                 gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1)),
                 gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1)),
+            ]
+        )
+
+    # Every environment simulates the kinematic tree of the first variant, which the others must state alike
+    with pytest.raises(gs.GenesisException, match="Link frame mismatch"):
+        scene.add_entity(
+            morph=[
+                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
+                gs.morphs.URDF(file=fixed_base_dual_arm, scale=1.25, fixed=True),
+            ]
+        )
+    with pytest.raises(gs.GenesisException, match="Link frame mismatch"):
+        scene.add_entity(
+            morph=[
+                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
+                gs.morphs.URDF(file=fixed_base_dual_arm, pos=(1.0, 0.0, 0.0), fixed=True),
+            ]
+        )
+    with pytest.raises(gs.GenesisException, match="Link parent mismatch"):
+        scene.add_entity(
+            morph=[
+                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
+                gs.morphs.URDF(file=fixed_base_dual_arm_chained, fixed=True),
+            ]
+        )
+    with pytest.raises(gs.GenesisException, match="Joint 'dofs_damping' mismatch"):
+        scene.add_entity(
+            morph=[
+                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
+                gs.morphs.URDF(file=fixed_base_dual_arm_high_damping, fixed=True),
+            ]
+        )
+    with pytest.raises(gs.GenesisException, match="Link frame mismatch"):
+        scene.add_entity(
+            morph=[
+                gs.morphs.Box(size=(0.1, 0.1, 0.1), fixed=True),
+                gs.morphs.Box(size=(0.1, 0.1, 0.1), euler=(0.0, 0.0, 90.0), fixed=True),
             ]
         )

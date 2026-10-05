@@ -12,7 +12,7 @@ that object returns the value the simulation currently uses.
 import math
 import os
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from itertools import chain
 from typing import Any, Sequence, TypeVar
 
@@ -470,6 +470,24 @@ class KinematicEntityDescription(EntityDescription):
                                 f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
                                 f"variant has {v_j_info['n_dofs']}."
                             )
+                        # Every environment simulates the joints of the primary. A variant owns its initial
+                        # configuration alone, and the inverse weights, which derive from the inertia it owns too.
+                        p_joint_fields = asdict(p_joint)
+                        v_joint_fields = asdict(description_from_info(RigidJointDescription, v_j_info))
+                        for field_name in sorted(
+                            p_joint_fields.keys() - {"name", "type", "n_qs", "n_dofs", "init_qpos", "dofs_invweight"}
+                        ):
+                            p_value, v_value = p_joint_fields[field_name], v_joint_fields[field_name]
+                            if (p_value is None) != (v_value is None) or (
+                                p_value is not None and not np.allclose(p_value, v_value, atol=gs.EPS)
+                            ):
+                                gs.raise_exception(
+                                    f"Joint '{field_name}' mismatch for '{p_joint.name}': primary has {p_value}, "
+                                    f"variant has {v_value}. All variants must share the joint parameters."
+                                )
+                v_links_placement = [
+                    (v_l_info["parent_idx"], v_l_info["pos"], v_l_info["quat"]) for v_l_info in v_l_infos
+                ]
 
                 # Post-process each link's geoms. The COM/principal-axis anchoring of the floating base is deferred
                 # to '_align_free_roots' (where the resolved per-variant composite inertia is known); here
@@ -534,6 +552,7 @@ class KinematicEntityDescription(EntityDescription):
                     g_infos = self._load_primitive(morph, resolution, load_geom_only_for_heterogeneous=True)
                 if morph.fixed != self.morphs[0].fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
+                v_links_placement = [(-1, morph.pos, morph.quat)]
                 cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
 
                 # The COM/principal-axis anchoring is deferred to '_align_free_roots', which runs once every variant
@@ -568,6 +587,28 @@ class KinematicEntityDescription(EntityDescription):
                 gs.raise_exception(
                     f"Heterogeneous morphs only support URDF, MJCF, Primitive, and Mesh, got: {type(morph).__name__}."
                 )
+
+            # Every environment moves the links of a variant along the kinematic tree of the primary, so every variant
+            # must hang each link from the same parent, at the same frame. The frame of the link of a free joint is the
+            # exception, since the initial configuration of the variant places it.
+            for i_l, (l_desc, (v_parent_idx, v_link_pos, v_link_quat)) in enumerate(zip(self.links, v_links_placement)):
+                if v_parent_idx != l_desc.parent_idx:
+                    gs.raise_exception(
+                        f"Link parent mismatch at link {i_l} ('{l_desc.name}'): primary hangs it from link "
+                        f"{l_desc.parent_idx}, variant from link {v_parent_idx}. All variants must share the kinematic "
+                        "tree of the primary."
+                    )
+                if any(j_desc.type == gs.JOINT_TYPE.FREE for j_desc in l_desc.joints):
+                    continue
+                if not (
+                    np.allclose(v_link_pos, l_desc.pos, atol=gs.EPS)
+                    and np.allclose(v_link_quat, l_desc.quat, atol=gs.EPS)
+                ):
+                    gs.raise_exception(
+                        f"Link frame mismatch at link {i_l} ('{l_desc.name}'): primary has pos {l_desc.pos} and quat "
+                        f"{l_desc.quat}, variant has pos {v_link_pos} and quat {v_link_quat}. All variants must place "
+                        "their links alike, which rules out a different 'scale', or a different pose for a fixed base."
+                    )
 
     def _describe_variant_link(self, i_link, v_l_info, cg_infos, vg_infos, morph, inertial_info):
         """Describe the geoms one variant gives one link. A kinematic entity only ever draws them."""

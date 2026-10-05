@@ -76,11 +76,14 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
     ET.SubElement(body, "joint", name=f"{name}_root", type="free")
 
 
-def _build_fixed_base_dual_arm(arm_thickness):
-    """Generate a URDF of a torso the world carries and two one-link arms hanging from it.
+def _build_fixed_base_dual_arm(arm_thickness, shoulder_damping, right_arm_parent):
+    """Generate a URDF of a torso the world carries and two one-link arms hanging from it by damped shoulders.
 
     The arms are mounted close enough that they overlap once they hang at rest, so that they touch when they fall under
     gravity, as soon as they are thicker than the 0.1 gap between their hinges.
+
+    'right_arm_parent' names the link the right shoulder hangs from. Both shoulders sit at the same offset from the
+    frame of their parent, so hanging the right arm from the left one changes the kinematic tree alone.
     """
     robot = ET.Element("robot", name="dual_arm")
     torso = ET.SubElement(robot, "link", name="torso")
@@ -100,23 +103,33 @@ def _build_fixed_base_dual_arm(arm_thickness):
             ET.SubElement(geom_prop, "origin", xyz=f"{sign * 0.15} 0 0")
             ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size=f"0.3 {arm_thickness} {arm_thickness}")
         joint = ET.SubElement(robot, "joint", name=f"{side}_shoulder", type="revolute")
-        ET.SubElement(joint, "parent", link="torso")
+        ET.SubElement(joint, "parent", link="torso" if side == "left" else right_arm_parent)
         ET.SubElement(joint, "child", link=f"{side}_arm")
         ET.SubElement(joint, "origin", xyz=f"{sign * 0.05} 0 0")
         ET.SubElement(joint, "axis", xyz="0 1 0")
         ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
-        ET.SubElement(joint, "dynamics", damping="0.5")
+        ET.SubElement(joint, "dynamics", damping=str(shoulder_damping))
     return ET.tostring(robot, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
 def fixed_base_dual_arm():
-    return _build_fixed_base_dual_arm(arm_thickness=0.12)
+    return _build_fixed_base_dual_arm(arm_thickness=0.12, shoulder_damping=0.5, right_arm_parent="torso")
 
 
 @pytest.fixture(scope="session")
 def fixed_base_dual_arm_thick():
-    return _build_fixed_base_dual_arm(arm_thickness=0.14)
+    return _build_fixed_base_dual_arm(arm_thickness=0.14, shoulder_damping=0.5, right_arm_parent="torso")
+
+
+@pytest.fixture(scope="session")
+def fixed_base_dual_arm_high_damping():
+    return _build_fixed_base_dual_arm(arm_thickness=0.12, shoulder_damping=1.0, right_arm_parent="torso")
+
+
+@pytest.fixture(scope="session")
+def fixed_base_dual_arm_chained():
+    return _build_fixed_base_dual_arm(arm_thickness=0.12, shoulder_damping=0.5, right_arm_parent="left_arm")
 
 
 @pytest.fixture(scope="session")
