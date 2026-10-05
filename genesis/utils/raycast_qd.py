@@ -723,8 +723,8 @@ def write_ray_hit(
     i_p_dist = i_p_offset + i_p_sensor
     if sensor_return_points[i_s]:
         i_p_dist += sensor_point_counts[i_s] * 3
-    if hit_face >= 0 and (not is_merge or hit_distance < output_hits[i_p_dist, i_b]):
-        output_hits[i_p_dist, i_b] = hit_distance
+    if hit_face >= 0 and (not is_merge or hit_distance < output_hits[i_b, i_p_dist]):
+        output_hits[i_b, i_p_dist] = hit_distance
 
         if sensor_return_points[i_s]:
             hit_point = qd.math.vec3(0.0, 0.0, 0.0)
@@ -734,24 +734,22 @@ def write_ray_hit(
                 # Local frame output along provided local ray direction
                 hit_point = hit_distance * gu.qd_normalize(ray_dir_local, eps)
             # Store points at: cache_offset + point_idx_in_sensor * 3
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = hit_point.x
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
+            for i in qd.static(range(3)):
+                output_hits[i_b, i_p_offset + i_p_sensor * 3 + i] = hit_point[i]
     elif not is_merge:
         # First-pass miss: zero the point and seed the distance - no_hit_value if this pass is also the last (single
         # BVH), else the max_range sentinel so a later pass's hit wins.
         if sensor_return_points[i_s]:
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
+            for i in qd.static(range(3)):
+                output_hits[i_b, i_p_offset + i_p_sensor * 3 + i] = 0.0
         if is_last:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
+            output_hits[i_b, i_p_dist] = no_hit_values[i_s]
         else:
-            output_hits[i_p_dist, i_b] = max_ranges[i_s]
+            output_hits[i_b, i_p_dist] = max_ranges[i_s]
     elif is_last:
         # Final-pass miss: a slot still at the sentinel means every pass missed, so stamp no_hit_value.
-        if output_hits[i_p_dist, i_b] >= max_ranges[i_s]:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
+        if output_hits[i_b, i_p_dist] >= max_ranges[i_s]:
+            output_hits[i_b, i_p_dist] = no_hit_values[i_s]
 
 
 @qd.func
@@ -810,7 +808,7 @@ def kernel_cast_rays(
     sensor_point_offsets: qd.types.ndarray(ndim=1),  # [n_sensors] - point start index for each sensor
     sensor_point_counts: qd.types.ndarray(ndim=1),  # [n_sensors] - number of points for each sensor
     sensor_return_points: qd.types.ndarray(ndim=1),  # [n_sensors] - True to store hit points, False for distances-only
-    output_hits: qd.types.ndarray(ndim=2),  # [total_cache_size, n_env]
+    output_hits: qd.types.ndarray(ndim=2),  # [n_env, total_cache_size]
     dyn_state: array_class.DynState,
     bvh_tree_state_a: array_class.BVHTreeState,
     bvh_tree_state_b: array_class.BVHTreeState,
@@ -826,7 +824,7 @@ def kernel_cast_rays(
 
     The second set casts with the distance of the first hit as its range, so it reports a hit only when closer.
     See write_ray_hit for `is_merge` / `is_last`, which chain the launches over several BVH sets into one output
-    buffer. ``output_hits`` is a 2D array of shape (total_cache_size, n_env) where in the first dimension each
+    buffer. ``output_hits`` is a 2D array of shape (n_env, total_cache_size) where in the second dimension each
     sensor's data is stored as [sensor_points (n_points * 3), sensor_ranges (n_points)], the point block being present
     only for sensors with sensor_return_points set.
 
@@ -835,7 +833,7 @@ def kernel_cast_rays(
     compile-time flag selecting the thread -> (ray, env) mapping matching that tree layout.
     """
     n_points = ray_starts.shape[0]
-    n_envs = output_hits.shape[-1]
+    n_envs = output_hits.shape[0]
     for i_flat in range(n_points * n_envs):
         i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local = func_ray_of_thread(
             i_flat,
@@ -928,7 +926,7 @@ def kernel_cast_rays_visual(
     See kernel_cast_rays for the arguments.
     """
     n_points = ray_starts.shape[0]
-    n_envs = output_hits.shape[-1]
+    n_envs = output_hits.shape[0]
     for i_flat in range(n_points * n_envs):
         i_b, i_p, i_s, ray_start_world, ray_direction_world, ray_dir_local = func_ray_of_thread(
             i_flat,

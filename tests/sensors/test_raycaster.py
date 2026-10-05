@@ -377,7 +377,7 @@ def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
 
     # Every entity is fixed, so each visual BVH is static (maybe_static) and rebuilt only when a GEOMETRY change is
     # pending; nothing is pending after the baseline step, so an idle step would rebuild none of them.
-    visual_entries = [entry for entry in cam_kin._shared_context.bvh_contexts if entry.raycast_mask is not None]
+    visual_entries = [entry for entry in cam_kin._array._raycast.bvh_contexts if entry.raycast_mask is not None]
     assert visual_entries and all(entry.maybe_static for entry in visual_entries)
     assert all(not entry.rebuild_subscriber.pending for entry in visual_entries)
 
@@ -483,7 +483,7 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
 
     # All links are fixed, so the collision BVH is static: rebuilt only when a set_pos invalidates it, never on an
     # ordinary step. The per-env obstacle geometry differs here, so it groups into one tree per env.
-    collision_bvh = next(entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is None)
+    collision_bvh = next(entry for entry in lidar._array._raycast.bvh_contexts if entry.raycast_mask is None)
     assert collision_bvh.maybe_static
     assert collision_bvh.n_trees == 2
 
@@ -555,8 +555,8 @@ def test_shared_static_bvh_regroup(show_viewer, n_envs):
 
     # Env-identical static geometry collapses to a single tree read by every env, for the static collision subset
     # (its verts are batched, so the collapse comes from the geometry signature) and the visual BVH alike.
-    static_bvh = next(entry for entry in lidar._shared_context.collision_bvh_contexts if entry.maybe_static)
-    visual_bvh = next(entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is not None)
+    static_bvh = next(entry for entry in lidar._array._raycast.collision_bvh_contexts if entry.maybe_static)
+    visual_bvh = next(entry for entry in lidar._array._raycast.bvh_contexts if entry.raycast_mask is not None)
     assert not static_bvh.is_env_uniform
     assert visual_bvh.maybe_static
     assert static_bvh.n_trees == 1
@@ -720,7 +720,7 @@ def test_heterogeneous_object(show_viewer, tol):
 
     # The static subset groups envs by identical geometry while keeping the rebuild skip: 3 distinct variants across
     # 6 envs yield 3 trees, each env casting against its own variant's tree.
-    collision_entries = [entry for entry in lidar._shared_context.bvh_contexts if entry.raycast_mask is None]
+    collision_entries = [entry for entry in lidar._array._raycast.bvh_contexts if entry.raycast_mask is None]
     assert len(collision_entries) == 2
     static_bvh = next(entry for entry in collision_entries if entry.maybe_static)
     assert static_bvh.n_trees == 3
@@ -875,7 +875,7 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
 
     # The solver mixes static (fixed-link) and dynamic (movable-link) collision faces, so its collision mesh is split
     # into one compacted BVH per group; the visual box contributes a third, visual entry.
-    collision_entries = [entry for entry in sensor._shared_context.bvh_contexts if entry.raycast_mask is None]
+    collision_entries = [entry for entry in sensor._array._raycast.bvh_contexts if entry.raycast_mask is None]
     assert len(collision_entries) == 2
     static_entry = next(entry for entry in collision_entries if entry.maybe_static)
     dynamic_entry = next(entry for entry in collision_entries if not entry.maybe_static)

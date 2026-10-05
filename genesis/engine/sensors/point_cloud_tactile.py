@@ -1,10 +1,12 @@
+import itertools
 import math
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Final, NamedTuple, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Final, NamedTuple
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
@@ -14,53 +16,47 @@ from genesis.options.sensors import (
     ElastomerTaxel as ElastomerTaxelSensorOptions,
     ProximityTaxel as ProximityTaxelOptions,
 )
-from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
+from genesis.typing import EnvsIdxType
+from genesis.utils.misc import tensor_to_array
 from genesis.utils.point_cloud import sample_mesh_point_cloud
 from genesis.utils.raycast_qd import closest_point_on_triangle, get_triangle_vertices, triangle_face_normal
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import LinkAttachedSensorMixin, RigidSensorArrayMixin, SimpleSensor, SimpleSensorArray
 from .probe import (
-    ProbeSensorMetadataMixin,
+    ProbeSensorArrayMixin,
     ProbeSensorMixin,
-    ProbesWithNormalSensorMetadataMixin,
-    ProbesWithNormalSensorMixin,
+    ProbesWithNormalSensorArrayMixin,
     func_noised_probe_radius,
-    get_measured_bufs,
 )
-from .raycaster import RaycastContext
 from .tactile_shared import (
     BVH_LEAF_SIZE,
     BVH_STACK_SIZE,
     BVHMetadata,
     ChunkedBVHData,
-    ContactDepthQueryMetadataMixin,
-    ContactDepthQuerySensorMixin,
-    GridFFTConvMetadataMixin,
-    SpatialCrosstalkMetadataMixin,
-    SpatialCrosstalkMixin,
-    ViscoelasticHysteresisMetadataMixin,
-    ViscoelasticHysteresisMixin,
+    ContactDepthQueryArrayMixin,
+    GridFFTConvArrayMixin,
+    SpatialCrosstalkArrayMixin,
+    ViscoelasticHysteresisArrayMixin,
+    build_grid_fft,
     build_static_chunk_bvh,
     func_aabb_intersects_aabb,
     func_sphere_intersects_aabb,
     func_vec3_at,
     get_mesh_geom_chunks,
     next_pow2,
-    normalize_grid_probe_layout,
-    register_grid_fft_sensor,
 )
+
+if TYPE_CHECKING:
+    from genesis.engine.entities.rigid_entity.rigid_geom import RigidGeom
+    from genesis.engine.solvers import RigidSolver
+    from genesis.utils.ring_buffer import TensorRingBuffer
+    from genesis.vis.rasterizer_context import RasterizerContext
+
 
 # Conservative cap for global-BVH closest-point walks in raycast mode. Points farther than this from every candidate
 # triangle map to depth = 0 (so the elastomer "out of contact" branch fires). Sized to cover realistic elastomer
 # penetrations -- bumping it widens BVH traversal cost but doesn't change correctness for in-contact probes.
 _ELASTOMER_RAYCAST_QUERY_DIST = 0.1
-
-if TYPE_CHECKING:
-    from genesis.options.sensors import SensorOptions
-    from genesis.utils.ring_buffer import TensorRingBuffer
-    from genesis.vis.rasterizer_context import RasterizerContext
-
-    from .sensor_manager import SensorManager
 
 
 def _n_sample_points_per_link(n_sample_points: int | list | tuple, n_links: int) -> list[int]:
@@ -84,13 +80,13 @@ def _n_sample_points_per_link(n_sample_points: int | list | tuple, n_links: int)
 
 class GridFFTMeta(NamedTuple):
     """
-    Per-grid-FFT-sensor record for HydroShear dilation.
+    Record of one grid-shaped sensor on the fast Fourier transform (FFT) dilation path of HydroShear.
 
-    ``sensor_idx``/``g_ny``/``g_nx``/``probe_start``/``cache_start`` are the leading fields every grid-FFT sensor
-    shares (the contract ``register_grid_fft_sensor`` relies on); ``lambda_d``/``spacing_u``/``spacing_v`` plus
-    ``compressibility``/``dilation_reg`` are the HydroShear kernel params consumed by ``_dilate_kernel_builder``
-    (``compressibility``: 1 = local Gaussian, 0 = incompressible 1/r, in-between = blend; ``dilation_reg``: resolved
-    epsilon in meters).
+    ``sensor_idx``, ``g_ny``, ``g_nx``, ``probe_start`` and ``cache_start`` are the leading fields every grid-FFT sensor
+    shares, the contract ``build_grid_fft`` relies on. ``lambda_d``, ``spacing_u``, ``spacing_v``, ``compressibility``
+    and ``dilation_reg`` are the HydroShear kernel parameters ``_dilate_kernel_builder`` consumes: ``compressibility``
+    blends the local Gaussian kernel (1) and the incompressible 1/r kernel (0), and ``dilation_reg`` is the resolved
+    epsilon in meters.
     """
 
     sensor_idx: int
@@ -106,25 +102,23 @@ class GridFFTMeta(NamedTuple):
     elastomer_thickness: float = 0.0
 
 
-def _build_candidate_geom_mask(
-    B: int, n_sensors: int, n_geoms: int, geom_starts: torch.Tensor, geom_ns: torch.Tensor, geom_idx: torch.Tensor
-) -> torch.Tensor:
+def _fill_candidate_geom_mask(
+    mask: torch.Tensor, geom_starts: torch.Tensor, geom_ns: torch.Tensor, geom_idx: torch.Tensor
+) -> None:
     """
-    Build a ``(B, n_sensors, n_geoms)`` bool mask marking, per sensor, which scene geoms are candidates.
+    Mark in the ``(B, n_sensors, n_geoms)`` bool ``mask``, per sensor, which scene geoms are candidates.
 
     ``geom_idx`` is the flat per-sensor concatenation of candidate geom indices; ``geom_starts``/``geom_ns`` give
-    each sensor's slice into it. The mask is broadcast identically across all ``B`` environments.
+    each sensor's slice into it. The marks are identical across all ``B`` environments.
     """
-    mask = torch.zeros((B, n_sensors, n_geoms), dtype=gs.tc_bool, device=gs.device)
     starts = tensor_to_array(geom_starts)
     ns = tensor_to_array(geom_ns)
     idx = tensor_to_array(geom_idx)
-    for i_s in range(n_sensors):
+    for i_s in range(mask.shape[1]):
         lo = int(starts[i_s])
         hi = lo + int(ns[i_s])
         if hi > lo:
             mask[:, i_s, idx[lo:hi]] = True
-    return mask
 
 
 def _mesh_area(verts: np.ndarray, faces: np.ndarray) -> float:
@@ -157,7 +151,7 @@ def _split_count_by_area(n_total: int, geom_chunks: list[tuple[object, np.ndarra
     return (extra + 1).tolist()
 
 
-def _active_envs_mask_tensor(geom, batch_size: int) -> torch.Tensor:
+def _active_envs_mask_tensor(geom: "RigidGeom", batch_size: int) -> torch.Tensor:
     if geom.active_envs_mask is None:
         return torch.ones((batch_size,), dtype=gs.tc_bool, device=gs.device)
     return geom.active_envs_mask.to(device=gs.device, dtype=gs.tc_bool)
@@ -167,10 +161,10 @@ def _group_geoms_by_variant(
     geom_chunks: list[tuple[object, np.ndarray, np.ndarray]], batch_size: int
 ) -> list[tuple[torch.Tensor, list[tuple[object, np.ndarray, np.ndarray]]]]:
     """
-    Partition a link's geoms into heterogeneous-variant groups by ``active_envs_mask``.
+    Partition the geoms of a link into heterogeneous-variant groups by ``active_envs_mask``.
 
-    Geoms sharing a mask are one variant; ``None`` masks (homogeneous) collapse into a single all-True group.
-    Returns ``[(mask, geom_chunks_for_variant), ...]`` preserving the original geom order within each group.
+    Geoms sharing a mask form one variant. ``None`` masks, the homogeneous case, collapse into a single all-True group.
+    It returns ``[(mask, geom_chunks_for_variant), ...]`` and preserves the original geom order within each group.
     """
     groups: dict[bytes, tuple[torch.Tensor, list[tuple[object, np.ndarray, np.ndarray]]]] = {}
     for chunk in geom_chunks:
@@ -184,20 +178,19 @@ def _group_geoms_by_variant(
 
 
 def _sample_track_links_point_cloud_tensors(
-    solver, track_link_idx: np.ndarray, n_sample_points: int | list | tuple, prefer_visual: bool
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    solver: "RigidSolver", track_link_idx: np.ndarray, n_sample_points: int | list | tuple, prefer_visual: bool
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    FPS-sample meshes on ``track_link_idx`` into concatenated link-local positions and normals.
+    Sample the meshes of the tracked links by farthest point sampling (FPS) into concatenated link-local positions.
 
-    The per-link budget from ``n_sample_points`` is allocated to every heterogeneous variant on a link
-    (geoms grouped by ``active_envs_mask``), so each parallel environment sees the full requested point
-    count regardless of which variant is active. Within a variant, the budget is split across geoms by
-    surface area.
+    The per-link budget from ``n_sample_points`` goes to every heterogeneous variant of a link (geoms grouped by
+    ``active_envs_mask``), so each parallel environment sees the full requested point count whatever variant is active.
+    Within a variant, the budget is split across geoms by surface area.
 
     Returns
     -------
-    idx_cat, pos_cat, nrm_cat, active_cat
-        Global link index per row, positions (N, 3), normals (N, 3), and active env mask (N, B), all on ``gs.device``.
+    idx_cat, pos_cat, active_cat
+        Global link index per row, positions (N, 3), and active env mask (N, B), all on ``gs.device``.
     """
     n_per_link = _n_sample_points_per_link(n_sample_points, int(track_link_idx.shape[0]))
     if sum(n_per_link) == 0:
@@ -205,7 +198,6 @@ def _sample_track_links_point_cloud_tensors(
 
     link_idx_chunks: list[torch.Tensor] = []
     pos_chunks: list[torch.Tensor] = []
-    nrm_chunks: list[torch.Tensor] = []
     active_chunks: list[torch.Tensor] = []
 
     for i_l in range(int(track_link_idx.shape[0])):
@@ -222,25 +214,17 @@ def _sample_track_links_point_cloud_tensors(
                 # Fixed seed: the cache key already discriminates between meshes (vertices+faces hashed), so the same
                 # mesh always resolves to the same sample, which keeps tactile readings reproducible across
                 # build/reset cycles.
-                pts_np, nrm_np = sample_mesh_point_cloud(
-                    verts, faces, n_geom_pts, seed=0, use_cache=True, return_normals=True
-                )
+                pts_np = sample_mesh_point_cloud(verts, faces, n_geom_pts, seed=0, use_cache=True)
 
                 li = torch.full((pts_np.shape[0],), link_idx, dtype=gs.tc_int, device=gs.device)
                 link_idx_chunks.append(li)
                 pos_chunks.append(torch.tensor(pts_np, dtype=gs.tc_float, device=gs.device))
-                nrm_chunks.append(torch.tensor(nrm_np, dtype=gs.tc_float, device=gs.device))
                 active_chunks.append(variant_mask.expand(pts_np.shape[0], solver._B))
 
     if not pos_chunks:
         gs.raise_exception("PointCloudTactile sensor produced an empty object point cloud.")
 
-    return (
-        torch.cat(link_idx_chunks, dim=0),
-        torch.cat(pos_chunks, dim=0),
-        torch.cat(nrm_chunks, dim=0),
-        torch.cat(active_chunks, dim=0),
-    )
+    return torch.cat(link_idx_chunks, dim=0), torch.cat(pos_chunks, dim=0), torch.cat(active_chunks, dim=0)
 
 
 _ELASTOMER_QUERY_AABB_MARGIN = 1e-3
@@ -249,102 +233,93 @@ _ELASTOMER_QUERY_AABB_MARGIN = 1e-3
 @dataclass
 class PointCloudBVH(BVHMetadata):
     """
-    BVH over the tracked point clouds of one sensor class.
+    BVH over the tracked point clouds of one sensor type.
 
-    ``leaf_elem_idx`` entries are absolute rows into ``pc_pos_link`` / ``pc_active_envs_mask`` / ``pc_normal_link``
-    so a leaf hit resolves to per-point data with one indirection. See ``BVHMetadata`` for the shared scaffolding
-    semantics.
+    ``leaf_elem_idx`` entries are absolute rows into ``pc_pos_link`` / ``pc_active_envs_mask`` so a leaf hit resolves
+    to per-point data with one indirection. See ``BVHMetadata`` for the shared scaffolding semantics.
     """
 
     # Inverse of sensor_chunk_start/count: chunk_sensor_idx[i_c] is the owning sensor's index. Enables
     # (env, chunk)-parallel kernels (e.g. ElastomerTaxel surface state) without rescanning sensor_chunk_start
     # in every thread; ProximityTaxel parallelizes per-probe and does not consume this field.
-    chunk_sensor_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    chunk_sensor_idx: torch.Tensor
 
-    def append_sensor(self, *, pc_start_row: int, idx_cat: torch.Tensor, pos_cat: torch.Tensor) -> None:
+    @classmethod
+    def build(cls, sensors_points: list[tuple[torch.Tensor, torch.Tensor]]) -> "PointCloudBVH":
         """
-        Build per-tracked-link chunks for one sensor and append into the flat tensors.
+        Build the per-(sensor, tracked link) chunks of every sensor at once into the flat tensors.
 
-        Must be called immediately after extending ``pc_pos_link`` by ``pos_cat`` so each leaf's element index
-        (``pc_start_row + local_row``) addresses the freshly-grown rows.
+        ``sensors_points`` holds the ``(link index, position)`` of the sampled points of each sensor. Each leaf's
+        element index is an absolute row into the point tables of the type, which lay the points sensor after sensor
+        in the same order.
         """
-        n_local = int(pos_cat.shape[0])
-        if n_local == 0:
-            gs.raise_exception("PointCloudBVH.append_sensor called with empty point cloud.")
+        sensor_chunk_start: list[int] = []
+        sensor_chunk_count: list[int] = []
+        chunk_link_idx: list[int] = []
+        chunk_sensor_idx: list[int] = []
+        chunk_node_start: list[int] = []
+        chunk_node_count: list[int] = []
+        # Seeded with typed empties so the tables come out well-formed without any chunk
+        node_min = [np.empty((0, 3), dtype=gs.np_float)]
+        node_max = [np.empty((0, 3), dtype=gs.np_float)]
+        node_left = [np.empty((0,), dtype=gs.np_int)]
+        node_right = [np.empty((0,), dtype=gs.np_int)]
+        node_leaf_start = [np.empty((0,), dtype=gs.np_int)]
+        node_leaf_count = [np.empty((0,), dtype=gs.np_int)]
+        leaf_elem_idx = [np.empty((0,), dtype=gs.np_int)]
 
-        idx_np = tensor_to_array(idx_cat).astype(gs.np_int)
-        pos_np = tensor_to_array(pos_cat).astype(gs.np_float, copy=False)
-        unique_links = np.unique(idx_np)
+        pc_start_row = 0
+        node_offset = 0
+        point_offset = 0
+        for i_s, (idx_cat, pos_cat) in enumerate(sensors_points):
+            if pos_cat.shape[0] == 0:
+                gs.raise_exception("PointCloudBVH cannot be built over an empty point cloud.")
+            idx_np = tensor_to_array(idx_cat)
+            pos_np = tensor_to_array(pos_cat)
+            unique_links = np.unique(idx_np)
+            sensor_chunk_start.append(len(chunk_link_idx))
+            sensor_chunk_count.append(len(unique_links))
+            for link_idx in unique_links.tolist():
+                local_rows = np.flatnonzero(idx_np == link_idx)
+                # The BVH builder indexes with the solver's integer width
+                global_rows = (pc_start_row + local_rows).astype(gs.np_int)
+                pts_link = pos_np[local_rows]
+                # Point cloud: AABB per element is degenerate (the point itself), so pass the points as both
+                # centroids and the per-element min/max bounds.
+                nmin, nmax, nleft, nright, npstart, npn, pidx = build_static_chunk_bvh(
+                    pts_link, pts_link, pts_link, global_rows, BVH_LEAF_SIZE
+                )
+                chunk_link_idx.append(link_idx)
+                chunk_sensor_idx.append(i_s)
+                chunk_node_start.append(node_offset)
+                chunk_node_count.append(nmin.shape[0])
+                node_min.append(nmin)
+                node_max.append(nmax)
+                # Rebase intra-chunk child / leaf-start indices into the flat tensors' absolute space.
+                node_left.append(np.where(nleft >= 0, nleft + node_offset, nleft))
+                node_right.append(np.where(nright >= 0, nright + node_offset, nright))
+                node_leaf_start.append(np.where(npn > 0, npstart + point_offset, npstart))
+                node_leaf_count.append(npn)
+                leaf_elem_idx.append(pidx)
+                node_offset += nmin.shape[0]
+                point_offset += pidx.shape[0]
+            pc_start_row += pos_cat.shape[0]
 
-        chunk_start_for_sensor = int(self.chunk_link_idx.shape[0])
-        node_offset = int(self.node_min.shape[0])
-        point_offset = int(self.leaf_elem_idx.shape[0])
-
-        new_chunk_link_idx: list[int] = []
-        new_chunk_node_start: list[int] = []
-        new_chunk_node_count: list[int] = []
-        all_node_min: list[np.ndarray] = []
-        all_node_max: list[np.ndarray] = []
-        all_node_left: list[np.ndarray] = []
-        all_node_right: list[np.ndarray] = []
-        all_node_leaf_start: list[np.ndarray] = []
-        all_node_leaf_count: list[np.ndarray] = []
-        all_leaf_elem_idx: list[np.ndarray] = []
-
-        for link_idx in unique_links:
-            local_rows = np.nonzero(idx_np == int(link_idx))[0].astype(gs.np_int)
-            global_rows = (int(pc_start_row) + local_rows).astype(gs.np_int)
-            pts_link = pos_np[local_rows]
-
-            # Point cloud: AABB per element is degenerate (the point itself), so pass the points as both
-            # centroids and the per-element min/max bounds.
-            nmin, nmax, nleft, nright, npstart, npn, pidx = build_static_chunk_bvh(
-                pts_link, pts_link, pts_link, global_rows, BVH_LEAF_SIZE
-            )
-
-            new_chunk_link_idx.append(int(link_idx))
-            new_chunk_node_start.append(node_offset)
-            new_chunk_node_count.append(int(nmin.shape[0]))
-
-            all_node_min.append(nmin)
-            all_node_max.append(nmax)
-            # Rebase intra-chunk child / leaf-start indices into the flat tensors' absolute space.
-            all_node_left.append(np.where(nleft >= 0, nleft + node_offset, nleft).astype(gs.np_int))
-            all_node_right.append(np.where(nright >= 0, nright + node_offset, nright).astype(gs.np_int))
-            all_node_leaf_start.append(np.where(npn > 0, npstart + point_offset, npstart).astype(gs.np_int))
-            all_node_leaf_count.append(npn)
-            all_leaf_elem_idx.append(pidx)
-
-            node_offset += int(nmin.shape[0])
-            point_offset += int(pidx.shape[0])
-
-        nm = torch.tensor(np.concatenate(all_node_min, axis=0), dtype=gs.tc_float, device=gs.device)
-        nx = torch.tensor(np.concatenate(all_node_max, axis=0), dtype=gs.tc_float, device=gs.device)
-        nl = torch.tensor(np.concatenate(all_node_left, axis=0), dtype=gs.tc_int, device=gs.device)
-        nr = torch.tensor(np.concatenate(all_node_right, axis=0), dtype=gs.tc_int, device=gs.device)
-        nps = torch.tensor(np.concatenate(all_node_leaf_start, axis=0), dtype=gs.tc_int, device=gs.device)
-        npn_t = torch.tensor(np.concatenate(all_node_leaf_count, axis=0), dtype=gs.tc_int, device=gs.device)
-        pidx_t = torch.tensor(np.concatenate(all_leaf_elem_idx, axis=0), dtype=gs.tc_int, device=gs.device)
-        cli = torch.tensor(new_chunk_link_idx, dtype=gs.tc_int, device=gs.device)
-        cns = torch.tensor(new_chunk_node_start, dtype=gs.tc_int, device=gs.device)
-        cnn = torch.tensor(new_chunk_node_count, dtype=gs.tc_int, device=gs.device)
-        # Sensor index for this batch of chunks = current sensor count (the entry we're about to add).
-        sensor_idx_for_chunks = int(self.sensor_chunk_start.shape[0])
-        csi = torch.full((len(unique_links),), sensor_idx_for_chunks, dtype=gs.tc_int, device=gs.device)
-
-        self.node_min = concat_with_tensor(self.node_min, nm, expand=(nm.shape[0], 3))
-        self.node_max = concat_with_tensor(self.node_max, nx, expand=(nx.shape[0], 3))
-        self.node_left = concat_with_tensor(self.node_left, nl, expand=(nl.shape[0],))
-        self.node_right = concat_with_tensor(self.node_right, nr, expand=(nr.shape[0],))
-        self.node_leaf_start = concat_with_tensor(self.node_leaf_start, nps, expand=(nps.shape[0],))
-        self.node_leaf_count = concat_with_tensor(self.node_leaf_count, npn_t, expand=(npn_t.shape[0],))
-        self.leaf_elem_idx = concat_with_tensor(self.leaf_elem_idx, pidx_t, expand=(pidx_t.shape[0],))
-        self.chunk_link_idx = concat_with_tensor(self.chunk_link_idx, cli, expand=(cli.shape[0],))
-        self.chunk_sensor_idx = concat_with_tensor(self.chunk_sensor_idx, csi, expand=(csi.shape[0],))
-        self.chunk_node_start = concat_with_tensor(self.chunk_node_start, cns, expand=(cns.shape[0],))
-        self.chunk_node_count = concat_with_tensor(self.chunk_node_count, cnn, expand=(cnn.shape[0],))
-        self.sensor_chunk_start = concat_with_tensor(self.sensor_chunk_start, chunk_start_for_sensor, expand=(1,))
-        self.sensor_chunk_count = concat_with_tensor(self.sensor_chunk_count, len(unique_links), expand=(1,))
+        return cls(
+            sensor_chunk_start=torch.tensor(sensor_chunk_start, dtype=gs.tc_int, device=gs.device),
+            sensor_chunk_count=torch.tensor(sensor_chunk_count, dtype=gs.tc_int, device=gs.device),
+            chunk_link_idx=torch.tensor(chunk_link_idx, dtype=gs.tc_int, device=gs.device),
+            chunk_node_start=torch.tensor(chunk_node_start, dtype=gs.tc_int, device=gs.device),
+            chunk_node_count=torch.tensor(chunk_node_count, dtype=gs.tc_int, device=gs.device),
+            node_min=torch.tensor(np.concatenate(node_min), dtype=gs.tc_float, device=gs.device),
+            node_max=torch.tensor(np.concatenate(node_max), dtype=gs.tc_float, device=gs.device),
+            node_left=torch.tensor(np.concatenate(node_left), dtype=gs.tc_int, device=gs.device),
+            node_right=torch.tensor(np.concatenate(node_right), dtype=gs.tc_int, device=gs.device),
+            node_leaf_start=torch.tensor(np.concatenate(node_leaf_start), dtype=gs.tc_int, device=gs.device),
+            node_leaf_count=torch.tensor(np.concatenate(node_leaf_count), dtype=gs.tc_int, device=gs.device),
+            leaf_elem_idx=torch.tensor(np.concatenate(leaf_elem_idx), dtype=gs.tc_int, device=gs.device),
+            chunk_sensor_idx=torch.tensor(chunk_sensor_idx, dtype=gs.tc_int, device=gs.device),
+        )
 
 
 @qd.kernel
@@ -373,7 +348,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
     eps: float,
 ):
     total_n_probes = probe_positions_local.shape[0]
-    n_batches = output_gt.shape[-1]
+    n_batches = output_gt.shape[0]
 
     for i_p, i_b in qd.ndrange(total_n_probes, n_batches):
         i_s = probe_sensor_idx[i_p]
@@ -519,7 +494,7 @@ def _kernel_point_cloud_proximity_taxel_bvh(
         for j in qd.static(range(3)):
             fv_m[j] = fv_m[j] * gain_m
 
-        taxel_signal_buf[i_p, i_b] = sum_p_m
+        taxel_signal_buf[i_b, i_p] = sum_p_m
 
         # Lever arm from the sensor link origin to the taxel, in world frame.
         lever_world = probe_world - s_pos
@@ -557,91 +532,64 @@ def _kernel_point_cloud_proximity_taxel_bvh(
         force_start = cache_start + _i_p * 3
         torque_start = cache_start + n_probes * 3 + _i_p * 3
         for j in qd.static(range(3)):
-            output_gt[force_start + j, i_b] = force_link_gt[j]
+            output_gt[i_b, force_start + j] = force_link_gt[j]
         for j in qd.static(range(3)):
-            output_gt[torque_start + j, i_b] = torque_link_gt[j]
+            output_gt[i_b, torque_start + j] = torque_link_gt[j]
         for j in qd.static(range(3)):
-            output_measured[force_start + j, i_b] = force_link_measured[j]
+            output_measured[i_b, force_start + j] = force_link_measured[j]
         for j in qd.static(range(3)):
-            output_measured[torque_start + j, i_b] = torque_link_measured[j]
+            output_measured[i_b, torque_start + j] = torque_link_measured[j]
 
 
-@dataclass
-class PointCloudTactileSharedMetadata(ProbeSensorMetadataMixin, RigidSensorMetadataMixin, SimpleSensorMetadata):
-    """Shared sensor-manager state for point-cloud-tracked tactile sensors (probes + merged track PC)."""
+class PointCloudTactileArrayMixin(ProbeSensorArrayMixin, RigidSensorArrayMixin):
+    """Array of point-cloud-tracked tactile sensors: the probes of every sensor plus the merged point cloud sampled on
+    their tracked links, and the BVH over it."""
 
-    pc_link_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    pc_pos_link: torch.Tensor = make_tensor_field((0, 3))
-    pc_normal_link: torch.Tensor = make_tensor_field((0, 3))
-    pc_active_envs_mask: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
-    sensor_pc_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    sensor_pc_n: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    pc_bvh: PointCloudBVH = field(default_factory=PointCloudBVH)
-
-
-PointCloudTactileSensorMetadataMixinT = TypeVar(
-    "PointCloudTactileSensorMetadataMixinT", bound=PointCloudTactileSharedMetadata
-)
-
-
-class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetadataMixinT]):
-    def __init__(self, options: "SensorOptions", idx: int, shared_context, shared_metadata, manager: "SensorManager"):
-        super().__init__(options, idx, shared_context, shared_metadata, manager)
-        self._probe_start_idx = -1
-        self._debug_pc_chunks: list[tuple[int, torch.Tensor, torch.Tensor]] | None = None
-
-    def build(self):
+    def build(self) -> None:
         super().build()
-        self._probe_start_idx = int(self._shared_metadata.sensor_probe_start[self._idx].item())
 
-        pc_start_row = self._shared_metadata.pc_pos_link.shape[0]
-        idx_cat, pos_cat, nrm_cat, active_cat = _sample_track_links_point_cloud_tensors(
-            self._shared_metadata.solver,
-            np.asarray(self._options.track_link_idx, dtype=gs.np_int),
-            self._options.n_sample_points,
-            self._options.use_visual_mesh,
-        )
-        if self._options.draw_debug:
-            self._debug_pc_chunks = []
-            for lid in torch.unique(idx_cat):
-                mask = idx_cat == lid
-                self._debug_pc_chunks.append((int(lid.item()), pos_cat[mask].clone(), active_cat[mask].clone()))
-        else:
-            self._debug_pc_chunks = None
+        # The tracked links of each sensor, sampled into link-local points laid sensor after sensor
+        sensors_points = [
+            _sample_track_links_point_cloud_tensors(
+                self._sim.rigid_solver,
+                np.asarray(sensor.options.track_link_idx, dtype=gs.np_int),
+                sensor.options.n_sample_points,
+                sensor.options.use_visual_mesh,
+            )
+            for sensor in self._sensors
+        ]
+        self.pc_link_idx = torch.cat([idx_cat for idx_cat, _, _ in sensors_points])
+        self.pc_pos_link = torch.cat([pos_cat for _, pos_cat, _ in sensors_points])
+        self.pc_active_envs_mask = torch.cat([active_cat for _, _, active_cat in sensors_points])
+        n_points = [pos_cat.shape[0] for _, pos_cat, _ in sensors_points]
+        self.pc_starts = list(itertools.accumulate(n_points, initial=0))[:-1]
+        self.sensor_pc_start = torch.tensor(self.pc_starts, dtype=gs.tc_int, device=gs.device)
+        self.sensor_pc_n = torch.tensor(n_points, dtype=gs.tc_int, device=gs.device)
+        # The leaves index the point tables just laid, sensor after sensor
+        self.pc_bvh = PointCloudBVH.build([(idx_cat, pos_cat) for idx_cat, pos_cat, _ in sensors_points])
 
-        self._shared_metadata.pc_link_idx = concat_with_tensor(
-            self._shared_metadata.pc_link_idx, idx_cat, expand=(idx_cat.shape[0],)
-        )
-        self._shared_metadata.pc_pos_link = concat_with_tensor(
-            self._shared_metadata.pc_pos_link, pos_cat, expand=(pos_cat.shape[0], 3)
-        )
-        self._shared_metadata.pc_normal_link = concat_with_tensor(
-            self._shared_metadata.pc_normal_link, nrm_cat, expand=(nrm_cat.shape[0], 3)
-        )
-        self._shared_metadata.pc_active_envs_mask = concat_with_tensor(
-            self._shared_metadata.pc_active_envs_mask, active_cat
-        )
-        self._shared_metadata.sensor_pc_start = concat_with_tensor(
-            self._shared_metadata.sensor_pc_start, pc_start_row, expand=(1,)
-        )
-        self._shared_metadata.sensor_pc_n = concat_with_tensor(
-            self._shared_metadata.sensor_pc_n, self._shared_metadata.pc_pos_link.shape[0] - pc_start_row, expand=(1,)
-        )
-
-        # BVH growth follows pc_pos_link growth in lockstep: each leaf's leaf_elem_idx is an absolute
-        # row into the just-grown pc_pos_link.
-        self._shared_metadata.pc_bvh.append_sensor(pc_start_row=pc_start_row, idx_cat=idx_cat, pos_cat=pos_cat)
+    def _pc_slice(self, i_s: int) -> slice:
+        """The rows of sensor ``i_s`` in the merged point tables."""
+        return slice(self.pc_starts[i_s], self.pc_starts[i_s] + int(self.sensor_pc_n[i_s].item()))
 
     def _draw_debug_probes(
-        self, context: "RasterizerContext", color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None
+        self,
+        i_s: int,
+        context: "RasterizerContext",
+        color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None,
     ) -> tuple[list[int] | None, int, np.ndarray | None]:
-        envs_idx, n_debug_envs, env_offsets = super()._draw_debug_probes(context, color_groups_fn)
-
-        if self._debug_pc_chunks is None:
-            return envs_idx, n_debug_envs, env_offsets
+        envs_idx, n_debug_envs, env_offsets = super()._draw_debug_probes(i_s, context, color_groups_fn)
+        options = self._sensors[i_s].options
+        # The sensor's slice of the merged point tables, one chunk per tracked link
+        pc_slice = self._pc_slice(i_s)
+        pc_link_idx = self.pc_link_idx[pc_slice]
+        pc_pos_link = self.pc_pos_link[pc_slice]
+        pc_active_envs_mask = self.pc_active_envs_mask[pc_slice]
         world_chunks: list[np.ndarray] = []
-        for link_idx, pos_local, active_envs_mask in self._debug_pc_chunks:
-            track_link = self._shared_metadata.solver.links[link_idx]
+        for link_idx in torch.unique(pc_link_idx).tolist():
+            mask = pc_link_idx == link_idx
+            pos_local, active_envs_mask = pc_pos_link[mask], pc_active_envs_mask[mask]
+            track_link = self._sim.rigid_solver.links[link_idx]
             if envs_idx is not None:
                 active_mask = tensor_to_array(active_envs_mask[:, envs_idx].T).astype(bool)
                 if not active_mask.any():
@@ -660,154 +608,115 @@ class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetad
                 track_quat = track_link.get_quat(envs_idx, relative=False).reshape(4)
                 world_chunks.append(tensor_to_array(gu.transform_by_trans_quat(pos_active, track_pos, track_quat)))
         if world_chunks:
-            self._debug_objects.append(
+            self._debug_objects[i_s].append(
                 context.draw_debug_spheres(
                     poss=np.concatenate(world_chunks, axis=0),
-                    radius=float(self._options.debug_point_cloud_radius),
-                    color=self._options.debug_point_cloud_color,
+                    radius=float(options.debug_point_cloud_radius),
+                    color=options.debug_point_cloud_color,
                 )
             )
         return envs_idx, n_debug_envs, env_offsets
 
-    def _debug_probe_buffer_magnitudes(self, buffer: torch.Tensor, envs_idx: list[int] | None) -> np.ndarray:
-        values = buffer[self._probe_start_idx : self._probe_start_idx + self._n_probes]
-        if envs_idx is None:
-            return tensor_to_array(values[:, 0])
-        return tensor_to_array(values[:, envs_idx].T)
-
 
 class ProximityTaxelReturnType(NamedTuple):
-    """Per-taxel estimates in link-local frame."""
+    """Force and torque estimates per taxel in the link frame."""
 
     force: torch.Tensor
     torque: torch.Tensor
 
 
-@dataclass
-class ProximityTaxelMetadata(
-    ViscoelasticHysteresisMetadataMixin,
-    SpatialCrosstalkMetadataMixin,
-    PointCloudTactileSharedMetadata,
-    ProbesWithNormalSensorMetadataMixin,
+class ProximityTaxelSensorArray(
+    ViscoelasticHysteresisArrayMixin,
+    SpatialCrosstalkArrayMixin,
+    PointCloudTactileArrayMixin,
+    ProbesWithNormalSensorArrayMixin,
+    SimpleSensorArray[ProximityTaxelOptions, ProximityTaxelReturnType],
 ):
-    stiffness: torch.Tensor = make_tensor_field((0,))
-    shear_coupling: torch.Tensor = make_tensor_field((0,))
-    twist_scalar: torch.Tensor = make_tensor_field((0,))
-    proximity_density_scale: torch.Tensor = make_tensor_field((0, 0))
-    taxel_signal_buf: torch.Tensor = make_tensor_field((0, 0))
+    """
+    Array of every proximity taxel of the scene, reading the force and torque of each spherical taxel in the link frame
+    against the tracked point clouds.
+    """
+
+    # Two channel groups: force xyz followed by torque xyz (probe-major within each group)
+    _taxel_channel_groups = 2
+
+    def build(self) -> None:
+        super().build()
+
+        sensors_options = [sensor.options for sensor in self._sensors]
+        self.stiffness = torch.tensor(
+            [sensor_options.stiffness for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
+        )
+        self.shear_coupling = torch.tensor(
+            [sensor_options.shear_coupling for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
+        )
+        self.twist_scalar = torch.tensor(
+            [sensor_options.twist_scalar for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
+        )
+        # Per sensor and environment, the density scalar over the number of its points active there
+        density_scales = []
+        for i_s, sensor_options in enumerate(sensors_options):
+            active_count = self.pc_active_envs_mask[self._pc_slice(i_s)].sum(dim=0).clamp_min(1)
+            density_scales.append(sensor_options.density_scalar / active_count.to(dtype=gs.tc_float))
+        self.proximity_density_scale = torch.stack(density_scales)
+        self.taxel_signal_buf = torch.zeros((self._sim._B, self.total_n_probes), dtype=gs.tc_float, device=gs.device)
+
+    def _get_return_format(self, options: ProximityTaxelOptions) -> tuple[tuple[int, ...], ...]:
+        shape = (*np.shape(options.probe_local_pos)[:-1], 3)
+        return shape, shape
+
+    def _get_cache_dtype(self) -> torch.dtype:
+        return gs.tc_float
+
+    def reset(self, envs_idx: EnvsIdxType | None) -> None:
+        super().reset(envs_idx)
+
+        self.taxel_signal_buf[envs_idx] = 0.0
+
+    def _update_current_timestep_data(self, ground_truth_slot_0: torch.Tensor, measured_slot_0: torch.Tensor) -> None:
+        bvh = self.pc_bvh
+        _kernel_point_cloud_proximity_taxel_bvh(
+            self.probe_sensor_idx,
+            self.links_idx,
+            self.sensors_cache_start,
+            self.sensor_probe_start,
+            self.probe_positions,
+            self.probe_local_normal,
+            self.n_probes_per_sensor,
+            bvh.kernel_bvh,
+            self.pc_pos_link,
+            self.pc_active_envs_mask,
+            self.probe_radii,
+            self.probe_radii_noise,
+            self.probe_gains,
+            self.stiffness,
+            self.shear_coupling,
+            self.twist_scalar,
+            self.proximity_density_scale,
+            ground_truth_slot_0,
+            measured_slot_0,
+            self.taxel_signal_buf,
+            self.solver.dyn_state,
+            gs.EPS,
+        )
+
+    def _draw_debug(self, i_s: int, context: "RasterizerContext") -> None:
+        def mask(envs_idx: EnvsIdxType | None) -> torch.Tensor:
+            signals = self.taxel_signal_buf[:, self._probe_slice(i_s)]
+            return tensor_to_array(signals[0] if envs_idx is None else signals[envs_idx]) >= gs.EPS
+
+        self._draw_debug_probes(i_s, context, self._tactile_color_groups_fn(i_s, mask))
 
 
 class ProximityTaxelSensor(
-    ViscoelasticHysteresisMixin[ProximityTaxelMetadata],
-    SpatialCrosstalkMixin[ProximityTaxelMetadata],
-    PointCloudTactileSensorMixin[ProximityTaxelMetadata],
-    ProbesWithNormalSensorMixin[ProximityTaxelMetadata],
-    RigidSensorMixin[ProximityTaxelMetadata],
-    SimpleSensor[ProximityTaxelOptions, None, ProximityTaxelMetadata, ProximityTaxelReturnType],
+    ProbeSensorMixin,
+    LinkAttachedSensorMixin,
+    SimpleSensor[ProximityTaxelOptions, ProximityTaxelSensorArray],
 ):
-    """Spherical point-cloud taxels: per-taxel force and torque in link-local frame vs tracked meshes."""
-
-    # Two channel groups: force xyz followed by torque xyz (probe-major within each group).
-    _taxel_channel_groups: int = 2
-
-    def __init__(
-        self, options: ProximityTaxelOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"
-    ):
-        super().__init__(options, idx, shared_context, shared_metadata, manager)
-        # Resolve the grid frame for spatial crosstalk (flat pos/normals are already populated by the base mixins).
-        self._setup_crosstalk_grid(options)
-
-    def build(self):
-        super().build()
-        if self._options.is_crosstalk_enabled and self._use_grid_crosstalk:
-            self._register_crosstalk()
-        self._shared_metadata.stiffness = concat_with_tensor(
-            self._shared_metadata.stiffness, float(self._options.stiffness), expand=(1,)
-        )
-        self._shared_metadata.shear_coupling = concat_with_tensor(
-            self._shared_metadata.shear_coupling, float(self._options.shear_coupling), expand=(1,)
-        )
-        self._shared_metadata.twist_scalar = concat_with_tensor(
-            self._shared_metadata.twist_scalar, float(self._options.twist_scalar), expand=(1,)
-        )
-        pc_start = self._shared_metadata.sensor_pc_start[-1].item()
-        pc_end = pc_start + self._shared_metadata.sensor_pc_n[-1].item()
-        active_count = (
-            self._shared_metadata.pc_active_envs_mask[pc_start:pc_end].sum(dim=0).clamp_min(1).to(dtype=gs.tc_float)
-        )
-        self._shared_metadata.proximity_density_scale = concat_with_tensor(
-            self._shared_metadata.proximity_density_scale,
-            self._options.density_scalar / active_count,
-            expand=(1, self._manager._sim._B),
-        )
-        self._shared_metadata.taxel_signal_buf = torch.zeros(
-            (self._shared_metadata.total_n_probes, self._manager._sim._B), dtype=gs.tc_float, device=gs.device
-        )
-
-    def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
-        shape = (*self._probe_layout_shape, 3)
-        return shape, shape
-
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
-        return gs.tc_float
-
-    @classmethod
-    def reset(cls, shared_metadata: ProximityTaxelMetadata, shared_ground_truth_cache: torch.Tensor, envs_idx):
-        super().reset(shared_metadata, shared_ground_truth_cache, envs_idx)
-        shared_metadata.taxel_signal_buf[:, envs_idx] = 0.0
-
-    @classmethod
-    def _update_current_timestep_data(
-        cls,
-        shared_context: None,
-        shared_metadata: ProximityTaxelMetadata,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer",
-    ):
-        solver = shared_metadata.solver
-        measured, measured_cols_b = get_measured_bufs(
-            shared_metadata, current_ground_truth_data_T, measured_data_timeline
-        )
-        bvh = shared_metadata.pc_bvh
-        _kernel_point_cloud_proximity_taxel_bvh(
-            shared_metadata.probe_sensor_idx,
-            shared_metadata.links_idx,
-            shared_metadata.sensor_cache_start,
-            shared_metadata.sensor_probe_start,
-            shared_metadata.probe_positions,
-            shared_metadata.probe_local_normal,
-            shared_metadata.n_probes_per_sensor,
-            bvh.kernel_bvh,
-            shared_metadata.pc_pos_link,
-            shared_metadata.pc_active_envs_mask,
-            shared_metadata.probe_radii,
-            shared_metadata.probe_radii_noise,
-            shared_metadata.probe_gains,
-            shared_metadata.stiffness,
-            shared_metadata.shear_coupling,
-            shared_metadata.twist_scalar,
-            shared_metadata.proximity_density_scale,
-            current_ground_truth_data_T,
-            measured_cols_b,
-            shared_metadata.taxel_signal_buf,
-            solver.dyn_state,
-            gs.EPS,
-        )
-        if ground_truth_data_timeline is not None:
-            ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
-        measured.copy_(measured_cols_b.T)
-
-    def _draw_debug(self, context: "RasterizerContext"):
-        self._draw_debug_probes(
-            context,
-            self._tactile_color_groups_fn(
-                lambda envs_idx: (
-                    self._debug_probe_buffer_magnitudes(self._shared_metadata.taxel_signal_buf, envs_idx) >= gs.EPS
-                )
-            ),
-        )
+    """
+    Sensor reading the force and torque of each of its spherical taxels in the link frame against the tracked point
+    clouds.
+    """
 
 
 @qd.func
@@ -888,11 +797,11 @@ def _func_elastomer_direct_dilate_contribution(
     eps: float,
 ) -> qd.types.vector(3):
     """
-    Single tracked-point dilation contribution: tangential spreading is linear in penetration depth, while the
-    out-of-plane bulge follows a ``depth ** normal_exponent`` power law (mirrors the FFT path's H / H**normal_exponent
-    channel split).
+    Dilation contribution of a single tracked point to a target probe.
 
-    The normal bulge always keeps the Gaussian falloff; the in-plane term is set by ``compressibility`` (1 = local
+    Tangential spreading is linear in penetration depth, while the out-of-plane bulge follows a
+    ``depth ** normal_exponent`` power law (mirrors the FFT path's H / H**normal_exponent channel split). The normal
+    bulge always keeps the Gaussian falloff; the in-plane term is set by ``compressibility`` (1 = local
     Gaussian first-moment, 0 = incompressible ``r_hat/r``, in-between = peak-normalized blend).
     """
     planar_diff = _func_elastomer_tangent(target_pos - source_pos, target_normal)
@@ -934,7 +843,7 @@ def _func_elastomer_direct_shear_contribution(
     return contribution
 
 
-def _collect_collision_geom_idx(solver, track_link_idx: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+def _collect_collision_geom_idx(solver: "RigidSolver", track_link_idx: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
     geom_idx: list[int] = []
     active_masks: list[torch.Tensor] = []
     for link_idx in track_link_idx:
@@ -957,8 +866,9 @@ _LAYER_Q_MAX: Final[float] = 30.0
 
 @torch.jit.script
 def _bonded_layer_transfer(q: torch.Tensor, q_min: float = _LAYER_Q_MIN, q_max: float = _LAYER_Q_MAX) -> torch.Tensor:
-    """In-plane transfer ``S(q)`` of an incompressible elastic layer of thickness ``h`` bonded to a rigid base,
-    with a shear-free top surface of prescribed normal displacement. For dimensionless wavenumber ``q = |k| * h``,
+    """In-plane transfer ``S(q)`` of an incompressible elastic layer of thickness ``h`` bonded to a rigid base.
+
+    The top surface is shear-free with a prescribed normal displacement. For dimensionless wavenumber ``q = |k| * h``,
     the tangential surface displacement spectrum is ``-i * k_hat * S(q) * H_hat`` from the height spectrum ``H_hat``.
 
     ``S(q) = 2 q^2 / (sinh(2q) - 2q)`` is the exact per-mode solution: it grows as ``1.5/q`` for small ``q``
@@ -999,9 +909,9 @@ def _precompute_hydroshear_dilate_kernel_fft(
     The in-plane planes ``(Ku, Kv)`` blend a local and a global kernel by ``compressibility`` (1 = local only,
     0 = global only, each peak-normalized in between). Local: the first-moment Gaussian
     ``offset * exp(-lambda_d r^2)``. Global: with ``elastomer_thickness`` set, the exact bonded incompressible
-    layer transfer ``-i k_hat S(|k| h)`` (see ``_bonded_layer_transfer``), built directly in k-space; otherwise the
-    free-space ``offset / (r^2 + eps^2)`` (gradient of the 2D inverse-Laplacian, ``~1/r``). The normal plane
-    ``Kn`` is always the Gaussian bulge.
+    layer transfer ``-i k_hat S(|k| h)`` (see ``_bonded_layer_transfer``), built directly in k-space; with a zero
+    thickness the free-space ``offset / (r^2 + eps^2)`` (gradient of the 2D inverse-Laplacian, ``~1/r``). The normal
+    plane ``Kn`` is the Gaussian bulge in both cases.
     """
     iv = torch.arange(fft_n[0], dtype=dtype, device=device)
     iu = torch.arange(fft_n[1], dtype=dtype, device=device)
@@ -1050,7 +960,7 @@ def _precompute_hydroshear_dilate_kernel_fft(
 
 
 def _dilate_kernel_builder(meta_entry: GridFFTMeta, fft_n: tuple[int, int]) -> torch.Tensor:
-    """``register_grid_fft_sensor`` kernel builder for HydroShear dilation: 3 planes ``(Ku, Kv, Kn)``."""
+    """Build the three HydroShear dilation kernel planes ``(Ku, Kv, Kn)`` for ``build_grid_fft``."""
     return _precompute_hydroshear_dilate_kernel_fft(
         meta_entry.lambda_d,
         (meta_entry.spacing_u, meta_entry.spacing_v),
@@ -1077,15 +987,15 @@ def _func_elastomer_min_signed_dist_bvh(
     max_query_dist: float,
 ) -> float:
     """
-    BVH-based signed distance from ``probe_world`` to the nearest triangle of any geom flagged for this sensor in
-    ``track_geom_mask`` (shape ``(B, n_sensors, n_geoms)``).
+    Return the signed distance from ``probe_world`` to the nearest triangle of any geom flagged for this sensor in
+    ``track_geom_mask``, through a bounding volume hierarchy (BVH).
 
-    Sign is positive when the probe is outside the surface (closest-triangle face-normal points away from probe),
-    negative when inside. Mirrors the return contract of ``_func_elastomer_min_sdf_over_active_geoms`` so callers
-    consume ``max(0, -signed)`` identically.
+    ``track_geom_mask`` has shape ``(B, n_sensors, n_geoms)``. The sign is positive when the probe is outside the
+    surface (the face normal of the closest triangle points away from the probe) and negative inside. The return mirrors
+    ``_func_elastomer_min_sdf_over_active_geoms``, so callers consume ``max(0, -signed)`` identically.
 
-    Uses ``max_query_dist`` as the BVH cull radius: probes farther than that from every candidate triangle are
-    treated as fully outside (returns ``+max_query_dist``), which downstream maps to depth = 0.
+    ``max_query_dist`` is the cull radius of the BVH: a probe farther than that from every candidate triangle counts as
+    fully outside and returns ``+max_query_dist``, which maps to a depth of 0 downstream.
     """
     # The tree's own leaf count: a compacted-subset tree (see RaycastContext.activate) has fewer leaves than faces.
     n_triangles = bvh_tree_state.leaves_idx.shape[1]
@@ -1158,11 +1068,11 @@ def _kernel_elastomer_probe_depth_bvh(
     is_split: qd.template(),
 ):
     """
-    Per-probe contact depth from the rigid solver's collision BVH entries (folded when split), gated by
-    ``track_geom_mask``.
+    Compute the contact depth of each probe from the collision bounding volume hierarchy (BVH) entries of the rigid
+    solver, folded when split and gated by ``track_geom_mask``.
 
-    Mirrors ``_kernel_elastomer_probe_depth``'s output contract (write into ``probe_depth_buf``); the dilate
-    accumulator consumes the same buffer downstream.
+    It writes ``probe_depth_buf`` like ``_kernel_elastomer_probe_depth``, and the dilate accumulator consumes the same
+    buffer downstream.
     """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = probe_depth_buf.shape[0]
@@ -1223,10 +1133,11 @@ def _kernel_elastomer_probe_depth(
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
 ):
-    """Per-probe contact depth from track-geom SDF, parallel over (env, probe).
+    """
+    Compute the contact depth of each probe from the signed distance fields (SDFs) of the tracked geoms, parallel over
+    (env, probe).
 
-    Writes only ``probe_depth_buf``; dilate accumulation is split into a separate target-major kernel that runs
-    without atomics.
+    It writes only ``probe_depth_buf``. The dilate accumulation runs in a separate target-major kernel without atomics.
     """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = probe_depth_buf.shape[0]
@@ -1276,12 +1187,12 @@ def _kernel_elastomer_dilate_accumulate(
     probe_depth_buf: qd.types.ndarray(),
     output: qd.types.ndarray(),
 ):
-    """Target-major dilate accumulator for non-grid sensors.
+    """
+    Accumulate the dilation onto each target probe of the sensors on the direct path.
 
-    Each (env, target_probe) thread sums Gaussian contributions from every in-contact source probe of its sensor
-    into a register and writes once -- no atomic_add. Grid sensors are skipped (FFT path handles them). Output write
-    is an OVERWRITE because output was pre-zeroed at step start and no other writer touches a non-grid sensor's range
-    before shear-accumulate.
+    Each (env, target_probe) thread sums the Gaussian contributions of every in-contact source probe of its sensor into
+    a register and overwrites its output slot, so no atomic add and no pre-zeroing is needed (see
+    ``_update_current_timestep_data`` for the write order). Grid sensors are skipped and take the FFT path.
     """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = probe_depth_buf.shape[0]
@@ -1303,7 +1214,7 @@ def _kernel_elastomer_dilate_accumulate(
         # Inactive filler probe: reads zero, no dilation accumulated.
         if probe_radii[i_p] <= gs.qd_float(0.0):
             for k in qd.static(range(3)):
-                output[cache_start + _i_p * 3 + k, i_b] = gs.qd_float(0.0)
+                output[i_b, cache_start + _i_p * 3 + k] = gs.qd_float(0.0)
             continue
 
         target_local = func_vec3_at(i_p, probe_positions_local)
@@ -1330,7 +1241,7 @@ def _kernel_elastomer_dilate_accumulate(
                 acc[k] = acc[k] + contribution[k]
 
         for k in qd.static(range(3)):
-            output[cache_start + _i_p * 3 + k, i_b] = acc[k]
+            output[i_b, cache_start + _i_p * 3 + k] = acc[k]
 
 
 @qd.kernel(fastcache=True)
@@ -1357,13 +1268,13 @@ def _kernel_elastomer_surface_state_bvh(
     aabb_margin: float,
     bvh_stack_size: qd.template(),
 ):
-    """Per-(env, chunk): compute the chunk-local query AABB in registers, BVH-traverse, and write
-    per-candidate surface state.
+    """
+    Compute the query axis-aligned bounding box (AABB) of each (env, chunk) pair in registers, traverse the bounding
+    volume hierarchy (BVH) and write the surface state of each candidate point.
 
-    The AABB fill and BVH traversal share one kernel so the AABB stays in thread-local state instead of
-    round-tripping through a (B, n_chunks, 3) buffer. No probe work happens here -- the shear contribution is
-    accumulated in a separate target-major kernel that reads surface_pos_sensor_buf / surface_depth_buf /
-    surface_entry_pos_sensor_buf.
+    The AABB fill and the BVH traversal share one kernel, so the AABB stays in thread-local state instead of a (B,
+    n_chunks, 3) buffer. The shear contribution is accumulated in a separate target-major kernel that reads
+    ``surface_pos_sensor_buf``, ``surface_depth_buf`` and ``surface_entry_pos_sensor_buf``.
     """
     n_batches = surface_pos_sensor_buf.shape[0]
     n_chunks = bvh_chunk_sensor_idx.shape[0]
@@ -1526,8 +1437,8 @@ def _kernel_elastomer_surface_state_via_global_bvh(
 
     Same outer (env, chunk) traversal over the point-cloud BVH per tracked link, but the inner signed-distance query
     at each PC point uses ``_func_elastomer_min_signed_dist_bvh`` over the rigid solver's collision BVH entries
-    (folded when split, gated by ``elastomer_candidate_geom_mask``) instead of the analytic SDF. Output contract matches the SDF variant so the
-    dilate / shear pipeline downstream is unchanged.
+    (folded when split, gated by ``elastomer_candidate_geom_mask``) instead of the analytic SDF. It writes the same
+    buffers as the SDF variant, so the dilate and shear kernels consume either.
     """
     n_batches = surface_pos_sensor_buf.shape[0]
     n_chunks = bvh_chunk_sensor_idx.shape[0]
@@ -1683,13 +1594,14 @@ def _kernel_elastomer_shear_accumulate(
     output: qd.types.ndarray(),
     eps: float,
 ):
-    """Target-major shear accumulator: per (env, target_probe), iterate over the sensor's compact active surface-point
-    index and sum Gaussian contributions into a register, then += the result into ``output``.
+    """
+    Accumulate the shear contribution of the active surface points of each sensor into ``output``, target-major.
 
-    No atomic_add (each (i_b, i_p) thread owns its output slot). Consumes the compact index produced by
-    ``_build_shear_active_pc_index`` (must run after the surface-state kernel AND after the post-kernel
-    ``surface_initialized_buf &= candidate`` cleanup). Inner-loop cost is O(active_count[i_b, i_s]) rather than
-    O(sensor_pc_n[i_s]), so the kernel scales with contact density rather than total point-cloud size.
+    Per (env, target_probe), the thread iterates over the compact active surface-point index of the sensor, sums the
+    Gaussian contributions into a register and adds the result to its own output slot, so no atomic add is needed. It
+    consumes the compact index ``_build_shear_active_pc_index`` produces, which runs after the surface-state kernel and
+    after the post-kernel ``surface_initialized_buf &= candidate`` cleanup. The inner loop costs O(active_count[i_b,
+    i_s]), so the kernel scales with the contact density.
     """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = surface_pos_sensor_buf.shape[0]
@@ -1740,9 +1652,11 @@ def _kernel_elastomer_shear_accumulate(
                 acc[k] = acc[k] + contribution[k]
 
         for k in qd.static(range(3)):
-            output[cache_start + _i_p * 3 + k, i_b] = output[cache_start + _i_p * 3 + k, i_b] + acc[k]
+            output[i_b, cache_start + _i_p * 3 + k] = output[i_b, cache_start + _i_p * 3 + k] + acc[k]
 
 
+# FIXME: three host transfers then one nonzero per active sensor, every step; compact in one kernel over the
+# sensor segments.
 def _build_shear_active_pc_index(
     surface_initialized_buf: torch.Tensor,
     sensor_pc_start: torch.Tensor,
@@ -1751,19 +1665,19 @@ def _build_shear_active_pc_index(
     active_pc_idx: torch.Tensor,
     active_pc_count: torch.Tensor,
 ) -> None:
-    """Build the compact per-(env, sensor) active surface-point index consumed by
-    ``_kernel_elastomer_shear_accumulate``.
+    """
+    Build the compact per-(env, sensor) active surface-point index ``_kernel_elastomer_shear_accumulate`` consumes.
 
-    Mutates ``active_pc_idx`` and ``active_pc_count`` in place.
+    It mutates ``active_pc_idx`` and ``active_pc_count`` in place.
 
-    For each sensor ``s`` with ``shear_scale[s] > 0``, gathers the indices of True entries in
-    ``surface_initialized_buf[:, pc_start[s] : pc_start[s] + pc_n[s]]`` into the per-sensor compact slice
-    ``active_pc_idx[:, pc_start[s] : pc_start[s] + active_count[:, s]]``; the per-(env, sensor) active
-    count is written to ``active_pc_count[:, s]``. Sensors with ``shear_scale == 0`` are skipped and
-    their count is left at zero so the kernel's outer early-exit handles them with no extra work.
+    For each sensor ``s`` with ``shear_scale[s] > 0``, it gathers the indices of the True entries of
+    ``surface_initialized_buf[:, pc_start[s] : pc_start[s] + pc_n[s]]`` into the compact slice ``active_pc_idx[:,
+    pc_start[s] : pc_start[s] + active_count[:, s]]`` and writes the count of each (env, sensor) pair to
+    ``active_pc_count[:, s]``. A sensor with ``shear_scale == 0`` is skipped and its count stays at zero, which the
+    outer early exit of the kernel handles with no extra work.
 
-    Uses exclusive cumsum + ``torch.nonzero`` for the per-sensor scatter so per-env Python loops are
-    avoided; cost is ~O(B * total_n_surface) torch ops over the whole pass.
+    The per-sensor scatter runs as an exclusive cumsum and one ``torch.nonzero`` over the whole pass, in O(B *
+    total_n_surface) torch ops.
     """
     active_pc_count.zero_()
     n_sensors = sensor_pc_start.shape[0]
@@ -1806,15 +1720,15 @@ def _elastomer_taxel_grid_fft_dilate(
     output: torch.Tensor,
 ) -> None:
     """
-    Elastomer marker dilation via 2D FFT in the validated probe tangent basis.
+    Dilate the elastomer markers of every grid sensor by a 2D fast Fourier transform (FFT) in the tangent basis of its
+    probes.
 
-    All grid sensors share the global ``grid_fft_max_n`` (= last two dims of ``grid_fft_buffer``); their
-    kernels are stacked into ``grid_fft_kernels_stacked`` of shape (n_grid, 3, fft_ny, fft_nx). The four heavy
-    FFTs (fft of H, fft of H**normal_exponent, ifft for Ku/Kv/Kn) thus run as batched ops over the grid-sensor
-    axis, dropping
-    launches from 4*n_grid to 4. The H-fill and write-back stages remain per-sensor (small Python loops over
-    view/copy and per-sensor tangent decomposition). Grid axes are ``(ny, nx)`` row-major throughout (matching
-    the probe flat index ``iy * nx + ix``), so no transpose is needed on either the fill or write-back side.
+    All grid sensors share one FFT size, the last two dimensions of ``grid_fft_buffer``, and their kernels are stacked
+    into ``grid_fft_kernels_stacked`` of shape (n_grid, 3, fft_ny, fft_nx). The four heavy FFTs (the FFT of H, the FFT
+    of H**normal_exponent, the inverse FFT for Ku, Kv and Kn) run as batched operations over the grid-sensor axis, in 4
+    launches instead of 4*n_grid. The H fill and the write-back stay per sensor, as small Python loops over views and
+    copies and a per-sensor tangent decomposition. The grid axes are ``(ny, nx)`` row-major throughout, matching the
+    probe flat index ``iy * nx + ix``, so the fill and the write-back read the grid as it is.
     """
     if len(grid_fft_meta) == 0:
         return
@@ -1867,347 +1781,227 @@ def _elastomer_taxel_grid_fft_dilate(
             out_block[:, k:grid_size:3] = (
                 disp_u_flat * tangent_u[k] + disp_v_flat * tangent_v[k] + disp_n_flat * normal[k]
             ) * active
-        output[cache_start : cache_start + grid_size].copy_(out_block.T)
+        output[:, cache_start : cache_start + grid_size].copy_(out_block)
 
 
-@dataclass
-class ElastomerTaxelSensorMetadata(
-    ViscoelasticHysteresisMetadataMixin,
-    GridFFTConvMetadataMixin,
-    ContactDepthQueryMetadataMixin,
-    PointCloudTactileSharedMetadata,
-    ProbesWithNormalSensorMetadataMixin,
+class ElastomerTaxelSensorArray(
+    ViscoelasticHysteresisArrayMixin,
+    GridFFTConvArrayMixin,
+    ContactDepthQueryArrayMixin,
+    PointCloudTactileArrayMixin,
+    ProbesWithNormalSensorArrayMixin,
+    SimpleSensorArray[ElastomerTaxelSensorOptions],
 ):
-    track_geom_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    track_geom_active_envs_mask: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
-    sensor_track_geom_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    sensor_track_geom_n: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    """Array of every elastomer taxel of the scene: the displacement of a soft elastomer surface under contact, dilated
+    over the grid of probes and sheared by the anchored contact points."""
 
-    elastomer_geom_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    elastomer_geom_active_envs_mask: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
-    sensor_elastomer_geom_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-    sensor_elastomer_geom_n: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
-
-    # Per-(B, sensor, geom) bitmask of elastomer (sensor-own) geoms, used by the global-BVH surface-state kernel
-    # to gate triangles back to the sensor's elastomer surface. Separate from ``sensor_candidate_geom_mask`` which
-    # gates by tracked-object geoms for the probe-depth kernel.
-    elastomer_candidate_geom_mask: torch.Tensor = make_tensor_field((0, 0, 0), dtype_factory=lambda: gs.tc_bool)
-
-    lambda_d: torch.Tensor = make_tensor_field((0,))
-    lambda_s: torch.Tensor = make_tensor_field((0,))
-    dilate_scale: torch.Tensor = make_tensor_field((0,))
-    shear_scale: torch.Tensor = make_tensor_field((0,))
-    normal_exponent: torch.Tensor = make_tensor_field((0,))
-    # In-plane dilation blend weight (1 = local Gaussian, 0 = incompressible 1/r) and the resolved incompressible
-    # regularization epsilon (meters); consumed per-sensor by the direct dilate kernel and baked into the FFT kernel.
-    compressibility: torch.Tensor = make_tensor_field((0,))
-    dilation_reg: torch.Tensor = make_tensor_field((0,))
-    # Shear-anchor gate as signed-distance margins, derived at build from contact_threshold/release_threshold: a surface
-    # point anchors when its sd < -sd_enter and releases when sd > sd_exit (= -release_threshold).
-    shear_anchor_sd_enter: torch.Tensor = make_tensor_field((0,))
-    shear_anchor_sd_exit: torch.Tensor = make_tensor_field((0,))
-
-    probe_depth_buf: torch.Tensor = make_tensor_field((0, 0))
-    surface_pos_sensor_buf: torch.Tensor = make_tensor_field((0, 0, 3))
-    surface_entry_pos_sensor_buf: torch.Tensor = make_tensor_field((0, 0, 3))
-    surface_depth_buf: torch.Tensor = make_tensor_field((0, 0))
-    surface_initialized_buf: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
-
-    # Per-(env, pc-row) BVH-candidate flag, zeroed each step and written True by the surface-state
-    # kernel for every visited active point. Post-kernel torch ops use ``!candidate`` to invalidate
-    # stale surface_initialized / surface_entry_pos for points the BVH skipped this step.
-    surface_candidate_buf: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
-
-    # Compact per-(env, sensor) active surface-point index, rebuilt every step right after the
-    # ``surface_initialized_buf &= candidate`` cleanup and consumed by ``_kernel_elastomer_shear_accumulate``.
-    # For sensor ``s`` in env ``i_b``, the first ``shear_active_pc_count[i_b, s]`` entries of
-    # ``shear_active_pc_idx[i_b, sensor_pc_start[s]:]`` hold the global pc-row indices whose
-    # ``surface_initialized_buf`` is True. Sensors with ``shear_scale == 0`` have count = 0.
-    shear_active_pc_idx: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_int)
-    shear_active_pc_count: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_int)
-
-    # Per-sensor flag selecting the FFT dilation path vs the direct (non-grid) dilation kernel.
-    use_grid_fft: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_bool)
-    # Per-grid-FFT-sensor tangent basis, consumed by the dilation write-back. See ``GridFFTMeta`` for the per-sensor
-    # ``grid_fft_meta`` record layout.
-    grid_normal: torch.Tensor = make_tensor_field((0, 3))
-    grid_tangent_u: torch.Tensor = make_tensor_field((0, 3))
-    grid_tangent_v: torch.Tensor = make_tensor_field((0, 3))
-    # Scratch for the per-sensor tangent-decomposition write-back, lazily grown to the largest grid.
-    grid_dilate_out_buffer: torch.Tensor = make_tensor_field((0, 0))
-
-    # True iff at least one configured ElastomerTaxel has shear_scale > 0. Set during build by OR-ing
-    # each sensor's value, so per-step gating avoids an O(n_sensors) reduction + device sync.
-    any_shear: bool = False
-
-
-class ElastomerTaxelSensor(
-    ViscoelasticHysteresisMixin[ElastomerTaxelSensorMetadata],
-    ContactDepthQuerySensorMixin,
-    PointCloudTactileSensorMixin[ElastomerTaxelSensorMetadata],
-    ProbesWithNormalSensorMixin[ElastomerTaxelSensorMetadata],
-    RigidSensorMixin[ElastomerTaxelSensorMetadata],
-    SimpleSensor[ElastomerTaxelSensorOptions, RaycastContext, ElastomerTaxelSensorMetadata],
-):
-    def __init__(
-        self, options: ElastomerTaxelSensorOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"
-    ):
-        super().__init__(options, idx, shared_context, shared_metadata, manager)
-        # FFT-grid eligibility check (flat pos/normals are already populated by the base mixins). 2D layouts with
-        # non-degenerate spacing use the FFT dilation path; strictly irregular grids still take that path with
-        # averaged metadata and only emit a warning.
-        self._is_grid = len(self._probe_layout_shape) == 2
-        _, _, self._use_grid_fft, is_grid_regular, grid_normal, grid_tangent_u, grid_tangent_v, grid_spacing = (
-            normalize_grid_probe_layout(
-                np.asarray(options.probe_local_pos, dtype=gs.np_float),
-                np.asarray(options.probe_local_normal, dtype=gs.np_float),
-                self._is_grid,
-            )
-        )
-        self._grid_normal = torch.tensor(grid_normal, dtype=gs.tc_float, device=gs.device)
-        self._grid_tangent_u = torch.tensor(grid_tangent_u, dtype=gs.tc_float, device=gs.device)
-        self._grid_tangent_v = torch.tensor(grid_tangent_v, dtype=gs.tc_float, device=gs.device)
-        self._grid_spacing = torch.tensor(grid_spacing, dtype=gs.tc_float, device=gs.device)
-
-        if self._use_grid_fft and not is_grid_regular:
-            gs.logger.warning(
-                "ElastomerTaxel grid is not strictly regular (uniform spacing, uniform normals, orthogonal "
-                "tangents); FFT dilation will use averaged spacing and normal as a best-fit approximation."
-            )
-
-    def build(self):
+    def build(self) -> None:
         super().build()
 
-        solver = self._shared_metadata.solver
-        B = self._manager._sim._B
-        if self._link is None:
-            gs.raise_exception("ElastomerTaxel must be attached to a rigid link with collision geometry.")
-        # The class-wide contact_depth_query backend is resolved + activated by ContactDepthQuerySensorMixin.build.
+        _B = self._sim._B
+        sensors_options = [sensor.options for sensor in self._sensors]
 
-        elastomer_geom_start_row = self._shared_metadata.elastomer_geom_idx.shape[0]
-        elastomer_geom_idx, elastomer_geom_active_envs_mask = _collect_collision_geom_idx(
-            solver, np.asarray((self._link.idx,), dtype=gs.np_int)
-        )
-        self._shared_metadata.elastomer_geom_idx = concat_with_tensor(
-            self._shared_metadata.elastomer_geom_idx, elastomer_geom_idx, expand=(elastomer_geom_idx.shape[0],)
-        )
-        self._shared_metadata.elastomer_geom_active_envs_mask = concat_with_tensor(
-            self._shared_metadata.elastomer_geom_active_envs_mask, elastomer_geom_active_envs_mask
-        )
-        self._shared_metadata.sensor_elastomer_geom_start = concat_with_tensor(
-            self._shared_metadata.sensor_elastomer_geom_start, elastomer_geom_start_row, expand=(1,)
-        )
-        self._shared_metadata.sensor_elastomer_geom_n = concat_with_tensor(
-            self._shared_metadata.sensor_elastomer_geom_n,
-            self._shared_metadata.elastomer_geom_idx.shape[0] - elastomer_geom_start_row,
-            expand=(1,),
-        )
+        for link in self._links:
+            if link is None:
+                gs.raise_exception("ElastomerTaxel must be attached to a rigid link with collision geometry.")
 
-        track_link_idx = np.asarray(self._options.track_link_idx, dtype=gs.np_int)
-        geom_start_row = self._shared_metadata.track_geom_idx.shape[0]
-        geom_idx, geom_active_envs_mask = _collect_collision_geom_idx(solver, track_link_idx)
-        self._shared_metadata.track_geom_idx = concat_with_tensor(
-            self._shared_metadata.track_geom_idx, geom_idx, expand=(geom_idx.shape[0],)
+        # The collision geoms of each sensor's own link and of its tracked links, laid end to end with their spans
+        elastomer_geoms = [
+            _collect_collision_geom_idx(self._sim.rigid_solver, np.asarray((link.idx,), dtype=gs.np_int))
+            for link in self._links
+        ]
+        self.elastomer_geom_idx = torch.cat([geom_idx for geom_idx, _ in elastomer_geoms])
+        self.elastomer_geom_active_envs_mask = torch.cat([active_mask for _, active_mask in elastomer_geoms])
+        n_elastomer_geoms = [geom_idx.shape[0] for geom_idx, _ in elastomer_geoms]
+        self.sensor_elastomer_geom_start = torch.tensor(
+            list(itertools.accumulate(n_elastomer_geoms, initial=0))[:-1], dtype=gs.tc_int, device=gs.device
         )
-        self._shared_metadata.track_geom_active_envs_mask = concat_with_tensor(
-            self._shared_metadata.track_geom_active_envs_mask, geom_active_envs_mask
-        )
-        self._shared_metadata.sensor_track_geom_start = concat_with_tensor(
-            self._shared_metadata.sensor_track_geom_start, geom_start_row, expand=(1,)
-        )
-        self._shared_metadata.sensor_track_geom_n = concat_with_tensor(
-            self._shared_metadata.sensor_track_geom_n,
-            self._shared_metadata.track_geom_idx.shape[0] - geom_start_row,
-            expand=(1,),
-        )
-
-        self._shared_metadata.lambda_d = concat_with_tensor(
-            self._shared_metadata.lambda_d, float(self._options.lambda_d), expand=(1,)
-        )
-        self._shared_metadata.lambda_s = concat_with_tensor(
-            self._shared_metadata.lambda_s, float(self._options.lambda_s), expand=(1,)
-        )
-        self._shared_metadata.dilate_scale = concat_with_tensor(
-            self._shared_metadata.dilate_scale, float(self._options.dilate_scale), expand=(1,)
-        )
-        self._shared_metadata.normal_exponent = concat_with_tensor(
-            self._shared_metadata.normal_exponent, float(self._options.normal_exponent), expand=(1,)
-        )
-        # Resolve the in-plane dilation blend weight + the incompressible-kernel regularization epsilon once,
-        # shared by the direct kernel (per-sensor tensors below) and the FFT path (baked via GridFFTMeta). The
-        # physical scale is elastomer_thickness: grid sensors use it in the exact spectral layer kernel, the
-        # direct path approximates the layer by regularizing 1/r at epsilon = h. Without a thickness, epsilon is
-        # a numerical guard at the probe spacing (grid step, else sqrt(in-plane area / n_probes)).
-        self._compressibility = float(self._options.compressibility)
-        self._elastomer_thickness = float(self._options.elastomer_thickness)
-        if self._elastomer_thickness > 0.0:
-            self._dilation_reg = self._elastomer_thickness
-        elif self._use_grid_fft:
-            self._dilation_reg = 0.5 * (float(self._grid_spacing[0].item()) + float(self._grid_spacing[1].item()))
-        else:
-            pos = np.asarray(self._options.probe_local_pos, dtype=gs.np_float).reshape(-1, 3)
-            ext = np.sort(pos.max(axis=0) - pos.min(axis=0))[::-1]
-            area = float(ext[0] * ext[1]) if ext[1] > gs.EPS else float(ext[0] * ext[0])
-            self._dilation_reg = float(np.sqrt(max(area, gs.EPS) / max(pos.shape[0], 1)))
-        self._shared_metadata.compressibility = concat_with_tensor(
-            self._shared_metadata.compressibility, self._compressibility, expand=(1,)
-        )
-        self._shared_metadata.dilation_reg = concat_with_tensor(
-            self._shared_metadata.dilation_reg, self._dilation_reg, expand=(1,)
-        )
-        self._shared_metadata.shear_scale = concat_with_tensor(
-            self._shared_metadata.shear_scale, float(self._options.shear_scale), expand=(1,)
-        )
-        # Shear-anchor gate, converted from depth (contact_threshold/release_threshold, latch on at depth >= enter, release
-        # at depth <= exit) to the signed-distance margins the surface-state kernels test: sd < -enter anchors,
-        # sd > -exit releases.
-        release_threshold = (
-            self._options.release_threshold
-            if self._options.release_threshold is not None
-            else (self._options.contact_threshold)
-        )
-        self._shared_metadata.shear_anchor_sd_enter = concat_with_tensor(
-            self._shared_metadata.shear_anchor_sd_enter, float(self._options.contact_threshold), expand=(1,)
-        )
-        self._shared_metadata.shear_anchor_sd_exit = concat_with_tensor(
-            self._shared_metadata.shear_anchor_sd_exit, -float(release_threshold), expand=(1,)
-        )
-        if float(self._options.shear_scale) > 0.0:
-            self._shared_metadata.any_shear = True
-
-        self._shared_metadata.probe_depth_buf = torch.zeros(
-            (B, self._shared_metadata.total_n_probes), dtype=gs.tc_float, device=gs.device
-        )
-        total_n_surface = self._shared_metadata.pc_pos_link.shape[0]
-        self._shared_metadata.surface_pos_sensor_buf = torch.zeros(
-            (B, total_n_surface, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._shared_metadata.surface_entry_pos_sensor_buf = torch.zeros(
-            (B, total_n_surface, 3), dtype=gs.tc_float, device=gs.device
-        )
-        self._shared_metadata.surface_depth_buf = torch.zeros((B, total_n_surface), dtype=gs.tc_float, device=gs.device)
-        self._shared_metadata.surface_initialized_buf = torch.zeros(
-            (B, total_n_surface), dtype=gs.tc_bool, device=gs.device
-        )
-
-        self._shared_metadata.surface_candidate_buf = torch.zeros(
-            (B, total_n_surface), dtype=gs.tc_bool, device=gs.device
-        )
-
-        # Compact active-point index for the shear accumulator. Re-allocated on each ElastomerTaxel build so the
-        # ``(B, total_n_surface)`` idx buffer and ``(B, n_sensors)`` count buffer absorb the newly registered sensor.
-        # Both are allocated unconditionally (zero-init); the per-step build at ``_build_shear_active_pc_index``
-        # leaves entries for non-shear sensors at count == 0, so unread regions remain harmless zeros.
-        n_sensors_built = self._shared_metadata.n_probes_per_sensor.shape[0]
-        self._shared_metadata.shear_active_pc_idx = torch.zeros((B, total_n_surface), dtype=gs.tc_int, device=gs.device)
-        self._shared_metadata.shear_active_pc_count = torch.zeros(
-            (B, n_sensors_built), dtype=gs.tc_int, device=gs.device
-        )
-
-        # Build the (B, n_sensors, n_geoms) candidate-geom masks scattered from track_geom_idx (probe-depth) and
-        # elastomer_geom_idx (surface-anchor). Only needed in raycast mode but allocated cheaply (bool, total
-        # scene-geom count) so we tolerate the small idle cost in sdf mode.
-        if self._shared_metadata.contact_depth_query == "raycast":
-            n_geoms = solver.n_geoms
-            self._shared_metadata.sensor_candidate_geom_mask = _build_candidate_geom_mask(
-                B,
-                n_sensors_built,
-                n_geoms,
-                self._shared_metadata.sensor_track_geom_start,
-                self._shared_metadata.sensor_track_geom_n,
-                self._shared_metadata.track_geom_idx,
+        self.sensor_elastomer_geom_n = torch.tensor(n_elastomer_geoms, dtype=gs.tc_int, device=gs.device)
+        track_geoms = [
+            _collect_collision_geom_idx(
+                self._sim.rigid_solver, np.asarray(sensor_options.track_link_idx, dtype=gs.np_int)
             )
-            self._shared_metadata.elastomer_candidate_geom_mask = _build_candidate_geom_mask(
-                B,
-                n_sensors_built,
-                n_geoms,
-                self._shared_metadata.sensor_elastomer_geom_start,
-                self._shared_metadata.sensor_elastomer_geom_n,
-                self._shared_metadata.elastomer_geom_idx,
-            )
-
-        self._shared_metadata.use_grid_fft = concat_with_tensor(
-            self._shared_metadata.use_grid_fft, self._use_grid_fft, expand=(1,)
+            for sensor_options in sensors_options
+        ]
+        self.track_geom_idx = torch.cat([geom_idx for geom_idx, _ in track_geoms])
+        self.track_geom_active_envs_mask = torch.cat([active_mask for _, active_mask in track_geoms])
+        n_track_geoms = [geom_idx.shape[0] for geom_idx, _ in track_geoms]
+        self.sensor_track_geom_start = torch.tensor(
+            list(itertools.accumulate(n_track_geoms, initial=0))[:-1], dtype=gs.tc_int, device=gs.device
         )
+        self.sensor_track_geom_n = torch.tensor(n_track_geoms, dtype=gs.tc_int, device=gs.device)
 
-        grid_normal = torch.zeros(3, dtype=gs.tc_float, device=gs.device)
-        grid_tangent_u = torch.zeros(3, dtype=gs.tc_float, device=gs.device)
-        grid_tangent_v = torch.zeros(3, dtype=gs.tc_float, device=gs.device)
-        if self._use_grid_fft:
-            nx, ny = int(self._probe_layout_shape[1]), int(self._probe_layout_shape[0])
-            grid_normal = self._grid_normal
-            grid_tangent_u = self._grid_tangent_u
-            grid_tangent_v = self._grid_tangent_v
-            spacing_u, spacing_v = float(self._grid_spacing[0].item()), float(self._grid_spacing[1].item())
-            # FFT size is (ny, nx) row-major. Sizing each axis to ``2n - 1`` (the full linear-convolution support)
-            # rounded up to a power of 2 guarantees zero circular wraparound regardless of the dilation kernel's
-            # decay -- the ``x*g`` / ``y*g`` first-moment kernels decay slower than the Gaussian itself.
-            this_fft_n = (next_pow2(2 * ny - 1), next_pow2(2 * nx - 1))
-            cache_start_py = int(self._shared_metadata.sensor_cache_start[self._idx].item())
-            register_grid_fft_sensor(
-                self._shared_metadata,
-                meta_entry=GridFFTMeta(
-                    sensor_idx=self._idx,
-                    g_ny=ny,
-                    g_nx=nx,
-                    probe_start=self._probe_start_idx,
-                    cache_start=cache_start_py,
-                    lambda_d=float(self._options.lambda_d),
-                    spacing_u=spacing_u,
-                    spacing_v=spacing_v,
-                    compressibility=self._compressibility,
-                    dilation_reg=self._dilation_reg,
-                    elastomer_thickness=self._elastomer_thickness,
-                ),
-                this_fft_n=this_fft_n,
-                kernel_builder=_dilate_kernel_builder,
-                n_buffer_channels=0,
-                batch_size=B,
-            )
-            grid_size = nx * ny * 3
-            out_buf = self._shared_metadata.grid_dilate_out_buffer
-            if out_buf.numel() == 0 or out_buf.shape[1] < grid_size:
-                self._shared_metadata.grid_dilate_out_buffer = torch.empty(
-                    (B, max(out_buf.shape[1] if out_buf.numel() > 0 else 0, grid_size)),
-                    dtype=gs.tc_float,
-                    device=gs.device,
+        # A 2D layout with non-degenerate spacing takes the FFT dilation path (an irregular one too, with averaged
+        # spacing and normal and a warning), the others the direct dilation kernel (see ProbeSensorArrayMixin.build)
+        for grid_frame in self._sensors_grid_frame:
+            if grid_frame.use_grid_fft and not grid_frame.is_grid_regular:
+                gs.logger.warning(
+                    "ElastomerTaxel grid is not strictly regular (uniform spacing, uniform normals, orthogonal "
+                    "tangents); FFT dilation will use averaged spacing and normal as a best-fit approximation."
                 )
 
-        self._shared_metadata.grid_normal = concat_with_tensor(
-            self._shared_metadata.grid_normal, grid_normal, expand=(1, 3)
+        self.lambda_d = torch.tensor(
+            [sensor_options.lambda_d for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
         )
-        self._shared_metadata.grid_tangent_u = concat_with_tensor(
-            self._shared_metadata.grid_tangent_u, grid_tangent_u, expand=(1, 3)
+        self.lambda_s = torch.tensor(
+            [sensor_options.lambda_s for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
         )
-        self._shared_metadata.grid_tangent_v = concat_with_tensor(
-            self._shared_metadata.grid_tangent_v, grid_tangent_v, expand=(1, 3)
+        self.dilate_scale = torch.tensor(
+            [sensor_options.dilate_scale for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
         )
+        self.normal_exponent = torch.tensor(
+            [sensor_options.normal_exponent for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
+        )
+        self.shear_scale = torch.tensor(
+            [sensor_options.shear_scale for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
+        )
+        # The in-plane dilation blend weight (1 = local Gaussian, 0 = incompressible 1/r) and the incompressible-kernel
+        # regularization epsilon, shared by the direct kernel and the FFT path (baked into GridFFTMeta). The physical
+        # scale is elastomer_thickness: grid sensors use it in the exact spectral layer kernel, the direct path
+        # approximates the layer by regularizing 1/r at epsilon = h. Without a thickness, epsilon is a numerical guard
+        # at the probe spacing (grid step, else sqrt(in-plane area / n_probes)).
+        dilation_regs = []
+        for sensor_options, grid_frame in zip(sensors_options, self._sensors_grid_frame):
+            if sensor_options.elastomer_thickness > 0.0:
+                dilation_regs.append(sensor_options.elastomer_thickness)
+            elif grid_frame.use_grid_fft:
+                dilation_regs.append(0.5 * (grid_frame.grid_spacing[0] + grid_frame.grid_spacing[1]))
+            else:
+                pos = np.asarray(sensor_options.probe_local_pos, dtype=gs.np_float).reshape(-1, 3)
+                ext = np.sort(pos.max(axis=0) - pos.min(axis=0))[::-1]
+                area = ext[0] * ext[1] if ext[1] > gs.EPS else ext[0] * ext[0]
+                dilation_regs.append(np.sqrt(max(area, gs.EPS) / max(pos.shape[0], 1)))
+        self.compressibility = torch.tensor(
+            [sensor_options.compressibility for sensor_options in sensors_options], dtype=gs.tc_float, device=gs.device
+        )
+        self.dilation_reg = torch.tensor(dilation_regs, dtype=gs.tc_float, device=gs.device)
+        # The shear-anchor gate as signed-distance margins: a surface point anchors when its sd < -contact_threshold and
+        # releases when sd > -release_threshold, the latter falling back to the former
+        self.shear_anchor_sd_enter = torch.tensor(
+            [sensor_options.contact_threshold for sensor_options in sensors_options],
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        self.shear_anchor_sd_exit = torch.tensor(
+            [
+                -(
+                    sensor_options.contact_threshold
+                    if sensor_options.release_threshold is None
+                    else sensor_options.release_threshold
+                )
+                for sensor_options in sensors_options
+            ],
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        # Python flag gating the per-step shear work without an O(n_sensors) reduction and a device sync
+        self.has_any_shear = any(sensor_options.shear_scale > 0.0 for sensor_options in sensors_options)
 
-    def _get_return_format(self) -> tuple[int, ...]:
-        return (*self._probe_layout_shape, 3)
+        total_n_surface = self.pc_pos_link.shape[0]
+        self.probe_depth_buf = torch.zeros((_B, self.total_n_probes), dtype=gs.tc_float, device=gs.device)
+        self.surface_pos_sensor_buf = torch.zeros((_B, total_n_surface, 3), dtype=gs.tc_float, device=gs.device)
+        self.surface_entry_pos_sensor_buf = torch.zeros((_B, total_n_surface, 3), dtype=gs.tc_float, device=gs.device)
+        self.surface_depth_buf = torch.zeros((_B, total_n_surface), dtype=gs.tc_float, device=gs.device)
+        self.surface_initialized_buf = torch.zeros((_B, total_n_surface), dtype=gs.tc_bool, device=gs.device)
+        # Per-(env, pc-row) BVH-candidate flag, zeroed each step and written True by the surface-state kernel for every
+        # visited active point, so the post-kernel torch ops can invalidate the stale surface_initialized /
+        # surface_entry_pos of the points the BVH skipped this step
+        self.surface_candidate_buf = torch.zeros((_B, total_n_surface), dtype=gs.tc_bool, device=gs.device)
+        # Compact per-(env, sensor) active surface-point index, rebuilt every step right after the
+        # ``surface_initialized_buf &= candidate`` cleanup and consumed by ``_kernel_elastomer_shear_accumulate``: for
+        # sensor ``s`` in env ``i_b``, the first ``shear_active_pc_count[i_b, s]`` entries of
+        # ``shear_active_pc_idx[i_b, sensor_pc_start[s]:]`` hold the global pc-row indices whose
+        # ``surface_initialized_buf`` is True. Zero-initialized whatever the sensors' shear: the per-step index build
+        # leaves the count of a sensor without shear at 0, so its unread region stays harmless zeros
+        self.shear_active_pc_idx = torch.zeros((_B, total_n_surface), dtype=gs.tc_int, device=gs.device)
+        self.shear_active_pc_count = torch.zeros((_B, self.n_sensors), dtype=gs.tc_int, device=gs.device)
 
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
+        # The candidate-geom masks of the BVH walks of the raycast mode: the tracked geoms (probe depth kernel) and the
+        # elastomer geoms of the sensor itself (surface-state kernel, gating the triangles back to the sensor's
+        # elastomer surface)
+        if self.contact_depth_query == "raycast":
+            _fill_candidate_geom_mask(
+                self.sensor_candidate_geom_mask,
+                self.sensor_track_geom_start,
+                self.sensor_track_geom_n,
+                self.track_geom_idx,
+            )
+            self.elastomer_candidate_geom_mask = torch.zeros_like(self.sensor_candidate_geom_mask)
+            _fill_candidate_geom_mask(
+                self.elastomer_candidate_geom_mask,
+                self.sensor_elastomer_geom_start,
+                self.sensor_elastomer_geom_n,
+                self.elastomer_geom_idx,
+            )
+
+        # The FFT dilation of the grid-shaped sensors (the others take the direct dilation kernel), all at one FFT size,
+        # and the tangent basis of each grid the dilation write-back decomposes along (see GridFFTMeta for the
+        # per-sensor record layout)
+        self.use_grid_fft = torch.tensor(
+            [grid_frame.use_grid_fft for grid_frame in self._sensors_grid_frame], dtype=gs.tc_bool, device=gs.device
+        )
+        self.grid_normal = torch.tensor(
+            np.stack([grid_frame.grid_normal for grid_frame in self._sensors_grid_frame]),
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        self.grid_tangent_u = torch.tensor(
+            np.stack([grid_frame.tangent_u for grid_frame in self._sensors_grid_frame]),
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        self.grid_tangent_v = torch.tensor(
+            np.stack([grid_frame.tangent_v for grid_frame in self._sensors_grid_frame]),
+            dtype=gs.tc_float,
+            device=gs.device,
+        )
+        meta_entries = []
+        fft_sizes = []
+        grid_sizes = []
+        for i_s, (sensor_options, layout_shape, grid_frame) in enumerate(
+            zip(sensors_options, self._sensors_probe_layout_shape, self._sensors_grid_frame)
+        ):
+            if grid_frame.use_grid_fft:
+                nx, ny = int(layout_shape[1]), int(layout_shape[0])
+                meta_entries.append(
+                    GridFFTMeta(
+                        sensor_idx=i_s,
+                        g_ny=ny,
+                        g_nx=nx,
+                        probe_start=int(self.sensor_probe_start[i_s].item()),
+                        cache_start=int(self.sensors_cache_start[i_s].item()),
+                        lambda_d=float(sensor_options.lambda_d),
+                        spacing_u=float(grid_frame.grid_spacing[0]),
+                        spacing_v=float(grid_frame.grid_spacing[1]),
+                        compressibility=sensor_options.compressibility,
+                        dilation_reg=dilation_regs[i_s],
+                        elastomer_thickness=sensor_options.elastomer_thickness,
+                    )
+                )
+                # FFT size is (ny, nx) row-major. Sizing each axis to ``2n - 1`` (the full linear-convolution support)
+                # rounded up to a power of 2 guarantees zero circular wraparound regardless of the dilation kernel's
+                # decay -- the ``x*g`` / ``y*g`` first-moment kernels decay slower than the Gaussian itself.
+                fft_sizes.append((next_pow2(2 * ny - 1), next_pow2(2 * nx - 1)))
+                grid_sizes.append(nx * ny * 3)
+        build_grid_fft(self, meta_entries, fft_sizes, _dilate_kernel_builder, n_buffer_channels=0, batch_size=_B)
+        # Scratch for the per-sensor tangent-decomposition write-back, sized to the largest grid
+        self.grid_dilate_out_buffer = torch.empty((_B, max(grid_sizes, default=0)), dtype=gs.tc_float, device=gs.device)
+
+    def _get_return_format(self, options: ElastomerTaxelSensorOptions) -> tuple[int, ...]:
+        return (*np.shape(options.probe_local_pos)[:-1], 3)
+
+    def _get_cache_dtype(self) -> torch.dtype:
         return gs.tc_float
 
-    @classmethod
-    def reset(cls, shared_metadata: ElastomerTaxelSensorMetadata, shared_ground_truth_cache: torch.Tensor, envs_idx):
-        super().reset(shared_metadata, shared_ground_truth_cache, envs_idx)
-        # Only the hysteresis flag needs clearing on env reset. probe_depth_buf is overwritten every
-        # step; surface_pos/entry/depth are only consumed where surface_initialized=True so they're
-        # implicitly invalidated by clearing it; surface_candidate_buf is .zero_()'d at step start.
-        shared_metadata.surface_initialized_buf[envs_idx, :] = False
+    def reset(self, envs_idx: EnvsIdxType | None) -> None:
+        super().reset(envs_idx)
 
-    @classmethod
-    def _apply_transform(
-        cls,
-        shared_metadata: ElastomerTaxelSensorMetadata,
-        data: torch.Tensor,
-        timeline: "TensorRingBuffer",
-        *,
-        is_measured: bool,
-    ):
-        super()._apply_transform(shared_metadata, data, timeline, is_measured=is_measured)
+        # Clearing the anchor state is enough: the other surface buffers are read only where it is True, probe_depth_buf
+        # is overwritten every step and surface_candidate_buf is zeroed at step start
+        self.surface_initialized_buf[envs_idx] = False
+
+    def _apply_transform(self, data: torch.Tensor, timeline: "TensorRingBuffer", *, is_measured: bool) -> None:
+        super()._apply_transform(data, timeline, is_measured=is_measured)
         if not is_measured:
             return
         # ElastomerTaxel's kernel writes a single output used for both GT and measured (measured is .copy_'d from
@@ -2215,53 +2009,42 @@ class ElastomerTaxelSensor(
         # Approximation note: tangential dilation and shear scale linearly with gain (exact), but the H^2
         # normal-dilation term ideally scales as gain^2 -- here we apply gain^1 across all components. For typical
         # gains near 1 this is a small error; for large deviations the normal component will be slightly off.
-        cls._maybe_build_cache_col_probe_idx(shared_metadata, data)
-        gain_per_col = shared_metadata.probe_gains[:, shared_metadata.cache_col_probe_idx]
+        gain_per_col = self.probe_gains[:, self.cache_col_probe_idx]
         data.mul_(gain_per_col)
 
-    @classmethod
-    def _update_current_timestep_data(
-        cls,
-        shared_context: RaycastContext,
-        shared_metadata: ElastomerTaxelSensorMetadata,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer",
-    ):
-        solver = shared_metadata.solver
-        # No pre-zeros: probe_depth is fully overwritten by _kernel_elastomer_probe_depth;
-        # current_ground_truth_data_T is fully overwritten by FFT-dilate union dilate-accumulate (then
-        # shear-accumulate += on top); surface_depth_buf is only read where surface_initialized=True,
-        # which is set in lockstep with that same depth write; measured is .copy_'d at the end.
-        measured = measured_data_timeline.at(0, copy=False)
-
-        if (shared_metadata.contact_depth_query or "sdf") == "sdf":
+    def _update_current_timestep_data(self, ground_truth_slot_0: torch.Tensor, measured_slot_0: torch.Tensor) -> None:
+        solver = self.solver
+        # No pre-zeros: probe_depth is fully overwritten by _kernel_elastomer_probe_depth; the ground-truth slot is
+        # fully overwritten by FFT-dilate union dilate-accumulate (then shear-accumulate += on top); surface_depth_buf
+        # is only read where surface_initialized=True, which is set in lockstep with that same depth write; the
+        # measured slot is copied at the end.
+        if (self.contact_depth_query or "sdf") == "sdf":
             _kernel_elastomer_probe_depth(
-                shared_metadata.probe_sensor_idx,
-                shared_metadata.links_idx,
-                shared_metadata.sensor_track_geom_start,
-                shared_metadata.track_geom_idx,
-                shared_metadata.probe_positions,
-                shared_metadata.probe_radii,
-                shared_metadata.sensor_track_geom_n,
-                shared_metadata.track_geom_active_envs_mask,
-                shared_metadata.probe_depth_buf,
+                self.probe_sensor_idx,
+                self.links_idx,
+                self.sensor_track_geom_start,
+                self.track_geom_idx,
+                self.probe_positions,
+                self.probe_radii,
+                self.sensor_track_geom_n,
+                self.track_geom_active_envs_mask,
+                self.probe_depth_buf,
                 solver.dyn_state,
                 solver.dyn_info,
                 solver.collider.collider_info,
             )
         else:
-            collision_bvh_contexts = shared_context.collision_bvh_contexts
+            collision_bvh_contexts = self._raycast.collision_bvh_contexts
             entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]
             _kernel_elastomer_probe_depth_bvh(
-                shared_metadata.probe_sensor_idx,
-                shared_metadata.links_idx,
+                self.probe_sensor_idx,
+                self.links_idx,
                 entry_a.env_bvh_idx,
                 entry_b.env_bvh_idx,
-                shared_metadata.probe_positions,
-                shared_metadata.probe_radii,
-                shared_metadata.sensor_candidate_geom_mask,
-                shared_metadata.probe_depth_buf,
+                self.probe_positions,
+                self.probe_radii,
+                self.sensor_candidate_geom_mask,
+                self.probe_depth_buf,
                 solver.dyn_state,
                 entry_a.bvh_state.tree,
                 entry_b.bvh_state.tree,
@@ -2270,59 +2053,59 @@ class ElastomerTaxelSensor(
                 is_split=entry_b is not entry_a,
             )
         _kernel_elastomer_dilate_accumulate(
-            shared_metadata.probe_sensor_idx,
-            shared_metadata.sensor_cache_start,
-            shared_metadata.sensor_probe_start,
-            shared_metadata.use_grid_fft,
-            shared_metadata.probe_positions,
-            shared_metadata.probe_local_normal,
-            shared_metadata.probe_radii,
-            shared_metadata.n_probes_per_sensor,
-            shared_metadata.lambda_d,
-            shared_metadata.dilate_scale,
-            shared_metadata.normal_exponent,
-            shared_metadata.compressibility,
-            shared_metadata.dilation_reg,
-            shared_metadata.probe_depth_buf,
-            current_ground_truth_data_T,
+            self.probe_sensor_idx,
+            self.sensors_cache_start,
+            self.sensor_probe_start,
+            self.use_grid_fft,
+            self.probe_positions,
+            self.probe_local_normal,
+            self.probe_radii,
+            self.n_probes_per_sensor,
+            self.lambda_d,
+            self.dilate_scale,
+            self.normal_exponent,
+            self.compressibility,
+            self.dilation_reg,
+            self.probe_depth_buf,
+            ground_truth_slot_0,
         )
         # FFT runs after the qd dilate kernel: on Metal, write-only kernel outputs zero unwritten slots on copy-back,
         # which would erase the grid range the FFT just wrote.
         _elastomer_taxel_grid_fft_dilate(
-            shared_metadata.grid_fft_meta,
-            shared_metadata.grid_fft_kernels_stacked,
-            shared_metadata.probe_depth_buf,
-            shared_metadata.probe_radii,
-            shared_metadata.grid_fft_buffer,
-            shared_metadata.dilate_scale,
-            shared_metadata.normal_exponent,
-            shared_metadata.grid_normal,
-            shared_metadata.grid_tangent_u,
-            shared_metadata.grid_tangent_v,
-            shared_metadata.grid_dilate_out_buffer,
-            current_ground_truth_data_T,
+            self.grid_fft_meta,
+            self.grid_fft_kernels_stacked,
+            self.probe_depth_buf,
+            self.probe_radii,
+            self.grid_fft_buffer,
+            self.dilate_scale,
+            self.normal_exponent,
+            self.grid_normal,
+            self.grid_tangent_u,
+            self.grid_tangent_v,
+            self.grid_dilate_out_buffer,
+            ground_truth_slot_0,
         )
-        if shared_metadata.any_shear:
-            bvh = shared_metadata.pc_bvh
-            shared_metadata.surface_candidate_buf.zero_()
-            if (shared_metadata.contact_depth_query or "sdf") == "sdf":
+        if self.has_any_shear:
+            bvh = self.pc_bvh
+            self.surface_candidate_buf.zero_()
+            if (self.contact_depth_query or "sdf") == "sdf":
                 _kernel_elastomer_surface_state_bvh(
-                    shared_metadata.links_idx,
-                    shared_metadata.sensor_elastomer_geom_start,
-                    shared_metadata.elastomer_geom_idx,
+                    self.links_idx,
+                    self.sensor_elastomer_geom_start,
+                    self.elastomer_geom_idx,
                     bvh.chunk_sensor_idx,
-                    shared_metadata.sensor_elastomer_geom_n,
-                    shared_metadata.elastomer_geom_active_envs_mask,
+                    self.sensor_elastomer_geom_n,
+                    self.elastomer_geom_active_envs_mask,
                     bvh.kernel_bvh,
-                    shared_metadata.pc_pos_link,
-                    shared_metadata.pc_active_envs_mask,
-                    shared_metadata.shear_anchor_sd_enter,
-                    shared_metadata.shear_anchor_sd_exit,
-                    shared_metadata.surface_pos_sensor_buf,
-                    shared_metadata.surface_entry_pos_sensor_buf,
-                    shared_metadata.surface_depth_buf,
-                    shared_metadata.surface_initialized_buf,
-                    shared_metadata.surface_candidate_buf,
+                    self.pc_pos_link,
+                    self.pc_active_envs_mask,
+                    self.shear_anchor_sd_enter,
+                    self.shear_anchor_sd_exit,
+                    self.surface_pos_sensor_buf,
+                    self.surface_entry_pos_sensor_buf,
+                    self.surface_depth_buf,
+                    self.surface_initialized_buf,
+                    self.surface_candidate_buf,
                     solver.dyn_state,
                     solver.dyn_info,
                     solver.collider.collider_info,
@@ -2330,28 +2113,28 @@ class ElastomerTaxelSensor(
                     BVH_STACK_SIZE,
                 )
             else:
-                collision_bvh_contexts = shared_context.collision_bvh_contexts
+                collision_bvh_contexts = self._raycast.collision_bvh_contexts
                 entry_a, entry_b = collision_bvh_contexts[0], collision_bvh_contexts[-1]
                 _kernel_elastomer_surface_state_via_global_bvh(
-                    shared_metadata.links_idx,
+                    self.links_idx,
                     entry_a.env_bvh_idx,
                     entry_b.env_bvh_idx,
-                    shared_metadata.sensor_elastomer_geom_start,
-                    shared_metadata.elastomer_geom_idx,
+                    self.sensor_elastomer_geom_start,
+                    self.elastomer_geom_idx,
                     bvh.chunk_sensor_idx,
-                    shared_metadata.sensor_elastomer_geom_n,
-                    shared_metadata.elastomer_geom_active_envs_mask,
-                    shared_metadata.elastomer_candidate_geom_mask,
+                    self.sensor_elastomer_geom_n,
+                    self.elastomer_geom_active_envs_mask,
+                    self.elastomer_candidate_geom_mask,
                     bvh.kernel_bvh,
-                    shared_metadata.pc_pos_link,
-                    shared_metadata.pc_active_envs_mask,
-                    shared_metadata.shear_anchor_sd_enter,
-                    shared_metadata.shear_anchor_sd_exit,
-                    shared_metadata.surface_pos_sensor_buf,
-                    shared_metadata.surface_entry_pos_sensor_buf,
-                    shared_metadata.surface_depth_buf,
-                    shared_metadata.surface_initialized_buf,
-                    shared_metadata.surface_candidate_buf,
+                    self.pc_pos_link,
+                    self.pc_active_envs_mask,
+                    self.shear_anchor_sd_enter,
+                    self.shear_anchor_sd_exit,
+                    self.surface_pos_sensor_buf,
+                    self.surface_entry_pos_sensor_buf,
+                    self.surface_depth_buf,
+                    self.surface_initialized_buf,
+                    self.surface_candidate_buf,
                     solver.dyn_state,
                     entry_a.bvh_state.tree,
                     entry_b.bvh_state.tree,
@@ -2366,46 +2149,49 @@ class ElastomerTaxelSensor(
             # they don't need clearing. The shear accumulator below reads from a compact index
             # rebuilt from surface_initialized -- without this step, stale True from a prior step
             # would inject phantom contributions.
-            cand = shared_metadata.surface_candidate_buf
-            shared_metadata.surface_initialized_buf &= cand
+            cand = self.surface_candidate_buf
+            self.surface_initialized_buf &= cand
             # Implicit bool->float broadcast zeros entries where cand=False, no `~` allocation.
-            shared_metadata.surface_entry_pos_sensor_buf.mul_(cand.unsqueeze(-1))
+            self.surface_entry_pos_sensor_buf.mul_(cand.unsqueeze(-1))
             _build_shear_active_pc_index(
-                shared_metadata.surface_initialized_buf,
-                shared_metadata.sensor_pc_start,
-                shared_metadata.sensor_pc_n,
-                shared_metadata.shear_scale,
-                shared_metadata.shear_active_pc_idx,
-                shared_metadata.shear_active_pc_count,
+                self.surface_initialized_buf,
+                self.sensor_pc_start,
+                self.sensor_pc_n,
+                self.shear_scale,
+                self.shear_active_pc_idx,
+                self.shear_active_pc_count,
             )
             _kernel_elastomer_shear_accumulate(
-                shared_metadata.probe_sensor_idx,
-                shared_metadata.sensor_cache_start,
-                shared_metadata.sensor_probe_start,
-                shared_metadata.sensor_pc_start,
-                shared_metadata.shear_active_pc_idx,
-                shared_metadata.probe_positions,
-                shared_metadata.probe_local_normal,
-                shared_metadata.probe_radii,
-                shared_metadata.lambda_s,
-                shared_metadata.shear_scale,
-                shared_metadata.surface_pos_sensor_buf,
-                shared_metadata.surface_entry_pos_sensor_buf,
-                shared_metadata.surface_depth_buf,
-                shared_metadata.shear_active_pc_count,
-                current_ground_truth_data_T,
+                self.probe_sensor_idx,
+                self.sensors_cache_start,
+                self.sensor_probe_start,
+                self.sensor_pc_start,
+                self.shear_active_pc_idx,
+                self.probe_positions,
+                self.probe_local_normal,
+                self.probe_radii,
+                self.lambda_s,
+                self.shear_scale,
+                self.surface_pos_sensor_buf,
+                self.surface_entry_pos_sensor_buf,
+                self.surface_depth_buf,
+                self.shear_active_pc_count,
+                ground_truth_slot_0,
                 gs.EPS,
             )
+        measured_slot_0.copy_(ground_truth_slot_0)
 
-        if ground_truth_data_timeline is not None:
-            ground_truth_data_timeline.at(0, copy=False).copy_(current_ground_truth_data_T.T)
-        measured.copy_(current_ground_truth_data_T.T)
-
-    def _draw_debug(self, context: "RasterizerContext"):
-        def mask(envs_idx):
-            disp = self.read_ground_truth(envs_idx)
-            if self._options.history_length > 0:
-                disp = disp.select(1 if self._manager._sim.n_envs > 0 else 0, -1)
+    def _draw_debug(self, i_s: int, context: "RasterizerContext") -> None:
+        def mask(envs_idx: EnvsIdxType | None) -> torch.Tensor:
+            disp = self.read(i_s, envs_idx, is_ground_truth=True)
+            if self.history_lengths[i_s] > 0:
+                disp = disp.select(1 if self._sim.n_envs > 0 else 0, -1)
             return torch.linalg.norm(disp, dim=-1) >= gs.EPS
 
-        self._draw_debug_probes(context, self._tactile_color_groups_fn(mask))
+        self._draw_debug_probes(i_s, context, self._tactile_color_groups_fn(i_s, mask))
+
+
+class ElastomerTaxelSensor(
+    ProbeSensorMixin, LinkAttachedSensorMixin, SimpleSensor[ElastomerTaxelSensorOptions, ElastomerTaxelSensorArray]
+):
+    """Sensor reading the displacement of a soft elastomer surface under contact, per probe in the link frame."""

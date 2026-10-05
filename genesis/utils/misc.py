@@ -11,7 +11,6 @@ import random
 import sys
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import field
 from importlib import import_module
 from itertools import combinations
 from typing import Any, NoReturn, Optional, Sequence
@@ -562,54 +561,6 @@ def gaussian_crosstalk_kernel(n_rows: int, n_cols: int, sigma: float, spacing: f
     return kernel / kernel.sum()
 
 
-def concat_with_tensor(
-    tensor: torch.Tensor, value, expand: tuple[int, ...] | None = None, dim: int = 0, flatten: bool = False
-):
-    """Helper method to concatenate a value (not necessarily a tensor) with a tensor."""
-    if not isinstance(value, torch.Tensor):
-        if isinstance(value, (numbers.Real, np.floating, numbers.Integral, np.integer)):
-            value = [value]
-        value = torch.tensor(value, dtype=tensor.dtype, device=tensor.device)
-    if expand is not None:
-        value = value.expand(*expand)
-    if dim < 0:
-        dim = tensor.ndim + dim
-    if flatten:
-        value = value.flatten()
-    assert (
-        0 <= dim < tensor.ndim
-        and tensor.ndim == value.ndim
-        and all(e_1 == e_2 for i, (e_1, e_2) in enumerate(zip(tensor.shape, value.shape)) if e_1 > 0 and i != dim)
-    )
-    if tensor.numel() == 0:
-        # 'expand' leaves a zero stride on the broadcast dimensions, so materialize to get a real table supporting
-        # in-place writes on a subset of the rows and usable as a kernel argument
-        return value.contiguous()
-    return torch.cat([tensor, value], dim=dim)
-
-
-def make_tensor_field(shape: tuple[int, ...] = (), dtype_factory: Callable[[], torch.dtype] | None = None):
-    """
-    Helper method to create a tensor field for dataclasses.
-
-    Parameters
-    ----------
-    shape : tuple
-        The shape of the tensor field. It must have zero elements, otherwise it will trigger an exception.
-    dtype_factory : Callable[[], torch.dtype], optional
-        The factory function to create the dtype of the tensor field. Default is gs.tc_float.
-        A factory is used because gs types may not be available at the time of field creation.
-    """
-    assert not shape or math.prod(shape) == 0
-
-    def _default_factory():
-        nonlocal shape, dtype_factory
-        dtype = dtype_factory() if dtype_factory is not None else gs.tc_float
-        return torch.empty(shape, dtype=dtype, device=gs.device)
-
-    return field(default_factory=_default_factory)
-
-
 def get_default_screen(display=None):
     """Return the screen a window should be created on, for the given pyglet display or the default one.
 
@@ -751,6 +702,9 @@ def indices_to_mask(
             else:  # np.ndarray, torch.tensor, list, tuple, np.int32...
                 try:
                     is_torch_, is_numpy_ = False, False
+                    # A boolean array is a mask like a boolean tensor; converted here, it takes the tensor path
+                    if isinstance(arg, np.ndarray) and arg.dtype == np.bool_:
+                        arg = torch.as_tensor(arg, device=gs.device)
                     if isinstance(arg, torch.Tensor):
                         if not boolean_mask and arg.dtype == torch.bool:
                             arg = arg.nonzero()[:, 0]

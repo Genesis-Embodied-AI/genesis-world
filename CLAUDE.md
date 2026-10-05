@@ -2,7 +2,7 @@
 
 ## Miscellaneous
 
-* getattr / hasattr are prohibited. Use None initialization and isinstance checks instead.
+* getattr / hasattr are prohibited. Use None initialization and isinstance checks instead. Two exceptions: a generic mechanism whose names come from a schema or a registration (serialization, a type lookup), confined to that mechanism, and a unit test factoring a loop over an explicit list of fields.
 * Never add attributes on the fly to external / non-owned instances.
 * Keep interop data as torch tensors or numpy arrays from the start instead of Quadrants kernels operating on CPU numpy arrays. Numpy implementations must be fully vectorized. Use Numba (single thread, CPU backend) for computation-heavy "kernels".
 * Allocate the exact memory size needed. Preallocation based on max size is prohibited.
