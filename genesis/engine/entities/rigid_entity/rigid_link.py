@@ -535,7 +535,8 @@ class RigidLink(KinematicLink):
             aabb_min = torch.full((self._solver.n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
             aabb_max = torch.full((self._solver.n_envs, 3), float("-inf"), dtype=gs.tc_float, device=gs.device)
             for geom in self.geoms:
-                geom_aabb = geom.get_AABB()
+                # A fixed geom without batched fixed vertices holds a single copy of them for every environment
+                geom_aabb = geom.get_AABB().expand((self._solver.n_envs, 2, 3))
                 active_mask = geom.active_envs_mask if geom.active_envs_mask is not None else ()
                 aabb_min[active_mask] = torch.minimum(aabb_min[active_mask], geom_aabb[active_mask, 0])
                 aabb_max[active_mask] = torch.maximum(aabb_max[active_mask], geom_aabb[active_mask, 1])

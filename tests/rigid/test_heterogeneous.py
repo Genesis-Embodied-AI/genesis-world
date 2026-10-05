@@ -136,7 +136,8 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_thick, broadpha
     # Each cube rests on the torso of the dual arm variant its environment carries, as its reference does
     ref_cube_pos = torch.cat([ref_cube.get_pos(envs_idx=[i_env]) for i_env, ref_cube in enumerate(ref_cubes)])
     assert_allclose(ref_cube_pos - het_cube.get_pos(), REFERENCE_OFFSETS, tol=tol)
-    assert_allclose(het_cube.get_pos()[:, 2], [pos[2] for pos in CUBE_POSITIONS], tol=2e-4)
+    torso_top = het_dual_arm.get_link("torso").get_AABB()[:, 1, 2]
+    assert_allclose(het_cube.get_pos()[:, 2] - torso_top, 0.5 * np.array(CUBE_SIZES), tol=2e-4)
 
     # The variants are genuinely distinct: their masses are not all equal.
     with pytest.raises(AssertionError):
@@ -215,6 +216,14 @@ def test_aabb(show_viewer, tol):
     het_obj = scene.add_entity(
         morph=morphs_heterogeneous,
     )
+    # Fixed boxes of different sizes, holding a single copy of their vertices for every environment
+    FIXED_POS = (0.05, 0.08, 0.12)
+    het_fixed = scene.add_entity(
+        morph=tuple(
+            gs.morphs.Box(size=(size, size, size), pos=FIXED_POS, fixed=True, batch_fixed_verts=False)
+            for size in (0.02, 0.03)
+        ),
+    )
     # 4 envs: envs 0-1 get box, envs 2-3 get sphere
     scene.build(n_envs=4)
 
@@ -222,6 +231,12 @@ def test_aabb(show_viewer, tol):
     pos = het_obj.get_pos()
     assert_allclose(pos[[0, 1]], (0.0, 0.0, 0.1), tol=tol)
     assert_allclose(pos[[2, 3]], (0.1, 0.0, 0.15), tol=tol)
+
+    # The AABB of a fixed heterogeneous entity bounds the box each environment carries
+    envs_box_size = np.array([0.02, 0.02, 0.03, 0.03])[:, None]
+    fixed_aabb = np.stack((FIXED_POS - 0.5 * envs_box_size, FIXED_POS + 0.5 * envs_box_size), axis=-2)
+    assert_allclose(het_fixed.get_AABB(), fixed_aabb, tol=tol)
+    assert_allclose(het_fixed.base_link.get_AABB(), fixed_aabb, tol=tol)
 
     # get_AABB should return correct shapes
     aabb = het_obj.get_AABB()
