@@ -1467,6 +1467,17 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
         png_snapshot.extension._std_err_threshold = STD_ERR_THR
         assert rgb_array_to_png_bytes(viewer_rgb) == png_snapshot
 
+        # The interactive viewer shows a setter right away, without stepping
+        franka.set_dofs_position(np.roll(dofs_pos, 1, axis=0))
+        pyrender_viewer.on_draw()
+        viewer_rgb_set = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        scene.visualizer.update(force=True)
+        pyrender_viewer.on_draw()
+        viewer_rgb_forced = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+        assert_equal(viewer_rgb_set, viewer_rgb_forced)
+        franka.set_dofs_position(dofs_pos)
+        scene.step()
+
     # Render both cameras
     rgb, *_ = cam.render(rgb=True)
     rgb_debug, *_ = cam_debug.render(rgb=True)

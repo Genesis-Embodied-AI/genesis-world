@@ -3,6 +3,7 @@ import sys
 import pyglet
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.repr_base import RBC
 
 from .camera import Camera
@@ -189,6 +190,14 @@ class Visualizer(RBC):
         self._context.build(self._scene)
 
         if self._viewer is not None:
+            # The interactive viewer shows the changes of state made outside of stepping, such as a setter, right away
+            viewer_subscriber = Subscriber(
+                to=frozenset((StateChange.GEOMETRY,)),
+                callback=lambda change, envs_idx: self.update(force=True),
+            )
+            for solver in self._scene.active_solvers:
+                solver.subscribe(viewer_subscriber)
+
             self._viewer.build(self._scene)
             self.viewer_lock = self._viewer.lock
 
