@@ -262,10 +262,12 @@ class Noise(ForceField):
 
 class Vortex(ForceField):
     """
-    Vortex force field revolving around z-axis.
+    Vortex force field revolving around the axis going through `center` along `direction`.
 
     Parameters:
     -----------
+    direction: array_like, shape=(3,)
+        The direction of the vortex axis. Will be normalized.
     strength_perpendicular: float
         The strength of the vortex flow in the perpendicular direction. Positive for counterclockwise, negative for clockwise.
     strength_radial: float
@@ -317,10 +319,11 @@ class Vortex(ForceField):
 
     @qd.func
     def _get_acc(self, pos, vel, t, i):
-        relative_pos = qd.Vector([pos[0] - self._center_qd[0], pos[1] - self._center_qd[1]])
-        radius = relative_pos.norm()
-        perpendicular = qd.Vector([-relative_pos[1], relative_pos[0], 0.0], dt=gs.qd_float)
-        radial = -qd.Vector([relative_pos[0], relative_pos[1], 0.0], dt=gs.qd_float)
+        relative_pos = pos - self._center_qd
+        radial_pos = relative_pos - relative_pos.dot(self._direction_qd) * self._direction_qd
+        radius = radial_pos.norm()
+        perpendicular = self._direction_qd.cross(radial_pos)
+        radial = -radial_pos
 
         falloff = gs.qd_float(0.0)
         if radius < self._falloff_min:
@@ -339,10 +342,6 @@ class Vortex(ForceField):
     @property
     def direction(self):
         return self._direction
-
-    @property
-    def radius(self):
-        return self._radius
 
     @property
     def center(self):
