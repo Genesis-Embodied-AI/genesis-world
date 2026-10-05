@@ -323,13 +323,23 @@ def test_slerp(batch_shape, tol):
     q1 /= np.linalg.norm(q1)
 
     lerp_true = np.empty_like(q0)
+    lerp_from_one_true = np.empty_like(q1)
     for i in range(numel):
         rots = R.from_quat([q0[i], q1[i]], scalar_first=True)
         slerp = Slerp([0, 1], rots)
         lerp_true[i] = slerp([INTERP_RATIO]).as_quat(scalar_first=True)
+        rots = R.from_quat([q0[0], q1[i]], scalar_first=True)
+        slerp = Slerp([0, 1], rots)
+        lerp_from_one_true[i] = slerp([INTERP_RATIO]).as_quat(scalar_first=True)
 
-    lerp = gu.slerp(q0.reshape((*batch_shape, 4)), q1.reshape((*batch_shape, 4)), np.full(batch_shape, INTERP_RATIO))
-    assert_allclose(lerp_true.reshape((*batch_shape, 4)), lerp, tol=tol)
+    ratio = np.full(batch_shape, INTERP_RATIO)
+    for convert in (lambda x: x, lambda x: gs.tensor(x, dtype=gs.tc_float)):
+        q0_batch, q1_batch = convert(q0.reshape((*batch_shape, 4))), convert(q1.reshape((*batch_shape, 4)))
+        lerp = gu.slerp(q0_batch, q1_batch, convert(ratio))
+        assert_allclose(lerp_true.reshape((*batch_shape, 4)), lerp, tol=tol)
+        # A single start quaternion is interpolated towards every end quaternion of the batch.
+        lerp = gu.slerp(convert(q0[0]), q1_batch, convert(ratio))
+        assert_allclose(lerp_from_one_true.reshape((*batch_shape, 4)), lerp, tol=tol)
 
 
 @pytest.mark.required

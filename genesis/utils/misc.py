@@ -571,7 +571,8 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
             if any(shape != batch_shape for shape in batch_shapes[1:]):
                 batch_shape = torch.broadcast_shapes(*batch_shapes)
             n_elems = math.prod(batch_shape)
-            is_compiled = _is_torch_compile_supported(tensors[0].device.type)
+            device_type = next(tensor for tensor in tensors if tensor is not None).device.type
+            is_compiled = _is_torch_compile_supported(device_type)
             tensors_flat = []
             for tensor, n in zip(tensors, elems_ndim):
                 if tensor is not None:
@@ -585,8 +586,9 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
                         is_compiled = False
                     else:
                         # A view is traced along with its base, whose shape would then key the compiled graphs too.
-                        # Detaching drops the base without copying.
-                        tensor = tensor.detach()
+                        # Detaching drops the base without copying. A Genesis tensor checks the scene of every
+                        # operation in a hook that cannot be traced, so its plain tensor is passed instead.
+                        tensor = tensor.as_subclass(torch.Tensor).detach()
                     # The sizes of an element are constants that let the elementwise operations unroll and vectorize
                     if n > 0:
                         torch._dynamo.mark_static(tensor, tuple(range(1, tensor.ndim)))
@@ -594,11 +596,12 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
             # A CPU kernel traced for a small batch runs on a single thread whatever the batch size it is later called
             # with. Bounding the batch size gives small and large batches graphs of their own, each traced for a batch
             # of its class. Other devices tune their kernels independently of the batch size they are traced with.
-            if is_compiled and tensors[0].device.type == "cpu" and n_elems > 1:
+            if is_compiled and device_type == "cpu" and n_elems > 1:
+                tensor = next(tensor for tensor in tensors_flat if tensor is not None)
                 if n_elems < 16384:
-                    torch._dynamo.mark_dynamic(tensors_flat[0], 0, min=2, max=16383)
+                    torch._dynamo.mark_dynamic(tensor, 0, min=2, max=16383)
                 else:
-                    torch._dynamo.mark_dynamic(tensors_flat[0], 0, min=16384, max=sys.maxsize)
+                    torch._dynamo.mark_dynamic(tensor, 0, min=16384, max=sys.maxsize)
             out = (fn_compiled if is_compiled else fn)(*tensors_flat, *args, **kwargs)
             if len(batch_shape) == 1:
                 return out

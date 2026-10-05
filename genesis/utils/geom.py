@@ -930,6 +930,7 @@ def quat_to_R(quat, *, out=None):
         R = _tc_quat_to_R(quat)
         if out is None:
             return R
+        assert out.shape == R.shape
         return out.copy_(R)
     elif all(isinstance(e, np.ndarray) for e in (quat, out) if e is not None):
         return _np_quat_to_R(quat, out=out)
@@ -1813,7 +1814,8 @@ def slerp(q0, q1, t):
     if isinstance(q0, np.ndarray):
         return _np_slerp(q0, q1, t)
     if isinstance(q0, torch.Tensor):
-        t = torch.as_tensor(t, dtype=gs.tc_float, device=q0.device).reshape(q0.shape[:-1])
+        batch_shape = torch.broadcast_shapes(q0.shape[:-1], q1.shape[:-1])
+        t = torch.as_tensor(t, dtype=gs.tc_float, device=q0.device).reshape(batch_shape)
         return _tc_slerp(q0, q1, t, gs.EPS)
     gs.raise_exception(f"the input must be either torch.Tensor or np.ndarray. got: {type(q0)=}")
 
