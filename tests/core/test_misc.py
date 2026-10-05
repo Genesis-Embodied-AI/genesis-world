@@ -291,6 +291,7 @@ def test_coacd_options_pca_validation():
         (np.array((-5, -1), dtype=np.int32), (-5, 3)),
         (np.array((1, 3), dtype=np.uint32), (1, 3)),
         (np.array((-2.0, -1.0), dtype=np.float64), (2, 3)),
+        (np.arange(4)[::-2], (3, 1)),
         (torch.tensor((-2, -1), dtype=torch.int32), (2, 3)),
         (torch.tensor((-5, -1), dtype=torch.int32), (-5, 3)),
         (torch.tensor((0, 3), dtype=torch.uint8), (0, 3)),

@@ -501,7 +501,11 @@ def to_gs_tensor(x, dtype: torch.dtype | None = None):
     elif isinstance(x, torch.Tensor):
         tensor = gs.Tensor(x)
     else:
-        tensor = gs.from_numpy(np.asarray(x))
+        x = np.asarray(x)
+        # See broadcast_tensor for arrays with negative strides
+        if any(stride < 0 for stride in x.strides):
+            x = x.copy()
+        tensor = gs.from_numpy(x)
     return tensor.to(dtype=dtype, device=gs.device)
 
 
@@ -1138,11 +1142,15 @@ def sanitize_index(
             elif index[0] < 0 or index[-1] < 0:
                 index = tuple(index)
                 is_negative_wrap_required = True
-    elif isinstance(index, (list, tuple, torch.Tensor, np.ndarray)):
-        is_bool_mask = (isinstance(index, torch.Tensor) and index.dtype == torch.bool) or (
-            isinstance(index, np.ndarray) and np.issubdtype(index.dtype, np.bool_)
-        )
+    elif isinstance(index, (list, tuple, torch.Tensor)):
+        is_bool_mask = isinstance(index, torch.Tensor) and index.dtype == torch.bool
         is_negative_wrap_required = not is_bool_mask
+    elif isinstance(index, np.ndarray):
+        is_bool_mask = np.issubdtype(index.dtype, np.bool_)
+        is_negative_wrap_required = not is_bool_mask
+        # See broadcast_tensor for arrays with negative strides
+        if any(stride < 0 for stride in index.strides):
+            index = index.copy()
     else:
         gs.raise_exception(f"Expecting integer indices for `{name}`.")
 
@@ -1217,6 +1225,9 @@ def broadcast_tensor(
             )
         return torch.empty(expected_shape, dtype=dtype, device=gs.device)
 
+    # Torch refuses to wrap a numpy array with negative strides, such as a reversed view, so it is copied first
+    if isinstance(tensor, np.ndarray) and any(stride < 0 for stride in tensor.strides):
+        tensor = tensor.copy()
     tensor_ = torch.as_tensor(tensor, dtype=dtype, device=gs.device)
 
     tensor_shape = tensor_.shape
@@ -1337,6 +1348,9 @@ def assign_indexed_tensor(
     dim_names: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     if isinstance(tensor, np.ndarray):
+        # See broadcast_tensor for arrays with negative strides
+        if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
+            value = value.copy()
         value = torch.as_tensor(value)
     # A single value written over a selection of one axis has faster forms than advanced indexing, which stages an
     # index tensor and a scatter that dominate a write this small: the buffer is filled whole when every axis is taken

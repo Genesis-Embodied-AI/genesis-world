@@ -457,6 +457,8 @@ def test_extended_broadcasting():
     assert_allclose(entity.get_dofs_velocity(), 3.0, tol=gs.EPS)
     entity.zero_all_dofs_velocity(torch.tensor([False, True], dtype=torch.bool, device=gs.device))
     assert_allclose(entity.get_dofs_velocity(), np.array([(3.0,) * 6, (0.0,) * 6]), tol=gs.EPS)
+    entity.set_dofs_velocity(np.array(((2.0,) * 6, (1.0,) * 6))[::-1])
+    assert_allclose(entity.get_dofs_velocity(), np.array([(1.0,) * 6, (2.0,) * 6]), tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~250s
