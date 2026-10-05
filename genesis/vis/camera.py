@@ -194,6 +194,10 @@ class Camera(RBC):
         self.set_pose(
             transform=self._initial_transform, pos=self._initial_pos, lookat=self._initial_lookat, up=self._initial_up
         )
+        if self._followed_entity is not None:
+            self.follow_entity(
+                self._followed_entity, self._follow_fixed_axis, self._follow_smoothing, self._follow_fix_orientation
+            )
 
         # FIXME: For some reason, it is necessary to update the camera twice...
         if self._raytracer is not None:
@@ -287,17 +291,17 @@ class Camera(RBC):
         if self._attached_link is not None:
             gs.raise_exception("Impossible to following an entity with a camera that is already attached.")
 
+        # The pose of the entity in the environments the camera renders is only known once the scene is built, the
+        # variant of a heterogeneous entity standing wherever its morph puts it, so the offset is measured then
+        pos_rel = None
         if self._is_built:
             if self._is_batched and self._env_idx is None:
                 entity_pos = entity.get_pos(self._visualizer._context.rendered_envs_idx, relative=False)
             else:
                 entity_pos = entity.get_pos(self._env_idx, relative=False).reshape((-1,))
             pos_rel = self._pos - entity_pos
-        else:
-            pos_rel = self._initial_pos - torch.tensor(entity.base_link.desc.pos, dtype=gs.tc_float, device=gs.device)
-
-        if (pos_rel.abs() < gs.EPS).all():
-            gs.raise_exception("Camera must not be co-located with base link of entity to which it is attached.")
+            if (pos_rel.abs() < gs.EPS).all(dim=-1).any():
+                gs.raise_exception("Camera must not be co-located with base link of entity to which it is attached.")
 
         self._followed_entity = entity
         self._follow_pos_rel = pos_rel

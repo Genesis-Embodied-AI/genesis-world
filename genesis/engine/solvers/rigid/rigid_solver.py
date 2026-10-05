@@ -475,25 +475,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         n_free_joints = sum(joint.type == gs.JOINT_TYPE.FREE for joint in self.joints)
         has_multi_island_structure = n_dof_entities >= 2 or n_free_joints >= 2
 
-        # A heterogeneous entity has a different body size (hence rotational dof_length) per variant, so its dof_length
-        # is genuinely per-env and dofs_info must be batched to hold it. dof_length is read only by the hibernation
-        # rest test, so this is needed exactly when both features are active. We must update options because
-        # get_dofs_info reads from solver._options.batch_dofs_info.
-        if self._enable_heterogeneous and self._use_hibernation:
-            self._options.batch_dofs_info = True
-        # Likewise, the variants of a heterogeneous entity each state their own default armature (see build), which is
-        # per-env on every joint carrying a rotor whenever those defaults differ.
-        for entity in self._entities:
-            variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
-            if variants_default.size < 2 or np.ptp(variants_default) <= gs.EPS:
-                continue
-            has_rotor = any(
-                link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
-                for link in entity.links
-            )
-            if has_rotor:
-                self._options.batch_dofs_info = True
-
         # sparse_solve=None resolves automatically: the sparse Jacobian makes the per-iteration Jacobian-vector
         # products, the constraint-to-island lookup and the per-island Hessian assembly cost O(nonzeros) instead of
         # O(n_constraints * n_dofs), which pays off on CPU when the scene has block structure, whereas a single
@@ -809,11 +790,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         smallest principal inertia for free and spherical DOFs), and at most the same with the largest principal inertia
         plus, per descendant, its largest principal inertia and its mass times the squared anchor-to-COM distance no
         configuration exceeds (frame offsets along the chain, each anchor twice, prismatic spans, infinite when
-        unlimited). A build-time default armature adds the value of the variant an entity takes to the entries it fills
-        in, and any variant may be dispatched to any environment, so the bounds are kept per variant of each entity and
-        the spread is the largest over every combination of variants across entities. That spread is at least the true
-        one, so the gate never leaves a scene that needs equilibration without it; its only error is to enable it for a
-        scene that does not, at a small runtime cost.
+        unlimited). The variants of a heterogeneous entity each bring their own inertial, link frames, joints and
+        build-time default armature, which adds its value to the entries it fills in, and any variant may be dispatched
+        to any environment, so the bounds are kept per variant of each entity and the spread is the largest over every
+        combination of variants across entities. That spread is at least the true one, so the gate never leaves a scene
+        that needs equilibration without it, its only error being to enable it at a small cost for one that does not.
         """
         children = {}
         for entity in self._entities:
@@ -835,80 +816,88 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 variants_default = np.array([entity.main_morph.default_armature or 0.0])
             else:
                 variants_default = np.zeros(1)
-            lower, upper = [], []
-            for link in entity.links:
-                if link.is_fixed:
-                    continue
-                is_rotor = link in rotor_links
-                for joint in link.joints:
-                    if joint.type == gs.JOINT_TYPE.FIXED:
+            variants_links = [entity.desc.links, *(variant.links for variant in entity.desc.variants[1:])]
+            variants_lower, variants_upper = [], []
+            for variant_default, variant_links in zip(variants_default, variants_links):
+                # The subtree of a link reaches the entities attached to it, which have no variants of their own
+                links_desc = {link.idx: l_desc for link, l_desc in zip(entity.links, variant_links)}
+                lower, upper = [], []
+                for link in entity.links:
+                    if link.is_fixed:
                         continue
-                    anchor = joint.pos
-                    # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own term is
-                    # exact only when this joint is its sole joint, since later chained joints re-rotate the link about
-                    # their own anchors.
-                    is_sole_joint = len(link.joints) == 1
-                    if is_sole_joint:
-                        dist_com = {link.idx: np.linalg.norm(link.desc.inertial_pos - anchor)}
-                    else:
-                        dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(link.desc.inertial_pos)}
-                    dist_origin = {link.idx: np.linalg.norm(anchor)}
-                    sub, stack = [], [link]
-                    while stack:
-                        cur = stack.pop()
-                        sub.append(cur)
-                        for child in children.get(cur.idx, []):
-                            hop = np.linalg.norm(child.desc.pos) + 2.0 * sum(
-                                np.linalg.norm(j.pos) for j in child.joints
-                            )
-                            # A prismatic descendant carries the subtree outward by up to its full travel span (which
-                            # covers the offset from any zero configuration within limits); an unlimited slide makes the
-                            # upper bound infinite and the gate enables.
-                            hop += sum(
-                                np.ptp(j.desc.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC
-                            )
-                            dist_origin[child.idx] = dist_origin[cur.idx] + hop
-                            dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.desc.inertial_pos)
-                            stack.append(child)
-                    sub_mass = sum(l.desc.mass for l in sub)
-                    eigvals = np.linalg.eigvalsh(link.desc.inertia)
-                    rot_desc_upper = sum(
-                        np.linalg.eigvalsh(l.desc.inertia)[-1] + l.desc.mass * dist_com[l.idx] ** 2
-                        for l in sub
-                        if l is not link
-                    )
-                    # Carrying link's inertia about the anchor: exact along a fixed axis, otherwise between its smallest
-                    # and largest principal inertia.
-                    if is_sole_joint:
-                        R_inertial = gu.quat_to_R(link.desc.inertial_quat)
-                        inertia_com = R_inertial @ link.desc.inertia @ R_inertial.T
-                        offset_com = link.desc.inertial_pos - anchor
-                        rot_self_lower = eigvals[0]
-                        rot_self_upper = eigvals[-1] + link.desc.mass * np.dot(offset_com, offset_com)
-                    else:
-                        inertia_com = None
-                        offset_com = None
-                        rot_self_lower = eigvals[0]
-                        rot_self_upper = eigvals[-1] + link.desc.mass * dist_com[link.idx] ** 2
-                    for i_d, armature_d in enumerate(joint.desc.dofs_armature):
-                        if is_rotor and armature_d <= 0.0:
-                            armature = variants_default
+                    l_desc = links_desc[link.idx]
+                    is_rotor = link in rotor_links
+                    for joint, j_desc in zip(link.joints, l_desc.joints):
+                        if joint.type == gs.JOINT_TYPE.FIXED:
+                            continue
+                        anchor = j_desc.pos
+                        # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own
+                        # term is exact only when this joint is its sole joint, since later chained joints re-rotate the
+                        # link about their own anchors.
+                        is_sole_joint = len(link.joints) == 1
+                        if is_sole_joint:
+                            dist_com = {link.idx: np.linalg.norm(l_desc.inertial_pos - anchor)}
                         else:
-                            armature = np.full(variants_default.size, armature_d)
-                        if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
-                            lower.append(armature + sub_mass)
-                            upper.append(armature + sub_mass)
-                        elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
-                            axis = joint.desc.dofs_motion_ang[i_d]
-                            lever = np.cross(axis, offset_com)
-                            rot_self = axis @ inertia_com @ axis + link.desc.mass * np.dot(lever, lever)
-                            lower.append(armature + rot_self)
-                            upper.append(armature + rot_self + rot_desc_upper)
+                            dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(l_desc.inertial_pos)}
+                        dist_origin = {link.idx: np.linalg.norm(anchor)}
+                        sub, stack = [], [link]
+                        while stack:
+                            cur = stack.pop()
+                            sub.append(cur)
+                            for child in children.get(cur.idx, []):
+                                child_desc = links_desc.get(child.idx, child.desc)
+                                hop = np.linalg.norm(child_desc.pos) + 2.0 * sum(
+                                    np.linalg.norm(j.pos) for j in child_desc.joints
+                                )
+                                # A prismatic descendant carries the subtree outward by up to its full travel span
+                                # (which covers the offset from any zero configuration within limits); an unlimited
+                                # slide makes the upper bound infinite and the gate enables.
+                                hop += sum(
+                                    np.ptp(j.dofs_limit) for j in child_desc.joints if j.type == gs.JOINT_TYPE.PRISMATIC
+                                )
+                                dist_origin[child.idx] = dist_origin[cur.idx] + hop
+                                dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child_desc.inertial_pos)
+                                stack.append(child)
+                        sub_desc = [links_desc.get(sub_link.idx, sub_link.desc) for sub_link in sub]
+                        sub_mass = sum(sub_link_desc.mass for sub_link_desc in sub_desc)
+                        eigvals = np.linalg.eigvalsh(l_desc.inertia)
+                        rot_desc_upper = sum(
+                            np.linalg.eigvalsh(sub_link_desc.inertia)[-1]
+                            + sub_link_desc.mass * dist_com[sub_link.idx] ** 2
+                            for sub_link, sub_link_desc in zip(sub, sub_desc)
+                            if sub_link is not link
+                        )
+                        # Carrying link's inertia about the anchor: exact along a fixed axis, otherwise between its
+                        # smallest and largest principal inertia.
+                        if is_sole_joint:
+                            R_inertial = gu.quat_to_R(l_desc.inertial_quat)
+                            inertia_com = R_inertial @ l_desc.inertia @ R_inertial.T
+                            offset_com = l_desc.inertial_pos - anchor
+                            rot_self_lower = eigvals[0]
+                            rot_self_upper = eigvals[-1] + l_desc.mass * np.dot(offset_com, offset_com)
                         else:
-                            lower.append(armature + max(rot_self_lower, 0.0))
-                            upper.append(armature + rot_self_upper + rot_desc_upper)
-            if lower:
-                lower, upper = np.array(lower), np.array(upper)
+                            inertia_com = None
+                            offset_com = None
+                            rot_self_lower = eigvals[0]
+                            rot_self_upper = eigvals[-1] + l_desc.mass * dist_com[link.idx] ** 2
+                        for i_d, armature_d in enumerate(j_desc.dofs_armature):
+                            armature = variant_default if is_rotor and armature_d <= 0.0 else armature_d
+                            if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
+                                lower.append(armature + sub_mass)
+                                upper.append(armature + sub_mass)
+                            elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
+                                axis = j_desc.dofs_motion_ang[i_d]
+                                lever = np.cross(axis, offset_com)
+                                rot_self = axis @ inertia_com @ axis + l_desc.mass * np.dot(lever, lever)
+                                lower.append(armature + rot_self)
+                                upper.append(armature + rot_self + rot_desc_upper)
+                            else:
+                                lower.append(armature + max(rot_self_lower, 0.0))
+                                upper.append(armature + rot_self_upper + rot_desc_upper)
+                variants_lower.append(lower)
+                variants_upper.append(upper)
+            if variants_lower[0]:
+                lower, upper = np.array(variants_lower).T, np.array(variants_upper).T
                 entities_lower.append(np.where(lower > 0.0, lower, np.inf).min(axis=0))
                 entities_upper.append(upper.max(axis=0))
         if not entities_lower:

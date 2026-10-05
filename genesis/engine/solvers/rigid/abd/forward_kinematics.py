@@ -823,25 +823,36 @@ def kernel_update_verts_for_geoms(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_, i_b in qd.ndrange(n_geoms, _B):
         i_g = geoms_idx[i_g_]
-        func_update_verts_for_geom(i_g, i_b, dyn_state, dyn_info)
+        func_update_verts_for_geom(i_g, i_b, dyn_state, dyn_info, rigid_config)
 
 
 @qd.func
 def func_update_verts_for_geom(
-    i_g: qd.i32, i_b: qd.i32, dyn_state: array_class.DynState, dyn_info: array_class.DynInfo
+    i_g: int,
+    i_b: int,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_config: qd.template(),
 ):
     _B = dyn_state.geoms.verts_updated.shape[1]
 
     if not dyn_state.geoms.verts_updated[i_g, i_b]:
         i_v_start = dyn_info.geoms.vert_start[i_g]
         if dyn_info.verts.is_fixed[i_v_start]:
-            for i_v in range(i_v_start, dyn_info.geoms.vert_end[i_g]):
-                verts_state_idx = dyn_info.verts.verts_state_idx[i_v]
-                dyn_state.fixed_verts.pos[verts_state_idx] = gu.qd_transform_by_trans_quat(
-                    dyn_info.verts.init_pos[i_v], dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b]
-                )
-            for j_b in range(_B):
-                dyn_state.geoms.verts_updated[i_g, j_b] = True
+            # The single copy of the vertices of a fixed geom comes from an env carrying its heterogeneous variant, the
+            # only ones where its pose is meaningful (see func_update_geom_aabbs)
+            is_carried = True
+            if qd.static(rigid_config.batch_links_info):
+                i_l = dyn_info.geoms.link_idx[i_g]
+                is_carried = dyn_info.links.geom_start[i_l, i_b] <= i_g < dyn_info.links.geom_end[i_l, i_b]
+            if is_carried:
+                for i_v in range(i_v_start, dyn_info.geoms.vert_end[i_g]):
+                    verts_state_idx = dyn_info.verts.verts_state_idx[i_v]
+                    dyn_state.fixed_verts.pos[verts_state_idx] = gu.qd_transform_by_trans_quat(
+                        dyn_info.verts.init_pos[i_v], dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b]
+                    )
+                for j_b in range(_B):
+                    dyn_state.geoms.verts_updated[i_g, j_b] = True
         else:
             for i_v in range(i_v_start, dyn_info.geoms.vert_end[i_g]):
                 verts_state_idx = dyn_info.verts.verts_state_idx[i_v]
@@ -857,7 +868,7 @@ def func_update_all_verts(dyn_state: array_class.DynState, dyn_info: array_class
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
-        func_update_verts_for_geom(i_g, i_b, dyn_state, dyn_info)
+        func_update_verts_for_geom(i_g, i_b, dyn_state, dyn_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)

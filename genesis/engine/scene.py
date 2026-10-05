@@ -336,9 +336,12 @@ class Scene(RBC):
         Parameters
         ----------
         morph : gs.morphs.Morph | list[gs.morphs.Morph]
-            The morph of the entity. If a list of morphs is provided, the entity will be heterogeneous
-            (rigid only, single-link entities only). Each parallel environment will simulate a different
-            geometry variant from the list.
+            The morph of the entity. If a list of morphs is provided, the entity is heterogeneous (rigid and kinematic
+            entities only): each parallel environment simulates one of them, the environments being split into
+            contiguous blocks of nearly equal size. The morphs must share their kinematic topology (the same links,
+            connected by joints of the same names, types and numbers of degrees of freedom), while their geometry,
+            inertia, link frames (e.g. a different 'scale', or a different pose for a fixed base) and joint parameters
+            may differ.
         material : gs.materials.Material | None, optional
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional

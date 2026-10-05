@@ -404,7 +404,7 @@ class KinematicOptions(Options):
     batch_links_info : bool, optional
         Whether to batch link info. Automatically enabled for heterogeneous simulation. Defaults to False.
     batch_dofs_info : bool, optional
-        Whether to batch DOF info. Defaults to False.
+        Whether to batch DOF info. Automatically enabled for heterogeneous simulation. Defaults to False.
     IK_max_targets : int, optional
         Maximum number of IK targets. Increasing this doesn't affect IK solving speed, but will increase memory usage.
         Defaults to 6.
@@ -483,10 +483,12 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         memory-bound kernels. Automatically enabled for heterogeneous simulation. Defaults to False.
     batch_joints_info : bool, optional
         Whether the model parameters of a joint are stored per environment rather than shared by the whole batch,
-        with the same tradeoff as `batch_links_info`. Defaults to False.
+        with the same tradeoff as `batch_links_info`. Automatically enabled for heterogeneous simulation. Defaults to
+        False.
     batch_dofs_info : bool, optional
         Whether the model parameters of a degree of freedom are stored per environment rather than shared by the
-        whole batch, with the same tradeoff as `batch_links_info`. Defaults to False.
+        whole batch, with the same tradeoff as `batch_links_info`. Automatically enabled for heterogeneous simulation.
+        Defaults to False.
     constraint_solver : gs.constraint_solver, optional
         Constraint solver type. Current supported constraint solvers are 'gs.constraint_solver.CG' (conjugate gradient)
         and 'gs.constraint_solver.Newton' (Newton's method). Defaults to 'Newton'.

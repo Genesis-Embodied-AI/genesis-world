@@ -362,17 +362,25 @@ class RigidJoint(RBC):
             # Per rotational dof, the largest perpendicular distance from its rotation axis (through the joint anchor)
             # to the geometry. Tighter than one shared sphere, and correct for an offset hinge (where the body rotates
             # about one end rather than its COM).
-            anchor = self.pos
+            geoms_joint = [self.desc] * len(geoms)
+            if self.link._variant_geom_ranges is not None:
+                i_link, i_joint = self.link.idx - self._entity.link_start, self.idx - self.link.joint_start
+                for i_variant, (geom_start, geom_end) in enumerate(self.link._variant_geom_ranges[1:], start=1):
+                    v_joint = self._entity.desc.variants[i_variant].links[i_link].joints[i_joint]
+                    for i_g, geom in enumerate(geoms):
+                        if geom_start <= geom.idx < geom_end:
+                            geoms_joint[i_g] = v_joint
             verts = [
-                gu.transform_by_trans_quat(geom.init_verts, geom.init_pos, geom.init_quat) - anchor for geom in geoms
+                gu.transform_by_trans_quat(geom.init_verts, geom.init_pos, geom.init_quat) - j_desc.pos
+                for geom, j_desc in zip(geoms, geoms_joint)
             ]
             for i_d in range(n_dofs):
-                axis = self.desc.dofs_motion_ang[i_d]
-                axis_norm = np.linalg.norm(axis)
-                if axis_norm < gs.EPS:
+                if np.linalg.norm(self.desc.dofs_motion_ang[i_d]) < gs.EPS:
                     continue  # translational dof, length stays 1
-                axis = axis / axis_norm
-                perp = [np.linalg.norm(v - np.outer(v @ axis, axis), axis=1).max() for v in verts]
+                perp = []
+                for geom_verts, j_desc in zip(verts, geoms_joint):
+                    axis = j_desc.dofs_motion_ang[i_d] / np.linalg.norm(j_desc.dofs_motion_ang[i_d])
+                    perp.append(np.linalg.norm(geom_verts - np.outer(geom_verts @ axis, axis), axis=1).max())
                 lengths[i_d] = body_radius(perp)
         return lengths
 

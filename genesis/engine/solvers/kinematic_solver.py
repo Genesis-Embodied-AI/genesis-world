@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -23,6 +24,7 @@ from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
     indices_to_mask,
+    qd_to_numpy,
     qd_to_torch,
     qd_zero_grad,
     sanitize_indexed_tensor,
@@ -362,10 +364,12 @@ class KinematicSolver(Solver):
         self._links_root_level = links_depth - links_depth[self._links_root_idx]
         self._links_tree_level = np.where(links_tree_root_idx >= 0, links_depth - links_depth[links_tree_root_idx], -1)
 
-        # batch_links_info is required when heterogeneous simulation is used.
-        # We must update options because get_links_info reads from solver._options.batch_links_info.
+        # Heterogeneous simulation stores the link, joint and dof info per environment, every variant stating its own
+        # (see '_dispatch_heterogeneous_kinematics'). We must update options because the getters read from them.
         if self._enable_heterogeneous:
             self._options.batch_links_info = True
+            self._options.batch_joints_info = True
+            self._options.batch_dofs_info = True
 
         self._build_static_config()
         self._create_data_manager()
@@ -402,8 +406,8 @@ class KinematicSolver(Solver):
             requires_grad=False,
             use_hibernation=False,
             batch_links_info=self._options.batch_links_info,
-            batch_dofs_info=False,
-            batch_joints_info=False,
+            batch_dofs_info=self._options.batch_dofs_info,
+            batch_joints_info=self._options.batch_joints_info,
             enable_mujoco_compatibility=False,
             enable_elliptic_friction=False,
             enable_signorini_contact=False,
@@ -647,6 +651,8 @@ class KinematicSolver(Solver):
                 self.rigid_config,
             )
 
+        self._dispatch_heterogeneous_kinematics()
+
         # Set initial qpos
         self.qpos = self.rigid_info.qpos
         self.qpos0 = self.rigid_info.qpos0
@@ -664,11 +670,14 @@ class KinematicSolver(Solver):
                     init_qpos[q_s:q_e, i_b] = entity._desc.variants[variant_idx[i_b]].init_qpos
 
             self.qpos0.from_numpy(init_qpos)
+            dofs_limit = np.broadcast_to(
+                qd_to_numpy(self.dyn_info.dofs.limit, transpose=True), (self._B, self.n_dofs_, 2)
+            )
             is_init_qpos_out_of_bounds = False
             for joint in self.joints:
                 if joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC):
-                    is_init_qpos_out_of_bounds |= (joint.desc.dofs_limit[0, 0] > init_qpos[joint.q_start]).any()
-                    is_init_qpos_out_of_bounds |= (init_qpos[joint.q_start] > joint.desc.dofs_limit[0, 1]).any()
+                    is_init_qpos_out_of_bounds |= (dofs_limit[:, joint.dof_start, 0] > init_qpos[joint.q_start]).any()
+                    is_init_qpos_out_of_bounds |= (init_qpos[joint.q_start] > dofs_limit[:, joint.dof_start, 1]).any()
             if is_init_qpos_out_of_bounds:
                 gs.logger.warning("Neutral robot position (qpos0) exceeds joint limits.")
             self.qpos.from_numpy(init_qpos)
@@ -677,6 +686,86 @@ class KinematicSolver(Solver):
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
+
+    def _dispatch_heterogeneous_kinematics(self):
+        """Write the link frames and the joint and dof parameters of each heterogeneous variant to the envs carrying it.
+
+        The init kernels broadcast those of the primary to every environment, while heterogeneous simulation batches
+        the link, joint and dof info (see 'build').
+        """
+        entities = [entity for entity in self._entities if entity._desc.variants]
+        if not entities:
+            return
+
+        # Field layout, batch second, since the arrays are written back as fields
+        links_pos = qd_to_numpy(self.dyn_info.links.pos, transpose=False, copy=True)
+        links_quat = qd_to_numpy(self.dyn_info.links.quat, transpose=False, copy=True)
+        joints_pos = qd_to_numpy(self.dyn_info.joints.pos, transpose=False, copy=True)
+        joints_sol_params = qd_to_numpy(self.dyn_info.joints.sol_params, transpose=False, copy=True)
+        dofs_info = self.dyn_info.dofs
+        dofs_fields = (
+            (dofs_info.motion_ang, "dofs_motion_ang"),
+            (dofs_info.motion_vel, "dofs_motion_vel"),
+            (dofs_info.limit, "dofs_limit"),
+            (dofs_info.stiffness, "dofs_stiffness"),
+            (dofs_info.damping, "dofs_damping"),
+            (dofs_info.frictionloss, "dofs_frictionloss"),
+            (dofs_info.armature, "dofs_armature"),
+            (dofs_info.act_gain, "dofs_act_gain"),
+            (dofs_info.act_bias, "dofs_act_bias"),
+            (dofs_info.force_range, "dofs_force_range"),
+        )
+        dofs_values = [qd_to_numpy(field, transpose=False, copy=True) for field, _ in dofs_fields]
+
+        for entity in entities:
+            variants_links = [entity._desc.links, *(variant.links for variant in entity._desc.variants[1:])]
+            envs_variant_idx = _balanced_variant_mapping(len(variants_links), self._B)
+            links_slice = slice(entity.link_start, entity.link_end)
+            variants_links_pos = np.stack([[l_desc.pos for l_desc in links] for links in variants_links])
+            variants_links_quat = np.stack([[l_desc.quat for l_desc in links] for links in variants_links])
+            links_pos[links_slice] = variants_links_pos[envs_variant_idx].swapaxes(0, 1)
+            links_quat[links_slice] = variants_links_quat[envs_variant_idx].swapaxes(0, 1)
+
+            # A file morph drops its joints without degrees of freedom, so a fixed one may leave the entity without any
+            if entity.n_joints == 0:
+                continue
+            variants_joints = [
+                [asdict(j_desc) for l_desc in links for j_desc in l_desc.joints] for links in variants_links
+            ]
+            joints_slice = slice(entity.joint_start, entity.joint_end)
+            variants_joints_pos = np.stack([[j_fields["pos"] for j_fields in joints] for joints in variants_joints])
+            joints_pos[joints_slice] = variants_joints_pos[envs_variant_idx].swapaxes(0, 1)
+            variants_sol_params = np.stack(
+                [[j_fields["sol_params"] for j_fields in joints] for joints in variants_joints]
+            )
+            variants_sol_params = self._sanitize_joint_sol_params(variants_sol_params).reshape(
+                variants_sol_params.shape
+            )
+            joints_sol_params[joints_slice] = variants_sol_params[envs_variant_idx].swapaxes(0, 1)
+            dofs_slice = slice(entity.dof_start, entity.dof_end)
+            for dofs_value, (_, name) in zip(dofs_values, dofs_fields):
+                variants_value = np.stack(
+                    [np.concatenate([j_fields[name] for j_fields in joints]) for joints in variants_joints]
+                )
+                dofs_value[dofs_slice] = variants_value[envs_variant_idx].swapaxes(0, 1)
+
+        self.dyn_info.links.pos.from_numpy(links_pos)
+        self.dyn_info.links.quat.from_numpy(links_quat)
+        self.dyn_info.joints.pos.from_numpy(joints_pos)
+        self.dyn_info.joints.sol_params.from_numpy(joints_sol_params)
+        for (field, _), dofs_value in zip(dofs_fields, dofs_values):
+            field.from_numpy(dofs_value)
+
+        # The state of a fixed root link is set at init alone (see kernel_init_link_fields), so it takes the frame of
+        # the variant its environment carries too
+        fixed_roots_idx = [entity.link_start for entity in entities if entity.base_link.is_fixed]
+        if fixed_roots_idx:
+            links_state_pos = qd_to_numpy(self.dyn_state.links.pos, transpose=False, copy=True)
+            links_state_quat = qd_to_numpy(self.dyn_state.links.quat, transpose=False, copy=True)
+            links_state_pos[fixed_roots_idx] = links_pos[fixed_roots_idx]
+            links_state_quat[fixed_roots_idx] = links_quat[fixed_roots_idx]
+            self.dyn_state.links.pos.from_numpy(links_state_pos)
+            self.dyn_state.links.quat.from_numpy(links_state_quat)
 
     def _dispatch_heterogeneous_vgeoms(self):
         """Override per-link vgeom ranges for heterogeneous variants. RigidSolver extends this."""

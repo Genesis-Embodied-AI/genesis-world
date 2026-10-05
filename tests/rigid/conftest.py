@@ -76,11 +76,11 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
     ET.SubElement(body, "joint", name=f"{name}_root", type="free")
 
 
-def _build_fixed_base_dual_arm(arm_thickness, shoulder_damping, right_arm_parent):
+def _build_fixed_base_dual_arm(shoulder_damping, right_arm_parent):
     """Generate a URDF of a torso the world carries and two one-link arms hanging from it by damped shoulders.
 
     The arms are mounted close enough that they overlap once they hang at rest, so that they touch when they fall under
-    gravity, as soon as they are thicker than the 0.1 gap between their hinges.
+    gravity.
 
     'right_arm_parent' names the link the right shoulder hangs from. Both shoulders sit at the same offset from the
     frame of their parent, so hanging the right arm from the left one changes the kinematic tree alone.
@@ -101,7 +101,7 @@ def _build_fixed_base_dual_arm(arm_thickness, shoulder_damping, right_arm_parent
         for tag in ("visual", "collision"):
             geom_prop = ET.SubElement(link, tag)
             ET.SubElement(geom_prop, "origin", xyz=f"{sign * 0.15} 0 0")
-            ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size=f"0.3 {arm_thickness} {arm_thickness}")
+            ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size="0.3 0.12 0.12")
         joint = ET.SubElement(robot, "joint", name=f"{side}_shoulder", type="revolute")
         ET.SubElement(joint, "parent", link="torso" if side == "left" else right_arm_parent)
         ET.SubElement(joint, "child", link=f"{side}_arm")
@@ -114,22 +114,17 @@ def _build_fixed_base_dual_arm(arm_thickness, shoulder_damping, right_arm_parent
 
 @pytest.fixture(scope="session")
 def fixed_base_dual_arm():
-    return _build_fixed_base_dual_arm(arm_thickness=0.12, shoulder_damping=0.5, right_arm_parent="torso")
-
-
-@pytest.fixture(scope="session")
-def fixed_base_dual_arm_thick():
-    return _build_fixed_base_dual_arm(arm_thickness=0.14, shoulder_damping=0.5, right_arm_parent="torso")
+    return _build_fixed_base_dual_arm(shoulder_damping=0.5, right_arm_parent="torso")
 
 
 @pytest.fixture(scope="session")
 def fixed_base_dual_arm_high_damping():
-    return _build_fixed_base_dual_arm(arm_thickness=0.12, shoulder_damping=1.0, right_arm_parent="torso")
+    return _build_fixed_base_dual_arm(shoulder_damping=1.0, right_arm_parent="torso")
 
 
 @pytest.fixture(scope="session")
 def fixed_base_dual_arm_chained():
-    return _build_fixed_base_dual_arm(arm_thickness=0.12, shoulder_damping=0.5, right_arm_parent="left_arm")
+    return _build_fixed_base_dual_arm(shoulder_damping=0.5, right_arm_parent="left_arm")
 
 
 @pytest.fixture(scope="session")
@@ -516,6 +511,16 @@ def two_aligned_hinges():
     return mjcf
 
 
+@pytest.fixture(scope="session")
+def offset_hinge_box():
+    """Generate an MJCF of a box of half extents (0.05, 0.02, 0.03) turning about a hinge along y at x = 0.1."""
+    mjcf = ET.Element("mujoco", model="offset_hinge_box")
+    body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="box", pos="0 0 1")
+    ET.SubElement(body, "joint", type="hinge", name="hinge", pos="0.1 0 0", axis="0 1 0")
+    ET.SubElement(body, "geom", type="box", size="0.05 0.02 0.03")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
 def _build_chain_capsule_hinge(asset_tmp_path, enable_mesh):
     if enable_mesh:
         mesh_path = str(asset_tmp_path / "capsule.obj")
@@ -811,9 +816,8 @@ def implicit_inertial_origin_chain():
 
 @pytest.fixture(scope="session")
 def aligned_link_frame_urdfs():
-    """Generate two fixed-child URDF variants with nontrivial link-local frames."""
-    joint_pos = (0.31, -0.09, 0.11)
-    joint_rpy = (-0.2, 0.15, 0.35)
+    """Generate two fixed-child URDF variants with nontrivial link-local frames, each mounting its child its own way."""
+    variants_joint_origin = (((0.31, -0.09, 0.11), (-0.2, 0.15, 0.35)), ((0.27, -0.05, 0.14), (0.1, -0.25, 0.2)))
     variants_inertial = (
         (
             (1.0, (0.1, -0.05, 0.02), (0.0, 0.0, 0.0), (0.04, 0.05, 0.06)),
@@ -829,7 +833,7 @@ def aligned_link_frame_urdfs():
         ("child", ("0.08 0.01 -0.02", "-0.3 0.2 0.1"), ("0.02 -0.06 0.05", "0.1 -0.4 0.3")),
     )
     urdfs = []
-    for i_variant, links_inertial in enumerate(variants_inertial):
+    for i_variant, (links_inertial, (joint_pos, joint_rpy)) in enumerate(zip(variants_inertial, variants_joint_origin)):
         urdf = ET.Element("robot", name=f"fixed_child_inertial_frame_{i_variant}")
         for i_link, (link_name, geom_origin, vgeom_origin) in enumerate(links_geoms):
             link = ET.SubElement(urdf, "link", name=link_name)
