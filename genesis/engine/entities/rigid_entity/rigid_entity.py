@@ -105,7 +105,6 @@ class KinematicEntity(Entity):
         self._is_built: bool = False
         self._is_attached: bool = False
         self._is_vverts_overridden: bool = False
-        self._envs_variant_idx: np.ndarray | None = None
 
         self._load_model()
 
@@ -191,14 +190,6 @@ class KinematicEntity(Entity):
                 self._reassign_heterogeneous_indices()
 
     def _build(self):
-        if self._desc.variants:
-            # Balanced block assignment: the first 'B % n_variants' variants take one more environment, and with fewer
-            # environments than variants, environment i carries variant i.
-            n_variants = len(self._desc.variants)
-            envs_counts = np.full((n_variants,), self._solver._B // n_variants, dtype=gs.np_int)
-            envs_counts[: self._solver._B % n_variants] += 1
-            self._envs_variant_idx = np.repeat(np.arange(n_variants, dtype=gs.np_int), envs_counts)
-
         for link in self._links:
             link._build()
 
@@ -1226,12 +1217,6 @@ class KinematicEntity(Entity):
                 "or `.main_morph` only when explicitly using the first variant."
             )
         return self._morph
-
-    @property
-    @gs.assert_built
-    def envs_variant_idx(self) -> np.ndarray | None:
-        """Index in 'morphs' of the variant each environment carries, or None for a homogeneous entity."""
-        return self._envs_variant_idx
 
     @property
     def main_morph(self):

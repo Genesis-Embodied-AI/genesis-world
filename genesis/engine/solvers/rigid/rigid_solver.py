@@ -31,6 +31,7 @@ from genesis.utils.misc import (
 from ..base_solver import GravityMixin, MutatedLinks, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
+    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
@@ -378,9 +379,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
             if entity.desc.variants:
                 variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
-                envs_default = variants_default[entity.envs_variant_idx]
             else:
-                envs_default = np.full((self._B,), entity.main_morph.default_armature or 0.0)
+                variants_default = np.array([entity.main_morph.default_armature or 0.0])
+            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
             if (envs_default <= 0.0).all():
                 continue
             dofs_idx.extend(link.dof_start for link in rotor_links)
@@ -460,7 +461,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return self._options.broadphase_traversal
         # The valid pairs are shared by every environment, while a heterogeneous environment carries one variant of each
         # entity. ALL_VS_ALL tests the pairs of every variant in every environment, those of the variants it does not
-        # carry failing on their empty AABB (see func_update_geom_aabbs), whereas SAP sweeps the geoms it carries.
+        # carry failing on their empty axis-aligned bounding box (see func_update_geom_aabbs), whereas sweep-and-prune
+        # (SAP) only sweeps the geoms each environment carries.
         if gs.backend == gs.cpu or self._enable_heterogeneous:
             return gs.broadphase_traversal.SAP
         return gs.broadphase_traversal.ALL_VS_ALL
@@ -1029,7 +1031,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if link._variant_vgeom_ranges is None:
                 continue
 
-            variant_idx = link.entity.envs_variant_idx
+            n_variants = len(link._variant_vgeom_ranges)
+            variant_idx = _balanced_variant_mapping(n_variants, self._B)
 
             # Build per-env arrays from link's variant data
             geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)

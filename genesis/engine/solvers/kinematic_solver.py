@@ -73,6 +73,17 @@ if TYPE_CHECKING:
 TERRAIN_HEIGHT_QUERY_TILT_TOLERANCE = 1e-3
 
 
+def _balanced_variant_mapping(n_variants, B):
+    """Map N variants to B environments using balanced block assignment."""
+    if B >= n_variants:
+        base = B // n_variants
+        extra = B % n_variants
+        sizes = np.r_[np.full(extra, base + 1), np.full(n_variants - extra, base)]
+        return np.repeat(np.arange(n_variants), sizes)
+    else:
+        return np.arange(B)
+
+
 def _select_links_offset(offset, links_idx, envs_idx):
     """Index a base-link forward offset for a transposed state query.
 
@@ -272,7 +283,7 @@ class KinematicSolver(Solver):
         vgeoms_offset_quat = np.tile(gu.identity_quat(), (self.n_vgeoms, 1))
         for entity in self._entities:
             if links_offset_per_env and entity._desc.variants:
-                variant_idx = entity.envs_variant_idx
+                variant_idx = _balanced_variant_mapping(len(entity._desc.variants), self._B)
                 links_offset_pos[np.arange(self._B), entity.base_link_idx] = np.stack(
                     [entity._desc.variants[v].offset_pos for v in variant_idx]
                 )
@@ -646,7 +657,8 @@ class KinematicSolver(Solver):
             for entity in self.entities:
                 if not entity._desc.variants:
                     continue
-                variant_idx = entity.envs_variant_idx
+                n_variants = len(entity._desc.variants)
+                variant_idx = _balanced_variant_mapping(n_variants, self._B)
                 q_s, q_e = entity.q_start, entity.q_start + entity.n_qs
                 for i_b in range(self._B):
                     init_qpos[q_s:q_e, i_b] = entity._desc.variants[variant_idx[i_b]].init_qpos
@@ -672,7 +684,9 @@ class KinematicSolver(Solver):
             if link._variant_vgeom_ranges is None:
                 continue
 
-            variant_idx = link.entity.envs_variant_idx
+            n_variants = len(link._variant_vgeom_ranges)
+            variant_idx = _balanced_variant_mapping(n_variants, self._B)
+
             vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
             vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
 

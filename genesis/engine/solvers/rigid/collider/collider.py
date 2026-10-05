@@ -18,6 +18,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
+from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -416,31 +418,23 @@ class Collider:
         # Heterogeneous variants that no environment carries together never collide, and keeping their pairs would
         # grow the pair count quadratically with the pool size. An entity dispatches the same variant to all of its
         # links in a given environment, so a pair is kept only if some environment carries the variant of both geoms.
-        # Every homogeneous geom is the single variant of the pseudo-entity 0, carried by every environment.
-        geoms_hetero_entity_idx = np.zeros((n_geoms,), dtype=gs.np_int)
-        geoms_variant_idx = np.zeros((n_geoms,), dtype=gs.np_int)
-        hetero_entities_envs_variant_idx = [np.zeros((self._solver._B,), dtype=gs.np_int)]
-        hetero_entities_n_variants = [1]
-        for entity in self._solver._entities:
+        # Each variant of every heterogeneous entity gets its own key, and the key 0 stands for every homogeneous geom.
+        geoms_variant_key = np.zeros((n_geoms,), dtype=gs.np_int)
+        entities_envs_variant_key = [np.zeros((self._solver._B,), dtype=gs.np_int)]
+        n_variant_keys = 1
+        for entity in self._solver.entities:
             if not entity.desc.variants:
                 continue
             for link in entity.links:
-                for i_v, (geom_start, geom_end) in enumerate(link._variant_geom_ranges):
-                    geoms_hetero_entity_idx[geom_start:geom_end] = len(hetero_entities_n_variants)
-                    geoms_variant_idx[geom_start:geom_end] = i_v
-            hetero_entities_envs_variant_idx.append(entity.envs_variant_idx)
-            hetero_entities_n_variants.append(len(entity.desc.variants))
-        hetero_entity_a, hetero_entity_b = geoms_hetero_entity_idx[row], geoms_hetero_entity_idx[col]
-        is_variant_pair = valid & ((hetero_entity_a > 0) | (hetero_entity_b > 0))
-        hetero_entities_pairs = np.stack((hetero_entity_a[is_variant_pair], hetero_entity_b[is_variant_pair]), axis=-1)
-        for i_ea, i_eb in np.unique(hetero_entities_pairs, axis=0):
-            variants_is_carried = np.zeros(
-                (hetero_entities_n_variants[i_ea], hetero_entities_n_variants[i_eb]), dtype=bool
-            )
-            variants_is_carried[hetero_entities_envs_variant_idx[i_ea], hetero_entities_envs_variant_idx[i_eb]] = True
-            pairs_mask = is_variant_pair & (hetero_entity_a == i_ea) & (hetero_entity_b == i_eb)
-            variant_a, variant_b = geoms_variant_idx[row[pairs_mask]], geoms_variant_idx[col[pairs_mask]]
-            valid[pairs_mask] = variants_is_carried[variant_a, variant_b]
+                for i_variant, (geom_start, geom_end) in enumerate(link._variant_geom_ranges):
+                    geoms_variant_key[geom_start:geom_end] = n_variant_keys + i_variant
+            n_variants = len(entity.desc.variants)
+            entities_envs_variant_key.append(n_variant_keys + _balanced_variant_mapping(n_variants, self._solver._B))
+            n_variant_keys += n_variants
+        envs_variant_key = np.stack(entities_envs_variant_key)
+        variant_keys_is_co_carried = np.zeros((n_variant_keys, n_variant_keys), dtype=bool)
+        variant_keys_is_co_carried[envs_variant_key[:, None], envs_variant_key[None, :]] = True
+        valid &= variant_keys_is_co_carried[geoms_variant_key[row], geoms_variant_key[col]]
 
         # --- Self-collision: adjacent and neutral overlap checks (Python loop, only same-root pairs) ---
         # These checks only apply when self_collision is enabled and the pair passed all vectorized filters
@@ -454,18 +448,21 @@ class Collider:
         if needs_neutral_check:
             self_root_indices = np.where(valid & same_root)[0]
             self_root_geom_idxs = np.unique(np.concatenate([row[self_root_indices], col[self_root_indices]]))
-            # Compute vertices only for geoms involved in self-collision pairs,
-            # shrunk by 0.1% to avoid false positive when detecting self-collision.
-            # The pose of a heterogeneous geom is only meaningful in the environments carrying its variant. Every
-            # same-root pair left belongs to a single variant of one entity, whose first environment carries both. A
-            # fixed geom without batched fixed vertices holds a single copy of its vertices for every environment.
-            for gi in self_root_geom_idxs:
-                verts = tensor_to_array(geoms[gi].get_verts())
-                if verts.ndim > 2:
-                    verts = verts[geoms[gi].active_envs_idx[0] if geoms[gi].active_envs_idx is not None else 0]
+            # Compute vertices only for geoms involved in self-collision pairs, shrunk by 0.1% to avoid false positive
+            # when detecting self-collision. The pose of a heterogeneous geom is only meaningful in the environments
+            # carrying its variant. The pair filter above leaves only variants that some environment carries, and every
+            # same-root pair left belongs to a single variant of one entity, so the first environment carrying a geom
+            # carries the other geom of its pair as well.
+            for i_g in self_root_geom_idxs:
+                geom = geoms[i_g]
+                i_b = geom.active_envs_idx[0] if geom.active_envs_idx is not None else 0
+                env_idx = i_b if self._solver.n_envs > 0 else None
+                geom_pos = tensor_to_array(geom.get_pos(env_idx, relative=False).reshape((3,)))
+                geom_quat = tensor_to_array(geom.get_quat(env_idx, relative=False).reshape((4,)))
+                verts = gu.transform_by_trans_quat(geom.init_verts, geom_pos, geom_quat)
                 centroid = verts.mean(axis=0, keepdims=True)
                 verts = centroid + (1.0 - 1e-3) * (verts - centroid)
-                geoms_verts[gi] = verts
+                geoms_verts[i_g] = verts
 
         if needs_self_check:
             self_root_indices = np.where(valid & same_root)[0]

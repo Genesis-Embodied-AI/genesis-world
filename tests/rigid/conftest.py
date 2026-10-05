@@ -76,25 +76,29 @@ def _add_free_body(mjcf, name, geom_type, geom_size, pos, rgba=None):
     ET.SubElement(body, "joint", name=f"{name}_root", type="free")
 
 
-@pytest.fixture(scope="session")
-def fixed_base_dual_arm():
-    # A torso the world carries and two one-link arms hanging from it, mounted close enough that the arms overlap
-    # once they hang at rest, so that the arms touch when they fall under gravity
+def _build_fixed_base_dual_arm(arm_thickness):
+    """Generate a URDF of a torso the world carries and two one-link arms hanging from it.
+
+    The arms are mounted close enough that they overlap once they hang at rest, so that they touch when they fall under
+    gravity, as soon as they are thicker than the 0.1 gap between their hinges.
+    """
     robot = ET.Element("robot", name="dual_arm")
     torso = ET.SubElement(robot, "link", name="torso")
     inertial = ET.SubElement(torso, "inertial")
     ET.SubElement(inertial, "mass", value="5.0")
     ET.SubElement(inertial, "inertia", ixx="0.1", iyy="0.1", izz="0.1", ixy="0", ixz="0", iyz="0")
-    ET.SubElement(ET.SubElement(ET.SubElement(torso, "collision"), "geometry"), "box", size="0.1 0.3 0.1")
+    for tag in ("visual", "collision"):
+        ET.SubElement(ET.SubElement(ET.SubElement(torso, tag), "geometry"), "box", size="0.1 0.3 0.1")
     for side, sign in (("left", 1.0), ("right", -1.0)):
         link = ET.SubElement(robot, "link", name=f"{side}_arm")
         inertial = ET.SubElement(link, "inertial")
         ET.SubElement(inertial, "origin", xyz=f"{sign * 0.15} 0 0")
         ET.SubElement(inertial, "mass", value="1.0")
         ET.SubElement(inertial, "inertia", ixx="0.001", iyy="0.01", izz="0.01", ixy="0", ixz="0", iyz="0")
-        collision = ET.SubElement(link, "collision")
-        ET.SubElement(collision, "origin", xyz=f"{sign * 0.15} 0 0")
-        ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.3 0.12 0.12")
+        for tag in ("visual", "collision"):
+            geom_prop = ET.SubElement(link, tag)
+            ET.SubElement(geom_prop, "origin", xyz=f"{sign * 0.15} 0 0")
+            ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size=f"0.3 {arm_thickness} {arm_thickness}")
         joint = ET.SubElement(robot, "joint", name=f"{side}_shoulder", type="revolute")
         ET.SubElement(joint, "parent", link="torso")
         ET.SubElement(joint, "child", link=f"{side}_arm")
@@ -103,6 +107,16 @@ def fixed_base_dual_arm():
         ET.SubElement(joint, "limit", lower="-3.14", upper="3.14", effort="100", velocity="10")
         ET.SubElement(joint, "dynamics", damping="0.5")
     return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def fixed_base_dual_arm():
+    return _build_fixed_base_dual_arm(arm_thickness=0.12)
+
+
+@pytest.fixture(scope="session")
+def fixed_base_dual_arm_thick():
+    return _build_fixed_base_dual_arm(arm_thickness=0.14)
 
 
 @pytest.fixture(scope="session")
@@ -697,46 +711,6 @@ def sliding_ball_pair():
         ET.SubElement(joint, "origin", xyz="0.0 0.0 0.2", rpy="0.0 0.0 0.0")
         ET.SubElement(joint, "axis", xyz="0.0 0.0 1.0")
         ET.SubElement(joint, "limit", lower="-0.1", upper="0.1", effort="100.0", velocity="10.0")
-        return ET.tostring(urdf, encoding="unicode")
-
-    return build
-
-
-@pytest.fixture(scope="session")
-def folding_arm():
-    """Build a URDF of a plate carrying a post, on which hinges a horizontal arm of the requested length that falls
-    onto the plate under gravity. The post is fixed to the plate, so that the arm collides with the plate while being
-    adjacent to the post alone."""
-
-    def build(arm_length):
-        urdf = ET.Element("robot", name="folding_arm")
-        # Plate, post and arm, each as (link name, box size, box center in the link frame, mass)
-        for name, size, center, mass in (
-            ("plate", (1.0, 1.0, 0.02), (0.0, 0.0, -0.01), 5.0),
-            ("post", (0.02, 0.02, 0.06), (0.0, 0.0, 0.03), 0.1),
-            ("arm", (arm_length, 0.02, 0.02), (0.5 * arm_length, 0.0, 0.0), 0.2),
-        ):
-            link = ET.SubElement(urdf, "link", name=name)
-            inertial = ET.SubElement(link, "inertial")
-            ET.SubElement(inertial, "origin", xyz=" ".join(map(str, center)))
-            ET.SubElement(inertial, "mass", value=str(mass))
-            inertia = [mass / 12.0 * (size[j] ** 2 + size[k] ** 2) for j, k in ((1, 2), (0, 2), (0, 1))]
-            ixx, iyy, izz = map(str, inertia)
-            ET.SubElement(inertial, "inertia", ixx=ixx, ixy="0", ixz="0", iyy=iyy, iyz="0", izz=izz)
-            for tag in ("visual", "collision"):
-                geom_prop = ET.SubElement(link, tag)
-                ET.SubElement(geom_prop, "origin", xyz=" ".join(map(str, center)))
-                ET.SubElement(ET.SubElement(geom_prop, "geometry"), "box", size=" ".join(map(str, size)))
-        joint = ET.SubElement(urdf, "joint", name="post_mount", type="fixed")
-        ET.SubElement(joint, "origin", xyz="-0.4 -0.4 0.0")
-        ET.SubElement(joint, "parent", link="plate")
-        ET.SubElement(joint, "child", link="post")
-        joint = ET.SubElement(urdf, "joint", name="hinge", type="continuous")
-        ET.SubElement(joint, "origin", xyz="0.0 0.0 0.07")
-        ET.SubElement(joint, "axis", xyz="0 1 0")
-        ET.SubElement(joint, "parent", link="post")
-        ET.SubElement(joint, "child", link="arm")
-        ET.SubElement(joint, "limit", effort="100.0", velocity="30.0")
         return ET.tostring(urdf, encoding="unicode")
 
     return build

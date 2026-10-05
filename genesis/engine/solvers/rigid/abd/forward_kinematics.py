@@ -874,10 +874,10 @@ def func_update_geom_aabbs(
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
 ):
-    """Fit the world-frame AABB of every geom in every env.
+    """Fit the world-frame axis-aligned bounding box (AABB) of every geom in every environment.
 
-    A geom of a heterogeneous variant that the env does not carry gets an empty box, which overlaps nothing and drops
-    out of any union of boxes.
+    A geom of a heterogeneous variant that the environment does not carry gets an empty box, which overlaps nothing and
+    drops out of any union of boxes.
     """
     n_geoms = dyn_state.geoms.pos.shape[0]
     _B = dyn_state.geoms.pos.shape[1]
