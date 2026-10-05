@@ -210,6 +210,7 @@ class RasterizerContext:
 
     def reset(self):
         self._t = -1
+        self.clear_dynamic_nodes(only_outdated=False)
 
     def add_node(self, obj, **kwargs):
         with self.scene._visualizer.viewer_lock:

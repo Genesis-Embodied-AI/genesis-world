@@ -1445,14 +1445,15 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     # The rendered environments hold an arm resting against the ground, whose contacts give the contact markers
     # something to draw, and an arm yawed a quarter turn and reaching sideways, so the two render as differently as the
     # arm's reach allows. The others hold resting arms of their own from a converged simulation.
-    franka.set_dofs_position(
-        [
-            [-2.717, -1.763, -2.217, -2.566, 0.226, 2.933, 1.307, 0.017, 0.017],
-            [1.728, -1.763, -2.157, -2.275, -0.327, 2.201, 1.833, 0.018, 0.018],
-            [1.57, 1.0, 0.0, -0.5, 0.0, 1.5, 0.0, 0.04, 0.04],
-            [-2.098, 1.763, -1.004, -2.421, -0.227, 2.850, -0.136, 0.020, 0.020],
-        ]
+    dofs_pos = np.array(
+        (
+            (-2.717, -1.763, -2.217, -2.566, 0.226, 2.933, 1.307, 0.017, 0.017),
+            (1.728, -1.763, -2.157, -2.275, -0.327, 2.201, 1.833, 0.018, 0.018),
+            (1.57, 1.0, 0.0, -0.5, 0.0, 1.5, 0.0, 0.04, 0.04),
+            (-2.098, 1.763, -1.004, -2.421, -0.227, 2.850, -0.136, 0.020, 0.020),
+        )
     )
+    franka.set_dofs_position(dofs_pos)
     scene.step()
 
     # Capture viewer screenshot when the interactive viewer is enabled
@@ -1520,6 +1521,17 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     for env_rgb in (rgb, rgb_debug):
         env_diff = np.abs(env_rgb[0].astype(np.float32) - env_rgb[1].astype(np.float32))
         assert env_diff.mean() > 5.0, "Per-env renders are too similar — env isolation may be broken"
+
+    # The markers drawn for other contacts, then cleared by a reset that brings back the first state, never show again
+    franka.set_dofs_position(dofs_pos[::-1])
+    for _ in range(2):
+        scene.step()
+    cam_debug.render(rgb=True)
+    scene.reset()
+    franka.set_dofs_position(dofs_pos)
+    scene.step()
+    rgb_debug_reset, *_ = cam_debug.render(rgb=True)
+    assert_equal(rgb_debug_reset, rgb_debug)
 
 
 @pytest.mark.required
