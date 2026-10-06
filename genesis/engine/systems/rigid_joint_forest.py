@@ -53,7 +53,7 @@ class RigidJointForestSystem(SimSystem):
                         or moving_joints[0].type != gs.JOINT_TYPE.FREE
                         or moving_joints[0].n_dofs != 6
                     ):
-                        raise RuntimeError("RigidJointForestSystem requires a fixed or six-DOF " "free Genesis root")
+                        raise RuntimeError("RigidJointForestSystem requires a fixed or six-DOF free Genesis root")
                     root_dof = moving_joints[0].dof_start
                 root_dof_index.append(root_dof)
             else:
@@ -69,7 +69,7 @@ class RigidJointForestSystem(SimSystem):
                         )
                     ):
                         raise RuntimeError(
-                            "RigidJointForestSystem requires scalar revolute or " "prismatic Genesis forest edges"
+                            "RigidJointForestSystem requires scalar revolute or prismatic Genesis forest edges"
                         )
                     edge_child.append(link.idx)
                     edge_dof_index.append(moving_joints[0].dof_start)

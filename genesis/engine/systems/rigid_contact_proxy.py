@@ -180,7 +180,7 @@ class RigidContactProxySystem(SimSystem):
         if not math.isfinite(test_merit_energy_bias) or test_merit_energy_bias < 0.0:
             raise ValueError("rigid_proxy/test_merit_energy_bias must be finite and nonnegative")
         if not math.isfinite(ls_forensics_test_energy_bias) or ls_forensics_test_energy_bias < 0.0:
-            raise ValueError("extras/ls_forensics/test_energy_bias must be finite and " "nonnegative")
+            raise ValueError("extras/ls_forensics/test_energy_bias must be finite and nonnegative")
         self.globalization_mode_host = mode
         self.restoration_enabled_host = bool(restoration)
         self.test_merit_energy_bias_host = float(test_merit_energy_bias)

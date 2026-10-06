@@ -389,9 +389,7 @@ class DynamicRadixSort:
                     self.lookback_complete[
                         tile,
                         tid,
-                    ] = (
-                        tile_prefix + local_count
-                    )
+                    ] = tile_prefix + local_count
                     qd.simt.grid.mem_fence()
                     qd.atomic_exchange(
                         self.lookback_status[tile, tid],
