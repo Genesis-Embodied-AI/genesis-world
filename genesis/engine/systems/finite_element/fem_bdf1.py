@@ -32,7 +32,7 @@ class FEMBDF1(SimSystem):
         self.extent_action = self.create_action(report_fem_bdf1_extent, self.fem_system.data, self.data)
         self.assemble_action = self.create_action(assemble_fem_bdf1, self.fem_system.data, self.data)
         self.energy_action = self.create_action(compute_fem_bdf1_energy, self.fem_system.data, self.data)
-        self.fem_system.register_kinetic_actions(
+        self.fem_system.on_kinetic(
             self,
             self.predict_action,
             self.extent_action,

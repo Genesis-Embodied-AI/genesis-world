@@ -1880,7 +1880,7 @@ def contact_energy(contact: qd.template(), surface: qd.template(), vertex: qd.te
 class ConsistentIPCContactConstitution(ContactConstitution):
     """Production Consistent IPC contact action provider."""
 
-    def register_actions(self) -> dict[str, object]:
+    def create_action_protocol(self) -> dict[str, object]:
         contact = self.contact_system.data
         surface = self.surface_system.data
         vertex = self.vertex_system.data

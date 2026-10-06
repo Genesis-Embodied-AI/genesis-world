@@ -41,7 +41,7 @@ class LinearPCG(SimSystem):
         pcg_solver = self.require(PCGSolver)
         self.initialize_action = self.create_action(init_linear_pcg, self.data)
         self.solve_action = self.create_action(solve_linear_pcg, self.data)
-        pcg_solver.register_solver_actions(
+        pcg_solver.on_solve(
             self.initialize_action,
             self.solve_action,
         )
@@ -81,7 +81,9 @@ def get_linear_pcg_data(total_dof: int) -> LinearPCG.Data:
 
 
 @qd.func(requires_top_level=True)
-def init_linear_pcg(data: qd.template()):
+def init_linear_pcg(
+    data: qd.template(),  # LinearPCG.Data
+):
     """Reset the diagnostics of one preallocated linear PCG implementation."""
     for _ in range(1):
         data.n_iterations[()] = 0

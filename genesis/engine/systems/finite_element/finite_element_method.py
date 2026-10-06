@@ -64,7 +64,7 @@ class FiniteElementMethod(SimSystem):
         self.global_body_system = self.require(GlobalBodyManager)
         self.global_vertex_system = self.require(GlobalVertexManager)
 
-    def register_kinetic_actions(
+    def on_kinetic(
         self,
         kinetic_system: SimSystem,
         predict_action: SimAction,
@@ -80,7 +80,7 @@ class FiniteElementMethod(SimSystem):
         self.assemble_actions.register(assemble_action)
         self.energy_actions.register(energy_action)
 
-    def register_constitution_actions(
+    def on_constitution(
         self,
         constitution_system: SimSystem,
         extent_action: SimAction,

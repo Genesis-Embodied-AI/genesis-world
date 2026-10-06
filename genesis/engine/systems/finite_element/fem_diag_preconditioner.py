@@ -31,7 +31,7 @@ class FEMDiagPreconditioner(SimSystem):
         self.global_linear_system_system = self.require(GlobalLinearSystem)
         self.pcg_solver_system = self.require(PCGSolver)
         self.pcg_preconditioner_action = self.create_action(pcg_apply_preconditioner, self.data)
-        self.pcg_solver_system.register_shared_preconditioner(self.pcg_preconditioner_action)
+        self.pcg_solver_system.on_shared_preconditioner(self.pcg_preconditioner_action)
 
 
 def get_fem_diag_preconditioner_data(

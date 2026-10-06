@@ -40,7 +40,7 @@ class PCGSolver(SimSystem):
     def build(self) -> None:
         pass
 
-    def register_solver_actions(
+    def on_solve(
         self,
         initializer: SimAction,
         solver: SimAction,
@@ -63,18 +63,18 @@ class PCGSolver(SimSystem):
         self.solver_initializers.register(initializer)
         self.solvers.register(solver)
 
-    def register_primary_operator(self, action: SimAction) -> None:
+    def on_primary_operator(self, action: SimAction) -> None:
         """Declare the complete primary operator for the standard PCG route.
 
         The action applies the assembled base matrix. Additional physical
         systems may accumulate operator contributions through
-        ``register_system_actions``. Exactly one standard primary operator must
+        ``on_solve_contribution``. Exactly one standard primary operator must
         exist when the engine is initialized; any other count is a fatal engine
         construction error.
         """
         self.primary_operators.register(action)
 
-    def register_system_actions(
+    def on_solve_contribution(
         self,
         operator: SimAction,
         reduced_operator: SimAction,
@@ -86,7 +86,7 @@ class PCGSolver(SimSystem):
         the standard and reduced coordinate routes, together with the
         preconditioner contribution it owns in the standard route. The reduced
         route's primary operator and matching preconditioner are declared by
-        ``register_reduced_system_actions``.
+        ``on_reduced_solve``.
 
         All three actions must have the same owning ``SimSystem``. A missing
         action or mixed ownership is a fatal engine construction error; partial
@@ -103,7 +103,7 @@ class PCGSolver(SimSystem):
         self.reduced_operators.register(reduced_operator)
         self.preconditioners.register(preconditioner)
 
-    def register_reduced_system_actions(
+    def on_reduced_solve(
         self,
         primary_operator: SimAction,
         preconditioner: SimAction,
@@ -125,7 +125,7 @@ class PCGSolver(SimSystem):
         self.reduced_primary_operators.register(primary_operator)
         self.reduced_preconditioners.register(preconditioner)
 
-    def register_shared_preconditioner(self, action: SimAction) -> None:
+    def on_shared_preconditioner(self, action: SimAction) -> None:
         """Declare one complete route-invariant preconditioner contribution.
 
         The action must apply the preconditioner for the DOFs owned by its

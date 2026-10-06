@@ -138,7 +138,7 @@ class RigidJointForestSystem(SimSystem):
             self.rigid.data,
             self.contact_proxy.data,
         )
-        pcg_solver.register_reduced_system_actions(
+        pcg_solver.on_reduced_solve(
             self.pcg_operator_action,
             self.pcg_preconditioner_action,
         )

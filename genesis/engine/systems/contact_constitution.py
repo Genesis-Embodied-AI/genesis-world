@@ -16,7 +16,7 @@ class ContactConstitution(SimSystem):
         self.contact_system = self.require(ContactSystem)
         self.surface_system = self.require(GlobalSurfaceManager)
         self.vertex_system = self.require(GlobalVertexManager)
-        self.actions = self.register_actions()
+        self.actions = self.create_action_protocol()
 
     def resolve_actions(self) -> dict[str, object]:
         if self.is_building:
@@ -24,5 +24,5 @@ class ContactConstitution(SimSystem):
         return {name: action.invocation for name, action in self.actions.items()}
 
     @abstractmethod
-    def register_actions(self) -> dict[str, object]:
+    def create_action_protocol(self) -> dict[str, object]:
         """Create the complete stateless numerical action protocol."""

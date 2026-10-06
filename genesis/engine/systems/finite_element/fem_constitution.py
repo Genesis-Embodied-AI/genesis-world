@@ -15,7 +15,7 @@ class FEMConstitution(SimSystem):
         self.global_linear_system_system = self.require(GlobalLinearSystem)
         self.data.extent_slot = self.global_linear_system_system.register_extent_slot()
         extent_action, assemble_action, energy_action = self.create_constitution_actions()
-        self.fem_system.register_constitution_actions(
+        self.fem_system.on_constitution(
             self,
             extent_action,
             assemble_action,

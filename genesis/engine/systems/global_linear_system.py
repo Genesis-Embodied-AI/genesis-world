@@ -44,7 +44,7 @@ class GlobalLinearSystem(SimSystem):
 
         self.pcg_solver_system = self.require(PCGSolver)
         self.pcg_operator_action = self.create_action(pcg_apply_operator, self.data)
-        self.pcg_solver_system.register_primary_operator(self.pcg_operator_action)
+        self.pcg_solver_system.on_primary_operator(self.pcg_operator_action)
 
     def register_extent_slot(self) -> int:
         if self.extent_slot_count_host >= self.data.extent_capacity:

@@ -59,7 +59,7 @@ class RigidSystem(SimSystem):
         self.pcg_operator_action = self.create_action(pcg_apply_operator, self.data)
         self.pcg_reduced_operator_action = self.create_action(pcg_apply_reduced_operator, self.data)
         self.pcg_preconditioner_action = self.create_action(pcg_apply_preconditioner, self.data)
-        pcg_solver.register_system_actions(
+        pcg_solver.on_solve_contribution(
             self.pcg_operator_action,
             self.pcg_reduced_operator_action,
             self.pcg_preconditioner_action,
