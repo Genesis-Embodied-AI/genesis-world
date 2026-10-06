@@ -14,6 +14,8 @@ from .dynamic_radix_sort import DynamicRadixSort, dynamic_radix_sort
 from .fsr_reduce import fast_segmented_reduce_body as fsr_reduce_body
 from .sim_system import SimData
 
+QDDataType = type(qd.f64)
+
 
 @qd.data_oriented
 class BCOOMatrix(SimData):
@@ -26,7 +28,7 @@ class BCOOMatrix(SimData):
 
     shape: tuple[int, int]
     block_shape: tuple[int, int]
-    value_type: object
+    value_type: QDDataType
     symmetric: bool
     block_scalar_count: int
     sort_end_bit: int

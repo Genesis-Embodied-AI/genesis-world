@@ -465,7 +465,7 @@ class LBVH:
         srt_tmp_perm: qd.Ndarray
         srt_scratch: qd.Ndarray
         srt_n: qd.Ndarray
-        morton_sort: object
+        morton_sort: DynamicRadixSort
         red_partials: qd.Ndarray
         n_reduce_blocks: qd.Ndarray
         stack_pool: qd.Ndarray

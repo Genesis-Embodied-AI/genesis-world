@@ -4,11 +4,13 @@ import quadrants as qd
 
 from .broad_phase_system import BroadPhaseSystem
 from .dual_ee_query import (
+    DualEEQueryState,
     get_dual_ee_query_data,
     handle_overflow as handle_dual_ee_overflow,
     query as dual_ee_query,
 )
 from .lbvh import (
+    LBVH,
     build_edge,
     build_tri,
     get_lbvh_data,
@@ -34,9 +36,9 @@ class LBVHBroadPhase(BroadPhaseSystem):
         has_triangle_bvh: bool
         has_edge_bvh: bool
         has_codim_point_bvh: bool
-        triangle_bvh: object
-        edge_bvh: object
-        ee_dual_state: object
+        triangle_bvh: LBVH.Data | None
+        edge_bvh: LBVH.Data | None
+        ee_dual_state: DualEEQueryState.Data | None
 
     def __init__(self, data: Data) -> None:
         super().__init__()

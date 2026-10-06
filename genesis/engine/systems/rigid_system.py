@@ -4,6 +4,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.utils import array_class
 from genesis.engine.solvers.rigid.constraint import linesearch, solver
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, func_step_1, func_step_2
 
@@ -38,14 +39,14 @@ class RigidSystem(SimSystem):
         qacc_temp: qd.Ndarray
         Ma_temp: qd.Ndarray
         Jaref_temp: qd.Ndarray
-        dyn_state: object
-        constraint_state: object
-        dyn_info: object
-        rigid_info: object
-        rigid_config: object
-        collider_state: object
-        collider_config: object
-        errno: object
+        dyn_state: array_class.DynState
+        constraint_state: array_class.ConstraintState
+        dyn_info: array_class.DynInfo
+        rigid_info: array_class.RigidInfo
+        rigid_config: array_class.RigidSimStaticConfig
+        collider_state: array_class.ColliderState
+        collider_config: array_class.ColliderStaticConfig
+        errno: qd.Tensor
 
     def __init__(self, data: Data) -> None:
         super().__init__()

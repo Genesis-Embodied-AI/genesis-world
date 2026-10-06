@@ -34,8 +34,8 @@ class RigidContactAssemble(SimSystem):
         doublet_scan_scratch: qd.Ndarray
         pair_triplet_total: qd.Ndarray
         rigid_doublet_total: qd.Ndarray
-        triplet_scanner: object
-        doublet_scanner: object
+        triplet_scanner: DynamicExclusiveSum
+        doublet_scanner: DynamicExclusiveSum
 
     def __init__(self, data: Data) -> None:
         super().__init__()

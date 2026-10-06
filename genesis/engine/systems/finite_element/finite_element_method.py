@@ -42,8 +42,8 @@ class FiniteElementMethod(SimSystem):
         fem_energy: qd.Ndarray
         bridge_vertex: qd.Ndarray
         bridge_environment: qd.Ndarray
-        scene_elements_v: object
-        scene_vertex_constraints: object
+        scene_elements_v: qd.Field
+        scene_vertex_constraints: qd.Field
         scene_frame: int
 
     def __init__(self, data: Data) -> None:

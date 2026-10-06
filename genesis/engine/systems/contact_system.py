@@ -90,7 +90,7 @@ class ContactSystem(SimSystem):
         d_hat: qd.Ndarray
         default_friction_rate: qd.Ndarray
         doublet_scan_scratch: qd.Ndarray
-        doublet_scanner: object
+        doublet_scanner: DynamicExclusiveSum
         doublet_seg_flags: qd.Ndarray
         doublet_seg_ids: qd.Ndarray
         doublet_sort_keys: qd.Ndarray
@@ -99,7 +99,7 @@ class ContactSystem(SimSystem):
         doublet_sort_perm_out: qd.Ndarray
         doublet_sort_scratch: qd.Ndarray
         doublet_sort_size: qd.Ndarray
-        doublet_sorter: object
+        doublet_sorter: DynamicRadixSort
         dt_sq: qd.Ndarray
         enable_ee_table: qd.Ndarray
         enable_table: qd.Ndarray
@@ -190,7 +190,7 @@ class ContactSystem(SimSystem):
         pairs_pt: qd.Ndarray
         sort_log256_max_n: int
         triplet_scan_scratch: qd.Ndarray
-        triplet_scanner: object
+        triplet_scanner: DynamicExclusiveSum
         triplet_seg_flags: qd.Ndarray
         triplet_seg_ids: qd.Ndarray
         triplet_sort_keys: qd.Ndarray
@@ -199,7 +199,7 @@ class ContactSystem(SimSystem):
         triplet_sort_perm_out: qd.Ndarray
         triplet_sort_scratch: qd.Ndarray
         triplet_sort_size: qd.Ndarray
-        triplet_sorter: object
+        triplet_sorter: DynamicRadixSort
         unique_doublet_gradients: qd.Ndarray
         unique_doublet_vertices: qd.Ndarray
         unique_triplet_cols: qd.Ndarray

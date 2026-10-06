@@ -89,13 +89,13 @@ class RigidJointForestSystem(SimSystem):
         precond_a: qd.Ndarray
         precond_velocity: qd.Ndarray
         kkt_proxy_diagonal: qd.Ndarray
-        endpoint_qpos: object
-        endpoint_link_pos: object
-        endpoint_link_quat: object
-        endpoint_joint_xanchor: object
-        endpoint_joint_xaxis: object
-        endpoint_t: object
-        endpoint_quat: object
+        endpoint_qpos: qd.Tensor
+        endpoint_link_pos: qd.Tensor
+        endpoint_link_quat: qd.Tensor
+        endpoint_joint_xanchor: qd.Tensor
+        endpoint_joint_xaxis: qd.Tensor
+        endpoint_t: qd.Tensor
+        endpoint_quat: qd.Tensor
 
     def __init__(self, data: Data) -> None:
         super().__init__()
