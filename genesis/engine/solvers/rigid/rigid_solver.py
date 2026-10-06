@@ -215,6 +215,17 @@ def _sanitize_sol_params(
     return sol_params
 
 
+def _sanitize_runtime_sol_params(sol_params, min_timeconst: float):
+    """Validate the solver parameters of a constraint added at runtime, defaulting to the shortest time constant.
+
+    It sanitizes a copy of the given parameters.
+    """
+    sol_params = np.array(gu.default_solver_params() if sol_params is None else sol_params, dtype=gs.np_float)
+    if sol_params.shape != (7,):
+        gs.raise_exception(f"'sol_params' must have 7 entries, got shape {sol_params.shape}.")
+    return _sanitize_sol_params(sol_params, min_timeconst)
+
+
 class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     material_cls = Rigid
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
@@ -3384,14 +3395,146 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         kernel_set_geoms_friction_rolling(geoms_idx, friction_rolling, self.dyn_info, self.rigid_config)
 
-    def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        return self.constraint_solver.add_weld_constraint(link1_idx, link2_idx, envs_idx)
+    def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None, *, sol_params=None):
+        """
+        Weld two links together in their current relative pose.
+
+        Parameters
+        ----------
+        link1_idx : int
+            The global index of the first link.
+        link2_idx : int
+            The global index of the second link.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        sol_params : None | array_like, optional
+            The 7 constraint solver parameters of the weld (see `genesis.utils.geom.default_solver_params`). A stiffer
+            weld lets the links drift apart less under load, at the cost of numerical robustness. A light link, whose
+            weld yields the most, gains the most from a high impedance (`dmin` and `dmax` close to 1). None for the
+            default parameters with the shortest time constant the simulation timestep allows. Defaults to None.
+        """
+        sol_params = _sanitize_runtime_sol_params(sol_params, self._sol_min_timeconst)
+        return self.constraint_solver.add_weld_constraint(link1_idx, link2_idx, sol_params, envs_idx)
 
     def delete_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
         return self.constraint_solver.delete_weld_constraint(link1_idx, link2_idx, envs_idx)
 
     def get_weld_constraints(self, as_tensor: bool = True, to_torch: bool = True):
         return self.constraint_solver.get_weld_constraints(as_tensor, to_torch)
+
+    def add_screw_constraint(
+        self,
+        link1_idx,
+        link2_idx,
+        axis,
+        pitch,
+        envs_idx=None,
+        *,
+        pos=None,
+        limit=(-float("inf"), float("inf")),
+        frictionloss=0.0,
+        sol_params=None,
+    ):
+        """
+        Constrain a link to a screw motion relative to another link, travelling along an axis as it turns about it.
+
+        The second link keeps a single degree of freedom relative to the first one: it travels `pitch` along the
+        screw axis per radian it turns about it, in the right-handed sense (a positive turn about the axis moves it
+        along the axis). The current relative pose of the two links is the reference, at zero travel and zero turn.
+        The two links stop colliding with each other while the constraint holds. Remove it with
+        `delete_screw_constraint`, for instance once the screw has travelled out of its thread (see
+        `get_screw_constraints`).
+
+        Parameters
+        ----------
+        link1_idx : int
+            The global index of the link holding the thread, e.g. a nut or a threaded hole.
+        link2_idx : int
+            The global index of the screwed link.
+        axis : array_like
+            The direction of the screw axis, in the frame of the first link.
+        pitch : float
+            The travel per radian of turn (m/rad), positive for a right-handed thread. Zero keeps the second link
+            turning in place, infinity keeps it sliding without turning.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        pos : None | array_like, optional
+            A point of the screw axis, in the frame of the first link. None for the origin of the second link.
+            Defaults to None.
+        limit : tuple[float, float], optional
+            The lower and upper limits of the travel (m), where the screw stops as on a seat. Limits require a non-zero
+            pitch, since a screw turning in place does not travel. Defaults to no limit.
+        frictionloss : float, optional
+            The dry friction resisting the screw motion: a torque (N*m) about the axis, or a force (N) along it when
+            the pitch is infinite. Defaults to 0.
+        sol_params : None | array_like, optional
+            The 7 constraint solver parameters (see `genesis.utils.geom.default_solver_params`). A stiffer constraint
+            lets the second link drift off its screw motion less under load, at the cost of numerical robustness. None
+            for the default parameters with the shortest time constant the simulation timestep allows. Defaults to
+            None.
+        """
+        if self._requires_grad:
+            gs.raise_exception("Screw constraints are not supported in differentiable mode.")
+        link1_idx, link2_idx = int(link1_idx), int(link2_idx)
+        if not (0 <= link1_idx < self.n_links and 0 <= link2_idx < self.n_links) or link1_idx == link2_idx:
+            gs.raise_exception(f"Invalid pair of links ({link1_idx}, {link2_idx}) for a screw constraint.")
+        axis = np.array(axis, dtype=gs.np_float)
+        axis_norm = np.linalg.norm(axis)
+        if axis.shape != (3,) or axis_norm < gs.EPS:
+            gs.raise_exception(f"'axis' must be a non-zero 3D vector, got {axis}.")
+        if np.isnan(pitch):
+            gs.raise_exception("'pitch' must not be NaN.")
+        limit_lower, limit_upper = limit
+        if limit_lower > limit_upper:
+            gs.raise_exception(f"'limit' must be ordered (lower, upper), got {limit}.")
+        if abs(pitch) < gs.EPS and (np.isfinite(limit_lower) or np.isfinite(limit_upper)):
+            gs.raise_exception("A screw constraint with zero pitch does not travel, so it cannot have travel limits.")
+        if frictionloss < 0.0:
+            gs.raise_exception(f"'frictionloss' must be non-negative, got {frictionloss}.")
+        if pos is not None:
+            pos = np.array(pos, dtype=gs.np_float)
+            if pos.shape != (3,):
+                gs.raise_exception(f"'pos' must be a 3D point, got shape {pos.shape}.")
+        sol_params = _sanitize_runtime_sol_params(sol_params, self._sol_min_timeconst)
+        return self.constraint_solver.add_screw_constraint(
+            link1_idx, link2_idx, pos, axis / axis_norm, pitch, limit, frictionloss, sol_params, envs_idx
+        )
+
+    def delete_screw_constraint(self, link1_idx, link2_idx, envs_idx=None):
+        """
+        Remove the screw constraint between two links, leaving the second link free relative to the first one.
+
+        Parameters
+        ----------
+        link1_idx : int
+            The global index of the link holding the thread, as given to `add_screw_constraint`.
+        link2_idx : int
+            The global index of the screwed link, as given to `add_screw_constraint`.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        return self.constraint_solver.delete_screw_constraint(link1_idx, link2_idx, envs_idx)
+
+    def get_screw_constraints(self, as_tensor: bool = True, to_torch: bool = True):
+        """
+        Get the screw constraints of every environment, with their current travel.
+
+        Parameters
+        ----------
+        as_tensor : bool, optional
+            Whether to pad the constraints of every environment to the same count, with -1 links and zero values,
+            rather than returning one sequence per environment. Defaults to True.
+        to_torch : bool, optional
+            Whether to return torch tensors rather than numpy arrays. Defaults to True.
+
+        Returns
+        -------
+        screw_const_info : dict
+            'link_a' and 'link_b', the global indices of the two links of each constraint (the link holding the
+            thread first), 'travel', the displacement of the screwed link along the axis since the constraint was
+            added (m), and 'force', the constraint forces.
+        """
+        return self.constraint_solver.get_screw_constraints(as_tensor, to_torch)
 
     def get_equality_constraints(self, as_tensor: bool = True, to_torch: bool = True):
         return self.constraint_solver.get_equality_constraints(as_tensor, to_torch)

@@ -2789,7 +2789,7 @@ def get_equalities_info(solver, is_active=True):
     return EqualitiesInfo(
         eq_obj1id=V(dtype=gs.qd_int, shape=shape),
         eq_obj2id=V(dtype=gs.qd_int, shape=shape),
-        eq_data=V(dtype=gs.qd_vec11, shape=shape),
+        eq_data=V(dtype=gs.qd_vec18, shape=shape),
         eq_type=V(dtype=gs.qd_int, shape=shape),
         sol_params=V(dtype=gs.qd_vec7, shape=shape),
     )

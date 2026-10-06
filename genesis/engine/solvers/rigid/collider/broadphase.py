@@ -32,9 +32,10 @@ def func_check_collision_valid(
         i_la = dyn_info.geoms.link_idx[i_ga]
         i_lb = dyn_info.geoms.link_idx[i_gb]
 
-        # Filter out collision pairs that are involved in dynamically registered weld equality constraints
+        # Filter out collision pairs that are involved in dynamically registered weld or screw equality constraints
         for i_eq in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
-            if dyn_info.equalities.eq_type[i_eq, i_b] == gs.EQUALITY_TYPE.WELD:
+            eq_type = dyn_info.equalities.eq_type[i_eq, i_b]
+            if eq_type == gs.EQUALITY_TYPE.WELD or eq_type == gs.EQUALITY_TYPE.SCREW:
                 i_leqa = dyn_info.equalities.eq_obj1id[i_eq, i_b]
                 i_leqb = dyn_info.equalities.eq_obj2id[i_eq, i_b]
                 if (i_leqa == i_la and i_leqb == i_lb) or (i_leqa == i_lb and i_leqb == i_la):
