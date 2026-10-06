@@ -9,7 +9,7 @@ _ITEMS_PER_THREAD = 24
 
 @qd.data_oriented
 class DynamicExclusiveSum:
-    """CGQ decoupled-lookback exclusive sum over dynamic i32 data."""
+    """Decoupled-lookback exclusive sum over dynamic i32 data."""
 
     def __init__(self, capacity: int) -> None:
         if capacity < 1:

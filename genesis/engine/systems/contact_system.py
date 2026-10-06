@@ -46,7 +46,7 @@ def _padded64(value: int) -> int:
 
 @qd.data_oriented
 class ContactSystem(SimSystem):
-    """Own CGQ collision pairs, contact assembly, friction, energy, and CCD state."""
+    """Own collision pairs, contact assembly, friction, energy, and CCD state."""
 
     def __init__(
         self,
@@ -260,7 +260,9 @@ class ContactSystem(SimSystem):
         if tick not in tick_values:
             raise ValueError(f"Unsupported contact/adaptive_kappa_tick {tick!r}")
         if mode == "per-vertex" and tick == "newton":
-            raise ValueError("CGQ does not support per-vertex adaptive kappa with the Newton tick")
+            raise ValueError(
+                "The Newton contact system does not support per-vertex adaptive kappa with the Newton tick"
+            )
 
         self.adaptive_kappa_mode = qd.ndarray(qd.i32, shape=())
         self.adaptive_kappa_tick = qd.ndarray(qd.i32, shape=())

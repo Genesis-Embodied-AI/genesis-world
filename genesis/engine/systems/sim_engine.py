@@ -56,7 +56,7 @@ class ContactCheckpoint(IntEnum):
 
 @qd.data_oriented
 class SimEngine:
-    """GPU graph-native Newton engine composed explicitly from CGQ systems."""
+    """GPU graph-native Newton engine composed explicitly from the pinned reference systems."""
 
     def __init__(self) -> None:
         if gs.backend == gs.cpu:

@@ -6,7 +6,7 @@ from .sim_system import SimSystem
 
 
 class ContactConstitution(SimSystem):
-    """Base contract for CGQ contact constitutions."""
+    """Base contract for graph-native contact constitutions."""
 
     def build(self) -> None:
         from .contact_system import ContactSystem

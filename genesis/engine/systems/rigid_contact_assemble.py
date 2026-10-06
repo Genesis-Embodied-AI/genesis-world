@@ -20,7 +20,7 @@ from .sim_system import SimSystem
 
 @qd.data_oriented
 class RigidContactAssemble(SimSystem):
-    """CGQ rigid/proxy contact gradient and BCOO distribution routes."""
+    """Rigid/proxy contact gradient and BCOO distribution routes."""
 
     def __init__(self) -> None:
         super().__init__()

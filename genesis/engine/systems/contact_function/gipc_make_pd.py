@@ -1,9 +1,9 @@
 """Project a symmetric 2x2 matrix to its nearest PSD matrix (@qd.func).
 
 Device counterpart of ``make_pd.py``, specialised to the 2x2 block that the
-mollified barrier Hessian projects (cgq ``gipc_make_pd<double, 2>``).
+mollified barrier Hessian projects (the pinned reference's ``gipc_make_pd<double, 2>``).
 
-cgq reaches this through ``Eigen::SelfAdjointEigenSolver::computeDirect``, which
+The pinned reference reaches this through ``Eigen::SelfAdjointEigenSolver::computeDirect``, which
 for 2x2 is itself a closed form: eigenvalues ``tr/2 +- sqrt(((a-c)/2)^2 + b^2)``
 and, for the eigenvector, whichever of ``(b, l-a)`` / ``(l-c, b)`` has the larger
 norm (Eigen picks by the same comparison, expressed on the trace-shifted
@@ -23,7 +23,7 @@ def gipc_make_pd(a: qd.f64, b: qd.f64, c: qd.f64, out: qd.template()):
     """PSD-project symmetric ``[[a, b], [b, c]]`` into ``out = (a', b', c')``.
 
     Negative eigenvalues are clamped to zero. A matrix that is already PSD is
-    returned untouched, matching cgq's early return -- so the common case never
+    returned untouched, matching the pinned reference's early return -- so the common case never
     round-trips through the eigen-decomposition.
     """
     half_tr = 0.5 * (a + c)

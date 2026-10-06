@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def cloth_grid_asset(*, resolution: int = 25, size: float = 0.24) -> Path:
-    """Return the CGQ Franka-cloth grid (24x24 cells by default)."""
+    """Return the Franka-cloth grid (24x24 cells by default)."""
     if resolution < 2:
         raise ValueError("Cloth grid resolution must be at least two")
     path = Path(tempfile.gettempdir()) / f"genesis_qcloth_grid_{resolution}_{size:.6f}.obj"

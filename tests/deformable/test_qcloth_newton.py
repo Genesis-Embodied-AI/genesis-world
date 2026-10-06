@@ -169,7 +169,7 @@ def test_newton_engine_scene_step_and_reset(tmp_path, show_viewer):
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_qcloth_freefall_matches_cgq_converged_step(tmp_path, show_viewer):
+def test_qcloth_freefall_matches_reference_converged_step(tmp_path, show_viewer):
     path = tmp_path / "qcloth_freefall.obj"
     make_grid(path)
     dt = 0.01

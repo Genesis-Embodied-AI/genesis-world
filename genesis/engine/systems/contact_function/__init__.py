@@ -1,1 +1,1 @@
-"""CGQ Consistent IPC contact functions."""
+"""Consistent IPC contact functions."""

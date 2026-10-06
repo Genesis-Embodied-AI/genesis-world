@@ -8,7 +8,7 @@ from .sim_system import SimSystem
 
 @qd.data_oriented
 class GlobalVertexManager(SimSystem):
-    """Own the CGQ global world-space vertex index and contact attributes."""
+    """Own the global world-space vertex index and contact attributes."""
 
     def __init__(self) -> None:
         super().__init__()

@@ -96,8 +96,8 @@ class RigidJointForestSystem(SimSystem):
         if self.genesis_legacy_enabled:
             return "genesis_legacy"
         if self.use_fused_tree_path:
-            return "cgq_tree"
-        return "cgq_level"
+            return "tree"
+        return "level"
 
     def build(self) -> None:
         self.rigid = self.require(RigidSystem)

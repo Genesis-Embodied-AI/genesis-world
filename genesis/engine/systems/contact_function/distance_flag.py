@@ -1,6 +1,6 @@
 """Flag-based distance type classification and dispatch (@qd.func Quadrants version).
 
-Ports cgq ``distance_flag.h`` as quadrants @qd.func functions for use
+Ports the pinned reference ``distance_flag.h`` as quadrants @qd.func functions for use
 inside graph kernels.
 
 All vertex data is passed as flat f64 arrays and i32 indices.
@@ -136,8 +136,8 @@ def ee_distance_flag_gipc_legacy(
 ) -> qd.i32:
     """Classify EE contact sub-type, GIPC legacy rules. Returns a 4-bit flag.
 
-    Port of cgq ``ee_distance_flag_gipc_legacy`` (``distance_flag.h``), which
-    cgq calls only from ``gipc_contact.cu``. The ConsistentIPC path uses
+    Port of the pinned reference ``ee_distance_flag_gipc_legacy`` (``distance_flag.h``), which
+    the pinned reference calls only from ``gipc_contact.cu``. The ConsistentIPC path uses
     ``ee_distance_flag`` below instead; see its docstring for what
     differs and why.
     """
@@ -244,9 +244,9 @@ def ee_distance_flag(
 ) -> qd.i32:
     """Classify EE contact sub-type, ConsistentIPC rules. Returns a 4-bit flag.
 
-    Port of cgq ``ee_distance_flag`` (``distance_flag.h``), the classifier
+    Port of the pinned reference ``ee_distance_flag`` (``distance_flag.h``), the classifier
     ``consistent_ipc_contact.cu`` calls. It differs from the GIPC legacy variant
-    above in exactly two places, both of which cgq documents at length:
+    above in exactly two places, both of which the pinned reference documents at length:
 
     1. **A near-parallel guard.** ``D = |u x v|^2``, so ``D ~ 0`` means the two
        edges are nearly parallel and the segment parameter ``s`` is
@@ -267,7 +267,7 @@ def ee_distance_flag(
        classifier discontinuous across a 1-ulp perturbation. The ``1e-20`` test
        is unreachable once the guard above diverts everything below ``1e-6 a c``.
 
-    Not bitwise-faithful in one respect: cgq spells every operation with
+    Not bitwise-faithful in one respect: the pinned reference spells every operation with
     ``nofma_*`` so the classification is reproducible across compilers, and
     the Quadrants source language currently exposes no no-FMA primitive. The guard is a coarse
     threshold spanning six orders of magnitude, so contraction cannot flip it
@@ -477,9 +477,9 @@ def gipc_d_EE(
 ) -> qd.f64:
     """Interior edge-edge d², the projection onto the edge cross product.
 
-    Ports cgq ``gipc_distance.h::gipc_d_EE``. Kept separate from the codegen'd
+    Ports the pinned reference ``gipc_distance.h::gipc_d_EE``. Kept separate from the codegen'd
     ``ee_distance2`` (same quantity, different expression) so the value
-    fed to the mollified barrier is the one cgq computes bit for bit.
+    fed to the mollified barrier is the one computed by the pinned reference.
     """
     bx = (v1y - v0y) * (v3z - v2z) - (v1z - v0z) * (v3y - v2y)
     by = (v1z - v0z) * (v3x - v2x) - (v1x - v0x) * (v3z - v2z)

@@ -5,7 +5,7 @@ All buffers are ``qd.ndarray`` to enable fastcache
 kernel sharing across instances with different sizes.  Build and query methods
 are ``@qd.func(requires_top_level=True)`` for use inside graph kernels.
 
-Faithfully ports cgq ``BVHContext`` + ``lbvh_kernels.cu`` + ``bvh_subgraph.h``.
+Faithfully ports the pinned reference's ``BVHContext`` + ``lbvh_kernels.cu`` + ``bvh_subgraph.h``.
 """
 
 # ruff: noqa: SIM102
@@ -551,7 +551,7 @@ class LBVH:
     def calc_leaf_aabb_tri(self, surf_mgr: qd.template(), vtx_mgr: qd.template()):
         """Compute swept leaf AABBs for triangles (stride=3).
 
-        Matches cgq ``calc_leaf_aabb`` with stride=3.
+        Matches the pinned reference ``calc_leaf_aabb`` with stride=3.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_calc_leaf_aabb_tri")
@@ -623,7 +623,7 @@ class LBVH:
     def calc_leaf_aabb_edge(self, surf_mgr: qd.template(), vtx_mgr: qd.template()):
         """Compute swept leaf AABBs for edges (stride=2).
 
-        Matches cgq ``calc_leaf_aabb`` with stride=2.
+        Matches the pinned reference ``calc_leaf_aabb`` with stride=2.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_calc_leaf_aabb_edge")
@@ -690,17 +690,17 @@ class LBVH:
                 body_id = -1
             self.node_body_id[leaf] = body_id
 
-    # --- Scene AABB reduce (cgq: cub::DeviceReduce::Reduce + AABBReduceOp) ---
+    # --- Scene AABB reduce (pinned reference: cub::DeviceReduce::Reduce + AABBReduceOp) ---
     # Decomposed into 6 scalar reduce_min/reduce_max via qd.static unrolling.
 
     @qd.func(requires_top_level=True)
     def reduce_scene_aabb(self):
         """Parallel reduce of leaf AABBs into aabbs[0] (scene bounding box).
 
-        Matches cgq ``cub::DeviceReduce::Reduce(AABBReduceOp)``.
+        Matches the pinned reference ``cub::DeviceReduce::Reduce(AABBReduceOp)``.
         Two-phase block reduce: phase 1 (multi-block) writes per-block
         partials, phase 2 (single-block) reduces partials into aabbs[0].
-        Total: 2 kernel launches (vs cgq's 1 CUB launch).
+        Total: 2 kernel launches (vs the pinned reference's 1 CUB launch).
         """
         n_blocks = self.n_reduce_blocks[()]
         total_threads = n_blocks * self.bvh_block
@@ -741,7 +741,7 @@ class LBVH:
     def calc_morton(self):
         """Compute Morton codes from leaf AABB centers, normalized to scene AABB.
 
-        Matches cgq ``calc_morton``: each thread reads scene AABB independently.
+        Matches the pinned reference ``calc_morton``: each thread reads scene AABB independently.
         The legacy generic-sort fallback additionally fills its padded tail.
         """
         n = self.n_prims[()]
@@ -777,7 +777,7 @@ class LBVH:
 
     @qd.func(requires_top_level=True)
     def sort_morton(self):
-        """Sort Morton keys with CGQ's dynamic OneSweep u64 path.
+        """Sort Morton keys with the pinned reference's dynamic OneSweep u64 path.
 
         The retained generic Quadrants radix sort is an explicit A/B fallback.
         """
@@ -807,7 +807,7 @@ class LBVH:
     def extract_indices(self):
         """Extract original primitive index from lower 32 bits of sorted Morton keys.
 
-        Matches cgq ``extract_indices``.
+        Matches the pinned reference ``extract_indices``.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_extract_indices")
@@ -818,7 +818,7 @@ class LBVH:
     def copy_leaf_aabb_to_temp(self):
         """Copy leaf AABBs to temp before reorder.
 
-        Matches cgq ``bvh_copy_leaf_aabb_kernel``.
+        Matches the pinned reference ``bvh_copy_leaf_aabb_kernel``.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_copy_leaf_aabb")
@@ -832,7 +832,7 @@ class LBVH:
     def reorder_leaf_aabb(self):
         """Reorder leaf AABBs to Morton-sorted order.
 
-        Matches cgq ``reorder_leaf_aabb``.
+        Matches the pinned reference ``reorder_leaf_aabb``.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_reorder_leaf_aabb")
@@ -847,7 +847,7 @@ class LBVH:
     def calc_leaf_nodes(self):
         """Initialize all BVH nodes: internals get sentinel, leaves get element_idx.
 
-        Matches cgq ``calc_leaf_nodes``.
+        Matches the pinned reference ``calc_leaf_nodes``.
         """
         n = self.n_prims[()]
         n_nodes = 2 * n - 1
@@ -866,7 +866,7 @@ class LBVH:
     def calc_internal_nodes(self):
         """Karras 2012 internal node construction.
 
-        Matches cgq ``calc_internal_nodes``.
+        Matches the pinned reference ``calc_internal_nodes``.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_calc_internal_nodes")
@@ -894,7 +894,7 @@ class LBVH:
     def memset_flags(self):
         """Reset flags to 0xFFFFFFFF sentinel for bottom-up AABB refit.
 
-        Matches cgq ``bvh_memset_flags_kernel``.
+        Matches the pinned reference ``bvh_memset_flags_kernel``.
         """
         n = self.n_prims[()]
         loop_config(name="bvh_memset_flags")
@@ -905,7 +905,7 @@ class LBVH:
     def calc_internal_aabb(self):
         """Bottom-up parallel AABB refit using atomicCAS on flags.
 
-        Matches cgq ``calc_internal_aabb``:
+        Matches the pinned reference ``calc_internal_aabb``:
         - flags initialized to 0xFFFFFFFF
         - atomicCAS(flags[parent], 0xFFFFFFFF, 0): first child returns, second merges
         - production writes the direct min/max merge once; the former
@@ -968,7 +968,7 @@ class LBVH:
                     parent = self.nodes_parent[qd.i32(parent)]
 
     # ======================================================================
-    # TOY-MODE leaf AABB + query (matches cgq toy/lbvh.cu for ipctk tests)
+    # TOY-MODE leaf AABB + query (matches the pinned reference toy/lbvh.cu for ipctk tests)
     # Leaf AABBs expanded by d_hat; query AABB expanded by d_hat; plain aabb_overlap.
     # ======================================================================
 
@@ -976,7 +976,7 @@ class LBVH:
     def calc_leaf_aabb_tri_toy(self, surf_mgr: qd.template(), vtx_mgr: qd.template(), d_hat: qd.f64):
         """Toy-mode: leaf AABBs for triangles with d_hat expansion.
 
-        Matches cgq ``toy/lbvh.cu::calc_leaf_aabb_face_kernel``.
+        Matches the pinned reference ``toy/lbvh.cu::calc_leaf_aabb_face_kernel``.
         """
         n = self.n_prims[()]
         for idx in range(n):
@@ -1008,7 +1008,7 @@ class LBVH:
     def calc_leaf_aabb_edge_toy(self, surf_mgr: qd.template(), vtx_mgr: qd.template(), d_hat: qd.f64):
         """Toy-mode: leaf AABBs for edges with d_hat expansion.
 
-        Matches cgq ``toy/lbvh.cu::calc_leaf_aabb_edge_kernel``.
+        Matches the pinned reference ``toy/lbvh.cu::calc_leaf_aabb_edge_kernel``.
         """
         n = self.n_prims[()]
         for idx in range(n):
@@ -1048,7 +1048,7 @@ class LBVH:
     ):
         """Toy-mode PT query: query AABB expanded by d_hat + plain aabb_overlap.
 
-        Matches cgq ``toy/lbvh.cu::query_pt_kernel``.
+        Matches the pinned reference ``toy/lbvh.cu::query_pt_kernel``.
         """
         n_queries = surf_mgr.n_surf_verts[()]
 
@@ -1171,7 +1171,7 @@ class LBVH:
     ):
         """Toy-mode EE self-query: leaf AABB already expanded, plain aabb_overlap.
 
-        Matches cgq ``toy/lbvh.cu::query_ee_kernel``.
+        Matches the pinned reference ``toy/lbvh.cu::query_ee_kernel``.
         """
         n = self.n_prims[()]
 
@@ -1340,7 +1340,7 @@ class LBVH:
     ):
         """Retained per-thread PT swept broadphase.
 
-        Matches CGQ ``pt_query_batched`` and remains available as the explicit
+        Matches the pinned reference ``pt_query_batched`` and remains available as the explicit
         comparison path. Sets ``overflow_flag`` to 1 when the candidate count
         exceeds ``max_pairs_val``.
         Output pairs: ``(surf_vert_idx, face_idx)``.
@@ -1549,7 +1549,7 @@ class LBVH:
         d_hat: qd.f64,
         overflow_flag: qd.template(),
     ):
-        """CGQ warp-per-query swept PT traversal."""
+        """Warp-per-query swept PT traversal."""
         n_queries = surf_mgr.n_surf_verts[()]
         n = self.n_prims[()]
         group_size = qd_subgroup.group_size()

@@ -1,6 +1,6 @@
 """PFPx Jacobians (@qd.func device version).
 
-Ports cgq ``gipc_pfpx.h``. Each function writes into an output template array.
+Ports the pinned reference ``gipc_pfpx.h``. Each function writes into an output template array.
 PT/EE: (12, 9), PP: (6,), PE: (9, 4). Only the nonzero column is populated.
 """
 
@@ -212,7 +212,7 @@ def gipc_pfpx_pe(
     out[8] = t51_sc2 * (t56 - t43 * (t18 * t46 * 2.0 + t19 * t47 * 2.0)) / 2.0
 
 
-# Mollified PFPx variants from the same CGQ header.
+# Mollified PFPx variants from the same pinned-reference header.
 @qd.func
 def gipc_pfpx_ee_mollified(
     x0x: qd.f64,
@@ -329,7 +329,7 @@ def gipc_pfpx_pp_mollified(
     """PP mollified PFPx columns 4 and 8.
 
     The PP distance depends only on ``x0``/``x1``, so ``c8`` is zero on the
-    trailing six rows (cgq writes those zeros explicitly).
+    trailing six rows (the pinned reference writes those zeros explicitly).
     """
     t8 = 1.0 / d_hat_sqrt
     t49_orig = x0x - x1x

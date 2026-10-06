@@ -91,7 +91,7 @@ def _rank_warp_striped_items(
 
 @qd.data_oriented
 class DynamicRadixSort:
-    """CGQ OneSweep radix sort with a device-resident live count."""
+    """OneSweep radix sort with a device-resident live count."""
 
     def __init__(self, key_dtype, capacity: int) -> None:
         if key_dtype not in (qd.u32, qd.u64):

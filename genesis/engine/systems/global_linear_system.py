@@ -23,7 +23,7 @@ from .sim_system import SimSystem
 
 @qd.data_oriented
 class GlobalLinearSystem(SimSystem):
-    """CGQ-compatible global 3x3-block BCOO linear system."""
+    """Graph-native global 3x3-block BCOO linear system."""
 
     def __init__(
         self,
@@ -383,6 +383,8 @@ class GlobalLinearSystem(SimSystem):
 
     @qd.func(requires_top_level=True)
     def spmv(self, x: qd.template(), y: qd.template()):
+        # TODO: Replace row-side per-block atomics with a warp head-segmented
+        # reduction; keep mirrored-column atomics and benchmark the crossover.
         for i in range(self.bcoo_nnz[()]):
             row = self.bcoo_row[i]
             col = self.bcoo_col[i]

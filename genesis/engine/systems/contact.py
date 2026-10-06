@@ -69,7 +69,7 @@ class ContactElement:
 
 
 class ContactTabular:
-    """CGQ contact-element registry and ordinary pair model table."""
+    """Contact-element registry and ordinary pair model table."""
 
     def __init__(self) -> None:
         self._elements = [ContactElement(0, "default")]

@@ -9,7 +9,7 @@ from .finite_element_method import FiniteElementMethod
 
 @qd.data_oriented
 class FEMDiagPreconditioner(SimSystem):
-    """CGQ FEM 3x3 block-diagonal preconditioner."""
+    """FEM 3x3 block-diagonal preconditioner."""
 
     def build(self) -> None:
         self.fem = self.require(FiniteElementMethod)

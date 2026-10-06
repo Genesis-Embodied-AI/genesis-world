@@ -175,7 +175,7 @@ def _surface_area_weights(
 
 
 class FiniteElement:
-    """CGQ-compatible host-side FEM staging owner."""
+    """Graph-native host-side FEM staging owner."""
 
     def init(self, scene) -> bool:
         entities = [

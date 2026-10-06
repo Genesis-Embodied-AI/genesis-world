@@ -1700,7 +1700,7 @@ def cipc_filter_energy_ph_kernel(contact: qd.template(), surface: qd.template(),
 
 @qd.data_oriented
 class ConsistentIPCContactConstitution(ContactConstitution):
-    """CGQ production Consistent IPC contact constitution."""
+    """Production Consistent IPC contact constitution."""
 
     def do_build_constitution(self) -> None:
         pass

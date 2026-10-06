@@ -317,7 +317,7 @@ def evaluate_screw_halfplane(
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_cgq_proxy_constraint_maps():
+def test_proxy_constraint_maps():
     mechanism_t_host = np.array([0.2, -0.1, 0.3], dtype=np.float64)
     mechanism_q_host = _quat_exp(np.array([0.2, -0.1, 0.15], dtype=np.float64))
     rotation = np.array([-0.12, 0.08, 0.05], dtype=np.float64)
@@ -354,7 +354,7 @@ def test_cgq_proxy_constraint_maps():
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_cgq_fk_defect_prefix_cap():
+def test_fk_defect_prefix_cap():
     cases = np.array(
         [
             [0.2, 0.1, 0.0, 0.2],
@@ -402,7 +402,7 @@ def test_screw_halfplane_ccd_certifies_rotational_arc():
 @pytest.mark.parametrize("backend", [gs.gpu])
 @pytest.mark.parametrize(
     "forest_path",
-    ("genesis_legacy", "cgq_level", "cgq_tree"),
+    ("genesis_legacy", "level", "tree"),
 )
 def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     scene = gs.Scene()
@@ -453,7 +453,7 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     np.testing.assert_array_equal(qd_to_numpy(vertex.path_kind), 0)
 
     forest = RigidJointForestSystem(scene.rigid_solver)
-    forest.configure(forest_path == "cgq_tree")
+    forest.configure(forest_path == "tree")
     forest.configure_genesis_legacy(forest_path == "genesis_legacy")
     forest.rigid = rigid
     forest.contact_proxy = proxy
@@ -555,7 +555,7 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_proxy_contact_routes_emit_cgq_block_counts():
+def test_proxy_contact_routes_emit_block_counts():
     contact = ProxyContactFixture()
     contact.n_unique_doublets.from_numpy(np.array(3, dtype=np.int32))
     contact.n_unique_triplets.from_numpy(np.array(3, dtype=np.int32))
@@ -678,7 +678,7 @@ def test_standard_pcg_kkt_builder_path():
     assert engine.rigid_contact_proxy is not None
     assert engine.rigid_forest is not None
     assert engine.rigid_contact_assemble is not None
-    assert engine.rigid_forest.selected_path == "cgq_tree"
+    assert engine.rigid_forest.selected_path == "tree"
     engine.step()
 
     mechanism = int(qd_to_numpy(engine.rigid_contact_proxy.mechanism_body)[0])
@@ -979,9 +979,9 @@ def test_franka_forest_paths_match_P_and_PT():
     residual.from_numpy(residual_host)
 
     outputs = {}
-    for path in ("genesis_legacy", "cgq_level", "cgq_tree"):
+    for path in ("genesis_legacy", "level", "tree"):
         forest = RigidJointForestSystem(scene.rigid_solver)
-        forest.configure(path == "cgq_tree")
+        forest.configure(path == "tree")
         forest.configure_genesis_legacy(path == "genesis_legacy")
         forest.rigid = rigid
         forest.contact_proxy = None
@@ -1022,7 +1022,7 @@ def test_franka_forest_paths_match_P_and_PT():
             body_wrench,
             reduced_wrench,
         )
-        if path == "cgq_tree":
+        if path == "tree":
             apply_forest_preconditioner_tree(
                 forest,
                 residual,
@@ -1046,7 +1046,7 @@ def test_franka_forest_paths_match_P_and_PT():
             atol=1.0e-12,
         )
 
-    for path in ("cgq_level", "cgq_tree"):
+    for path in ("level", "tree"):
         np.testing.assert_allclose(
             outputs[path][0],
             outputs["genesis_legacy"][0],
@@ -1106,7 +1106,7 @@ def test_franka_cloth_reduced_kkt_step():
         },
         contact_tabular=contact_tabular,
     )
-    assert engine.rigid_forest.selected_path == "cgq_tree"
+    assert engine.rigid_forest.selected_path == "tree"
     assert not engine.rigid.has_collision
 
     home_qpos = np.array(

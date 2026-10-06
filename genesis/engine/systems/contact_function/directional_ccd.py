@@ -1,6 +1,6 @@
 """Directional CCD — device (@qd.func) implementation.
 
-Port of cgq ``directional_ccd.h`` (closest-point conservative advancement)
+Port of the pinned reference ``directional_ccd.h`` (closest-point conservative advancement)
 and ``halfplane_contact_kernels.cu`` (analytic ray-plane).
 
 Closest-point routines follow Ericson, *Real-Time Collision Detection*:
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import quadrants as qd
 
-# cgq gipc_accd.h: constexpr int32_t ACCD_MAX_ITERS = 50000;
+# Pinned reference gipc_accd.h: constexpr int32_t ACCD_MAX_ITERS = 50000;
 # Structural invariant: never changed at runtime. Passed as a qd.template()
 # parameter from callers so it enters the fastcache key (Standing rule 5).
 CCD_MAX_ITERS_DEFAULT = 50000
@@ -46,7 +46,7 @@ def closest_pt(
 ):
     """Closest point on triangle to point. Writes ``out[0..2]`` = closest point, ``out[3]`` = dist.
 
-    Port of cgq ``detail::closest_pt``. Uses flag-based dispatch to avoid
+    Port of the pinned reference ``detail::closest_pt``. Uses flag-based dispatch to avoid
     early returns (quadrants limitation).
     """
     abx = t1x - t0x
@@ -169,7 +169,7 @@ def closest_ee(
 ):
     """Closest points of two segments. Writes ``out[0..2]`` = ca, ``out[3..5]`` = cb, ``out[6]`` = dist.
 
-    Port of cgq ``detail::closest_ee``. Flag-based dispatch.
+    Port of the pinned reference ``detail::closest_ee``. Flag-based dispatch.
     """
     d1x = q1x - p1x
     d1y = q1y - p1y
@@ -275,7 +275,7 @@ def directional_point_triangle_ccd(
 ):
     """Directional CCD for point-triangle. Writes ``result[0]`` = toc.
 
-    Port of cgq ``directional_point_triangle_ccd``.
+    Port of the pinned reference ``directional_point_triangle_ccd``.
     """
     cp = qd.Vector.zero(qd.f64, 4)
     closest_pt(px, py, pz, t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z, cp)
@@ -396,7 +396,7 @@ def directional_edge_edge_ccd(
 ):
     """Directional CCD for edge-edge. Writes ``result[0]`` = toc.
 
-    Port of cgq ``directional_edge_edge_ccd``.
+    Port of the pinned reference ``directional_edge_edge_ccd``.
     """
     cp = qd.Vector.zero(qd.f64, 7)
     closest_ee(ea0x, ea0y, ea0z, ea1x, ea1y, ea1z, eb0x, eb0y, eb0z, eb1x, eb1y, eb1z, cp)
@@ -510,7 +510,7 @@ def halfplane_ccd(
 ):
     """Analytic ray-plane CCD. Writes ``result[0]`` = toi.
 
-    Port of cgq halfplane_ccd_alpha_kernel (linear path).
+    Port of the pinned reference halfplane_ccd_alpha_kernel (linear path).
     """
     current_dist = Nx * (x0 - Px) + Ny * (x1 - Py) + Nz * (x2 - Pz)
     safe_dist = current_dist - thickness

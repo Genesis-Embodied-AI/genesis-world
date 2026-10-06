@@ -1,7 +1,7 @@
 """BVH math primitives: AABB operations, Morton codes, Karras 2012 helpers.
 
 All functions are ``@qd.func`` for use inside graph kernels. They port
-``bvh_types.cuh`` from CGQ, with the documented stricter outward rounding in
+``bvh_types.cuh`` from the pinned reference, with the documented stricter outward rounding in
 ``aabb_expand``.
 """
 
@@ -14,13 +14,13 @@ import quadrants as qd
 # ---------------------------------------------------------------------------
 # Bounding-volume helpers. AABB uses six contiguous f64 values. DOP14f uses
 # fourteen active f32 values in a sixteen-value row: lo[7], hi[7], padding[2].
-# The 64-byte row stride mirrors CGQ's alignas(64) DOP14f.
+# The 64-byte row stride mirrors the pinned reference's alignas(64) DOP14f.
 # ---------------------------------------------------------------------------
 
 
 @qd.func
 def f64_to_f32_rd(value: qd.f64):
-    """CGQ ``bvf_rd``: convert f64 to f32 with round-toward-negative-infinity."""
+    """Pinned-reference ``bvf_rd``: convert f64 to f32 with round-toward-negative-infinity."""
     result = qd.f32(value)
     if qd.f64(result) > value:
         bits = qd.bit_cast(result, qd.u32)
@@ -34,7 +34,7 @@ def f64_to_f32_rd(value: qd.f64):
 
 @qd.func
 def f64_to_f32_ru(value: qd.f64):
-    """CGQ ``bvf_ru``: convert f64 to f32 with round-toward-positive-infinity."""
+    """Pinned-reference ``bvf_ru``: convert f64 to f32 with round-toward-positive-infinity."""
     result = qd.f32(value)
     if qd.f64(result) < value:
         bits = qd.bit_cast(result, qd.u32)
@@ -55,7 +55,7 @@ def aabb_init(
 ):
     """Reset aabbs[idx] to the empty sentinel (lower=+inf, upper=-inf).
 
-    The fp64 AABB uses +-1e32 and DOP14f uses CGQ's +-3e38f. They are
+    The fp64 AABB uses +-1e32 and DOP14f uses the pinned reference's +-3e38f. They are
     sentinels for "no bound yet" that min/max expansion reduces away, not a
     length scale. They are spelled inline because a module constant read from
     device code never enters the fastcache key, so editing it would silently
@@ -81,7 +81,7 @@ def aabb_expand(
 ):
     """Expand a bound by ``r``.
 
-    DOP14f rounds the final lower/upper values outward. CGQ currently rounds
+    DOP14f rounds the final lower/upper values outward. The pinned reference rounds
     only ``r`` upward and then uses round-to-nearest f32 arithmetic; adversarial
     values prove that can move the final bound inward by one ulp.
     """
@@ -146,7 +146,7 @@ def aabb_overlap(
 ):
     """Return 1 if AABB a and b overlap, 0 otherwise.
 
-    Matches cgq ``aabb_overlap`` (plain overlap, no gap tolerance).
+    Matches the pinned reference ``aabb_overlap`` (plain overlap, no gap tolerance).
     """
     result = qd.i32(1)
     for axis in qd.static(range(half)):
@@ -166,7 +166,7 @@ def aabb_overlap_gap(
 ):
     """Return 1 if AABB a and b overlap within gap tolerance, 0 otherwise.
 
-    Matches cgq ``aabb_overlap_gap``: boxes overlap iff separation along
+    Matches the pinned reference ``aabb_overlap_gap``: boxes overlap iff separation along
     every axis is strictly less than *gap*.
     """
     result = qd.i32(1)
@@ -193,7 +193,7 @@ def aabb_center(
 
 
 # ---------------------------------------------------------------------------
-# Morton codes (30-bit, from cgq bvh_types.cuh)
+# Morton codes (30-bit, from the pinned reference bvh_types.cuh)
 # ---------------------------------------------------------------------------
 
 
@@ -221,7 +221,7 @@ def morton_code_30bit(x: qd.f64, y: qd.f64, z: qd.f64):
 
 
 # ---------------------------------------------------------------------------
-# Karras 2012 helpers (from cgq bvh_types.cuh)
+# Karras 2012 helpers (from the pinned reference bvh_types.cuh)
 # ---------------------------------------------------------------------------
 
 

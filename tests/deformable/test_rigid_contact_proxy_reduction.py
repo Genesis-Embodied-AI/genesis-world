@@ -1,4 +1,4 @@
-"""Pinned CGQ dense-reference gates for reduced rigid-proxy KKT algebra."""
+"""Pinned dense-reference gates for reduced rigid-proxy KKT algebra."""
 
 from __future__ import annotations
 

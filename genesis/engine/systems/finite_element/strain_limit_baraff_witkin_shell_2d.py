@@ -10,7 +10,7 @@ from .strain_limit_bws_shell_2d import Ds3x2, E, F3x2, ddEddF, dEdF, dFdX
 
 @qd.data_oriented
 class StrainLimitBaraffWitkinShell2D(FEMConstitution):
-    """CGQ Baraff-Witkin shell membrane constitution."""
+    """Baraff-Witkin shell membrane constitution."""
 
     def __init__(self) -> None:
         super().__init__()

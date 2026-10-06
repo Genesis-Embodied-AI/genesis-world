@@ -9,7 +9,7 @@ from .lbvh import LBVH
 
 @qd.data_oriented
 class LBVHBroadPhase(BroadPhaseSystem):
-    """CGQ baseline fp64-AABB LBVH broad phase."""
+    """Baseline fp64-AABB LBVH broad phase."""
 
     def __init__(
         self,
@@ -180,7 +180,7 @@ class LBVHBroadPhase(BroadPhaseSystem):
 
 @qd.data_oriented
 class InfoLBVHBatchedBroadPhaseDop14(LBVHBroadPhase):
-    """CGQ default DOP14 broad phase with homogeneous-body culling and dual EE traversal."""
+    """Default DOP14 broad phase with homogeneous-body culling and dual EE traversal."""
 
     def __init__(
         self,

@@ -8,7 +8,7 @@ from .sim_system import SimSystem
 
 @qd.data_oriented
 class GlobalSurfaceManager(SimSystem):
-    """Own the CGQ global collision surface topology and area weights."""
+    """Own the global collision surface topology and area weights."""
 
     def __init__(self) -> None:
         super().__init__()

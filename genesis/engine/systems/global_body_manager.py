@@ -8,7 +8,7 @@ from .sim_system import SimSystem
 
 @qd.data_oriented
 class GlobalBodyManager(SimSystem):
-    """Own CGQ body ranges and contact-ignorance data."""
+    """Own body ranges and contact-ignorance data."""
 
     def __init__(self) -> None:
         super().__init__()

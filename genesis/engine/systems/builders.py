@@ -35,7 +35,7 @@ def build_scene_engine(
     contact_tabular: ContactTabular | None = None,
     halfplanes: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> SimEngine:
-    """Build the graph-native Rigid + QCloth CGQ system set."""
+    """Build the graph-native Rigid + QCloth system set."""
     finite_element = FiniteElement()
     has_fem = finite_element.init(scene)
     contact_requested = contact_config is not None
@@ -43,7 +43,7 @@ def build_scene_engine(
     if contact_config is not None:
         unknown = set(contact_config) - set(CONTACT_CONFIG_DEFAULTS)
         if unknown:
-            raise ValueError(f"Unknown CGQ contact config keys: {sorted(unknown)}")
+            raise ValueError(f"Unknown contact config keys: {sorted(unknown)}")
         resolved_contact_config.update(contact_config)
     enable_contact = contact_requested and bool(resolved_contact_config["contact/enable"])
     if enable_contact and not has_fem:
@@ -125,7 +125,7 @@ def build_scene_engine(
                     genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
                 )
             else:
-                raise NotImplementedError(f"Unsupported CGQ bvh/type {bvh_type!r}")
+                raise NotImplementedError(f"Unsupported bvh/type {bvh_type!r}")
             contact_constitution = ConsistentIPCContactConstitution()
             for system in (contact_system, broad_phase_system, contact_constitution):
                 engine.add_system(system)

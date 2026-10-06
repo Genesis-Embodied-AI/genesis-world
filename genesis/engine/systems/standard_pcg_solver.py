@@ -9,7 +9,7 @@ from .sim_system import SimSystem
 
 @qd.data_oriented
 class StandardPCGSolver(SimSystem):
-    """CGQ standard PCG solver system."""
+    """Standard PCG solver system."""
 
     def __init__(self) -> None:
         super().__init__()

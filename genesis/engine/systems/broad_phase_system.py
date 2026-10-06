@@ -6,7 +6,7 @@ from .sim_system import SimSystem
 
 
 class BroadPhaseSystem(SimSystem):
-    """CGQ broad-phase system contract."""
+    """Broad-phase system contract."""
 
     def build(self) -> None:
         from .contact_system import ContactSystem

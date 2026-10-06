@@ -9,7 +9,7 @@ from .fem_constitution import FEMConstitution
 
 @qd.data_oriented
 class QuadraticBending(FEMConstitution):
-    """CGQ Bergou quadratic shell-bending constitution."""
+    """Bergou quadratic shell-bending constitution."""
 
     def __init__(self) -> None:
         super().__init__()

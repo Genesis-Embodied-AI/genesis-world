@@ -345,7 +345,7 @@ def inspect_pt_pair(
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_cgq_barrier_and_halfplane_functions():
+def test_barrier_and_halfplane_functions():
     D = 0.006**2
     d_hat = 0.01
     xi = 0.001
@@ -394,7 +394,7 @@ def test_cgq_barrier_and_halfplane_functions():
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_cgq_pp_barrier_derivatives():
+def test_pp_barrier_derivatives():
     x = np.array([0.0, 0.0, 0.0, 0.006, 0.001, -0.0005], dtype=np.float64)
     d_hat = 0.01
     xi = 0.001
@@ -439,7 +439,7 @@ def test_cgq_pp_barrier_derivatives():
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_cgq_ee_rank1_matches_dense_barrier():
+def test_ee_rank1_matches_dense_barrier():
     positions = qd.ndarray(qd.f64, shape=(12,))
     parameters = qd.ndarray(qd.f64, shape=(3,))
     output = qd.ndarray(qd.f64, shape=(312,))
@@ -473,7 +473,7 @@ def test_cgq_ee_rank1_matches_dense_barrier():
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_cgq_rank1_triplet_scatter_matches_dense():
+def test_rank1_triplet_scatter_matches_dense():
     dense = TripletScatterFixture()
     rank1 = TripletScatterFixture()
     values = qd.ndarray(qd.f64, shape=(12,))
