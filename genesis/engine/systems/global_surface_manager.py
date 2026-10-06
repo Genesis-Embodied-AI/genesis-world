@@ -3,91 +3,102 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from .sim_system import SimSystem
+from .sim_system import SimData, SimSystem
 
 
-@qd.data_oriented
 class GlobalSurfaceManager(SimSystem):
-    """Own the global collision surface topology and area weights."""
+    """Organize global surface data and host wiring."""
 
-    def __init__(self) -> None:
+    @qd.data_oriented
+    class Data(SimData):
+        """Device-visible collision surface topology and area weights."""
+
+        n_surf_triangles: qd.Ndarray
+        n_surf_edges: qd.Ndarray
+        n_surf_verts: qd.Ndarray
+        n_codim_verts: qd.Ndarray
+        surf_triangles: qd.Ndarray
+        surf_edges: qd.Ndarray
+        surf_verts: qd.Ndarray
+        vert_dimensions: qd.Ndarray
+        vert_area_weights: qd.Ndarray
+        edge_area_weights: qd.Ndarray
+        face_area_weights: qd.Ndarray
+        codim_verts: qd.Ndarray
+        codim_vert_area_weights: qd.Ndarray
+
+    def __init__(self, data: Data | None = None) -> None:
         super().__init__()
-        self.is_wired_host = False
+        self.data = (
+            get_global_surface_data(
+                np.empty((0, 3), dtype=np.int32),
+                np.empty((0, 2), dtype=np.int32),
+                np.empty(0, dtype=np.int32),
+            )
+            if data is None
+            else data
+        )
 
     def build(self) -> None:
         from .finite_element import FiniteElementMethod
         from .global_vertex_manager import GlobalVertexManager
 
-        self.fem = self.require(FiniteElementMethod)
-        self.vertex = self.require(GlobalVertexManager)
+        self.fem_system = self.require(FiniteElementMethod)
+        self.vertex_system = self.require(GlobalVertexManager)
 
-    def wire_surface_data(
-        self,
-        surf_triangles: np.ndarray,
-        surf_edges: np.ndarray,
-        surf_verts: np.ndarray,
-    ) -> None:
-        if self.is_wired_host:
-            raise RuntimeError("GlobalSurfaceManager data is already wired")
 
-        triangles = np.ascontiguousarray(surf_triangles, dtype=np.int32).reshape(-1, 3)
-        edges = np.ascontiguousarray(surf_edges, dtype=np.int32).reshape(-1, 2)
-        vertices = np.ascontiguousarray(surf_verts, dtype=np.int32).reshape(-1)
+def get_global_surface_data(
+    surf_triangles: np.ndarray,
+    surf_edges: np.ndarray,
+    surf_verts: np.ndarray,
+    *,
+    vert_dimensions: np.ndarray | None = None,
+    surf_vert_area_weights: np.ndarray | None = None,
+    surf_edge_area_weights: np.ndarray | None = None,
+    surf_face_area_weights: np.ndarray | None = None,
+) -> GlobalSurfaceManager.Data:
+    triangles = np.ascontiguousarray(surf_triangles, dtype=np.int32).reshape(-1, 3)
+    edges = np.ascontiguousarray(surf_edges, dtype=np.int32).reshape(-1, 2)
+    vertices = np.ascontiguousarray(surf_verts, dtype=np.int32).reshape(-1)
+    triangle_capacity = max(len(triangles), 1)
+    edge_capacity = max(len(edges), 1)
+    vertex_capacity = max(len(vertices), 1)
 
-        self.n_surf_triangles = qd.ndarray(qd.i32, shape=())
-        self.n_surf_edges = qd.ndarray(qd.i32, shape=())
-        self.n_surf_verts = qd.ndarray(qd.i32, shape=())
-        self.n_codim_verts = qd.ndarray(qd.i32, shape=())
-        self.surf_triangles = qd.ndarray(qd.i32, shape=(max(len(triangles), 1), 3))
-        self.surf_edges = qd.ndarray(qd.i32, shape=(max(len(edges), 1), 2))
-        self.surf_verts = qd.ndarray(qd.i32, shape=(max(len(vertices), 1),))
-        self.vert_dimensions = qd.ndarray(qd.i32, shape=(max(len(vertices), 1),))
-        self.vert_area_weights = qd.ndarray(qd.f64, shape=(max(len(vertices), 1),))
-        self.edge_area_weights = qd.ndarray(qd.f64, shape=(max(len(edges), 1),))
-        self.face_area_weights = qd.ndarray(qd.f64, shape=(max(len(triangles), 1),))
-        self.codim_verts = qd.ndarray(qd.u32, shape=(1,))
-        self.codim_vert_area_weights = qd.ndarray(qd.f64, shape=(1,))
+    def padded(values, count, capacity, dtype, default):
+        if values is None:
+            return np.full(capacity, default, dtype=dtype)
+        result = np.ascontiguousarray(values, dtype=dtype).reshape(-1)
+        if len(result) not in ({count} if count else {0, 1}):
+            raise ValueError("Global surface attribute length must match its topology")
+        if count == 0:
+            return np.full(capacity, default, dtype=dtype)
+        return result
 
-        self.n_surf_triangles.from_numpy(np.array(len(triangles), dtype=np.int32))
-        self.n_surf_edges.from_numpy(np.array(len(edges), dtype=np.int32))
-        self.n_surf_verts.from_numpy(np.array(len(vertices), dtype=np.int32))
-        self.n_codim_verts.from_numpy(np.array(0, dtype=np.int32))
-        self.surf_triangles.from_numpy(triangles if len(triangles) else np.zeros((1, 3), dtype=np.int32))
-        self.surf_edges.from_numpy(edges if len(edges) else np.zeros((1, 2), dtype=np.int32))
-        self.surf_verts.from_numpy(vertices if len(vertices) else np.zeros(1, dtype=np.int32))
-        self.vert_dimensions.from_numpy(np.full(max(len(vertices), 1), 2, dtype=np.int32))
-        self.vert_area_weights.from_numpy(np.zeros(max(len(vertices), 1), dtype=np.float64))
-        self.edge_area_weights.from_numpy(np.zeros(max(len(edges), 1), dtype=np.float64))
-        self.face_area_weights.from_numpy(np.zeros(max(len(triangles), 1), dtype=np.float64))
-        self.codim_verts.from_numpy(np.zeros(1, dtype=np.uint32))
-        self.codim_vert_area_weights.from_numpy(np.zeros(1, dtype=np.float64))
-        self.is_wired_host = True
+    dimension_values = padded(vert_dimensions, len(vertices), vertex_capacity, np.int32, 2)
+    vertex_weights = padded(surf_vert_area_weights, len(vertices), vertex_capacity, np.float64, 0.0)
+    edge_weights = padded(surf_edge_area_weights, len(edges), edge_capacity, np.float64, 0.0)
+    face_weights = padded(surf_face_area_weights, len(triangles), triangle_capacity, np.float64, 0.0)
 
-    def wire_vert_dimensions(self, vert_dimensions: np.ndarray) -> None:
-        values = np.ascontiguousarray(vert_dimensions, dtype=np.int32).reshape(-1)
-        if len(values) != self.vert_dimensions.shape[0]:
-            raise ValueError("GlobalSurfaceManager vertex dimensions must match surf_verts")
-        self.vert_dimensions.from_numpy(values)
+    def array(dtype, shape, values):
+        result = qd.ndarray(dtype, shape=shape)
+        result.from_numpy(values)
+        return result
 
-    def wire_area_weights(
-        self,
-        surf_vert_area_weights: np.ndarray,
-        surf_edge_area_weights: np.ndarray,
-        surf_face_area_weights: np.ndarray,
-    ) -> None:
-        vertex_values = np.ascontiguousarray(surf_vert_area_weights, dtype=np.float64).reshape(-1)
-        edge_values = np.ascontiguousarray(surf_edge_area_weights, dtype=np.float64).reshape(-1)
-        face_values = np.ascontiguousarray(surf_face_area_weights, dtype=np.float64).reshape(-1)
-        if len(vertex_values) != self.vert_area_weights.shape[0]:
-            raise ValueError("GlobalSurfaceManager vertex area weights must match surf_verts")
-        if len(edge_values) not in (0, self.edge_area_weights.shape[0]):
-            raise ValueError("GlobalSurfaceManager edge area weights must match surf_edges")
-        if len(face_values) not in (0, self.face_area_weights.shape[0]):
-            raise ValueError("GlobalSurfaceManager face area weights must match surf_triangles")
-        self.vert_area_weights.from_numpy(vertex_values)
-        self.edge_area_weights.from_numpy(
-            edge_values if len(edge_values) else np.zeros(self.edge_area_weights.shape[0], dtype=np.float64)
-        )
-        self.face_area_weights.from_numpy(
-            face_values if len(face_values) else np.zeros(self.face_area_weights.shape[0], dtype=np.float64)
-        )
+    triangle_storage = triangles if len(triangles) else np.zeros((1, 3), dtype=np.int32)
+    edge_storage = edges if len(edges) else np.zeros((1, 2), dtype=np.int32)
+    vertex_storage = vertices if len(vertices) else np.zeros(1, dtype=np.int32)
+    data = GlobalSurfaceManager.Data()
+    data.n_surf_triangles = array(qd.i32, (), np.array(len(triangles), dtype=np.int32))
+    data.n_surf_edges = array(qd.i32, (), np.array(len(edges), dtype=np.int32))
+    data.n_surf_verts = array(qd.i32, (), np.array(len(vertices), dtype=np.int32))
+    data.n_codim_verts = array(qd.i32, (), np.array(0, dtype=np.int32))
+    data.surf_triangles = array(qd.i32, (triangle_capacity, 3), triangle_storage)
+    data.surf_edges = array(qd.i32, (edge_capacity, 2), edge_storage)
+    data.surf_verts = array(qd.i32, (vertex_capacity,), vertex_storage)
+    data.vert_dimensions = array(qd.i32, (vertex_capacity,), dimension_values)
+    data.vert_area_weights = array(qd.f64, (vertex_capacity,), vertex_weights)
+    data.edge_area_weights = array(qd.f64, (edge_capacity,), edge_weights)
+    data.face_area_weights = array(qd.f64, (triangle_capacity,), face_weights)
+    data.codim_verts = array(qd.u32, (1,), np.zeros(1, dtype=np.uint32))
+    data.codim_vert_area_weights = array(qd.f64, (1,), np.zeros(1, dtype=np.float64))
+    return data

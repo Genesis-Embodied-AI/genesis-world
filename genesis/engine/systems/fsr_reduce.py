@@ -155,6 +155,8 @@ def fast_segmented_reduce_body(
     n: qd.template(),
     padded_n: qd.template(),
     capacity: qd.template(),
+    value_type: qd.template(),
+    block_scalar_count: qd.template(),
 ):
     qd.loop_config(name="fast_segmented_reduce_body", block_dim=256)
     for gid in range(capacity):
@@ -170,16 +172,16 @@ def fast_segmented_reduce_body(
             source = qd.i32(0)
             if metadata[0] != 0:
                 source = qd.i32(sorted_perm[gid])
-            for component in qd.static(range(9)):
-                value = qd.f64(0.0)
+            for component in qd.static(range(block_scalar_count)):
+                value = value_type(0.0)
                 if metadata[0] != 0:
-                    value = values[source * 9 + component]
+                    value = values[source * block_scalar_count + component]
                 reduced = _head_segmented_reduce_add(
                     value,
                     metadata[3],
                 )
                 if metadata[0] != 0 and metadata[2] != 0:
                     qd.atomic_add(
-                        output[metadata[1] * 9 + component],
+                        output[metadata[1] * block_scalar_count + component],
                         reduced,
                     )

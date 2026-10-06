@@ -3,6 +3,7 @@ from __future__ import annotations
 import quadrants as qd
 
 from .contact_function.contact_table_query import ct_enabled_ee, ct_enabled_pt
+from .global_body_manager import is_body_contact_ignored
 
 
 @qd.func
@@ -13,7 +14,7 @@ def _node_pair_enabled(body_mgr: qd.template(), left_body, right_body):
         and right_body >= 0
         and (
             (left_body == right_body and body_mgr.self_collision[left_body] == 0)
-            or body_mgr.is_body_contact_ignored(left_body, right_body)
+            or is_body_contact_ignored(body_mgr, left_body, right_body)
         )
     ):
         enabled = False
@@ -38,7 +39,7 @@ def _ee_pair_enabled(
     accept = qd.i32(1)
     if body_a == body_b and body_a >= 0 and body.self_collision[body_a] == 0:
         accept = 0
-    if body_a >= 0 and body_b >= 0 and body.is_body_contact_ignored(body_a, body_b):
+    if body_a >= 0 and body_b >= 0 and is_body_contact_ignored(body, body_a, body_b):
         accept = 0
     if ea0 == eb0 or ea0 == eb1 or ea1 == eb0 or ea1 == eb1:
         accept = 0
@@ -105,7 +106,7 @@ def _pt_pair_enabled(
         vertex_body >= 0
         and triangle_body >= 0
         and vertex_body != triangle_body
-        and body.is_body_contact_ignored(vertex_body, triangle_body)
+        and is_body_contact_ignored(body, vertex_body, triangle_body)
     ):
         accept = 0
     if vertex_index == triangle_a or vertex_index == triangle_b or vertex_index == triangle_c:

@@ -109,6 +109,13 @@ class NewtonSimulator(BaseSimulator):
     def _step_grad(self):
         gs.raise_exception("NewtonSimulator does not support backward simulation.")
 
+    def start_system_visualizer(self, host: str = "127.0.0.1", port: int = 0):
+        """Start the read-only SimSystem architecture website."""
+        return self.engine.start_visualizer(host=host, port=port)
+
+    def stop_system_visualizer(self) -> None:
+        self.engine.stop_visualizer()
+
     @property
     def engine(self) -> "SimEngine":
         engine = self._engine

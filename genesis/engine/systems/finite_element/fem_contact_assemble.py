@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import quadrants as qd
 
+from ..bcoo_matrix import write_bcoo_block
+
 
 @qd.func(requires_top_level=True)
 def distribute_fem_gradient_kernel(
     contact: qd.template(),
     fem: qd.template(),
-    global_linear_system: qd.template(),
+    global_linear_system_data: qd.template(),
 ):
     global_begin = fem.global_vert_offset[()]
     global_end = global_begin + fem.n_fem_verts[()]
@@ -18,7 +20,7 @@ def distribute_fem_gradient_kernel(
             if fem.is_fixed[local_vertex] == 0:
                 for axis in qd.static(range(3)):
                     qd.atomic_add(
-                        global_linear_system.b_rhs[fem.dof_offset[()] + local_vertex * 3 + axis],
+                        global_linear_system_data.b_rhs[fem.dof_offset[()] + local_vertex * 3 + axis],
                         contact.unique_doublet_gradients[index, axis],
                     )
 
@@ -27,11 +29,11 @@ def distribute_fem_gradient_kernel(
 def distribute_fem_fem_kernel(
     contact: qd.template(),
     fem: qd.template(),
-    global_linear_system: qd.template(),
+    global_linear_system_data: qd.template(),
 ):
     global_begin = fem.global_vert_offset[()]
     global_end = global_begin + fem.n_fem_verts[()]
-    output_begin = global_linear_system.n_elastic[()]
+    output_begin = global_linear_system_data.n_elastic[()]
     for index in range(contact.n_unique_triplets[()]):
         global_row = contact.unique_triplet_rows[index]
         global_column = contact.unique_triplet_cols[index]
@@ -48,7 +50,8 @@ def distribute_fem_fem_kernel(
                 for row in qd.static(range(3)):
                     for column in qd.static(range(3)):
                         block[row, column] = contact.unique_triplet_values[index, row, column]
-            global_linear_system.set_sym(
+            write_bcoo_block(
+                global_linear_system_data.matrix,
                 output_begin + index,
                 fem.dof_offset[()] // 3 + local_row,
                 fem.dof_offset[()] // 3 + local_column,

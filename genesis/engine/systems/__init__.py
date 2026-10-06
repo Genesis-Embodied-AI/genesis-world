@@ -1,3 +1,5 @@
+from .bcoo_matrix import BCOOMatrix
+from .bcoo_operations import sym_bcoo_spmv_naive
 from .broad_phase_system import BroadPhaseSystem
 from .builders import build_scene_engine
 from .consistent_ipc_contact import ConsistentIPCContactConstitution
@@ -16,16 +18,19 @@ from .global_linear_system import GlobalLinearSystem
 from .global_surface_manager import GlobalSurfaceManager
 from .global_vertex_manager import GlobalVertexManager
 from .lbvh_broad_phase import InfoLBVHBatchedBroadPhaseDop14, LBVHBroadPhase
+from .linear_pcg import LinearPCG
+from .pcg_solver import PCGSolver
 from .rigid_contact_assemble import RigidContactAssemble
 from .rigid_contact_proxy import RigidContactProxyGeometry, RigidContactProxySystem
 from .rigid_joint_forest import RigidJointForestSystem
 from .rigid_system import RigidSystem
 from .sim_config import SimConfig
 from .sim_engine import SimEngine
-from .sim_system import SimSystem
-from .standard_pcg_solver import StandardPCGSolver
+from .sim_system import SimAction, SimData, SimPipeline, SimSystem
+from .visualizer import VisualizerServer, build_snapshot, start_visualizer
 
 __all__ = [
+    "BCOOMatrix",
     "FEMBDF1",
     "BroadPhaseSystem",
     "ConsistentIPCContactConstitution",
@@ -44,14 +49,22 @@ __all__ = [
     "GlobalVertexManager",
     "InfoLBVHBatchedBroadPhaseDop14",
     "LBVHBroadPhase",
+    "LinearPCG",
+    "PCGSolver",
     "RigidContactAssemble",
     "RigidContactProxyGeometry",
     "RigidContactProxySystem",
     "RigidJointForestSystem",
     "RigidSystem",
     "SimConfig",
+    "SimAction",
+    "SimData",
     "SimEngine",
+    "SimPipeline",
     "SimSystem",
-    "StandardPCGSolver",
+    "VisualizerServer",
+    "build_snapshot",
     "build_scene_engine",
+    "start_visualizer",
+    "sym_bcoo_spmv_naive",
 ]

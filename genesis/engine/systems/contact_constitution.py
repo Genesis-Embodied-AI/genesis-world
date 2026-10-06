@@ -10,25 +10,19 @@ class ContactConstitution(SimSystem):
 
     def build(self) -> None:
         from .contact_system import ContactSystem
+        from .global_surface_manager import GlobalSurfaceManager
+        from .global_vertex_manager import GlobalVertexManager
 
-        self.require(ContactSystem).set_contact_constitution(self)
-        self.do_build_constitution()
+        self.contact_system = self.require(ContactSystem)
+        self.surface_system = self.require(GlobalSurfaceManager)
+        self.vertex_system = self.require(GlobalVertexManager)
+        self.actions = self.register_actions()
 
-    def do_build_constitution(self) -> None:
-        pass
-
-    @abstractmethod
-    def count_active(self, contact, surface, vertex):
-        pass
-
-    @abstractmethod
-    def filter_assemble(self, contact, surface, vertex):
-        pass
+    def resolve_actions(self) -> dict[str, object]:
+        if self.is_building:
+            raise RuntimeError("Contact constitution actions are available only after build")
+        return {name: action.invocation for name, action in self.actions.items()}
 
     @abstractmethod
-    def contact_energy(self, contact, surface, vertex):
-        pass
-
-    @abstractmethod
-    def friction_snapshot(self, contact, surface, vertex):
-        pass
+    def register_actions(self) -> dict[str, object]:
+        """Create the complete stateless numerical action protocol."""

@@ -80,6 +80,8 @@ def run_fsr_body(
         n,
         n,
         output.shape[0] // 9,
+        qd.f64,
+        9,
     )
 
 

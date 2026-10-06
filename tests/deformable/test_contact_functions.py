@@ -3,9 +3,13 @@ import pytest
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.systems.bcoo_matrix import sort_reduce_bcoo, zero_bcoo_triplets
 from genesis.engine.systems.consistent_ipc_contact import (
-    ConsistentIPCContactConstitution,
     cipc_count_active_pt_kernel,
+    contact_energy,
+    count_active,
+    filter_assemble,
+    friction_snapshot,
 )
 from genesis.engine.systems.contact import ContactTabular
 from genesis.engine.systems.contact_function.cipc_simplex_scatter import (
@@ -36,14 +40,27 @@ from genesis.engine.systems.contact_function.halfplane_contact import (
     halfplane_signed_distance,
 )
 from genesis.engine.systems.contact_function.pair_d_hat import pair_d_hat_pt
-from genesis.engine.systems.contact_system import ContactSystem
+from genesis.engine.systems.contact_system import (
+    adaptive_kappa_newton_tick,
+    ccd,
+    get_contact_system_data,
+    halfplane_query,
+    init_ccd,
+    reset_collision_counts,
+    sort_reduce,
+)
 from genesis.engine.systems.finite_element.fem_contact_assemble import (
     distribute_fem_fem_kernel,
     distribute_fem_gradient_kernel,
 )
-from genesis.engine.systems.global_linear_system import GlobalLinearSystem
-from genesis.engine.systems.global_surface_manager import GlobalSurfaceManager
-from genesis.engine.systems.global_vertex_manager import GlobalVertexManager
+from genesis.engine.systems.global_linear_system import (
+    GlobalLinearSystem,
+    compute_n_triplets,
+    get_global_linear_system_data,
+    zero_rhs,
+)
+from genesis.engine.systems.global_surface_manager import GlobalSurfaceManager, get_global_surface_data
+from genesis.engine.systems.global_vertex_manager import GlobalVertexManager, get_global_vertex_data
 from genesis.utils.misc import qd_to_numpy
 
 
@@ -227,7 +244,6 @@ def evaluate_rank1_triplet_scatter(
 @qd.kernel
 def evaluate_consistent_ipc_constitution(
     contact: qd.template(),
-    constitution: qd.template(),
     surface: qd.template(),
     vertex: qd.template(),
 ):
@@ -239,19 +255,18 @@ def evaluate_consistent_ipc_constitution(
         contact.n_active_pairs[()] = 0
         contact.barrier_energy[()] = 0.0
         contact.friction_energy[()] = 0.0
-    constitution.count_active(contact, surface, vertex)
-    constitution.filter_assemble(contact, surface, vertex)
-    constitution.contact_energy(contact, surface, vertex)
+    count_active(contact, surface, vertex)
+    filter_assemble(contact, surface, vertex)
+    contact_energy(contact, surface, vertex)
 
 
 @qd.kernel
 def evaluate_friction_snapshot(
     contact: qd.template(),
-    constitution: qd.template(),
     surface: qd.template(),
     vertex: qd.template(),
 ):
-    constitution.friction_snapshot(contact, surface, vertex)
+    friction_snapshot(contact, surface, vertex)
 
 
 @qd.kernel
@@ -268,38 +283,42 @@ def evaluate_pt_count_active(
 
 @qd.kernel
 def evaluate_contact_sort_reduce(contact: qd.template()):
-    contact.sort_reduce()
+    sort_reduce(contact)
 
 
 @qd.kernel
 def evaluate_contact_distribute(
     contact: qd.template(),
     fem: qd.template(),
-    global_linear_system: qd.template(),
+    global_linear_system_data: qd.template(),
 ):
-    global_linear_system.compute_n_triplets(contact)
-    global_linear_system.zero_rhs()
-    global_linear_system.zero_triplet()
-    distribute_fem_gradient_kernel(contact, fem, global_linear_system)
-    distribute_fem_fem_kernel(contact, fem, global_linear_system)
-    global_linear_system.body_sort_reduce()
+    compute_n_triplets(global_linear_system_data, contact)
+    zero_rhs(global_linear_system_data)
+    zero_bcoo_triplets(global_linear_system_data.matrix)
+    distribute_fem_gradient_kernel(contact, fem, global_linear_system_data)
+    distribute_fem_fem_kernel(contact, fem, global_linear_system_data)
+    sort_reduce_bcoo(global_linear_system_data.matrix)
 
 
 @qd.kernel
 def evaluate_adaptive_kappa_newton_tick(contact: qd.template()):
-    contact.adaptive_kappa_newton_tick()
+    adaptive_kappa_newton_tick(contact)
 
 
 @qd.kernel
-def evaluate_contact_ccd(contact: qd.template()):
-    contact.init_ccd()
-    contact.ccd()
+def evaluate_contact_ccd(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+    init_ccd(contact)
+    ccd(contact, surface, vertex)
 
 
 @qd.kernel
-def evaluate_halfplane_query(contact: qd.template()):
-    contact.reset_collision_counts()
-    contact.halfplane_query()
+def evaluate_halfplane_query(
+    contact: qd.template(),
+    surface: qd.template(),
+    vertex: qd.template(),
+):
+    reset_collision_counts(contact)
+    halfplane_query(contact, surface, vertex)
 
 
 @qd.kernel(fastcache=True)
@@ -340,6 +359,38 @@ def inspect_pt_pair(
         output[3] = pair_thickness_pt(vertex.thicknesses, vertex_id, v1, v2, v3)
         output[4] = qd.f64(contact.n_pairs_pt[()])
         output[5] = qd.f64(_popcount4(flag))
+
+
+def make_contact_data(
+    n_verts: int,
+    n_bodies: int,
+    *,
+    halfplane_positions: np.ndarray | None = None,
+    halfplane_normals: np.ndarray | None = None,
+    tabular: ContactTabular | None = None,
+    friction_mu: float = 0.05,
+    adaptive_kappa_mode: str = "off",
+    adaptive_kappa_tick: str = "frame",
+):
+    if halfplane_positions is None:
+        halfplane_positions = np.empty((0, 3), dtype=np.float64)
+    if halfplane_normals is None:
+        halfplane_normals = np.empty((0, 3), dtype=np.float64)
+    return get_contact_system_data(
+        n_verts=n_verts,
+        n_bodies=n_bodies,
+        d_hat=0.01,
+        kappa=1.0e4,
+        dt_sq=0.01**2,
+        init_pair_capacity=1,
+        contact_tabular=ContactTabular() if tabular is None else tabular,
+        friction_mu=friction_mu,
+        friction_eps_v=1.0e-2,
+        halfplane_positions=halfplane_positions,
+        halfplane_normals=halfplane_normals,
+        adaptive_kappa_mode=adaptive_kappa_mode,
+        adaptive_kappa_tick=adaptive_kappa_tick,
+    )
 
 
 @pytest.mark.required
@@ -499,19 +550,25 @@ def test_rank1_triplet_scatter_matches_dense():
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_halfplane_query_respects_contact_tabular():
-    vertex = GlobalVertexManager()
-    vertex.init(1)
+    vertex_system = GlobalVertexManager(
+        get_global_vertex_data(
+            1,
+            thicknesses=np.array([0.001], dtype=np.float64),
+            d_hats=np.array([0.01], dtype=np.float64),
+        )
+    )
+    vertex = vertex_system.data
     vertex.positions.from_numpy(np.array([[0.0, 0.0, 0.006]], dtype=np.float64))
     vertex.trajectory_end_positions.from_numpy(np.array([[0.0, 0.0, -0.004]], dtype=np.float64))
-    vertex.wire_thickness_data(np.array([0.001], dtype=np.float64))
-    vertex.wire_d_hat_data(np.array([0.01], dtype=np.float64))
 
-    surface = GlobalSurfaceManager()
-    surface.wire_surface_data(
-        np.empty((0, 3), dtype=np.int32),
-        np.empty((0, 2), dtype=np.int32),
-        np.array([0], dtype=np.int32),
+    surface_system = GlobalSurfaceManager(
+        get_global_surface_data(
+            np.empty((0, 3), dtype=np.int32),
+            np.empty((0, 2), dtype=np.int32),
+            np.array([0], dtype=np.int32),
+        )
     )
+    surface = surface_system.data
 
     tabular = ContactTabular()
     tabular.default_model(
@@ -520,19 +577,16 @@ def test_halfplane_query_respects_contact_tabular():
         enable=False,
         enable_ee=False,
     )
-    contact = ContactSystem()
-    contact.vertex = vertex
-    contact.surface = surface
-    contact.wire_params(d_hat=0.01, kappa=1.0e4, init_pair_capacity=1)
-    contact.wire_contact_tabular(tabular)
-    contact.wire_halfplanes(
-        np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+    contact = make_contact_data(
+        1,
+        1,
+        tabular=tabular,
+        friction_mu=0.0,
+        halfplane_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+        halfplane_normals=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
     )
-    contact.set_contact_constitution(ConsistentIPCContactConstitution())
-    contact.init(1)
 
-    evaluate_halfplane_query(contact)
+    evaluate_halfplane_query(contact, surface, vertex)
 
     assert int(qd_to_numpy(contact.n_pairs_ph)) == 0
     assert int(qd_to_numpy(contact.intersection_flag)) == 0
@@ -542,49 +596,44 @@ def test_halfplane_query_respects_contact_tabular():
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_consistent_ipc_halfplane_assembly():
-    vertex = GlobalVertexManager()
-    vertex.init(1)
+    vertex_system = GlobalVertexManager(
+        get_global_vertex_data(
+            1,
+            thicknesses=np.array([0.001], dtype=np.float64),
+            d_hats=np.array([0.01], dtype=np.float64),
+            is_fixed=np.array([0], dtype=np.int32),
+        )
+    )
+    vertex = vertex_system.data
     vertex.positions.from_numpy(np.array([[0.0, 0.0, 0.006]], dtype=np.float64))
     vertex.x_bar.from_numpy(np.array([[0.0, 0.0, 0.006]], dtype=np.float64))
     vertex.body_id.from_numpy(np.array([0], dtype=np.int32))
-    vertex.wire_thickness_data(np.array([0.001], dtype=np.float64))
-    vertex.wire_d_hat_data(np.array([0.01], dtype=np.float64))
-    vertex.wire_is_fixed_data(np.array([0], dtype=np.int32))
 
-    surface = GlobalSurfaceManager()
-    surface.wire_surface_data(
-        np.empty((0, 3), dtype=np.int32),
-        np.empty((0, 2), dtype=np.int32),
-        np.array([0], dtype=np.int32),
+    surface_system = GlobalSurfaceManager(
+        get_global_surface_data(
+            np.empty((0, 3), dtype=np.int32),
+            np.empty((0, 2), dtype=np.int32),
+            np.array([0], dtype=np.int32),
+            vert_dimensions=np.array([2], dtype=np.int32),
+            surf_vert_area_weights=np.array([0.04], dtype=np.float64),
+        )
     )
-    surface.wire_vert_dimensions(np.array([2], dtype=np.int32))
-    surface.wire_area_weights(
-        np.array([0.04], dtype=np.float64),
-        np.empty(0, dtype=np.float64),
-        np.empty(0, dtype=np.float64),
-    )
+    surface = surface_system.data
 
-    contact = ContactSystem()
-    contact.vertex = vertex
-    contact.surface = surface
-    contact.wire_params(d_hat=0.01, kappa=1e4, init_pair_capacity=1)
-    contact.set_dt_sq(0.01**2)
-    contact.wire_friction_params(mu=0.05, eps_v=1e-2)
-    contact.wire_contact_tabular(ContactTabular())
-    contact.wire_halfplanes(
-        np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+    contact = make_contact_data(
+        1,
+        1,
+        halfplane_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+        halfplane_normals=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
+        adaptive_kappa_mode="per-body",
+        adaptive_kappa_tick="newton",
     )
-    contact.set_adaptive_kappa("per-body", "newton", 1)
-    constitution = ConsistentIPCContactConstitution()
-    contact.set_contact_constitution(constitution)
-    contact.init(1)
     contact.pairs_ph.from_numpy(np.array([[0, 0]], dtype=np.int32))
     contact.n_pairs_ph.from_numpy(np.array(1, dtype=np.int32))
 
-    evaluate_friction_snapshot(contact, constitution, surface, vertex)
+    evaluate_friction_snapshot(contact, surface, vertex)
     vertex.positions.from_numpy(np.array([[0.001, 0.0, 0.006]], dtype=np.float64))
-    evaluate_consistent_ipc_constitution(contact, constitution, surface, vertex)
+    evaluate_consistent_ipc_constitution(contact, surface, vertex)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_doublets), 1)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_triplets), 1)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_friction_pairs_ph), 1)
@@ -602,7 +651,7 @@ def test_consistent_ipc_halfplane_assembly():
     np.testing.assert_allclose(qd_to_numpy(contact.body_kappa_scale)[0], 2.0)
     np.testing.assert_array_equal(qd_to_numpy(contact.adaptive_kappa_grew), 1)
     vertex.trajectory_end_positions.from_numpy(np.array([[0.001, 0.0, -0.004]], dtype=np.float64))
-    evaluate_contact_ccd(contact)
+    evaluate_contact_ccd(contact, surface, vertex)
     np.testing.assert_allclose(qd_to_numpy(contact.ccd_alpha), 0.4, rtol=1e-12)
 
 
@@ -619,47 +668,36 @@ def test_consistent_ipc_point_triangle_assembly():
         ],
         dtype=np.float64,
     )
-    vertex = GlobalVertexManager()
-    vertex.init(4)
+    vertex_system = GlobalVertexManager(
+        get_global_vertex_data(
+            4,
+            thicknesses=np.full(4, 0.001, dtype=np.float64),
+            d_hats=np.full(4, 0.01, dtype=np.float64),
+            is_fixed=np.zeros(4, dtype=np.int32),
+        )
+    )
+    vertex = vertex_system.data
     vertex.positions.from_numpy(positions_np)
     vertex.x_bar.from_numpy(positions_np)
     vertex.body_id.from_numpy(np.array([0, 1, 1, 1], dtype=np.int32))
-    vertex.wire_thickness_data(np.full(4, 0.001, dtype=np.float64))
-    vertex.wire_d_hat_data(np.full(4, 0.01, dtype=np.float64))
-    vertex.wire_is_fixed_data(np.zeros(4, dtype=np.int32))
 
-    surface = GlobalSurfaceManager()
-    surface.wire_surface_data(
-        np.array([[1, 2, 3]], dtype=np.int32),
-        np.empty((0, 2), dtype=np.int32),
-        np.arange(4, dtype=np.int32),
+    surface_system = GlobalSurfaceManager(
+        get_global_surface_data(
+            np.array([[1, 2, 3]], dtype=np.int32),
+            np.empty((0, 2), dtype=np.int32),
+            np.arange(4, dtype=np.int32),
+            vert_dimensions=np.full(4, 2, dtype=np.int32),
+            surf_vert_area_weights=np.full(4, 0.25, dtype=np.float64),
+            surf_face_area_weights=np.array([0.5], dtype=np.float64),
+        )
     )
-    surface.wire_vert_dimensions(np.full(4, 2, dtype=np.int32))
-    surface.wire_area_weights(
-        np.full(4, 0.25, dtype=np.float64),
-        np.empty(0, dtype=np.float64),
-        np.array([0.5], dtype=np.float64),
-    )
+    surface = surface_system.data
 
-    contact = ContactSystem()
-    contact.vertex = vertex
-    contact.surface = surface
-    contact.wire_params(d_hat=0.01, kappa=1e4, init_pair_capacity=1)
-    contact.set_dt_sq(0.01**2)
-    contact.wire_friction_params(mu=0.05, eps_v=1e-2)
-    contact.wire_contact_tabular(ContactTabular())
-    contact.wire_halfplanes(
-        np.empty((0, 3), dtype=np.float64),
-        np.empty((0, 3), dtype=np.float64),
-    )
-    contact.set_adaptive_kappa("off", "frame", 2)
-    constitution = ConsistentIPCContactConstitution()
-    contact.set_contact_constitution(constitution)
-    contact.init(4)
+    contact = make_contact_data(4, 2)
     contact.pairs_pt.from_numpy(np.array([[0, 0]], dtype=np.int32))
     contact.n_pairs_pt.from_numpy(np.array(1, dtype=np.int32))
 
-    evaluate_friction_snapshot(contact, constitution, surface, vertex)
+    evaluate_friction_snapshot(contact, surface, vertex)
     positions_np[0, 0] += 0.001
     vertex.positions.from_numpy(positions_np)
     pair_diagnostics = qd.ndarray(qd.f64, shape=(6,))
@@ -673,7 +711,7 @@ def test_consistent_ipc_point_triangle_assembly():
     evaluate_pt_count_active(contact, surface, vertex)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_doublets), 4)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_triplets), 10)
-    evaluate_consistent_ipc_constitution(contact, constitution, surface, vertex)
+    evaluate_consistent_ipc_constitution(contact, surface, vertex)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_doublets), 4)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_triplets), 10)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_friction_pairs_pt), 1)
@@ -695,13 +733,21 @@ def test_consistent_ipc_point_triangle_assembly():
         atol=1e-10,
     )
     fem = FEMContactFixture(4)
-    global_linear_system = GlobalLinearSystem()
-    global_linear_system.init(4, 0, 10, 0, 1e-4)
-    evaluate_contact_distribute(contact, fem, global_linear_system)
-    np.testing.assert_array_equal(qd_to_numpy(global_linear_system.n_triplets), 10)
-    np.testing.assert_array_equal(qd_to_numpy(global_linear_system.bcoo_nnz), 10)
+    global_linear_system_system = GlobalLinearSystem(
+        data=get_global_linear_system_data(
+            n_block_rows=4,
+            n_elastic_triplets=0,
+            max_contact_body_triplets=10,
+            dof_block_base=0,
+            extent_capacity=0,
+        )
+    )
+    global_linear_system_data = global_linear_system_system.data
+    evaluate_contact_distribute(contact, fem, global_linear_system_data)
+    np.testing.assert_array_equal(qd_to_numpy(global_linear_system_data.matrix.n_triplets), 10)
+    np.testing.assert_array_equal(qd_to_numpy(global_linear_system_data.matrix.bcoo_nnz), 10)
     np.testing.assert_allclose(
-        qd_to_numpy(global_linear_system.b_rhs).reshape(4, 3).sum(axis=0),
+        qd_to_numpy(global_linear_system_data.b_rhs).reshape(4, 3).sum(axis=0),
         0.0,
         atol=1e-10,
     )
@@ -720,50 +766,39 @@ def test_consistent_ipc_edge_edge_assembly():
         ],
         dtype=np.float64,
     )
-    vertex = GlobalVertexManager()
-    vertex.init(4)
+    vertex_system = GlobalVertexManager(
+        get_global_vertex_data(
+            4,
+            thicknesses=np.full(4, 0.001, dtype=np.float64),
+            d_hats=np.full(4, 0.01, dtype=np.float64),
+            is_fixed=np.zeros(4, dtype=np.int32),
+        )
+    )
+    vertex = vertex_system.data
     vertex.positions.from_numpy(positions_np)
     vertex.x_bar.from_numpy(positions_np)
     vertex.body_id.from_numpy(np.array([0, 0, 1, 1], dtype=np.int32))
-    vertex.wire_thickness_data(np.full(4, 0.001, dtype=np.float64))
-    vertex.wire_d_hat_data(np.full(4, 0.01, dtype=np.float64))
-    vertex.wire_is_fixed_data(np.zeros(4, dtype=np.int32))
 
-    surface = GlobalSurfaceManager()
-    surface.wire_surface_data(
-        np.empty((0, 3), dtype=np.int32),
-        np.array([[0, 1], [2, 3]], dtype=np.int32),
-        np.arange(4, dtype=np.int32),
+    surface_system = GlobalSurfaceManager(
+        get_global_surface_data(
+            np.empty((0, 3), dtype=np.int32),
+            np.array([[0, 1], [2, 3]], dtype=np.int32),
+            np.arange(4, dtype=np.int32),
+            vert_dimensions=np.full(4, 2, dtype=np.int32),
+            surf_vert_area_weights=np.full(4, 0.25, dtype=np.float64),
+            surf_edge_area_weights=np.full(2, 0.5, dtype=np.float64),
+        )
     )
-    surface.wire_vert_dimensions(np.full(4, 2, dtype=np.int32))
-    surface.wire_area_weights(
-        np.full(4, 0.25, dtype=np.float64),
-        np.full(2, 0.5, dtype=np.float64),
-        np.empty(0, dtype=np.float64),
-    )
+    surface = surface_system.data
 
-    contact = ContactSystem()
-    contact.vertex = vertex
-    contact.surface = surface
-    contact.wire_params(d_hat=0.01, kappa=1e4, init_pair_capacity=1)
-    contact.set_dt_sq(0.01**2)
-    contact.wire_friction_params(mu=0.05, eps_v=1e-2)
-    contact.wire_contact_tabular(ContactTabular())
-    contact.wire_halfplanes(
-        np.empty((0, 3), dtype=np.float64),
-        np.empty((0, 3), dtype=np.float64),
-    )
-    contact.set_adaptive_kappa("off", "frame", 2)
-    constitution = ConsistentIPCContactConstitution()
-    contact.set_contact_constitution(constitution)
-    contact.init(4)
+    contact = make_contact_data(4, 2)
     contact.pairs_ee.from_numpy(np.array([[0, 1]], dtype=np.int32))
     contact.n_pairs_ee.from_numpy(np.array(1, dtype=np.int32))
 
-    evaluate_friction_snapshot(contact, constitution, surface, vertex)
+    evaluate_friction_snapshot(contact, surface, vertex)
     positions_np[:2, 0] += 0.001
     vertex.positions.from_numpy(positions_np)
-    evaluate_consistent_ipc_constitution(contact, constitution, surface, vertex)
+    evaluate_consistent_ipc_constitution(contact, surface, vertex)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_doublets), 4)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_counted_triplets), 10)
     np.testing.assert_array_equal(qd_to_numpy(contact.n_friction_pairs_ee), 1)

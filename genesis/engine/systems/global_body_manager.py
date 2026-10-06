@@ -3,101 +3,121 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from .sim_system import SimSystem
+from .sim_system import SimData, SimSystem
 
 
-@qd.data_oriented
 class GlobalBodyManager(SimSystem):
-    """Own body ranges and contact-ignorance data."""
+    """Organize global body data and its host wiring lifecycle."""
 
-    def __init__(self) -> None:
+    @qd.data_oriented
+    class Data(SimData):
+        """Device-visible body ranges and contact-ignorance data."""
+
+        n_bodies: qd.Ndarray
+        halfplane_body_id_offset: qd.Ndarray
+        n_body_contact_ignorance: qd.Ndarray
+        self_collision: qd.Ndarray
+        vertex_offsets: qd.Ndarray
+        body_contact_ignorance_ranges: qd.Ndarray
+        body_contact_ignorance_body_ids: qd.Ndarray
+
+    def __init__(self, data: Data | None = None) -> None:
         super().__init__()
-        self.is_initialized_host = False
+        self.data = get_global_body_data(0) if data is None else data
 
     def build(self) -> None:
         from .finite_element import FiniteElementMethod
         from .global_vertex_manager import GlobalVertexManager
 
-        self.fem = self.require(FiniteElementMethod)
-        self.vertex = self.require(GlobalVertexManager)
+        self.fem_system = self.require(FiniteElementMethod)
+        self.vertex_system = self.require(GlobalVertexManager)
 
-    def init(self, n_bodies: int) -> None:
-        if self.is_initialized_host:
-            raise RuntimeError("GlobalBodyManager is already initialized")
-        if n_bodies < 0:
-            raise ValueError("GlobalBodyManager body count must be non-negative")
 
-        capacity = max(n_bodies, 1)
-        self.n_bodies = qd.ndarray(qd.i32, shape=())
-        self.halfplane_body_id_offset = qd.ndarray(qd.i32, shape=())
-        self.n_body_contact_ignorance = qd.ndarray(qd.i32, shape=())
-        self.self_collision = qd.ndarray(qd.i32, shape=(capacity,))
-        self.vertex_offsets = qd.ndarray(qd.i32, shape=(capacity + 1,))
-        self.body_contact_ignorance_ranges = qd.ndarray(qd.i32, shape=(capacity + 1,))
-        self.body_contact_ignorance_body_ids = qd.ndarray(qd.i32, shape=(1,))
+def get_global_body_data(
+    n_bodies: int,
+    *,
+    vertex_offsets: np.ndarray | None = None,
+    self_collision: np.ndarray | None = None,
+    body_contact_ignorance_ranges: np.ndarray | None = None,
+    body_contact_ignorance_body_ids: np.ndarray | None = None,
+    halfplane_body_id_offset: int | None = None,
+) -> GlobalBodyManager.Data:
+    if n_bodies < 0:
+        raise ValueError("Global body count must be non-negative")
+    capacity = max(n_bodies, 1)
+    if vertex_offsets is None:
+        offset_values = np.zeros(capacity + 1, dtype=np.int32)
+    else:
+        offset_values = np.ascontiguousarray(vertex_offsets, dtype=np.int32).reshape(-1)
+        if len(offset_values) != n_bodies + 1:
+            raise ValueError("Global body vertex offsets must have n_bodies + 1 entries")
+        if offset_values[0] != 0 or np.any(offset_values[1:] < offset_values[:-1]):
+            raise ValueError("Global body vertex offsets must be non-decreasing from zero")
+        if n_bodies == 0:
+            offset_values = np.zeros(capacity + 1, dtype=np.int32)
+    if self_collision is None:
+        collision_values = np.ones(capacity, dtype=np.int32)
+    else:
+        collision_values = np.ascontiguousarray(self_collision, dtype=np.int32).reshape(-1)
+        if len(collision_values) != n_bodies:
+            raise ValueError("Global body self-collision flags must match n_bodies")
+        if np.any((collision_values != 0) & (collision_values != 1)):
+            raise ValueError("Global body self-collision flags must be zero or one")
+        if n_bodies == 0:
+            collision_values = np.ones(capacity, dtype=np.int32)
 
-        self.n_bodies.from_numpy(np.array(n_bodies, dtype=np.int32))
-        self.halfplane_body_id_offset.from_numpy(np.array(n_bodies, dtype=np.int32))
-        self.n_body_contact_ignorance.from_numpy(np.array(0, dtype=np.int32))
-        self.self_collision.from_numpy(np.ones(capacity, dtype=np.int32))
-        self.vertex_offsets.from_numpy(np.zeros(capacity + 1, dtype=np.int32))
-        self.body_contact_ignorance_ranges.from_numpy(np.zeros(capacity + 1, dtype=np.int32))
-        self.body_contact_ignorance_body_ids.from_numpy(np.zeros(1, dtype=np.int32))
-        self.is_initialized_host = True
-
-    def wire_body_layout(
-        self,
-        vertex_offsets: np.ndarray,
-        self_collision: np.ndarray,
-    ) -> None:
-        offsets = np.ascontiguousarray(vertex_offsets, dtype=np.int32).reshape(-1)
-        collision = np.ascontiguousarray(self_collision, dtype=np.int32).reshape(-1)
-        if len(offsets) != self.vertex_offsets.shape[0]:
-            raise ValueError("GlobalBodyManager vertex offsets must have n_bodies + 1 entries")
-        if len(collision) != self.self_collision.shape[0]:
-            raise ValueError("GlobalBodyManager self-collision flags must match n_bodies")
-        if offsets[0] != 0 or np.any(offsets[1:] < offsets[:-1]):
-            raise ValueError("GlobalBodyManager vertex offsets must be non-decreasing from zero")
-        if np.any((collision != 0) & (collision != 1)):
-            raise ValueError("GlobalBodyManager self-collision flags must be zero or one")
-        self.vertex_offsets.from_numpy(offsets)
-        self.self_collision.from_numpy(collision)
-
-    def wire_body_contact_ignorance(
-        self,
-        ranges: np.ndarray,
-        body_ids: np.ndarray,
-    ) -> None:
-        range_values = np.ascontiguousarray(ranges, dtype=np.int32).reshape(-1)
-        id_values = np.ascontiguousarray(body_ids, dtype=np.int32).reshape(-1)
-        if len(range_values) != self.vertex_offsets.shape[0]:
-            raise ValueError("GlobalBodyManager ignorance ranges must have n_bodies + 1 entries")
+    id_values = (
+        np.empty(0, dtype=np.int32)
+        if body_contact_ignorance_body_ids is None
+        else np.ascontiguousarray(body_contact_ignorance_body_ids, dtype=np.int32).reshape(-1)
+    )
+    if body_contact_ignorance_ranges is None:
+        range_values = np.zeros(capacity + 1, dtype=np.int32)
+    else:
+        range_values = np.ascontiguousarray(body_contact_ignorance_ranges, dtype=np.int32).reshape(-1)
+        if len(range_values) != n_bodies + 1:
+            raise ValueError("Global body ignorance ranges must have n_bodies + 1 entries")
         if range_values[0] != 0 or range_values[-1] != len(id_values):
-            raise ValueError("GlobalBodyManager ignorance ranges must span the body-id array")
+            raise ValueError("Global body ignorance ranges must span the body-id array")
         if np.any(range_values[1:] < range_values[:-1]):
-            raise ValueError("GlobalBodyManager ignorance ranges must be non-decreasing")
+            raise ValueError("Global body ignorance ranges must be non-decreasing")
+        if n_bodies == 0:
+            range_values = np.zeros(capacity + 1, dtype=np.int32)
 
-        self.body_contact_ignorance_ranges.from_numpy(range_values)
-        self.body_contact_ignorance_body_ids = qd.ndarray(qd.i32, shape=(max(len(id_values), 1),))
-        if len(id_values) == 0:
-            self.body_contact_ignorance_body_ids.from_numpy(np.zeros(1, dtype=np.int32))
-        else:
-            self.body_contact_ignorance_body_ids.from_numpy(id_values)
-        self.n_body_contact_ignorance.from_numpy(np.array(len(id_values), dtype=np.int32))
+    def array(dtype, shape, values):
+        result = qd.ndarray(dtype, shape=shape)
+        result.from_numpy(values)
+        return result
 
-    @qd.func(requires_top_level=True)
-    def compute_vertex_offsets(self, fem: qd.template()):
-        for i_body in range(fem.n_bodies[()] + 1):
-            self.vertex_offsets[i_body] = fem.body_vertex_offsets[i_body]
-        for i_body in range(fem.n_bodies[()]):
-            self.self_collision[i_body] = fem.self_collision[i_body]
+    id_storage = id_values if len(id_values) else np.zeros(1, dtype=np.int32)
+    halfplane_offset = n_bodies if halfplane_body_id_offset is None else int(halfplane_body_id_offset)
+    if halfplane_offset < 0:
+        raise ValueError("Halfplane body ID offset must be non-negative")
+    data = GlobalBodyManager.Data()
+    data.n_bodies = array(qd.i32, (), np.array(n_bodies, dtype=np.int32))
+    data.halfplane_body_id_offset = array(qd.i32, (), np.array(halfplane_offset, dtype=np.int32))
+    data.n_body_contact_ignorance = array(qd.i32, (), np.array(len(id_values), dtype=np.int32))
+    data.self_collision = array(qd.i32, (capacity,), collision_values)
+    data.vertex_offsets = array(qd.i32, (capacity + 1,), offset_values)
+    data.body_contact_ignorance_ranges = array(qd.i32, (capacity + 1,), range_values)
+    data.body_contact_ignorance_body_ids = array(qd.i32, (max(len(id_values), 1),), id_storage)
+    return data
 
-    @qd.func
-    def is_body_contact_ignored(self, source, target):
-        ignored = False
-        begin = self.body_contact_ignorance_ranges[source]
-        end = self.body_contact_ignorance_ranges[source + 1]
-        for index in range(begin, end):
-            if self.body_contact_ignorance_body_ids[index] == target:
-                ignored = True
-        return ignored
+
+@qd.func(requires_top_level=True)
+def compute_vertex_offsets(data: qd.template(), fem: qd.template()):
+    for i_body in range(fem.n_bodies[()] + 1):
+        data.vertex_offsets[i_body] = fem.body_vertex_offsets[i_body]
+    for i_body in range(fem.n_bodies[()]):
+        data.self_collision[i_body] = fem.self_collision[i_body]
+
+
+@qd.func
+def is_body_contact_ignored(data: qd.template(), source, target):
+    ignored = False
+    begin = data.body_contact_ignorance_ranges[source]
+    end = data.body_contact_ignorance_ranges[source + 1]
+    for index in range(begin, end):
+        if data.body_contact_ignorance_body_ids[index] == target:
+            ignored = True
+    return ignored

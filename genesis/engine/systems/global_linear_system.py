@@ -2,404 +2,155 @@ from __future__ import annotations
 
 import numpy as np
 import quadrants as qd
-from quadrants.algorithms import (
-    exclusive_scan_add,
-    exclusive_scan_scratch_slots,
-    sort,
-    sort_scratch_slots,
-)
 
-from .dynamic_exclusive_sum import (
-    DynamicExclusiveSum,
-    dynamic_exclusive_sum,
-)
-from .dynamic_radix_sort import (
-    DynamicRadixSort,
-    dynamic_radix_sort,
-)
-from .fsr_reduce import fast_segmented_reduce_body as fsr_reduce_body
-from .sim_system import SimSystem
+from .bcoo_matrix import BCOOMatrix, get_bcoo_matrix, set_bcoo_n_triplets
+from .bcoo_operations import sym_bcoo_spmv_naive
+from .sim_system import SimData, SimSystem
 
 
-@qd.data_oriented
 class GlobalLinearSystem(SimSystem):
-    """Graph-native global 3x3-block BCOO linear system."""
+    """Global linear problem layout, vectors, and solver entry point."""
+
+    @qd.data_oriented
+    class Data(SimData):
+        """Device-visible global matrix, vector, and extent state."""
+
+        n_block_rows_host: int
+        total_dof_host: int
+        extent_capacity: int
+        n_block_rows: qd.Ndarray
+        total_dof: qd.Ndarray
+        dof_block_base: qd.Ndarray
+        n_extent_slots: qd.Ndarray
+        n_elastic: qd.Ndarray
+        required_block_rows: qd.Ndarray
+        extent_slots: qd.Ndarray
+        extent_offsets: qd.Ndarray
+        matrix: BCOOMatrix
+        x_sol: qd.Ndarray
+        b_rhs: qd.Ndarray
 
     def __init__(
         self,
         *,
-        genesis_legacy_sort_reduce: bool = False,
+        data: Data,
     ) -> None:
         super().__init__()
-        self.sort_end_bit = 64
-        self.sort_log256_max_n = 4
-        self.scan_log256_max_n = 4
+        self.data = data
         self.extent_slot_count_host = 0
-        self.is_initialized_host = False
-        self.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
 
     def build(self) -> None:
-        pass
+        from .pcg_solver import PCGSolver
+
+        self.pcg_solver_system = self.require(PCGSolver)
+        self.pcg_operator_action = self.create_action(pcg_apply_operator, self.data)
+        self.pcg_solver_system.register_primary_operator(self.pcg_operator_action)
 
     def register_extent_slot(self) -> int:
-        if self.is_initialized_host:
-            raise RuntimeError("Extent slots must be registered before GlobalLinearSystem.init()")
+        if self.extent_slot_count_host >= self.data.extent_capacity:
+            raise RuntimeError("GlobalLinearSystem extent capacity is too small for the registered assembly systems")
         slot = self.extent_slot_count_host
         self.extent_slot_count_host += 1
+        self.data.n_extent_slots.from_numpy(np.array(self.extent_slot_count_host, dtype=np.int32))
         return slot
 
-    def init(
-        self,
-        n_block_rows: int,
-        n_elastic_triplets: int,
-        max_contact_body_triplets: int,
-        dof_block_base: int,
-        pcg_tol_rate: float,
-    ) -> None:
-        if self.is_initialized_host:
-            raise RuntimeError("GlobalLinearSystem is already initialized")
-        if min(n_block_rows, n_elastic_triplets, max_contact_body_triplets, dof_block_base) < 0:
-            raise ValueError("GlobalLinearSystem sizes must be non-negative")
 
-        self.n_block_rows_host = n_block_rows
-        self.total_dof_host = n_block_rows * 3
-        self.max_triplets_host = max(n_elastic_triplets + max_contact_body_triplets, 1)
-        self.padded_triplets_host = max(((self.max_triplets_host + 63) // 64) * 64, 64)
-        self.pcg_tol_rate = pcg_tol_rate
-
-        self.n_block_rows = qd.ndarray(qd.i32, shape=())
-        self.total_dof = qd.ndarray(qd.i32, shape=())
-        self.n_triplets = qd.ndarray(qd.i32, shape=())
-        self.max_triplets = qd.ndarray(qd.i32, shape=())
-        self.padded_triplets = qd.ndarray(qd.i32, shape=())
-        self.n_elastic_triplets = qd.ndarray(qd.i32, shape=())
-        self.max_contact_body_triplets = qd.ndarray(qd.i32, shape=())
-        self.dof_block_base = qd.ndarray(qd.i32, shape=())
-        self.n_extent_slots = qd.ndarray(qd.i32, shape=())
-        self.n_elastic = qd.ndarray(qd.i32, shape=())
-        self.required_block_rows = qd.ndarray(qd.i32, shape=())
-        self.triplet_overflow = qd.ndarray(qd.i32, shape=())
-        self.bcoo_valid = qd.ndarray(qd.i32, shape=())
-
-        self.n_block_rows.from_numpy(np.array(n_block_rows, dtype=np.int32))
-        self.total_dof.from_numpy(np.array(self.total_dof_host, dtype=np.int32))
-        self.n_triplets.from_numpy(np.array(n_elastic_triplets, dtype=np.int32))
-        self.max_triplets.from_numpy(np.array(self.max_triplets_host, dtype=np.int32))
-        self.padded_triplets.from_numpy(np.array(self.max_triplets_host, dtype=np.int32))
-        self.n_elastic_triplets.from_numpy(np.array(n_elastic_triplets, dtype=np.int32))
-        self.max_contact_body_triplets.from_numpy(np.array(max_contact_body_triplets, dtype=np.int32))
-        self.dof_block_base.from_numpy(np.array(dof_block_base, dtype=np.int32))
-        self.n_extent_slots.from_numpy(np.array(self.extent_slot_count_host, dtype=np.int32))
-        self.n_elastic.from_numpy(np.array(n_elastic_triplets, dtype=np.int32))
-        self.required_block_rows.from_numpy(np.array(n_block_rows, dtype=np.int32))
-        self.triplet_overflow.from_numpy(np.array(0, dtype=np.int32))
-        self.bcoo_valid.from_numpy(np.array(1, dtype=np.int32))
-
-        self.extent_slots = qd.ndarray(qd.i32, shape=(max(self.extent_slot_count_host, 1),))
-        self.extent_offsets = qd.ndarray(qd.i32, shape=(max(self.extent_slot_count_host, 1),))
-        self.extent_slots.from_numpy(np.zeros(max(self.extent_slot_count_host, 1), dtype=np.int32))
-        self.extent_offsets.from_numpy(np.full(max(self.extent_slot_count_host, 1), n_elastic_triplets, dtype=np.int32))
-
-        self.triplet_row = qd.ndarray(qd.i32, shape=(self.max_triplets_host,))
-        self.triplet_col = qd.ndarray(qd.i32, shape=(self.max_triplets_host,))
-        self.triplet_val = qd.ndarray(qd.f64, shape=(self.max_triplets_host * 9,))
-        self.triplet_keys = qd.ndarray(qd.u64, shape=(self.padded_triplets_host,))
-        self.triplet_perm = qd.ndarray(qd.i32, shape=(self.padded_triplets_host,))
-
-        self.sort_keys_out = qd.ndarray(qd.u64, shape=(self.padded_triplets_host,))
-        self.sort_perm_out = qd.ndarray(qd.i32, shape=(self.padded_triplets_host,))
-        self.triplet_sorter = DynamicRadixSort(
-            qd.u64,
-            self.padded_triplets_host,
+def get_global_linear_system_data(
+    *,
+    n_block_rows: int,
+    n_elastic_triplets: int,
+    max_contact_body_triplets: int,
+    dof_block_base: int,
+    extent_capacity: int,
+    n_extent_slots: int = 0,
+    genesis_legacy_sort_reduce: bool = False,
+) -> GlobalLinearSystem.Data:
+    if (
+        min(
+            n_block_rows,
+            n_elastic_triplets,
+            max_contact_body_triplets,
+            dof_block_base,
+            extent_capacity,
+            n_extent_slots,
         )
-        sort_scratch_size = max(
-            sort_scratch_slots(self.padded_triplets_host, self.sort_log256_max_n),
-            1,
-        )
-        self.sort_scratch = qd.ndarray(qd.u32, shape=(sort_scratch_size,))
-        self.sort_size = qd.ndarray(qd.i32, shape=())
-        self.sort_size.from_numpy(np.array(n_elastic_triplets, dtype=np.int32))
+        < 0
+    ):
+        raise ValueError("Global linear system sizes must be non-negative")
+    if n_extent_slots > extent_capacity:
+        raise ValueError("Global linear system extent count exceeds capacity")
+    total_dof = n_block_rows * 3
+    extent_storage = max(extent_capacity, 1)
+    dof_storage = max(total_dof, 1)
 
-        self.seg_flags = qd.ndarray(qd.i32, shape=(self.padded_triplets_host,))
-        self.seg_ids = qd.ndarray(qd.i32, shape=(self.padded_triplets_host,))
-        self.segment_scanner = DynamicExclusiveSum(
-            self.padded_triplets_host,
-        )
-        scan_scratch_size = max(
-            exclusive_scan_scratch_slots(self.padded_triplets_host, self.scan_log256_max_n),
-            1,
-        )
-        self.scan_scratch = qd.ndarray(qd.i32, shape=(scan_scratch_size,))
+    def scalar(value):
+        result = qd.ndarray(qd.i32, shape=())
+        result.from_numpy(np.array(value, dtype=np.int32))
+        return result
 
-        self.bcoo_nnz = qd.ndarray(qd.i32, shape=())
-        self.bcoo_row = qd.ndarray(qd.i32, shape=(self.max_triplets_host,))
-        self.bcoo_col = qd.ndarray(qd.i32, shape=(self.max_triplets_host,))
-        self.bcoo_val = qd.ndarray(qd.f64, shape=(self.max_triplets_host * 9,))
-        self.bcoo_nnz.from_numpy(np.array(0, dtype=np.int32))
+    extent_slots = qd.ndarray(qd.i32, shape=(extent_storage,))
+    extent_offsets = qd.ndarray(qd.i32, shape=(extent_storage,))
+    extent_slots.from_numpy(np.zeros(extent_storage, dtype=np.int32))
+    extent_offsets.from_numpy(np.full(extent_storage, n_elastic_triplets, dtype=np.int32))
+    x_sol = qd.ndarray(qd.f64, shape=(dof_storage,))
+    b_rhs = qd.ndarray(qd.f64, shape=(dof_storage,))
+    x_sol.from_numpy(np.zeros(dof_storage, dtype=np.float64))
+    b_rhs.from_numpy(np.zeros(dof_storage, dtype=np.float64))
+    data = GlobalLinearSystem.Data()
+    data.n_block_rows_host = n_block_rows
+    data.total_dof_host = total_dof
+    data.extent_capacity = extent_capacity
+    data.n_block_rows = scalar(n_block_rows)
+    data.total_dof = scalar(total_dof)
+    data.dof_block_base = scalar(dof_block_base)
+    data.n_extent_slots = scalar(n_extent_slots)
+    data.n_elastic = scalar(n_elastic_triplets)
+    data.required_block_rows = scalar(n_block_rows)
+    data.extent_slots = extent_slots
+    data.extent_offsets = extent_offsets
+    data.matrix = get_bcoo_matrix(
+        shape=(n_block_rows, n_block_rows),
+        block_shape=(3, 3),
+        value_type=qd.f64,
+        symmetric=True,
+        initial_triplets=n_elastic_triplets,
+        max_triplets=n_elastic_triplets + max_contact_body_triplets,
+        genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
+    )
+    data.x_sol = x_sol
+    data.b_rhs = b_rhs
+    return data
 
-        self.x_sol = qd.ndarray(qd.f64, shape=(max(self.total_dof_host, 1),))
-        self.b_rhs = qd.ndarray(qd.f64, shape=(max(self.total_dof_host, 1),))
-        self.is_initialized_host = True
 
-    def realloc_triplet_buffers(self, capacity: int, live_size: int | None = None) -> None:
-        if capacity <= self.triplet_row.shape[0]:
-            self.max_triplets.from_numpy(np.array(self.triplet_row.shape[0], dtype=np.int32))
-            if live_size is not None:
-                self.sort_size.from_numpy(np.array(live_size, dtype=np.int32))
-            return
-        padded_capacity = max(((capacity + 63) // 64) * 64, 64)
-        self.triplet_row = qd.ndarray(qd.i32, shape=(capacity,))
-        self.triplet_col = qd.ndarray(qd.i32, shape=(capacity,))
-        self.triplet_val = qd.ndarray(qd.f64, shape=(capacity * 9,))
-        self.triplet_keys = qd.ndarray(qd.u64, shape=(padded_capacity,))
-        self.triplet_perm = qd.ndarray(qd.i32, shape=(padded_capacity,))
-        self.sort_keys_out = qd.ndarray(qd.u64, shape=(padded_capacity,))
-        self.sort_perm_out = qd.ndarray(qd.i32, shape=(padded_capacity,))
-        self.triplet_sorter = DynamicRadixSort(
-            qd.u64,
-            padded_capacity,
-        )
-        self.sort_scratch = qd.ndarray(
-            qd.u32,
-            shape=(max(sort_scratch_slots(padded_capacity, self.sort_log256_max_n), 1),),
-        )
-        self.seg_flags = qd.ndarray(qd.i32, shape=(padded_capacity,))
-        self.seg_ids = qd.ndarray(qd.i32, shape=(padded_capacity,))
-        self.segment_scanner = DynamicExclusiveSum(
-            padded_capacity,
-        )
-        self.scan_scratch = qd.ndarray(
-            qd.i32,
-            shape=(max(exclusive_scan_scratch_slots(padded_capacity, self.scan_log256_max_n), 1),),
-        )
-        self.bcoo_row = qd.ndarray(qd.i32, shape=(capacity,))
-        self.bcoo_col = qd.ndarray(qd.i32, shape=(capacity,))
-        self.bcoo_val = qd.ndarray(qd.f64, shape=(capacity * 9,))
-        self.max_triplets.from_numpy(np.array(capacity, dtype=np.int32))
-        self.padded_triplets.from_numpy(np.array(capacity, dtype=np.int32))
-        self.max_contact_body_triplets.from_numpy(np.array(capacity, dtype=np.int32))
-        if live_size is not None:
-            self.sort_size.from_numpy(np.array(live_size, dtype=np.int32))
+@qd.func(requires_top_level=True)
+def derive_extents(data: qd.template()):
+    for _ in range(1):
+        total = qd.i32(0)
+        for slot in range(data.n_extent_slots[()]):
+            data.extent_offsets[slot] = total
+            total = total + data.extent_slots[slot]
+        data.n_elastic[()] = total
+        set_bcoo_n_triplets(data.matrix, total)
 
-    @qd.func(requires_top_level=True)
-    def derive_extents(self):
-        for _ in range(1):
-            total = qd.i32(0)
-            for slot in range(self.n_extent_slots[()]):
-                self.extent_offsets[slot] = total
-                total = total + self.extent_slots[slot]
-            self.n_elastic[()] = total
-            self.n_triplets[()] = total
-            overflow = total > self.max_triplets[()]
-            self.triplet_overflow[()] = qd.i32(overflow)
-            if overflow:
-                self.sort_size[()] = 0
-            else:
-                self.sort_size[()] = total
 
-    @qd.func(requires_top_level=True)
-    def compute_n_triplets(self, contact: qd.template()):
-        for _ in range(1):
-            total = self.n_elastic[()] + contact.n_unique_triplets[()]
-            self.n_triplets[()] = total
-            overflow = total > self.max_triplets[()]
-            self.triplet_overflow[()] = qd.i32(overflow)
-            if overflow:
-                self.sort_size[()] = 0
-            else:
-                self.sort_size[()] = total
+@qd.func(requires_top_level=True)
+def compute_n_triplets(data: qd.template(), contact_data: qd.template()):
+    for _ in range(1):
+        total = data.n_elastic[()] + contact_data.n_unique_triplets[()]
+        set_bcoo_n_triplets(data.matrix, total)
 
-    @qd.func(requires_top_level=True)
-    def zero_rhs(self):
-        for i in range(self.total_dof[()]):
-            self.b_rhs[i] = qd.f64(0.0)
 
-    @qd.func(requires_top_level=True)
-    def zero_triplet(self):
-        for i in range(self.n_triplets[()] * 9):
-            self.triplet_val[i] = qd.f64(0.0)
+@qd.func(requires_top_level=True)
+def zero_rhs(data: qd.template()):
+    for i in range(data.total_dof[()]):
+        data.b_rhs[i] = qd.f64(0.0)
 
-    @qd.func
-    def set_sym(self, slot, row, col, block: qd.template()):
-        if row <= col:
-            self.triplet_row[slot] = row
-            self.triplet_col[slot] = col
-            for i in qd.static(range(3)):
-                for j in qd.static(range(3)):
-                    self.triplet_val[slot * 9 + i * 3 + j] = block[i, j]
-        else:
-            self.triplet_row[slot] = col
-            self.triplet_col[slot] = row
-            for i in qd.static(range(3)):
-                for j in qd.static(range(3)):
-                    self.triplet_val[slot * 9 + i * 3 + j] = block[j, i]
 
-    @qd.func(requires_top_level=True)
-    def compose_sort_keys_padded(self):
-        qd.loop_config(name="body_compose_sort_keys")
-        for i in range(self.triplet_keys.shape[0]):
-            if i < self.padded_triplets[()]:
-                if i < self.n_triplets[()]:
-                    self.triplet_keys[i] = (qd.u64(self.triplet_row[i]) << 32) | qd.u64(self.triplet_col[i])
-                    self.triplet_perm[i] = i
-                else:
-                    self.triplet_keys[i] = qd.u64(0xFFFFFFFFFFFFFFFF)
-                    self.triplet_perm[i] = i
-
-    @qd.func(requires_top_level=True)
-    def sort_triplets(self):
-        if qd.static(self.genesis_legacy_sort_reduce_host):
-            sort(
-                self.triplet_keys,
-                self.sort_keys_out,
-                self.triplet_perm,
-                self.sort_perm_out,
-                self.sort_scratch,
-                self.sort_size,
-                qd.u64,
-                True,
-                self.sort_end_bit,
-                self.sort_log256_max_n,
-            )
-        else:
-            dynamic_radix_sort(
-                self.triplet_sorter,
-                self.triplet_keys,
-                self.sort_keys_out,
-                self.triplet_perm,
-                self.sort_perm_out,
-                self.padded_triplets[()],
-            )
-
-    @qd.func(requires_top_level=True)
-    def segment_flags_body(self):
-        qd.loop_config(name="body_segment_flags")
-        for i in range(self.triplet_keys.shape[0]):
-            if i < self.padded_triplets[()]:
-                flag = qd.i32(0)
-                if i < self.n_triplets[()] and (
-                    i == self.n_triplets[()] - 1 or self.triplet_keys[i] != self.triplet_keys[i + 1]
-                ):
-                    flag = qd.i32(1)
-                self.seg_flags[i] = flag
-
-    @qd.func(requires_top_level=True)
-    def scan_body(self):
-        if qd.static(self.genesis_legacy_sort_reduce_host):
-            exclusive_scan_add(
-                self.seg_flags,
-                self.seg_ids,
-                self.scan_scratch,
-                self.n_triplets[()],
-                qd.i32,
-                self.scan_log256_max_n,
-            )
-        else:
-            dynamic_exclusive_sum(
-                self.segment_scanner,
-                self.seg_flags,
-                self.seg_ids,
-                self.padded_triplets[()],
-            )
-
-    @qd.func(requires_top_level=True)
-    def zero_bcoo(self):
-        for _ in range(1):
-            self.bcoo_nnz[()] = 0
-        qd.loop_config(name="body_zero_bcoo")
-        for i in range(self.bcoo_val.shape[0]):
-            if i < self.padded_triplets[()] * 9:
-                self.bcoo_val[i] = qd.f64(0.0)
-
-    @qd.func(requires_top_level=True)
-    def fast_segmented_reduce_body(self):
-        if qd.static(self.genesis_legacy_sort_reduce_host):
-            qd.loop_config(name="body_fsr_merge_legacy")
-            for i in range(self.n_triplets[()]):
-                source = qd.i32(self.triplet_perm[i])
-                segment = self.seg_ids[i]
-                for component in qd.static(range(9)):
-                    qd.atomic_add(
-                        self.bcoo_val[segment * 9 + component],
-                        self.triplet_val[source * 9 + component],
-                    )
-        else:
-            fsr_reduce_body(
-                self.seg_ids,
-                self.triplet_perm,
-                self.triplet_keys,
-                self.triplet_val,
-                self.bcoo_val,
-                self.n_triplets,
-                self.padded_triplets,
-                self.triplet_keys.shape[0],
-            )
-
-    @qd.func(requires_top_level=True)
-    def extract_unique_body(self):
-        qd.loop_config(name="body_extract_unique")
-        for i in range(self.triplet_keys.shape[0]):
-            if i < self.padded_triplets[()] and i < self.n_triplets[()] and self.seg_flags[i] != 0:
-                segment = qd.i32(self.seg_ids[i])
-                key = self.triplet_keys[i]
-                self.bcoo_row[segment] = qd.i32(key >> 32)
-                self.bcoo_col[segment] = qd.i32(key & qd.u64(0xFFFFFFFF))
-                if i == self.n_triplets[()] - 1:
-                    self.bcoo_nnz[()] = segment + 1
-
-    @qd.func(requires_top_level=True)
-    def validate_bcoo(self):
-        for _ in range(1):
-            self.bcoo_valid[()] = qd.i32(self.triplet_overflow[()] == 0)
-        qd.loop_config(name="body_validate_bcoo")
-        for i in range(self.bcoo_nnz[()]):
-            row = self.bcoo_row[i]
-            col = self.bcoo_col[i]
-            if row > col:
-                self.bcoo_valid[()] = 0
-            if i > 0:
-                previous_row = self.bcoo_row[i - 1]
-                previous_col = self.bcoo_col[i - 1]
-                if previous_row > row or (previous_row == row and previous_col >= col):
-                    self.bcoo_valid[()] = 0
-
-    @qd.func(requires_top_level=True)
-    def body_sort_reduce(self):
-        self.compose_sort_keys_padded()
-        self.sort_triplets()
-        self.segment_flags_body()
-        self.scan_body()
-        self.zero_bcoo()
-        self.fast_segmented_reduce_body()
-        self.extract_unique_body()
-        self.validate_bcoo()
-
-    @qd.func(requires_top_level=True)
-    def traverse(self, fem_preconditioner: qd.template(), has_fem: qd.template()):
-        if qd.static(has_fem):
-            fem_preconditioner.memset()
-            fem_preconditioner.gather()
-            fem_preconditioner.invert()
-
-    @qd.func(requires_top_level=True)
-    def spmv(self, x: qd.template(), y: qd.template()):
-        # TODO: Replace row-side per-block atomics with a warp head-segmented
-        # reduction; keep mirrored-column atomics and benchmark the crossover.
-        for i in range(self.bcoo_nnz[()]):
-            row = self.bcoo_row[i]
-            col = self.bcoo_col[i]
-            block = qd.Matrix.zero(qd.f64, 3, 3)
-            for r in qd.static(range(3)):
-                for c in qd.static(range(3)):
-                    block[r, c] = self.bcoo_val[i * 9 + r * 3 + c]
-
-            x_col = qd.Vector([x[col * 3], x[col * 3 + 1], x[col * 3 + 2]])
-            y_row = block @ x_col
-            for r in qd.static(range(3)):
-                qd.atomic_add(y[row * 3 + r], y_row[r])
-
-            if row != col:
-                x_row = qd.Vector([x[row * 3], x[row * 3 + 1], x[row * 3 + 2]])
-                y_col = block.transpose() @ x_row
-                for r in qd.static(range(3)):
-                    qd.atomic_add(y[col * 3 + r], y_col[r])
+@qd.func(requires_top_level=True)
+def pcg_apply_operator(
+    data: qd.template(),
+    _linear_system_data: qd.template(),
+    direction: qd.template(),
+    output: qd.template(),
+):
+    sym_bcoo_spmv_naive(data.matrix, direction, output)

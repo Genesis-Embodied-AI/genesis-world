@@ -3,205 +3,278 @@ from __future__ import annotations
 import quadrants as qd
 
 from .broad_phase_system import BroadPhaseSystem
-from .dual_ee_query import DualEEQueryState
-from .lbvh import LBVH
+from .dual_ee_query import (
+    get_dual_ee_query_data,
+    handle_overflow as handle_dual_ee_overflow,
+    query as dual_ee_query,
+)
+from .lbvh import (
+    build_edge,
+    build_tri,
+    get_lbvh_data,
+    query_ee_warp,
+    query_et,
+    query_pt_batched,
+    query_pt_warp,
+)
+from .sim_system import SimData
 
 
-@qd.data_oriented
 class LBVHBroadPhase(BroadPhaseSystem):
-    """Baseline fp64-AABB LBVH broad phase."""
+    """Baseline LBVH broad phase with explicit mutable Data."""
 
-    def __init__(
-        self,
-        bound_type: str = "aabb",
-        pt_query: str = "warp",
-        ee_query: str = "dual",
-        dual_frontier_levels: int = 0,
-        dual_target_waves: float = 24.0,
-        dual_max_levels: int = 18,
-        genesis_legacy_sort_reduce: bool = False,
-        genesis_legacy_fp64_bounds: bool = False,
-        genesis_legacy_refit: bool = False,
-    ) -> None:
+    @qd.data_oriented
+    class Data(SimData):
+        bound_type: str
+        use_warp_pt: bool
+        use_dual_ee: bool
+        genesis_legacy_sort_reduce: bool
+        genesis_legacy_fp64_bounds: bool
+        genesis_legacy_refit: bool
+        has_triangle_bvh: bool
+        has_edge_bvh: bool
+        has_codim_point_bvh: bool
+        triangle_bvh: object
+        edge_bvh: object
+        ee_dual_state: object
+
+    def __init__(self, data: Data) -> None:
         super().__init__()
-        if pt_query not in ("warp", "batched"):
-            raise ValueError(f"Unsupported bvh/pt_query {pt_query!r}")
-        if ee_query not in ("dual", "warp"):
-            raise ValueError(f"Unsupported bvh/ee_query {ee_query!r}")
-        self.bound_type = bound_type
-        self.use_warp_pt = pt_query == "warp"
-        self.use_dual_ee = ee_query == "dual"
-        self.dual_frontier_levels = dual_frontier_levels
-        self.dual_target_waves = dual_target_waves
-        self.dual_max_levels = dual_max_levels
-        self.genesis_legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
-        self.genesis_legacy_fp64_bounds = bool(genesis_legacy_fp64_bounds)
-        self.genesis_legacy_refit = bool(genesis_legacy_refit)
-        self.has_triangle_bvh = False
-        self.has_edge_bvh = False
-        self.has_codim_point_bvh = False
+        self.data = data
+        self.actions: dict[str, object] = {}
 
-    def init_bvh(self, n_triangles: int, n_edges: int, n_codim_verts: int) -> None:
-        if n_triangles > 0:
-            self.triangle_bvh = LBVH(
-                n_triangles,
-                max(
-                    self.surface.surf_verts.shape[0],
-                    self.surface.surf_edges.shape[0],
-                    1,
-                ),
-                self.bound_type,
-                self.genesis_legacy_sort_reduce,
-                self.genesis_legacy_fp64_bounds,
-                self.genesis_legacy_refit,
-            )
-            self.has_triangle_bvh = True
-        if n_edges > 0:
-            self.edge_bvh = LBVH(
-                n_edges,
-                n_edges,
-                self.bound_type,
-                self.genesis_legacy_sort_reduce,
-                self.genesis_legacy_fp64_bounds,
-                self.genesis_legacy_refit,
-            )
-            if self.use_dual_ee:
-                self.ee_dual_state = DualEEQueryState(
-                    n_edges,
-                    self.dual_frontier_levels,
-                    self.dual_target_waves,
-                    self.dual_max_levels,
-                )
-            self.has_edge_bvh = True
-        self.has_codim_point_bvh = n_codim_verts > 0
-        if self.has_codim_point_bvh:
-            raise NotImplementedError("Explicit codimensional PE/PP broad phase is outside the cloth milestone")
+    def build(self) -> None:
+        super().build()
+        data = self.data
+        surface = self.surface_system.data
+        vertex = self.vertex_system.data
+        body = self.body_system.data
+        contact = self.contact_system.data
+        protocol = {
+            "triangle_build": (triangle_build, (data, surface, vertex)),
+            "edge_build": (edge_build, (data, surface, vertex)),
+            "pt_query": (pt_query, (data, surface, vertex, body, contact)),
+            "ee_query": (ee_query, (data, surface, vertex, body, contact)),
+            "trajectory_query": (trajectory_query, (data, surface, vertex, body, contact)),
+            "detect_initial_intersections": (
+                detect_initial_intersections,
+                (data, surface, vertex, body, contact),
+            ),
+        }
+        self.actions = {
+            name: self.create_action(kernel, *action_data) for name, (kernel, action_data) in protocol.items()
+        }
 
-    @qd.func(requires_top_level=True)
-    def triangle_build(self):
-        if qd.static(self.has_triangle_bvh):
-            self.triangle_bvh.calc_leaf_aabb_tri(self.surface, self.vertex)
-            self.triangle_bvh.reduce_scene_aabb()
-            self.triangle_bvh.calc_morton()
-            self.triangle_bvh.sort_morton()
-            self.triangle_bvh.extract_indices()
-            self.triangle_bvh.copy_leaf_aabb_to_temp()
-            self.triangle_bvh.reorder_leaf_aabb()
-            self.triangle_bvh.calc_leaf_nodes()
-            self.triangle_bvh.calc_internal_nodes()
-            self.triangle_bvh.memset_flags()
-            self.triangle_bvh.calc_internal_aabb()
-
-    @qd.func(requires_top_level=True)
-    def edge_build(self):
-        if qd.static(self.has_edge_bvh):
-            self.edge_bvh.calc_leaf_aabb_edge(self.surface, self.vertex)
-            self.edge_bvh.reduce_scene_aabb()
-            self.edge_bvh.calc_morton()
-            self.edge_bvh.sort_morton()
-            self.edge_bvh.extract_indices()
-            self.edge_bvh.copy_leaf_aabb_to_temp()
-            self.edge_bvh.reorder_leaf_aabb()
-            self.edge_bvh.calc_leaf_nodes()
-            self.edge_bvh.calc_internal_nodes()
-            self.edge_bvh.memset_flags()
-            self.edge_bvh.calc_internal_aabb()
-
-    @qd.func(requires_top_level=True)
-    def pt_query(self):
-        if qd.static(self.has_triangle_bvh):
-            if qd.static(self.use_warp_pt):
-                self.triangle_bvh.query_pt_warp(
-                    self.surface,
-                    self.vertex,
-                    self.body,
-                    self.contact,
-                    self.contact.pairs_pt,
-                    self.contact.n_pairs_pt,
-                    self.contact.max_pairs_pt[()],
-                    self.contact.d_hat[()],
-                    self.contact.overflow_flag,
-                )
-            else:
-                self.triangle_bvh.query_pt_batched(
-                    self.surface,
-                    self.vertex,
-                    self.body,
-                    self.contact,
-                    self.contact.pairs_pt,
-                    self.contact.n_pairs_pt,
-                    self.contact.max_pairs_pt[()],
-                    self.contact.d_hat[()],
-                    self.contact.overflow_flag,
-                )
-
-    @qd.func(requires_top_level=True)
-    def ee_query(self):
-        if qd.static(self.has_edge_bvh):
-            if qd.static(self.use_dual_ee):
-                self.ee_dual_state.query(
-                    self.edge_bvh,
-                    self.surface,
-                    self.vertex,
-                    self.body,
-                    self.contact,
-                    self.contact.pairs_ee,
-                    self.contact.n_pairs_ee,
-                    self.contact.max_pairs_ee[()],
-                    self.contact.overflow_flag,
-                )
-            else:
-                self.edge_bvh.query_ee_warp(
-                    self.surface,
-                    self.vertex,
-                    self.body,
-                    self.contact,
-                    self.contact.pairs_ee,
-                    self.contact.n_pairs_ee,
-                    self.contact.max_pairs_ee[()],
-                    qd.f64(0.0),
-                    self.contact.overflow_flag,
-                )
-
-    @qd.func(requires_top_level=True)
-    def trajectory_query(self):
-        self.pt_query()
-        self.ee_query()
+    def resolve_actions(self) -> dict[str, object]:
+        if self.is_building:
+            raise RuntimeError("Broad-phase actions are available only after build")
+        return {name: action.invocation for name, action in self.actions.items()}
 
     def handle_ee_query_overflow(self) -> bool:
-        if not self.has_edge_bvh:
+        data = self.data
+        if not data.has_edge_bvh:
             return False
-        if self.use_dual_ee:
-            return self.ee_dual_state.handle_overflow()
-        if int(self.edge_bvh.ee_warp_stack_overflow.to_numpy()):
+        if data.use_dual_ee:
+            return handle_dual_ee_overflow(data.ee_dual_state)
+        if int(data.edge_bvh.ee_warp_stack_overflow.to_numpy()):
             raise RuntimeError("warp EE shared frontier stack exhausted; increase ee_warp_stack_capacity")
         return False
 
 
-@qd.data_oriented
 class InfoLBVHBatchedBroadPhaseDop14(LBVHBroadPhase):
     """Default DOP14 broad phase with homogeneous-body culling and dual EE traversal."""
 
-    def __init__(
-        self,
-        *,
-        pt_query: str = "warp",
-        ee_query: str = "dual",
-        dual_frontier_levels: int = 0,
-        dual_target_waves: float = 24.0,
-        dual_max_levels: int = 18,
-        genesis_legacy_sort_reduce: bool = False,
-        genesis_legacy_fp64_bounds: bool = False,
-        genesis_legacy_refit: bool = False,
-    ) -> None:
-        super().__init__(
-            bound_type="dop14",
-            pt_query=pt_query,
-            ee_query=ee_query,
-            dual_frontier_levels=dual_frontier_levels,
-            dual_target_waves=dual_target_waves,
-            dual_max_levels=dual_max_levels,
-            genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
-            genesis_legacy_fp64_bounds=genesis_legacy_fp64_bounds,
-            genesis_legacy_refit=genesis_legacy_refit,
+
+def get_lbvh_broad_phase_data(
+    *,
+    n_triangles: int,
+    n_edges: int,
+    n_surface_vertices: int,
+    n_codim_verts: int = 0,
+    bound_type: str = "aabb",
+    pt_query: str = "warp",
+    ee_query: str = "dual",
+    dual_frontier_levels: int = 0,
+    dual_target_waves: float = 24.0,
+    dual_max_levels: int = 18,
+    genesis_legacy_sort_reduce: bool = False,
+    genesis_legacy_fp64_bounds: bool = False,
+    genesis_legacy_refit: bool = False,
+) -> LBVHBroadPhase.Data:
+    """Construct all LBVH-owned Data before broad-phase action registration."""
+    if pt_query not in ("warp", "batched"):
+        raise ValueError(f"Unsupported bvh/pt_query {pt_query!r}")
+    if ee_query not in ("dual", "warp"):
+        raise ValueError(f"Unsupported bvh/ee_query {ee_query!r}")
+    if n_codim_verts > 0:
+        raise NotImplementedError("Explicit codimensional PE/PP broad phase is outside the cloth milestone")
+
+    data = LBVHBroadPhase.Data()
+    data.bound_type = bound_type
+    data.use_warp_pt = pt_query == "warp"
+    data.use_dual_ee = ee_query == "dual"
+    data.genesis_legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
+    data.genesis_legacy_fp64_bounds = bool(genesis_legacy_fp64_bounds)
+    data.genesis_legacy_refit = bool(genesis_legacy_refit)
+    data.has_triangle_bvh = n_triangles > 0
+    data.has_edge_bvh = n_edges > 0
+    data.has_codim_point_bvh = False
+    data.triangle_bvh = (
+        get_lbvh_data(
+            n_triangles,
+            max(n_surface_vertices, n_edges, 1),
+            bound_type,
+            genesis_legacy_sort_reduce,
+            genesis_legacy_fp64_bounds,
+            genesis_legacy_refit,
+        )
+        if data.has_triangle_bvh
+        else None
+    )
+    data.edge_bvh = (
+        get_lbvh_data(
+            n_edges,
+            n_edges,
+            bound_type,
+            genesis_legacy_sort_reduce,
+            genesis_legacy_fp64_bounds,
+            genesis_legacy_refit,
+        )
+        if data.has_edge_bvh
+        else None
+    )
+    data.ee_dual_state = (
+        get_dual_ee_query_data(
+            n_edges,
+            dual_frontier_levels,
+            dual_target_waves,
+            dual_max_levels,
+        )
+        if data.has_edge_bvh and data.use_dual_ee
+        else None
+    )
+    return data
+
+
+def get_info_lbvh_batched_broad_phase_dop14_data(**kwargs) -> LBVHBroadPhase.Data:
+    return get_lbvh_broad_phase_data(bound_type="dop14", **kwargs)
+
+
+@qd.func(requires_top_level=True)
+def triangle_build(data: qd.template(), surface: qd.template(), vertex: qd.template()):
+    if qd.static(data.has_triangle_bvh):
+        build_tri(data.triangle_bvh, surface, vertex)
+
+
+@qd.func(requires_top_level=True)
+def edge_build(data: qd.template(), surface: qd.template(), vertex: qd.template()):
+    if qd.static(data.has_edge_bvh):
+        build_edge(data.edge_bvh, surface, vertex)
+
+
+@qd.func(requires_top_level=True)
+def pt_query(
+    data: qd.template(),
+    surface: qd.template(),
+    vertex: qd.template(),
+    body: qd.template(),
+    contact: qd.template(),
+):
+    if qd.static(data.has_triangle_bvh):
+        if qd.static(data.use_warp_pt):
+            query_pt_warp(
+                data.triangle_bvh,
+                surface,
+                vertex,
+                body,
+                contact,
+                contact.pairs_pt,
+                contact.n_pairs_pt,
+                contact.max_pairs_pt[()],
+                contact.d_hat[()],
+                contact.overflow_flag,
+            )
+        else:
+            query_pt_batched(
+                data.triangle_bvh,
+                surface,
+                vertex,
+                body,
+                contact,
+                contact.pairs_pt,
+                contact.n_pairs_pt,
+                contact.max_pairs_pt[()],
+                contact.d_hat[()],
+                contact.overflow_flag,
+            )
+
+
+@qd.func(requires_top_level=True)
+def ee_query(
+    data: qd.template(),
+    surface: qd.template(),
+    vertex: qd.template(),
+    body: qd.template(),
+    contact: qd.template(),
+):
+    if qd.static(data.has_edge_bvh):
+        if qd.static(data.use_dual_ee):
+            dual_ee_query(
+                data.ee_dual_state,
+                data.edge_bvh,
+                surface,
+                vertex,
+                body,
+                contact,
+                contact.pairs_ee,
+                contact.n_pairs_ee,
+                contact.max_pairs_ee[()],
+                contact.overflow_flag,
+            )
+        else:
+            query_ee_warp(
+                data.edge_bvh,
+                surface,
+                vertex,
+                body,
+                contact,
+                contact.pairs_ee,
+                contact.n_pairs_ee,
+                contact.max_pairs_ee[()],
+                qd.f64(0.0),
+                contact.overflow_flag,
+            )
+
+
+@qd.func(requires_top_level=True)
+def trajectory_query(
+    data: qd.template(),
+    surface: qd.template(),
+    vertex: qd.template(),
+    body: qd.template(),
+    contact: qd.template(),
+):
+    pt_query(data, surface, vertex, body, contact)
+    ee_query(data, surface, vertex, body, contact)
+
+
+@qd.func(requires_top_level=True)
+def detect_initial_intersections(
+    data: qd.template(),
+    surface: qd.template(),
+    vertex: qd.template(),
+    body: qd.template(),
+    contact: qd.template(),
+):
+    if qd.static(data.has_triangle_bvh):
+        query_et(
+            data.triangle_bvh,
+            surface,
+            vertex,
+            body,
+            contact,
+            contact.et_pairs,
+            contact.n_et_pairs,
+            contact.max_et_pairs[()],
+            contact.et_overflow_flag,
         )

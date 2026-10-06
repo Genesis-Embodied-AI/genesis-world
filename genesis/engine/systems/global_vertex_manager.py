@@ -3,151 +3,149 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from .sim_system import SimSystem
+from .sim_system import SimData, SimSystem
 
 
-@qd.data_oriented
 class GlobalVertexManager(SimSystem):
-    """Own the global world-space vertex index and contact attributes."""
+    """Organize global vertex data and dependency relationships."""
 
-    def __init__(self) -> None:
+    @qd.data_oriented
+    class Data(SimData):
+        """Device-visible global vertex index and contact attributes."""
+
+        n_verts: qd.Ndarray
+        positions: qd.Ndarray
+        safe_positions: qd.Ndarray
+        trajectory_end_positions: qd.Ndarray
+        x_bar: qd.Ndarray
+        body_id: qd.Ndarray
+        geometry_id: qd.Ndarray
+        geometry_source: qd.Ndarray
+        source_geometry_id: qd.Ndarray
+        geometry_environment: qd.Ndarray
+        thicknesses: qd.Ndarray
+        d_hats: qd.Ndarray
+        is_fixed: qd.Ndarray
+        in_contact: qd.Ndarray
+        path_rot: qd.Ndarray
+        path_pivot: qd.Ndarray
+        path_pivot_disp: qd.Ndarray
+        path_inflation: qd.Ndarray
+        path_kind: qd.Ndarray
+        path_speed: qd.Ndarray
+
+    def __init__(self, data: Data | None = None) -> None:
         super().__init__()
-        self.is_initialized_host = False
+        self.data = get_global_vertex_data(0) if data is None else data
 
     def build(self) -> None:
         from .finite_element import FiniteElementMethod
 
-        self.fem = self.require(FiniteElementMethod)
+        self.fem_system = self.require(FiniteElementMethod)
 
-    def init(self, n_verts: int) -> None:
-        if self.is_initialized_host:
-            raise RuntimeError("GlobalVertexManager is already initialized")
-        if n_verts < 0:
-            raise ValueError("GlobalVertexManager vertex count must be non-negative")
 
-        capacity = max(n_verts, 1)
-        self.n_verts = qd.ndarray(qd.i32, shape=())
-        self.positions = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.safe_positions = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.trajectory_end_positions = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.x_bar = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.body_id = qd.ndarray(qd.i32, shape=(capacity,))
-        self.geometry_id = qd.ndarray(qd.i32, shape=(capacity,))
-        self.geometry_source = qd.ndarray(qd.i32, shape=(capacity,))
-        self.source_geometry_id = qd.ndarray(qd.i32, shape=(capacity,))
-        self.geometry_environment = qd.ndarray(qd.i32, shape=(capacity,))
-        self.thicknesses = qd.ndarray(qd.f64, shape=(capacity,))
-        self.d_hats = qd.ndarray(qd.f64, shape=(capacity,))
-        self.is_fixed = qd.ndarray(qd.i32, shape=(capacity,))
-        self.in_contact = qd.ndarray(qd.i32, shape=(capacity,))
-        self.path_rot = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.path_pivot = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.path_pivot_disp = qd.ndarray(qd.f64, shape=(capacity, 3))
-        self.path_inflation = qd.ndarray(qd.f64, shape=(capacity,))
-        self.path_kind = qd.ndarray(qd.i32, shape=(capacity,))
-        self.path_speed = qd.ndarray(qd.f64, shape=(capacity,))
+def get_global_vertex_data(
+    n_verts: int,
+    *,
+    thicknesses: np.ndarray | None = None,
+    d_hats: np.ndarray | None = None,
+    is_fixed: np.ndarray | None = None,
+    geometry_ids: np.ndarray | None = None,
+    geometry_sources: np.ndarray | None = None,
+    source_geometry_ids: np.ndarray | None = None,
+    geometry_environments: np.ndarray | None = None,
+) -> GlobalVertexManager.Data:
+    if n_verts < 0:
+        raise ValueError("Global vertex count must be non-negative")
+    capacity = max(n_verts, 1)
 
-        self.n_verts.from_numpy(np.array(n_verts, dtype=np.int32))
-        self.positions.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.safe_positions.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.trajectory_end_positions.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.x_bar.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.body_id.from_numpy(np.full(capacity, -1, dtype=np.int32))
-        self.geometry_id.from_numpy(np.full(capacity, -1, dtype=np.int32))
-        self.geometry_source.from_numpy(np.full(capacity, -1, dtype=np.int32))
-        self.source_geometry_id.from_numpy(np.full(capacity, -1, dtype=np.int32))
-        self.geometry_environment.from_numpy(np.full(capacity, -1, dtype=np.int32))
-        self.thicknesses.from_numpy(np.zeros(capacity, dtype=np.float64))
-        self.d_hats.from_numpy(np.zeros(capacity, dtype=np.float64))
-        self.is_fixed.from_numpy(np.zeros(capacity, dtype=np.int32))
-        self.in_contact.from_numpy(np.zeros(capacity, dtype=np.int32))
-        self.path_rot.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.path_pivot.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.path_pivot_disp.from_numpy(np.zeros((capacity, 3), dtype=np.float64))
-        self.path_inflation.from_numpy(np.zeros(capacity, dtype=np.float64))
-        self.path_kind.from_numpy(np.zeros(capacity, dtype=np.int32))
-        self.path_speed.from_numpy(np.zeros(capacity, dtype=np.float64))
-        self.is_initialized_host = True
+    def values_or_default(values, dtype, default):
+        if values is None:
+            return np.full(capacity, default, dtype=dtype)
+        result = np.ascontiguousarray(values, dtype=dtype).reshape(-1)
+        if len(result) != n_verts:
+            raise ValueError("Global vertex input length must match n_verts")
+        if n_verts == 0:
+            return np.full(capacity, default, dtype=dtype)
+        return result
 
-    def wire_thickness_data(self, thicknesses: np.ndarray) -> None:
-        values = np.ascontiguousarray(thicknesses, dtype=np.float64).reshape(-1)
-        if len(values) != self.positions.shape[0]:
-            raise ValueError("GlobalVertexManager thickness count must match n_verts")
-        if np.any(values < 0.0):
-            raise ValueError("GlobalVertexManager thicknesses must be non-negative")
-        self.thicknesses.from_numpy(values)
+    thickness_values = values_or_default(thicknesses, np.float64, 0.0)
+    d_hat_values = values_or_default(d_hats, np.float64, 0.0)
+    fixed_values = values_or_default(is_fixed, np.int32, 0)
+    geometry_id_values = values_or_default(geometry_ids, np.int32, -1)
+    geometry_source_values = values_or_default(geometry_sources, np.int32, -1)
+    source_geometry_id_values = values_or_default(source_geometry_ids, np.int32, -1)
+    geometry_environment_values = values_or_default(geometry_environments, np.int32, -1)
+    if np.any(thickness_values[:n_verts] < 0.0):
+        raise ValueError("Global vertex thicknesses must be non-negative")
+    if d_hats is not None and np.any(d_hat_values[:n_verts] <= 0.0):
+        raise ValueError("Global vertex d_hats must be positive")
+    if np.any((fixed_values[:n_verts] != 0) & (fixed_values[:n_verts] != 1)):
+        raise ValueError("Global vertex fixed flags must be zero or one")
+    if geometry_ids is not None and np.any(geometry_id_values[:n_verts] < 0):
+        raise ValueError("Global vertex geometry IDs must be non-negative")
+    if geometry_sources is not None and np.any(
+        (geometry_source_values[:n_verts] != 0) & (geometry_source_values[:n_verts] != 1)
+    ):
+        raise ValueError("Global vertex geometry sources must be zero or one")
+    if source_geometry_ids is not None and np.any(source_geometry_id_values[:n_verts] < 0):
+        raise ValueError("Global vertex source geometry IDs must be non-negative")
+    if geometry_environments is not None and np.any(geometry_environment_values[:n_verts] < 0):
+        raise ValueError("Global vertex geometry environments must be non-negative")
 
-    def wire_d_hat_data(self, d_hats: np.ndarray) -> None:
-        values = np.ascontiguousarray(d_hats, dtype=np.float64).reshape(-1)
-        if len(values) != self.positions.shape[0]:
-            raise ValueError("GlobalVertexManager d_hat count must match n_verts")
-        if np.any(values <= 0.0):
-            raise ValueError("GlobalVertexManager d_hats must be positive")
-        self.d_hats.from_numpy(values)
+    def array(dtype, shape, values):
+        result = qd.ndarray(dtype, shape=shape)
+        result.from_numpy(values)
+        return result
 
-    def wire_is_fixed_data(self, is_fixed: np.ndarray) -> None:
-        values = np.ascontiguousarray(is_fixed, dtype=np.int32).reshape(-1)
-        if len(values) != self.positions.shape[0]:
-            raise ValueError("GlobalVertexManager fixed-flag count must match n_verts")
-        if np.any((values != 0) & (values != 1)):
-            raise ValueError("GlobalVertexManager fixed flags must be zero or one")
-        self.is_fixed.from_numpy(values)
+    zeros_3 = np.zeros((capacity, 3), dtype=np.float64)
+    data = GlobalVertexManager.Data()
+    data.n_verts = array(qd.i32, (), np.array(n_verts, dtype=np.int32))
+    data.positions = array(qd.f64, (capacity, 3), zeros_3)
+    data.safe_positions = array(qd.f64, (capacity, 3), zeros_3)
+    data.trajectory_end_positions = array(qd.f64, (capacity, 3), zeros_3)
+    data.x_bar = array(qd.f64, (capacity, 3), zeros_3)
+    data.body_id = array(qd.i32, (capacity,), np.full(capacity, -1, dtype=np.int32))
+    data.geometry_id = array(qd.i32, (capacity,), geometry_id_values)
+    data.geometry_source = array(qd.i32, (capacity,), geometry_source_values)
+    data.source_geometry_id = array(qd.i32, (capacity,), source_geometry_id_values)
+    data.geometry_environment = array(qd.i32, (capacity,), geometry_environment_values)
+    data.thicknesses = array(qd.f64, (capacity,), thickness_values)
+    data.d_hats = array(qd.f64, (capacity,), d_hat_values)
+    data.is_fixed = array(qd.i32, (capacity,), fixed_values)
+    data.in_contact = array(qd.i32, (capacity,), np.zeros(capacity, dtype=np.int32))
+    data.path_rot = array(qd.f64, (capacity, 3), zeros_3)
+    data.path_pivot = array(qd.f64, (capacity, 3), zeros_3)
+    data.path_pivot_disp = array(qd.f64, (capacity, 3), zeros_3)
+    data.path_inflation = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
+    data.path_kind = array(qd.i32, (capacity,), np.zeros(capacity, dtype=np.int32))
+    data.path_speed = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
+    return data
 
-    def wire_geometry_id_data(self, geometry_ids: np.ndarray) -> None:
-        values = np.ascontiguousarray(geometry_ids, dtype=np.int32).reshape(-1)
-        if len(values) != self.positions.shape[0]:
-            raise ValueError("GlobalVertexManager geometry ID count must match n_verts")
-        if np.any(values < 0):
-            raise ValueError("GlobalVertexManager geometry IDs must be non-negative")
-        self.geometry_id.from_numpy(values)
 
-    def wire_geometry_source_data(
-        self,
-        geometry_sources: np.ndarray,
-        source_geometry_ids: np.ndarray,
-        geometry_environments: np.ndarray,
-    ) -> None:
-        sources = np.ascontiguousarray(
-            geometry_sources,
-            dtype=np.int32,
-        ).reshape(-1)
-        source_ids = np.ascontiguousarray(
-            source_geometry_ids,
-            dtype=np.int32,
-        ).reshape(-1)
-        environments = np.ascontiguousarray(
-            geometry_environments,
-            dtype=np.int32,
-        ).reshape(-1)
-        if not (len(sources) == len(source_ids) == len(environments) == self.positions.shape[0]):
-            raise ValueError("GlobalVertexManager geometry source data must match n_verts")
-        if np.any((sources != 0) & (sources != 1)) or np.any(source_ids < 0) or np.any(environments < 0):
-            raise ValueError("GlobalVertexManager geometry source data is invalid")
-        self.geometry_source.from_numpy(sources)
-        self.source_geometry_id.from_numpy(source_ids)
-        self.geometry_environment.from_numpy(environments)
+@qd.func(requires_top_level=True)
+def record_safe_positions(data: qd.template()):
+    for i_vertex in range(data.n_verts[()]):
+        for axis in qd.static(range(3)):
+            data.safe_positions[i_vertex, axis] = data.positions[i_vertex, axis]
 
-    @qd.func(requires_top_level=True)
-    def record_safe_positions(self):
-        for i_vertex in range(self.n_verts[()]):
-            for axis in qd.static(range(3)):
-                self.safe_positions[i_vertex, axis] = self.positions[i_vertex, axis]
 
-    @qd.func(requires_top_level=True)
-    def reset_trajectory(self):
-        for i_vertex in range(self.n_verts[()]):
-            for axis in qd.static(range(3)):
-                value = self.positions[i_vertex, axis]
-                self.safe_positions[i_vertex, axis] = value
-                self.trajectory_end_positions[i_vertex, axis] = value
-                self.path_rot[i_vertex, axis] = 0.0
-                self.path_pivot[i_vertex, axis] = 0.0
-                self.path_pivot_disp[i_vertex, axis] = 0.0
-            self.path_inflation[i_vertex] = 0.0
-            self.path_kind[i_vertex] = 0
-            self.path_speed[i_vertex] = 0.0
+@qd.func(requires_top_level=True)
+def reset_trajectory(data: qd.template()):
+    for i_vertex in range(data.n_verts[()]):
+        for axis in qd.static(range(3)):
+            value = data.positions[i_vertex, axis]
+            data.safe_positions[i_vertex, axis] = value
+            data.trajectory_end_positions[i_vertex, axis] = value
+            data.path_rot[i_vertex, axis] = 0.0
+            data.path_pivot[i_vertex, axis] = 0.0
+            data.path_pivot_disp[i_vertex, axis] = 0.0
+        data.path_inflation[i_vertex] = 0.0
+        data.path_kind[i_vertex] = 0
+        data.path_speed[i_vertex] = 0.0
 
-    @qd.func(requires_top_level=True)
-    def zero_in_contact(self):
-        for i_vertex in range(self.n_verts[()]):
-            self.in_contact[i_vertex] = 0
+
+@qd.func(requires_top_level=True)
+def zero_in_contact(data: qd.template()):
+    for i_vertex in range(data.n_verts[()]):
+        data.in_contact[i_vertex] = 0

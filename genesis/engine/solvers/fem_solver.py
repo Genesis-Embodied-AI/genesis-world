@@ -332,8 +332,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.vertex_constraints.link_idx.fill(-1)
 
     def reset_grad(self):
-        self.elements_v.grad.fill(0)
-        self.elements_el.grad.fill(0)
+        # Keep zeroing on device: MatrixField.fill(0) expands scalar zero to a
+        # Python tuple, which disables Quadrants template-mapper caching.
+        self.reset_grad_till_frame(self.sim.substeps_local + 1)
 
         for entity in self._entities:
             entity.reset_grad()
