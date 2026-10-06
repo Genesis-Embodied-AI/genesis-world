@@ -230,7 +230,9 @@ def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     has_envs_differed = False
     for i_step in range(80):
         scene.step()
-        is_arms_touching = tensor_to_array(dual_arm.get_contacts(with_entity=dual_arm)["valid_mask"].any(dim=-1))
+        # FIXME: pytorch#TBD - 'any' over an empty dimension returns uninitialized memory on MPS, so the contacts are
+        # reduced on the host, an environment without any contact leaving that dimension empty
+        is_arms_touching = tensor_to_array(dual_arm.get_contacts(with_entity=dual_arm)["valid_mask"]).any(axis=-1)
         assert_equal(qd_to_numpy(n_islands), 3 - is_arms_touching)
         has_envs_differed |= is_arms_touching[0] != is_arms_touching[1]
         if i_step == 0:

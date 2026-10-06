@@ -8,7 +8,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.states.solvers import RigidSolverState
-from genesis.utils.misc import qd_to_numpy, qd_to_torch
+from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
@@ -767,11 +767,13 @@ def test_set_root_pose(batch_fixed_verts, relative, show_viewer, tol):
 
     # Simulate for a while to check if the dynamic object is colliding with the static one
     if batch_fixed_verts:
-        has_collided = torch.tensor([False, False], dtype=torch.bool, device=gs.device)
+        has_collided = np.zeros((2,), dtype=bool)
         for _ in range(20):
             scene.step()
             contacts_state = cube.get_contacts(with_entity=robot, exclude_self_contact=True)
-            has_collided |= contacts_state["valid_mask"].any(dim=-1)
+            # FIXME: pytorch#TBD - 'any' over an empty dimension returns uninitialized memory on MPS, so the contacts
+            # are reduced on the host, an environment without any contact leaving that dimension empty
+            has_collided |= tensor_to_array(contacts_state["valid_mask"]).any(axis=-1)
             if has_collided.all():
                 break
         else:
