@@ -183,56 +183,56 @@ class SimEngine:
         pcg_solver_invocations: tuple[ActionInvocation, ...]
         pcg_operator_actions: tuple[ActionInvocation, ...]
         pcg_preconditioner_actions: tuple[ActionInvocation, ...]
-        contact_reset_initial_intersections_action: ActionInvocation
-        contact_flag_et_intersections_action: ActionInvocation
-        contact_reset_counted_demand_action: ActionInvocation
-        contact_adaptive_kappa_update_action: ActionInvocation
-        contact_adaptive_kappa_newton_tick_action: ActionInvocation
-        contact_reset_collision_counts_action: ActionInvocation
-        contact_halfplane_query_action: ActionInvocation
-        contact_init_ccd_action: ActionInvocation
-        contact_reset_frame_ccd_action: ActionInvocation
-        contact_ccd_alpha_pt_action: ActionInvocation
-        contact_ccd_alpha_ee_action: ActionInvocation
-        contact_ccd_alpha_ph_action: ActionInvocation
-        contact_reduce_ccd_alpha_action: ActionInvocation
-        contact_ccd_action: ActionInvocation
-        contact_reset_contact_energy_action: ActionInvocation
-        contact_sum_contact_energy_action: ActionInvocation
-        contact_check_assembly_capacity_action: ActionInvocation
-        contact_check_assembly_padding_action: ActionInvocation
-        contact_shrink_assembly_padding_action: ActionInvocation
-        contact_reset_assembly_counts_action: ActionInvocation
-        contact_sort_reduce_action: ActionInvocation
-        broad_phase_triangle_build_action: ActionInvocation
-        broad_phase_edge_build_action: ActionInvocation
-        broad_phase_pt_query_action: ActionInvocation
-        broad_phase_ee_query_action: ActionInvocation
-        broad_phase_trajectory_query_action: ActionInvocation
-        broad_phase_detect_initial_intersections_action: ActionInvocation
-        contact_constitution_snapshot_lagged_positions_action: ActionInvocation
-        contact_constitution_friction_pair_filter_pt_action: ActionInvocation
-        contact_constitution_friction_pair_filter_ee_action: ActionInvocation
-        contact_constitution_friction_pair_filter_ph_action: ActionInvocation
-        contact_constitution_friction_snapshot_action: ActionInvocation
-        contact_constitution_count_active_pt_action: ActionInvocation
-        contact_constitution_count_active_ee_action: ActionInvocation
-        contact_constitution_count_active_ph_action: ActionInvocation
-        contact_constitution_count_active_action: ActionInvocation
-        contact_constitution_filter_assemble_pt_action: ActionInvocation
-        contact_constitution_filter_assemble_ee_action: ActionInvocation
-        contact_constitution_filter_assemble_ph_action: ActionInvocation
-        contact_constitution_friction_assemble_pt_action: ActionInvocation
-        contact_constitution_friction_assemble_ee_action: ActionInvocation
-        contact_constitution_friction_assemble_ph_action: ActionInvocation
-        contact_constitution_filter_assemble_action: ActionInvocation
-        contact_constitution_filter_energy_pt_action: ActionInvocation
-        contact_constitution_filter_energy_ee_action: ActionInvocation
-        contact_constitution_filter_energy_ph_action: ActionInvocation
-        contact_constitution_friction_energy_pt_action: ActionInvocation
-        contact_constitution_friction_energy_ee_action: ActionInvocation
-        contact_constitution_friction_energy_ph_action: ActionInvocation
-        contact_constitution_contact_energy_action: ActionInvocation
+        contact_reset_initial_intersections_action: ActionInvocation | None
+        contact_flag_et_intersections_action: ActionInvocation | None
+        contact_reset_counted_demand_action: ActionInvocation | None
+        contact_adaptive_kappa_update_action: ActionInvocation | None
+        contact_adaptive_kappa_newton_tick_action: ActionInvocation | None
+        contact_reset_collision_counts_action: ActionInvocation | None
+        contact_halfplane_query_action: ActionInvocation | None
+        contact_init_ccd_action: ActionInvocation | None
+        contact_reset_frame_ccd_action: ActionInvocation | None
+        contact_ccd_alpha_pt_action: ActionInvocation | None
+        contact_ccd_alpha_ee_action: ActionInvocation | None
+        contact_ccd_alpha_ph_action: ActionInvocation | None
+        contact_reduce_ccd_alpha_action: ActionInvocation | None
+        contact_ccd_action: ActionInvocation | None
+        contact_reset_contact_energy_action: ActionInvocation | None
+        contact_sum_contact_energy_action: ActionInvocation | None
+        contact_check_assembly_capacity_action: ActionInvocation | None
+        contact_check_assembly_padding_action: ActionInvocation | None
+        contact_shrink_assembly_padding_action: ActionInvocation | None
+        contact_reset_assembly_counts_action: ActionInvocation | None
+        contact_sort_reduce_action: ActionInvocation | None
+        broad_phase_triangle_build_action: ActionInvocation | None
+        broad_phase_edge_build_action: ActionInvocation | None
+        broad_phase_pt_query_action: ActionInvocation | None
+        broad_phase_ee_query_action: ActionInvocation | None
+        broad_phase_trajectory_query_action: ActionInvocation | None
+        broad_phase_detect_initial_intersections_action: ActionInvocation | None
+        contact_constitution_snapshot_lagged_positions_action: ActionInvocation | None
+        contact_constitution_friction_pair_filter_pt_action: ActionInvocation | None
+        contact_constitution_friction_pair_filter_ee_action: ActionInvocation | None
+        contact_constitution_friction_pair_filter_ph_action: ActionInvocation | None
+        contact_constitution_friction_snapshot_action: ActionInvocation | None
+        contact_constitution_count_active_pt_action: ActionInvocation | None
+        contact_constitution_count_active_ee_action: ActionInvocation | None
+        contact_constitution_count_active_ph_action: ActionInvocation | None
+        contact_constitution_count_active_action: ActionInvocation | None
+        contact_constitution_filter_assemble_pt_action: ActionInvocation | None
+        contact_constitution_filter_assemble_ee_action: ActionInvocation | None
+        contact_constitution_filter_assemble_ph_action: ActionInvocation | None
+        contact_constitution_friction_assemble_pt_action: ActionInvocation | None
+        contact_constitution_friction_assemble_ee_action: ActionInvocation | None
+        contact_constitution_friction_assemble_ph_action: ActionInvocation | None
+        contact_constitution_filter_assemble_action: ActionInvocation | None
+        contact_constitution_filter_energy_pt_action: ActionInvocation | None
+        contact_constitution_filter_energy_ee_action: ActionInvocation | None
+        contact_constitution_filter_energy_ph_action: ActionInvocation | None
+        contact_constitution_friction_energy_pt_action: ActionInvocation | None
+        contact_constitution_friction_energy_ee_action: ActionInvocation | None
+        contact_constitution_friction_energy_ph_action: ActionInvocation | None
+        contact_constitution_contact_energy_action: ActionInvocation | None
 
     def __init__(self) -> None:
         if gs.backend == gs.cpu:
