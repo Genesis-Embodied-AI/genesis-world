@@ -4,7 +4,6 @@ import subprocess
 from pathlib import Path
 import pytest
 
-
 EXAMPLES_DIR = Path(__file__).parents[1] / "examples"
 
 ALLOW_PATTERNS = {
@@ -16,6 +15,8 @@ ALLOW_PATTERNS = {
     "fluid/**/*.py",
     "ipc/**/*.py",
     "kinematic/**/*.py",
+    "newton_coupling/cloth_stack.py",
+    "newton_coupling/franka_cloth_grasp.py",
     "rendering/**/*.py",
     "rigid/**/*.py",
     "sap_coupling/**/*.py",
