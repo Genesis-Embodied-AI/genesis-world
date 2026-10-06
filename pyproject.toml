@@ -11,7 +11,7 @@ requires-python = ">=3.10,<3.14"
 dependencies = [
     "psutil",
     # Includes checkpoint-contained graph parallel regions required by the Newton coupling runtime.
-    "quadrants @ git+https://github.com/alanray-tech/quadrants.git@974a8975b24518e44618c0c071d9202df6d9f693",
+    "quadrants @ git+https://github.com/alanray-tech/quadrants.git@73920ffc15ee7dfc55227bbf4283d2a81c9a3aa4",
     # * 2.13.0 sets the private state of a model built by 'model_construct', which pickling reads.
     "pydantic>=2.13.0",
     "numpy>=1.26.4",
