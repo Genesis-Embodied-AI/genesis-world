@@ -54,7 +54,7 @@ def main() -> None:
     gs.init(backend=gs.gpu, precision="64", logging_level="info", seed=0)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT),
-        coupler_options=gs.options.NewtonCouplerOptions(
+        engine_options=gs.options.NewtonEngineOptions(
             contact_d_hat=1e-3,
             contact_friction_mu=2.0,
             contact_resistance=1e4,

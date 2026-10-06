@@ -1,3 +1,4 @@
+from .engines import BaseEngineOptions, LegacyEngineOptions, NewtonEngineOptions
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
@@ -8,7 +9,6 @@ from .solvers import (
     IPCCouplerOptions,
     LegacyCouplerOptions,
     MPMOptions,
-    NewtonCouplerOptions,
     PBDOptions,
     RigidOptions,
     SAPCouplerOptions,
@@ -21,14 +21,16 @@ from .vis import ViewerOptions, VisOptions
 
 __all__ = [
     "KinematicOptions",
+    "BaseEngineOptions",
     "BaseCouplerOptions",
     "CoacdOptions",
     "FEMOptions",
     "FoamOptions",
     "IPCCouplerOptions",
     "LegacyCouplerOptions",
+    "LegacyEngineOptions",
     "MPMOptions",
-    "NewtonCouplerOptions",
+    "NewtonEngineOptions",
     "PBDOptions",
     "ProfilingOptions",
     "RigidOptions",

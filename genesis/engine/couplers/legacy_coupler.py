@@ -13,7 +13,7 @@ from genesis.utils.array_class import LinksState
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
 
 if TYPE_CHECKING:
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
 
 CLAMPED_INV_DT = 50.0
 
@@ -28,7 +28,7 @@ class LegacyCoupler(RBC):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, simulator: "Simulator", options: "LegacyCouplerOptions") -> None:
+    def __init__(self, simulator: "BaseSimulator", options: "LegacyCouplerOptions") -> None:
         self.sim = simulator
         self.options = options
 

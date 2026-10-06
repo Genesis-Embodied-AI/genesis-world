@@ -91,7 +91,7 @@ def test_qcloth_contact_graph_step(
     make_contact_grid(path, height=0.008)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     scene.add_entity(
@@ -127,7 +127,7 @@ def test_contact_checkpoint_capacity_growth(tmp_path, show_viewer):
     make_contact_grid(path, height=0.008)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     scene.add_entity(
@@ -173,7 +173,7 @@ def test_contact_checkpoint_yield_skips_pcg(tmp_path, show_viewer):
     make_contact_grid(path, height=0.008)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     scene.add_entity(
@@ -216,7 +216,7 @@ def test_contact_rejects_initial_cloth_intersection(tmp_path, show_viewer):
     make_contact_grid(path, height=0.2)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     material = gs.materials.FEM.QCloth(E=1e4, thickness=1e-3)
@@ -248,7 +248,7 @@ def test_et_report_resolves_rigid_geometry(tmp_path, show_viewer):
     make_contact_grid(path, n=5, size=0.16, height=0.04)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     scene.add_entity(
@@ -284,7 +284,7 @@ def test_et_report_resolves_rigid_geometry(tmp_path, show_viewer):
 def test_crossed_vertical_cloths_drop_without_penetration(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     asset = Path(__file__).parents[2] / "examples" / "newton_coupling" / "assets" / "qcloth_grid.obj"

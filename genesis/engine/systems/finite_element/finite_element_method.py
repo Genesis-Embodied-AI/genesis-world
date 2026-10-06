@@ -83,6 +83,7 @@ class FiniteElementMethod(SimSystem):
         self._bridge_vertex = qd.ndarray(qd.i32, shape=(self.vert_capacity_host,))
         self._bridge_environment = qd.ndarray(qd.i32, shape=(self.vert_capacity_host,))
         self._scene_elements_v = finite_element.scene_elements_v
+        self._scene_vertex_constraints = finite_element.scene_vertex_constraints
         self._scene_frame = finite_element.scene_frame
 
         self.n_fem_verts.from_numpy(np.array(finite_element.n_verts, dtype=np.int32))
@@ -156,6 +157,33 @@ class FiniteElementMethod(SimSystem):
     @qd.func(requires_top_level=True)
     def predict(self, sim_config: qd.template()):
         self.kinetic.predict(self, sim_config)
+
+    @qd.func(requires_top_level=True)
+    def sync_from_scene(self, vertex: qd.template()):
+        for i_vertex in range(self.n_fem_verts[()]):
+            scene_vertex = self._bridge_vertex[i_vertex]
+            environment = self._bridge_environment[i_vertex]
+            constraint = self._scene_vertex_constraints[scene_vertex, environment]
+            is_fixed = constraint.is_constrained and not constraint.is_soft_constraint and constraint.link_idx < 0
+            self.is_fixed[i_vertex] = qd.cast(is_fixed, qd.i32)
+            global_vertex = self.global_vert_offset[()] + i_vertex
+            vertex.is_fixed[global_vertex] = qd.cast(is_fixed, qd.i32)
+            for axis in qd.static(range(3)):
+                position = self._scene_elements_v[self._scene_frame, scene_vertex, environment].pos[axis]
+                velocity = self._scene_elements_v[self._scene_frame, scene_vertex, environment].vel[axis]
+                if is_fixed:
+                    position = constraint.target_pos[axis]
+                    velocity = qd.f64(0.0)
+                self.x[i_vertex, axis] = position
+                self.x_prev[i_vertex, axis] = position
+                self.x_tilde[i_vertex, axis] = position
+                self.x_temp[i_vertex, axis] = position
+                self.velocities[i_vertex, axis] = velocity
+                self.dx[i_vertex, axis] = qd.f64(0.0)
+                vertex.positions[global_vertex, axis] = position
+                vertex.safe_positions[global_vertex, axis] = position
+                vertex.trajectory_end_positions[global_vertex, axis] = position
+                vertex.x_bar[global_vertex, axis] = position
 
     @qd.func(requires_top_level=True)
     def initialize_global_vertices(self, vertex: qd.template()):

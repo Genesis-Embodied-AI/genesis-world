@@ -35,7 +35,7 @@ from .recorder_manager import register_recording
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene, TrajectorySource
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
     from genesis.options.renderers import RendererOptions
     from genesis.options.vis import ViewerOptions, VisOptions
 
@@ -110,7 +110,7 @@ def _frame_arrays(frame: np.ndarray, fields: list[FrameField], kinds: frozenset[
     }
 
 
-def _frame_fields(sim: "Simulator", kinds: frozenset[DataKind]) -> list[FrameField]:
+def _frame_fields(sim: "BaseSimulator", kinds: frozenset[DataKind]) -> list[FrameField]:
     """Lay out one frame of the given kinds (see '_read_frame'): every array, then the step count of each environment
     and the forward-kinematics flags of every kinematic or rigid solver.
     """
@@ -131,7 +131,7 @@ def _frame_fields(sim: "Simulator", kinds: frozenset[DataKind]) -> list[FrameFie
     return fields
 
 
-def _read_frame(sim: "Simulator", kinds: frozenset[DataKind]) -> np.ndarray:
+def _read_frame(sim: "BaseSimulator", kinds: frozenset[DataKind]) -> np.ndarray:
     """Return one frame as a flat uint8 buffer laid out as '_frame_fields' states.
 
     Where zero-copy views exist the arrays are concatenated on the device and cross to the host once. Otherwise each

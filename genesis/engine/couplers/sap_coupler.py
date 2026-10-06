@@ -17,7 +17,7 @@ from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 
 if TYPE_CHECKING:
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
 
 MARCHING_TETS_EDGE_TABLE = (
     (-1, -1, -1, -1),
@@ -179,7 +179,7 @@ class SAPCoupler(RBC):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, simulator: "Simulator", options: "SAPCouplerOptions") -> None:
+    def __init__(self, simulator: "BaseSimulator", options: "SAPCouplerOptions") -> None:
         self.sim = simulator
         self.options = options
         self.rigid_solver = self.sim.rigid_solver
@@ -1869,7 +1869,7 @@ class BaseConstraintHandler(RBC):
     Base class for constraint handling in SAPCoupler.
     """
 
-    def __init__(self, simulator: "Simulator", stiffness: float = 1e8, beta: float = 0.1) -> None:
+    def __init__(self, simulator: "BaseSimulator", stiffness: float = 1e8, beta: float = 0.1) -> None:
         self.sim = simulator
         self.stiffness = stiffness
         self.beta = beta
@@ -1924,7 +1924,7 @@ class RigidConstraintHandler(BaseConstraintHandler):
     Rigid body constraints in SAPCoupler. Currently only support joint equality constraints.
     """
 
-    def __init__(self, simulator: "Simulator", stiffness: float = 1e8, beta: float = 0.1) -> None:
+    def __init__(self, simulator: "BaseSimulator", stiffness: float = 1e8, beta: float = 0.1) -> None:
         super().__init__(simulator, stiffness, beta)
         self.rigid_solver = simulator.rigid_solver
         self.constraint_solver = simulator.rigid_solver.constraint_solver
@@ -2097,7 +2097,7 @@ class BaseContactHandler(RBC):
     and handling contact-related computations.
     """
 
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         self.sim = simulator
         self.coupler = simulator.coupler
         self.n_contact_pairs = qd.field(gs.qd_int, shape=())
@@ -2265,7 +2265,7 @@ class BaseContactHandler(RBC):
 
 @qd.data_oriented
 class RigidContactHandler(BaseContactHandler):
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         super().__init__(simulator)
         self.rigid_solver = self.sim.rigid_solver
 
@@ -2368,7 +2368,7 @@ class RigidContactHandler(BaseContactHandler):
 
 @qd.data_oriented
 class RigidRigidContactHandler(RigidContactHandler):
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         super().__init__(simulator)
 
     @qd.func
@@ -2440,7 +2440,7 @@ class RigidRigidContactHandler(RigidContactHandler):
 
 @qd.data_oriented
 class FEMContactHandler(BaseContactHandler):
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         super().__init__(simulator)
         self.fem_solver = simulator.fem_solver
 
@@ -2481,7 +2481,7 @@ class FEMContactHandler(BaseContactHandler):
 
 @qd.data_oriented
 class RigidFEMContactHandler(RigidContactHandler):
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         super().__init__(simulator)
         self.fem_solver = simulator.fem_solver
 
@@ -2549,7 +2549,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
     contact-related computations.
     """
 
-    def __init__(self, simulator: "Simulator", eps: float = 1e-10) -> None:
+    def __init__(self, simulator: "BaseSimulator", eps: float = 1e-10) -> None:
         super().__init__(simulator)
         self.name = "FEMFloorTetContactHandler"
         self.fem_solver = self.sim.fem_solver
@@ -2736,7 +2736,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
     between tetrahedral elements, computing contact pairs, and managing contact-related computations.
     """
 
-    def __init__(self, simulator: "Simulator", eps: float = 1e-10) -> None:
+    def __init__(self, simulator: "BaseSimulator", eps: float = 1e-10) -> None:
         super().__init__(simulator)
         self.name = "FEMSelfTetContactHandler"
         self.eps = eps
@@ -3099,7 +3099,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
     contact-related computations.
     """
 
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         super().__init__(simulator)
         self.name = "FEMFloorVertContactHandler"
         self.fem_solver = self.sim.fem_solver
@@ -3189,7 +3189,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
 
 @qd.data_oriented
 class RigidFloorVertContactHandler(RigidContactHandler):
-    def __init__(self, simulator: "Simulator") -> None:
+    def __init__(self, simulator: "BaseSimulator") -> None:
         super().__init__(simulator)
         self.name = "RigidFloorVertContactHandler"
         self.rigid_solver = self.sim.rigid_solver
@@ -3248,7 +3248,7 @@ class RigidFloorVertContactHandler(RigidContactHandler):
 
 @qd.data_oriented
 class RigidFloorTetContactHandler(RigidContactHandler):
-    def __init__(self, simulator: "Simulator", eps: float = 1e-10) -> None:
+    def __init__(self, simulator: "BaseSimulator", eps: float = 1e-10) -> None:
         super().__init__(simulator)
         self.name = "RigidFloorTetContactHandler"
         self.rigid_solver = self.sim.rigid_solver
@@ -3403,7 +3403,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
     between tetrahedral elements, computing contact pairs, and managing contact-related computations.
     """
 
-    def __init__(self, simulator: "Simulator", eps: float = 1e-10) -> None:
+    def __init__(self, simulator: "BaseSimulator", eps: float = 1e-10) -> None:
         super().__init__(simulator)
         self.name = "RigidFemTriTetContactHandler"
         self.eps = eps
@@ -3742,7 +3742,7 @@ class RigidRigidTetContactHandler(RigidRigidContactHandler):
     between tetrahedral elements, computing contact pairs, and managing contact-related computations.
     """
 
-    def __init__(self, simulator: "Simulator", eps: float = 1e-10) -> None:
+    def __init__(self, simulator: "BaseSimulator", eps: float = 1e-10) -> None:
         super().__init__(simulator)
         self.coupler = simulator.coupler
         self.name = "RigidRigidTetContactHandler"

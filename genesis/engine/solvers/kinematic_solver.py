@@ -67,7 +67,7 @@ from .rigid.abd.misc import (
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
 
 
 TERRAIN_HEIGHT_QUERY_TILT_TOLERANCE = 1e-3
@@ -169,7 +169,7 @@ class KinematicSolver(Solver):
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: "KinematicOptions") -> None:
+    def __init__(self, scene: "Scene", sim: "BaseSimulator", options: "KinematicOptions") -> None:
         super().__init__(scene, sim, options)
 
         self._enable_collision = False

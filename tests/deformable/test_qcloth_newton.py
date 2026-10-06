@@ -58,13 +58,35 @@ def test_qcloth_zero_hinge_capacity():
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_scene_selects_concrete_simulator(show_viewer):
+    from genesis.engine.newton_simulator import NewtonSimulator
+    from genesis.engine.simulator import LegacySimulator
+
+    legacy_scene = gs.Scene(show_viewer=show_viewer)
+    newton_scene = gs.Scene(
+        engine_options=gs.options.NewtonEngineOptions(),
+        show_viewer=show_viewer,
+    )
+
+    assert isinstance(legacy_scene.sim, LegacySimulator)
+    assert isinstance(newton_scene.sim, NewtonSimulator)
+    with pytest.raises(gs.GenesisException, match="coupler_options"):
+        gs.Scene(
+            engine_options=gs.options.NewtonEngineOptions(),
+            coupler_options=gs.options.LegacyCouplerOptions(),
+            show_viewer=show_viewer,
+        )
+
+
+@pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_qcloth_graph_step(tmp_path, show_viewer):
     path = tmp_path / "qcloth_grid.obj"
     make_grid(path)
     scene = gs.Scene(
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     cloth = scene.add_entity(
@@ -103,12 +125,12 @@ def test_qcloth_graph_step(tmp_path, show_viewer):
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_newton_coupler_scene_step_and_reset(tmp_path, show_viewer):
-    path = tmp_path / "newton_coupler_grid.obj"
+def test_newton_engine_scene_step_and_reset(tmp_path, show_viewer):
+    path = tmp_path / "newton_engine_grid.obj"
     make_grid(path)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     cloth = scene.add_entity(
@@ -116,17 +138,16 @@ def test_newton_coupler_scene_step_and_reset(tmp_path, show_viewer):
         material=gs.materials.FEM.QCloth(E=1e4, thickness=1e-3),
     )
     scene.build()
+    first_engine = scene.sim.engine
     cloth.set_vertex_constraints([0, 2])
 
-    with pytest.raises(RuntimeError, match="created lazily"):
-        scene.sim.coupler.engine
     initial = np.squeeze(tensor_to_array(cloth.get_state().pos), axis=0).copy()
     for _ in range(3):
         scene.step()
     first_final = np.squeeze(tensor_to_array(cloth.get_state().pos), axis=0).copy()
-    first_engine = scene.sim.coupler.engine
 
     assert scene.sim.cur_step_global == 3
+    assert scene.sim.engine is first_engine
     assert np.isfinite(first_final).all()
     np.testing.assert_array_equal(first_final[[0, 2]], initial[[0, 2]])
     assert first_final[4, 2] < initial[4, 2]
@@ -134,6 +155,7 @@ def test_newton_coupler_scene_step_and_reset(tmp_path, show_viewer):
 
     scene.reset()
     assert scene.sim.cur_step_global == 0
+    assert scene.sim.engine is first_engine
     reset_state = np.squeeze(tensor_to_array(cloth.get_state().pos), axis=0)
     np.testing.assert_allclose(reset_state, initial, rtol=0.0, atol=1e-12)
     for _ in range(3):
@@ -159,7 +181,7 @@ def test_qcloth_freefall_matches_cgq_converged_step(tmp_path, show_viewer):
             dt=dt,
             gravity=tuple(gravity),
         ),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     scene.add_entity(
@@ -207,7 +229,7 @@ def test_qcloth_global_managers_two_entities(tmp_path, show_viewer):
     path = tmp_path / "qcloth_grid.obj"
     make_grid(path)
     scene = gs.Scene(
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
         show_viewer=show_viewer,
     )
     material = gs.materials.FEM.QCloth(E=1e4, thickness=1e-3)

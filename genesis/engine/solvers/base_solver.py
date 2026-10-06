@@ -25,10 +25,9 @@ from genesis.utils.misc import (
     tensor_to_array,
 )
 
-
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
 
 
 class StateChange(enum.Enum):
@@ -315,7 +314,7 @@ class Solver(RBC):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options):
+    def __init__(self, scene: "Scene", sim: "BaseSimulator", options):
         self._uid = gs.UID()
         self._sim = sim
         self._scene = scene

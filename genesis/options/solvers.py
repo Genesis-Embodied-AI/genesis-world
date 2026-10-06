@@ -120,31 +120,6 @@ class LegacyCouplerOptions(BaseCouplerOptions):
     fem_sph: StrictBool = True
 
 
-class NewtonCouplerOptions(BaseCouplerOptions):
-    """Options for the graph-native QCloth, Rigid, and IPC contact runtime.
-
-    This first version deliberately exposes only physical contact parameters.
-    The numerical implementation is fixed to the production graph pipeline,
-    Consistent IPC, and LinearPCG.
-
-    Parameters
-    ----------
-    contact_d_hat : float, optional
-        IPC activation distance in meters. Defaults to 1e-3.
-    contact_friction_mu : float, optional
-        Global Coulomb friction coefficient. Defaults to 1.0.
-    contact_resistance : float, optional
-        Global IPC barrier resistance. Defaults to 1e4.
-    contact_eps_velocity : float, optional
-        Friction velocity regularization in meters per second. Defaults to 1e-2.
-    """
-
-    contact_d_hat: PositiveFloat = 1e-3
-    contact_friction_mu: NonNegativeFloat = 1.0
-    contact_resistance: PositiveFloat = 1e4
-    contact_eps_velocity: PositiveFloat = 1e-2
-
-
 class SAPCouplerOptions(BaseCouplerOptions):
     """
     Options configuring the inter-solver coupling for the Semi-Analytic Primal (SAP) contact solver used in Drake.

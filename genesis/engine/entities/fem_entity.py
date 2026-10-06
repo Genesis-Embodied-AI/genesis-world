@@ -975,6 +975,7 @@ class FEMEntity(Entity):
                 List of environment indices to apply the constraints to. If None, applies to all environments.
         """
         from genesis.engine.couplers import IPCCoupler
+        from genesis.engine.newton_simulator import NewtonSimulator
 
         if self._solver._use_implicit_solver and not self._solver._enable_vertex_constraints:
             gs.raise_exception(
@@ -983,6 +984,8 @@ class FEMEntity(Entity):
 
         if isinstance(self.sim.coupler, IPCCoupler):
             gs.raise_exception("Vertex constraints are not supported by the IPC coupler.")
+        if isinstance(self.sim, NewtonSimulator) and (is_soft_constraint or link is not None):
+            gs.raise_exception("NewtonSimulator supports only fixed hard vertex constraints.")
 
         if not self._solver._constraints_initialized:
             self._solver.init_constraints()
@@ -1021,6 +1024,7 @@ class FEMEntity(Entity):
             link_init_pos,
             link_init_quat,
         )
+        self._sim.mark_state_dirty("fem")
 
     def update_constraint_targets(self, verts_idx_local, target_poss, envs_idx=None):
         """Update target positions for existing constraints."""
@@ -1035,6 +1039,7 @@ class FEMEntity(Entity):
         target_poss = self._sanitize_verts_tensor(target_poss, gs.tc_float, verts_idx, envs_idx, (3,))
 
         self._solver._kernel_update_constraint_targets(verts_idx, envs_idx, target_poss)
+        self._sim.mark_state_dirty("fem")
 
     def remove_vertex_constraints(self, verts_idx_local=None, envs_idx=None):
         """Remove constraints from the specified vertices and environments, or from all of them if None."""
@@ -1045,6 +1050,7 @@ class FEMEntity(Entity):
         # FIXME: Quadrants 'fill' method is very inefficient. Try using zero-copy if possible.
         if verts_idx_local is None and envs_idx is None:
             self._solver.vertex_constraints.is_constrained.fill(0)
+            self._sim.mark_state_dirty("fem")
             return
 
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -1052,6 +1058,7 @@ class FEMEntity(Entity):
         verts_idx = verts_idx_local + self._v_start
 
         self._solver._kernel_remove_specific_constraints(verts_idx, envs_idx)
+        self._sim.mark_state_dirty("fem")
 
     @qd.kernel
     def _kernel_get_verts_pos(

@@ -19,7 +19,7 @@ from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tenso
 if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
     from genesis.engine.entities.rigid_entity import RigidJoint, RigidLink
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
     from genesis.engine.solvers import FEMSolver, RigidSolver
 
 # Check if libuipc is available
@@ -97,7 +97,7 @@ class IPCCoupler(RBC):
     including rigid bodies (as ABD objects) and FEM bodies in a unified contact framework.
     """
 
-    def __init__(self, simulator: "Simulator", options: IPCCouplerOptions) -> None:
+    def __init__(self, simulator: "BaseSimulator", options: IPCCouplerOptions) -> None:
         """
         Initialize IPC Coupler.
 

@@ -268,6 +268,8 @@ class SimEngine:
 
     @qd.kernel(fastcache=True)
     def _initialize_global_resources(self, graph_fastcache_key: qd.template()):
+        if qd.static(graph_fastcache_key < 0):
+            self.frame_failed[()] = 0
         if qd.static(self.has_fem):
             self.fem.initialize_global_vertices(self.global_vertex_manager)
             self.global_body_manager.compute_vertex_offsets(self.fem)
@@ -276,6 +278,24 @@ class SimEngine:
             self.rigid_contact_proxy.prepare_metric()
             self.rigid_contact_proxy.initialize_global_vertices(self.global_vertex_manager)
 
+    @qd.kernel(fastcache=True)
+    def _sync_from_solvers_kernel(self, graph_fastcache_key: qd.template()):
+        if qd.static(graph_fastcache_key < 0):
+            self.frame_failed[()] = 0
+        if qd.static(self.has_fem):
+            self.fem.sync_from_scene(self.global_vertex_manager)
+        if qd.static(self.has_rigid_contact_proxy):
+            self.rigid_contact_proxy.initialize_proxy_state()
+            self.rigid_contact_proxy.reset_frame()
+            self.rigid_contact_proxy.prepare_metric()
+            self.rigid_contact_proxy.initialize_global_vertices(self.global_vertex_manager)
+
+    def sync_from_solvers(self) -> None:
+        """Synchronize externally authored Scene state without rebuilding graph resources."""
+        self._sync_from_solvers_kernel(self.graph_fastcache_key)
+        if self.contact is not None:
+            self._initialize_contact()
+
     @qd.kernel(graph=True, checkpoints=True, fastcache=True)
     def _init_contact_kernel(
         self,
@@ -283,6 +303,8 @@ class SimEngine:
         et_overflow: qd.types.ndarray(qd.i32, ndim=0),
         graph_fastcache_key: qd.template(),
     ):
+        if qd.static(graph_fastcache_key < 0):
+            self.frame_failed[()] = 0
         with qd.checkpoint(ContactCheckpoint.FRAME, yield_on=self.checkpoint_never_yield):
             if qd.static(True):
                 self.fem.forward_global_vertices(self.global_vertex_manager)
@@ -484,6 +506,8 @@ class SimEngine:
         et_overflow: qd.types.ndarray(qd.i32, ndim=0),
         graph_fastcache_key: qd.template(),
     ):
+        if qd.static(graph_fastcache_key < 0):
+            self.frame_failed[()] = 0
         with qd.checkpoint(ContactCheckpoint.FRAME, yield_on=self.checkpoint_never_yield):
             if qd.static(self.has_contact):
                 self.contact.adaptive_kappa_update()

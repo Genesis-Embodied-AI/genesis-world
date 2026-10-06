@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 
 import genesis as gs
 
+from .engines import BaseEngineOptions, LegacyEngineOptions, NewtonEngineOptions
 from .options import Options
 from .profiling import ProfilingOptions
 from .renderers import Rasterizer, RendererOptions
@@ -36,6 +37,7 @@ class SceneOptions(Options):
     """
 
     sim: SimOptions = Field(default_factory=SimOptions)
+    engine: BaseEngineOptions = Field(default_factory=LegacyEngineOptions)
     tool: ToolOptions = Field(default_factory=ToolOptions)
     rigid: RigidOptions = Field(default_factory=RigidOptions)
     kinematic: KinematicOptions = Field(default_factory=KinematicOptions)
@@ -63,6 +65,9 @@ class SceneOptions(Options):
         return values
 
     def model_post_init(self, context) -> None:
+        if isinstance(self.engine, NewtonEngineOptions) and "coupler" in self.model_fields_set:
+            gs.raise_exception("`coupler_options` cannot be set when using `NewtonEngineOptions`.")
+
         # Validate rigid_options against sim_options
         if self.rigid.box_box_detection is None:
             self.rigid.box_box_detection = not self.sim.requires_grad

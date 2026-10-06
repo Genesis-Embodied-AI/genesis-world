@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities import MPMEntity
     from genesis.engine.scene import Scene
     from genesis.engine.solvers.base_solver import Solver
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
 
 
 @qd.data_oriented
@@ -31,7 +31,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: "MPMOptions"):
+    def __init__(self, scene: "Scene", sim: "BaseSimulator", options: "MPMOptions"):
         super().__init__(scene, sim, options)
 
         # options

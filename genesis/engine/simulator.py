@@ -1,17 +1,18 @@
 from collections.abc import Iterator
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import torch
 
 import genesis as gs
 from genesis.options.morphs import Morph
-from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, NewtonCouplerOptions, SAPCouplerOptions
+from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import DataItem, DataKind
 from genesis.utils.misc import indices_to_mask
 from genesis.utils.tools import FPSTracker
 
-from .couplers import IPCCoupler, LegacyCoupler, NewtonCoupler, SAPCoupler
+from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 RATE_CHECK_ERRNO = 10
 
 
-class Simulator(RBC):
+class BaseSimulator(RBC, ABC):
     """
     A simulator is a scene-level simulation manager, which manages all simulation-related operations in the scene, including multiple solvers and the inter-solver coupler.
 
@@ -100,20 +101,8 @@ class Simulator(RBC):
 
         self._active_solvers: list["Solver"] = gs.List()
 
-        # coupler
-        if isinstance(options.coupler, NewtonCouplerOptions):
-            self._coupler = NewtonCoupler(self, options.coupler)
-        elif isinstance(options.coupler, SAPCouplerOptions):
-            self._coupler = SAPCoupler(self, options.coupler)
-        elif isinstance(options.coupler, LegacyCouplerOptions):
-            self._coupler = LegacyCoupler(self, options.coupler)
-        elif isinstance(options.coupler, IPCCouplerOptions):
-            self._coupler = IPCCoupler(self, options.coupler)
-        else:
-            gs.raise_exception(
-                f"Coupler options {options.coupler} not supported. Please use NewtonCouplerOptions, "
-                "SAPCouplerOptions, LegacyCouplerOptions, or IPCCouplerOptions."
-            )
+        self._coupler = None
+        self._state_dirty: set[str] = set()
 
         # states
         self._queried_states = QueriedStates()
@@ -162,6 +151,21 @@ class Simulator(RBC):
     def _add_force_field(self, force_field):
         for solver in self._solvers:
             solver._add_force_field(force_field)
+
+    def mark_state_dirty(self, state: str) -> None:
+        self._state_dirty.add(state)
+
+    @abstractmethod
+    def _build_runtime(self) -> None:
+        pass
+
+    @abstractmethod
+    def _reset_runtime(self, envs_idx=None) -> None:
+        pass
+
+    @abstractmethod
+    def _step_physics(self, in_backward: bool) -> None:
+        pass
 
     def build(self):
         self.n_envs = self.scene.n_envs
@@ -220,19 +224,12 @@ class Simulator(RBC):
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
         # solvers
-        # IPCCoupler needs full substep flow for pre/post coupling phases
-        self._rigid_only = self.rigid_solver.is_active and not isinstance(
-            self._coupler, (NewtonCoupler, SAPCoupler, IPCCoupler)
-        )
         for solver in self._solvers:
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
-                if not isinstance(solver, RigidSolver):
-                    self._rigid_only = False
 
-        # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
-        self._coupler.build()
+        self._build_runtime()
 
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
@@ -260,7 +257,7 @@ class Simulator(RBC):
 
     def _restart(self, envs_idx=None):
         """Restart the coupler, the gradient tape and the sensors."""
-        self._coupler.reset(envs_idx=envs_idx)
+        self._reset_runtime(envs_idx)
 
         # TODO: keeping as is for now
         self.reset_grad()
@@ -360,24 +357,7 @@ class Simulator(RBC):
             self._steps += 1
 
         with self._fps_tracker.phase("physics"):
-            if isinstance(self._coupler, NewtonCoupler):
-                if in_backward:
-                    gs.raise_exception("NewtonCoupler does not support backward simulation.")
-                self.process_input(in_backward=False)
-                self._coupler.step()
-                self._cur_substep_global += 1
-            elif self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
-                for _ in range(self._substeps):
-                    self.rigid_solver.substep(self.cur_substep_local)
-                    self._cur_substep_global += 1
-            else:
-                self.process_input(in_backward=in_backward)
-                for _ in range(self._substeps):
-                    self.substep(self.cur_substep_local)
-
-                    self._cur_substep_global += 1
-                    if self.cur_substep_local == 0 and not in_backward:
-                        self.save_ckpt()
+            self._step_physics(in_backward)
 
             if self.rigid_solver.is_active:
                 self.rigid_solver.clear_external_force()
@@ -636,3 +616,58 @@ class Simulator(RBC):
     def active_solvers(self):
         """The list of active solvers in the simulator."""
         return self._active_solvers
+
+
+class LegacySimulator(BaseSimulator):
+    """Run the existing solver-substep and inter-solver coupling pipeline."""
+
+    def __init__(self, scene: "Scene", options: "SceneOptions"):
+        super().__init__(scene, options)
+        if isinstance(options.coupler, SAPCouplerOptions):
+            self._coupler = SAPCoupler(self, options.coupler)
+        elif isinstance(options.coupler, LegacyCouplerOptions):
+            self._coupler = LegacyCoupler(self, options.coupler)
+        elif isinstance(options.coupler, IPCCouplerOptions):
+            self._coupler = IPCCoupler(self, options.coupler)
+        else:
+            gs.raise_exception(
+                f"Coupler options {options.coupler} not supported by LegacySimulator. "
+                "Please use SAPCouplerOptions, LegacyCouplerOptions, or IPCCouplerOptions."
+            )
+
+    def _build_runtime(self) -> None:
+        self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        for solver in self._active_solvers:
+            if not isinstance(solver, RigidSolver):
+                self._rigid_only = False
+        self._coupler.build()
+
+    def _reset_runtime(self, envs_idx=None) -> None:
+        self._coupler.reset(envs_idx=envs_idx)
+
+    def _step_physics(self, in_backward: bool) -> None:
+        if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
+            for _ in range(self._substeps):
+                self.rigid_solver.substep(self.cur_substep_local)
+                self._cur_substep_global += 1
+            return
+
+        self.process_input(in_backward=in_backward)
+        for _ in range(self._substeps):
+            self.substep(self.cur_substep_local)
+            self._cur_substep_global += 1
+            if self.cur_substep_local == 0 and not in_backward:
+                self.save_ckpt()
+
+
+def create_simulator(scene: "Scene", options: "SceneOptions") -> BaseSimulator:
+    """Create the concrete simulator selected by Scene engine options."""
+    from genesis.options.engines import LegacyEngineOptions, NewtonEngineOptions
+
+    if isinstance(options.engine, NewtonEngineOptions):
+        from .newton_simulator import NewtonSimulator
+
+        return NewtonSimulator(scene, options)
+    if isinstance(options.engine, LegacyEngineOptions):
+        return LegacySimulator(scene, options)
+    gs.raise_exception(f"Unsupported engine options {type(options.engine).__name__}.")

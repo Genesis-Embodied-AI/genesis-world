@@ -655,7 +655,7 @@ def test_proxy_contact_routes_emit_cgq_block_counts():
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_standard_pcg_kkt_builder_path():
     scene = gs.Scene(
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
     )
     scene.add_entity(
         morph=gs.morphs.Sphere(
@@ -706,7 +706,7 @@ def test_standard_pcg_kkt_builder_path():
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_kkt_restoration_returns_through_hard_probe():
     scene = gs.Scene(
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
     )
     scene.add_entity(
         morph=gs.morphs.Sphere(pos=(2.0, 0.0, 1.0), radius=0.1),
@@ -745,7 +745,7 @@ def test_kkt_restoration_returns_through_hard_probe():
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_kkt_newton_exhaustion_does_not_commit_previous_state():
     scene = gs.Scene(
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
     )
     scene.add_entity(
         morph=gs.morphs.Sphere(pos=(2.0, 0.0, 1.0), radius=0.1),
@@ -788,7 +788,7 @@ def test_kkt_newton_exhaustion_does_not_commit_previous_state():
 def test_rigid_proxy_cloth_contact_step():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
     )
     sphere = scene.add_entity(
         morph=gs.morphs.Sphere(pos=(0.0, 0.0, 0.15), radius=0.1),
@@ -839,7 +839,7 @@ def test_cloth_drapes_on_fixed_proxy_box():
     cloth_resolution = 25
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
     )
     scene.add_entity(
         morph=gs.morphs.Box(
@@ -888,12 +888,12 @@ def test_cloth_drapes_on_fixed_proxy_box():
 @pytest.mark.required
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_newton_coupler_cloth_drapes_on_fixed_proxy_box():
+def test_newton_engine_cloth_drapes_on_fixed_proxy_box():
     cube_top = 0.08
     cloth_resolution = 25
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(
+        engine_options=gs.options.NewtonEngineOptions(
             contact_d_hat=1e-3,
             contact_friction_mu=0.05,
             contact_resistance=1e4,
@@ -927,7 +927,7 @@ def test_newton_coupler_cloth_drapes_on_fixed_proxy_box():
         scene.step()
         maximum_proxy_doublets = max(
             maximum_proxy_doublets,
-            int(qd_to_numpy(scene.sim.coupler.engine.rigid_contact_assemble.rigid_doublet_total)),
+            int(qd_to_numpy(scene.sim.engine.rigid_contact_assemble.rigid_doublet_total)),
         )
 
     center_vertex = cloth_resolution * cloth_resolution // 2
@@ -1073,7 +1073,7 @@ def test_franka_forest_paths_match_P_and_PT():
 def test_franka_cloth_reduced_kkt_step():
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=0.01),
-        coupler_options=gs.options.NewtonCouplerOptions(),
+        engine_options=gs.options.NewtonEngineOptions(),
     )
     franka = scene.add_entity(
         morph=gs.morphs.MJCF(

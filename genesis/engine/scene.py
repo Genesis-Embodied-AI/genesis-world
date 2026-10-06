@@ -28,6 +28,7 @@ from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     SceneOptions,
     BaseCouplerOptions,
+    BaseEngineOptions,
     FEMOptions,
     KinematicOptions,
     MPMOptions,
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
     from genesis.options.sensors.options import SensorOptions, SensorT
     from genesis.recorders import Recorder
 
@@ -102,7 +103,7 @@ class SceneCheckpoint:
 class TrajectorySource(NamedTuple):
     """The simulator, scene description and environment layout a trajectory recorder reads at build."""
 
-    sim: "Simulator"
+    sim: "BaseSimulator"
     desc: SceneDescription
     layout: EnvironmentLayout
 
@@ -144,6 +145,8 @@ class Scene(RBC):
     ----------
     sim_options : gs.options.SimOptions
         The options configuring the overarching `simulator`, which in turn manages all the solvers.
+    engine_options : gs.options.BaseEngineOptions
+        The options selecting the concrete simulator implementation.
     tool_options : gs.options.ToolOptions
         The options configuring the tool_solver (``scene.sim.ToolSolver``).
     rigid_options : gs.options.RigidOptions
@@ -178,6 +181,7 @@ class Scene(RBC):
     def __init__(
         self,
         sim_options: SimOptions | None = None,
+        engine_options: BaseEngineOptions | None = None,
         tool_options: ToolOptions | None = None,
         rigid_options: RigidOptions | None = None,
         kinematic_options: KinematicOptions | None = None,
@@ -196,10 +200,11 @@ class Scene(RBC):
         options: SceneOptions | None = None,
     ):
         # Delay simulator import to allow specifying Quadrants array type at init
-        from genesis.engine.simulator import Simulator
+        from genesis.engine.simulator import create_simulator
 
         individual_options = (
             sim_options,
+            engine_options,
             tool_options,
             rigid_options,
             kinematic_options,
@@ -221,6 +226,7 @@ class Scene(RBC):
         else:
             self.options = SceneOptions(
                 sim=sim_options,
+                engine=engine_options,
                 tool=tool_options,
                 rigid=rigid_options,
                 kinematic=kinematic_options,
@@ -243,7 +249,7 @@ class Scene(RBC):
         self._desc = SceneDescription(options=self.options)
 
         # simulator
-        self._sim = Simulator(scene=self, options=self.options)
+        self._sim = create_simulator(scene=self, options=self.options)
 
         # visualizer
         self._visualizer = Visualizer(
@@ -877,16 +883,15 @@ class Scene(RBC):
 
             self._is_built = True
 
-        if not getattr(self._sim.coupler, "defer_build_warmup", False):
-            with gs.logger.timer("Compiling simulation kernels..."):
-                self._sim.step()
-                if self._sim.rigid_solver.is_active:
-                    try:
-                        self._sim.rigid_solver.check_errno()
-                    except gs.GenesisException:
-                        self.destroy()
-                        raise
-                self._reset()
+        with gs.logger.timer("Compiling simulation kernels..."):
+            self._sim.step()
+            if self._sim.rigid_solver.is_active:
+                try:
+                    self._sim.rigid_solver.check_errno()
+                except gs.GenesisException:
+                    self.destroy()
+                    raise
+            self._reset()
 
         # visualizer
         with gs.logger.timer("Building visualizer..."):

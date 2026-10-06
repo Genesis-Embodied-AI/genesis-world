@@ -158,7 +158,7 @@ from .constraint.solver import (
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
-    from genesis.engine.simulator import Simulator
+    from genesis.engine.simulator import BaseSimulator
 
 
 IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
@@ -225,7 +225,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def __init__(self, scene: "Scene", sim: "Simulator", options: RigidOptions) -> None:
+    def __init__(self, scene: "Scene", sim: "BaseSimulator", options: RigidOptions) -> None:
         super().__init__(scene, sim, options)
 
         self._enable_collision = options.enable_collision
@@ -1945,6 +1945,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
+        self.sim.mark_state_dirty("rigid")
+
         self._restart()
 
     @property
@@ -2150,6 +2152,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
+        self.sim.mark_state_dirty("rigid")
+
     def set_links_quat(self, quat, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_quat' instead.")
 
@@ -2283,6 +2287,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         else:
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
+
+        self.sim.mark_state_dirty("rigid")
 
     def _set_links_info(self, values, links_idx, name, envs_idx=None, *, scale_inertia=False):
         """Write one inertial property of the given links, then recompute the inverse weights of their trees once.
@@ -2537,6 +2543,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
+        self.sim.mark_state_dirty("rigid")
+
     def set_global_sol_params(self, sol_params):
         """
         Set constraint solver parameters.
@@ -2743,6 +2751,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
         self._is_forward_pos_updated = True
         self._is_forward_vel_updated = True
+        self.sim.mark_state_dirty("rigid")
 
     def _wake_dofs(self, dofs_idx, envs_idx):
         # Revive any hibernated entity owning these (already sanitized) dofs before a state is written to them;

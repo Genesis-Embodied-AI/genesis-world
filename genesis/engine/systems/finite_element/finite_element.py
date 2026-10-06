@@ -431,6 +431,7 @@ class FiniteElement:
             dtype=np.int32,
         )
         self.scene_elements_v = entities[0]._solver.elements_v
+        self.scene_vertex_constraints = scene.fem_solver.vertex_constraints
         self.scene_frame = entities[0]._sim.cur_substep_local
         self.n_verts = len(self.positions)
         self.n_tris = len(self.tri_indices)

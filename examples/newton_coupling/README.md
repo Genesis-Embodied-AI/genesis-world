@@ -5,7 +5,7 @@ and Consistent IPC contact behind the normal `Scene.step()` interface:
 
 ```python
 scene = gs.Scene(
-    coupler_options=gs.options.NewtonCouplerOptions(
+    engine_options=gs.options.NewtonEngineOptions(
         contact_d_hat=1e-3,
         contact_friction_mu=1.0,
         contact_resistance=1e4,
@@ -14,9 +14,10 @@ scene = gs.Scene(
 ```
 
 It requires a GPU, double precision, the Quadrants ndarray backend, one
-unbatched environment, and one substep. The engine is built lazily on the
-first `Scene.step()`, after post-build qpos, controller, and QCloth constraint
-setup. Cloth-only scenes use `FEMOptions.floor_height` as an analytical
+unbatched environment, and one substep. The engine is constructed and compiled
+by `Scene.build()`. Post-build qpos, controller, and QCloth constraint changes
+are synchronized into that existing engine before the next step. Cloth-only
+scenes use `FEMOptions.floor_height` as an analytical
 halfplane. Mixed Rigid–QCloth scenes should author fixed rigid support geometry
 so the halfplane does not also collide with the robot.
 
