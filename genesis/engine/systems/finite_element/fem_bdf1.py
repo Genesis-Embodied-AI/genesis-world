@@ -11,7 +11,7 @@ from .finite_element_method import FiniteElementMethod
 class FEMBDF1(SimSystem):
     """Incremental-potential inertia for FEM vertices."""
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         fem = self.require(FiniteElementMethod)
         linear_system = self.require(GlobalLinearSystem)
         self.extent_slot = linear_system.register_extent_slot()

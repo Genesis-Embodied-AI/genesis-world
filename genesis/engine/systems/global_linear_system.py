@@ -38,7 +38,7 @@ class GlobalLinearSystem(SimSystem):
         self.is_initialized_host = False
         self.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         pass
 
     def register_extent_slot(self) -> int:

@@ -155,7 +155,7 @@ class RigidContactProxySystem(SimSystem):
         self.ls_forensics_test_energy_bias_host = 0.0
         self.has_forest = False
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         from .rigid_joint_forest import RigidJointForestSystem
 
         self.rigid = self.require(RigidSystem)

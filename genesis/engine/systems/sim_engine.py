@@ -119,7 +119,7 @@ class SimEngine:
         if self.is_built_host:
             raise RuntimeError("SimEngine systems are already built")
         for system in self.systems.values():
-            system.do_build()
+            system.build()
 
         self.rigid = self.find(RigidSystem)
         self.fem = self.find(FiniteElementMethod)

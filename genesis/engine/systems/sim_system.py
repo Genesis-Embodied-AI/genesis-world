@@ -40,7 +40,7 @@ class SimSystem(ABC):
         return system
 
     @abstractmethod
-    def do_build(self) -> None:
+    def build(self) -> None:
         """Resolve dependencies and initialize device-visible runtime data."""
 
     def _set_engine(self, engine: SimEngine) -> None:

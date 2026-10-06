@@ -11,7 +11,7 @@ from .finite_element_method import FiniteElementMethod
 class FEMDiagPreconditioner(SimSystem):
     """CGQ FEM 3x3 block-diagonal preconditioner."""
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         self.fem = self.require(FiniteElementMethod)
         self.global_linear_system = self.require(GlobalLinearSystem)
 

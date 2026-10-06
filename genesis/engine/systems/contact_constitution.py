@@ -8,7 +8,7 @@ from .sim_system import SimSystem
 class ContactConstitution(SimSystem):
     """Base contract for CGQ contact constitutions."""
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         from .contact_system import ContactSystem
 
         self.require(ContactSystem).set_contact_constitution(self)

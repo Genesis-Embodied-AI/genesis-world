@@ -9,7 +9,7 @@ from .finite_element_method import FiniteElementMethod
 class FEMConstitution(SimSystem):
     """Base contract for CGQ FEM constitutions."""
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         self.require(FiniteElementMethod).add_constitution(self)
         self.do_build_constitution()
 

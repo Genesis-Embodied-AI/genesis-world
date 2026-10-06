@@ -20,7 +20,7 @@ class FiniteElementMethod(SimSystem):
         self._quadratic_bending = None
         self._is_wired = False
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         from ..global_body_manager import GlobalBodyManager
         from ..global_vertex_manager import GlobalVertexManager
 

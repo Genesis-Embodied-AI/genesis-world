@@ -66,7 +66,7 @@ class ContactSystem(SimSystem):
         self.intersection_check_host = bool(intersection_check)
         self.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         from .global_body_manager import GlobalBodyManager
         from .global_linear_system import GlobalLinearSystem
         from .global_surface_manager import GlobalSurfaceManager

@@ -15,7 +15,7 @@ class StandardPCGSolver(SimSystem):
         super().__init__()
         self.is_initialized_host = False
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         pass
 
     def init(self, total_dof: int, n_block_rows: int, pcg_tol_rate: float) -> None:

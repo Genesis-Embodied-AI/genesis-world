@@ -99,7 +99,7 @@ class RigidJointForestSystem(SimSystem):
             return "cgq_tree"
         return "cgq_level"
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         self.rigid = self.require(RigidSystem)
         self.contact_proxy = self.find(RigidContactProxySystem)
         self.has_contact_proxy = self.contact_proxy is not None

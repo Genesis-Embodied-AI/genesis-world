@@ -65,7 +65,7 @@ class RigidSystem(SimSystem):
         self.is_forward_pos_updated = rigid_solver._is_forward_pos_updated
         self.is_forward_vel_updated = rigid_solver._is_forward_vel_updated
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         pass
 
     def init(self, dof_offset: int) -> None:

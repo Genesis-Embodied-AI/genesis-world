@@ -8,7 +8,7 @@ from .sim_system import SimSystem
 class BroadPhaseSystem(SimSystem):
     """CGQ broad-phase system contract."""
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         from .contact_system import ContactSystem
         from .global_body_manager import GlobalBodyManager
         from .global_surface_manager import GlobalSurfaceManager

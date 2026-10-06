@@ -14,7 +14,7 @@ class GlobalBodyManager(SimSystem):
         super().__init__()
         self.is_initialized_host = False
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         from .finite_element import FiniteElementMethod
         from .global_vertex_manager import GlobalVertexManager
 

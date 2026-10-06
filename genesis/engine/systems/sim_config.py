@@ -17,5 +17,5 @@ class SimConfig(SimSystem):
         self.max_pcg_iter = qd.ndarray(qd.i64, shape=())
         self.max_ls_iter = qd.ndarray(qd.i64, shape=())
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         pass

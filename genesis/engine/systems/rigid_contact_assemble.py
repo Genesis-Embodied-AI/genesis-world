@@ -27,7 +27,7 @@ class RigidContactAssemble(SimSystem):
         self.scan_log256_max_n = 4
         self.is_initialized_host = False
 
-    def do_build(self) -> None:
+    def build(self) -> None:
         self.contact = self.require(ContactSystem)
         self.fem = self.require(FiniteElementMethod)
         self.vertex = self.require(GlobalVertexManager)
