@@ -177,7 +177,7 @@ class FEMEntity(Entity):
         self._step_global_added = None
         self.sample()
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self.material, (gs.materials.FEM.Cloth, gs.materials.FEM.QCloth)):
             # For cloth, elements are already surface triangles
             self._surface_tri_np = self.elems
             self._n_surfaces = len(self._surface_tri_np)
@@ -516,7 +516,7 @@ class FEMEntity(Entity):
             vvert_start += len(mesh.verts)
             vface_start += len(mesh.faces)
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self.material, (gs.materials.FEM.Cloth, gs.materials.FEM.QCloth)):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
             verts = surface_verts + self._morph.pos
             elems = surface_faces
@@ -545,7 +545,7 @@ class FEMEntity(Entity):
         # Convert to appropriate numpy array types
         verts_numpy = tensor_to_array(self.init_positions, dtype=gs.np_float)
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self.material, (gs.materials.FEM.Cloth, gs.materials.FEM.QCloth)):
             self._solver._kernel_add_cloth(
                 f=self._sim.cur_substep_local,
                 v_start=self._v_start,

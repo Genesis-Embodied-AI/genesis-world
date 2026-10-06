@@ -5418,7 +5418,7 @@ def initialize_Ma(
 # ======================================================= Core ========================================================
 
 
-@qd.kernel(fastcache=True)
+@qd.func
 def func_solve_init(
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
@@ -5613,6 +5613,18 @@ def func_solve_init(
                     )
 
 
+@qd.kernel(fastcache=True)
+def kernel_solve_init(
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    write_L: bool,
+):
+    func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L)
+
+
 @qd.func
 def func_solve_iter(
     i_b: int,
@@ -5770,7 +5782,7 @@ def func_solve_body_monolith(dyn_state, constraint_state, dyn_info, rigid_info, 
     # consumes, then the solve kernel runs. Keeping the init inside the entrypoint (rather than in resolve, before the
     # dispatch) is what lets each arm declare its own init behavior - the dispatcher may run a different arm on the next
     # step during autotuning.
-    func_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=True)
+    kernel_solve_init(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, write_L=True)
     _kernel_solve_monolith(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, _n_iterations)
 
 
