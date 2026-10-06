@@ -5,13 +5,13 @@ import torch
 
 import genesis as gs
 from genesis.options.morphs import Morph
-from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
+from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, NewtonCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import DataItem, DataKind
 from genesis.utils.misc import indices_to_mask
 from genesis.utils.tools import FPSTracker
 
-from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .couplers import IPCCoupler, LegacyCoupler, NewtonCoupler, SAPCoupler
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -101,7 +101,9 @@ class Simulator(RBC):
         self._active_solvers: list["Solver"] = gs.List()
 
         # coupler
-        if isinstance(options.coupler, SAPCouplerOptions):
+        if isinstance(options.coupler, NewtonCouplerOptions):
+            self._coupler = NewtonCoupler(self, options.coupler)
+        elif isinstance(options.coupler, SAPCouplerOptions):
             self._coupler = SAPCoupler(self, options.coupler)
         elif isinstance(options.coupler, LegacyCouplerOptions):
             self._coupler = LegacyCoupler(self, options.coupler)
@@ -109,8 +111,8 @@ class Simulator(RBC):
             self._coupler = IPCCoupler(self, options.coupler)
         else:
             gs.raise_exception(
-                f"Coupler options {options.coupler} not supported. Please use SAPCouplerOptions, "
-                "LegacyCouplerOptions, or IPCCouplerOptions."
+                f"Coupler options {options.coupler} not supported. Please use NewtonCouplerOptions, "
+                "SAPCouplerOptions, LegacyCouplerOptions, or IPCCouplerOptions."
             )
 
         # states
@@ -219,7 +221,9 @@ class Simulator(RBC):
 
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
-        self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
+        self._rigid_only = self.rigid_solver.is_active and not isinstance(
+            self._coupler, (NewtonCoupler, SAPCoupler, IPCCoupler)
+        )
         for solver in self._solvers:
             solver.build()
             if solver.is_active:
@@ -356,7 +360,13 @@ class Simulator(RBC):
             self._steps += 1
 
         with self._fps_tracker.phase("physics"):
-            if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
+            if isinstance(self._coupler, NewtonCoupler):
+                if in_backward:
+                    gs.raise_exception("NewtonCoupler does not support backward simulation.")
+                self.process_input(in_backward=False)
+                self._coupler.step()
+                self._cur_substep_global += 1
+            elif self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
                 for _ in range(self._substeps):
                     self.rigid_solver.substep(self.cur_substep_local)
                     self._cur_substep_global += 1

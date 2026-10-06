@@ -377,7 +377,10 @@ class Scene(RBC):
             surface.smooth = False
 
         if surface.double_sided is None:
-            surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
+            surface.double_sided = isinstance(
+                material,
+                (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth, gs.materials.FEM.QCloth),
+            )
 
         if vis_mode is not None:
             surface.vis_mode = vis_mode
@@ -874,15 +877,16 @@ class Scene(RBC):
 
             self._is_built = True
 
-        with gs.logger.timer("Compiling simulation kernels..."):
-            self._sim.step()
-            if self._sim.rigid_solver.is_active:
-                try:
-                    self._sim.rigid_solver.check_errno()
-                except gs.GenesisException:
-                    self.destroy()
-                    raise
-            self._reset()
+        if not getattr(self._sim.coupler, "defer_build_warmup", False):
+            with gs.logger.timer("Compiling simulation kernels..."):
+                self._sim.step()
+                if self._sim.rigid_solver.is_active:
+                    try:
+                        self._sim.rigid_solver.check_errno()
+                    except gs.GenesisException:
+                        self.destroy()
+                        raise
+                self._reset()
 
         # visualizer
         with gs.logger.timer("Building visualizer..."):
