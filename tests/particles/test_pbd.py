@@ -269,22 +269,17 @@ def test_cloth_attach_rigid_link(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_vortex_force_field(n_envs, show_viewer, tol):
-    dt = 1e-2
+def test_vortex_force_field(n_envs, tol):
+    DT = 1e-2
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=dt,
+            dt=DT,
             substeps=1,
             gravity=(0.0, 0.0, 0.0),
         ),
         pbd_options=gs.options.PBDOptions(
             particle_size=0.05,
         ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, 1.5, 1.5),
-            camera_lookat=(0.0, 0.0, 0.5),
-        ),
-        show_viewer=show_viewer,
     )
     particles = scene.add_entity(
         morph=gs.morphs.Box(
@@ -300,17 +295,17 @@ def test_vortex_force_field(n_envs, show_viewer, tol):
             strength_radial=3.0,
         )
     )
-    vortex.activate()
     scene.build(n_envs=n_envs)
+    vortex.activate()
 
-    particles_pos = particles.get_particles_pos()
+    particles_pos_init = particles.get_particles_pos()
     scene.step()
 
     # The particles start at rest, so their velocity after one step is the field acceleration times dt
     direction = torch.tensor(vortex.direction, dtype=gs.tc_float, device=gs.device)
-    radial_pos = particles_pos - (particles_pos @ direction)[..., None] * direction
+    radial_pos = particles_pos_init - (particles_pos_init @ direction)[..., None] * direction
     radius = radial_pos.norm(dim=-1, keepdim=True)
     falloff = 1.0 / (radius - vortex.falloff_min + 1.0) ** vortex.falloff_pow
     perpendicular = torch.cross(direction.expand_as(radial_pos), radial_pos, dim=-1)
     acc = falloff * (vortex.strength_perpendicular * perpendicular - vortex.strength_radial * radial_pos)
-    assert_allclose(particles.get_particles_vel(), dt * acc, tol=tol)
+    assert_allclose(particles.get_particles_vel(), DT * acc, tol=tol)
