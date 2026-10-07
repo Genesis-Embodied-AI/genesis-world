@@ -25,7 +25,10 @@ class QuadraticBending(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._inputs = None
+        self._hinge_indices: np.ndarray | None = None
+        self._bending_stiffness: np.ndarray | None = None
+        self._Q0: np.ndarray | None = None
+        self._vert_bend_k: np.ndarray | None = None
 
     def build(self) -> None:
         self.fem_system = self.require(FiniteElementMethod)
@@ -55,17 +58,20 @@ class QuadraticBending(SimSystem):
     ) -> None:
         if hasattr(self.data, "n_hinges"):
             raise RuntimeError("QuadraticBending data is already initialized")
-        self._inputs = _quadratic_bending_inputs(
-            hinge_indices,
-            bending_stiffness,
-            Q0,
-            vert_bend_k,
-        )
+        self._hinge_indices = np.ascontiguousarray(hinge_indices, dtype=np.int32).reshape(-1, 4)
+        self._bending_stiffness = np.ascontiguousarray(bending_stiffness, dtype=np.float64).reshape(-1)
+        self._Q0 = np.ascontiguousarray(Q0, dtype=np.float64).reshape(-1, 16)
+        self._vert_bend_k = np.ascontiguousarray(vert_bend_k, dtype=np.float64).reshape(-1)
+        if len(self._bending_stiffness) != len(self._hinge_indices) or len(self._Q0) != len(self._hinge_indices):
+            raise ValueError("QuadraticBending wire-data lengths must match")
 
     def init(self) -> None:
-        if self._inputs is None:
+        if self._hinge_indices is None:
             raise RuntimeError("QuadraticBending data has not been wired")
-        hinges, stiffness, matrices, vertex_stiffness = self._inputs
+        hinges = self._hinge_indices
+        stiffness = self._bending_stiffness
+        matrices = self._Q0
+        vertex_stiffness = self._vert_bend_k
         n_hinges = len(hinges)
         hinge_capacity = max(n_hinges, 1)
         vertex_capacity = max(len(vertex_stiffness), 1)
@@ -96,58 +102,10 @@ class QuadraticBending(SimSystem):
             (vertex_capacity,),
             vertex_stiffness if len(vertex_stiffness) else np.zeros(vertex_capacity, dtype=np.float64),
         )
-        self._inputs = None
-
-
-def _quadratic_bending_inputs(
-    hinge_indices: np.ndarray,
-    bending_stiffness: np.ndarray,
-    Q0: np.ndarray,
-    vert_bend_k: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    hinges = np.ascontiguousarray(hinge_indices, dtype=np.int32).reshape(-1, 4)
-    stiffness = np.ascontiguousarray(bending_stiffness, dtype=np.float64).reshape(-1)
-    matrices = np.ascontiguousarray(Q0, dtype=np.float64).reshape(-1, 16)
-    vertex_stiffness = np.ascontiguousarray(vert_bend_k, dtype=np.float64).reshape(-1)
-    if len(stiffness) != len(hinges) or len(matrices) != len(hinges):
-        raise ValueError("QuadraticBending wire-data lengths must match")
-    return hinges, stiffness, matrices, vertex_stiffness
-
-
-def wire_quadratic_bending_data(
-    data: QuadraticBending.Data,
-    hinge_indices: np.ndarray,
-    bending_stiffness: np.ndarray,
-    Q0: np.ndarray,
-    vert_bend_k: np.ndarray,
-) -> None:
-    hinges, stiffness, matrices, vertex_stiffness = _quadratic_bending_inputs(
-        hinge_indices,
-        bending_stiffness,
-        Q0,
-        vert_bend_k,
-    )
-    n_hinges = len(hinges)
-    hinge_capacity = max(n_hinges, 1)
-    vertex_capacity = max(len(vertex_stiffness), 1)
-    data.n_hinges.from_numpy(np.array(n_hinges, dtype=np.int32))
-    if data.hinge_indices.shape[0] != hinge_capacity:
-        data.hinge_indices = qd.ndarray(qd.i32, shape=(hinge_capacity, 4))
-        data.k = qd.ndarray(qd.f64, shape=(hinge_capacity,))
-        data.Q0 = qd.ndarray(qd.f64, shape=(hinge_capacity, 16))
-    if data.vert_bend_k.shape[0] != vertex_capacity:
-        data.vert_bend_k = qd.ndarray(qd.f64, shape=(vertex_capacity,))
-    if n_hinges:
-        data.hinge_indices.from_numpy(hinges)
-        data.k.from_numpy(stiffness)
-        data.Q0.from_numpy(matrices)
-    else:
-        data.hinge_indices.from_numpy(np.zeros((hinge_capacity, 4), dtype=np.int32))
-        data.k.from_numpy(np.zeros(hinge_capacity, dtype=np.float64))
-        data.Q0.from_numpy(np.zeros((hinge_capacity, 16), dtype=np.float64))
-    data.vert_bend_k.from_numpy(
-        vertex_stiffness if len(vertex_stiffness) else np.zeros(vertex_capacity, dtype=np.float64)
-    )
+        self._hinge_indices = None
+        self._bending_stiffness = None
+        self._Q0 = None
+        self._vert_bend_k = None
 
 
 @qd.func(requires_top_level=True)

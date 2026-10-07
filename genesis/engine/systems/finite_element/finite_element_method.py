@@ -48,8 +48,8 @@ class FiniteElementMethod(SimSystem):
         super().__init__()
         self.data = self.Data()
         self._finite_element: FiniteElement | None = None
-        self._global_vert_offset = 0
-        self._global_body_offset = 0
+        self._global_vert_offset: int = 0
+        self._global_body_offset: int = 0
         self.predict_actions = self.create_action_collection()
         self.init_actions = self.create_action_collection()
         self.extent_actions = self.create_action_collection()

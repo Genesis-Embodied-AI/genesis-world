@@ -21,7 +21,11 @@ class SimConfig(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
+        self._dt: float | None = None
+        self._tol: float | None = None
+        self._max_newton_iter: int | None = None
+        self._max_pcg_iter: int | None = None
+        self._max_ls_iter: int | None = None
 
     def build(self) -> None:
         pass
@@ -35,18 +39,20 @@ class SimConfig(SimSystem):
         max_pcg_iter: int,
         max_ls_iter: int,
     ) -> None:
-        self._wire_args = (
-            float(dt),
-            float(tol),
-            int(max_newton_iter),
-            int(max_pcg_iter),
-            int(max_ls_iter),
-        )
+        self._dt = float(dt)
+        self._tol = float(tol)
+        self._max_newton_iter = int(max_newton_iter)
+        self._max_pcg_iter = int(max_pcg_iter)
+        self._max_ls_iter = int(max_ls_iter)
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._dt is None:
             raise RuntimeError("SimConfig parameters have not been wired")
-        dt, tol, max_newton_iter, max_pcg_iter, max_ls_iter = self._wire_args
+        dt = self._dt
+        tol = self._tol
+        max_newton_iter = self._max_newton_iter
+        max_pcg_iter = self._max_pcg_iter
+        max_ls_iter = self._max_ls_iter
         data = self.data
         data.dt = qd.ndarray(qd.f64, shape=())
         data.tol = qd.ndarray(qd.f64, shape=())
@@ -58,4 +64,8 @@ class SimConfig(SimSystem):
         data.max_newton_iter.from_numpy(np.array(max_newton_iter, dtype=np.int64))
         data.max_pcg_iter.from_numpy(np.array(max_pcg_iter, dtype=np.int64))
         data.max_ls_iter.from_numpy(np.array(max_ls_iter, dtype=np.int64))
-        self._wire_args = None
+        self._dt = None
+        self._tol = None
+        self._max_newton_iter = None
+        self._max_pcg_iter = None
+        self._max_ls_iter = None

@@ -26,6 +26,8 @@ _FUSED_MAX_TREE_SIZE = 64
 _FUSED_MAX_TREES = 8
 
 if TYPE_CHECKING:
+    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
     from .rigid_contact_proxy import RigidContactProxySystem
 
 
@@ -87,15 +89,18 @@ class RigidJointForestSystem(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
-        self.fused_enabled = True
-        self.genesis_legacy_enabled = False
-        self.use_fused_tree_path = False
-        self.n_links = 0
+        self._rigid_solver: RigidSolver | None = None
+        self._total_dof: int | None = None
+        self._n_rigid_bodies: int | None = None
+        self._proxy_dof_offset: int | None = None
+        self.fused_enabled: bool = True
+        self.genesis_legacy_enabled: bool = False
+        self.use_fused_tree_path: bool = False
+        self.n_links: int = 0
 
     def wire_data(
         self,
-        rigid_solver,
+        rigid_solver: RigidSolver,
         *,
         total_dof: int,
         n_rigid_bodies: int,
@@ -106,27 +111,30 @@ class RigidJointForestSystem(SimSystem):
         self.n_links = int(rigid_solver.n_links)
         self.fused_enabled = bool(fused_enabled)
         self.genesis_legacy_enabled = bool(genesis_legacy_enabled)
-        self._wire_args = {
-            "rigid_solver": rigid_solver,
-            "total_dof": total_dof,
-            "n_rigid_bodies": n_rigid_bodies,
-            "proxy_dof_offset": proxy_dof_offset,
-            "fused_enabled": fused_enabled,
-            "genesis_legacy_enabled": genesis_legacy_enabled,
-        }
+        self._rigid_solver = rigid_solver
+        self._total_dof = total_dof
+        self._n_rigid_bodies = n_rigid_bodies
+        self._proxy_dof_offset = proxy_dof_offset
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._rigid_solver is None:
             raise RuntimeError("RigidJointForestSystem data has not been wired")
         _populate_rigid_joint_forest_data(
             self,
-            self._wire_args.pop("rigid_solver"),
+            self._rigid_solver,
             self.rigid.data,
+            total_dof=self._total_dof,
+            n_rigid_bodies=self._n_rigid_bodies,
+            proxy_dof_offset=self._proxy_dof_offset,
             proxy_data=self.contact_proxy.data,
             n_proxy_pairs=self.contact_proxy.n_pairs,
-            **self._wire_args,
+            fused_enabled=self.fused_enabled,
+            genesis_legacy_enabled=self.genesis_legacy_enabled,
         )
-        self._wire_args = None
+        self._rigid_solver = None
+        self._total_dof = None
+        self._n_rigid_bodies = None
+        self._proxy_dof_offset = None
 
     def build(self) -> None:
         from .global_linear_system import GlobalLinearSystem

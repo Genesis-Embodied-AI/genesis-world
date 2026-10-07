@@ -67,12 +67,16 @@ class GlobalLinearSystem(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self.capacity_grow_factor = 1.2
+        self.capacity_grow_factor: float = 1.2
         self.extent_actions = self.create_action_collection()
         self.assemble_actions = self.create_action_collection()
         self.extent_schedule = ()
         self.assemble_schedule = ()
-        self._wire_args = None
+        self._n_block_rows: int | None = None
+        self._n_elastic_triplets: int | None = None
+        self._max_contact_body_triplets: int | None = None
+        self._dof_block_base: int | None = None
+        self._legacy_sort_reduce: bool | None = None
 
     def wire_data(
         self,
@@ -87,13 +91,11 @@ class GlobalLinearSystem(SimSystem):
         if capacity_grow_factor <= 1.0:
             raise ValueError("GlobalLinearSystem capacity grow factor must be greater than one")
         self.capacity_grow_factor = float(capacity_grow_factor)
-        self._wire_args = (
-            n_block_rows,
-            n_elastic_triplets,
-            max_contact_body_triplets,
-            dof_block_base,
-            genesis_legacy_sort_reduce,
-        )
+        self._n_block_rows = n_block_rows
+        self._n_elastic_triplets = n_elastic_triplets
+        self._max_contact_body_triplets = max_contact_body_triplets
+        self._dof_block_base = dof_block_base
+        self._legacy_sort_reduce = genesis_legacy_sort_reduce
 
     def build(self) -> None:
         from .contact_system import ContactSystem
@@ -141,15 +143,13 @@ class GlobalLinearSystem(SimSystem):
         return ContactCheckpoint.SOLVE
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._n_block_rows is None:
             raise RuntimeError("GlobalLinearSystem data has not been wired")
-        (
-            n_block_rows,
-            n_elastic_triplets,
-            max_contact_body_triplets,
-            dof_block_base,
-            genesis_legacy_sort_reduce,
-        ) = self._wire_args
+        n_block_rows = self._n_block_rows
+        n_elastic_triplets = self._n_elastic_triplets
+        max_contact_body_triplets = self._max_contact_body_triplets
+        dof_block_base = self._dof_block_base
+        genesis_legacy_sort_reduce = self._legacy_sort_reduce
         if (
             min(
                 n_block_rows,
@@ -195,7 +195,11 @@ class GlobalLinearSystem(SimSystem):
         self.data.b_rhs = qd.ndarray(qd.f64, shape=(dof_storage,))
         self.data.x_sol.from_numpy(np.zeros(dof_storage, dtype=np.float64))
         self.data.b_rhs.from_numpy(np.zeros(dof_storage, dtype=np.float64))
-        self._wire_args = None
+        self._n_block_rows = None
+        self._n_elastic_triplets = None
+        self._max_contact_body_triplets = None
+        self._dof_block_base = None
+        self._legacy_sort_reduce = None
 
     @qd.func(requires_top_level=True)
     def on_derive_extents(self):

@@ -80,7 +80,7 @@ class SimEngine:
         self.systems: dict[type, SimSystem] = {}
         self._dependencies: dict[SimSystem, bool] = {}
         self._is_built = False
-        self._solver_params = None
+        self._solver_params: tuple[int, float] | None = None
         self.genesis_serial_pipeline = False
         self.has_rigid = False
         self.has_fem = False

@@ -204,14 +204,29 @@ class ContactSystem(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
+        self._n_verts: int | None = None
+        self._n_bodies: int | None = None
+        self._d_hat: float | None = None
+        self._kappa: float | None = None
+        self._dt_sq: float | None = None
+        self._init_pair_capacity: int | None = None
+        self._contact_tabular: ContactTabular | None = None
+        self._friction_mu: float | None = None
+        self._friction_eps_v: float | None = None
+        self._halfplane_positions: np.ndarray | None = None
+        self._halfplane_normals: np.ndarray | None = None
+        self._adaptive_kappa_mode: str | None = None
+        self._adaptive_kappa_tick: str | None = None
+        self._contact_element_ids: np.ndarray | None = None
+        self._halfplane_contact_element_ids: np.ndarray | None = None
+        self._intersection_check_capacity: int | None = None
         self.broad_phase_init_actions = self.create_action_collection()
         self.contact_assemble_init_actions = self.create_action_collection()
-        self.intersection_check = False
-        self.genesis_legacy_sort_reduce = False
-        self.has_friction = False
-        self.has_halfplanes = False
-        self.has_codim = False
+        self.intersection_check: bool = False
+        self.genesis_legacy_sort_reduce: bool = False
+        self.has_friction: bool = False
+        self.has_halfplanes: bool = False
+        self.has_codim: bool = False
 
     def wire_data(
         self,
@@ -235,26 +250,22 @@ class ContactSystem(SimSystem):
         intersection_check_capacity: int = 1_024,
         genesis_legacy_sort_reduce: bool = False,
     ) -> None:
-        self._wire_args = {
-            "n_verts": n_verts,
-            "n_bodies": n_bodies,
-            "d_hat": d_hat,
-            "kappa": kappa,
-            "dt_sq": dt_sq,
-            "init_pair_capacity": init_pair_capacity,
-            "contact_tabular": contact_tabular,
-            "friction_mu": friction_mu,
-            "friction_eps_v": friction_eps_v,
-            "halfplane_positions": halfplane_positions,
-            "halfplane_normals": halfplane_normals,
-            "adaptive_kappa_mode": adaptive_kappa_mode,
-            "adaptive_kappa_tick": adaptive_kappa_tick,
-            "contact_element_ids": contact_element_ids,
-            "halfplane_contact_element_ids": halfplane_contact_element_ids,
-            "intersection_check": intersection_check,
-            "intersection_check_capacity": intersection_check_capacity,
-            "genesis_legacy_sort_reduce": genesis_legacy_sort_reduce,
-        }
+        self._n_verts = n_verts
+        self._n_bodies = n_bodies
+        self._d_hat = d_hat
+        self._kappa = kappa
+        self._dt_sq = dt_sq
+        self._init_pair_capacity = init_pair_capacity
+        self._contact_tabular = contact_tabular
+        self._friction_mu = friction_mu
+        self._friction_eps_v = friction_eps_v
+        self._halfplane_positions = halfplane_positions
+        self._halfplane_normals = halfplane_normals
+        self._adaptive_kappa_mode = adaptive_kappa_mode
+        self._adaptive_kappa_tick = adaptive_kappa_tick
+        self._contact_element_ids = contact_element_ids
+        self._halfplane_contact_element_ids = halfplane_contact_element_ids
+        self._intersection_check_capacity = intersection_check_capacity
         self.intersection_check = bool(intersection_check)
         self.genesis_legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
         self.has_friction = friction_mu > 0.0
@@ -321,11 +332,10 @@ class ContactSystem(SimSystem):
         self.contact_assemble_init_actions.register(init_action)
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._n_verts is None:
             raise RuntimeError("ContactSystem data has not been wired")
-        args = self._wire_args
-        n_verts = args["n_verts"]
-        n_bodies = args["n_bodies"]
+        n_verts = self._n_verts
+        n_bodies = self._n_bodies
         if n_verts < 0:
             raise ValueError("ContactSystem n_verts must be non-negative")
         if n_bodies < 0:
@@ -333,38 +343,53 @@ class ContactSystem(SimSystem):
         data = self.data
         _wire_contact_params(
             data,
-            d_hat=args["d_hat"],
-            kappa=args["kappa"],
-            init_pair_capacity=args["init_pair_capacity"],
-            intersection_check=args["intersection_check"],
-            intersection_check_capacity=args["intersection_check_capacity"],
+            d_hat=self._d_hat,
+            kappa=self._kappa,
+            init_pair_capacity=self._init_pair_capacity,
+            intersection_check=self.intersection_check,
+            intersection_check_capacity=self._intersection_check_capacity,
         )
-        set_contact_dt_sq(data, args["dt_sq"])
-        _wire_contact_friction_params(data, mu=args["friction_mu"], eps_v=args["friction_eps_v"])
-        _wire_contact_tabular(data, args["contact_tabular"])
+        set_contact_dt_sq(data, self._dt_sq)
+        _wire_contact_friction_params(data, mu=self._friction_mu, eps_v=self._friction_eps_v)
+        _wire_contact_tabular(data, self._contact_tabular)
         _wire_contact_halfplanes(
             data,
-            args["halfplane_positions"],
-            args["halfplane_normals"],
-            args["halfplane_contact_element_ids"],
+            self._halfplane_positions,
+            self._halfplane_normals,
+            self._halfplane_contact_element_ids,
         )
         _set_contact_adaptive_kappa(
             data,
-            args["adaptive_kappa_mode"],
-            args["adaptive_kappa_tick"],
+            self._adaptive_kappa_mode,
+            self._adaptive_kappa_tick,
             n_bodies,
             n_verts,
         )
         _initialize_contact_data(data, n_verts)
-        if args["contact_element_ids"] is not None:
-            set_contact_element_ids(data, args["contact_element_ids"])
+        if self._contact_element_ids is not None:
+            set_contact_element_ids(data, self._contact_element_ids)
         if not self.broad_phase_init_actions.actions:
             raise RuntimeError("ContactSystem requires a broad-phase initializer")
         for action in self.broad_phase_init_actions.actions:
             action.invoke()
         for action in self.contact_assemble_init_actions.actions:
             action.invoke()
-        self._wire_args = None
+        self._n_verts = None
+        self._n_bodies = None
+        self._d_hat = None
+        self._kappa = None
+        self._dt_sq = None
+        self._init_pair_capacity = None
+        self._contact_tabular = None
+        self._friction_mu = None
+        self._friction_eps_v = None
+        self._halfplane_positions = None
+        self._halfplane_normals = None
+        self._adaptive_kappa_mode = None
+        self._adaptive_kappa_tick = None
+        self._contact_element_ids = None
+        self._halfplane_contact_element_ids = None
+        self._intersection_check_capacity = None
 
     @qd.func(requires_top_level=True)
     def on_reset_initial_intersections(self):

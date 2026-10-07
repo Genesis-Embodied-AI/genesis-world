@@ -38,7 +38,14 @@ class GlobalVertexManager(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
+        self._n_verts: int | None = None
+        self._thicknesses: np.ndarray | None = None
+        self._d_hats: np.ndarray | None = None
+        self._is_fixed: np.ndarray | None = None
+        self._geometry_ids: np.ndarray | None = None
+        self._geometry_sources: np.ndarray | None = None
+        self._source_geometry_ids: np.ndarray | None = None
+        self._geometry_environments: np.ndarray | None = None
 
     def wire_data(
         self,
@@ -52,16 +59,14 @@ class GlobalVertexManager(SimSystem):
         source_geometry_ids: np.ndarray | None = None,
         geometry_environments: np.ndarray | None = None,
     ) -> None:
-        self._wire_args = (
-            n_verts,
-            thicknesses,
-            d_hats,
-            is_fixed,
-            geometry_ids,
-            geometry_sources,
-            source_geometry_ids,
-            geometry_environments,
-        )
+        self._n_verts = n_verts
+        self._thicknesses = thicknesses
+        self._d_hats = d_hats
+        self._is_fixed = is_fixed
+        self._geometry_ids = geometry_ids
+        self._geometry_sources = geometry_sources
+        self._source_geometry_ids = source_geometry_ids
+        self._geometry_environments = geometry_environments
 
     def build(self) -> None:
         from .finite_element import FiniteElementMethod
@@ -69,18 +74,16 @@ class GlobalVertexManager(SimSystem):
         self.fem_system = self.require(FiniteElementMethod)
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._n_verts is None:
             raise RuntimeError("GlobalVertexManager data has not been wired")
-        (
-            n_verts,
-            thicknesses,
-            d_hats,
-            is_fixed,
-            geometry_ids,
-            geometry_sources,
-            source_geometry_ids,
-            geometry_environments,
-        ) = self._wire_args
+        n_verts = self._n_verts
+        thicknesses = self._thicknesses
+        d_hats = self._d_hats
+        is_fixed = self._is_fixed
+        geometry_ids = self._geometry_ids
+        geometry_sources = self._geometry_sources
+        source_geometry_ids = self._source_geometry_ids
+        geometry_environments = self._geometry_environments
         if n_verts < 0:
             raise ValueError("Global vertex count must be non-negative")
         capacity = max(n_verts, 1)
@@ -145,7 +148,14 @@ class GlobalVertexManager(SimSystem):
         self.data.path_inflation = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
         self.data.path_kind = array(qd.i32, (capacity,), np.zeros(capacity, dtype=np.int32))
         self.data.path_speed = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
-        self._wire_args = None
+        self._n_verts = None
+        self._thicknesses = None
+        self._d_hats = None
+        self._is_fixed = None
+        self._geometry_ids = None
+        self._geometry_sources = None
+        self._source_geometry_ids = None
+        self._geometry_environments = None
 
 
 @qd.func(requires_top_level=True)

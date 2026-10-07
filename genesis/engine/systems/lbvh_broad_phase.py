@@ -34,26 +34,60 @@ class LBVHBroadPhase(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
-        self.bound_type = "aabb"
-        self.use_warp_pt = True
-        self.use_dual_ee = True
-        self.has_triangle_bvh = False
-        self.has_edge_bvh = False
-        self.genesis_legacy_sort_reduce = False
-        self.genesis_legacy_fp64_bounds = False
-        self.genesis_legacy_refit = False
+        self._n_triangles: int | None = None
+        self._n_edges: int | None = None
+        self._n_surface_vertices: int | None = None
+        self._n_codim_verts: int | None = None
+        self._dual_frontier_levels: int | None = None
+        self._dual_target_waves: float | None = None
+        self._dual_max_levels: int | None = None
+        self.bound_type: str = "aabb"
+        self.use_warp_pt: bool = True
+        self.use_dual_ee: bool = True
+        self.has_triangle_bvh: bool = False
+        self.has_edge_bvh: bool = False
+        self.genesis_legacy_sort_reduce: bool = False
+        self.genesis_legacy_fp64_bounds: bool = False
+        self.genesis_legacy_refit: bool = False
 
-    def wire_data(self, **kwargs) -> None:
-        self._wire_args = dict(kwargs)
-        self.bound_type = str(kwargs["bound_type"])
-        self.use_warp_pt = kwargs["pt_query"] == "warp"
-        self.use_dual_ee = kwargs["ee_query"] == "dual"
-        self.has_triangle_bvh = kwargs["n_triangles"] > 0
-        self.has_edge_bvh = kwargs["n_edges"] > 0
-        self.genesis_legacy_sort_reduce = bool(kwargs["genesis_legacy_sort_reduce"])
-        self.genesis_legacy_fp64_bounds = bool(kwargs["genesis_legacy_fp64_bounds"])
-        self.genesis_legacy_refit = bool(kwargs["genesis_legacy_refit"])
+    def wire_data(
+        self,
+        *,
+        n_triangles: int,
+        n_edges: int,
+        n_surface_vertices: int,
+        pt_query: str,
+        ee_query: str,
+        bound_type: str,
+        dual_frontier_levels: int,
+        dual_target_waves: float,
+        dual_max_levels: int,
+        genesis_legacy_sort_reduce: bool,
+        genesis_legacy_fp64_bounds: bool,
+        genesis_legacy_refit: bool,
+        n_codim_verts: int = 0,
+    ) -> None:
+        self._n_triangles = n_triangles
+        self._n_edges = n_edges
+        self._n_surface_vertices = n_surface_vertices
+        self._n_codim_verts = n_codim_verts
+        self._dual_frontier_levels = dual_frontier_levels
+        self._dual_target_waves = dual_target_waves
+        self._dual_max_levels = dual_max_levels
+        self.bound_type = bound_type
+        self.use_warp_pt = pt_query == "warp"
+        self.use_dual_ee = ee_query == "dual"
+        self.has_triangle_bvh = n_triangles > 0
+        self.has_edge_bvh = n_edges > 0
+        self.genesis_legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
+        self.genesis_legacy_fp64_bounds = bool(genesis_legacy_fp64_bounds)
+        self.genesis_legacy_refit = bool(genesis_legacy_refit)
+        if pt_query not in ("warp", "batched"):
+            raise ValueError(f"Unsupported bvh/pt_query {pt_query!r}")
+        if ee_query not in ("dual", "warp"):
+            raise ValueError(f"Unsupported bvh/ee_query {ee_query!r}")
+        if n_codim_verts > 0:
+            raise NotImplementedError("Explicit codimensional PE/PP broad phase is outside the cloth milestone")
 
     def build(self) -> None:
         from .contact_system import ContactSystem
@@ -153,43 +187,21 @@ class LBVHBroadPhase(SimSystem):
         return False
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._n_triangles is None:
             raise RuntimeError("LBVHBroadPhase data has not been wired")
-        args = self._wire_args
-        pt_query = args.pop("pt_query")
-        ee_query = args.pop("ee_query")
-        bound_type = args.pop("bound_type")
-        n_triangles = args.pop("n_triangles")
-        n_edges = args.pop("n_edges")
-        n_surface_vertices = args.pop("n_surface_vertices")
-        n_codim_verts = args.pop("n_codim_verts", 0)
-        if pt_query not in ("warp", "batched"):
-            raise ValueError(f"Unsupported bvh/pt_query {pt_query!r}")
-        if ee_query not in ("dual", "warp"):
-            raise ValueError(f"Unsupported bvh/ee_query {ee_query!r}")
-        if n_codim_verts > 0:
-            raise NotImplementedError("Explicit codimensional PE/PP broad phase is outside the cloth milestone")
-        self.bound_type = bound_type
-        self.use_warp_pt = pt_query == "warp"
-        self.use_dual_ee = ee_query == "dual"
-        self.has_triangle_bvh = n_triangles > 0
-        self.has_edge_bvh = n_edges > 0
-        legacy_sort = bool(args.pop("genesis_legacy_sort_reduce"))
-        legacy_fp64 = bool(args.pop("genesis_legacy_fp64_bounds"))
-        legacy_refit = bool(args.pop("genesis_legacy_refit"))
-        dual_frontier_levels = args.pop("dual_frontier_levels")
-        dual_target_waves = args.pop("dual_target_waves")
-        dual_max_levels = args.pop("dual_max_levels")
+        n_triangles = self._n_triangles
+        n_edges = self._n_edges
+        n_surface_vertices = self._n_surface_vertices
         self.data.triangle_bvh = LBVH.Data() if self.has_triangle_bvh else None
         if self.has_triangle_bvh:
             initialize_lbvh_data(
                 self.data.triangle_bvh,
                 n_triangles,
                 max(n_surface_vertices, n_edges, 1),
-                bound_type,
-                legacy_sort,
-                legacy_fp64,
-                legacy_refit,
+                self.bound_type,
+                self.genesis_legacy_sort_reduce,
+                self.genesis_legacy_fp64_bounds,
+                self.genesis_legacy_refit,
             )
         self.data.edge_bvh = LBVH.Data() if self.has_edge_bvh else None
         if self.has_edge_bvh:
@@ -197,21 +209,27 @@ class LBVHBroadPhase(SimSystem):
                 self.data.edge_bvh,
                 n_edges,
                 n_edges,
-                bound_type,
-                legacy_sort,
-                legacy_fp64,
-                legacy_refit,
+                self.bound_type,
+                self.genesis_legacy_sort_reduce,
+                self.genesis_legacy_fp64_bounds,
+                self.genesis_legacy_refit,
             )
         self.data.ee_dual_state = DualEEQueryState.Data() if self.has_edge_bvh and self.use_dual_ee else None
         if self.data.ee_dual_state is not None:
             initialize_dual_ee_query_data(
                 self.data.ee_dual_state,
                 n_edges,
-                dual_frontier_levels,
-                dual_target_waves,
-                dual_max_levels,
+                self._dual_frontier_levels,
+                self._dual_target_waves,
+                self._dual_max_levels,
             )
-        self._wire_args = None
+        self._n_triangles = None
+        self._n_edges = None
+        self._n_surface_vertices = None
+        self._n_codim_verts = None
+        self._dual_frontier_levels = None
+        self._dual_target_waves = None
+        self._dual_max_levels = None
 
 
 @qd.func(requires_top_level=True)

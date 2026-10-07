@@ -25,7 +25,12 @@ class GlobalBodyManager(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
+        self._n_bodies: int | None = None
+        self._vertex_offsets: np.ndarray | None = None
+        self._self_collision: np.ndarray | None = None
+        self._body_contact_ignorance_ranges: np.ndarray | None = None
+        self._body_contact_ignorance_body_ids: np.ndarray | None = None
+        self._halfplane_body_id_offset: int | None = None
 
     def wire_data(
         self,
@@ -37,14 +42,12 @@ class GlobalBodyManager(SimSystem):
         body_contact_ignorance_body_ids: np.ndarray | None = None,
         halfplane_body_id_offset: int | None = None,
     ) -> None:
-        self._wire_args = (
-            n_bodies,
-            vertex_offsets,
-            self_collision,
-            body_contact_ignorance_ranges,
-            body_contact_ignorance_body_ids,
-            halfplane_body_id_offset,
-        )
+        self._n_bodies = n_bodies
+        self._vertex_offsets = vertex_offsets
+        self._self_collision = self_collision
+        self._body_contact_ignorance_ranges = body_contact_ignorance_ranges
+        self._body_contact_ignorance_body_ids = body_contact_ignorance_body_ids
+        self._halfplane_body_id_offset = halfplane_body_id_offset
 
     def build(self) -> None:
         from .finite_element import FiniteElementMethod
@@ -54,16 +57,14 @@ class GlobalBodyManager(SimSystem):
         self.vertex_system = self.require(GlobalVertexManager)
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._n_bodies is None:
             raise RuntimeError("GlobalBodyManager data has not been wired")
-        (
-            n_bodies,
-            vertex_offsets,
-            self_collision,
-            body_contact_ignorance_ranges,
-            body_contact_ignorance_body_ids,
-            halfplane_body_id_offset,
-        ) = self._wire_args
+        n_bodies = self._n_bodies
+        vertex_offsets = self._vertex_offsets
+        self_collision = self._self_collision
+        body_contact_ignorance_ranges = self._body_contact_ignorance_ranges
+        body_contact_ignorance_body_ids = self._body_contact_ignorance_body_ids
+        halfplane_body_id_offset = self._halfplane_body_id_offset
         if n_bodies < 0:
             raise ValueError("Global body count must be non-negative")
         capacity = max(n_bodies, 1)
@@ -121,7 +122,12 @@ class GlobalBodyManager(SimSystem):
         self.data.vertex_offsets = array(qd.i32, (capacity + 1,), offset_values)
         self.data.body_contact_ignorance_ranges = array(qd.i32, (capacity + 1,), range_values)
         self.data.body_contact_ignorance_body_ids = array(qd.i32, (max(len(id_values), 1),), id_storage)
-        self._wire_args = None
+        self._n_bodies = None
+        self._vertex_offsets = None
+        self._self_collision = None
+        self._body_contact_ignorance_ranges = None
+        self._body_contact_ignorance_body_ids = None
+        self._halfplane_body_id_offset = None
 
 
 @qd.func(requires_top_level=True)

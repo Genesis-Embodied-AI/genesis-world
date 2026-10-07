@@ -31,7 +31,13 @@ class GlobalSurfaceManager(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
+        self._surf_triangles: np.ndarray | None = None
+        self._surf_edges: np.ndarray | None = None
+        self._surf_verts: np.ndarray | None = None
+        self._vert_dimensions: np.ndarray | None = None
+        self._surf_vert_area_weights: np.ndarray | None = None
+        self._surf_edge_area_weights: np.ndarray | None = None
+        self._surf_face_area_weights: np.ndarray | None = None
 
     def wire_data(
         self,
@@ -44,15 +50,13 @@ class GlobalSurfaceManager(SimSystem):
         surf_edge_area_weights: np.ndarray | None = None,
         surf_face_area_weights: np.ndarray | None = None,
     ) -> None:
-        self._wire_args = (
-            surf_triangles,
-            surf_edges,
-            surf_verts,
-            vert_dimensions,
-            surf_vert_area_weights,
-            surf_edge_area_weights,
-            surf_face_area_weights,
-        )
+        self._surf_triangles = surf_triangles
+        self._surf_edges = surf_edges
+        self._surf_verts = surf_verts
+        self._vert_dimensions = vert_dimensions
+        self._surf_vert_area_weights = surf_vert_area_weights
+        self._surf_edge_area_weights = surf_edge_area_weights
+        self._surf_face_area_weights = surf_face_area_weights
 
     def build(self) -> None:
         from .finite_element import FiniteElementMethod
@@ -62,17 +66,15 @@ class GlobalSurfaceManager(SimSystem):
         self.vertex_system = self.require(GlobalVertexManager)
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._surf_triangles is None:
             raise RuntimeError("GlobalSurfaceManager data has not been wired")
-        (
-            surf_triangles,
-            surf_edges,
-            surf_verts,
-            vert_dimensions,
-            surf_vert_area_weights,
-            surf_edge_area_weights,
-            surf_face_area_weights,
-        ) = self._wire_args
+        surf_triangles = self._surf_triangles
+        surf_edges = self._surf_edges
+        surf_verts = self._surf_verts
+        vert_dimensions = self._vert_dimensions
+        surf_vert_area_weights = self._surf_vert_area_weights
+        surf_edge_area_weights = self._surf_edge_area_weights
+        surf_face_area_weights = self._surf_face_area_weights
         triangles = np.ascontiguousarray(surf_triangles, dtype=np.int32).reshape(-1, 3)
         edges = np.ascontiguousarray(surf_edges, dtype=np.int32).reshape(-1, 2)
         vertices = np.ascontiguousarray(surf_verts, dtype=np.int32).reshape(-1)
@@ -116,4 +118,10 @@ class GlobalSurfaceManager(SimSystem):
         self.data.face_area_weights = array(qd.f64, (triangle_capacity,), face_weights)
         self.data.codim_verts = array(qd.u32, (1,), np.zeros(1, dtype=np.uint32))
         self.data.codim_vert_area_weights = array(qd.f64, (1,), np.zeros(1, dtype=np.float64))
-        self._wire_args = None
+        self._surf_triangles = None
+        self._surf_edges = None
+        self._surf_verts = None
+        self._vert_dimensions = None
+        self._surf_vert_area_weights = None
+        self._surf_edge_area_weights = None
+        self._surf_face_area_weights = None

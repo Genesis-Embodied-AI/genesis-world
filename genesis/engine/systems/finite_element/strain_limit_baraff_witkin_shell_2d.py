@@ -26,7 +26,10 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._inputs = None
+        self._tri_indices: np.ndarray | None = None
+        self._mu: np.ndarray | None = None
+        self._lambda: np.ndarray | None = None
+        self._strain_limit_multiplier: np.ndarray | None = None
 
     def build(self) -> None:
         self.fem_system = self.require(FiniteElementMethod)
@@ -56,17 +59,23 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
     ) -> None:
         if hasattr(self.data, "n_tris"):
             raise RuntimeError("StrainLimitBaraffWitkinShell2D data is already initialized")
-        self._inputs = _strain_limit_inputs(
-            tri_indices,
-            mu,
-            lambda_param,
-            strain_limit_multiplier,
-        )
+        self._tri_indices = np.ascontiguousarray(tri_indices, dtype=np.int32).reshape(-1)
+        self._mu = np.ascontiguousarray(mu, dtype=np.float64).reshape(-1)
+        self._lambda = np.ascontiguousarray(lambda_param, dtype=np.float64).reshape(-1)
+        self._strain_limit_multiplier = np.ascontiguousarray(strain_limit_multiplier, dtype=np.float64).reshape(-1)
+        n_tris = len(self._tri_indices)
+        if not (
+            len(self._mu) == n_tris and len(self._lambda) == n_tris and len(self._strain_limit_multiplier) == n_tris
+        ):
+            raise ValueError("StrainLimitBaraffWitkinShell2D wire-data lengths must match")
 
     def init(self) -> None:
-        if self._inputs is None:
+        if self._tri_indices is None:
             raise RuntimeError("StrainLimitBaraffWitkinShell2D data has not been wired")
-        triangles, mu_values, lambda_values, multiplier_values = self._inputs
+        triangles = self._tri_indices
+        mu_values = self._mu
+        lambda_values = self._lambda
+        multiplier_values = self._strain_limit_multiplier
         n_tris = len(triangles)
         capacity = max(n_tris, 1)
 
@@ -82,56 +91,10 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
         self.data.mu = array(qd.f64, mu_values)
         self.data.lambda_ = array(qd.f64, lambda_values)
         self.data.strain_limit_multiplier = array(qd.f64, multiplier_values)
-        self._inputs = None
-
-
-def _strain_limit_inputs(
-    tri_indices: np.ndarray,
-    mu: np.ndarray,
-    lambda_param: np.ndarray,
-    strain_limit_multiplier: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    triangles = np.ascontiguousarray(tri_indices, dtype=np.int32).reshape(-1)
-    mu_values = np.ascontiguousarray(mu, dtype=np.float64).reshape(-1)
-    lambda_values = np.ascontiguousarray(lambda_param, dtype=np.float64).reshape(-1)
-    multiplier_values = np.ascontiguousarray(strain_limit_multiplier, dtype=np.float64).reshape(-1)
-    n_tris = len(triangles)
-    if not (len(mu_values) == n_tris and len(lambda_values) == n_tris and len(multiplier_values) == n_tris):
-        raise ValueError("StrainLimitBaraffWitkinShell2D wire-data lengths must match")
-    return triangles, mu_values, lambda_values, multiplier_values
-
-
-def wire_strain_limit_baraff_witkin_shell_2d_data(
-    data: StrainLimitBaraffWitkinShell2D.Data,
-    tri_indices: np.ndarray,
-    mu: np.ndarray,
-    lambda_param: np.ndarray,
-    strain_limit_multiplier: np.ndarray,
-) -> None:
-    triangles, mu_values, lambda_values, multiplier_values = _strain_limit_inputs(
-        tri_indices,
-        mu,
-        lambda_param,
-        strain_limit_multiplier,
-    )
-    n_tris = len(triangles)
-    capacity = max(n_tris, 1)
-    data.n_tris.from_numpy(np.array(n_tris, dtype=np.int32))
-    if data.tri_indices.shape[0] != capacity:
-        data.tri_indices = qd.ndarray(qd.i32, shape=(capacity,))
-        data.mu = qd.ndarray(qd.f64, shape=(capacity,))
-        data.lambda_ = qd.ndarray(qd.f64, shape=(capacity,))
-        data.strain_limit_multiplier = qd.ndarray(qd.f64, shape=(capacity,))
-    if n_tris:
-        data.tri_indices.from_numpy(triangles)
-        data.mu.from_numpy(mu_values)
-        data.lambda_.from_numpy(lambda_values)
-        data.strain_limit_multiplier.from_numpy(multiplier_values)
-    else:
-        data.tri_indices.from_numpy(np.zeros(capacity, dtype=np.int32))
-        data.mu.from_numpy(np.zeros(capacity, dtype=np.float64))
-        data.lambda_.from_numpy(np.zeros(capacity, dtype=np.float64))
-        data.strain_limit_multiplier.from_numpy(np.zeros(capacity, dtype=np.float64))
+        self._tri_indices = None
+        self._mu = None
+        self._lambda = None
+        self._strain_limit_multiplier = None
 
 
 @qd.func(requires_top_level=True)

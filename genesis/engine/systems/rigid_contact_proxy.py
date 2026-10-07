@@ -236,11 +236,21 @@ class RigidContactProxySystem(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self._wire_args = None
-        self.n_links = 0
-        self.n_instances = 0
-        self.n_bodies = 0
-        self.n_pairs = 0
+        self._mechanism_body: np.ndarray | None = None
+        self._proxy_body: np.ndarray | None = None
+        self._surface_radius: np.ndarray | None = None
+        self._geometry: RigidContactProxyGeometry | None = None
+        self._global_vert_offset: int | None = None
+        self._global_body_offset: int | None = None
+        self._merit_gradient_capacity: int | None = None
+        self._globalization: str | None = None
+        self._restoration: bool | None = None
+        self._test_merit_energy_bias: float | None = None
+        self._ls_forensics_test_energy_bias: float | None = None
+        self.n_links: int = 0
+        self.n_instances: int = 0
+        self.n_bodies: int = 0
+        self.n_pairs: int = 0
 
     def wire_data(
         self,
@@ -264,28 +274,49 @@ class RigidContactProxySystem(SimSystem):
         self.n_instances = int(n_instances)
         self.n_bodies = int(n_rigid_bodies)
         self.n_pairs = len(np.ascontiguousarray(mechanism_body).reshape(-1))
-        self._wire_args = {
-            "n_links": n_links,
-            "n_instances": n_instances,
-            "n_rigid_bodies": n_rigid_bodies,
-            "mechanism_body": mechanism_body,
-            "proxy_body": proxy_body,
-            "surface_radius": surface_radius,
-            "geometry": geometry,
-            "global_vert_offset": global_vert_offset,
-            "global_body_offset": global_body_offset,
-            "merit_gradient_capacity": merit_gradient_capacity,
-            "globalization": globalization,
-            "restoration": restoration,
-            "test_merit_energy_bias": test_merit_energy_bias,
-            "ls_forensics_test_energy_bias": ls_forensics_test_energy_bias,
-        }
+        self._mechanism_body = mechanism_body
+        self._proxy_body = proxy_body
+        self._surface_radius = surface_radius
+        self._geometry = geometry
+        self._global_vert_offset = global_vert_offset
+        self._global_body_offset = global_body_offset
+        self._merit_gradient_capacity = merit_gradient_capacity
+        self._globalization = globalization
+        self._restoration = restoration
+        self._test_merit_energy_bias = test_merit_energy_bias
+        self._ls_forensics_test_energy_bias = ls_forensics_test_energy_bias
 
     def init(self) -> None:
-        if self._wire_args is None:
+        if self._mechanism_body is None:
             raise RuntimeError("RigidContactProxySystem data has not been wired")
-        _populate_rigid_contact_proxy_data(self.data, **self._wire_args)
-        self._wire_args = None
+        _populate_rigid_contact_proxy_data(
+            self.data,
+            n_links=self.n_links,
+            n_instances=self.n_instances,
+            n_rigid_bodies=self.n_bodies,
+            mechanism_body=self._mechanism_body,
+            proxy_body=self._proxy_body,
+            surface_radius=self._surface_radius,
+            geometry=self._geometry,
+            global_vert_offset=self._global_vert_offset,
+            global_body_offset=self._global_body_offset,
+            merit_gradient_capacity=self._merit_gradient_capacity,
+            globalization=self._globalization,
+            restoration=self._restoration,
+            test_merit_energy_bias=self._test_merit_energy_bias,
+            ls_forensics_test_energy_bias=self._ls_forensics_test_energy_bias,
+        )
+        self._mechanism_body = None
+        self._proxy_body = None
+        self._surface_radius = None
+        self._geometry = None
+        self._global_vert_offset = None
+        self._global_body_offset = None
+        self._merit_gradient_capacity = None
+        self._globalization = None
+        self._restoration = None
+        self._test_merit_energy_bias = None
+        self._ls_forensics_test_energy_bias = None
 
     def build(self) -> None:
         from .contact_system import ContactSystem
