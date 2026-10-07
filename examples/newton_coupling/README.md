@@ -30,9 +30,10 @@ python examples/newton_coupling/cloth_stack.py -v
 The Panda `hand` link origin is approximately 10.34 cm behind that point and
 is converted internally before every IK solve.
 
-The first version pins
-[Quadrants `974a8975b`](https://github.com/alanray-tech/quadrants/commit/974a8975b24518e44618c0c071d9202df6d9f693)
-for checkpoint-contained graph parallel regions. Published
-`quadrants==1.3.3` cannot compile this pipeline. Benchmark reports must record
-the exact compiler commit used; no checkout name or directory layout is
-assumed.
+The base package retains the published `quadrants==1.3.3` wheel so Genesis
+remains installable on every supported platform. The Newton examples currently
+require the checkpoint-contained graph-parallel patch validated at
+[Quadrants `73920ffc`](https://github.com/alanray-tech/quadrants/commit/73920ffc15ee7dfc55227bbf4283d2a81c9a3aa4);
+use a compatible prebuilt wheel or local Quadrants build when running this
+experimental engine. Benchmark reports must record the exact compiler commit
+used; no checkout name or directory layout is assumed.
