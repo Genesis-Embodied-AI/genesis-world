@@ -305,7 +305,13 @@ def test_vortex_force_field(n_envs, tol):
     direction = torch.tensor(vortex.direction, dtype=gs.tc_float, device=gs.device)
     radial_pos = particles_pos_init - (particles_pos_init @ direction)[..., None] * direction
     radius = radial_pos.norm(dim=-1, keepdim=True)
-    falloff = 1.0 / (radius - vortex.falloff_min + 1.0) ** vortex.falloff_pow
+    falloff = torch.where(
+        radius < vortex.falloff_min, 1.0, 1.0 / (radius - vortex.falloff_min + 1.0) ** vortex.falloff_pow
+    )
     perpendicular = torch.cross(direction.expand_as(radial_pos), radial_pos, dim=-1)
     acc = falloff * (vortex.strength_perpendicular * perpendicular - vortex.strength_radial * radial_pos)
     assert_allclose(particles.get_particles_vel(), DT * acc, tol=tol)
+
+    # A zero direction defines no axis to revolve around
+    with pytest.raises(ValueError):
+        gs.force_fields.Vortex(direction=(0.0, 0.0, 0.0))

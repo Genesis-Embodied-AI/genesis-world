@@ -299,12 +299,16 @@ class Vortex(ForceField):
         if direction.shape != (3,):
             raise ValueError("direction must have shape (3,)")
 
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < gs.EPS:
+            raise ValueError("direction must be a non-zero vector")
+
         center = np.array(center)
         if center.shape != (3,):
             raise ValueError("center must have shape (3,)")
 
         self._center = center
-        self._direction = direction / np.linalg.norm(direction)
+        self._direction = direction / direction_norm
         self._damping = damping
 
         self._strength_perpendicular = strength_perpendicular
