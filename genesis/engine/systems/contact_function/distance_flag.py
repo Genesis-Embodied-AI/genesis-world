@@ -418,7 +418,7 @@ def flag_active_offsets_for_ee(
 @qd.func
 def pt_flagged_distance2(
     flag: qd.i32,
-    verts: qd.template(),  # qd.Vector
+    verts: qd.template(),  # qd.Matrix
 ) -> qd.f64:
     """Dispatch PT d² by flag sub-type. verts is (4, 3) field/ndarray."""
     pc = _popcount4(flag)
@@ -498,7 +498,7 @@ def gipc_d_EE(
 @qd.func
 def ee_flagged_distance2(
     flag: qd.i32,
-    verts: qd.template(),  # qd.Vector
+    verts: qd.template(),  # qd.Matrix
 ) -> qd.f64:
     """Dispatch EE d² by flag sub-type. verts is (4, 3) field/ndarray."""
     pc = _popcount4(flag)
