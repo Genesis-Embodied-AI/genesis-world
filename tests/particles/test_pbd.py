@@ -265,3 +265,53 @@ def test_cloth_attach_rigid_link(show_viewer):
     link_disp = link_pos2 - link_pos1
     cloth_disp = cloth_pos2 - cloth_pos1
     assert ((cloth_disp.movedim(0, -2) - link_disp).norm(dim=-1) > 0.2).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_vortex_force_field(n_envs, tol):
+    DT = 1e-2
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=1,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.05,
+        ),
+    )
+    particles = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.PBD.Particle(),
+    )
+    vortex = scene.add_force_field(
+        gs.force_fields.Vortex(
+            direction=(1.0, 0.0, 0.0),
+            strength_perpendicular=10.0,
+            strength_radial=3.0,
+        )
+    )
+    scene.build(n_envs=n_envs)
+    vortex.activate()
+
+    particles_pos_init = particles.get_particles_pos()
+    scene.step()
+
+    # The particles start at rest, so their velocity after one step is the field acceleration times dt
+    direction = torch.tensor(vortex.direction, dtype=gs.tc_float, device=gs.device)
+    radial_pos = particles_pos_init - (particles_pos_init @ direction)[..., None] * direction
+    radius = radial_pos.norm(dim=-1, keepdim=True)
+    falloff = torch.where(
+        radius < vortex.falloff_min, 1.0, 1.0 / (radius - vortex.falloff_min + 1.0) ** vortex.falloff_pow
+    )
+    perpendicular = torch.cross(direction.expand_as(radial_pos), radial_pos, dim=-1)
+    acc = falloff * (vortex.strength_perpendicular * perpendicular - vortex.strength_radial * radial_pos)
+    assert_allclose(particles.get_particles_vel(), DT * acc, tol=tol)
+
+    # A zero direction defines no axis to revolve around
+    with pytest.raises(ValueError):
+        gs.force_fields.Vortex(direction=(0.0, 0.0, 0.0))
