@@ -117,7 +117,12 @@ class RigidJointForestSystem(SimSystem):
         self._proxy_dof_offset = proxy_dof_offset
 
     def init(self) -> None:
-        if self._rigid_solver is None:
+        if (
+            self._rigid_solver is None
+            or self._total_dof is None
+            or self._n_rigid_bodies is None
+            or self._proxy_dof_offset is None
+        ):
             raise RuntimeError("RigidJointForestSystem data has not been wired")
         _populate_rigid_joint_forest_data(
             self,

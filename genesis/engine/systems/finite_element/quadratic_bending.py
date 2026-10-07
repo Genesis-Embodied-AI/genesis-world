@@ -58,15 +58,24 @@ class QuadraticBending(SimSystem):
     ) -> None:
         if hasattr(self.data, "n_hinges"):
             raise RuntimeError("QuadraticBending data is already initialized")
-        self._hinge_indices = np.ascontiguousarray(hinge_indices, dtype=np.int32).reshape(-1, 4)
-        self._bending_stiffness = np.ascontiguousarray(bending_stiffness, dtype=np.float64).reshape(-1)
-        self._Q0 = np.ascontiguousarray(Q0, dtype=np.float64).reshape(-1, 16)
-        self._vert_bend_k = np.ascontiguousarray(vert_bend_k, dtype=np.float64).reshape(-1)
-        if len(self._bending_stiffness) != len(self._hinge_indices) or len(self._Q0) != len(self._hinge_indices):
+        hinges = np.ascontiguousarray(hinge_indices, dtype=np.int32).reshape(-1, 4)
+        stiffness = np.ascontiguousarray(bending_stiffness, dtype=np.float64).reshape(-1)
+        matrices = np.ascontiguousarray(Q0, dtype=np.float64).reshape(-1, 16)
+        vertex_stiffness = np.ascontiguousarray(vert_bend_k, dtype=np.float64).reshape(-1)
+        if len(stiffness) != len(hinges) or len(matrices) != len(hinges):
             raise ValueError("QuadraticBending wire-data lengths must match")
+        self._hinge_indices = hinges
+        self._bending_stiffness = stiffness
+        self._Q0 = matrices
+        self._vert_bend_k = vertex_stiffness
 
     def init(self) -> None:
-        if self._hinge_indices is None:
+        if (
+            self._hinge_indices is None
+            or self._bending_stiffness is None
+            or self._Q0 is None
+            or self._vert_bend_k is None
+        ):
             raise RuntimeError("QuadraticBending data has not been wired")
         hinges = self._hinge_indices
         stiffness = self._bending_stiffness

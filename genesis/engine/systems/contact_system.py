@@ -332,7 +332,22 @@ class ContactSystem(SimSystem):
         self.contact_assemble_init_actions.register(init_action)
 
     def init(self) -> None:
-        if self._n_verts is None:
+        if (
+            self._n_verts is None
+            or self._n_bodies is None
+            or self._d_hat is None
+            or self._kappa is None
+            or self._dt_sq is None
+            or self._init_pair_capacity is None
+            or self._contact_tabular is None
+            or self._friction_mu is None
+            or self._friction_eps_v is None
+            or self._halfplane_positions is None
+            or self._halfplane_normals is None
+            or self._adaptive_kappa_mode is None
+            or self._adaptive_kappa_tick is None
+            or self._intersection_check_capacity is None
+        ):
             raise RuntimeError("ContactSystem data has not been wired")
         n_verts = self._n_verts
         n_bodies = self._n_bodies

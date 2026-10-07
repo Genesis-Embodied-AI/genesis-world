@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import inspect
 from pathlib import Path
 
+import numpy as np
 import pytest
 import quadrants as qd
 
@@ -20,7 +21,11 @@ from genesis.engine.systems import (
     SimSystem,
     validate_action_protocol,
 )
-from genesis.engine.systems.finite_element import FiniteElementMethod
+from genesis.engine.systems.finite_element import (
+    FiniteElementMethod,
+    QuadraticBending,
+    StrainLimitBaraffWitkinShell2D,
+)
 from genesis.engine.systems.rigid_system import RigidSystem
 
 
@@ -296,6 +301,34 @@ def test_system_template_parameters_document_concrete_types():
                 if not comment or comment.startswith(("noqa", "type: ignore")):
                     undocumented.append(f"{path.relative_to(systems_root)}:{line_number}")
     assert undocumented == []
+
+
+def test_constitution_wire_validation_is_atomic():
+    bending = QuadraticBending()
+    with pytest.raises(ValueError, match="wire-data lengths"):
+        bending.wire_data(
+            np.zeros((1, 4), dtype=np.int32),
+            np.zeros(0, dtype=np.float64),
+            np.zeros((1, 16), dtype=np.float64),
+            np.zeros(1, dtype=np.float64),
+        )
+    assert bending._hinge_indices is None
+    assert bending._bending_stiffness is None
+    assert bending._Q0 is None
+    assert bending._vert_bend_k is None
+
+    membrane = StrainLimitBaraffWitkinShell2D()
+    with pytest.raises(ValueError, match="wire-data lengths"):
+        membrane.wire_data(
+            np.zeros(1, dtype=np.int32),
+            np.zeros(0, dtype=np.float64),
+            np.zeros(1, dtype=np.float64),
+            np.zeros(1, dtype=np.float64),
+        )
+    assert membrane._tri_indices is None
+    assert membrane._mu is None
+    assert membrane._lambda is None
+    assert membrane._strain_limit_multiplier is None
 
 
 def test_action_invokes_pure_function_with_ordered_data_inputs():

@@ -59,18 +59,25 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
     ) -> None:
         if hasattr(self.data, "n_tris"):
             raise RuntimeError("StrainLimitBaraffWitkinShell2D data is already initialized")
-        self._tri_indices = np.ascontiguousarray(tri_indices, dtype=np.int32).reshape(-1)
-        self._mu = np.ascontiguousarray(mu, dtype=np.float64).reshape(-1)
-        self._lambda = np.ascontiguousarray(lambda_param, dtype=np.float64).reshape(-1)
-        self._strain_limit_multiplier = np.ascontiguousarray(strain_limit_multiplier, dtype=np.float64).reshape(-1)
-        n_tris = len(self._tri_indices)
-        if not (
-            len(self._mu) == n_tris and len(self._lambda) == n_tris and len(self._strain_limit_multiplier) == n_tris
-        ):
+        triangles = np.ascontiguousarray(tri_indices, dtype=np.int32).reshape(-1)
+        mu_values = np.ascontiguousarray(mu, dtype=np.float64).reshape(-1)
+        lambda_values = np.ascontiguousarray(lambda_param, dtype=np.float64).reshape(-1)
+        multiplier_values = np.ascontiguousarray(strain_limit_multiplier, dtype=np.float64).reshape(-1)
+        n_tris = len(triangles)
+        if not (len(mu_values) == n_tris and len(lambda_values) == n_tris and len(multiplier_values) == n_tris):
             raise ValueError("StrainLimitBaraffWitkinShell2D wire-data lengths must match")
+        self._tri_indices = triangles
+        self._mu = mu_values
+        self._lambda = lambda_values
+        self._strain_limit_multiplier = multiplier_values
 
     def init(self) -> None:
-        if self._tri_indices is None:
+        if (
+            self._tri_indices is None
+            or self._mu is None
+            or self._lambda is None
+            or self._strain_limit_multiplier is None
+        ):
             raise RuntimeError("StrainLimitBaraffWitkinShell2D data has not been wired")
         triangles = self._tri_indices
         mu_values = self._mu

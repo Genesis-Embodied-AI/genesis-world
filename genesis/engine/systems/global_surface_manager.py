@@ -66,7 +66,7 @@ class GlobalSurfaceManager(SimSystem):
         self.vertex_system = self.require(GlobalVertexManager)
 
     def init(self) -> None:
-        if self._surf_triangles is None:
+        if self._surf_triangles is None or self._surf_edges is None or self._surf_verts is None:
             raise RuntimeError("GlobalSurfaceManager data has not been wired")
         surf_triangles = self._surf_triangles
         surf_edges = self._surf_edges

@@ -88,6 +88,8 @@ class GlobalLinearSystem(SimSystem):
         genesis_legacy_sort_reduce: bool = False,
         capacity_grow_factor: float = 1.2,
     ) -> None:
+        if min(n_block_rows, n_elastic_triplets, max_contact_body_triplets, dof_block_base) < 0:
+            raise ValueError("Global linear system sizes must be non-negative")
         if capacity_grow_factor <= 1.0:
             raise ValueError("GlobalLinearSystem capacity grow factor must be greater than one")
         self.capacity_grow_factor = float(capacity_grow_factor)
@@ -143,24 +145,19 @@ class GlobalLinearSystem(SimSystem):
         return ContactCheckpoint.SOLVE
 
     def init(self) -> None:
-        if self._n_block_rows is None:
+        if (
+            self._n_block_rows is None
+            or self._n_elastic_triplets is None
+            or self._max_contact_body_triplets is None
+            or self._dof_block_base is None
+            or self._legacy_sort_reduce is None
+        ):
             raise RuntimeError("GlobalLinearSystem data has not been wired")
         n_block_rows = self._n_block_rows
         n_elastic_triplets = self._n_elastic_triplets
         max_contact_body_triplets = self._max_contact_body_triplets
         dof_block_base = self._dof_block_base
         genesis_legacy_sort_reduce = self._legacy_sort_reduce
-        if (
-            min(
-                n_block_rows,
-                n_elastic_triplets,
-                max_contact_body_triplets,
-                dof_block_base,
-                len(self.extent_actions.actions),
-            )
-            < 0
-        ):
-            raise ValueError("Global linear system sizes must be non-negative")
         total_dof = n_block_rows * 3
         self.extent_schedule = self.extent_actions.actions
         self.assemble_schedule = self.assemble_actions.actions

@@ -287,7 +287,19 @@ class RigidContactProxySystem(SimSystem):
         self._ls_forensics_test_energy_bias = ls_forensics_test_energy_bias
 
     def init(self) -> None:
-        if self._mechanism_body is None:
+        if (
+            self._mechanism_body is None
+            or self._proxy_body is None
+            or self._surface_radius is None
+            or self._geometry is None
+            or self._global_vert_offset is None
+            or self._global_body_offset is None
+            or self._merit_gradient_capacity is None
+            or self._globalization is None
+            or self._restoration is None
+            or self._test_merit_energy_bias is None
+            or self._ls_forensics_test_energy_bias is None
+        ):
             raise RuntimeError("RigidContactProxySystem data has not been wired")
         _populate_rigid_contact_proxy_data(
             self.data,

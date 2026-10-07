@@ -46,7 +46,13 @@ class SimConfig(SimSystem):
         self._max_ls_iter = int(max_ls_iter)
 
     def init(self) -> None:
-        if self._dt is None:
+        if (
+            self._dt is None
+            or self._tol is None
+            or self._max_newton_iter is None
+            or self._max_pcg_iter is None
+            or self._max_ls_iter is None
+        ):
             raise RuntimeError("SimConfig parameters have not been wired")
         dt = self._dt
         tol = self._tol

@@ -67,6 +67,16 @@ class LBVHBroadPhase(SimSystem):
         genesis_legacy_refit: bool,
         n_codim_verts: int = 0,
     ) -> None:
+        if min(n_triangles, n_edges, n_surface_vertices, n_codim_verts) < 0:
+            raise ValueError("LBVHBroadPhase topology counts must be non-negative")
+        if pt_query not in ("warp", "batched"):
+            raise ValueError(f"Unsupported bvh/pt_query {pt_query!r}")
+        if ee_query not in ("dual", "warp"):
+            raise ValueError(f"Unsupported bvh/ee_query {ee_query!r}")
+        if bound_type not in ("aabb", "dop14"):
+            raise ValueError(f"Unsupported LBVH bound type {bound_type!r}")
+        if n_codim_verts > 0:
+            raise NotImplementedError("Explicit codimensional PE/PP broad phase is outside the cloth milestone")
         self._n_triangles = n_triangles
         self._n_edges = n_edges
         self._n_surface_vertices = n_surface_vertices
@@ -82,12 +92,6 @@ class LBVHBroadPhase(SimSystem):
         self.genesis_legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
         self.genesis_legacy_fp64_bounds = bool(genesis_legacy_fp64_bounds)
         self.genesis_legacy_refit = bool(genesis_legacy_refit)
-        if pt_query not in ("warp", "batched"):
-            raise ValueError(f"Unsupported bvh/pt_query {pt_query!r}")
-        if ee_query not in ("dual", "warp"):
-            raise ValueError(f"Unsupported bvh/ee_query {ee_query!r}")
-        if n_codim_verts > 0:
-            raise NotImplementedError("Explicit codimensional PE/PP broad phase is outside the cloth milestone")
 
     def build(self) -> None:
         from .contact_system import ContactSystem
@@ -187,7 +191,15 @@ class LBVHBroadPhase(SimSystem):
         return False
 
     def init(self) -> None:
-        if self._n_triangles is None:
+        if (
+            self._n_triangles is None
+            or self._n_edges is None
+            or self._n_surface_vertices is None
+            or self._n_codim_verts is None
+            or self._dual_frontier_levels is None
+            or self._dual_target_waves is None
+            or self._dual_max_levels is None
+        ):
             raise RuntimeError("LBVHBroadPhase data has not been wired")
         n_triangles = self._n_triangles
         n_edges = self._n_edges
