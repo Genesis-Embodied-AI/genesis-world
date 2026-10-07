@@ -9,7 +9,6 @@ from quadrants.lang.simt import block as qd_block, subgroup as qd_subgroup
 from .bvh_math import aabb_overlap
 from .bvh_predicate import _ee_emit_pair, _ee_pair_enabled, _node_pair_enabled
 from .gpu_occupancy import cuda_resident_blocks
-from .sim_system import SimData
 
 
 @qd.func
@@ -109,7 +108,7 @@ def _dual_ee_expand_pair(
 
 class DualEEQueryState:
     @qd.data_oriented
-    class Data(SimData):
+    class Data:
         """Device-visible mutable data owned by ``DualEEQueryState``."""
 
         block_size: int
@@ -145,11 +144,13 @@ class DualEEQueryState:
         resident_dfs_warps: qd.Ndarray
 
 
-def get_dual_ee_query_data(
-    n_edges: int, frontier_levels: int, target_waves: float, max_levels: int
-) -> DualEEQueryState.Data:
-    """Construct complete DualEEQueryState data before graph registration."""
-    data = DualEEQueryState.Data()
+def initialize_dual_ee_query_data(
+    data: DualEEQueryState.Data,
+    n_edges: int,
+    frontier_levels: int,
+    target_waves: float,
+    max_levels: int,
+) -> None:
     data.block_size = 256
     data.stack_capacity = 512
     data.max_levels_limit = 18
@@ -207,7 +208,6 @@ def get_dual_ee_query_data(
     data.config_max_levels.from_numpy(np.array(max_levels, dtype=np.int32))
     data.frontier_capacity.from_numpy(np.array(capacity, dtype=np.int32))
     data.resident_dfs_warps.from_numpy(np.array(data.resident_dfs_warps_value, dtype=np.int32))
-    return data
 
 
 def handle_overflow(data) -> bool:

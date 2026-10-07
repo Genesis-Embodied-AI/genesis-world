@@ -11,6 +11,7 @@ from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, func_step_1, 
 from .sim_system import SimData, SimSystem
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class RigidSystem(SimSystem):
     """Expose the existing Genesis RigidSolver numerical state to the Newton runtime."""
 
@@ -18,22 +19,13 @@ class RigidSystem(SimSystem):
     class Data(SimData):
         """Stable references to RigidSolver-owned state plus coupling scratch."""
 
-        has_constraints: bool
-        has_collision: bool
-        n_dofs_per_instance_host: int
-        n_instances_host: int
-        dof_count_host: int
-        storage_dof_count_host: int
-        h: float
-        h4: float
-        is_forward_pos_updated: bool
-        is_forward_vel_updated: bool
         n_dofs_per_instance: qd.Ndarray
         n_instances: qd.Ndarray
         n_links: qd.Ndarray
         n_dofs: qd.Ndarray
         dof_offset: qd.Ndarray
         n_storage_dofs: qd.Ndarray
+        h: qd.Ndarray
         gradient_squared: qd.Ndarray
         rigid_energy: qd.Ndarray
         qacc_temp: qd.Ndarray
@@ -48,17 +40,44 @@ class RigidSystem(SimSystem):
         collider_config: array_class.ColliderStaticConfig
         errno: qd.Tensor
 
-    def __init__(self, data: Data) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = data
+        self.data = self.Data()
+        self._rigid_solver: RigidSolver | None = None
+        self.has_constraints = False
+        self.has_collision = False
+        self.n_dofs_per_instance = 0
+        self.n_instances = 0
+        self.dof_count = 0
+        self.storage_dof_count = 0
+        self.h = 0.0
+        self.h4 = 0.0
+        self.is_forward_pos_updated = False
+        self.is_forward_vel_updated = False
+
+    def wire_solver(self, rigid_solver: RigidSolver) -> None:
+        self._rigid_solver = rigid_solver
+        self.has_constraints = not rigid_solver._disable_constraint
+        self.n_dofs_per_instance = rigid_solver.n_dofs
+        self.n_instances = rigid_solver._B
+        self.dof_count = self.n_dofs_per_instance * self.n_instances
+        self.storage_dof_count = ((self.dof_count + 2) // 3) * 3
+        self.h = rigid_solver._substep_dt
+        self.h4 = self.h**4
+        self.is_forward_pos_updated = rigid_solver._is_forward_pos_updated
+        self.is_forward_vel_updated = rigid_solver._is_forward_vel_updated
 
     def build(self) -> None:
+        from .global_linear_system import GlobalLinearSystem
         from .pcg_solver import PCGSolver
+        from .sim_config import SimConfig
 
         pcg_solver = self.require(PCGSolver)
-        self.pcg_operator_action = self.create_action(pcg_apply_operator, self.data)
-        self.pcg_reduced_operator_action = self.create_action(pcg_apply_reduced_operator, self.data)
-        self.pcg_preconditioner_action = self.create_action(pcg_apply_preconditioner, self.data)
+        self.global_linear_system_system = self.require(GlobalLinearSystem)
+        self.sim_config_system = self.require(SimConfig)
+        self.pcg_operator_action = self.create_action(pcg_apply_operator, self)
+        self.pcg_reduced_operator_action = self.create_action(pcg_apply_reduced_operator, self)
+        self.pcg_preconditioner_action = self.create_action(pcg_apply_preconditioner, self)
         pcg_solver.on_solve_contribution(
             self.pcg_operator_action,
             self.pcg_reduced_operator_action,
@@ -66,113 +85,131 @@ class RigidSystem(SimSystem):
         )
 
     def init(self, dof_offset: int) -> None:
-        self.data.dof_offset.from_numpy(np.array(dof_offset, dtype=np.int32))
+        rigid_solver = self._rigid_solver
+        if rigid_solver is None:
+            raise RuntimeError("RigidSystem solver has not been wired")
+        if gs.qd_float != qd.f64:
+            raise RuntimeError("The Rigid Newton framework requires double precision")
+        if rigid_solver._requires_grad:
+            raise RuntimeError("The Rigid Newton framework does not support differentiable simulation")
+        if rigid_solver.rigid_config.solver_type != gs.constraint_solver.Newton:
+            raise RuntimeError("The Rigid Newton framework requires the native Newton constraint formulation")
+        if rigid_solver._options.noslip_iterations > 0:
+            raise RuntimeError("The Rigid Newton framework does not support the noslip post-processing solve")
+        if rigid_solver.rigid_config.use_hibernation:
+            raise RuntimeError("The Rigid Newton framework does not support hibernation")
+        data = self.data
+        data.dyn_state = rigid_solver.dyn_state
+        data.constraint_state = rigid_solver.constraint_solver.constraint_state
+        data.dyn_info = rigid_solver.dyn_info
+        data.rigid_info = rigid_solver.rigid_info
+        data.rigid_config = rigid_solver.rigid_config
+        data.collider_state = rigid_solver.collider.collider_state
+        data.collider_config = rigid_solver.collider.collider_config
+        data.errno = rigid_solver._errno
+        data.n_dofs_per_instance = qd.ndarray(qd.i32, shape=())
+        data.n_instances = qd.ndarray(qd.i32, shape=())
+        data.n_links = qd.ndarray(qd.i32, shape=())
+        data.n_dofs = qd.ndarray(qd.i32, shape=())
+        data.dof_offset = qd.ndarray(qd.i32, shape=())
+        data.n_storage_dofs = qd.ndarray(qd.i32, shape=())
+        data.h = qd.ndarray(qd.f64, shape=())
+        data.gradient_squared = qd.ndarray(qd.f64, shape=())
+        data.rigid_energy = qd.ndarray(qd.f64, shape=())
+        data.qacc_temp = qd.ndarray(qd.f64, shape=data.constraint_state.qacc.shape)
+        data.Ma_temp = qd.ndarray(qd.f64, shape=data.constraint_state.Ma.shape)
+        data.Jaref_temp = qd.ndarray(qd.f64, shape=data.constraint_state.Jaref.shape)
+        data.n_dofs_per_instance.from_numpy(np.array(self.n_dofs_per_instance, dtype=np.int32))
+        data.n_instances.from_numpy(np.array(self.n_instances, dtype=np.int32))
+        data.n_links.from_numpy(np.array(rigid_solver.n_links, dtype=np.int32))
+        data.n_dofs.from_numpy(np.array(self.dof_count, dtype=np.int32))
+        data.dof_offset.from_numpy(np.array(dof_offset, dtype=np.int32))
+        data.n_storage_dofs.from_numpy(np.array(self.storage_dof_count, dtype=np.int32))
+        data.h.from_numpy(np.array(self.h, dtype=np.float64))
+        data.gradient_squared.from_numpy(np.array(0.0, dtype=np.float64))
+        data.rigid_energy.from_numpy(np.array(0.0, dtype=np.float64))
+        data.qacc_temp.from_numpy(np.zeros(data.constraint_state.qacc.shape, dtype=np.float64))
+        data.Ma_temp.from_numpy(np.zeros(data.constraint_state.Ma.shape, dtype=np.float64))
+        data.Jaref_temp.from_numpy(np.zeros(data.constraint_state.Jaref.shape, dtype=np.float64))
+        self._rigid_solver = None
 
-    @property
-    def has_constraints(self) -> bool:
-        return self.data.has_constraints
+    @qd.func(requires_top_level=True)
+    def on_predict(self):
+        predict(self)
 
-    @property
-    def has_collision(self) -> bool:
-        return self.data.has_collision
+    @qd.func(requires_top_level=True)
+    def on_assemble_candidate_rows(self):
+        assemble_candidate_rows(self)
 
-    @property
-    def n_dofs_per_instance_host(self) -> int:
-        return self.data.n_dofs_per_instance_host
+    @qd.func(requires_top_level=True)
+    def on_initialize_newton(self):
+        initialize_newton(self)
 
-    @property
-    def n_instances_host(self) -> int:
-        return self.data.n_instances_host
+    @qd.func(requires_top_level=True)
+    def on_assemble(self, displacement_coordinates: qd.template()):
+        assemble(
+            self,
+            self.sim_config_system.data,
+            self.global_linear_system_system.data,
+            displacement_coordinates,
+        )
 
-    @property
-    def dof_count_host(self) -> int:
-        return self.data.dof_count_host
+    @qd.func(requires_top_level=True)
+    def on_negate_direction(self, displacement_coordinates: qd.template()):
+        negate_dq(
+            self,
+            self.global_linear_system_system.data,
+            displacement_coordinates,
+        )
 
-    @property
-    def storage_dof_count_host(self) -> int:
-        return self.data.storage_dof_count_host
+    @qd.func(requires_top_level=True)
+    def on_record_start_point(self):
+        record_start_point(self)
 
+    @qd.func(requires_top_level=True)
+    def on_energy(self):
+        energy(self, self.sim_config_system.data)
 
-def get_rigid_system_data(rigid_solver: RigidSolver) -> RigidSystem.Data:
-    """Reference RigidSolver-owned buffers without copying or changing their layout."""
-    data = RigidSystem.Data()
-    if gs.qd_float != qd.f64:
-        raise RuntimeError("The Rigid Newton framework requires double precision")
-    if rigid_solver._requires_grad:
-        raise RuntimeError("The Rigid Newton framework does not support differentiable simulation")
-    if rigid_solver.rigid_config.solver_type != gs.constraint_solver.Newton:
-        raise RuntimeError("The Rigid Newton framework requires the native Newton constraint formulation")
-    if rigid_solver._options.noslip_iterations > 0:
-        raise RuntimeError("The Rigid Newton framework does not support the noslip post-processing solve")
-    if rigid_solver.rigid_config.use_hibernation:
-        raise RuntimeError("The Rigid Newton framework does not support hibernation")
+    @qd.func(requires_top_level=True)
+    def on_step_forward(self, alpha):
+        step_forward(self, alpha)
 
-    data.dyn_state = rigid_solver.dyn_state
-    data.constraint_state = rigid_solver.constraint_solver.constraint_state
-    data.dyn_info = rigid_solver.dyn_info
-    data.rigid_info = rigid_solver.rigid_info
-    data.rigid_config = rigid_solver.rigid_config
-    data.collider_state = rigid_solver.collider.collider_state
-    data.collider_config = rigid_solver.collider.collider_config
-    data.errno = rigid_solver._errno
+    @qd.func(requires_top_level=True)
+    def on_set_newton_active(self, is_active):
+        set_newton_active(self, is_active)
 
-    data.has_constraints = not rigid_solver._disable_constraint
-    data.has_collision = False
+    @qd.func(requires_top_level=True)
+    def on_build_preconditioner(self, compute_envelope: qd.template()):
+        build_preconditioner(self, compute_envelope)
 
-    data.n_dofs_per_instance_host = rigid_solver.n_dofs
-    data.n_instances_host = rigid_solver._B
-    data.dof_count_host = data.n_dofs_per_instance_host * data.n_instances_host
-    data.storage_dof_count_host = ((data.dof_count_host + 2) // 3) * 3
-    data.n_dofs_per_instance = qd.ndarray(qd.i32, shape=())
-    data.n_instances = qd.ndarray(qd.i32, shape=())
-    data.n_links = qd.ndarray(qd.i32, shape=())
-    data.n_dofs = qd.ndarray(qd.i32, shape=())
-    data.dof_offset = qd.ndarray(qd.i32, shape=())
-    data.n_storage_dofs = qd.ndarray(qd.i32, shape=())
-    data.gradient_squared = qd.ndarray(qd.f64, shape=())
-    data.rigid_energy = qd.ndarray(qd.f64, shape=())
-    data.qacc_temp = qd.ndarray(qd.f64, shape=data.constraint_state.qacc.shape)
-    data.Ma_temp = qd.ndarray(qd.f64, shape=data.constraint_state.Ma.shape)
-    data.Jaref_temp = qd.ndarray(qd.f64, shape=data.constraint_state.Jaref.shape)
-    data.n_dofs_per_instance.from_numpy(np.array(data.n_dofs_per_instance_host, dtype=np.int32))
-    data.n_instances.from_numpy(np.array(data.n_instances_host, dtype=np.int32))
-    data.n_links.from_numpy(np.array(rigid_solver.n_links, dtype=np.int32))
-    data.n_dofs.from_numpy(np.array(data.dof_count_host, dtype=np.int32))
-    data.dof_offset.from_numpy(np.array(0, dtype=np.int32))
-    data.n_storage_dofs.from_numpy(np.array(data.storage_dof_count_host, dtype=np.int32))
-    data.h = rigid_solver._substep_dt
-    data.h4 = data.h**4
-    data.is_forward_pos_updated = rigid_solver._is_forward_pos_updated
-    data.is_forward_vel_updated = rigid_solver._is_forward_vel_updated
-    data.gradient_squared.from_numpy(np.array(0.0, dtype=np.float64))
-    data.rigid_energy.from_numpy(np.array(0.0, dtype=np.float64))
-    data.qacc_temp.from_numpy(np.zeros(data.constraint_state.qacc.shape, dtype=np.float64))
-    data.Ma_temp.from_numpy(np.zeros(data.constraint_state.Ma.shape, dtype=np.float64))
-    data.Jaref_temp.from_numpy(np.zeros(data.constraint_state.Jaref.shape, dtype=np.float64))
-    return data
+    @qd.func(requires_top_level=True)
+    def on_update_velocity(self):
+        update_velocity(self)
 
 
 @qd.func(requires_top_level=True)
 def predict(
-    data: qd.template(),
+    system: qd.template(),
 ):
+    data = system.data
     func_step_1(
         data.dyn_state,
         data.constraint_state,
         data.dyn_info,
         data.rigid_info,
         data.rigid_config,
-        data.is_forward_pos_updated,
-        data.is_forward_vel_updated,
+        system.is_forward_pos_updated,
+        system.is_forward_vel_updated,
         False,
     )
 
 
 @qd.func(requires_top_level=True)
 def assemble_candidate_rows(
-    data: qd.template(),
+    system: qd.template(),
 ):
-    if qd.static(data.has_constraints):
+    data = system.data
+    if qd.static(system.has_constraints):
         solver.func_add_equality_constraints(
             data.dyn_state,
             data.collider_state,
@@ -186,7 +223,7 @@ def assemble_candidate_rows(
         data.collider_state.n_contacts[i_b] = 0
         data.collider_state.n_contacts_hibernated[i_b] = 0
 
-    if qd.static(data.has_constraints):
+    if qd.static(system.has_constraints):
         solver.func_add_inequality_constraints(
             data.dyn_state,
             data.collider_state,
@@ -200,9 +237,10 @@ def assemble_candidate_rows(
 
 @qd.func(requires_top_level=True)
 def initialize_newton(
-    data: qd.template(),
+    system: qd.template(),
 ):
-    if qd.static(data.has_constraints):
+    data = system.data
+    if qd.static(system.has_constraints):
         solver.func_solve_init(
             data.dyn_state,
             data.constraint_state,
@@ -211,8 +249,8 @@ def initialize_newton(
             data.rigid_config,
             True,
         )
-        set_newton_active(data, 1)
-        build_preconditioner(data, compute_envelope=True)
+        set_newton_active(system, 1)
+        build_preconditioner(system, compute_envelope=True)
         solver.func_update_gradient_no_solve(
             data.dyn_state,
             data.constraint_state,
@@ -223,7 +261,8 @@ def initialize_newton(
 
 
 @qd.func(requires_top_level=True)
-def set_newton_active(data: qd.template(), is_active):
+def set_newton_active(system: qd.template(), is_active):
+    data = system.data
     for i_b in range(data.n_instances[()]):
         has_constraints = data.constraint_state.n_constraints[i_b] > 0 and is_active != 0
         data.constraint_state.improved[i_b] = has_constraints
@@ -232,7 +271,8 @@ def set_newton_active(data: qd.template(), is_active):
 
 
 @qd.func(requires_top_level=True)
-def build_preconditioner(data: qd.template(), compute_envelope: qd.template()):
+def build_preconditioner(system: qd.template(), compute_envelope: qd.template()):
+    data = system.data
     solver.func_hessian_and_cholesky_factor_direct(
         data.constraint_state,
         data.dyn_info,
@@ -244,75 +284,81 @@ def build_preconditioner(data: qd.template(), compute_envelope: qd.template()):
 
 @qd.func(requires_top_level=True)
 def assemble(
-    data: qd.template(),
+    system: qd.template(),
     sim_config: qd.template(),
     global_linear_system_data: qd.template(),
     displacement_coordinates: qd.template(),
 ):
+    data = system.data
     for _ in range(1):
         data.gradient_squared[()] = qd.f64(0.0)
-    gradient_scale = data.h4
+    gradient_scale = system.h4
     if qd.static(displacement_coordinates):
-        gradient_scale = data.h * data.h
+        gradient_scale = system.h * system.h
     for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
         i_global = data.dof_offset[()] + i_b * data.n_dofs_per_instance[()] + i_d
         gradient = qd.f64(0.0)
         gradient_unscaled = qd.f64(0.0)
         has_live_constraints = False
-        if qd.static(data.has_constraints):
+        if qd.static(system.has_constraints):
             has_live_constraints = data.constraint_state.n_constraints[i_b] > 0
         if has_live_constraints:
             gradient_unscaled = data.constraint_state.grad[i_d, i_b]
             gradient = gradient_scale * gradient_unscaled
-        global_linear_system_data.b_rhs[i_global] = gradient
+        global_linear_system_data.write_rhs(i_global, gradient)
         qd.atomic_add(data.gradient_squared[()], gradient_unscaled * gradient_unscaled)
 
     for i_padding in range(data.n_dofs[()], data.n_storage_dofs[()]):
-        global_linear_system_data.b_rhs[data.dof_offset[()] + i_padding] = qd.f64(0.0)
+        global_linear_system_data.write_rhs(data.dof_offset[()] + i_padding, qd.f64(0.0))
 
 
 @qd.func(requires_top_level=True)
-def energy(data: qd.template(), sim_config: qd.template()):
+def energy(system: qd.template(), sim_config: qd.template()):
+    data = system.data
     for _ in range(1):
         data.rigid_energy[()] = qd.f64(0.0)
-    if qd.static(data.has_constraints):
+    if qd.static(system.has_constraints):
         for i_b in range(data.n_instances[()]):
-            qd.atomic_add(data.rigid_energy[()], data.h4 * data.constraint_state.cost[i_b])
+            qd.atomic_add(data.rigid_energy[()], system.h4 * data.constraint_state.cost[i_b])
 
 
 @qd.func(requires_top_level=True)
 def pcg_apply_operator(
-    data: qd.template(),
+    system: qd.template(),
     linear_system_data: qd.template(),
     direction: qd.template(),
     output: qd.template(),
 ):
-    apply_hessian(data, direction, output, False)
+    apply_hessian(system, direction, output, False)
 
 
 @qd.func(requires_top_level=True)
 def pcg_apply_reduced_operator(
-    data: qd.template(),
+    system: qd.template(),
     linear_system_data: qd.template(),
     direction: qd.template(),
     output: qd.template(),
 ):
-    apply_hessian(data, direction, output, True)
+    apply_hessian(system, direction, output, True)
 
 
 @qd.func(requires_top_level=True)
 def apply_hessian(
-    data: qd.template(),
+    system: qd.template(),
     x: qd.template(),
     y: qd.template(),
     displacement_coordinates: qd.template(),
 ):
+    data = system.data
     for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
         i_global = data.dof_offset[()] + i_b * data.n_dofs_per_instance[()] + i_d
         data.constraint_state.search[i_d, i_b] = x[i_global]
 
     for i_b in range(data.n_instances[()]):
-        if qd.static(data.has_constraints) and data.constraint_state.n_constraints[i_b] > 0:
+        has_live_constraints = False
+        if qd.static(system.has_constraints):
+            has_live_constraints = data.constraint_state.n_constraints[i_b] > 0
+        if has_live_constraints:
             for i_island in range(data.constraint_state.island.n_islands[i_b]):
                 n_dofs = data.constraint_state.island.dof_slices.n[i_island, i_b]
                 if qd.static(data.rigid_config.is_single_island):
@@ -359,7 +405,7 @@ def apply_hessian(
                     value = value + (data.rigid_info.mass_mat[i_d, j_d, i_b] * data.constraint_state.search[j_d, i_b])
                 data.constraint_state.grad[i_d, i_b] = value
 
-    hessian_scale = data.h4
+    hessian_scale = system.h4
     if qd.static(displacement_coordinates):
         hessian_scale = 1.0
     for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
@@ -372,18 +418,19 @@ def apply_hessian(
 
 
 @qd.func(requires_top_level=True)
-def pcg_apply_preconditioner(data: qd.template(), residual: qd.template(), output: qd.template()):
-    apply_preconditioner(data, residual, output, False)
+def pcg_apply_preconditioner(system: qd.template(), residual: qd.template(), output: qd.template()):
+    apply_preconditioner(system, residual, output, False)
 
 
 @qd.func(requires_top_level=True)
 def apply_preconditioner(
-    data: qd.template(),
+    system: qd.template(),
     residual: qd.template(),
     result: qd.template(),
     displacement_coordinates: qd.template(),
 ):
-    if qd.static(data.has_constraints):
+    data = system.data
+    if qd.static(system.has_constraints):
         for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
             i_global = data.dof_offset[()] + i_b * data.n_dofs_per_instance[()] + i_d
             data.constraint_state.grad[i_d, i_b] = residual[i_global]
@@ -400,7 +447,7 @@ def apply_preconditioner(
                         rigid_config=data.rigid_config,
                     )
 
-        preconditioner_scale = 1.0 / data.h4
+        preconditioner_scale = 1.0 / system.h4
         if qd.static(displacement_coordinates):
             preconditioner_scale = 1.0
         for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
@@ -415,16 +462,17 @@ def apply_preconditioner(
 
 @qd.func(requires_top_level=True)
 def negate_dq(
-    data: qd.template(),
+    system: qd.template(),
     global_linear_system_data: qd.template(),
     displacement_coordinates: qd.template(),
 ):
-    if qd.static(data.has_constraints):
+    data = system.data
+    if qd.static(system.has_constraints):
         for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
             i_global = data.dof_offset[()] + i_b * data.n_dofs_per_instance[()] + i_d
-            direction = global_linear_system_data.x_sol[i_global]
+            direction = global_linear_system_data.read_solution(i_global)
             if qd.static(displacement_coordinates):
-                direction = direction / (data.h * data.h)
+                direction = direction / (system.h * system.h)
             data.constraint_state.search[i_d, i_b] = -direction
             data.constraint_state.Mgrad[i_d, i_b] = direction
         for i_b in range(data.n_instances[()]):
@@ -434,9 +482,10 @@ def negate_dq(
 
 @qd.func(requires_top_level=True)
 def record_start_point(
-    data: qd.template(),
+    system: qd.template(),
 ):
-    if qd.static(data.has_constraints):
+    data = system.data
+    if qd.static(system.has_constraints):
         for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
             data.qacc_temp[i_d, i_b] = data.constraint_state.qacc[i_d, i_b]
             data.Ma_temp[i_d, i_b] = data.constraint_state.Ma[i_d, i_b]
@@ -446,8 +495,9 @@ def record_start_point(
 
 
 @qd.func(requires_top_level=True)
-def step_forward(data: qd.template(), alpha):
-    if qd.static(data.has_constraints):
+def step_forward(system: qd.template(), alpha):
+    data = system.data
+    if qd.static(system.has_constraints):
         for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
             data.constraint_state.qacc[i_d, i_b] = (
                 data.qacc_temp[i_d, i_b] + alpha * data.constraint_state.search[i_d, i_b]
@@ -467,7 +517,7 @@ def step_forward(data: qd.template(), alpha):
             constraint_state=data.constraint_state,
             rigid_config=data.rigid_config,
         )
-        set_newton_active(data, 1)
+        set_newton_active(system, 1)
         solver.func_update_gradient_no_solve(
             data.dyn_state,
             data.constraint_state,
@@ -479,9 +529,10 @@ def step_forward(data: qd.template(), alpha):
 
 @qd.func(requires_top_level=True)
 def update_velocity(
-    data: qd.template(),
+    system: qd.template(),
 ):
-    if qd.static(data.has_constraints):
+    data = system.data
+    if qd.static(system.has_constraints):
         solver.func_update_qacc(data.dyn_state, data.constraint_state, data.rigid_config, data.errno)
     func_step_2(
         data.dyn_state,

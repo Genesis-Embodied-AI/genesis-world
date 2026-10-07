@@ -3,13 +3,14 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from .sim_system import ActionInvocation, SimAction, SimData, SimSystem
+from .sim_system import ActionKind, SimAction, SimData, SimSystem, validate_action_protocol
 
 
 def _same_action_data(lhs: tuple[object, ...], rhs: tuple[object, ...]) -> bool:
     return len(lhs) == len(rhs) and all(left is right for left, right in zip(lhs, rhs))
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class PCGSolver(SimSystem):
     """PCG interface and lifecycle-action owner."""
 
@@ -25,7 +26,7 @@ class PCGSolver(SimSystem):
 
     def __init__(self) -> None:
         super().__init__()
-        self.data: PCGSolver.Data | None = None
+        self.data = self.Data()
         self.is_initialized_host = False
         self.primary_operators = self.create_action_collection()
         self.operators = self.create_action_collection()
@@ -38,7 +39,9 @@ class PCGSolver(SimSystem):
         self.solvers = self.create_action_collection()
 
     def build(self) -> None:
-        pass
+        from .global_linear_system import GlobalLinearSystem
+
+        self.global_linear_system = self.require(GlobalLinearSystem)
 
     def on_solve(
         self,
@@ -56,6 +59,18 @@ class PCGSolver(SimSystem):
         initialized; absence, duplication, or mixed ownership is a fatal engine
         construction error.
         """
+        validate_action_protocol(
+            initializer,
+            protocol="PCGSolver.on_solve.initializer",
+            expected_kind=ActionKind.TOP_LEVEL_FUNC,
+            transient_arity=0,
+        )
+        validate_action_protocol(
+            solver,
+            protocol="PCGSolver.on_solve.solver",
+            expected_kind=ActionKind.TOP_LEVEL_FUNC,
+            transient_arity=6,
+        )
         if initializer.owner is not solver.owner:
             raise RuntimeError("PCG solver actions must have exactly one owning SimSystem")
         if not _same_action_data(initializer.data, solver.data):
@@ -72,6 +87,12 @@ class PCGSolver(SimSystem):
         exist when the engine is initialized; any other count is a fatal engine
         construction error.
         """
+        validate_action_protocol(
+            action,
+            protocol="PCGSolver.on_primary_operator",
+            expected_kind=ActionKind.TOP_LEVEL_FUNC,
+            transient_arity=3,
+        )
         self.primary_operators.register(action)
 
     def on_solve_contribution(
@@ -92,6 +113,17 @@ class PCGSolver(SimSystem):
         action or mixed ownership is a fatal engine construction error; partial
         system participation is not a supported state.
         """
+        for protocol, action, arity in (
+            ("operator", operator, 3),
+            ("reduced_operator", reduced_operator, 3),
+            ("preconditioner", preconditioner, 2),
+        ):
+            validate_action_protocol(
+                action,
+                protocol=f"PCGSolver.on_solve_contribution.{protocol}",
+                expected_kind=ActionKind.TOP_LEVEL_FUNC,
+                transient_arity=arity,
+            )
         owners = {
             operator.owner,
             reduced_operator.owner,
@@ -120,6 +152,18 @@ class PCGSolver(SimSystem):
         action or mixing owners is a fatal engine construction error; there is
         no partially registered reduced route.
         """
+        validate_action_protocol(
+            primary_operator,
+            protocol="PCGSolver.on_reduced_solve.primary_operator",
+            expected_kind=ActionKind.TOP_LEVEL_FUNC,
+            transient_arity=3,
+        )
+        validate_action_protocol(
+            preconditioner,
+            protocol="PCGSolver.on_reduced_solve.preconditioner",
+            expected_kind=ActionKind.TOP_LEVEL_FUNC,
+            transient_arity=2,
+        )
         if primary_operator.owner is not preconditioner.owner:
             raise RuntimeError("Reduced PCG system actions must have exactly one owning SimSystem")
         self.reduced_primary_operators.register(primary_operator)
@@ -133,15 +177,21 @@ class PCGSolver(SimSystem):
         preconditioner selected for either route. Missing preconditioning for a
         selected route is a fatal engine initialization error.
         """
+        validate_action_protocol(
+            action,
+            protocol="PCGSolver.on_shared_preconditioner",
+            expected_kind=ActionKind.TOP_LEVEL_FUNC,
+            transient_arity=2,
+        )
         self.shared_preconditioners.register(action)
 
     def _resolve_actions(
         self,
     ) -> tuple[
         SimAction,
-        tuple[ActionInvocation, ...],
-        tuple[ActionInvocation, ...],
-        tuple[ActionInvocation, ...],
+        tuple[SimAction, ...],
+        tuple[SimAction, ...],
+        tuple[SimAction, ...],
     ]:
         solver_initializers = self.solver_initializers.actions
         solvers = self.solvers.actions
@@ -167,25 +217,25 @@ class PCGSolver(SimSystem):
             raise RuntimeError("PCGSolver requires at least one preconditioner contributor")
         if not reduced_primary_operators:
             operator_actions = (
-                primary_operators[0].invocation,
-                *(action.invocation for action in operators),
+                primary_operators[0],
+                *operators,
             )
             selected_preconditioners = preconditioners
         else:
             operator_actions = (
-                reduced_primary_operators[0].invocation,
-                *(action.invocation for action in reduced_operators),
+                reduced_primary_operators[0],
+                *reduced_operators,
             )
             selected_preconditioners = reduced_preconditioners
         preconditioner_actions = (
-            *(action.invocation for action in selected_preconditioners),
-            *(action.invocation for action in shared_preconditioners),
+            *selected_preconditioners,
+            *shared_preconditioners,
         )
         if not preconditioner_actions:
             raise RuntimeError("Selected PCG path has no preconditioner actions")
         return (
             solver_initializers[0],
-            (solvers[0].invocation,),
+            (solvers[0],),
             operator_actions,
             preconditioner_actions,
         )
@@ -197,49 +247,45 @@ class PCGSolver(SimSystem):
             raise ValueError("PCGSolver dimensions must be non-negative")
         (
             solver_initializer,
-            solver_invocations,
+            solver_actions,
             operator_actions,
             preconditioner_actions,
         ) = self._resolve_actions()
+        solver_initializer.owner.init()
         if len(solver_initializer.data) != 1:
             raise RuntimeError("The selected PCG implementation requires exactly one primary Data input")
         solver_data = solver_initializer.data[0]
-        if solver_data.dof_capacity != total_dof:
+        if solver_data.residual.shape[0] != max(total_dof, 1):
             raise RuntimeError(
-                f"PCG implementation capacity {solver_data.dof_capacity} does not match total DOFs {total_dof}"
+                f"PCG implementation capacity {solver_data.residual.shape[0]} does not match total DOFs {total_dof}"
             )
-        self.solver_invocations = solver_invocations
+        self.solver_actions = solver_actions
         self.operator_actions = operator_actions
         self.preconditioner_actions = preconditioner_actions
-        self.data = get_pcg_solver_data(
-            n_iterations=solver_data.n_iterations,
-            is_failed=solver_data.is_failed,
-            preconditioned_residual=solver_data.preconditioned_residual,
-            n_block_rows=n_block_rows,
-            pcg_tol_rate=pcg_tol_rate,
-        )
+        self.data.n_iterations = solver_data.n_iterations
+        self.data.is_failed = solver_data.is_failed
+        self.data.preconditioned_residual = solver_data.preconditioned_residual
+        self.data.n_block_rows = qd.ndarray(qd.i32, shape=())
+        self.data.pcg_tol_rate = qd.ndarray(qd.f64, shape=())
+        self.data.n_block_rows.from_numpy(np.array(n_block_rows, dtype=np.int32))
+        self.data.pcg_tol_rate.from_numpy(np.array(pcg_tol_rate, dtype=np.float64))
         self.is_initialized_host = True
 
-
-def get_pcg_solver_data(
-    *,
-    n_iterations,
-    is_failed,
-    preconditioned_residual,
-    n_block_rows: int,
-    pcg_tol_rate: float,
-) -> PCGSolver.Data:
-    n_block_rows_data = qd.ndarray(qd.i32, shape=())
-    pcg_tol_rate_data = qd.ndarray(qd.f64, shape=())
-    n_block_rows_data.from_numpy(np.array(n_block_rows, dtype=np.int32))
-    pcg_tol_rate_data.from_numpy(np.array(pcg_tol_rate, dtype=np.float64))
-    data = PCGSolver.Data()
-    data.n_iterations = n_iterations
-    data.is_failed = is_failed
-    data.preconditioned_residual = preconditioned_residual
-    data.n_block_rows = n_block_rows_data
-    data.pcg_tol_rate = pcg_tol_rate_data
-    return data
+    @qd.func(requires_top_level=True)
+    def solve(
+        self,
+        max_iterations,
+        max_pcg_iterations: qd.template(),
+        total_pcg_iterations: qd.template(),
+    ):
+        solve_pcg(
+            self.data,
+            self.global_linear_system.data,
+            self,
+            max_iterations,
+            max_pcg_iterations,
+            total_pcg_iterations,
+        )
 
 
 @qd.func(requires_top_level=True)
@@ -251,17 +297,14 @@ def solve_pcg(
     max_pcg_iterations: qd.template(),
     total_pcg_iterations: qd.template(),
 ):
-    for solver_invocation in qd.static(action_provider.pcg_solver_invocations):
-        solver_invocation.kernel(
-            *(
-                solver_invocation.data
-                + (
-                    linear_system_data,
-                    action_provider,
-                    data.pcg_tol_rate[()],
-                    max_iterations,
-                    max_pcg_iterations,
-                    total_pcg_iterations,
-                )
+    for solver_action in qd.static(action_provider.solver_actions):
+        solver_action.invoke(
+            (
+                linear_system_data,
+                action_provider,
+                data.pcg_tol_rate[()],
+                max_iterations,
+                max_pcg_iterations,
+                total_pcg_iterations,
             )
         )

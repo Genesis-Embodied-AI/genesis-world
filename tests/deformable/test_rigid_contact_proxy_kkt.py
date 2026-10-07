@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,19 +14,19 @@ from genesis.engine.systems.contact_function.screw_ccd import screw_halfplane_cc
 from genesis.engine.systems.global_linear_system import (
     GlobalLinearSystem,
     derive_extents,
-    get_global_linear_system_data,
     zero_rhs,
 )
-from genesis.engine.systems.global_vertex_manager import GlobalVertexManager, get_global_vertex_data
+from genesis.engine.systems.global_vertex_manager import GlobalVertexManager
 from genesis.engine.systems.rigid_contact_assemble import (
+    RigidContactAssemble,
     classify as classify_rigid_contact,
     distribute as distribute_rigid_contact,
-    get_rigid_contact_assemble_data,
 )
 from genesis.engine.systems.rigid_contact_proxy import (
     RigidContactProxyGeometry,
+    RigidContactProxySystem,
+    _populate_rigid_contact_proxy_data,
     forward_global_vertices as forward_proxy_global_vertices,
-    get_rigid_contact_proxy_data,
     initialize_global_vertices as initialize_proxy_global_vertices,
     initialize_proxy_state,
     prepare_constraint,
@@ -38,13 +39,14 @@ from genesis.engine.systems.rigid_contact_proxy_kkt import (
     rigid_contact_proxy_prepare_maps,
 )
 from genesis.engine.systems.rigid_joint_forest import (
+    RigidJointForestSystem,
+    _populate_rigid_joint_forest_data,
     clear_body_wrench,
     compute_endpoint_fk,
     expand_reduced_direction,
     finish_reduced_spmv,
     forest_precond_apply_level,
     forest_precond_apply_tree_shared,
-    get_rigid_joint_forest_data,
     particular_spmv,
     prepare_particular,
     prepare_physical_direction as prepare_forest_physical_direction,
@@ -52,8 +54,44 @@ from genesis.engine.systems.rigid_joint_forest import (
     restrict_body_wrenches,
     restrict_proxy_wrenches,
 )
-from genesis.engine.systems.rigid_system import get_rigid_system_data
+from genesis.engine.systems.rigid_system import RigidSystem
 from genesis.utils.misc import qd_to_numpy
+
+
+def create_global_vertex_data(*args, **kwargs):
+    system = GlobalVertexManager()
+    system.wire_data(*args, **kwargs)
+    system.init()
+    return system.data
+
+
+def create_rigid_system_data(rigid_solver):
+    system = RigidSystem()
+    system.wire_solver(rigid_solver)
+    system.init(0)
+    return system.data
+
+
+def create_rigid_contact_proxy_data(**kwargs):
+    data = RigidContactProxySystem.Data()
+    _populate_rigid_contact_proxy_data(data, **kwargs)
+    return data
+
+
+def create_rigid_joint_forest_data(rigid_solver, rigid_data, **kwargs):
+    kwargs.setdefault("n_proxy_pairs", int(kwargs["proxy_data"].n_pairs.to_numpy()))
+    system = RigidJointForestSystem()
+    system.fused_enabled = bool(kwargs["fused_enabled"])
+    system.genesis_legacy_enabled = bool(kwargs["genesis_legacy_enabled"])
+    _populate_rigid_joint_forest_data(system, rigid_solver, rigid_data, **kwargs)
+    return system.data
+
+
+def create_rigid_contact_assemble_data(contact):
+    system = RigidContactAssemble()
+    system.contact_system = SimpleNamespace(data=contact, genesis_legacy_sort_reduce=False)
+    system.init()
+    return system
 
 
 @qd.data_oriented
@@ -203,6 +241,7 @@ def initialize_and_prepare_proxy(
     forest: qd.template(),
     vertex: qd.template(),
 ):
+    compute_endpoint_fk(forest, rigid, proxy)
     initialize_proxy_state(proxy, rigid, forest)
     prepare_metric(proxy, rigid, forest)
     prepare_constraint(proxy, rigid, forest)
@@ -232,16 +271,35 @@ def evaluate_forest_virtual_work(
     reduced_direction: qd.types.ndarray(qd.f64, ndim=1),
     proxy_wrench: qd.types.ndarray(qd.f64, ndim=1),
     reduced_wrench: qd.types.ndarray(qd.f64, ndim=1),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     compute_endpoint_fk(forest, rigid, proxy)
-    expand_reduced_direction(forest, rigid, proxy, reduced_direction)
+    expand_reduced_direction(
+        forest,
+        rigid,
+        proxy,
+        reduced_direction,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
     clear_body_wrench(forest, rigid, proxy)
     for component in range(6):
         forest.body_wrench[proxy.proxy_body[0], component] = proxy_wrench[component]
     restrict_proxy_wrenches(forest, rigid, proxy)
     for dof in range(reduced_wrench.shape[0]):
         reduced_wrench[dof] = 0.0
-    restrict_body_wrenches(forest, rigid, proxy, reduced_wrench)
+    restrict_body_wrenches(
+        forest,
+        rigid,
+        proxy,
+        reduced_wrench,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -252,15 +310,34 @@ def evaluate_forest_transform(
     reduced_direction: qd.types.ndarray(qd.f64, ndim=1),
     body_wrench: qd.types.ndarray(qd.f64, ndim=2),
     reduced_wrench: qd.types.ndarray(qd.f64, ndim=1),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     compute_endpoint_fk(forest, rigid, proxy)
-    expand_reduced_direction(forest, rigid, proxy, reduced_direction)
+    expand_reduced_direction(
+        forest,
+        rigid,
+        proxy,
+        reduced_direction,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
     for body in range(forest.n_mechanism_bodies[()]):
         for component in qd.static(range(6)):
             forest.body_wrench[body, component] = body_wrench[body, component]
     for dof in range(forest.total_dof[()]):
         reduced_wrench[dof] = 0.0
-    restrict_body_wrenches(forest, rigid, proxy, reduced_wrench)
+    restrict_body_wrenches(
+        forest,
+        rigid,
+        proxy,
+        reduced_wrench,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -270,8 +347,9 @@ def apply_forest_preconditioner_level(
     proxy: qd.template(),
     residual: qd.types.ndarray(qd.f64, ndim=1),
     result: qd.types.ndarray(qd.f64, ndim=1),
+    n_links: qd.template(),
 ):
-    forest_precond_apply_level(forest, rigid, proxy, residual, result)
+    forest_precond_apply_level(forest, rigid, proxy, residual, result, n_links)
 
 
 @qd.kernel(fastcache=True)
@@ -293,13 +371,33 @@ def apply_reduced_contact_operator(
     linear_system_data: qd.template(),
     direction: qd.types.ndarray(qd.f64, ndim=1),
     result: qd.types.ndarray(qd.f64, ndim=1),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     for dof in range(forest.total_dof[()]):
         result[dof] = 0.0
         forest.physical_Ap[dof] = 0.0
-    prepare_forest_physical_direction(forest, rigid, proxy, direction)
+    prepare_forest_physical_direction(
+        forest,
+        rigid,
+        proxy,
+        direction,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
     sym_bcoo_spmv_naive(linear_system_data.matrix, forest.physical_p, forest.physical_Ap)
-    finish_reduced_spmv(forest, rigid, proxy, direction, result)
+    finish_reduced_spmv(
+        forest,
+        rigid,
+        proxy,
+        direction,
+        result,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -308,12 +406,23 @@ def project_particular_rhs(
     rigid: qd.template(),
     proxy: qd.template(),
     linear_system_data: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     for dof in range(forest.total_dof[()]):
         linear_system_data.b_rhs[dof] = 0.0
     prepare_particular(forest, rigid, proxy)
     particular_spmv(forest, rigid, proxy, linear_system_data)
-    project_physical_rhs(forest, rigid, proxy, linear_system_data)
+    project_physical_rhs(
+        forest,
+        rigid,
+        proxy,
+        linear_system_data,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -322,8 +431,19 @@ def prepare_physical_direction(
     rigid: qd.template(),
     proxy: qd.template(),
     direction: qd.types.ndarray(qd.f64, ndim=1),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
-    prepare_forest_physical_direction(forest, rigid, proxy, direction)
+    prepare_forest_physical_direction(
+        forest,
+        rigid,
+        proxy,
+        direction,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.kernel(fastcache=True)
@@ -336,11 +456,11 @@ def assemble_proxy_contact(
     fem_data: qd.template(),
     linear_system_data: qd.template(),
 ):
-    classify_rigid_contact(route, proxy, forest, vertex, contact, linear_system_data)
+    classify_rigid_contact(route, proxy, forest, vertex, contact, linear_system_data, 0)
     derive_extents(linear_system_data)
     zero_rhs(linear_system_data)
     zero_bcoo_triplets(linear_system_data.matrix)
-    distribute_rigid_contact(route, proxy, forest, vertex, contact, fem_data, linear_system_data)
+    distribute_rigid_contact(route, proxy, forest, vertex, contact, fem_data, fem_data, linear_system_data, 0)
     sort_reduce_bcoo(linear_system_data.matrix)
 
 
@@ -441,7 +561,7 @@ def test_fk_defect_prefix_cap():
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_screw_halfplane_ccd_certifies_rotational_arc():
-    vertex = get_global_vertex_data(1)
+    vertex = create_global_vertex_data(1)
     vertex.positions.from_numpy(np.array([[1.0, 0.0, 0.0]], dtype=np.float64))
     vertex.trajectory_end_positions.from_numpy(np.array([[0.0, 1.0, 0.0]], dtype=np.float64))
     vertex.path_rot.from_numpy(np.array([[0.0, 0.0, 0.5 * np.pi]], dtype=np.float64))
@@ -472,9 +592,10 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     scene.build()
     geometry = RigidContactProxyGeometry()
     assert geometry.init(scene, 0.01)
-    rigid = get_rigid_system_data(scene.rigid_solver)
-    total_dof = rigid.storage_dof_count_host + 6
-    proxy = get_rigid_contact_proxy_data(
+    rigid = create_rigid_system_data(scene.rigid_solver)
+    rigid_storage_dofs = int(qd_to_numpy(rigid.n_storage_dofs))
+    total_dof = rigid_storage_dofs + 6
+    proxy = create_rigid_contact_proxy_data(
         n_links_host=scene.rigid_solver.n_links,
         n_instances_host=scene.rigid_solver._B,
         n_rigid_bodies=2,
@@ -486,17 +607,17 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
         global_body_offset=0,
         merit_gradient_capacity=total_dof,
     )
-    forest = get_rigid_joint_forest_data(
+    forest = create_rigid_joint_forest_data(
         scene.rigid_solver,
         rigid,
         total_dof=total_dof,
         n_rigid_bodies=2,
-        proxy_dof_offset=rigid.storage_dof_count_host,
+        proxy_dof_offset=rigid_storage_dofs,
         proxy_data=proxy,
         fused_enabled=forest_path == "tree",
         genesis_legacy_enabled=forest_path == "genesis_legacy",
     )
-    vertex = get_global_vertex_data(len(geometry.local_positions))
+    vertex = create_global_vertex_data(len(geometry.local_positions))
 
     initialize_and_prepare_proxy(proxy, rigid, forest, vertex)
 
@@ -505,8 +626,10 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
         np.array([0.1, -0.2, 0.4]),
         atol=1.0e-14,
     )
-    np.testing.assert_allclose(qd_to_numpy(proxy.constraint)[0], 0.0, atol=1.0e-14)
-    np.testing.assert_allclose(qd_to_numpy(proxy.particular)[0], 0.0, atol=1.0e-14)
+    expected_constraint = np.zeros(6, dtype=np.float64)
+    expected_constraint[:3] = qd_to_numpy(proxy.t)[0] - qd_to_numpy(forest.endpoint_t)[0]
+    np.testing.assert_allclose(qd_to_numpy(proxy.constraint)[0], expected_constraint, atol=1.0e-14)
+    np.testing.assert_allclose(qd_to_numpy(proxy.particular)[0], -expected_constraint, atol=1.0e-14)
     np.testing.assert_allclose(qd_to_numpy(proxy.tangent_map)[0], np.eye(6), atol=1.0e-14)
     np.testing.assert_allclose(qd_to_numpy(proxy.normal_map)[0], np.eye(6), atol=1.0e-14)
     assert np.linalg.eigvalsh(qd_to_numpy(proxy.metric)[0]).min() > 0.0
@@ -521,10 +644,8 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     assert qd_to_numpy(vertex.path_inflation).max() > 0.0
     np.testing.assert_array_equal(qd_to_numpy(vertex.path_kind), 0)
 
-    selected_path = (
-        "genesis_legacy" if forest.genesis_legacy_enabled else "tree" if forest.use_fused_tree_path else "level"
-    )
-    assert selected_path == forest_path
+    genesis_legacy_enabled = forest_path == "genesis_legacy"
+    use_fused_tree_path = forest_path == "tree"
     reduced_direction = qd.ndarray(qd.f64, shape=(total_dof,))
     proxy_wrench = qd.ndarray(qd.f64, shape=(6,))
     reduced_wrench = qd.ndarray(qd.f64, shape=(total_dof,))
@@ -539,6 +660,9 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
         reduced_direction,
         proxy_wrench,
         reduced_wrench,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        scene.rigid_solver.n_links,
     )
     mechanism_twist = qd_to_numpy(forest.body_twist)[0]
     proxy_twist = qd_to_numpy(forest.body_twist)[1]
@@ -555,15 +679,14 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
         atol=1.0e-12,
     )
 
-    linear_system_system = GlobalLinearSystem(
-        data=get_global_linear_system_data(
-            n_block_rows=4,
-            n_elastic_triplets=3,
-            max_contact_body_triplets=0,
-            dof_block_base=2,
-            extent_capacity=0,
-        )
+    linear_system_system = GlobalLinearSystem()
+    linear_system_system.wire_data(
+        n_block_rows=4,
+        n_elastic_triplets=3,
+        max_contact_body_triplets=0,
+        dof_block_base=2,
     )
+    linear_system_system.init()
     linear_system_data = linear_system_system.data
     linear_system_data.matrix.bcoo_nnz.from_numpy(np.array(3, dtype=np.int32))
     linear_system_data.matrix.bcoo_row.from_numpy(np.array([2, 2, 3], dtype=np.int32))
@@ -584,8 +707,28 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     second_result = qd.ndarray(qd.f64, shape=(total_dof,))
     second_host = np.linspace(0.5, -0.2, total_dof, dtype=np.float64)
     second.from_numpy(second_host)
-    apply_reduced_contact_operator(forest, rigid, proxy, linear_system_data, reduced_direction, first_result)
-    apply_reduced_contact_operator(forest, rigid, proxy, linear_system_data, second, second_result)
+    apply_reduced_contact_operator(
+        forest,
+        rigid,
+        proxy,
+        linear_system_data,
+        reduced_direction,
+        first_result,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        scene.rigid_solver.n_links,
+    )
+    apply_reduced_contact_operator(
+        forest,
+        rigid,
+        proxy,
+        linear_system_data,
+        second,
+        second_result,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        scene.rigid_solver.n_links,
+    )
     first_result_host = qd_to_numpy(first_result)
     second_result_host = qd_to_numpy(second_result)
     np.testing.assert_allclose(
@@ -601,10 +744,26 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     proxy.t.from_numpy(perturbed)
     prepare_proxy_constraint(proxy, rigid, forest)
     assert np.linalg.norm(qd_to_numpy(proxy.particular)[0]) > 0.0
-    project_particular_rhs(forest, rigid, proxy, linear_system_data)
+    project_particular_rhs(
+        forest,
+        rigid,
+        proxy,
+        linear_system_data,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        scene.rigid_solver.n_links,
+    )
     reduced_rhs = qd_to_numpy(linear_system_data.b_rhs)
     h_particular = qd_to_numpy(forest.physical_Ap).copy()
-    prepare_physical_direction(forest, rigid, proxy, reduced_direction)
+    prepare_physical_direction(
+        forest,
+        rigid,
+        proxy,
+        reduced_direction,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        scene.rigid_solver.n_links,
+    )
     physical_direction = qd_to_numpy(forest.physical_p)
     np.testing.assert_allclose(
         direction_host @ reduced_rhs,
@@ -613,7 +772,7 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
         atol=1.0e-12,
     )
     np.testing.assert_allclose(
-        reduced_rhs[rigid.storage_dof_count_host :],
+        reduced_rhs[rigid_storage_dofs:],
         0.0,
         atol=1.0e-14,
     )
@@ -662,7 +821,7 @@ def test_proxy_contact_routes_emit_block_counts():
         dtype=np.float64,
     )
     geometry.vertex_pair = np.array([0, 0], dtype=np.int32)
-    proxy = get_rigid_contact_proxy_data(
+    proxy = create_rigid_contact_proxy_data(
         n_links_host=1,
         n_instances_host=1,
         n_rigid_bodies=2,
@@ -676,7 +835,9 @@ def test_proxy_contact_routes_emit_block_counts():
     )
     proxy.t.from_numpy(np.zeros((1, 3), dtype=np.float64))
 
-    vertex_system = GlobalVertexManager(get_global_vertex_data(3))
+    vertex_system = GlobalVertexManager()
+    vertex_system.wire_data(3)
+    vertex_system.init()
     vertex = vertex_system.data
     vertex.positions.from_numpy(
         np.array(
@@ -685,19 +846,17 @@ def test_proxy_contact_routes_emit_block_counts():
         )
     )
 
-    linear_system_system = GlobalLinearSystem(
-        data=get_global_linear_system_data(
-            n_block_rows=3,
-            n_elastic_triplets=0,
-            max_contact_body_triplets=9,
-            dof_block_base=0,
-            extent_capacity=1,
-        )
+    linear_system_system = GlobalLinearSystem()
+    linear_system_system.wire_data(
+        n_block_rows=3,
+        n_elastic_triplets=0,
+        max_contact_body_triplets=9,
+        dof_block_base=0,
     )
-    extent_slot = linear_system_system.register_extent_slot()
+    linear_system_system.init()
     linear_system_data = linear_system_system.data
-    route = get_rigid_contact_assemble_data(contact)
-    route.extent_slot = extent_slot
+    linear_system_data.n_extent_slots.from_numpy(np.array(1, dtype=np.int32))
+    route = create_rigid_contact_assemble_data(contact)
 
     assemble_proxy_contact(route, proxy, forest, vertex, contact, fem, linear_system_data)
 
@@ -745,15 +904,15 @@ def test_standard_pcg_kkt_builder_path():
     engine.step()
 
     mechanism = int(qd_to_numpy(engine.rigid_contact_proxy.data.mechanism_body)[0])
-    link = mechanism % engine.rigid_contact_proxy.data.n_links_host
+    link = mechanism % engine.rigid_contact_proxy.n_links
     mechanism_position = (
         scene.rigid_solver.get_links_pos(links_idx=np.array([link], dtype=np.int32)).cpu().numpy().reshape(-1, 3)[0]
     )
     proxy_position = qd_to_numpy(engine.rigid_contact_proxy.data.t)[0]
     residual = float(np.linalg.norm(proxy_position - mechanism_position))
     tolerance = min(
-        float(qd_to_numpy(engine.sim_config_data.tol)),
-        0.01 * float(qd_to_numpy(engine.contact_data.d_hat)),
+        float(qd_to_numpy(engine.sim_config_system.data.tol)),
+        0.01 * float(qd_to_numpy(engine.contact_system.data.d_hat)),
     )
     assert np.isfinite(residual)
     assert residual <= tolerance, (
@@ -824,7 +983,7 @@ def test_kkt_newton_exhaustion_does_not_commit_previous_state():
     scene.build()
     cloth.set_vertex_constraints([0, 4, 20, 24])
     engine = build_scene_engine(scene, contact_config={})
-    engine.sim_config_data.max_newton_iter.from_numpy(np.array(1, dtype=np.int64))
+    engine.sim_config_system.data.max_newton_iter.from_numpy(np.array(1, dtype=np.int64))
 
     proxy = engine.rigid_contact_proxy
     perturbed = qd_to_numpy(proxy.t).copy()
@@ -868,25 +1027,25 @@ def test_rigid_proxy_cloth_contact_step():
     sphere.set_dofs_velocity([0.0, 0.0, -5.0, 0.0, 0.0, 0.0])
 
     engine = build_scene_engine(scene, contact_config={})
-    old_doublet_capacity = engine.contact_data.unique_doublet_vertices.shape[0]
-    old_triplet_capacity = engine.contact_data.unique_triplet_rows.shape[0]
+    old_doublet_capacity = engine.contact_system.data.unique_doublet_vertices.shape[0]
+    old_triplet_capacity = engine.contact_system.data.unique_triplet_rows.shape[0]
     engine.contact_system.realloc_assembly_buffers(
         old_doublet_capacity + 1,
         old_triplet_capacity + 1,
     )
-    engine.rigid_contact_assemble.realloc_assembly_buffers(engine.contact_data)
+    engine.rigid_contact_assemble.realloc_assembly_buffers(engine.contact_system.data)
     assert engine.rigid_contact_assemble.data.doublet_scanner.status.shape[0] == max(
-        (engine.contact_data.unique_doublet_vertices.shape[0] + 3071) // 3072,
+        (engine.contact_system.data.unique_doublet_vertices.shape[0] + 3071) // 3072,
         1,
     )
     assert engine.rigid_contact_assemble.data.triplet_scanner.status.shape[0] == max(
-        (engine.contact_data.unique_triplet_rows.shape[0] + 3071) // 3072,
+        (engine.contact_system.data.unique_triplet_rows.shape[0] + 3071) // 3072,
         1,
     )
     engine.step()
 
-    assert int(qd_to_numpy(engine.contact_data.intersection_flag)) == 0
-    assert float(qd_to_numpy(engine.contact_data.ccd_alpha)) > 0.0
+    assert int(qd_to_numpy(engine.contact_system.data.intersection_flag)) == 0
+    assert float(qd_to_numpy(engine.contact_system.data.ccd_alpha)) > 0.0
     assert int(qd_to_numpy(engine.rigid_contact_assemble.data.rigid_doublet_total)) > 0
     assert np.linalg.norm(qd_to_numpy(engine.rigid_contact_proxy.data.reaction)) > 0.0
     assert float(qd_to_numpy(engine.rigid_contact_proxy.data.max_surface_residual)) <= float(
@@ -943,7 +1102,7 @@ def test_cloth_drapes_on_fixed_proxy_box():
         )
 
     center_vertex = cloth_resolution * cloth_resolution // 2
-    center_height = float(qd_to_numpy(engine.fem.x)[center_vertex, 2])
+    center_height = float(qd_to_numpy(engine.fem_system.data.x)[center_vertex, 2])
     assert maximum_proxy_doublets > 0
     assert center_height > cube_top
 
@@ -1022,13 +1181,13 @@ def test_franka_forest_paths_match_P_and_PT():
     )
     scene.build()
 
-    rigid = get_rigid_system_data(scene.rigid_solver)
-    total_dof = rigid.storage_dof_count_host
+    rigid = create_rigid_system_data(scene.rigid_solver)
+    total_dof = int(qd_to_numpy(rigid.n_storage_dofs))
     n_bodies = scene.rigid_solver.n_links * scene.rigid_solver._B
     empty_geometry = RigidContactProxyGeometry()
     empty_geometry.local_positions = np.empty((0, 3), dtype=np.float64)
     empty_geometry.vertex_pair = np.empty(0, dtype=np.int32)
-    proxy = get_rigid_contact_proxy_data(
+    proxy = create_rigid_contact_proxy_data(
         n_links_host=scene.rigid_solver.n_links,
         n_instances_host=scene.rigid_solver._B,
         n_rigid_bodies=n_bodies,
@@ -1057,20 +1216,16 @@ def test_franka_forest_paths_match_P_and_PT():
 
     outputs = {}
     for path in ("genesis_legacy", "level", "tree"):
-        forest = get_rigid_joint_forest_data(
+        forest = create_rigid_joint_forest_data(
             scene.rigid_solver,
             rigid,
             total_dof=total_dof,
             n_rigid_bodies=n_bodies,
             proxy_dof_offset=total_dof,
-            proxy_data=None,
+            proxy_data=proxy,
             fused_enabled=path == "tree",
             genesis_legacy_enabled=path == "genesis_legacy",
         )
-        selected_path = (
-            "genesis_legacy" if forest.genesis_legacy_enabled else "tree" if forest.use_fused_tree_path else "level"
-        )
-        assert selected_path == path
         edge_capacity = forest.edge_d.shape[0]
         forest.edge_basis.from_numpy(
             np.linspace(
@@ -1106,6 +1261,9 @@ def test_franka_forest_paths_match_P_and_PT():
             direction,
             body_wrench,
             reduced_wrench,
+            path == "genesis_legacy",
+            path == "tree",
+            scene.rigid_solver.n_links,
         )
         if path == "tree":
             apply_forest_preconditioner_tree(
@@ -1122,6 +1280,7 @@ def test_franka_forest_paths_match_P_and_PT():
                 proxy,
                 residual,
                 preconditioned,
+                scene.rigid_solver.n_links,
             )
         outputs[path] = (
             qd_to_numpy(forest.body_twist).copy(),

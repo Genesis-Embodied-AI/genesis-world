@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Mapping
+from enum import Enum, auto
+import inspect
 from typing import TYPE_CHECKING, Callable, TypeVar
+
+import quadrants as qd
 
 if TYPE_CHECKING:
     from .sim_engine import SimEngine
@@ -15,82 +19,129 @@ class SimData:
     """Marker for fully constructed mutable Quadrants data objects."""
 
 
-@dataclass(frozen=True)
-class ActionInvocation:
-    """Quadrants-visible implementation of one scheduled ``SimAction``."""
+class ActionKind(Enum):
+    """Actual Quadrants callable category derived from compiler metadata."""
 
-    data: tuple[object, ...]
-    kernel: Callable
-
-    def __call__(self, *args, **kwargs):
-        return self.kernel(*(self.data + args), **kwargs)
+    HOST = auto()
+    INLINE_FUNC = auto()
+    TOP_LEVEL_FUNC = auto()
+    REAL_FUNC = auto()
 
 
-@dataclass(frozen=True)
+def _classify_qd_callable(kernel: Callable) -> ActionKind:
+    if not getattr(kernel, "_is_quadrants_function", False):
+        raise TypeError(f"{kernel!r} is not a Quadrants @qd.func")
+    if getattr(kernel, "_is_wrapped_kernel", False):
+        raise TypeError("Quadrants @qd.kernel objects are not SimAction callables")
+    if getattr(kernel, "_is_real_function", False):
+        return ActionKind.REAL_FUNC
+    if getattr(kernel, "_qd_requires_top_level", False):
+        return ActionKind.TOP_LEVEL_FUNC
+    return ActionKind.INLINE_FUNC
+
+
+def _transient_arity(kernel: Callable, closed_data: tuple[object, ...]) -> int:
+    fn = getattr(kernel, "fn", None)
+    if fn is None:
+        raise TypeError(f"{kernel!r} does not expose its underlying Quadrants function")
+    signature = inspect.signature(fn)
+    if any(
+        parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for parameter in signature.parameters.values()
+    ):
+        raise TypeError(f"{fn.__qualname__} uses unsupported variable arguments")
+    arity = len(signature.parameters) - len(closed_data)
+    if arity < 0:
+        raise TypeError(
+            f"{fn.__qualname__} has {len(signature.parameters)} parameters but "
+            f"{len(closed_data)} persistent arguments were closed"
+        )
+    return arity
+
+
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class SimAction:
     """Schedulable ``(kernel, *data)`` closure owned by a ``SimSystem``.
 
-    ``owner`` exists only for lifecycle validation and diagnostics. Pipelines
-    pass only the ordered ``data`` and ``kernel`` closure into Quadrants graphs.
+    ``owner`` exists only for lifecycle validation and diagnostics.
     """
 
-    owner: "SimSystem"
-    data: tuple[object, ...]
-    kernel: Callable
+    def __init__(
+        self,
+        *,
+        owner: "SimSystem",
+        data: tuple[object, ...],
+        kernel: Callable,
+        kind: ActionKind,
+        transient_arity: int,
+        rank: int = -1,
+    ) -> None:
+        self.owner = owner
+        self.data = data
+        self.kernel = kernel
+        self.kind = kind
+        self.transient_arity = transient_arity
+        self.rank = int(rank)
 
-    @property
-    def invocation(self) -> ActionInvocation:
-        return ActionInvocation(
-            data=self.data,
-            kernel=self.kernel,
+    # Quadrants does not recognize a data-oriented @qd.func __call__ through
+    # its public callable API. Keep an explicit method until that is supported.
+    @qd.pyfunc
+    def invoke(self, transient_args: qd.template() = ()):
+        self.kernel(*(self.data + transient_args))
+
+
+def validate_action_protocol(
+    action: SimAction,
+    *,
+    protocol: str,
+    expected_kind: ActionKind,
+    transient_arity: int,
+) -> None:
+    """Validate a registered Action against its actual Quadrants callable."""
+    if action.kind is ActionKind.HOST:
+        actual_kind = ActionKind.HOST
+        actual_arity = len(inspect.signature(action.kernel).parameters) - len(action.data)
+    else:
+        actual_kind = _classify_qd_callable(action.kernel)
+        actual_arity = _transient_arity(action.kernel, action.data)
+    if actual_kind is not expected_kind:
+        raise TypeError(
+            f"{protocol} requires {expected_kind.name}, but {action.kernel.fn.__qualname__} is {actual_kind.name}"
+        )
+    if actual_arity != transient_arity:
+        raise TypeError(
+            f"{protocol} requires {transient_arity} transient arguments, but "
+            f"{action.kernel.fn.__qualname__} requires {actual_arity}"
         )
 
 
 class SimPipeline:
-    """Instantiated graph runtime with checkpoint-yield callbacks."""
+    """Host runtime for a bound graph and its checkpoint-yield callbacks."""
 
-    def __init__(self, data: object, graph: Callable) -> None:
-        self.data = data
+    def __init__(
+        self,
+        graph: Callable,
+        *,
+        yield_callbacks: Mapping[int, Callable] | None = None,
+    ) -> None:
         self.graph = graph
-        self._yield_callbacks: dict[int, Callable] = {}
-        self._action_data: list[object] = []
-        self._has_launched = False
-
-    def bind_actions(self, *actions: SimAction | ActionInvocation) -> None:
-        """Expose every scheduled Data object directly from the graph root."""
-        if self._has_launched:
-            raise RuntimeError("Actions must be bound before SimPipeline.run()")
-        for action in actions:
-            for data in action.data:
-                if any(registered is data for registered in self._action_data):
-                    continue
-                index = len(self._action_data)
-                self._action_data.append(data)
-                setattr(self.data, f"_sim_pipeline_action_data_{index}", data)
-
-    def register_yield_callback(self, checkpoint: int, callback: Callable) -> None:
-        """Register the host callback required to resume one graph checkpoint."""
-        if self._has_launched:
-            raise RuntimeError("Yield callbacks must be registered before SimPipeline.run()")
-        checkpoint = int(checkpoint)
-        if checkpoint in self._yield_callbacks:
-            raise RuntimeError(f"Checkpoint {checkpoint} already has a yield callback")
-        self._yield_callbacks[checkpoint] = callback
+        self.yield_callbacks = {
+            int(checkpoint): callback
+            for checkpoint, callback in (() if yield_callbacks is None else yield_callbacks.items())
+        }
 
     def run(self, *args, **kwargs):
         """Launch the graph and handle every yield until it completes."""
-        self._has_launched = True
-        status = self.graph(self.data, *args, **kwargs)
+        status = self.graph(*args, **kwargs)
         while status.yielded:
             checkpoint = int(status.checkpoint)
-            callback = self._yield_callbacks.get(checkpoint)
+            callback = self.yield_callbacks.get(checkpoint)
             if callback is None:
                 raise RuntimeError(f"SimPipeline has no yield callback for checkpoint {checkpoint}")
             resume_from = callback(status)
             if resume_from is None:
                 resume_from = checkpoint
             status = self.graph.resume(
-                self.data,
                 *args,
                 from_checkpoint=int(resume_from),
                 **kwargs,
@@ -120,23 +171,50 @@ class ActionCollection:
             for registered in self._actions
         ):
             raise RuntimeError("SimAction is already registered")
+        if action.rank >= 0 and any(registered.rank == action.rank for registered in self._actions):
+            raise RuntimeError(f"SimAction rank {action.rank} is already registered")
         self._actions.append(action)
 
     @property
     def actions(self) -> tuple[SimAction, ...]:
         if self._owner.is_building:
             raise RuntimeError("ActionCollection is available only after build")
-        return tuple(self._actions)
+        ranked = [(index, action) for index, action in enumerate(self._actions) if action.rank >= 0]
+        unranked = [action for action in self._actions if action.rank < 0]
+        ranked.sort(key=lambda item: item[1].rank)
+        return tuple(action for _, action in ranked) + tuple(unranked)
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class SimSystem(ABC):
     """Python organizational node for simulation data, dependencies, and actions.
 
     A system collects ``SimData``, declares dependencies on other systems, and
-    publishes ``SimAction`` objects during build. Device execution is expressed
+    publishes ``SimAction`` objects during build, then populates the canonical
+    nested ``Data`` object during init. Device execution is expressed
     by composed ``SimPipeline`` instances rather than by scheduling the system
     object itself.
+
+    Concrete Systems must be default-constructible. Scene values, capacities,
+    solver references, and configuration enter through explicit wiring or
+    dependencies and populate the already-created ``Data`` object during
+    ``init()``. Constructor arguments would bypass dependency discovery and the
+    build/init lifecycle, hide ownership in call sites, and prevent uniform
+    Engine construction.
     """
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.__bases__ != (SimSystem,):
+            raise TypeError(f"{cls.__name__} must inherit directly and only from SimSystem")
+        initializer = cls.__dict__.get("__init__")
+        if initializer is not None:
+            parameters = tuple(inspect.signature(initializer).parameters.values())
+            if len(parameters) != 1 or parameters[0].name != "self":
+                raise TypeError(
+                    f"{cls.__name__}.__init__ must accept only self; "
+                    "wire scene/configuration inputs explicitly and populate the stable Data object in init()"
+                )
 
     def __init__(self) -> None:
         self._engine: SimEngine | None = None
@@ -189,48 +267,53 @@ class SimSystem(ABC):
             return None
         return data, kernel
 
-    def create_action(self, kernel: Callable, *data: object) -> SimAction:
+    def create_action(self, kernel: Callable, *data: object, rank: int = -1) -> SimAction:
         """Create a schedulable ``(kernel, *data)`` closure during build."""
         if not self._build_phase_open:
             raise RuntimeError("SimAction objects may be created only during SimSystem.build()")
-        if data:
+        resolved = self._resolve_bound_callable(kernel)
+        if resolved is not None:
+            bound_target, resolved_kernel = resolved
+            resolved_data = (bound_target, *data)
+        else:
             resolved_kernel = kernel
             resolved_data = tuple(data)
-        else:
-            resolved = self._resolve_bound_callable(kernel)
-            if resolved is None:
+            if not resolved_data:
                 raise TypeError("Pure action kernels require one or more explicit ordered Data arguments")
-            bound_target, resolved_kernel = resolved
-            resolved_data = (bound_target,)
+        is_qd_callable = getattr(resolved_kernel, "_is_quadrants_function", False)
+        kind = _classify_qd_callable(resolved_kernel) if is_qd_callable else ActionKind.HOST
+        transient_arity = (
+            _transient_arity(resolved_kernel, resolved_data)
+            if is_qd_callable
+            else len(inspect.signature(resolved_kernel).parameters) - len(resolved_data)
+        )
+        if transient_arity < 0:
+            raise TypeError(f"{resolved_kernel.__qualname__} has fewer parameters than closed objects")
         return SimAction(
             owner=self,
             data=resolved_data,
             kernel=resolved_kernel,
+            kind=kind,
+            transient_arity=transient_arity,
+            rank=rank,
         )
 
     def create_action_collection(self) -> ActionCollection:
         """Create a lifecycle collection owned by this system."""
         return ActionCollection(self)
 
-    def create_pipeline(self, graph: Callable | tuple[object, Callable]) -> SimPipeline:
-        """Instantiate one graph runtime from ``(data, graph)``."""
-        if isinstance(graph, tuple):
-            if len(graph) != 2:
-                raise TypeError("Expected a (data, callable) pair")
-            data, graph_callable = graph
-        else:
-            resolved = self._resolve_bound_callable(graph)
-            if resolved is None:
-                raise TypeError("Expected a (data, callable) pair or a bound method")
-            data, graph_callable = resolved
-        return SimPipeline(
-            data=data,
-            graph=graph_callable,
-        )
+    def create_pipeline(self, graph: Callable) -> SimPipeline:
+        """Instantiate one graph runtime from a bound graph method."""
+        if self._resolve_bound_callable(graph) is None:
+            raise TypeError("Expected a bound graph method")
+        return SimPipeline(graph)
 
     @abstractmethod
     def build(self) -> None:
-        """Resolve dependencies and initialize device-visible runtime data."""
+        """Resolve dependencies and publish actions while registration is open."""
+
+    def init(self) -> None:
+        """Allocate and populate fields on the canonical nested Data object."""
 
     def _begin_build(self) -> None:
         if self._build_phase_open:
@@ -243,6 +326,8 @@ class SimSystem(ABC):
         self._build_phase_open = False
 
     def _set_engine(self, engine: SimEngine) -> None:
+        if not type(self).__dict__.get("_data_oriented", False):
+            raise TypeError(f"{type(self).__name__} must be explicitly decorated with @qd.data_oriented")
         self._engine = engine
 
     def _invalidate(self) -> None:

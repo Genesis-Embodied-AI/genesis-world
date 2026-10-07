@@ -12,13 +12,10 @@ from quadrants.algorithms import (
 from .dynamic_exclusive_sum import DynamicExclusiveSum, dynamic_exclusive_sum
 from .dynamic_radix_sort import DynamicRadixSort, dynamic_radix_sort
 from .fsr_reduce import fast_segmented_reduce_body as fsr_reduce_body
-from .sim_system import SimData
-
-QDDataType = type(qd.f64)
 
 
 @qd.data_oriented
-class BCOOMatrix(SimData):
+class BCOOMatrix:
     """General block-COO storage and its assembly workspace.
 
     Matrix shape, block shape, scalar type, and symmetric storage are explicit
@@ -26,9 +23,11 @@ class BCOOMatrix(SimData):
     those properties; numerical operations such as SpMV are external.
     """
 
-    shape: tuple[int, int]
-    block_shape: tuple[int, int]
-    value_type: QDDataType
+    n_block_rows: int
+    n_block_cols: int
+    block_rows: int
+    block_cols: int
+    value_type_is_f64: bool
     symmetric: bool
     block_scalar_count: int
     sort_end_bit: int
@@ -61,159 +60,222 @@ class BCOOMatrix(SimData):
     bcoo_col: qd.Ndarray
     bcoo_val: qd.Ndarray
 
+    def __init__(
+        self,
+        *,
+        shape: tuple[int, int],
+        block_shape: tuple[int, int],
+        value_type,
+        symmetric: bool,
+        initial_triplets: int,
+        max_triplets: int,
+        genesis_legacy_sort_reduce: bool = False,
+    ) -> None:
+        if min(*shape, *block_shape, initial_triplets, max_triplets) < 0:
+            raise ValueError("BCOOMatrix dimensions and capacities must be non-negative")
+        if min(*block_shape) == 0:
+            raise ValueError("BCOOMatrix block dimensions must be positive")
+        if initial_triplets > max_triplets:
+            raise ValueError("BCOOMatrix initial triplet count exceeds capacity")
+        if symmetric and (shape[0] != shape[1] or block_shape[0] != block_shape[1]):
+            raise ValueError("Symmetric BCOOMatrix storage requires square matrix and block shapes")
+        if value_type not in (qd.f32, qd.f64):
+            raise TypeError("BCOOMatrix currently supports qd.f32 and qd.f64 scalar values")
 
-def get_bcoo_matrix(
-    *,
-    shape: tuple[int, int],
-    block_shape: tuple[int, int],
-    value_type,
-    symmetric: bool,
-    initial_triplets: int,
-    max_triplets: int,
-    genesis_legacy_sort_reduce: bool = False,
-) -> BCOOMatrix:
-    if min(*shape, *block_shape, initial_triplets, max_triplets) < 0:
-        raise ValueError("BCOOMatrix dimensions and capacities must be non-negative")
-    if min(*block_shape) == 0:
-        raise ValueError("BCOOMatrix block dimensions must be positive")
-    if initial_triplets > max_triplets:
-        raise ValueError("BCOOMatrix initial triplet count exceeds capacity")
-    if symmetric and (shape[0] != shape[1] or block_shape[0] != block_shape[1]):
-        raise ValueError("Symmetric BCOOMatrix storage requires square matrix and block shapes")
+        block_scalar_count = block_shape[0] * block_shape[1]
+        sort_log256_max_n = 4
+        scan_log256_max_n = 4
+        triplet_capacity = max(max_triplets, 1)
+        padded_capacity = max(((triplet_capacity + 63) // 64) * 64, 64)
 
-    block_scalar_count = block_shape[0] * block_shape[1]
-    sort_log256_max_n = 4
-    scan_log256_max_n = 4
-    triplet_capacity = max(max_triplets, 1)
-    padded_capacity = max(((triplet_capacity + 63) // 64) * 64, 64)
+        def scalar(dtype, value, np_dtype):
+            result = qd.ndarray(dtype, shape=())
+            result.from_numpy(np.array(value, dtype=np_dtype))
+            return result
 
-    def scalar(dtype, value, np_dtype):
-        result = qd.ndarray(dtype, shape=())
-        result.from_numpy(np.array(value, dtype=np_dtype))
-        return result
+        self.n_block_rows, self.n_block_cols = shape
+        self.block_rows, self.block_cols = block_shape
+        self.value_type_is_f64 = value_type == qd.f64
+        self.symmetric = bool(symmetric)
+        self.block_scalar_count = block_scalar_count
+        self.sort_end_bit = 64
+        self.sort_log256_max_n = sort_log256_max_n
+        self.scan_log256_max_n = scan_log256_max_n
+        self.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
+        self.max_triplets_host = triplet_capacity
+        self.padded_triplets_host = padded_capacity
+        self.n_triplets = scalar(qd.i32, initial_triplets, np.int32)
+        self.max_triplets = scalar(qd.i32, triplet_capacity, np.int32)
+        self.padded_triplets = scalar(qd.i32, triplet_capacity, np.int32)
+        self.triplet_overflow = scalar(qd.i32, 0, np.int32)
+        self.bcoo_valid = scalar(qd.i32, 1, np.int32)
+        self.triplet_row = qd.ndarray(qd.i32, shape=(triplet_capacity,))
+        self.triplet_col = qd.ndarray(qd.i32, shape=(triplet_capacity,))
+        self.triplet_val = qd.ndarray(value_type, shape=(triplet_capacity * block_scalar_count,))
+        self.triplet_keys = qd.ndarray(qd.u64, shape=(padded_capacity,))
+        self.triplet_perm = qd.ndarray(qd.i32, shape=(padded_capacity,))
+        self.sort_keys_out = qd.ndarray(qd.u64, shape=(padded_capacity,))
+        self.sort_perm_out = qd.ndarray(qd.i32, shape=(padded_capacity,))
+        self.triplet_sorter = DynamicRadixSort(qd.u64, padded_capacity)
+        self.sort_scratch = qd.ndarray(
+            qd.u32,
+            shape=(max(sort_scratch_slots(padded_capacity, sort_log256_max_n), 1),),
+        )
+        self.sort_size = scalar(qd.i32, initial_triplets, np.int32)
+        self.seg_flags = qd.ndarray(qd.i32, shape=(padded_capacity,))
+        self.seg_ids = qd.ndarray(qd.i32, shape=(padded_capacity,))
+        self.segment_scanner = DynamicExclusiveSum(padded_capacity)
+        self.scan_scratch = qd.ndarray(
+            qd.i32,
+            shape=(max(exclusive_scan_scratch_slots(padded_capacity, scan_log256_max_n), 1),),
+        )
+        self.bcoo_nnz = scalar(qd.i32, 0, np.int32)
+        self.bcoo_row = qd.ndarray(qd.i32, shape=(triplet_capacity,))
+        self.bcoo_col = qd.ndarray(qd.i32, shape=(triplet_capacity,))
+        self.bcoo_val = qd.ndarray(value_type, shape=(triplet_capacity * block_scalar_count,))
 
-    data = BCOOMatrix()
-    data.shape = shape
-    data.block_shape = block_shape
-    data.value_type = value_type
-    data.symmetric = bool(symmetric)
-    data.block_scalar_count = block_scalar_count
-    data.sort_end_bit = 64
-    data.sort_log256_max_n = sort_log256_max_n
-    data.scan_log256_max_n = scan_log256_max_n
-    data.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
-    data.max_triplets_host = triplet_capacity
-    data.padded_triplets_host = padded_capacity
-    data.n_triplets = scalar(qd.i32, initial_triplets, np.int32)
-    data.max_triplets = scalar(qd.i32, triplet_capacity, np.int32)
-    data.padded_triplets = scalar(qd.i32, triplet_capacity, np.int32)
-    data.triplet_overflow = scalar(qd.i32, 0, np.int32)
-    data.bcoo_valid = scalar(qd.i32, 1, np.int32)
-    data.triplet_row = qd.ndarray(qd.i32, shape=(triplet_capacity,))
-    data.triplet_col = qd.ndarray(qd.i32, shape=(triplet_capacity,))
-    data.triplet_val = qd.ndarray(value_type, shape=(triplet_capacity * block_scalar_count,))
-    data.triplet_keys = qd.ndarray(qd.u64, shape=(padded_capacity,))
-    data.triplet_perm = qd.ndarray(qd.i32, shape=(padded_capacity,))
-    data.sort_keys_out = qd.ndarray(qd.u64, shape=(padded_capacity,))
-    data.sort_perm_out = qd.ndarray(qd.i32, shape=(padded_capacity,))
-    data.triplet_sorter = DynamicRadixSort(qd.u64, padded_capacity)
-    data.sort_scratch = qd.ndarray(
-        qd.u32,
-        shape=(max(sort_scratch_slots(padded_capacity, sort_log256_max_n), 1),),
-    )
-    data.sort_size = scalar(qd.i32, initial_triplets, np.int32)
-    data.seg_flags = qd.ndarray(qd.i32, shape=(padded_capacity,))
-    data.seg_ids = qd.ndarray(qd.i32, shape=(padded_capacity,))
-    data.segment_scanner = DynamicExclusiveSum(padded_capacity)
-    data.scan_scratch = qd.ndarray(
-        qd.i32,
-        shape=(max(exclusive_scan_scratch_slots(padded_capacity, scan_log256_max_n), 1),),
-    )
-    data.bcoo_nnz = scalar(qd.i32, 0, np.int32)
-    data.bcoo_row = qd.ndarray(qd.i32, shape=(triplet_capacity,))
-    data.bcoo_col = qd.ndarray(qd.i32, shape=(triplet_capacity,))
-    data.bcoo_val = qd.ndarray(value_type, shape=(triplet_capacity * block_scalar_count,))
-    return data
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Host-side matrix shape; device code uses scalar dimension members."""
+        return self.n_block_rows, self.n_block_cols
 
+    @property
+    def block_shape(self) -> tuple[int, int]:
+        """Host-side block shape; device code uses scalar dimension members."""
+        return self.block_rows, self.block_cols
 
-def grow_bcoo_matrix(
-    matrix: BCOOMatrix,
-    capacity: int,
-    *,
-    live_size: int | None = None,
-) -> None:
-    """Grow matrix buffers in place while preserving the data-object identity."""
-    if capacity < 0 or (live_size is not None and live_size < 0):
-        raise ValueError("BCOOMatrix growth sizes must be non-negative")
-    if capacity <= matrix.triplet_row.shape[0]:
-        matrix.max_triplets.from_numpy(np.array(matrix.triplet_row.shape[0], dtype=np.int32))
-        if live_size is not None:
-            matrix.sort_size.from_numpy(np.array(live_size, dtype=np.int32))
-        return
-    replacement = get_bcoo_matrix(
-        shape=matrix.shape,
-        block_shape=matrix.block_shape,
-        value_type=matrix.value_type,
-        symmetric=matrix.symmetric,
-        initial_triplets=0 if live_size is None else live_size,
-        max_triplets=capacity,
-        genesis_legacy_sort_reduce=matrix.genesis_legacy_sort_reduce_host,
-    )
-    matrix.max_triplets_host = replacement.max_triplets_host
-    matrix.padded_triplets_host = replacement.padded_triplets_host
-    matrix.triplet_row = replacement.triplet_row
-    matrix.triplet_col = replacement.triplet_col
-    matrix.triplet_val = replacement.triplet_val
-    matrix.triplet_keys = replacement.triplet_keys
-    matrix.triplet_perm = replacement.triplet_perm
-    matrix.sort_keys_out = replacement.sort_keys_out
-    matrix.sort_perm_out = replacement.sort_perm_out
-    matrix.triplet_sorter = replacement.triplet_sorter
-    matrix.sort_scratch = replacement.sort_scratch
-    matrix.seg_flags = replacement.seg_flags
-    matrix.seg_ids = replacement.seg_ids
-    matrix.segment_scanner = replacement.segment_scanner
-    matrix.scan_scratch = replacement.scan_scratch
-    matrix.bcoo_row = replacement.bcoo_row
-    matrix.bcoo_col = replacement.bcoo_col
-    matrix.bcoo_val = replacement.bcoo_val
-    matrix.max_triplets.from_numpy(np.array(capacity, dtype=np.int32))
-    matrix.padded_triplets.from_numpy(np.array(capacity, dtype=np.int32))
-    matrix.sort_size.from_numpy(np.array(0 if live_size is None else live_size, dtype=np.int32))
+    def grow(self, capacity: int, *, live_size: int | None = None) -> None:
+        """Grow storage while preserving this data-object identity."""
+        if capacity < 0 or (live_size is not None and live_size < 0):
+            raise ValueError("BCOOMatrix growth sizes must be non-negative")
+        if capacity <= self.triplet_row.shape[0]:
+            self.max_triplets.from_numpy(np.array(self.triplet_row.shape[0], dtype=np.int32))
+            if live_size is not None:
+                self.sort_size.from_numpy(np.array(live_size, dtype=np.int32))
+            return
 
+        replacement = BCOOMatrix(
+            shape=self.shape,
+            block_shape=self.block_shape,
+            value_type=qd.f64 if self.value_type_is_f64 else qd.f32,
+            symmetric=self.symmetric,
+            initial_triplets=0 if live_size is None else live_size,
+            max_triplets=capacity,
+            genesis_legacy_sort_reduce=self.genesis_legacy_sort_reduce_host,
+        )
+        self.max_triplets_host = replacement.max_triplets_host
+        self.padded_triplets_host = replacement.padded_triplets_host
+        self.triplet_row = replacement.triplet_row
+        self.triplet_col = replacement.triplet_col
+        self.triplet_val = replacement.triplet_val
+        self.triplet_keys = replacement.triplet_keys
+        self.triplet_perm = replacement.triplet_perm
+        self.sort_keys_out = replacement.sort_keys_out
+        self.sort_perm_out = replacement.sort_perm_out
+        self.triplet_sorter = replacement.triplet_sorter
+        self.sort_scratch = replacement.sort_scratch
+        self.seg_flags = replacement.seg_flags
+        self.seg_ids = replacement.seg_ids
+        self.segment_scanner = replacement.segment_scanner
+        self.scan_scratch = replacement.scan_scratch
+        self.bcoo_row = replacement.bcoo_row
+        self.bcoo_col = replacement.bcoo_col
+        self.bcoo_val = replacement.bcoo_val
+        self.max_triplets.from_numpy(np.array(capacity, dtype=np.int32))
+        self.padded_triplets.from_numpy(np.array(capacity, dtype=np.int32))
+        self.sort_size.from_numpy(np.array(0 if live_size is None else live_size, dtype=np.int32))
 
-@qd.func
-def set_bcoo_n_triplets(matrix: qd.template(), count):
-    matrix.n_triplets[()] = count
-    overflow = count > matrix.max_triplets[()]
-    matrix.triplet_overflow[()] = qd.i32(overflow)
-    if overflow:
-        matrix.sort_size[()] = 0
-    else:
-        matrix.sort_size[()] = count
+    @qd.func
+    def set_n_triplets(self, count):
+        assert count >= 0 and count <= self.max_triplets[()], (
+            f"BCOOMatrix set_n_triplets count={count}, capacity={self.max_triplets[()]}"
+        )
+        self.n_triplets[()] = count
+        self.triplet_overflow[()] = 0
+        self.sort_size[()] = count
+
+    @qd.func
+    def report_triplet_demand(self, count):
+        """Publish required capacity without permitting an out-of-bounds write."""
+        assert count >= 0, f"BCOOMatrix report_triplet_demand count={count}"
+        self.n_triplets[()] = count
+        overflow = count > self.max_triplets[()]
+        self.triplet_overflow[()] = qd.i32(overflow)
+        if overflow:
+            self.sort_size[()] = 0
+        else:
+            self.sort_size[()] = count
+
+    @qd.func
+    def write_triplet(self, slot, row, col, block: qd.template()):
+        """Write one block according to this matrix's storage contract."""
+        assert slot >= 0 and slot < self.n_triplets[()] and self.n_triplets[()] <= self.max_triplets[()], (
+            f"BCOOMatrix write_triplet slot={slot}, row={row}, col={col}, "
+            f"live={self.n_triplets[()]}, capacity={self.max_triplets[()]}"
+        )
+        if qd.static(not self.symmetric):
+            self.triplet_row[slot] = row
+            self.triplet_col[slot] = col
+            for i in qd.static(range(self.block_rows)):
+                for j in qd.static(range(self.block_cols)):
+                    self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] = block[i, j]
+        else:
+            if row <= col:
+                self.triplet_row[slot] = row
+                self.triplet_col[slot] = col
+                for i in qd.static(range(self.block_rows)):
+                    for j in qd.static(range(self.block_cols)):
+                        self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] = block[i, j]
+            else:
+                self.triplet_row[slot] = col
+                self.triplet_col[slot] = row
+                for i in qd.static(range(self.block_rows)):
+                    for j in qd.static(range(self.block_cols)):
+                        self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j] = block[j, i]
+
+    @qd.func
+    def read_triplet(self, slot):
+        """Return one stored input triplet as ``(row, column, block)``."""
+        assert slot >= 0 and slot < self.n_triplets[()], (
+            f"BCOOMatrix read_triplet slot={slot}, live={self.n_triplets[()]}, capacity={self.max_triplets[()]}"
+        )
+        if qd.static(self.value_type_is_f64):
+            block = qd.Matrix.zero(qd.f64, self.block_rows, self.block_cols)
+            for i in qd.static(range(self.block_rows)):
+                for j in qd.static(range(self.block_cols)):
+                    block[i, j] = self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j]
+            return self.triplet_row[slot], self.triplet_col[slot], block
+        else:
+            block = qd.Matrix.zero(qd.f32, self.block_rows, self.block_cols)
+            for i in qd.static(range(self.block_rows)):
+                for j in qd.static(range(self.block_cols)):
+                    block[i, j] = self.triplet_val[slot * self.block_scalar_count + i * self.block_cols + j]
+            return self.triplet_row[slot], self.triplet_col[slot], block
+
+    @qd.func
+    def read_bcoo(self, entry):
+        """Return one reduced BCOO entry as ``(row, column, block)``."""
+        assert entry >= 0 and entry < self.bcoo_nnz[()], (
+            f"BCOOMatrix read_bcoo entry={entry}, nnz={self.bcoo_nnz[()]}, capacity={self.max_triplets[()]}"
+        )
+        if qd.static(self.value_type_is_f64):
+            block = qd.Matrix.zero(qd.f64, self.block_rows, self.block_cols)
+            for i in qd.static(range(self.block_rows)):
+                for j in qd.static(range(self.block_cols)):
+                    block[i, j] = self.bcoo_val[entry * self.block_scalar_count + i * self.block_cols + j]
+            return self.bcoo_row[entry], self.bcoo_col[entry], block
+        else:
+            block = qd.Matrix.zero(qd.f32, self.block_rows, self.block_cols)
+            for i in qd.static(range(self.block_rows)):
+                for j in qd.static(range(self.block_cols)):
+                    block[i, j] = self.bcoo_val[entry * self.block_scalar_count + i * self.block_cols + j]
+            return self.bcoo_row[entry], self.bcoo_col[entry], block
 
 
 @qd.func(requires_top_level=True)
 def zero_bcoo_triplets(matrix: qd.template()):
     for i in range(matrix.n_triplets[()] * matrix.block_scalar_count):
-        matrix.triplet_val[i] = matrix.value_type(0.0)
-
-
-@qd.func
-def write_bcoo_block(matrix: qd.template(), slot, row, col, block: qd.template()):
-    """Write one block according to the matrix storage contract."""
-    if qd.static(not matrix.symmetric) or row <= col:
-        matrix.triplet_row[slot] = row
-        matrix.triplet_col[slot] = col
-        for i in qd.static(range(matrix.block_shape[0])):
-            for j in qd.static(range(matrix.block_shape[1])):
-                matrix.triplet_val[slot * matrix.block_scalar_count + i * matrix.block_shape[1] + j] = block[i, j]
-    else:
-        matrix.triplet_row[slot] = col
-        matrix.triplet_col[slot] = row
-        for i in qd.static(range(matrix.block_shape[0])):
-            for j in qd.static(range(matrix.block_shape[1])):
-                matrix.triplet_val[slot * matrix.block_scalar_count + i * matrix.block_shape[1] + j] = block[j, i]
+        matrix.triplet_val[i] = 0.0
 
 
 @qd.func(requires_top_level=True)
@@ -295,7 +357,7 @@ def zero_bcoo_values(matrix: qd.template()):
     qd.loop_config(name="body_zero_bcoo")
     for i in range(matrix.bcoo_val.shape[0]):
         if i < matrix.padded_triplets[()] * matrix.block_scalar_count:
-            matrix.bcoo_val[i] = matrix.value_type(0.0)
+            matrix.bcoo_val[i] = 0.0
 
 
 @qd.func(requires_top_level=True)
@@ -311,18 +373,32 @@ def reduce_bcoo_segments(matrix: qd.template()):
                     matrix.triplet_val[source * matrix.block_scalar_count + component],
                 )
     else:
-        fsr_reduce_body(
-            matrix.seg_ids,
-            matrix.triplet_perm,
-            matrix.triplet_keys,
-            matrix.triplet_val,
-            matrix.bcoo_val,
-            matrix.n_triplets,
-            matrix.padded_triplets,
-            matrix.triplet_keys.shape[0],
-            matrix.value_type,
-            matrix.block_scalar_count,
-        )
+        if qd.static(matrix.value_type_is_f64):
+            fsr_reduce_body(
+                matrix.seg_ids,
+                matrix.triplet_perm,
+                matrix.triplet_keys,
+                matrix.triplet_val,
+                matrix.bcoo_val,
+                matrix.n_triplets,
+                matrix.padded_triplets,
+                matrix.triplet_keys.shape[0],
+                qd.f64,
+                matrix.block_scalar_count,
+            )
+        else:
+            fsr_reduce_body(
+                matrix.seg_ids,
+                matrix.triplet_perm,
+                matrix.triplet_keys,
+                matrix.triplet_val,
+                matrix.bcoo_val,
+                matrix.n_triplets,
+                matrix.padded_triplets,
+                matrix.triplet_keys.shape[0],
+                qd.f32,
+                matrix.block_scalar_count,
+            )
 
 
 @qd.func(requires_top_level=True)
@@ -346,10 +422,11 @@ def validate_bcoo(matrix: qd.template()):
     for i in range(matrix.bcoo_nnz[()]):
         row = matrix.bcoo_row[i]
         col = matrix.bcoo_col[i]
-        if row < 0 or row >= matrix.shape[0] or col < 0 or col >= matrix.shape[1]:
+        if row < 0 or row >= matrix.n_block_rows or col < 0 or col >= matrix.n_block_cols:
             matrix.bcoo_valid[()] = 0
-        if qd.static(matrix.symmetric) and row > col:
-            matrix.bcoo_valid[()] = 0
+        if qd.static(matrix.symmetric):
+            if row > col:
+                matrix.bcoo_valid[()] = 0
         if i > 0:
             previous_row = matrix.bcoo_row[i - 1]
             previous_col = matrix.bcoo_col[i - 1]

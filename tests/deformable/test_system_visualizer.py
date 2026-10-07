@@ -61,10 +61,6 @@ class FakeData:
         raise RuntimeError("Partially built attribute")
 
 
-class Data(FakeData):
-    engine_state: FakeBuffer
-
-
 def integrate_kernel():
     return None
 
@@ -104,7 +100,7 @@ class FakePipeline:
     def __init__(self):
         self.data = object()
         self.graph = step_graph
-        self._yield_callbacks = {7: resume_collision}
+        self.yield_callbacks = {7: resume_collision}
         self._has_launched = False
 
 
@@ -147,8 +143,7 @@ class FakeEngine:
             IntegratorSystem: integrator,
         }
         self.is_built_host = True
-        self.data = Data()
-        self.data.engine_state = FakeBuffer((), "i32")
+        self.engine_state = FakeBuffer((), "i32")
         self.monitor = FakeBuffer((), "i32")
         self.step_pipeline = FakePipeline()
         self.step_pipeline._action_data = [integrator.data, collision.data]
@@ -170,12 +165,13 @@ class SystemVisualizerSnapshotTest(unittest.TestCase):
         self.assertEqual(first["dependencies"][0]["attribute"], "require")
         self.assertTrue(first["dependencies"][0]["required"])
         self.assertEqual(first["pipelines"][0]["yield_callbacks"][0]["checkpoint"], 7)
-        self.assertEqual(len(first["pipelines"][0]["action_data_refs"]), 2)
         self.assertIn("step_graph", first["pipelines"][0]["graph"])
         self.assertTrue(any(entry["kind"] == "action" for entry in first["graph_entries"]))
-        self.assertEqual(first["engine"]["data"][0]["name"], "data")
-        self.assertEqual(first["engine"]["data"][0]["buffers"][0]["name"], "engine_state")
-        self.assertEqual(first["engine"]["buffers"][0]["name"], "monitor")
+        self.assertEqual(first["engine"]["data"], [])
+        self.assertEqual(
+            [buffer["name"] for buffer in first["engine"]["buffers"]],
+            ["engine_state", "monitor"],
+        )
         self.assertTrue(any(system["buffers"] for system in first["systems"]))
         self.assertTrue(all("data_refs" in action for action in first["actions"]))
         declared = first["systems"][0]["data"][0]["declared_fields"]

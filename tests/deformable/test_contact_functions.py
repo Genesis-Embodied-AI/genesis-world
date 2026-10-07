@@ -41,9 +41,9 @@ from genesis.engine.systems.contact_function.halfplane_contact import (
 )
 from genesis.engine.systems.contact_function.pair_d_hat import pair_d_hat_pt
 from genesis.engine.systems.contact_system import (
+    ContactSystem,
     adaptive_kappa_newton_tick,
     ccd,
-    get_contact_system_data,
     halfplane_query,
     init_ccd,
     reset_collision_counts,
@@ -56,12 +56,25 @@ from genesis.engine.systems.finite_element.fem_contact_assemble import (
 from genesis.engine.systems.global_linear_system import (
     GlobalLinearSystem,
     compute_n_triplets,
-    get_global_linear_system_data,
     zero_rhs,
 )
-from genesis.engine.systems.global_surface_manager import GlobalSurfaceManager, get_global_surface_data
-from genesis.engine.systems.global_vertex_manager import GlobalVertexManager, get_global_vertex_data
+from genesis.engine.systems.global_surface_manager import GlobalSurfaceManager
+from genesis.engine.systems.global_vertex_manager import GlobalVertexManager
 from genesis.utils.misc import qd_to_numpy
+
+
+def make_vertex_system(*args, **kwargs):
+    system = GlobalVertexManager()
+    system.wire_data(*args, **kwargs)
+    system.init()
+    return system
+
+
+def make_surface_system(*args, **kwargs):
+    system = GlobalSurfaceManager()
+    system.wire_data(*args, **kwargs)
+    system.init()
+    return system
 
 
 @qd.data_oriented
@@ -283,7 +296,7 @@ def evaluate_pt_count_active(
 
 @qd.kernel
 def evaluate_contact_sort_reduce(contact: qd.template()):
-    sort_reduce(contact)
+    sort_reduce(contact, False)
 
 
 @qd.kernel
@@ -376,7 +389,8 @@ def make_contact_data(
         halfplane_positions = np.empty((0, 3), dtype=np.float64)
     if halfplane_normals is None:
         halfplane_normals = np.empty((0, 3), dtype=np.float64)
-    return get_contact_system_data(
+    system = ContactSystem()
+    system.wire_data(
         n_verts=n_verts,
         n_bodies=n_bodies,
         d_hat=0.01,
@@ -391,6 +405,8 @@ def make_contact_data(
         adaptive_kappa_mode=adaptive_kappa_mode,
         adaptive_kappa_tick=adaptive_kappa_tick,
     )
+    system.init()
+    return system.data
 
 
 @pytest.mark.required
@@ -550,23 +566,19 @@ def test_rank1_triplet_scatter_matches_dense():
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_halfplane_query_respects_contact_tabular():
-    vertex_system = GlobalVertexManager(
-        get_global_vertex_data(
-            1,
-            thicknesses=np.array([0.001], dtype=np.float64),
-            d_hats=np.array([0.01], dtype=np.float64),
-        )
+    vertex_system = make_vertex_system(
+        1,
+        thicknesses=np.array([0.001], dtype=np.float64),
+        d_hats=np.array([0.01], dtype=np.float64),
     )
     vertex = vertex_system.data
     vertex.positions.from_numpy(np.array([[0.0, 0.0, 0.006]], dtype=np.float64))
     vertex.trajectory_end_positions.from_numpy(np.array([[0.0, 0.0, -0.004]], dtype=np.float64))
 
-    surface_system = GlobalSurfaceManager(
-        get_global_surface_data(
-            np.empty((0, 3), dtype=np.int32),
-            np.empty((0, 2), dtype=np.int32),
-            np.array([0], dtype=np.int32),
-        )
+    surface_system = make_surface_system(
+        np.empty((0, 3), dtype=np.int32),
+        np.empty((0, 2), dtype=np.int32),
+        np.array([0], dtype=np.int32),
     )
     surface = surface_system.data
 
@@ -596,27 +608,23 @@ def test_halfplane_query_respects_contact_tabular():
 @pytest.mark.precision("64")
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_consistent_ipc_halfplane_assembly():
-    vertex_system = GlobalVertexManager(
-        get_global_vertex_data(
-            1,
-            thicknesses=np.array([0.001], dtype=np.float64),
-            d_hats=np.array([0.01], dtype=np.float64),
-            is_fixed=np.array([0], dtype=np.int32),
-        )
+    vertex_system = make_vertex_system(
+        1,
+        thicknesses=np.array([0.001], dtype=np.float64),
+        d_hats=np.array([0.01], dtype=np.float64),
+        is_fixed=np.array([0], dtype=np.int32),
     )
     vertex = vertex_system.data
     vertex.positions.from_numpy(np.array([[0.0, 0.0, 0.006]], dtype=np.float64))
     vertex.x_bar.from_numpy(np.array([[0.0, 0.0, 0.006]], dtype=np.float64))
     vertex.body_id.from_numpy(np.array([0], dtype=np.int32))
 
-    surface_system = GlobalSurfaceManager(
-        get_global_surface_data(
-            np.empty((0, 3), dtype=np.int32),
-            np.empty((0, 2), dtype=np.int32),
-            np.array([0], dtype=np.int32),
-            vert_dimensions=np.array([2], dtype=np.int32),
-            surf_vert_area_weights=np.array([0.04], dtype=np.float64),
-        )
+    surface_system = make_surface_system(
+        np.empty((0, 3), dtype=np.int32),
+        np.empty((0, 2), dtype=np.int32),
+        np.array([0], dtype=np.int32),
+        vert_dimensions=np.array([2], dtype=np.int32),
+        surf_vert_area_weights=np.array([0.04], dtype=np.float64),
     )
     surface = surface_system.data
 
@@ -668,28 +676,24 @@ def test_consistent_ipc_point_triangle_assembly():
         ],
         dtype=np.float64,
     )
-    vertex_system = GlobalVertexManager(
-        get_global_vertex_data(
-            4,
-            thicknesses=np.full(4, 0.001, dtype=np.float64),
-            d_hats=np.full(4, 0.01, dtype=np.float64),
-            is_fixed=np.zeros(4, dtype=np.int32),
-        )
+    vertex_system = make_vertex_system(
+        4,
+        thicknesses=np.full(4, 0.001, dtype=np.float64),
+        d_hats=np.full(4, 0.01, dtype=np.float64),
+        is_fixed=np.zeros(4, dtype=np.int32),
     )
     vertex = vertex_system.data
     vertex.positions.from_numpy(positions_np)
     vertex.x_bar.from_numpy(positions_np)
     vertex.body_id.from_numpy(np.array([0, 1, 1, 1], dtype=np.int32))
 
-    surface_system = GlobalSurfaceManager(
-        get_global_surface_data(
-            np.array([[1, 2, 3]], dtype=np.int32),
-            np.empty((0, 2), dtype=np.int32),
-            np.arange(4, dtype=np.int32),
-            vert_dimensions=np.full(4, 2, dtype=np.int32),
-            surf_vert_area_weights=np.full(4, 0.25, dtype=np.float64),
-            surf_face_area_weights=np.array([0.5], dtype=np.float64),
-        )
+    surface_system = make_surface_system(
+        np.array([[1, 2, 3]], dtype=np.int32),
+        np.empty((0, 2), dtype=np.int32),
+        np.arange(4, dtype=np.int32),
+        vert_dimensions=np.full(4, 2, dtype=np.int32),
+        surf_vert_area_weights=np.full(4, 0.25, dtype=np.float64),
+        surf_face_area_weights=np.array([0.5], dtype=np.float64),
     )
     surface = surface_system.data
 
@@ -733,15 +737,14 @@ def test_consistent_ipc_point_triangle_assembly():
         atol=1e-10,
     )
     fem = FEMContactFixture(4)
-    global_linear_system_system = GlobalLinearSystem(
-        data=get_global_linear_system_data(
-            n_block_rows=4,
-            n_elastic_triplets=0,
-            max_contact_body_triplets=10,
-            dof_block_base=0,
-            extent_capacity=0,
-        )
+    global_linear_system_system = GlobalLinearSystem()
+    global_linear_system_system.wire_data(
+        n_block_rows=4,
+        n_elastic_triplets=0,
+        max_contact_body_triplets=10,
+        dof_block_base=0,
     )
+    global_linear_system_system.init()
     global_linear_system_data = global_linear_system_system.data
     evaluate_contact_distribute(contact, fem, global_linear_system_data)
     np.testing.assert_array_equal(qd_to_numpy(global_linear_system_data.matrix.n_triplets), 10)
@@ -766,28 +769,24 @@ def test_consistent_ipc_edge_edge_assembly():
         ],
         dtype=np.float64,
     )
-    vertex_system = GlobalVertexManager(
-        get_global_vertex_data(
-            4,
-            thicknesses=np.full(4, 0.001, dtype=np.float64),
-            d_hats=np.full(4, 0.01, dtype=np.float64),
-            is_fixed=np.zeros(4, dtype=np.int32),
-        )
+    vertex_system = make_vertex_system(
+        4,
+        thicknesses=np.full(4, 0.001, dtype=np.float64),
+        d_hats=np.full(4, 0.01, dtype=np.float64),
+        is_fixed=np.zeros(4, dtype=np.int32),
     )
     vertex = vertex_system.data
     vertex.positions.from_numpy(positions_np)
     vertex.x_bar.from_numpy(positions_np)
     vertex.body_id.from_numpy(np.array([0, 0, 1, 1], dtype=np.int32))
 
-    surface_system = GlobalSurfaceManager(
-        get_global_surface_data(
-            np.empty((0, 3), dtype=np.int32),
-            np.array([[0, 1], [2, 3]], dtype=np.int32),
-            np.arange(4, dtype=np.int32),
-            vert_dimensions=np.full(4, 2, dtype=np.int32),
-            surf_vert_area_weights=np.full(4, 0.25, dtype=np.float64),
-            surf_edge_area_weights=np.full(2, 0.5, dtype=np.float64),
-        )
+    surface_system = make_surface_system(
+        np.empty((0, 3), dtype=np.int32),
+        np.array([[0, 1], [2, 3]], dtype=np.int32),
+        np.arange(4, dtype=np.int32),
+        vert_dimensions=np.full(4, 2, dtype=np.int32),
+        surf_vert_area_weights=np.full(4, 0.25, dtype=np.float64),
+        surf_edge_area_weights=np.full(2, 0.5, dtype=np.float64),
     )
     surface = surface_system.data
 

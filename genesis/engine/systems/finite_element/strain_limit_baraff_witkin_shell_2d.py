@@ -3,45 +3,49 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from ..bcoo_matrix import write_bcoo_block
-from ..sim_system import SimData
-from .fem_constitution import FEMConstitution
+from ..global_linear_system import GlobalLinearSystem
+from ..sim_system import SimData, SimSystem
+from .finite_element_method import FiniteElementMethod
 from .strain_limit_bws_shell_2d import Ds3x2, E, F3x2, ddEddF, dEdF, dFdX
 
 
-class StrainLimitBaraffWitkinShell2D(FEMConstitution):
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
+class StrainLimitBaraffWitkinShell2D(SimSystem):
     """Baraff-Witkin shell membrane constitution."""
 
     @qd.data_oriented
     class Data(SimData):
         """Device-visible membrane parameters and extent metadata."""
 
-        n_tris_host: int
-        extent_slot: int
         n_tris: qd.Ndarray
         tri_indices: qd.Ndarray
         mu: qd.Ndarray
         lambda_: qd.Ndarray
         strain_limit_multiplier: qd.Ndarray
 
-    def __init__(self, data: Data | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = (
-            get_strain_limit_baraff_witkin_shell_2d_data(
-                np.empty(0, dtype=np.int32),
-                np.empty(0, dtype=np.float64),
-                np.empty(0, dtype=np.float64),
-                np.empty(0, dtype=np.float64),
-            )
-            if data is None
-            else data
-        )
+        self.data = self.Data()
+        self._inputs = None
+        self._initialized = False
 
-    def create_constitution_actions(self):
-        return (
-            self.create_action(report_strain_limit_extent, self.fem_system.data, self.data),
-            self.create_action(assemble_strain_limit, self.fem_system.data, self.data),
-            self.create_action(compute_strain_limit_energy, self.fem_system.data, self.data),
+    def build(self) -> None:
+        self.fem_system = self.require(FiniteElementMethod)
+        self.global_linear_system_system = self.require(GlobalLinearSystem)
+        self.init_action = self.create_action(self.init)
+        self.extent_action = self.create_action(report_strain_limit_extent, self.fem_system.data, self.data)
+        self.assemble_action = self.create_action(assemble_strain_limit, self.fem_system.data, self.data)
+        self.energy_action = self.create_action(compute_strain_limit_energy, self.fem_system.data, self.data)
+        self.global_linear_system_system.on_subsystem(
+            extent=self.extent_action,
+            assemble=self.assemble_action,
+        )
+        self.fem_system.on_constitution(
+            self,
+            self.init_action,
+            self.extent_action,
+            self.assemble_action,
+            self.energy_action,
         )
 
     def wire_data(
@@ -51,16 +55,41 @@ class StrainLimitBaraffWitkinShell2D(FEMConstitution):
         lambda_param: np.ndarray,
         strain_limit_multiplier: np.ndarray,
     ) -> None:
-        wire_strain_limit_baraff_witkin_shell_2d_data(
-            self.data,
+        if self._initialized:
+            raise RuntimeError("StrainLimitBaraffWitkinShell2D data is already initialized")
+        self._inputs = _strain_limit_inputs(
             tri_indices,
             mu,
             lambda_param,
             strain_limit_multiplier,
         )
 
+    def init(self) -> None:
+        if self._inputs is None:
+            raise RuntimeError("StrainLimitBaraffWitkinShell2D data has not been wired")
+        triangles, mu_values, lambda_values, multiplier_values = self._inputs
+        n_tris = len(triangles)
+        capacity = max(n_tris, 1)
+
+        def array(dtype, values):
+            result = qd.ndarray(dtype, shape=(capacity,))
+            storage = values if n_tris else np.zeros(capacity, dtype=values.dtype)
+            result.from_numpy(storage)
+            return result
+
+        self.data.n_tris = qd.ndarray(qd.i32, shape=())
+        self.data.n_tris.from_numpy(np.array(n_tris, dtype=np.int32))
+        self.data.tri_indices = array(qd.i32, triangles)
+        self.data.mu = array(qd.f64, mu_values)
+        self.data.lambda_ = array(qd.f64, lambda_values)
+        self.data.strain_limit_multiplier = array(qd.f64, multiplier_values)
+        self._initialized = True
+        self._inputs = None
+
     def triplet_count(self) -> int:
-        return self.data.n_tris_host * 6
+        if self._inputs is None:
+            raise RuntimeError("StrainLimitBaraffWitkinShell2D triplet count is available only before initialization")
+        return len(self._inputs[0]) * 6
 
 
 def _strain_limit_inputs(
@@ -79,40 +108,6 @@ def _strain_limit_inputs(
     return triangles, mu_values, lambda_values, multiplier_values
 
 
-def get_strain_limit_baraff_witkin_shell_2d_data(
-    tri_indices: np.ndarray,
-    mu: np.ndarray,
-    lambda_param: np.ndarray,
-    strain_limit_multiplier: np.ndarray,
-) -> StrainLimitBaraffWitkinShell2D.Data:
-    triangles, mu_values, lambda_values, multiplier_values = _strain_limit_inputs(
-        tri_indices,
-        mu,
-        lambda_param,
-        strain_limit_multiplier,
-    )
-    n_tris = len(triangles)
-    capacity = max(n_tris, 1)
-
-    def array(dtype, values):
-        result = qd.ndarray(dtype, shape=(capacity,))
-        storage = values if n_tris else np.zeros(capacity, dtype=values.dtype)
-        result.from_numpy(storage)
-        return result
-
-    n_tris_data = qd.ndarray(qd.i32, shape=())
-    n_tris_data.from_numpy(np.array(n_tris, dtype=np.int32))
-    data = StrainLimitBaraffWitkinShell2D.Data()
-    data.n_tris_host = n_tris
-    data.extent_slot = -1
-    data.n_tris = n_tris_data
-    data.tri_indices = array(qd.i32, triangles)
-    data.mu = array(qd.f64, mu_values)
-    data.lambda_ = array(qd.f64, lambda_values)
-    data.strain_limit_multiplier = array(qd.f64, multiplier_values)
-    return data
-
-
 def wire_strain_limit_baraff_witkin_shell_2d_data(
     data: StrainLimitBaraffWitkinShell2D.Data,
     tri_indices: np.ndarray,
@@ -128,7 +123,6 @@ def wire_strain_limit_baraff_witkin_shell_2d_data(
     )
     n_tris = len(triangles)
     capacity = max(n_tris, 1)
-    data.n_tris_host = n_tris
     data.n_tris.from_numpy(np.array(n_tris, dtype=np.int32))
     if data.tri_indices.shape[0] != capacity:
         data.tri_indices = qd.ndarray(qd.i32, shape=(capacity,))
@@ -152,9 +146,10 @@ def report_strain_limit_extent(
     fem: qd.template(),
     data: qd.template(),
     global_linear_system_data: qd.template(),
+    linear_system_id: qd.template(),
 ):
     for _ in range(1):
-        global_linear_system_data.extent_slots[data.extent_slot] = data.n_tris[()] * 6
+        global_linear_system_data.set_subsystem_extent(linear_system_id, data.n_tris[()] * 6)
 
 
 @qd.func(requires_top_level=True)
@@ -163,9 +158,10 @@ def assemble_strain_limit(
     data: qd.template(),
     sim_config: qd.template(),
     global_linear_system_data: qd.template(),
+    linear_system_id: qd.template(),
 ):
-    triplet_offset = global_linear_system_data.extent_offsets[data.extent_slot]
     for i in range(data.n_tris[()]):
+        triplet_offset = global_linear_system_data.subsystem_offset(linear_system_id)
         if global_linear_system_data.matrix.triplet_overflow[()] == 0:
             tri = data.tri_indices[i]
             verts = qd.Vector(
@@ -212,8 +208,8 @@ def assemble_strain_limit(
             for local in qd.static(range(3)):
                 if fem.is_fixed[verts[local]] == 0:
                     for axis in qd.static(range(3)):
-                        qd.atomic_add(
-                            global_linear_system_data.b_rhs[fem.dof_offset[()] + verts[local] * 3 + axis],
+                        global_linear_system_data.atomic_add_rhs(
+                            fem.dof_offset[()] + verts[local] * 3 + axis,
                             gradient[local * 3 + axis],
                         )
 
@@ -225,8 +221,7 @@ def assemble_strain_limit(
                         for row in qd.static(range(3)):
                             for col in qd.static(range(3)):
                                 block[row, col] = hessian[left * 3 + row, right * 3 + col]
-                    write_bcoo_block(
-                        global_linear_system_data.matrix,
+                    global_linear_system_data.matrix.write_triplet(
                         slot,
                         fem.dof_offset[()] // 3 + verts[left],
                         fem.dof_offset[()] // 3 + verts[right],

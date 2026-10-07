@@ -11,7 +11,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 _MISSING = object()
-_STRUCTURAL_PRIVATE_NAMES = frozenset({"_action_data", "_actions", "_owner", "_yield_callbacks"})
+_STRUCTURAL_PRIVATE_NAMES = frozenset({"_actions", "_owner"})
 
 
 def _type_name(value: object) -> str:
@@ -173,7 +173,7 @@ def _looks_like_action_collection(value: object) -> bool:
 
 
 def _looks_like_pipeline(value: object) -> bool:
-    callbacks = _safe_getattr(value, "_yield_callbacks")
+    callbacks = _safe_getattr(value, "yield_callbacks")
     return _class_name(value) == "SimPipeline" or (
         callable(_safe_getattr(value, "graph", None)) and isinstance(callbacks, Mapping)
     )
@@ -389,6 +389,9 @@ class SnapshotBuilder:
         data = _safe_getattr(action, "data")
         data_items = data if isinstance(data, tuple) else (() if data is _MISSING else (data,))
         data_refs = [self._data_ids.get(id(item)) for item in data_items]
+        kind = _safe_getattr(action, "kind")
+        kind_name = _safe_getattr(kind, "name")
+        transient_arity = _safe_getattr(action, "transient_arity")
         snapshot: dict[str, object] = {
             "id": action_id,
             "name": name,
@@ -397,6 +400,8 @@ class SnapshotBuilder:
             "kernel": kernel_name,
             "data_types": [_type_name(item) for item in data_items],
             "data_refs": data_refs,
+            "kind": None if kind_name is _MISSING else kind_name,
+            "transient_arity": None if transient_arity is _MISSING else transient_arity,
         }
         if len(data_items) == 1:
             snapshot["data_type"] = snapshot["data_types"][0]
@@ -440,9 +445,7 @@ class SnapshotBuilder:
         self._pipeline_ids[id(pipeline)] = pipeline_id
         graph = _safe_getattr(pipeline, "graph")
         graph_name = _callable_name(graph) if callable(graph) else None
-        callbacks = _safe_getattr(pipeline, "_yield_callbacks", {})
-        action_data = _safe_getattr(pipeline, "_action_data", ())
-        action_data_items = action_data if isinstance(action_data, (list, tuple)) else ()
+        callbacks = _safe_getattr(pipeline, "yield_callbacks", {})
         callback_snapshots: list[dict[str, object]] = []
         if isinstance(callbacks, Mapping):
             for checkpoint, callback in sorted(callbacks.items(), key=lambda item: str(item[0])):
@@ -463,8 +466,6 @@ class SnapshotBuilder:
             "graph": graph_name,
             "stages": ([] if graph_name is None else [{"kind": "graph", "entry": graph_name}]),
             "yield_callbacks": callback_snapshots,
-            "action_data_types": [_type_name(item) for item in action_data_items],
-            "action_data_refs": [self._data_ids.get(id(item)) for item in action_data_items],
             "has_launched": launched if isinstance(launched, bool) else None,
         }
         self._pipelines.append(snapshot)

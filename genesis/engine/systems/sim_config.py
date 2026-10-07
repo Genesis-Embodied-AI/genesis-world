@@ -6,6 +6,7 @@ import quadrants as qd
 from .sim_system import SimData, SimSystem
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class SimConfig(SimSystem):
     """Organize numerical controls shared by the global Newton pipeline."""
 
@@ -19,27 +20,42 @@ class SimConfig(SimSystem):
 
     def __init__(self) -> None:
         super().__init__()
-        self.data = get_sim_config_data()
+        self.data = self.Data()
+        self._wire_args = None
 
     def build(self) -> None:
         pass
 
+    def wire(
+        self,
+        *,
+        dt: float,
+        tol: float,
+        max_newton_iter: int,
+        max_pcg_iter: int,
+        max_ls_iter: int,
+    ) -> None:
+        self._wire_args = (
+            float(dt),
+            float(tol),
+            int(max_newton_iter),
+            int(max_pcg_iter),
+            int(max_ls_iter),
+        )
 
-def get_sim_config_data() -> SimConfig.Data:
-    dt = qd.ndarray(qd.f64, shape=())
-    tol = qd.ndarray(qd.f64, shape=())
-    max_newton_iter = qd.ndarray(qd.i64, shape=())
-    max_pcg_iter = qd.ndarray(qd.i64, shape=())
-    max_ls_iter = qd.ndarray(qd.i64, shape=())
-    dt.from_numpy(np.array(0.0, dtype=np.float64))
-    tol.from_numpy(np.array(0.0, dtype=np.float64))
-    max_newton_iter.from_numpy(np.array(0, dtype=np.int64))
-    max_pcg_iter.from_numpy(np.array(0, dtype=np.int64))
-    max_ls_iter.from_numpy(np.array(0, dtype=np.int64))
-    data = SimConfig.Data()
-    data.dt = dt
-    data.tol = tol
-    data.max_newton_iter = max_newton_iter
-    data.max_pcg_iter = max_pcg_iter
-    data.max_ls_iter = max_ls_iter
-    return data
+    def init(self) -> None:
+        if self._wire_args is None:
+            raise RuntimeError("SimConfig parameters have not been wired")
+        dt, tol, max_newton_iter, max_pcg_iter, max_ls_iter = self._wire_args
+        data = self.data
+        data.dt = qd.ndarray(qd.f64, shape=())
+        data.tol = qd.ndarray(qd.f64, shape=())
+        data.max_newton_iter = qd.ndarray(qd.i64, shape=())
+        data.max_pcg_iter = qd.ndarray(qd.i64, shape=())
+        data.max_ls_iter = qd.ndarray(qd.i64, shape=())
+        data.dt.from_numpy(np.array(dt, dtype=np.float64))
+        data.tol.from_numpy(np.array(tol, dtype=np.float64))
+        data.max_newton_iter.from_numpy(np.array(max_newton_iter, dtype=np.int64))
+        data.max_pcg_iter.from_numpy(np.array(max_pcg_iter, dtype=np.int64))
+        data.max_ls_iter.from_numpy(np.array(max_ls_iter, dtype=np.int64))
+        self._wire_args = None

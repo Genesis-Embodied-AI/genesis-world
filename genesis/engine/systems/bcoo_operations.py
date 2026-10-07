@@ -14,21 +14,17 @@ def sym_bcoo_spmv_naive(matrix: qd.template(), x: qd.template(), y: qd.template(
     # TODO: Replace row-side per-block atomics with a warp head-segmented
     # reduction; keep mirrored-column atomics and benchmark the crossover.
     for entry in range(matrix.bcoo_nnz[()]):
-        row = matrix.bcoo_row[entry]
-        col = matrix.bcoo_col[entry]
-        value_offset = entry * matrix.block_scalar_count
+        row, col, block = matrix.read_bcoo(entry)
 
-        for block_row in qd.static(range(matrix.block_shape[0])):
-            result = matrix.value_type(0.0)
-            for block_col in qd.static(range(matrix.block_shape[1])):
-                value = matrix.bcoo_val[value_offset + block_row * matrix.block_shape[1] + block_col]
-                result = result + value * x[col * matrix.block_shape[1] + block_col]
-            qd.atomic_add(y[row * matrix.block_shape[0] + block_row], result)
+        for block_row in qd.static(range(matrix.block_rows)):
+            result = block[block_row, 0] * 0.0
+            for block_col in qd.static(range(matrix.block_cols)):
+                result = result + block[block_row, block_col] * x[col * matrix.block_cols + block_col]
+            qd.atomic_add(y[row * matrix.block_rows + block_row], result)
 
         if row != col:
-            for block_col in qd.static(range(matrix.block_shape[1])):
-                result = matrix.value_type(0.0)
-                for block_row in qd.static(range(matrix.block_shape[0])):
-                    value = matrix.bcoo_val[value_offset + block_row * matrix.block_shape[1] + block_col]
-                    result = result + value * x[row * matrix.block_shape[0] + block_row]
-                qd.atomic_add(y[col * matrix.block_shape[1] + block_col], result)
+            for block_col in qd.static(range(matrix.block_cols)):
+                result = block[0, block_col] * 0.0
+                for block_row in qd.static(range(matrix.block_rows)):
+                    result = result + block[block_row, block_col] * x[row * matrix.block_rows + block_row]
+                qd.atomic_add(y[col * matrix.block_cols + block_col], result)

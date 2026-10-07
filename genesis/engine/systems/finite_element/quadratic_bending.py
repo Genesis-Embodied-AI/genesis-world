@@ -3,44 +3,48 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from ..bcoo_matrix import write_bcoo_block
-from ..sim_system import SimData
-from .fem_constitution import FEMConstitution
+from ..global_linear_system import GlobalLinearSystem
+from ..sim_system import SimData, SimSystem
+from .finite_element_method import FiniteElementMethod
 
 
-class QuadraticBending(FEMConstitution):
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
+class QuadraticBending(SimSystem):
     """Bergou quadratic shell-bending constitution."""
 
     @qd.data_oriented
     class Data(SimData):
         """Device-visible hinge data and extent metadata."""
 
-        n_hinges_host: int
-        extent_slot: int
         n_hinges: qd.Ndarray
         hinge_indices: qd.Ndarray
         k: qd.Ndarray
         Q0: qd.Ndarray
         vert_bend_k: qd.Ndarray
 
-    def __init__(self, data: Data | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = (
-            get_quadratic_bending_data(
-                np.empty((0, 4), dtype=np.int32),
-                np.empty(0, dtype=np.float64),
-                np.empty((0, 4, 4), dtype=np.float64),
-                np.empty(0, dtype=np.float64),
-            )
-            if data is None
-            else data
-        )
+        self.data = self.Data()
+        self._inputs = None
+        self._initialized = False
 
-    def create_constitution_actions(self):
-        return (
-            self.create_action(report_quadratic_bending_extent, self.fem_system.data, self.data),
-            self.create_action(assemble_quadratic_bending, self.fem_system.data, self.data),
-            self.create_action(compute_quadratic_bending_energy, self.fem_system.data, self.data),
+    def build(self) -> None:
+        self.fem_system = self.require(FiniteElementMethod)
+        self.global_linear_system_system = self.require(GlobalLinearSystem)
+        self.init_action = self.create_action(self.init)
+        self.extent_action = self.create_action(report_quadratic_bending_extent, self.fem_system.data, self.data)
+        self.assemble_action = self.create_action(assemble_quadratic_bending, self.fem_system.data, self.data)
+        self.energy_action = self.create_action(compute_quadratic_bending_energy, self.fem_system.data, self.data)
+        self.global_linear_system_system.on_subsystem(
+            extent=self.extent_action,
+            assemble=self.assemble_action,
+        )
+        self.fem_system.on_constitution(
+            self,
+            self.init_action,
+            self.extent_action,
+            self.assemble_action,
+            self.energy_action,
         )
 
     def wire_data(
@@ -50,32 +54,56 @@ class QuadraticBending(FEMConstitution):
         Q0: np.ndarray,
         vert_bend_k: np.ndarray,
     ) -> None:
-        wire_quadratic_bending_data(
-            self.data,
+        if self._initialized:
+            raise RuntimeError("QuadraticBending data is already initialized")
+        self._inputs = _quadratic_bending_inputs(
             hinge_indices,
             bending_stiffness,
             Q0,
             vert_bend_k,
         )
 
+    def init(self) -> None:
+        if self._inputs is None:
+            raise RuntimeError("QuadraticBending data has not been wired")
+        hinges, stiffness, matrices, vertex_stiffness = self._inputs
+        n_hinges = len(hinges)
+        hinge_capacity = max(n_hinges, 1)
+        vertex_capacity = max(len(vertex_stiffness), 1)
+
+        def array(dtype, shape, values):
+            result = qd.ndarray(dtype, shape=shape)
+            result.from_numpy(values)
+            return result
+
+        self.data.n_hinges = array(qd.i32, (), np.array(n_hinges, dtype=np.int32))
+        self.data.hinge_indices = array(
+            qd.i32,
+            (hinge_capacity, 4),
+            hinges if n_hinges else np.zeros((hinge_capacity, 4), dtype=np.int32),
+        )
+        self.data.k = array(
+            qd.f64,
+            (hinge_capacity,),
+            stiffness if n_hinges else np.zeros(hinge_capacity, dtype=np.float64),
+        )
+        self.data.Q0 = array(
+            qd.f64,
+            (hinge_capacity, 16),
+            matrices if n_hinges else np.zeros((hinge_capacity, 16), dtype=np.float64),
+        )
+        self.data.vert_bend_k = array(
+            qd.f64,
+            (vertex_capacity,),
+            vertex_stiffness if len(vertex_stiffness) else np.zeros(vertex_capacity, dtype=np.float64),
+        )
+        self._initialized = True
+        self._inputs = None
+
     def triplet_count(self) -> int:
-        return self.data.n_hinges_host * 10
-
-    @property
-    def n_hinges(self):
-        return self.data.n_hinges
-
-    @property
-    def hinge_indices(self):
-        return self.data.hinge_indices
-
-    @property
-    def k(self):
-        return self.data.k
-
-    @property
-    def Q0(self):
-        return self.data.Q0
+        if self._inputs is None:
+            raise RuntimeError("QuadraticBending triplet count is available only before initialization")
+        return len(self._inputs[0]) * 10
 
 
 def _quadratic_bending_inputs(
@@ -91,54 +119,6 @@ def _quadratic_bending_inputs(
     if len(stiffness) != len(hinges) or len(matrices) != len(hinges):
         raise ValueError("QuadraticBending wire-data lengths must match")
     return hinges, stiffness, matrices, vertex_stiffness
-
-
-def get_quadratic_bending_data(
-    hinge_indices: np.ndarray,
-    bending_stiffness: np.ndarray,
-    Q0: np.ndarray,
-    vert_bend_k: np.ndarray,
-) -> QuadraticBending.Data:
-    hinges, stiffness, matrices, vertex_stiffness = _quadratic_bending_inputs(
-        hinge_indices,
-        bending_stiffness,
-        Q0,
-        vert_bend_k,
-    )
-    n_hinges = len(hinges)
-    hinge_capacity = max(n_hinges, 1)
-    vertex_capacity = max(len(vertex_stiffness), 1)
-
-    def array(dtype, shape, values):
-        result = qd.ndarray(dtype, shape=shape)
-        result.from_numpy(values)
-        return result
-
-    data = QuadraticBending.Data()
-    data.n_hinges_host = n_hinges
-    data.extent_slot = -1
-    data.n_hinges = array(qd.i32, (), np.array(n_hinges, dtype=np.int32))
-    data.hinge_indices = array(
-        qd.i32,
-        (hinge_capacity, 4),
-        hinges if n_hinges else np.zeros((hinge_capacity, 4), dtype=np.int32),
-    )
-    data.k = array(
-        qd.f64,
-        (hinge_capacity,),
-        stiffness if n_hinges else np.zeros(hinge_capacity, dtype=np.float64),
-    )
-    data.Q0 = array(
-        qd.f64,
-        (hinge_capacity, 16),
-        matrices if n_hinges else np.zeros((hinge_capacity, 16), dtype=np.float64),
-    )
-    data.vert_bend_k = array(
-        qd.f64,
-        (vertex_capacity,),
-        vertex_stiffness if len(vertex_stiffness) else np.zeros(vertex_capacity, dtype=np.float64),
-    )
-    return data
 
 
 def wire_quadratic_bending_data(
@@ -157,7 +137,6 @@ def wire_quadratic_bending_data(
     n_hinges = len(hinges)
     hinge_capacity = max(n_hinges, 1)
     vertex_capacity = max(len(vertex_stiffness), 1)
-    data.n_hinges_host = n_hinges
     data.n_hinges.from_numpy(np.array(n_hinges, dtype=np.int32))
     if data.hinge_indices.shape[0] != hinge_capacity:
         data.hinge_indices = qd.ndarray(qd.i32, shape=(hinge_capacity, 4))
@@ -183,9 +162,10 @@ def report_quadratic_bending_extent(
     fem: qd.template(),
     data: qd.template(),
     global_linear_system_data: qd.template(),
+    linear_system_id: qd.template(),
 ):
     for _ in range(1):
-        global_linear_system_data.extent_slots[data.extent_slot] = data.n_hinges[()] * 10
+        global_linear_system_data.set_subsystem_extent(linear_system_id, data.n_hinges[()] * 10)
 
 
 @qd.func(requires_top_level=True)
@@ -194,10 +174,11 @@ def assemble_quadratic_bending(
     data: qd.template(),
     sim_config: qd.template(),
     global_linear_system_data: qd.template(),
+    linear_system_id: qd.template(),
 ):
-    triplet_offset = global_linear_system_data.extent_offsets[data.extent_slot]
-    dt2 = sim_config.dt[()] * sim_config.dt[()]
     for i in range(data.n_hinges[()]):
+        triplet_offset = global_linear_system_data.subsystem_offset(linear_system_id)
+        dt2 = sim_config.dt[()] * sim_config.dt[()]
         if global_linear_system_data.matrix.triplet_overflow[()] == 0:
             verts = qd.Vector(
                 [
@@ -216,8 +197,8 @@ def assemble_quadratic_bending(
                         gradient = qd.f64(0.0)
                         for right in qd.static(range(4)):
                             gradient = gradient + data.Q0[i, left * 4 + right] * fem.x[verts[right], axis]
-                        qd.atomic_add(
-                            global_linear_system_data.b_rhs[fem.dof_offset[()] + verts[left] * 3 + axis],
+                        global_linear_system_data.atomic_add_rhs(
+                            fem.dof_offset[()] + verts[left] * 3 + axis,
                             stiffness * dt2 * gradient,
                         )
 
@@ -229,8 +210,7 @@ def assemble_quadratic_bending(
                         value = stiffness * dt2 * data.Q0[i, left * 4 + right]
                         for axis in qd.static(range(3)):
                             block[axis, axis] = value
-                    write_bcoo_block(
-                        global_linear_system_data.matrix,
+                    global_linear_system_data.matrix.write_triplet(
                         slot,
                         fem.dof_offset[()] // 3 + verts[left],
                         fem.dof_offset[()] // 3 + verts[right],
@@ -245,8 +225,8 @@ def compute_quadratic_bending_energy(
     data: qd.template(),
     sim_config: qd.template(),
 ):
-    dt2 = sim_config.dt[()] * sim_config.dt[()]
     for i in range(data.n_hinges[()]):
+        dt2 = sim_config.dt[()] * sim_config.dt[()]
         value = qd.f64(0.0)
         for left in qd.static(range(4)):
             left_vertex = data.hinge_indices[i, left]

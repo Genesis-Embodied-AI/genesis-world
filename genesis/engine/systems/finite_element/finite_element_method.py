@@ -3,10 +3,11 @@ from __future__ import annotations
 import numpy as np
 import quadrants as qd
 
-from ..sim_system import ActionInvocation, SimAction, SimData, SimSystem
+from ..sim_system import ActionKind, SimAction, SimData, SimSystem, validate_action_protocol
 from .finite_element import FiniteElement
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class FiniteElementMethod(SimSystem):
     """Own FEM state and compose kinetic and constitutive systems."""
 
@@ -14,9 +15,6 @@ class FiniteElementMethod(SimSystem):
     class Data(SimData):
         """Device-visible FEM state and host scene bridge."""
 
-        vert_capacity_host: int
-        tri_capacity_host: int
-        n_bodies_host: int
         n_fem_verts: qd.Ndarray
         n_tris: qd.Ndarray
         n_bodies: qd.Ndarray
@@ -44,37 +42,71 @@ class FiniteElementMethod(SimSystem):
         bridge_environment: qd.Ndarray
         scene_elements_v: qd.Field
         scene_vertex_constraints: qd.Field
-        scene_frame: int
+        scene_frame: qd.Ndarray
 
-    def __init__(self, data: Data) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = data
-        self.kinetic_system = None
-        self.strain_limit_baraff_witkin_shell_2d_system = None
-        self.quadratic_bending_system = None
+        self.data = self.Data()
+        self._finite_element: FiniteElement | None = None
+        self._global_vert_offset_host = 0
+        self._global_body_offset_host = 0
         self.predict_actions = self.create_action_collection()
+        self.init_actions = self.create_action_collection()
         self.extent_actions = self.create_action_collection()
         self.assemble_actions = self.create_action_collection()
         self.energy_actions = self.create_action_collection()
+        self.predict_schedule = ()
+        self.extent_schedule = ()
+        self.assemble_schedule = ()
+        self.energy_schedule = ()
+
+    def wire_data(self, finite_element: FiniteElement) -> None:
+        self._finite_element = finite_element
 
     def build(self) -> None:
         from ..global_body_manager import GlobalBodyManager
+        from ..global_linear_system import GlobalLinearSystem
         from ..global_vertex_manager import GlobalVertexManager
+        from ..sim_config import SimConfig
 
         self.global_body_system = self.require(GlobalBodyManager)
+        self.global_linear_system = self.require(GlobalLinearSystem)
         self.global_vertex_system = self.require(GlobalVertexManager)
+        self.sim_config_system = self.require(SimConfig)
 
     def on_kinetic(
         self,
         kinetic_system: SimSystem,
+        init_action: SimAction,
         predict_action: SimAction,
         extent_action: SimAction,
         assemble_action: SimAction,
         energy_action: SimAction,
     ) -> None:
-        if self.kinetic_system is not None:
+        validate_action_protocol(
+            init_action,
+            protocol="FiniteElementMethod.on_kinetic.init",
+            expected_kind=ActionKind.HOST,
+            transient_arity=0,
+        )
+        actions = (
+            ("predict", predict_action, 1),
+            ("extent", extent_action, 2),
+            ("assemble", assemble_action, 3),
+            ("energy", energy_action, 1),
+        )
+        for name, action, arity in actions:
+            validate_action_protocol(
+                action,
+                protocol=f"FiniteElementMethod.on_kinetic.{name}",
+                expected_kind=ActionKind.TOP_LEVEL_FUNC,
+                transient_arity=arity,
+            )
+        if any(action.owner is not kinetic_system for _, action, _ in actions):
+            raise TypeError("FiniteElementMethod kinetic actions must be owned by the kinetic system")
+        if self.predict_actions._actions:
             raise RuntimeError("FiniteElementMethod already has a kinetic system")
-        self.kinetic_system = kinetic_system
+        self.init_actions.register(init_action)
         self.predict_actions.register(predict_action)
         self.extent_actions.register(extent_action)
         self.assemble_actions.register(assemble_action)
@@ -83,65 +115,189 @@ class FiniteElementMethod(SimSystem):
     def on_constitution(
         self,
         constitution_system: SimSystem,
+        init_action: SimAction,
         extent_action: SimAction,
         assemble_action: SimAction,
         energy_action: SimAction,
     ) -> None:
-        from .quadratic_bending import QuadraticBending
-        from .strain_limit_baraff_witkin_shell_2d import StrainLimitBaraffWitkinShell2D
-
-        if isinstance(constitution_system, StrainLimitBaraffWitkinShell2D):
-            if self.strain_limit_baraff_witkin_shell_2d_system is not None:
-                raise RuntimeError("StrainLimitBaraffWitkinShell2D is already registered")
-            self.strain_limit_baraff_witkin_shell_2d_system = constitution_system
-        elif isinstance(constitution_system, QuadraticBending):
-            if self.quadratic_bending_system is not None:
-                raise RuntimeError("QuadraticBending is already registered")
-            self.quadratic_bending_system = constitution_system
-        else:
-            raise TypeError(f"Unsupported FEMConstitution {type(constitution_system).__name__}")
+        validate_action_protocol(
+            init_action,
+            protocol="FiniteElementMethod.on_constitution.init",
+            expected_kind=ActionKind.HOST,
+            transient_arity=0,
+        )
+        actions = (
+            ("extent", extent_action, 2),
+            ("assemble", assemble_action, 3),
+            ("energy", energy_action, 1),
+        )
+        for name, action, arity in actions:
+            validate_action_protocol(
+                action,
+                protocol=f"FiniteElementMethod.on_constitution.{name}",
+                expected_kind=ActionKind.TOP_LEVEL_FUNC,
+                transient_arity=arity,
+            )
+        if any(action.owner is not constitution_system for _, action, _ in actions):
+            raise TypeError("FiniteElementMethod constitution actions must be owned by the constitution system")
+        if any(action.owner is constitution_system for action in self.extent_actions._actions):
+            raise RuntimeError(f"{type(constitution_system).__name__} is already registered")
+        self.init_actions.register(init_action)
         self.extent_actions.register(extent_action)
         self.assemble_actions.register(assemble_action)
         self.energy_actions.register(energy_action)
 
+    def on_preconditioner(self, init_action: SimAction) -> None:
+        validate_action_protocol(
+            init_action,
+            protocol="FiniteElementMethod.on_preconditioner.init",
+            expected_kind=ActionKind.HOST,
+            transient_arity=0,
+        )
+        self.init_actions.register(init_action)
+
     def report_global_vertex_extent(self) -> int:
-        return self.data.vert_capacity_host
+        if self._finite_element is None:
+            raise RuntimeError("FiniteElementMethod data has not been wired")
+        return max(self._finite_element.n_verts, 1)
 
     def receive_global_vertex_range(self, offset: int, count: int) -> None:
-        if count != self.data.vert_capacity_host:
+        if count != self.report_global_vertex_extent():
             raise ValueError("FiniteElementMethod global vertex range has the wrong extent")
-        self.data.global_vert_offset.from_numpy(np.array(offset, dtype=np.int32))
+        self._global_vert_offset_host = int(offset)
 
     def report_global_body_extent(self) -> int:
-        return self.data.n_bodies_host
+        if self._finite_element is None:
+            raise RuntimeError("FiniteElementMethod data has not been wired")
+        return self._finite_element.n_bodies
 
     def receive_global_body_range(self, offset: int, count: int) -> None:
         if count != self.report_global_body_extent():
             raise ValueError("FiniteElementMethod global body range has the wrong extent")
-        self.data.global_body_offset.from_numpy(np.array(offset, dtype=np.int32))
+        self._global_body_offset_host = int(offset)
 
     def init(self, dof_offset: int) -> None:
-        if self.kinetic_system is None:
+        if not self.predict_actions._actions:
             raise RuntimeError("FiniteElementMethod requires FEMBDF1")
-        self.data.dof_offset.from_numpy(np.array(dof_offset, dtype=np.int32))
+        finite_element = self._finite_element
+        if finite_element is None:
+            raise RuntimeError("FiniteElementMethod data has not been wired")
 
-    def n_elastic_triplets(self) -> int:
-        if self.kinetic_system is None:
-            raise RuntimeError("FiniteElementMethod actions have not been built")
-        count = self.kinetic_system.triplet_count()
-        if self.strain_limit_baraff_witkin_shell_2d_system is not None:
-            count += self.strain_limit_baraff_witkin_shell_2d_system.triplet_count()
-        if self.quadratic_bending_system is not None:
-            count += self.quadratic_bending_system.triplet_count()
-        return count
+        vert_capacity = max(finite_element.n_verts, 1)
+        tri_capacity = max(finite_element.n_tris, 1)
+        body_capacity = max(finite_element.n_bodies, 1)
+
+        def array(dtype, shape, values):
+            result = qd.ndarray(dtype, shape=shape)
+            result.from_numpy(values)
+            return result
+
+        def padded(values, shape, dtype):
+            result = np.zeros(shape, dtype=dtype)
+            values = np.asarray(values, dtype=dtype)
+            if values.size:
+                result[: len(values)] = values
+            return result
+
+        positions = padded(finite_element.positions, (vert_capacity, 3), np.float64)
+        self.data.n_fem_verts = array(qd.i32, (), np.array(finite_element.n_verts, dtype=np.int32))
+        self.data.n_tris = array(qd.i32, (), np.array(finite_element.n_tris, dtype=np.int32))
+        self.data.n_bodies = array(qd.i32, (), np.array(finite_element.n_bodies, dtype=np.int32))
+        self.data.dof_offset = array(qd.i32, (), np.array(dof_offset, dtype=np.int32))
+        self.data.global_vert_offset = array(qd.i32, (), np.array(self._global_vert_offset_host, dtype=np.int32))
+        self.data.global_body_offset = array(qd.i32, (), np.array(self._global_body_offset_host, dtype=np.int32))
+        self.data.x = array(qd.f64, (vert_capacity, 3), positions)
+        self.data.x_prev = array(qd.f64, (vert_capacity, 3), positions)
+        self.data.velocities = array(
+            qd.f64,
+            (vert_capacity, 3),
+            padded(finite_element.velocities, (vert_capacity, 3), np.float64),
+        )
+        self.data.masses = array(
+            qd.f64,
+            (vert_capacity,),
+            padded(finite_element.masses, (vert_capacity,), np.float64),
+        )
+        self.data.is_fixed = array(
+            qd.i32,
+            (vert_capacity,),
+            padded(finite_element.is_fixed, (vert_capacity,), np.int32),
+        )
+        self.data.gravity = array(
+            qd.f64,
+            (vert_capacity, 3),
+            padded(finite_element.gravity, (vert_capacity, 3), np.float64),
+        )
+        self.data.thicknesses = array(
+            qd.f64,
+            (vert_capacity,),
+            padded(finite_element.thicknesses, (vert_capacity,), np.float64),
+        )
+        self.data.body_id = array(
+            qd.i32,
+            (vert_capacity,),
+            padded(finite_element.body_ids, (vert_capacity,), np.int32),
+        )
+        self.data.body_vertex_offsets = array(
+            qd.i32,
+            (finite_element.n_bodies + 1,),
+            np.asarray(finite_element.body_vertex_offsets, dtype=np.int32),
+        )
+        self.data.self_collision = array(
+            qd.i32,
+            (body_capacity,),
+            padded(finite_element.self_collision, (body_capacity,), np.int32),
+        )
+        self.data.tri_indices = array(
+            qd.i32,
+            (tri_capacity, 3),
+            padded(finite_element.tri_indices, (tri_capacity, 3), np.int32),
+        )
+        self.data.Dm_inv_2d = array(
+            qd.f64,
+            (tri_capacity, 4),
+            padded(
+                finite_element.Dm_inv_2d.reshape(finite_element.n_tris, 4),
+                (tri_capacity, 4),
+                np.float64,
+            ),
+        )
+        self.data.rest_areas = array(
+            qd.f64,
+            (tri_capacity,),
+            padded(finite_element.rest_areas, (tri_capacity,), np.float64),
+        )
+        self.data.x_tilde = array(qd.f64, (vert_capacity, 3), positions)
+        self.data.x_temp = array(qd.f64, (vert_capacity, 3), positions)
+        self.data.dx = array(qd.f64, (vert_capacity, 3), np.zeros((vert_capacity, 3), dtype=np.float64))
+        self.data.fem_energy = array(qd.f64, (), np.array(0.0, dtype=np.float64))
+        self.data.bridge_vertex = array(
+            qd.i32,
+            (vert_capacity,),
+            padded(finite_element.bridge_vertex, (vert_capacity,), np.int32),
+        )
+        self.data.bridge_environment = array(
+            qd.i32,
+            (vert_capacity,),
+            padded(finite_element.bridge_environment, (vert_capacity,), np.int32),
+        )
+        self.data.scene_elements_v = finite_element.scene_elements_v
+        self.data.scene_vertex_constraints = finite_element.scene_vertex_constraints
+        self.data.scene_frame = array(qd.i32, (), np.array(finite_element.scene_frame, dtype=np.int32))
+        for action in self.init_actions.actions:
+            action.invoke()
+        self.resolve_actions()
+        self._finite_element = None
+        self._global_vert_offset_host = 0
+        self._global_body_offset_host = 0
 
     def resolve_actions(
         self,
     ) -> tuple[
-        tuple[ActionInvocation, ...],
-        tuple[ActionInvocation, ...],
-        tuple[ActionInvocation, ...],
-        tuple[ActionInvocation, ...],
+        tuple[SimAction, ...],
+        tuple[SimAction, ...],
+        tuple[SimAction, ...],
+        tuple[SimAction, ...],
     ]:
         predict = self.predict_actions.actions
         extent = self.extent_actions.actions
@@ -151,99 +307,77 @@ class FiniteElementMethod(SimSystem):
             raise RuntimeError(f"FiniteElementMethod requires exactly one kinetic predictor, got {len(predict)}")
         if not extent or len(extent) != len(assemble) or len(extent) != len(energy):
             raise RuntimeError("FiniteElementMethod requires complete extent, assembly, and energy action protocols")
-        return tuple(tuple(action.invocation for action in actions) for actions in (predict, extent, assemble, energy))
+        (
+            self.predict_schedule,
+            self.extent_schedule,
+            self.assemble_schedule,
+            self.energy_schedule,
+        ) = (predict, extent, assemble, energy)
+        return predict, extent, assemble, energy
 
-    @property
-    def x(self):
-        return self.data.x
+    @qd.func(requires_top_level=True)
+    def on_initialize_global_vertices(self):
+        initialize_fem_global_vertices(self.data, self.global_vertex_system.data)
 
-    @property
-    def fem_energy(self):
-        return self.data.fem_energy
+    @qd.func(requires_top_level=True)
+    def on_sync_from_scene(self):
+        sync_fem_from_scene(self.data, self.global_vertex_system.data)
 
-    @property
-    def vert_capacity_host(self) -> int:
-        return self.data.vert_capacity_host
+    @qd.func(requires_top_level=True)
+    def on_forward_global_vertices(self):
+        forward_fem_global_vertices(self.data, self.global_vertex_system.data)
 
-    @property
-    def quadratic_bending(self):
-        return self.quadratic_bending_system
+    @qd.func(requires_top_level=True)
+    def on_predict(self):
+        for action in qd.static(self.predict_schedule):
+            action.invoke((self.sim_config_system.data,))
 
+    @qd.func(requires_top_level=True)
+    def on_extent(self):
+        for linear_system_id, action in qd.static(enumerate(self.extent_schedule)):
+            action.invoke((self.global_linear_system.data, linear_system_id))
 
-def get_finite_element_method_data(finite_element: FiniteElement) -> FiniteElementMethod.Data:
-    """Construct complete FEM runtime data before graph action registration."""
+    @qd.func(requires_top_level=True)
+    def on_assemble(self):
+        for linear_system_id, action in qd.static(enumerate(self.assemble_schedule)):
+            action.invoke((self.sim_config_system.data, self.global_linear_system.data, linear_system_id))
 
-    vert_capacity = max(finite_element.n_verts, 1)
-    tri_capacity = max(finite_element.n_tris, 1)
-    body_capacity = max(finite_element.n_bodies, 1)
+    @qd.func(requires_top_level=True)
+    def on_energy(self):
+        for action in qd.static(self.energy_schedule):
+            action.invoke((self.sim_config_system.data,))
 
-    def array(dtype, shape, values):
-        result = qd.ndarray(dtype, shape=shape)
-        result.from_numpy(values)
-        return result
+    @qd.func(requires_top_level=True)
+    def on_negate_direction(self):
+        negate_fem_dx(self.data, self.global_linear_system.data)
 
-    def padded(values, shape, dtype):
-        result = np.zeros(shape, dtype=dtype)
-        values = np.asarray(values, dtype=dtype)
-        if values.size:
-            result[: len(values)] = values
-        return result
+    @qd.func(requires_top_level=True)
+    def on_contribute_newton_max_displacement(self, max_displacement: qd.template()):
+        contribute_fem_newton_max_disp(self.data, max_displacement)
 
-    positions = padded(finite_element.positions, (vert_capacity, 3), np.float64)
-    velocities = padded(finite_element.velocities, (vert_capacity, 3), np.float64)
-    masses = padded(finite_element.masses, (vert_capacity,), np.float64)
-    fixed = padded(finite_element.is_fixed, (vert_capacity,), np.int32)
-    gravity = padded(finite_element.gravity, (vert_capacity, 3), np.float64)
-    thicknesses = padded(finite_element.thicknesses, (vert_capacity,), np.float64)
-    body_ids = padded(finite_element.body_ids, (vert_capacity,), np.int32)
-    self_collision = padded(finite_element.self_collision, (body_capacity,), np.int32)
-    triangles = padded(finite_element.tri_indices, (tri_capacity, 3), np.int32)
-    dm_inverse = padded(
-        finite_element.Dm_inv_2d.reshape(finite_element.n_tris, 4),
-        (tri_capacity, 4),
-        np.float64,
-    )
-    rest_areas = padded(finite_element.rest_areas, (tri_capacity,), np.float64)
-    bridge_vertex = padded(finite_element.bridge_vertex, (vert_capacity,), np.int32)
-    bridge_environment = padded(finite_element.bridge_environment, (vert_capacity,), np.int32)
+    @qd.func(requires_top_level=True)
+    def on_record_start_point(self):
+        record_fem_start_point(self.data)
 
-    data = FiniteElementMethod.Data()
-    data.vert_capacity_host = vert_capacity
-    data.tri_capacity_host = tri_capacity
-    data.n_bodies_host = finite_element.n_bodies
-    data.n_fem_verts = array(qd.i32, (), np.array(finite_element.n_verts, dtype=np.int32))
-    data.n_tris = array(qd.i32, (), np.array(finite_element.n_tris, dtype=np.int32))
-    data.n_bodies = array(qd.i32, (), np.array(finite_element.n_bodies, dtype=np.int32))
-    data.dof_offset = array(qd.i32, (), np.array(0, dtype=np.int32))
-    data.global_vert_offset = array(qd.i32, (), np.array(0, dtype=np.int32))
-    data.global_body_offset = array(qd.i32, (), np.array(0, dtype=np.int32))
-    data.x = array(qd.f64, (vert_capacity, 3), positions)
-    data.x_prev = array(qd.f64, (vert_capacity, 3), positions)
-    data.velocities = array(qd.f64, (vert_capacity, 3), velocities)
-    data.masses = array(qd.f64, (vert_capacity,), masses)
-    data.is_fixed = array(qd.i32, (vert_capacity,), fixed)
-    data.gravity = array(qd.f64, (vert_capacity, 3), gravity)
-    data.thicknesses = array(qd.f64, (vert_capacity,), thicknesses)
-    data.body_id = array(qd.i32, (vert_capacity,), body_ids)
-    data.body_vertex_offsets = array(
-        qd.i32,
-        (finite_element.n_bodies + 1,),
-        np.asarray(finite_element.body_vertex_offsets, dtype=np.int32),
-    )
-    data.self_collision = array(qd.i32, (body_capacity,), self_collision)
-    data.tri_indices = array(qd.i32, (tri_capacity, 3), triangles)
-    data.Dm_inv_2d = array(qd.f64, (tri_capacity, 4), dm_inverse)
-    data.rest_areas = array(qd.f64, (tri_capacity,), rest_areas)
-    data.x_tilde = array(qd.f64, (vert_capacity, 3), positions)
-    data.x_temp = array(qd.f64, (vert_capacity, 3), positions)
-    data.dx = array(qd.f64, (vert_capacity, 3), np.zeros((vert_capacity, 3), dtype=np.float64))
-    data.fem_energy = array(qd.f64, (), np.array(0.0, dtype=np.float64))
-    data.bridge_vertex = array(qd.i32, (vert_capacity,), bridge_vertex)
-    data.bridge_environment = array(qd.i32, (vert_capacity,), bridge_environment)
-    data.scene_elements_v = finite_element.scene_elements_v
-    data.scene_vertex_constraints = finite_element.scene_vertex_constraints
-    data.scene_frame = finite_element.scene_frame
-    return data
+    @qd.func(requires_top_level=True)
+    def on_reset_energy(self):
+        reset_fem_energy(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_step_forward(self, alpha):
+        step_fem_forward(self.data, alpha)
+
+    @qd.func(requires_top_level=True)
+    def on_update_velocity(self):
+        update_fem_velocity(self.data, self.sim_config_system.data)
+
+    @qd.func(requires_top_level=True)
+    def on_copy_previous_positions(self):
+        copy_fem_x_prev(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_publish_trajectory_end_positions(self):
+        publish_fem_trajectory_end_positions(self.data, self.global_vertex_system.data)
 
 
 @qd.func(requires_top_level=True)
@@ -257,8 +391,8 @@ def sync_fem_from_scene(data: qd.template(), vertex: qd.template()):
         global_vertex = data.global_vert_offset[()] + i_vertex
         vertex.is_fixed[global_vertex] = qd.cast(is_fixed, qd.i32)
         for axis in qd.static(range(3)):
-            position = data.scene_elements_v[data.scene_frame, scene_vertex, environment].pos[axis]
-            velocity = data.scene_elements_v[data.scene_frame, scene_vertex, environment].vel[axis]
+            position = data.scene_elements_v[data.scene_frame[()], scene_vertex, environment].pos[axis]
+            velocity = data.scene_elements_v[data.scene_frame[()], scene_vertex, environment].vel[axis]
             if is_fixed:
                 position = constraint.target_pos[axis]
                 velocity = qd.f64(0.0)
@@ -315,7 +449,7 @@ def negate_fem_dx(data: qd.template(), global_linear_system_data: qd.template())
         for axis in qd.static(range(3)):
             value = qd.f64(0.0)
             if data.is_fixed[i_vert] == 0:
-                value = -global_linear_system_data.x_sol[data.dof_offset[()] + i_vert * 3 + axis]
+                value = -global_linear_system_data.read_solution(data.dof_offset[()] + i_vert * 3 + axis)
             data.dx[i_vert, axis] = value
 
 
@@ -364,5 +498,7 @@ def forward_fem_scene_vertices(data: qd.template()):
         scene_vert = data.bridge_vertex[i_vert]
         environment = data.bridge_environment[i_vert]
         for axis in qd.static(range(3)):
-            data.scene_elements_v[data.scene_frame, scene_vert, environment].pos[axis] = data.x[i_vert, axis]
-            data.scene_elements_v[data.scene_frame, scene_vert, environment].vel[axis] = data.velocities[i_vert, axis]
+            data.scene_elements_v[data.scene_frame[()], scene_vert, environment].pos[axis] = data.x[i_vert, axis]
+            data.scene_elements_v[data.scene_frame[()], scene_vert, environment].vel[axis] = data.velocities[
+                i_vert, axis
+            ]

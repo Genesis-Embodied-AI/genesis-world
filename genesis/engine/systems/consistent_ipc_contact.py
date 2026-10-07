@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import quadrants as qd
 
-from .contact_constitution import ContactConstitution
+from .sim_system import SimSystem
 from .contact_function.cipc_simplex_scatter import (
     cipc_pair_area_weight,
     cipc_scatter_doublets,
@@ -1877,36 +1877,230 @@ def contact_energy(contact: qd.template(), surface: qd.template(), vertex: qd.te
             friction_energy_ph(contact, surface, vertex)
 
 
-class ConsistentIPCContactConstitution(ContactConstitution):
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
+class ConsistentIPCContactConstitution(SimSystem):
     """Production Consistent IPC contact action provider."""
 
-    def create_action_protocol(self) -> dict[str, object]:
+    def __init__(self) -> None:
+        super().__init__()
+
+    def build(self) -> None:
+        from .contact_system import ContactSystem
+        from .global_surface_manager import GlobalSurfaceManager
+        from .global_vertex_manager import GlobalVertexManager
+
+        self.contact_system = self.require(ContactSystem)
+        self.surface_system = self.require(GlobalSurfaceManager)
+        self.vertex_system = self.require(GlobalVertexManager)
+        self.create_actions()
+
+    def create_actions(self) -> None:
         contact = self.contact_system.data
         surface = self.surface_system.data
         vertex = self.vertex_system.data
-        protocol = {
-            "snapshot_lagged_positions": (snapshot_lagged_positions, (contact, vertex)),
-            "friction_pair_filter_pt": (friction_pair_filter_pt, (contact, surface, vertex)),
-            "friction_pair_filter_ee": (friction_pair_filter_ee, (contact, surface, vertex)),
-            "friction_pair_filter_ph": (friction_pair_filter_ph, (contact, surface, vertex)),
-            "friction_snapshot": (friction_snapshot, (contact, surface, vertex)),
-            "count_active_pt": (count_active_pt, (contact, surface, vertex)),
-            "count_active_ee": (count_active_ee, (contact, surface, vertex)),
-            "count_active_ph": (count_active_ph, (contact, surface, vertex)),
-            "count_active": (count_active, (contact, surface, vertex)),
-            "filter_assemble_pt": (filter_assemble_pt, (contact, surface, vertex)),
-            "filter_assemble_ee": (filter_assemble_ee, (contact, surface, vertex)),
-            "filter_assemble_ph": (filter_assemble_ph, (contact, surface, vertex)),
-            "friction_assemble_pt": (friction_assemble_pt, (contact, surface, vertex)),
-            "friction_assemble_ee": (friction_assemble_ee, (contact, surface, vertex)),
-            "friction_assemble_ph": (friction_assemble_ph, (contact, surface, vertex)),
-            "filter_assemble": (filter_assemble, (contact, surface, vertex)),
-            "filter_energy_pt": (filter_energy_pt, (contact, surface, vertex)),
-            "filter_energy_ee": (filter_energy_ee, (contact, surface, vertex)),
-            "filter_energy_ph": (filter_energy_ph, (contact, surface, vertex)),
-            "friction_energy_pt": (friction_energy_pt, (contact, surface, vertex)),
-            "friction_energy_ee": (friction_energy_ee, (contact, surface, vertex)),
-            "friction_energy_ph": (friction_energy_ph, (contact, surface, vertex)),
-            "contact_energy": (contact_energy, (contact, surface, vertex)),
-        }
-        return {name: self.create_action(kernel, *action_data) for name, (kernel, action_data) in protocol.items()}
+        self.snapshot_lagged_positions_action = self.create_action(snapshot_lagged_positions, contact, vertex)
+        self.friction_pair_filter_pt_action = self.create_action(friction_pair_filter_pt, contact, surface, vertex)
+        self.friction_pair_filter_ee_action = self.create_action(friction_pair_filter_ee, contact, surface, vertex)
+        self.friction_pair_filter_ph_action = self.create_action(friction_pair_filter_ph, contact, surface, vertex)
+        self.friction_snapshot_action = self.create_action(friction_snapshot, contact, surface, vertex)
+        self.count_active_pt_action = self.create_action(count_active_pt, contact, surface, vertex)
+        self.count_active_ee_action = self.create_action(count_active_ee, contact, surface, vertex)
+        self.count_active_ph_action = self.create_action(count_active_ph, contact, surface, vertex)
+        self.count_active_action = self.create_action(count_active, contact, surface, vertex)
+        self.filter_assemble_pt_action = self.create_action(filter_assemble_pt, contact, surface, vertex)
+        self.filter_assemble_ee_action = self.create_action(filter_assemble_ee, contact, surface, vertex)
+        self.filter_assemble_ph_action = self.create_action(filter_assemble_ph, contact, surface, vertex)
+        self.friction_assemble_pt_action = self.create_action(friction_assemble_pt, contact, surface, vertex)
+        self.friction_assemble_ee_action = self.create_action(friction_assemble_ee, contact, surface, vertex)
+        self.friction_assemble_ph_action = self.create_action(friction_assemble_ph, contact, surface, vertex)
+        self.filter_assemble_action = self.create_action(filter_assemble, contact, surface, vertex)
+        self.filter_energy_pt_action = self.create_action(filter_energy_pt, contact, surface, vertex)
+        self.filter_energy_ee_action = self.create_action(filter_energy_ee, contact, surface, vertex)
+        self.filter_energy_ph_action = self.create_action(filter_energy_ph, contact, surface, vertex)
+        self.friction_energy_pt_action = self.create_action(friction_energy_pt, contact, surface, vertex)
+        self.friction_energy_ee_action = self.create_action(friction_energy_ee, contact, surface, vertex)
+        self.friction_energy_ph_action = self.create_action(friction_energy_ph, contact, surface, vertex)
+        self.contact_energy_action = self.create_action(contact_energy, contact, surface, vertex)
+
+    @qd.func(requires_top_level=True)
+    def on_snapshot_lagged_positions(self):
+        snapshot_lagged_positions(
+            self.contact_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_friction_pairs_pt(self):
+        friction_pair_filter_pt(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_friction_pairs_ee(self):
+        friction_pair_filter_ee(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_friction_pairs_ph(self):
+        friction_pair_filter_ph(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_snapshot_friction(self):
+        friction_snapshot(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_count_active_pt(self):
+        count_active_pt(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_count_active_ee(self):
+        count_active_ee(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_count_active_ph(self):
+        count_active_ph(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_count_active(self):
+        count_active(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_assemble_pt(self):
+        filter_assemble_pt(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_assemble_ee(self):
+        filter_assemble_ee(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_assemble_ph(self):
+        filter_assemble_ph(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_friction_assemble_pt(self):
+        friction_assemble_pt(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_friction_assemble_ee(self):
+        friction_assemble_ee(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_friction_assemble_ph(self):
+        friction_assemble_ph(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_assemble(self):
+        filter_assemble(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_energy_pt(self):
+        filter_energy_pt(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_energy_ee(self):
+        filter_energy_ee(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_filter_energy_ph(self):
+        filter_energy_ph(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_friction_energy_pt(self):
+        friction_energy_pt(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_friction_energy_ee(self):
+        friction_energy_ee(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_friction_energy_ph(self):
+        friction_energy_ph(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_contact_energy(self):
+        contact_energy(
+            self.contact_system.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )

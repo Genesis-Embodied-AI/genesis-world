@@ -6,7 +6,7 @@ import numpy as np
 
 from .consistent_ipc_contact import ConsistentIPCContactConstitution
 from .contact import CONTACT_CONFIG_DEFAULTS, ContactTabular
-from .contact_system import ContactSystem, get_contact_assembly_capacity, get_contact_system_data
+from .contact_system import ContactSystem, get_contact_assembly_capacity
 from .finite_element import (
     FEMBDF1,
     FEMDiagPreconditioner,
@@ -15,33 +15,22 @@ from .finite_element import (
     QuadraticBending,
     StrainLimitBaraffWitkinShell2D,
 )
-from .finite_element.fem_bdf1 import get_fem_bdf1_data
-from .finite_element.fem_diag_preconditioner import get_fem_diag_preconditioner_data
-from .finite_element.finite_element_method import get_finite_element_method_data
-from .finite_element.quadratic_bending import get_quadratic_bending_data
-from .finite_element.strain_limit_baraff_witkin_shell_2d import (
-    get_strain_limit_baraff_witkin_shell_2d_data,
-)
-from .global_body_manager import GlobalBodyManager, get_global_body_data
-from .global_linear_system import GlobalLinearSystem, get_global_linear_system_data
-from .global_surface_manager import GlobalSurfaceManager, get_global_surface_data
-from .global_vertex_manager import GlobalVertexManager, get_global_vertex_data
+from .global_body_manager import GlobalBodyManager
+from .global_linear_system import GlobalLinearSystem
+from .global_surface_manager import GlobalSurfaceManager
+from .global_vertex_manager import GlobalVertexManager
 from .lbvh_broad_phase import (
-    InfoLBVHBatchedBroadPhaseDop14,
     LBVHBroadPhase,
-    get_info_lbvh_batched_broad_phase_dop14_data,
-    get_lbvh_broad_phase_data,
 )
-from .linear_pcg import LinearPCG, get_linear_pcg_data
+from .linear_pcg import LinearPCG
 from .pcg_solver import PCGSolver
-from .rigid_contact_assemble import RigidContactAssemble, get_rigid_contact_assemble_data
+from .rigid_contact_assemble import RigidContactAssemble
 from .rigid_contact_proxy import (
     RigidContactProxyGeometry,
     RigidContactProxySystem,
-    get_rigid_contact_proxy_data,
 )
-from .rigid_joint_forest import RigidJointForestSystem, get_rigid_joint_forest_data
-from .rigid_system import RigidSystem, get_rigid_system_data
+from .rigid_joint_forest import RigidJointForestSystem
+from .rigid_system import RigidSystem
 from .sim_engine import SimEngine
 
 
@@ -74,8 +63,10 @@ def build_scene_engine(
     genesis_legacy_sort_reduce = bool(int(resolved_contact_config["extras/sort_reduce/genesis_legacy"]))
     genesis_legacy_fp64_bounds = bool(int(resolved_contact_config["extras/bvh/genesis_legacy_fp64_bounds"]))
     genesis_legacy_refit = bool(int(resolved_contact_config["extras/bvh/genesis_legacy_refit"]))
-    rigid = RigidSystem(get_rigid_system_data(scene.rigid_solver)) if scene.rigid_solver.is_active else None
-    rigid_dof_count = 0 if rigid is None else rigid.storage_dof_count_host
+    rigid = RigidSystem() if scene.rigid_solver.is_active else None
+    if rigid is not None:
+        rigid.wire_solver(scene.rigid_solver)
+    rigid_dof_count = 0 if rigid is None else rigid.storage_dof_count
     fem_vert_capacity = max(finite_element.n_verts, 1) if has_fem else 0
     fem_dof_count = fem_vert_capacity * 3
     proxy_pair_count = 0 if rigid_proxy_geometry is None else rigid_proxy_geometry.n_pairs
@@ -85,7 +76,6 @@ def build_scene_engine(
     n_elastic_triplets = (
         finite_element.n_verts + finite_element.n_tris * 6 + len(finite_element.hinge_indices) * 10 if has_fem else 0
     )
-    extent_capacity = (3 if has_fem else 0) + (1 if rigid_proxy_geometry is not None else 0)
     max_contact_body_triplets = 0
     if enable_contact:
         assembly_capacity = get_contact_assembly_capacity()
@@ -95,17 +85,16 @@ def build_scene_engine(
 
     engine = SimEngine()
     engine.configure_genesis_serial_pipeline(bool(int(resolved_contact_config["extras/pipeline/genesis_serial"])))
-    global_linear_system = GlobalLinearSystem(
-        data=get_global_linear_system_data(
-            n_block_rows=n_block_rows,
-            n_elastic_triplets=n_elastic_triplets,
-            max_contact_body_triplets=max_contact_body_triplets,
-            dof_block_base=rigid_dof_count // 3,
-            extent_capacity=extent_capacity,
-            genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
-        )
+    global_linear_system = GlobalLinearSystem()
+    global_linear_system.wire_data(
+        n_block_rows=n_block_rows,
+        n_elastic_triplets=n_elastic_triplets,
+        max_contact_body_triplets=max_contact_body_triplets,
+        dof_block_base=rigid_dof_count // 3,
+        genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
+        capacity_grow_factor=float(resolved_contact_config["extras/capacity_grow_factor"]),
     )
-    linear_pcg = LinearPCG(get_linear_pcg_data(total_dof))
+    linear_pcg = LinearPCG()
     engine.add_system(global_linear_system)
     engine.add_system(PCGSolver())
     engine.add_system(linear_pcg)
@@ -126,7 +115,8 @@ def build_scene_engine(
     if has_fem:
         if enable_contact:
             if rigid_proxy_geometry is not None:
-                proxy_data = get_rigid_contact_proxy_data(
+                rigid_contact_proxy = RigidContactProxySystem()
+                rigid_contact_proxy.wire_data(
                     n_links_host=scene.rigid_solver.n_links,
                     n_instances_host=scene.rigid_solver._B,
                     n_rigid_bodies=rigid_proxy_geometry.n_rigid_bodies,
@@ -144,18 +134,15 @@ def build_scene_engine(
                         resolved_contact_config["extras/ls_forensics/test_energy_bias"]
                     ),
                 )
-                rigid_contact_proxy = RigidContactProxySystem(proxy_data)
-                forest_data = get_rigid_joint_forest_data(
+                rigid_forest = RigidJointForestSystem()
+                rigid_forest.wire_data(
                     scene.rigid_solver,
-                    rigid.data,
                     total_dof=total_dof,
                     n_rigid_bodies=rigid_proxy_geometry.n_rigid_bodies,
                     proxy_dof_offset=rigid_dof_count + fem_dof_count,
-                    proxy_data=proxy_data,
                     fused_enabled=bool(int(resolved_contact_config["rigid_forest/fused"])),
                     genesis_legacy_enabled=bool(int(resolved_contact_config["extras/rigid_forest/genesis_legacy"])),
                 )
-                rigid_forest = RigidJointForestSystem(forest_data)
 
     if has_fem:
         proxy_vert_count = 0 if rigid_proxy_geometry is None else len(rigid_proxy_geometry.local_positions)
@@ -203,7 +190,8 @@ def build_scene_engine(
                 )
             )
 
-        global_vertex_data = get_global_vertex_data(
+        global_vertex = GlobalVertexManager()
+        global_vertex.wire_data(
             total_vert_count,
             thicknesses=combined_thicknesses,
             d_hats=combined_d_hats,
@@ -254,7 +242,8 @@ def build_scene_engine(
             ignorance_ids.extend(sorted(targets))
             ignorance_ranges[body + 1] = len(ignorance_ids)
 
-        global_body_data = get_global_body_data(
+        global_body = GlobalBodyManager()
+        global_body.wire_data(
             total_body_count,
             vertex_offsets=body_vertex_offsets,
             self_collision=body_self_collision,
@@ -293,7 +282,8 @@ def build_scene_engine(
             edge_area_weights = np.concatenate((edge_area_weights, rigid_proxy_geometry.edge_area_weights))
             face_area_weights = np.concatenate((face_area_weights, rigid_proxy_geometry.face_area_weights))
 
-        global_surface_data = get_global_surface_data(
+        global_surface = GlobalSurfaceManager()
+        global_surface.wire_data(
             surf_triangles,
             surf_edges,
             surf_verts,
@@ -302,33 +292,26 @@ def build_scene_engine(
             surf_edge_area_weights=edge_area_weights,
             surf_face_area_weights=face_area_weights,
         )
-        fem = FiniteElementMethod(get_finite_element_method_data(finite_element))
+        fem = FiniteElementMethod()
+        fem.wire_data(finite_element)
         fem.receive_global_vertex_range(0, finite_element.n_verts)
         fem.receive_global_body_range(0, finite_element.n_bodies)
-        bdf1 = FEMBDF1(get_fem_bdf1_data(finite_element.n_verts))
-        membrane = StrainLimitBaraffWitkinShell2D(
-            get_strain_limit_baraff_witkin_shell_2d_data(
-                tri_indices=np.arange(finite_element.n_tris, dtype=np.int32),
-                mu=finite_element.membrane_mu,
-                lambda_param=finite_element.membrane_lambda,
-                strain_limit_multiplier=finite_element.strain_limit_multiplier,
-            )
+        bdf1 = FEMBDF1()
+        membrane = StrainLimitBaraffWitkinShell2D()
+        membrane.wire_data(
+            tri_indices=np.arange(finite_element.n_tris, dtype=np.int32),
+            mu=finite_element.membrane_mu,
+            lambda_param=finite_element.membrane_lambda,
+            strain_limit_multiplier=finite_element.strain_limit_multiplier,
         )
-        bending = QuadraticBending(
-            get_quadratic_bending_data(
-                hinge_indices=finite_element.hinge_indices,
-                bending_stiffness=finite_element.hinge_stiffness,
-                Q0=finite_element.hinge_Q0,
-                vert_bend_k=finite_element.vert_bend_k,
-            )
+        bending = QuadraticBending()
+        bending.wire_data(
+            hinge_indices=finite_element.hinge_indices,
+            bending_stiffness=finite_element.hinge_stiffness,
+            Q0=finite_element.hinge_Q0,
+            vert_bend_k=finite_element.vert_bend_k,
         )
-        fem_preconditioner = FEMDiagPreconditioner(
-            get_fem_diag_preconditioner_data(
-                vert_capacity=fem_vert_capacity,
-                n_fem_verts=finite_element.n_verts,
-                dof_offset=rigid_dof_count,
-            )
-        )
+        fem_preconditioner = FEMDiagPreconditioner()
         if enable_contact:
             table = contact_tabular if contact_tabular is not None else ContactTabular()
             default_model = table.at(0, 0)
@@ -344,25 +327,24 @@ def build_scene_engine(
                 halfplane_normals = np.empty((0, 3), dtype=np.float64)
             else:
                 halfplane_positions, halfplane_normals = halfplanes
-            contact_system = ContactSystem(
-                get_contact_system_data(
-                    n_verts=total_vert_count,
-                    n_bodies=total_body_count,
-                    d_hat=float(resolved_contact_config["contact/d_hat"]),
-                    kappa=default_model.resistance,
-                    dt_sq=scene.sim.substep_dt * scene.sim.substep_dt,
-                    init_pair_capacity=int(resolved_contact_config["contact/init_collision_pair_capacity"]),
-                    contact_tabular=table,
-                    friction_mu=default_model.friction_rate,
-                    friction_eps_v=float(resolved_contact_config["friction/eps_v"]),
-                    halfplane_positions=halfplane_positions,
-                    halfplane_normals=halfplane_normals,
-                    adaptive_kappa_mode=str(resolved_contact_config["contact/adaptive_kappa_mode"]),
-                    adaptive_kappa_tick=str(resolved_contact_config["contact/adaptive_kappa_tick"]),
-                    intersection_check=bool(int(resolved_contact_config["contact/intersection_check"])),
-                    intersection_check_capacity=int(resolved_contact_config["contact/intersection_check_capacity"]),
-                    genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
-                )
+            contact_system = ContactSystem()
+            contact_system.wire_data(
+                n_verts=total_vert_count,
+                n_bodies=total_body_count,
+                d_hat=float(resolved_contact_config["contact/d_hat"]),
+                kappa=default_model.resistance,
+                dt_sq=scene.sim.substep_dt * scene.sim.substep_dt,
+                init_pair_capacity=int(resolved_contact_config["contact/init_collision_pair_capacity"]),
+                contact_tabular=table,
+                friction_mu=default_model.friction_rate,
+                friction_eps_v=float(resolved_contact_config["friction/eps_v"]),
+                halfplane_positions=halfplane_positions,
+                halfplane_normals=halfplane_normals,
+                adaptive_kappa_mode=str(resolved_contact_config["contact/adaptive_kappa_mode"]),
+                adaptive_kappa_tick=str(resolved_contact_config["contact/adaptive_kappa_tick"]),
+                intersection_check=bool(int(resolved_contact_config["contact/intersection_check"])),
+                intersection_check_capacity=int(resolved_contact_config["contact/intersection_check_capacity"]),
+                genesis_legacy_sort_reduce=genesis_legacy_sort_reduce,
             )
             broad_phase_kwargs = {
                 "n_triangles": len(surf_triangles),
@@ -378,24 +360,23 @@ def build_scene_engine(
                 "genesis_legacy_refit": genesis_legacy_refit,
             }
             bvh_type = str(resolved_contact_config["bvh/type"])
+            broad_phase_system = LBVHBroadPhase()
             if bvh_type == "info_lbvh_batched_dop14":
-                broad_phase_system = InfoLBVHBatchedBroadPhaseDop14(
-                    get_info_lbvh_batched_broad_phase_dop14_data(**broad_phase_kwargs)
-                )
+                broad_phase_system.wire_data(bound_type="dop14", **broad_phase_kwargs)
             elif bvh_type in ("lbvh", "info_lbvh", "info_lbvh_batched"):
                 broad_phase_kwargs["genesis_legacy_fp64_bounds"] = False
                 broad_phase_kwargs["genesis_legacy_refit"] = False
-                broad_phase_system = LBVHBroadPhase(get_lbvh_broad_phase_data(bound_type="aabb", **broad_phase_kwargs))
+                broad_phase_system.wire_data(bound_type="aabb", **broad_phase_kwargs)
             else:
                 raise NotImplementedError(f"Unsupported bvh/type {bvh_type!r}")
             contact_constitution = ConsistentIPCContactConstitution()
             if rigid_contact_proxy is not None:
-                rigid_contact_assemble = RigidContactAssemble(get_rigid_contact_assemble_data(contact_system.data))
+                rigid_contact_assemble = RigidContactAssemble()
 
         for system in (
-            GlobalBodyManager(global_body_data),
-            GlobalVertexManager(global_vertex_data),
-            GlobalSurfaceManager(global_surface_data),
+            global_body,
+            global_vertex,
+            global_surface,
             fem,
             bdf1,
             membrane,

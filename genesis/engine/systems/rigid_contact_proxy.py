@@ -6,6 +6,7 @@ import numpy as np
 import quadrants as qd
 
 from genesis.utils import geom as gu
+from genesis.utils.misc import qd_to_numpy
 
 from .finite_element.finite_element import _surface_area_weights, _surface_edges
 from .rigid_contact_proxy_kkt import (
@@ -17,6 +18,13 @@ from .rigid_contact_proxy_kkt import (
 from .rigid_joint_forest import curvature_bound
 from .rigid_system import RigidSystem
 from .sim_system import SimData, SimSystem
+
+_MERIT_DOT_BLOCKS = 64
+_MERIT_DOT_WARPS_PER_BLOCK = 8
+_MERIT_DOT_PARTIALS = _MERIT_DOT_BLOCKS * _MERIT_DOT_WARPS_PER_BLOCK
+_FILTER_CAPACITY = 1024
+_GLOBALIZATION_WATCHDOG = 0
+_GLOBALIZATION_MERIT = 1
 
 
 class RigidContactProxyGeometry:
@@ -136,34 +144,17 @@ class RigidContactProxyGeometry:
         return True
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class RigidContactProxySystem(SimSystem):
     """Organize rigid contact proxy state and typed dependencies."""
 
-    globalization_watchdog = 0
-    globalization_merit = 1
+    globalization_watchdog = _GLOBALIZATION_WATCHDOG
+    globalization_merit = _GLOBALIZATION_MERIT
 
     @qd.data_oriented
     class Data(SimData):
         """Complete mutable rigid proxy state."""
 
-        is_initialized_host: bool
-        globalization_mode_host: int
-        restoration_enabled_host: bool
-        test_merit_energy_bias_host: float
-        ls_forensics_test_energy_bias_host: float
-        has_forest: bool
-        n_links_host: int
-        n_instances_host: int
-        n_bodies_host: int
-        n_pairs_host: int
-        globalization_watchdog: int
-        globalization_merit: int
-        merit_dot_blocks: int
-        merit_dot_warps_per_block: int
-        merit_dot_partials: int
-        filter_capacity_value: int
-        correction_fraction: float
-        penalty_ratio: float
         n_bodies: qd.Ndarray
         n_pairs: qd.Ndarray
         n_joint_edges: qd.Ndarray
@@ -242,27 +233,284 @@ class RigidContactProxySystem(SimSystem):
         local_positions: qd.Ndarray
         vertex_pair: qd.Ndarray
 
-    def __init__(self, data: Data) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = data
+        self.data = self.Data()
+        self._wire_args = None
+        self.is_initialized = False
+        self.n_links = 0
+        self.n_instances = 0
+        self.n_bodies = 0
+        self.n_pairs = 0
+
+    def wire_data(
+        self,
+        *,
+        n_links_host: int,
+        n_instances_host: int,
+        n_rigid_bodies: int,
+        mechanism_body: np.ndarray,
+        proxy_body: np.ndarray,
+        surface_radius: np.ndarray,
+        geometry: RigidContactProxyGeometry,
+        global_vert_offset: int,
+        global_body_offset: int,
+        merit_gradient_capacity: int,
+        globalization: str = "merit",
+        restoration: bool = True,
+        test_merit_energy_bias: float = 0.0,
+        ls_forensics_test_energy_bias: float = 0.0,
+    ) -> None:
+        self.n_links = int(n_links_host)
+        self.n_instances = int(n_instances_host)
+        self.n_bodies = int(n_rigid_bodies)
+        self.n_pairs = len(np.ascontiguousarray(mechanism_body).reshape(-1))
+        self._wire_args = {
+            "n_links_host": n_links_host,
+            "n_instances_host": n_instances_host,
+            "n_rigid_bodies": n_rigid_bodies,
+            "mechanism_body": mechanism_body,
+            "proxy_body": proxy_body,
+            "surface_radius": surface_radius,
+            "geometry": geometry,
+            "global_vert_offset": global_vert_offset,
+            "global_body_offset": global_body_offset,
+            "merit_gradient_capacity": merit_gradient_capacity,
+            "globalization": globalization,
+            "restoration": restoration,
+            "test_merit_energy_bias": test_merit_energy_bias,
+            "ls_forensics_test_energy_bias": ls_forensics_test_energy_bias,
+        }
+
+    def init(self) -> None:
+        if self.is_initialized:
+            raise RuntimeError("RigidContactProxySystem is already initialized")
+        if self._wire_args is None:
+            raise RuntimeError("RigidContactProxySystem data has not been wired")
+        _populate_rigid_contact_proxy_data(self.data, **self._wire_args)
+        self._wire_args = None
+        self.is_initialized = True
 
     def build(self) -> None:
+        from .contact_system import ContactSystem
+        from .global_linear_system import GlobalLinearSystem
+        from .global_vertex_manager import GlobalVertexManager
+        from .pcg_solver import PCGSolver
         from .rigid_joint_forest import RigidJointForestSystem
+        from .sim_config import SimConfig
 
         self.rigid = self.require(RigidSystem)
         self.forest = self.require(RigidJointForestSystem)
+        self.contact_system = self.require(ContactSystem)
+        self.vertex_system = self.require(GlobalVertexManager)
+        self.sim_config_system = self.require(SimConfig)
+        self.linear_system_system = self.require(GlobalLinearSystem)
+        self.pcg_solver_system = self.require(PCGSolver)
 
-    @property
-    def n_pairs_host(self) -> int:
-        return self.data.n_pairs_host
+    def on_kkt_failure_yield(self, _status):
+        """Raise the reduced-KKT failure diagnostic for this proxy."""
+        runtime = self.engine
+        proxy = self.data
+        linear = self.linear_system_system.data
+        pcg = self.pcg_solver_system.data
+        rigid = self.rigid.data
+        forest = self.forest.data
+        rigid_dofs = self.rigid.dof_count
+        rigid_rhs = qd_to_numpy(linear.b_rhs)[:rigid_dofs]
+        rigid_solution = qd_to_numpy(linear.x_sol)[:rigid_dofs]
+        rigid_preconditioned = qd_to_numpy(pcg.preconditioned_residual)[:rigid_dofs]
+        rigid_search = qd_to_numpy(rigid.constraint_state.search).reshape(-1)[:rigid_dofs]
+        edge_dofs = qd_to_numpy(forest.edge_dof_index)[: int(qd_to_numpy(forest.n_edges))]
+        parent_edges = qd_to_numpy(forest.parent_edge)[: int(qd_to_numpy(forest.n_mechanism_bodies))]
+        edge_pivots = qd_to_numpy(forest.edge_d)[: len(edge_dofs)]
+        edge_rhs = qd_to_numpy(forest.precond_a)[: len(edge_dofs)]
+        edge_children = qd_to_numpy(forest.edge_child)[: len(edge_dofs)]
+        forest_depth = qd_to_numpy(forest.depth)
+        details = (
+            f"newton={int(qd_to_numpy(runtime.newton_iter))}, "
+            f"pcg={int(qd_to_numpy(pcg.n_iterations))}, "
+            f"line_search={int(qd_to_numpy(runtime.ls_iter))}, "
+            f"alpha={float(qd_to_numpy(runtime.alpha)):.6g}, "
+            f"rigid_gradient_squared={float(qd_to_numpy(rigid.gradient_squared)):.6g}, "
+            f"rigid_rhs_norm={float(np.linalg.norm(rigid_rhs)):.6g}, "
+            f"rigid_solution_norm={float(np.linalg.norm(rigid_solution)):.6g}, "
+            f"rigid_preconditioned_norm={float(np.linalg.norm(rigid_preconditioned)):.6g}, "
+            f"rigid_search_norm={float(np.linalg.norm(rigid_search)):.6g}, "
+            f"edge_dofs={edge_dofs.tolist()}, "
+            f"edge_pivots={edge_pivots.tolist()}, "
+            f"edge_rhs={edge_rhs.tolist()}, "
+            f"edge_depths={forest_depth[edge_children].tolist()}, "
+            f"active_parent_edges={int(np.count_nonzero(parent_edges >= 0))}, "
+            f"forest_levels={int(qd_to_numpy(forest.n_levels))}, "
+            f"max_disp={float(qd_to_numpy(runtime.max_disp)):.6g}, "
+            f"residual={float(qd_to_numpy(proxy.max_surface_residual)):.6g}, "
+            f"tolerance={float(qd_to_numpy(proxy.solve_tolerance)):.6g}, "
+            f"fk_alpha={float(qd_to_numpy(proxy.fk_alpha)):.6g}, "
+            f"restoration_active={int(qd_to_numpy(proxy.restoration_active))}, "
+            f"hard_probe={int(qd_to_numpy(proxy.restoration_hard_probe))}, "
+            f"restoration_entries={int(qd_to_numpy(proxy.restoration_entries))}, "
+            f"restoration_epochs={int(qd_to_numpy(proxy.restoration_newton_epochs))}, "
+            f"hard_probes={int(qd_to_numpy(proxy.restoration_hard_probes))}, "
+            f"pcg_failed={int(qd_to_numpy(pcg.is_failed))}, "
+            f"proxy_failed={int(qd_to_numpy(proxy.frame_failed))}"
+        )
+        raise RuntimeError(
+            f"KKT rigid proxy solve exhausted the Newton budget before stationarity/feasibility ({details})"
+        )
 
-    @property
-    def n_bodies_host(self) -> int:
-        return self.data.n_bodies_host
+    @qd.func(requires_top_level=True)
+    def on_initialize_state(self):
+        initialize_proxy_state(self.data, self.rigid.data, self.forest.data)
 
-    @property
-    def n_links_host(self) -> int:
-        return self.data.n_links_host
+    @qd.func(requires_top_level=True)
+    def on_prepare_metric(self):
+        prepare_metric(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_reset_frame(self):
+        reset_frame(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_mark_mechanism_constrained(self):
+        mark_mechanism_constrained(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_prepare_tolerance(self):
+        prepare_tolerance(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.sim_config_system.data,
+            self.contact_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_initialize_newton(self):
+        initialize_newton(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_prepare_constraint(self):
+        prepare_constraint(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_capture_physical_gradient(self):
+        capture_physical_gradient(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.linear_system_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_prepare_path_limit(self):
+        prepare_path_limit(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.contact_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_contribute_newton_max_displacement(self, max_displacement: qd.template()):
+        contribute_newton_max_disp(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.vertex_system.data,
+            max_displacement,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_apply_convergence(self, converged: qd.template()):
+        apply_convergence(self.data, self.rigid.data, self.forest.data, converged)
+
+    @qd.func(requires_top_level=True)
+    def on_record_start_point(self):
+        record_start_point(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_forward_global_vertices(self):
+        forward_global_vertices(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_publish_trajectory_end_positions(self):
+        publish_trajectory_end_positions(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_compute_restoration_energy(self, use_trial: qd.template()):
+        compute_restoration_energy(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            use_trial,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_initialize_merit(self):
+        initialize_merit(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_step_forward(self, alpha):
+        step_forward(self.data, self.rigid.data, self.forest.data, alpha)
+
+    @qd.func(requires_top_level=True)
+    def on_evaluate_trial_guard(self):
+        evaluate_trial_guard(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func
+    def on_check_line_search(
+        self,
+        energy0,
+        trial_energy,
+        alpha,
+        step,
+        max_steps,
+        exhausted,
+        converged: qd.template(),
+    ):
+        return check_line_search(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            energy0,
+            trial_energy,
+            alpha,
+            step,
+            max_steps,
+            exhausted,
+            converged,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_finalize_restoration_step(self, alpha):
+        finalize_restoration_step(self.data, self.rigid.data, self.forest.data, alpha)
+
+    @qd.func(requires_top_level=True)
+    def on_recover_reaction(self):
+        recover_reaction(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_copy_previous_state(self):
+        copy_previous_state(self.data, self.rigid.data, self.forest.data)
+
+    @qd.func(requires_top_level=True)
+    def on_initialize_global_vertices(self):
+        initialize_global_vertices(
+            self.data,
+            self.rigid.data,
+            self.forest.data,
+            self.vertex_system.data,
+        )
 
 
 def _reset_rigid_contact_proxy_scalars(data: RigidContactProxySystem.Data) -> None:
@@ -307,9 +555,8 @@ def _reset_rigid_contact_proxy_scalars(data: RigidContactProxySystem.Data) -> No
         getattr(data, field).from_numpy(np.array(0, dtype=np.int32))
 
 
-def ensure_merit_gradient_capacity(data: RigidContactProxySystem.Data, capacity: int) -> None:
-    """Grow only the merit-gradient buffer while preserving Data identity."""
-    if data.globalization_mode_host != data.globalization_merit:
+def _initialize_merit_gradient(data: RigidContactProxySystem.Data, capacity: int, mode: int) -> None:
+    if mode != RigidContactProxySystem.globalization_merit:
         return
     current = data.merit_gradient.shape[0]
     if capacity <= current:
@@ -320,7 +567,8 @@ def ensure_merit_gradient_capacity(data: RigidContactProxySystem.Data, capacity:
     data.merit_gradient_capacity.from_numpy(np.array(capacity, dtype=np.int32))
 
 
-def get_rigid_contact_proxy_data(
+def _populate_rigid_contact_proxy_data(
+    data: RigidContactProxySystem.Data,
     *,
     n_links_host: int,
     n_instances_host: int,
@@ -336,8 +584,7 @@ def get_rigid_contact_proxy_data(
     restoration: bool = True,
     test_merit_energy_bias: float = 0.0,
     ls_forensics_test_energy_bias: float = 0.0,
-) -> RigidContactProxySystem.Data:
-    """Construct all proxy mappings, geometry, diagnostics, and work buffers."""
+) -> None:
     if globalization == "watchdog":
         mode = RigidContactProxySystem.globalization_watchdog
     elif globalization == "merit":
@@ -348,26 +595,6 @@ def get_rigid_contact_proxy_data(
         raise ValueError("rigid_proxy/test_merit_energy_bias must be finite and nonnegative")
     if not math.isfinite(ls_forensics_test_energy_bias) or ls_forensics_test_energy_bias < 0.0:
         raise ValueError("extras/ls_forensics/test_energy_bias must be finite and nonnegative")
-    data = RigidContactProxySystem.Data()
-    data.is_initialized_host = False
-    data.globalization_watchdog = RigidContactProxySystem.globalization_watchdog
-    data.globalization_merit = RigidContactProxySystem.globalization_merit
-    data.merit_dot_blocks = 64
-    data.merit_dot_warps_per_block = 8
-    data.merit_dot_partials = data.merit_dot_blocks * data.merit_dot_warps_per_block
-    data.filter_capacity_value = 1024
-    data.correction_fraction = 0.1
-    data.penalty_ratio = 1.0 / (data.correction_fraction * data.correction_fraction)
-    data.globalization_mode_host = mode
-    data.restoration_enabled_host = bool(restoration)
-    data.test_merit_energy_bias_host = float(test_merit_energy_bias)
-    data.ls_forensics_test_energy_bias_host = float(ls_forensics_test_energy_bias)
-    data.has_forest = True
-    data.n_links_host = n_links_host
-    data.n_instances_host = n_instances_host
-    if data.is_initialized_host:
-        raise RuntimeError("RigidContactProxySystem data is already wired")
-
     mechanism = np.ascontiguousarray(mechanism_body, dtype=np.int32).reshape(-1)
     proxies = np.ascontiguousarray(proxy_body, dtype=np.int32).reshape(-1)
     radii = np.ascontiguousarray(surface_radius, dtype=np.float64).reshape(-1)
@@ -375,7 +602,7 @@ def get_rigid_contact_proxy_data(
         raise ValueError("RigidContactProxySystem mapping arrays must have equal length")
     if n_rigid_bodies < 0:
         raise ValueError("RigidContactProxySystem body count must be non-negative")
-    if np.any(mechanism < 0) or np.any(mechanism >= data.n_links_host * data.n_instances_host):
+    if np.any(mechanism < 0) or np.any(mechanism >= n_links_host * n_instances_host):
         raise ValueError("RigidContactProxySystem mechanism body is out of range")
     if np.any(proxies < 0) or np.any(proxies >= n_rigid_bodies):
         raise ValueError("RigidContactProxySystem proxy body is out of range")
@@ -389,9 +616,6 @@ def get_rigid_contact_proxy_data(
     n_pairs = len(mechanism)
     pair_capacity = max(n_pairs, 1)
     body_capacity = max(n_rigid_bodies, 1)
-    data.n_bodies_host = n_rigid_bodies
-    data.n_pairs_host = n_pairs
-
     data.n_bodies = qd.ndarray(qd.i32, shape=())
     data.n_pairs = qd.ndarray(qd.i32, shape=())
     data.n_joint_edges = qd.ndarray(qd.i32, shape=())
@@ -427,10 +651,10 @@ def get_rigid_contact_proxy_data(
     data.slack = qd.ndarray(qd.f64, shape=(pair_capacity, 6))
     data.reaction = qd.ndarray(qd.f64, shape=(pair_capacity, 6))
     data.path_limit = qd.ndarray(qd.f64, shape=(pair_capacity,))
-    data.filter_h = qd.ndarray(qd.f64, shape=(data.filter_capacity_value,))
-    data.filter_energy = qd.ndarray(qd.f64, shape=(data.filter_capacity_value,))
+    data.filter_h = qd.ndarray(qd.f64, shape=(_FILTER_CAPACITY,))
+    data.filter_energy = qd.ndarray(qd.f64, shape=(_FILTER_CAPACITY,))
     data.merit_gradient = qd.ndarray(qd.f64, shape=(1,))
-    data.merit_dot_partial = qd.ndarray(qd.f64, shape=(data.merit_dot_partials,))
+    data.merit_dot_partial = qd.ndarray(qd.f64, shape=(_MERIT_DOT_PARTIALS,))
     data.merit_control_gradient = qd.ndarray(qd.f64, shape=(1,))
     data.energy_partial = qd.ndarray(qd.f64, shape=(1,))
     data.residual_partial = qd.ndarray(qd.f64, shape=(1,))
@@ -479,17 +703,12 @@ def get_rigid_contact_proxy_data(
     data.n_joint_edges.from_numpy(np.array(0, dtype=np.int32))
     data.n_energy_partial.from_numpy(np.array(0, dtype=np.int32))
     data.n_residual_partial.from_numpy(np.array(0, dtype=np.int32))
-    data.filter_capacity.from_numpy(np.array(data.filter_capacity_value, dtype=np.int32))
+    data.filter_capacity.from_numpy(np.array(_FILTER_CAPACITY, dtype=np.int32))
     data.merit_gradient_capacity.from_numpy(np.array(0, dtype=np.int32))
-    data.globalization_mode.from_numpy(np.array(data.globalization_mode_host, dtype=np.int32))
-    data.restoration_enabled.from_numpy(np.array(data.restoration_enabled_host, dtype=np.int32))
-    data.test_merit_energy_bias.from_numpy(np.array(data.test_merit_energy_bias_host, dtype=np.float64))
-    data.ls_forensics_test_energy_bias.from_numpy(
-        np.array(
-            data.ls_forensics_test_energy_bias_host,
-            dtype=np.float64,
-        )
-    )
+    data.globalization_mode.from_numpy(np.array(mode, dtype=np.int32))
+    data.restoration_enabled.from_numpy(np.array(restoration, dtype=np.int32))
+    data.test_merit_energy_bias.from_numpy(np.array(test_merit_energy_bias, dtype=np.float64))
+    data.ls_forensics_test_energy_bias.from_numpy(np.array(ls_forensics_test_energy_bias, dtype=np.float64))
     data.mechanism_body.from_numpy(mechanism if n_pairs else np.zeros(pair_capacity, dtype=np.int32))
     data.proxy_body.from_numpy(proxies if n_pairs else np.zeros(pair_capacity, dtype=np.int32))
     data.pair_of_body.from_numpy(pair_of_body)
@@ -517,22 +736,19 @@ def get_rigid_contact_proxy_data(
     data.slack.from_numpy(zero6)
     data.reaction.from_numpy(zero6)
     data.path_limit.from_numpy(np.full(pair_capacity, np.inf, dtype=np.float64))
-    data.filter_h.from_numpy(np.zeros(data.filter_capacity_value, dtype=np.float64))
-    data.filter_energy.from_numpy(np.zeros(data.filter_capacity_value, dtype=np.float64))
+    data.filter_h.from_numpy(np.zeros(_FILTER_CAPACITY, dtype=np.float64))
+    data.filter_energy.from_numpy(np.zeros(_FILTER_CAPACITY, dtype=np.float64))
     data.merit_gradient.from_numpy(np.zeros(1, dtype=np.float64))
-    data.merit_dot_partial.from_numpy(np.zeros(data.merit_dot_partials, dtype=np.float64))
+    data.merit_dot_partial.from_numpy(np.zeros(_MERIT_DOT_PARTIALS, dtype=np.float64))
     data.merit_control_gradient.from_numpy(np.zeros(1, dtype=np.float64))
     data.energy_partial.from_numpy(np.zeros(1, dtype=np.float64))
     data.residual_partial.from_numpy(np.zeros(1, dtype=np.float64))
     _reset_rigid_contact_proxy_scalars(data)
-    data.is_initialized_host = True
-    if not data.is_initialized_host:
-        raise RuntimeError("RigidContactProxySystem mappings must be wired before geometry")
     local_positions = np.ascontiguousarray(geometry.local_positions, dtype=np.float64).reshape(-1, 3)
     vertex_pair = np.ascontiguousarray(geometry.vertex_pair, dtype=np.int32).reshape(-1)
     if len(local_positions) != len(vertex_pair):
         raise ValueError("RigidContactProxySystem local position and pair counts must match")
-    if np.any(vertex_pair < 0) or np.any(vertex_pair >= int(data.n_pairs.to_numpy())):
+    if np.any(vertex_pair < 0) or np.any(vertex_pair >= n_pairs):
         raise ValueError("RigidContactProxySystem vertex pair is out of range")
     if global_vert_offset < 0 or global_body_offset < 0:
         raise ValueError("RigidContactProxySystem global offsets must be non-negative")
@@ -550,8 +766,7 @@ def get_rigid_contact_proxy_data(
         local_positions if len(local_positions) else np.zeros((capacity, 3), dtype=np.float64)
     )
     data.vertex_pair.from_numpy(vertex_pair if len(vertex_pair) else np.zeros(capacity, dtype=np.int32))
-    ensure_merit_gradient_capacity(data, merit_gradient_capacity)
-    return data
+    _initialize_merit_gradient(data, merit_gradient_capacity, mode)
 
 
 @qd.func(requires_top_level=True)
@@ -559,7 +774,7 @@ def capture_physical_gradient(
     data: qd.template(), rigid: qd.template(), forest: qd.template(), linear_system_data: qd.template()
 ):
     for dof in range(data.merit_gradient_capacity[()]):
-        data.merit_gradient[dof] = linear_system_data.b_rhs[dof]
+        data.merit_gradient[dof] = linear_system_data.read_rhs(dof)
 
 
 @qd.func(requires_top_level=True)
@@ -606,7 +821,7 @@ def check_line_search(
     if not decision_elastic_restoration and not restoration_trigger_bias:
         residual_floor = qd.max(1.0e-12, 1.0e-6 * tolerance)
         request_merit_probe = (
-            data.globalization_mode[()] == data.globalization_merit
+            data.globalization_mode[()] == 1
             and not energy_ok
             and data.merit_active[()] == 0
             and data.merit_evaluated[()] == 0
@@ -782,7 +997,7 @@ def prepare_metric(
                         value = mass
                 elif qd.static(row >= 3 and column >= 3):
                     value = world_inertia[row - 3, column - 3]
-                data.metric[pair, row, column] = data.penalty_ratio * value
+                data.metric[pair, row, column] = 100.0 * value
 
 
 @qd.func(requires_top_level=True)
@@ -1075,24 +1290,15 @@ def prepare_constraint(
         data.max_surface_residual[()] = 0.0
     for pair in range(data.n_pairs[()]):
         mechanism = data.mechanism_body[pair]
-        link = mechanism % rigid.n_links[()]
-        environment = mechanism // rigid.n_links[()]
         mechanism_position = qd.Vector.zero(qd.f64, 3)
         mechanism_quaternion = qd.Vector.zero(qd.f64, 4)
         proxy_position = qd.Vector.zero(qd.f64, 3)
         proxy_quaternion = qd.Vector.zero(qd.f64, 4)
-        current_position, current_quaternion = _current_mechanism_pose(data, rigid, forest, link, environment)
         for axis in qd.static(range(3)):
-            if qd.static(data.has_forest):
-                mechanism_position[axis] = forest.endpoint_t[mechanism][axis]
-            else:
-                mechanism_position[axis] = current_position[axis]
+            mechanism_position[axis] = forest.endpoint_t[mechanism][axis]
             proxy_position[axis] = data.t[pair, axis]
         for axis in qd.static(range(4)):
-            if qd.static(data.has_forest):
-                mechanism_quaternion[axis] = forest.endpoint_quat[mechanism][axis]
-            else:
-                mechanism_quaternion[axis] = current_quaternion[axis]
+            mechanism_quaternion[axis] = forest.endpoint_quat[mechanism][axis]
             proxy_quaternion[axis] = data.quat[pair, axis]
 
         translation = qd.Vector.zero(qd.f64, 3)

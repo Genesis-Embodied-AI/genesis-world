@@ -6,6 +6,7 @@ import quadrants as qd
 from .sim_system import SimData, SimSystem
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class LinearPCG(SimSystem):
     """Python lifecycle system for the graph-native linear PCG runtime."""
 
@@ -13,7 +14,6 @@ class LinearPCG(SimSystem):
     class Data(SimData):
         """Device-visible storage for the linear PCG algorithm."""
 
-        dof_capacity: int
         total_dof: qd.Ndarray
         residual: qd.Ndarray
         preconditioned_residual: qd.Ndarray
@@ -31,13 +31,15 @@ class LinearPCG(SimSystem):
         n_iterations: qd.Ndarray
         is_failed: qd.Ndarray
 
-    def __init__(self, data: Data) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = data
+        self.data = self.Data()
 
     def build(self) -> None:
+        from .global_linear_system import GlobalLinearSystem
         from .pcg_solver import PCGSolver
 
+        self.global_linear_system = self.require(GlobalLinearSystem)
         pcg_solver = self.require(PCGSolver)
         self.initialize_action = self.create_action(init_linear_pcg, self.data)
         self.solve_action = self.create_action(solve_linear_pcg, self.data)
@@ -46,38 +48,32 @@ class LinearPCG(SimSystem):
             self.solve_action,
         )
 
+    def init(self) -> None:
+        capacity = self.global_linear_system.data.b_rhs.shape[0]
 
-def get_linear_pcg_data(total_dof: int) -> LinearPCG.Data:
-    if total_dof < 0:
-        raise ValueError("Linear PCG DOF capacity must be non-negative")
-    capacity = max(total_dof, 1)
+        def array(dtype, shape, values):
+            result = qd.ndarray(dtype, shape=shape)
+            result.from_numpy(values)
+            return result
 
-    def array(dtype, shape, values):
-        result = qd.ndarray(dtype, shape=shape)
-        result.from_numpy(values)
-        return result
-
-    zero_scalar_f64 = np.array(0.0, dtype=np.float64)
-    zero_scalar_i32 = np.array(0, dtype=np.int32)
-    data = LinearPCG.Data()
-    data.dof_capacity = total_dof
-    data.total_dof = array(qd.i32, (), np.array(total_dof, dtype=np.int32))
-    data.residual = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
-    data.preconditioned_residual = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
-    data.direction = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
-    data.operator_direction = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
-    data.dot_partials = array(qd.f64, (64,), np.zeros(64, dtype=np.float64))
-    data.residual_preconditioned = array(qd.f64, (), zero_scalar_f64)
-    data.residual_preconditioned_initial = array(qd.f64, (), zero_scalar_f64)
-    data.residual_preconditioned_next = array(qd.f64, (), zero_scalar_f64)
-    data.direction_operator_direction = array(qd.f64, (), zero_scalar_f64)
-    data.alpha = array(qd.f64, (), zero_scalar_f64)
-    data.beta = array(qd.f64, (), zero_scalar_f64)
-    data.condition = array(qd.i32, (), zero_scalar_i32)
-    data.is_active = array(qd.i32, (), zero_scalar_i32)
-    data.n_iterations = array(qd.i32, (), zero_scalar_i32)
-    data.is_failed = array(qd.i32, (), zero_scalar_i32)
-    return data
+        zero_scalar_f64 = np.array(0.0, dtype=np.float64)
+        zero_scalar_i32 = np.array(0, dtype=np.int32)
+        self.data.total_dof = self.global_linear_system.data.total_dof
+        self.data.residual = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
+        self.data.preconditioned_residual = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
+        self.data.direction = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
+        self.data.operator_direction = array(qd.f64, (capacity,), np.zeros(capacity, dtype=np.float64))
+        self.data.dot_partials = array(qd.f64, (64,), np.zeros(64, dtype=np.float64))
+        self.data.residual_preconditioned = array(qd.f64, (), zero_scalar_f64)
+        self.data.residual_preconditioned_initial = array(qd.f64, (), zero_scalar_f64)
+        self.data.residual_preconditioned_next = array(qd.f64, (), zero_scalar_f64)
+        self.data.direction_operator_direction = array(qd.f64, (), zero_scalar_f64)
+        self.data.alpha = array(qd.f64, (), zero_scalar_f64)
+        self.data.beta = array(qd.f64, (), zero_scalar_f64)
+        self.data.condition = array(qd.i32, (), zero_scalar_i32)
+        self.data.is_active = array(qd.i32, (), zero_scalar_i32)
+        self.data.n_iterations = array(qd.i32, (), zero_scalar_i32)
+        self.data.is_failed = array(qd.i32, (), zero_scalar_i32)
 
 
 @qd.func(requires_top_level=True)
@@ -103,7 +99,10 @@ def pcg_dot_rz(
         value = qd.f64(0.0)
         index = thread
         while index < data.total_dof[()]:
-            if qd.static(not gate_active) or data.is_active[()] != 0:
+            if qd.static(gate_active):
+                if data.is_active[()] != 0:
+                    value = value + lhs[index] * rhs[index]
+            else:
                 value = value + lhs[index] * rhs[index]
             index = index + 16384
         block_sum = qd.simt.block.reduce_add(value, 256, qd.f64)
@@ -153,12 +152,12 @@ def initialize_linear_pcg(
     action_provider: qd.template(),
 ):
     for i_d in range(data.total_dof[()]):
-        linear_system_data.x_sol[i_d] = qd.f64(0.0)
-        data.residual[i_d] = linear_system_data.b_rhs[i_d]
+        linear_system_data.write_solution(i_d, qd.f64(0.0))
+        data.residual[i_d] = linear_system_data.read_rhs(i_d)
         data.preconditioned_residual[i_d] = qd.f64(0.0)
 
-    for action in qd.static(action_provider.pcg_preconditioner_actions):
-        action.kernel(*(action.data + (data.residual, data.preconditioned_residual)))
+    for action in qd.static(action_provider.preconditioner_actions):
+        action.invoke((data.residual, data.preconditioned_residual))
 
     for i_d in range(data.total_dof[()]):
         data.direction[i_d] = data.preconditioned_residual[i_d]
@@ -192,8 +191,8 @@ def iterate_linear_pcg(
         if data.is_active[()] != 0:
             data.operator_direction[i_d] = qd.f64(0.0)
 
-    for action in qd.static(action_provider.pcg_operator_actions):
-        action.kernel(*(action.data + (linear_system_data, data.direction, data.operator_direction)))
+    for action in qd.static(action_provider.operator_actions):
+        action.invoke((linear_system_data, data.direction, data.operator_direction))
 
     pcg_dot_pAp(data)
 
@@ -208,12 +207,12 @@ def iterate_linear_pcg(
 
     for i_d in range(data.total_dof[()]):
         if data.is_active[()] != 0:
-            linear_system_data.x_sol[i_d] = linear_system_data.x_sol[i_d] + data.alpha[()] * data.direction[i_d]
+            linear_system_data.add_solution(i_d, data.alpha[()] * data.direction[i_d])
             data.residual[i_d] = data.residual[i_d] - data.alpha[()] * data.operator_direction[i_d]
             data.preconditioned_residual[i_d] = qd.f64(0.0)
 
-    for action in qd.static(action_provider.pcg_preconditioner_actions):
-        action.kernel(*(action.data + (data.residual, data.preconditioned_residual)))
+    for action in qd.static(action_provider.preconditioner_actions):
+        action.invoke((data.residual, data.preconditioned_residual))
 
     pcg_dot_rz(
         data,

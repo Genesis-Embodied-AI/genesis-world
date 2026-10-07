@@ -6,7 +6,6 @@ from quadrants.lang import impl
 import genesis as gs
 from genesis.engine.systems import build_scene_engine
 from genesis.engine.systems.finite_element import QuadraticBending
-from genesis.engine.systems.sim_engine import _step_kernel
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 
@@ -36,6 +35,13 @@ def make_grid(path, n=3, size=0.2):
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_qcloth_zero_hinge_capacity():
     bending = QuadraticBending()
+    bending.wire_data(
+        hinge_indices=np.empty((0, 4), dtype=np.int32),
+        bending_stiffness=np.empty(0, dtype=np.float64),
+        Q0=np.empty((0, 4, 4), dtype=np.float64),
+        vert_bend_k=np.empty(0, dtype=np.float64),
+    )
+    bending.init()
     data = bending.data
     bending.wire_data(
         hinge_indices=np.empty((0, 4), dtype=np.int32),
@@ -100,24 +106,15 @@ def test_qcloth_graph_step(tmp_path, show_viewer):
     cloth.set_vertex_constraints([0, 2])
 
     engine = build_scene_engine(scene)
-    initial = qd_to_numpy(engine.fem.x)
+    initial = qd_to_numpy(engine.fem_system.data.x)
     for _ in range(5):
         engine.step()
     # Inspect the graph launch directly: engine.step() performs scene
     # writeback and a scalar failure read after this kernel.
-    _step_kernel(
-        engine.data,
-        engine.checkpoint_never_yield,
-        engine.checkpoint_never_yield,
-        engine.checkpoint_never_yield,
-        engine.global_linear_system_data.matrix.triplet_overflow,
-        engine.checkpoint_never_yield,
-        engine.checkpoint_never_yield,
-        engine.graph_fastcache_key,
-    )
+    engine.step_graph()
     graph_cache_used = impl.get_runtime().prog.get_graph_cache_used_on_last_call()
     graph_num_nodes = impl.get_runtime().prog.get_graph_num_nodes_on_last_call()
-    final = qd_to_numpy(engine.fem.x)
+    final = qd_to_numpy(engine.fem_system.data.x)
 
     assert graph_cache_used
     assert graph_num_nodes > 0
@@ -208,15 +205,15 @@ def test_qcloth_freefall_matches_reference_converged_step(tmp_path, show_viewer)
 
     expected_bending_stiffness = bending_youngs_modulus * (2.0 * thickness) ** 3 / 12.0
     np.testing.assert_allclose(
-        qd_to_numpy(engine.fem.quadratic_bending.k),
+        qd_to_numpy(engine.fem_system.quadratic_bending_system.data.k),
         expected_bending_stiffness,
         rtol=0.0,
         atol=1.0e-18,
     )
 
-    initial = qd_to_numpy(engine.fem.x)
+    initial = qd_to_numpy(engine.fem_system.data.x)
     engine.step()
-    displacement = qd_to_numpy(engine.fem.x) - initial
+    displacement = qd_to_numpy(engine.fem_system.data.x) - initial
     np.testing.assert_allclose(
         displacement,
         np.broadcast_to(dt * dt * gravity, displacement.shape),
@@ -248,29 +245,29 @@ def test_qcloth_global_managers_two_entities(tmp_path, show_viewer):
     scene.build()
 
     engine = build_scene_engine(scene)
-    np.testing.assert_array_equal(qd_to_numpy(engine.global_vertex_data.n_verts), 18)
-    np.testing.assert_array_equal(qd_to_numpy(engine.global_body_data.n_bodies), 2)
+    np.testing.assert_array_equal(qd_to_numpy(engine.global_vertex_system.data.n_verts), 18)
+    np.testing.assert_array_equal(qd_to_numpy(engine.global_body_system.data.n_bodies), 2)
     np.testing.assert_array_equal(
-        qd_to_numpy(engine.global_body_data.vertex_offsets)[:3],
+        qd_to_numpy(engine.global_body_system.data.vertex_offsets)[:3],
         np.array([0, 9, 18], dtype=np.int32),
     )
     np.testing.assert_array_equal(
-        qd_to_numpy(engine.global_vertex_data.body_id)[:18],
+        qd_to_numpy(engine.global_vertex_system.data.body_id)[:18],
         np.repeat(np.arange(2, dtype=np.int32), 9),
     )
     np.testing.assert_allclose(
-        qd_to_numpy(engine.global_vertex_data.positions)[:18],
-        qd_to_numpy(engine.fem.x)[:18],
+        qd_to_numpy(engine.global_vertex_system.data.positions)[:18],
+        qd_to_numpy(engine.fem_system.data.x)[:18],
     )
-    np.testing.assert_array_equal(qd_to_numpy(engine.global_surface_data.n_surf_triangles), 16)
-    np.testing.assert_array_equal(qd_to_numpy(engine.global_surface_data.n_surf_edges), 32)
+    np.testing.assert_array_equal(qd_to_numpy(engine.global_surface_system.data.n_surf_triangles), 16)
+    np.testing.assert_array_equal(qd_to_numpy(engine.global_surface_system.data.n_surf_edges), 32)
     np.testing.assert_allclose(
-        qd_to_numpy(engine.global_surface_data.face_area_weights)[:16].sum(),
+        qd_to_numpy(engine.global_surface_system.data.face_area_weights)[:16].sum(),
         0.08,
     )
 
     engine.step()
     np.testing.assert_allclose(
-        qd_to_numpy(engine.global_vertex_data.positions)[:18],
-        qd_to_numpy(engine.fem.x)[:18],
+        qd_to_numpy(engine.global_vertex_system.data.positions)[:18],
+        qd_to_numpy(engine.fem_system.data.x)[:18],
     )

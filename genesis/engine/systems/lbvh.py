@@ -44,7 +44,6 @@ from .contact_function.edge_triangle_intersection import (
 from .dynamic_radix_sort import DynamicRadixSort
 from .global_body_manager import is_body_contact_ignored
 from .gpu_occupancy import cuda_resident_blocks
-from .sim_system import SimData
 
 # structural, host-only: traversal stack depth. Read once to shape `stack_pool`
 # and never from device code, so it may stay a module constant.
@@ -419,7 +418,7 @@ def _aabb_reduce_phase2_f32(
 
 class LBVH:
     @qd.data_oriented
-    class Data(SimData):
+    class Data:
         """Device-visible mutable data owned by ``LBVH``."""
 
         sort_end_bit: int
@@ -471,16 +470,15 @@ class LBVH:
         stack_pool: qd.Ndarray
 
 
-def get_lbvh_data(
+def initialize_lbvh_data(
+    data: LBVH.Data,
     n_prims: int,
     max_queries: int = 0,
     bound_type: str = "aabb",
     genesis_legacy_sort_reduce: bool = False,
     genesis_legacy_fp64_bounds: bool = False,
     genesis_legacy_refit: bool = False,
-) -> LBVH.Data:
-    """Construct complete LBVH data before graph registration."""
-    data = LBVH.Data()
+) -> None:
     assert n_prims > 0, "LBVH requires n_prims > 0"
     # Radix-sort pass geometry, the u32 "no node" marker and the reduction
     # block width. All fix unroll counts or block shapes, so none can be a
@@ -572,7 +570,6 @@ def get_lbvh_data(
     data.ee_warp_stack_overflow.from_numpy(np.array(0, dtype=np.int32))
     data.srt_n.from_numpy(np.array(padded, dtype=np.int32))
     data.n_reduce_blocks.from_numpy(np.array(n_blocks, dtype=np.int32))
-    return data
 
 
 @qd.func(requires_top_level=True)
@@ -1326,7 +1323,7 @@ def query_ee_toy(
 
 @qd.func(requires_top_level=True)
 def build_tri(data, surf_mgr, vtx_mgr):
-    """Full BVH build for triangles (call from ``_step_kernel`` top level)."""
+    """Full BVH build for triangles (call from ``SimEngine.step_graph`` top level)."""
     calc_leaf_aabb_tri(data, surf_mgr, vtx_mgr)
     reduce_scene_aabb(data)
     calc_morton(data)
@@ -1342,7 +1339,7 @@ def build_tri(data, surf_mgr, vtx_mgr):
 
 @qd.func(requires_top_level=True)
 def build_edge(data, surf_mgr, vtx_mgr):
-    """Full BVH build for edges (call from ``_step_kernel`` top level)."""
+    """Full BVH build for edges (call from ``SimEngine.step_graph`` top level)."""
     calc_leaf_aabb_edge(data, surf_mgr, vtx_mgr)
     reduce_scene_aabb(data)
     calc_morton(data)
@@ -2035,12 +2032,13 @@ def query_ee_warp(
                                     child,
                                     data.bounds_width // 2,
                                 )
-                                if d_hat != 0.0 and qd.static(data.bounds_width == 6):
-                                    for axis in qd.static(range(3)):
-                                        if (data.aabbs[child, axis] - data.aabbs[leaf, axis + 3]) >= d_hat:
-                                            overlap = 0
-                                        if (data.aabbs[leaf, axis] - data.aabbs[child, axis + 3]) >= d_hat:
-                                            overlap = 0
+                                if qd.static(data.bounds_width == 6):
+                                    if d_hat != 0.0:
+                                        for axis in qd.static(range(3)):
+                                            if (data.aabbs[child, axis] - data.aabbs[leaf, axis + 3]) >= d_hat:
+                                                overlap = 0
+                                            if (data.aabbs[leaf, axis] - data.aabbs[child, axis + 3]) >= d_hat:
+                                                overlap = 0
                                 if overlap != 0 and _node_pair_enabled(
                                     body_mgr,
                                     query_body,

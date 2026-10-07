@@ -5,14 +5,16 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.systems.bvh_math import f64_to_f32_rd, f64_to_f32_ru
 from genesis.engine.systems.dual_ee_query import (
-    get_dual_ee_query_data,
+    DualEEQueryState,
     handle_overflow as handle_dual_ee_overflow,
+    initialize_dual_ee_query_data,
     query as dual_ee_query,
 )
-from genesis.engine.systems.global_body_manager import get_global_body_data
-from genesis.engine.systems.global_surface_manager import get_global_surface_data
-from genesis.engine.systems.global_vertex_manager import get_global_vertex_data
+from genesis.engine.systems.global_body_manager import GlobalBodyManager
+from genesis.engine.systems.global_surface_manager import GlobalSurfaceManager
+from genesis.engine.systems.global_vertex_manager import GlobalVertexManager
 from genesis.engine.systems.lbvh import (
+    LBVH,
     calc_internal_aabb,
     calc_internal_nodes,
     calc_leaf_aabb_edge,
@@ -21,7 +23,7 @@ from genesis.engine.systems.lbvh import (
     calc_morton,
     copy_leaf_aabb_to_temp,
     extract_indices,
-    get_lbvh_data,
+    initialize_lbvh_data,
     memset_flags,
     query_ee_warp as lbvh_query_ee_warp,
     query_pt_batched,
@@ -31,6 +33,39 @@ from genesis.engine.systems.lbvh import (
     sort_morton,
 )
 from genesis.utils.misc import qd_to_numpy
+
+
+def create_global_vertex_data(*args, **kwargs):
+    system = GlobalVertexManager()
+    system.wire_data(*args, **kwargs)
+    system.init()
+    return system.data
+
+
+def create_global_surface_data(*args, **kwargs):
+    system = GlobalSurfaceManager()
+    system.wire_data(*args, **kwargs)
+    system.init()
+    return system.data
+
+
+def create_global_body_data(*args, **kwargs):
+    system = GlobalBodyManager()
+    system.wire_data(*args, **kwargs)
+    system.init()
+    return system.data
+
+
+def create_lbvh_data(*args, **kwargs):
+    data = LBVH.Data()
+    initialize_lbvh_data(data, *args, **kwargs)
+    return data
+
+
+def create_dual_ee_query_data(*args, **kwargs):
+    data = DualEEQueryState.Data()
+    initialize_dual_ee_query_data(data, *args, **kwargs)
+    return data
 
 
 @qd.data_oriented
@@ -292,7 +327,7 @@ def make_single_body_pt_scene(
     triangles: np.ndarray,
 ):
     n_vertices = positions.shape[0]
-    vertex = get_global_vertex_data(
+    vertex = create_global_vertex_data(
         n_vertices,
         thicknesses=np.full(n_vertices, 0.001, dtype=np.float64),
         d_hats=np.full(n_vertices, 0.01, dtype=np.float64),
@@ -304,7 +339,7 @@ def make_single_body_pt_scene(
     vertex.x_bar.from_numpy(positions)
     vertex.body_id.from_numpy(np.zeros(n_vertices, dtype=np.int32))
 
-    surface = get_global_surface_data(
+    surface = create_global_surface_data(
         triangles,
         np.empty((0, 2), dtype=np.int32),
         np.arange(n_vertices, dtype=np.int32),
@@ -317,7 +352,7 @@ def make_single_body_pt_scene(
         ),
     )
 
-    body = get_global_body_data(
+    body = create_global_body_data(
         1,
         vertex_offsets=np.array([0, n_vertices], dtype=np.int32),
         self_collision=np.ones(1, dtype=np.int32),
@@ -419,8 +454,8 @@ def test_dop14f_leaf_bounds_conservatively_contain_fp64_reference():
     endpoints = np.nextafter(positions + 3.0e-8, -direction)
     vertex.trajectory_end_positions.from_numpy(endpoints)
 
-    dop14f = get_lbvh_data(2, 6, "dop14")
-    fp64_reference = get_lbvh_data(
+    dop14f = create_lbvh_data(2, 6, "dop14")
+    fp64_reference = create_lbvh_data(
         2,
         6,
         "dop14",
@@ -465,7 +500,7 @@ def test_lbvh_dynamic_morton_sort_matches_retained_generic_path():
 
     outputs = []
     for genesis_legacy_sort_reduce in (False, True):
-        bvh = get_lbvh_data(
+        bvh = create_lbvh_data(
             count,
             count,
             "aabb",
@@ -526,7 +561,7 @@ def test_lbvh_pt_candidates_match_two_parallel_triangles(
         ],
         dtype=np.float64,
     )
-    vertex = get_global_vertex_data(
+    vertex = create_global_vertex_data(
         6,
         thicknesses=np.full(6, 0.001, dtype=np.float64),
         d_hats=np.full(6, 0.01, dtype=np.float64),
@@ -538,7 +573,7 @@ def test_lbvh_pt_candidates_match_two_parallel_triangles(
     vertex.x_bar.from_numpy(positions)
     vertex.body_id.from_numpy(np.array([0, 0, 0, 1, 1, 1], dtype=np.int32))
 
-    surface = get_global_surface_data(
+    surface = create_global_surface_data(
         np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int32),
         np.array([[0, 1], [1, 2], [0, 2], [3, 4], [4, 5], [3, 5]], dtype=np.int32),
         np.arange(6, dtype=np.int32),
@@ -548,14 +583,14 @@ def test_lbvh_pt_candidates_match_two_parallel_triangles(
         surf_face_area_weights=np.full(2, 0.5, dtype=np.float64),
     )
 
-    body = get_global_body_data(
+    body = create_global_body_data(
         2,
         vertex_offsets=np.array([0, 3, 6], dtype=np.int32),
         self_collision=np.ones(2, dtype=np.int32),
         body_contact_ignorance_ranges=np.array([0, 0, 0], dtype=np.int32),
     )
 
-    bvh = get_lbvh_data(
+    bvh = create_lbvh_data(
         2,
         6,
         bound_type,
@@ -602,7 +637,7 @@ def test_pt_warp_matches_batched_for_single_leaf():
         positions,
         triangles,
     )
-    bvh = get_lbvh_data(1, 4, "dop14")
+    bvh = create_lbvh_data(1, 4, "dop14")
     build_triangle_bvh(bvh, surface, vertex)
 
     batched_pairs = qd.ndarray(qd.i32, shape=(4, 2))
@@ -696,7 +731,7 @@ def test_pt_warp_matches_batched_dense_and_exact_overflow_count():
         positions,
         triangles,
     )
-    bvh = get_lbvh_data(n_triangles, n_vertices, "dop14")
+    bvh = create_lbvh_data(n_triangles, n_vertices, "dop14")
     build_triangle_bvh(bvh, surface, vertex)
 
     expected_count = n_vertices * n_triangles - 3 * n_triangles
@@ -786,7 +821,7 @@ def test_dop14_dual_ee_query():
         ],
         dtype=np.float64,
     )
-    vertex = get_global_vertex_data(
+    vertex = create_global_vertex_data(
         4,
         thicknesses=np.full(4, 0.001, dtype=np.float64),
         d_hats=np.full(4, 0.01, dtype=np.float64),
@@ -798,7 +833,7 @@ def test_dop14_dual_ee_query():
     vertex.x_bar.from_numpy(positions)
     vertex.body_id.from_numpy(np.array([0, 0, 1, 1], dtype=np.int32))
 
-    surface = get_global_surface_data(
+    surface = create_global_surface_data(
         np.empty((0, 3), dtype=np.int32),
         np.array([[0, 1], [2, 3]], dtype=np.int32),
         np.arange(4, dtype=np.int32),
@@ -807,15 +842,15 @@ def test_dop14_dual_ee_query():
         surf_edge_area_weights=np.full(2, 0.5, dtype=np.float64),
     )
 
-    body = get_global_body_data(
+    body = create_global_body_data(
         2,
         vertex_offsets=np.array([0, 2, 4], dtype=np.int32),
         self_collision=np.ones(2, dtype=np.int32),
         body_contact_ignorance_ranges=np.array([0, 0, 0], dtype=np.int32),
     )
 
-    bvh = get_lbvh_data(2, 2, "dop14")
-    dual = get_dual_ee_query_data(2, 0, 24.0, 18)
+    bvh = create_lbvh_data(2, 2, "dop14")
+    dual = create_dual_ee_query_data(2, 0, 24.0, 18)
     pairs = qd.ndarray(qd.i32, shape=(16, 2))
     n_pairs = qd.ndarray(qd.i32, shape=())
     overflow = qd.ndarray(qd.i32, shape=())
@@ -878,7 +913,7 @@ def test_dop14_dual_ee_matches_per_edge_query():
         dtype=np.float64,
     )
     edges = np.array([[0, 1], [1, 2], [0, 2], [3, 4], [4, 5], [3, 5]], dtype=np.int32)
-    vertex = get_global_vertex_data(
+    vertex = create_global_vertex_data(
         6,
         thicknesses=np.full(6, 0.001, dtype=np.float64),
         d_hats=np.full(6, 0.01, dtype=np.float64),
@@ -889,7 +924,7 @@ def test_dop14_dual_ee_matches_per_edge_query():
     vertex.trajectory_end_positions.from_numpy(positions)
     vertex.x_bar.from_numpy(positions)
     vertex.body_id.from_numpy(np.array([0, 0, 0, 1, 1, 1], dtype=np.int32))
-    surface = get_global_surface_data(
+    surface = create_global_surface_data(
         np.empty((0, 3), dtype=np.int32),
         edges,
         np.arange(6, dtype=np.int32),
@@ -897,15 +932,15 @@ def test_dop14_dual_ee_matches_per_edge_query():
         surf_vert_area_weights=np.full(6, 1.0 / 6.0, dtype=np.float64),
         surf_edge_area_weights=np.full(6, 1.0 / 6.0, dtype=np.float64),
     )
-    body = get_global_body_data(
+    body = create_global_body_data(
         2,
         vertex_offsets=np.array([0, 3, 6], dtype=np.int32),
         self_collision=np.ones(2, dtype=np.int32),
         body_contact_ignorance_ranges=np.array([0, 0, 0], dtype=np.int32),
     )
 
-    bvh = get_lbvh_data(6, 6, "dop14")
-    dual_state = get_dual_ee_query_data(6, 0, 24.0, 18)
+    bvh = create_lbvh_data(6, 6, "dop14")
+    dual_state = create_dual_ee_query_data(6, 0, 24.0, 18)
     dual_pairs = qd.ndarray(qd.i32, shape=(64, 2))
     dual_count = qd.ndarray(qd.i32, shape=())
     warp_pairs = qd.ndarray(qd.i32, shape=(64, 2))
@@ -990,7 +1025,7 @@ def test_dual_ee_morton_reorders_body_metadata_with_leaves():
         [[0, 1], [2, 3], [4, 5], [6, 7]],
         dtype=np.int32,
     )
-    vertex = get_global_vertex_data(
+    vertex = create_global_vertex_data(
         8,
         thicknesses=np.full(8, 0.001, dtype=np.float64),
         d_hats=np.full(8, 0.01, dtype=np.float64),
@@ -1002,7 +1037,7 @@ def test_dual_ee_morton_reorders_body_metadata_with_leaves():
     vertex.x_bar.from_numpy(positions)
     vertex.body_id.from_numpy(np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int32))
 
-    surface = get_global_surface_data(
+    surface = create_global_surface_data(
         np.empty((0, 3), dtype=np.int32),
         edges,
         np.arange(8, dtype=np.int32),
@@ -1010,15 +1045,15 @@ def test_dual_ee_morton_reorders_body_metadata_with_leaves():
         surf_vert_area_weights=np.full(8, 1.0 / 8.0, dtype=np.float64),
         surf_edge_area_weights=np.full(4, 0.25, dtype=np.float64),
     )
-    body = get_global_body_data(
+    body = create_global_body_data(
         2,
         vertex_offsets=np.array([0, 4, 8], dtype=np.int32),
         self_collision=np.ones(2, dtype=np.int32),
         body_contact_ignorance_ranges=np.array([0, 0, 0], dtype=np.int32),
     )
 
-    bvh = get_lbvh_data(4, 4, "dop14")
-    dual_state = get_dual_ee_query_data(4, 0, 24.0, 18)
+    bvh = create_lbvh_data(4, 4, "dop14")
+    dual_state = create_dual_ee_query_data(4, 0, 24.0, 18)
     dual_pairs = qd.ndarray(qd.i32, shape=(16, 2))
     dual_count = qd.ndarray(qd.i32, shape=())
     warp_pairs = qd.ndarray(qd.i32, shape=(16, 2))

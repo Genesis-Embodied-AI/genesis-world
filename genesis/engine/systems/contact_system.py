@@ -11,6 +11,9 @@ from quadrants.algorithms import (
     sort_scratch_slots,
 )
 
+import genesis as gs
+from genesis.utils.misc import qd_to_numpy
+
 from .contact import CONTACT_CONFIG_DEFAULTS, ContactTabular
 from .contact_function.codim_thickness import pair_thickness_ee, pair_thickness_ph, pair_thickness_pt
 from .contact_function.halfplane_contact import halfplane_signed_distance
@@ -32,7 +35,7 @@ from .fsr_reduce import (
     fast_segmented_reduce_doublet as fsr_reduce_doublet,
     fast_segmented_reduce_triplet as fsr_reduce_triplet,
 )
-from .sim_system import SimData, SimSystem
+from .sim_system import ActionKind, SimAction, SimData, SimSystem, validate_action_protocol
 
 _CONTACT_SORT_MIN_CAPACITY = 4_865
 _CONTACT_SORT_LOG256_MAX_N = 4
@@ -48,6 +51,7 @@ def get_contact_assembly_capacity() -> int:
     return _CONTACT_SORT_MIN_CAPACITY
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class ContactSystem(SimSystem):
     """Organize contact data, dependencies, actions, and capacity growth."""
 
@@ -77,7 +81,6 @@ class ContactSystem(SimSystem):
         ccd_alpha_pp: qd.Ndarray
         ccd_alpha_pt: qd.Ndarray
         ccd_eta: qd.Ndarray
-        ccd_max_iters: int
         contact_doublet_gradients: qd.Ndarray
         contact_doublet_vertices: qd.Ndarray
         contact_energy_value: qd.Ndarray
@@ -121,20 +124,13 @@ class ContactSystem(SimSystem):
         friction_pairs_ph: qd.Ndarray
         friction_pairs_pp: qd.Ndarray
         friction_pairs_pt: qd.Ndarray
-        genesis_legacy_sort_reduce_host: bool
         global_calm_frames: qd.Ndarray
         halfplane_contact_element_ids: qd.Ndarray
         halfplane_normals: qd.Ndarray
         halfplane_positions: qd.Ndarray
-        has_codim: bool
-        has_friction: bool
-        has_halfplanes: bool
         init_pair_capacity: qd.Ndarray
         intersection_check: qd.Ndarray
-        intersection_check_host: bool
         intersection_flag: qd.Ndarray
-        is_initialized_host: bool
-        is_wired_host: bool
         iter_body_min_gap: qd.Ndarray
         iter_min_gap_ratio: qd.Ndarray
         kappa: qd.Ndarray
@@ -188,7 +184,6 @@ class ContactSystem(SimSystem):
         pairs_ph: qd.Ndarray
         pairs_pp: qd.Ndarray
         pairs_pt: qd.Ndarray
-        sort_log256_max_n: int
         triplet_scan_scratch: qd.Ndarray
         triplet_scanner: DynamicExclusiveSum
         triplet_seg_flags: qd.Ndarray
@@ -210,60 +205,467 @@ class ContactSystem(SimSystem):
         vertex_kappa_scale: qd.Ndarray
         vertex_min_gap: qd.Ndarray
 
-    def __init__(self, data: Data) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = data
-        self.actions: dict[str, object] = {}
+        self.data = self.Data()
+        self._wire_args = None
+        self.broad_phase_init_actions = self.create_action_collection()
+        self.contact_assemble_init_actions = self.create_action_collection()
+        self.intersection_check = False
+        self.genesis_legacy_sort_reduce = False
+        self.has_friction = False
+        self.has_halfplanes = False
+        self.has_codim = False
+        self.is_initialized = False
+
+    def wire_data(
+        self,
+        *,
+        n_verts: int,
+        n_bodies: int,
+        d_hat: float,
+        kappa: float,
+        dt_sq: float,
+        init_pair_capacity: int,
+        contact_tabular: ContactTabular,
+        friction_mu: float,
+        friction_eps_v: float,
+        halfplane_positions: np.ndarray,
+        halfplane_normals: np.ndarray,
+        adaptive_kappa_mode: str,
+        adaptive_kappa_tick: str,
+        contact_element_ids: np.ndarray | None = None,
+        halfplane_contact_element_ids: np.ndarray | None = None,
+        intersection_check: bool = False,
+        intersection_check_capacity: int = 1_024,
+        genesis_legacy_sort_reduce: bool = False,
+    ) -> None:
+        self._wire_args = {
+            "n_verts": n_verts,
+            "n_bodies": n_bodies,
+            "d_hat": d_hat,
+            "kappa": kappa,
+            "dt_sq": dt_sq,
+            "init_pair_capacity": init_pair_capacity,
+            "contact_tabular": contact_tabular,
+            "friction_mu": friction_mu,
+            "friction_eps_v": friction_eps_v,
+            "halfplane_positions": halfplane_positions,
+            "halfplane_normals": halfplane_normals,
+            "adaptive_kappa_mode": adaptive_kappa_mode,
+            "adaptive_kappa_tick": adaptive_kappa_tick,
+            "contact_element_ids": contact_element_ids,
+            "halfplane_contact_element_ids": halfplane_contact_element_ids,
+            "intersection_check": intersection_check,
+            "intersection_check_capacity": intersection_check_capacity,
+            "genesis_legacy_sort_reduce": genesis_legacy_sort_reduce,
+        }
+        self.intersection_check = bool(intersection_check)
+        self.genesis_legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
+        self.has_friction = friction_mu > 0.0
+        self.has_halfplanes = len(halfplane_positions) != 0
 
     def build(self) -> None:
         from .global_body_manager import GlobalBodyManager
         from .global_linear_system import GlobalLinearSystem
         from .global_surface_manager import GlobalSurfaceManager
         from .global_vertex_manager import GlobalVertexManager
-        from .lbvh_broad_phase import InfoLBVHBatchedBroadPhaseDop14, LBVHBroadPhase
+        from .lbvh_broad_phase import LBVHBroadPhase
+        from .rigid_contact_assemble import RigidContactAssemble
 
         self.body_system = self.require(GlobalBodyManager)
         self.vertex_system = self.require(GlobalVertexManager)
         self.surface_system = self.require(GlobalSurfaceManager)
         self.global_linear_system_system = self.require(GlobalLinearSystem)
-        self.broad_phase_system = self.find(InfoLBVHBatchedBroadPhaseDop14)
-        if self.broad_phase_system is None:
-            self.broad_phase_system = self.require(LBVHBroadPhase)
+        self.broad_phase_system = self.require(LBVHBroadPhase)
+        self.rigid_contact_assemble_system = self.find(RigidContactAssemble)
 
         data = self.data
         surface = self.surface_system.data
         vertex = self.vertex_system.data
-        own_actions = {
-            "reset_initial_intersections": (reset_initial_intersections, (data,)),
-            "flag_et_intersections": (flag_et_intersections, (data,)),
-            "reset_counted_demand": (reset_counted_demand, (data,)),
-            "adaptive_kappa_update": (adaptive_kappa_update, (data,)),
-            "adaptive_kappa_newton_tick": (adaptive_kappa_newton_tick, (data,)),
-            "reset_collision_counts": (reset_collision_counts, (data,)),
-            "halfplane_query": (halfplane_query, (data, surface, vertex)),
-            "init_ccd": (init_ccd, (data,)),
-            "reset_frame_ccd": (reset_frame_ccd, (data,)),
-            "ccd_alpha_pt": (ccd_alpha_pt_kernel, (data, surface, vertex)),
-            "ccd_alpha_ee": (ccd_alpha_ee_kernel, (data, surface, vertex)),
-            "ccd_alpha_ph": (halfplane_ccd_alpha_kernel, (data, surface, vertex)),
-            "reduce_ccd_alpha": (reduce_ccd_alpha_final_kernel, (data,)),
-            "ccd": (ccd, (data, surface, vertex)),
-            "reset_contact_energy": (reset_contact_energy, (data,)),
-            "sum_contact_energy": (sum_contact_energy, (data,)),
-            "check_assembly_capacity": (check_assembly_capacity, (data,)),
-            "check_assembly_padding": (check_assembly_padding, (data,)),
-            "shrink_assembly_padding": (shrink_assembly_padding, (data,)),
-            "reset_assembly_counts": (reset_assembly_counts, (data,)),
-            "sort_reduce": (sort_reduce, (data,)),
-        }
-        self.actions = {
-            name: self.create_action(kernel, *action_data) for name, (kernel, action_data) in own_actions.items()
-        }
+        self.reset_initial_intersections_action = self.create_action(reset_initial_intersections, data)
+        self.flag_et_intersections_action = self.create_action(flag_et_intersections, data)
+        self.reset_counted_demand_action = self.create_action(reset_counted_demand, data)
+        self.adaptive_kappa_update_action = self.create_action(adaptive_kappa_update, data)
+        self.adaptive_kappa_newton_tick_action = self.create_action(adaptive_kappa_newton_tick, data)
+        self.reset_collision_counts_action = self.create_action(reset_collision_counts, data)
+        self.halfplane_query_action = self.create_action(halfplane_query, data, surface, vertex)
+        self.init_ccd_action = self.create_action(init_ccd, data)
+        self.reset_frame_ccd_action = self.create_action(reset_frame_ccd, data)
+        self.ccd_alpha_pt_action = self.create_action(ccd_alpha_pt_kernel, data, surface, vertex)
+        self.ccd_alpha_ee_action = self.create_action(ccd_alpha_ee_kernel, data, surface, vertex)
+        self.ccd_alpha_ph_action = self.create_action(halfplane_ccd_alpha_kernel, data, surface, vertex)
+        self.reduce_ccd_alpha_action = self.create_action(reduce_ccd_alpha_final_kernel, data)
+        self.ccd_action = self.create_action(ccd, data, surface, vertex)
+        self.reset_contact_energy_action = self.create_action(reset_contact_energy, data)
+        self.sum_contact_energy_action = self.create_action(sum_contact_energy, data)
+        self.check_assembly_capacity_action = self.create_action(check_assembly_capacity, data)
+        self.check_assembly_padding_action = self.create_action(check_assembly_padding, data)
+        self.shrink_assembly_padding_action = self.create_action(shrink_assembly_padding, data)
+        self.reset_assembly_counts_action = self.create_action(reset_assembly_counts, data)
+        self.sort_reduce_action = self.create_action(sort_reduce, data)
 
-    def resolve_actions(self) -> dict[str, object]:
-        if self.is_building:
-            raise RuntimeError("Contact actions are available only after build")
-        return {name: action.invocation for name, action in self.actions.items()}
+    def on_broad_phase(self, init_action: SimAction) -> None:
+        validate_action_protocol(
+            init_action,
+            protocol="ContactSystem.on_broad_phase.init",
+            expected_kind=ActionKind.HOST,
+            transient_arity=0,
+        )
+        if self.broad_phase_init_actions._actions:
+            raise RuntimeError("ContactSystem already has a broad-phase initializer")
+        self.broad_phase_init_actions.register(init_action)
+
+    def on_contact_assemble(self, init_action: SimAction) -> None:
+        validate_action_protocol(
+            init_action,
+            protocol="ContactSystem.on_contact_assemble.init",
+            expected_kind=ActionKind.HOST,
+            transient_arity=0,
+        )
+        self.contact_assemble_init_actions.register(init_action)
+
+    def init(self) -> None:
+        if self.is_initialized:
+            raise RuntimeError("ContactSystem is already initialized")
+        if self._wire_args is None:
+            raise RuntimeError("ContactSystem data has not been wired")
+        args = self._wire_args
+        n_verts = args["n_verts"]
+        n_bodies = args["n_bodies"]
+        if n_verts < 0:
+            raise ValueError("ContactSystem n_verts must be non-negative")
+        if n_bodies < 0:
+            raise ValueError("ContactSystem n_bodies must be non-negative")
+        data = self.data
+        _wire_contact_params(
+            data,
+            d_hat=args["d_hat"],
+            kappa=args["kappa"],
+            init_pair_capacity=args["init_pair_capacity"],
+            intersection_check=args["intersection_check"],
+            intersection_check_capacity=args["intersection_check_capacity"],
+        )
+        set_contact_dt_sq(data, args["dt_sq"])
+        _wire_contact_friction_params(data, mu=args["friction_mu"], eps_v=args["friction_eps_v"])
+        _wire_contact_tabular(data, args["contact_tabular"])
+        _wire_contact_halfplanes(
+            data,
+            args["halfplane_positions"],
+            args["halfplane_normals"],
+            args["halfplane_contact_element_ids"],
+        )
+        _set_contact_adaptive_kappa(
+            data,
+            args["adaptive_kappa_mode"],
+            args["adaptive_kappa_tick"],
+            n_bodies,
+            n_verts,
+        )
+        _initialize_contact_data(data, n_verts)
+        if args["contact_element_ids"] is not None:
+            set_contact_element_ids(data, args["contact_element_ids"])
+        if not self.broad_phase_init_actions.actions:
+            raise RuntimeError("ContactSystem requires a broad-phase initializer")
+        for action in self.broad_phase_init_actions.actions:
+            action.invoke()
+        for action in self.contact_assemble_init_actions.actions:
+            action.invoke()
+        self._wire_args = None
+        self.is_initialized = True
+
+    @qd.func(requires_top_level=True)
+    def on_reset_initial_intersections(self):
+        reset_initial_intersections(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_flag_et_intersections(self):
+        flag_et_intersections(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_reset_counted_demand(self):
+        reset_counted_demand(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_update_adaptive_kappa(self):
+        adaptive_kappa_update(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_tick_adaptive_kappa_newton(self):
+        adaptive_kappa_newton_tick(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_reset_collision_counts(self):
+        reset_collision_counts(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_query_halfplanes(self):
+        halfplane_query(
+            self.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_initialize_ccd(self):
+        init_ccd(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_reset_frame(self):
+        reset_frame_ccd(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_compute_ccd_alpha_pt(self):
+        ccd_alpha_pt_kernel(
+            self.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_compute_ccd_alpha_ee(self):
+        ccd_alpha_ee_kernel(
+            self.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_compute_ccd_alpha_ph(self):
+        halfplane_ccd_alpha_kernel(
+            self.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_reduce_ccd_alpha(self):
+        reduce_ccd_alpha_final_kernel(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_ccd(self):
+        ccd(
+            self.data,
+            self.surface_system.data,
+            self.vertex_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_reset_contact_energy(self):
+        reset_contact_energy(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_sum_contact_energy(self):
+        sum_contact_energy(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_check_assembly_capacity(self):
+        check_assembly_capacity(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_check_assembly_padding(self):
+        check_assembly_padding(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_shrink_assembly_padding(self):
+        shrink_assembly_padding(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_reset_assembly_counts(self):
+        reset_assembly_counts(self.data)
+
+    @qd.func(requires_top_level=True)
+    def on_sort_reduce(self):
+        sort_reduce(self.data, self.genesis_legacy_sort_reduce)
+
+    def _handle_pair_overflow(self) -> None:
+        data = self.data
+        self.handle_broad_phase_overflow()
+        self.realloc_pair_buffers(
+            pt=int(qd_to_numpy(data.n_pairs_pt)),
+            ee=int(qd_to_numpy(data.n_pairs_ee)),
+            pe=int(qd_to_numpy(data.n_pairs_pe)),
+            pp=int(qd_to_numpy(data.n_pairs_pp)),
+            ph=int(qd_to_numpy(data.n_pairs_ph)),
+        )
+
+    def on_initial_intersection_yield(self, _status):
+        from .sim_engine import ContactCheckpoint
+
+        required = int(qd_to_numpy(self.data.n_et_pairs))
+        self.realloc_et_pairs(required)
+        return ContactCheckpoint.INITIAL_INTERSECTION
+
+    def on_query_yield(self, _status):
+        from .sim_engine import ContactCheckpoint
+
+        self._handle_pair_overflow()
+        return ContactCheckpoint.QUERY
+
+    def on_friction_yield(self, _status):
+        from .sim_engine import ContactCheckpoint
+
+        data = self.data
+        required = {
+            channel: int(qd_to_numpy(getattr(data, f"n_friction_pairs_{channel}")))
+            for channel in ("pt", "ee", "pe", "pp", "ph")
+        }
+        self.realloc_friction_pair_buffers(required)
+        data.friction_overflow_flag.from_numpy(np.array(0, dtype=np.int32))
+        return ContactCheckpoint.FRICTION
+
+    def on_count_yield(self, _status):
+        from .sim_engine import ContactCheckpoint
+
+        data = self.data
+        required_doublets = int(qd_to_numpy(data.n_counted_doublets)) + int(
+            qd_to_numpy(data.n_friction_demand_doublets)
+        )
+        required_triplets = int(qd_to_numpy(data.n_counted_triplets)) + int(
+            qd_to_numpy(data.n_friction_demand_triplets)
+        )
+        self.realloc_assembly_buffers(required_doublets, required_triplets)
+        if self.rigid_contact_assemble_system is not None:
+            self.rigid_contact_assemble_system.realloc_assembly_buffers(data)
+        data.count_overflow_flag.from_numpy(np.array(0, dtype=np.int32))
+        return ContactCheckpoint.FILTER
+
+    def on_filter_yield(self, _status):
+        from .sim_engine import ContactCheckpoint
+
+        data = self.data
+        grow_factor = CONTACT_CONFIG_DEFAULTS["extras/capacity_grow_factor"]
+        n_doublets = int(qd_to_numpy(data.n_contact_doublets))
+        n_triplets = int(qd_to_numpy(data.n_contact_triplets))
+        padded_doublets = max(
+            int(qd_to_numpy(data.padded_contact_doublets)),
+            min(
+                int(np.ceil(n_doublets * grow_factor)),
+                data.contact_doublet_vertices.shape[0],
+            ),
+        )
+        padded_triplets = max(
+            int(qd_to_numpy(data.padded_contact_triplets)),
+            min(
+                int(np.ceil(n_triplets * grow_factor)),
+                data.contact_triplet_rows.shape[0],
+            ),
+        )
+        self.set_assembly_padding(padded_doublets, padded_triplets)
+        data.contact_padding_overflow.from_numpy(np.array(0, dtype=np.int32))
+        return ContactCheckpoint.SORT
+
+    def on_et_overflow_yield(self, _status):
+        from .sim_engine import ContactCheckpoint
+
+        required = int(qd_to_numpy(self.data.n_et_pairs))
+        self.realloc_et_pairs(required)
+        return ContactCheckpoint.ET_OVERFLOW
+
+    def on_et_failure_yield(self, _status):
+        message = self.et_report_message("step")
+        gs.logger.error(message)
+        raise RuntimeError(message)
+
+    def raise_if_initial_intersection(self) -> None:
+        if int(qd_to_numpy(self.data.n_et_pairs)) == 0:
+            return
+        message = self.et_report_message("initial state")
+        gs.logger.error(message)
+        raise RuntimeError(message)
+
+    def et_report_message(self, stage: str) -> str:
+        data = self.data
+        surface = self.surface_system.data
+        vertex = self.vertex_system.data
+        count = int(qd_to_numpy(data.n_et_pairs))
+        pairs = qd_to_numpy(data.et_pairs)[:count]
+        edges = qd_to_numpy(surface.surf_edges)
+        faces = qd_to_numpy(surface.surf_triangles)
+        positions = qd_to_numpy(vertex.positions)
+        body_ids = qd_to_numpy(vertex.body_id)
+        geometry_ids = qd_to_numpy(vertex.geometry_id)
+        geometry_sources = qd_to_numpy(vertex.geometry_source)
+        source_geometry_ids = qd_to_numpy(vertex.source_geometry_id)
+        geometry_environments = qd_to_numpy(vertex.geometry_environment)
+        reports = []
+        for edge, face in pairs[:8]:
+            edge_vertex = int(edges[edge, 0])
+            edge_vertex_b = int(edges[edge, 1])
+            face_vertex = int(faces[face, 0])
+            face_vertex_b = int(faces[face, 1])
+            face_vertex_c = int(faces[face, 2])
+            edge_source = int(geometry_sources[edge_vertex])
+            face_source = int(geometry_sources[face_vertex])
+            edge_source_name = "FEM" if edge_source == 0 else "RIGID"
+            face_source_name = "FEM" if face_source == 0 else "RIGID"
+            edge_source_id = int(source_geometry_ids[edge_vertex])
+            face_source_id = int(source_geometry_ids[face_vertex])
+            edge_environment = int(geometry_environments[edge_vertex])
+            face_environment = int(geometry_environments[face_vertex])
+            edge_lookup = (
+                f"fem_solver.entities[{edge_source_id}]"
+                if edge_source == 0
+                else f"rigid_solver.geoms[{edge_source_id}]"
+            )
+            face_lookup = (
+                f"fem_solver.entities[{face_source_id}]"
+                if face_source == 0
+                else f"rigid_solver.geoms[{face_source_id}]"
+            )
+            reports.append(
+                f"(edge {int(edge)}, face {int(face)}, "
+                f"edge global_geometry_id {int(geometry_ids[edge_vertex])}, "
+                f"face global_geometry_id {int(geometry_ids[face_vertex])}, "
+                f"edge source {edge_source_name}, "
+                f"edge geo_id {edge_source_id}, "
+                f"edge env {edge_environment}, "
+                f"edge lookup {edge_lookup}, "
+                f"face source {face_source_name}, "
+                f"face geo_id {face_source_id}, "
+                f"face env {face_environment}, "
+                f"face lookup {face_lookup}, "
+                f"edge body_id {int(body_ids[edge_vertex])}, "
+                f"face body_id {int(body_ids[face_vertex])}, "
+                f"edge_positions "
+                f"{positions[[edge_vertex, edge_vertex_b]].tolist()}, "
+                f"face_positions "
+                f"{positions[[face_vertex, face_vertex_b, face_vertex_c]].tolist()})"
+            )
+        more = f", ... +{count - 8} more" if count > 8 else ""
+        contact_state = (
+            f"pt_pairs={int(qd_to_numpy(data.n_pairs_pt))}, "
+            f"ee_pairs={int(qd_to_numpy(data.n_pairs_ee))}, "
+            f"active_pairs={int(qd_to_numpy(data.n_active_pairs))}, "
+            f"ccd_alpha={float(qd_to_numpy(data.ccd_alpha)):.9g}, "
+            "frame_ccd_alpha="
+            f"{float(qd_to_numpy(data.frame_ccd_alpha)):.9g}"
+        )
+        if self.rigid_contact_assemble_system is not None:
+            contact_state += (
+                f", proxy_doublets={int(qd_to_numpy(self.rigid_contact_assemble_system.data.rigid_doublet_total))}"
+            )
+        broad_phase = self.broad_phase_system.data
+        if broad_phase.use_dual_ee:
+            dual = broad_phase.ee_dual_state
+            contact_state += (
+                ", dual_selected="
+                f"{int(qd_to_numpy(dual.selected_count))}, "
+                "dual_parity="
+                f"{int(qd_to_numpy(dual.selected_parity))}, "
+                "dual_level="
+                f"{int(qd_to_numpy(dual.current_level))}, "
+                "dual_overflow="
+                f"{int(qd_to_numpy(dual.overflow_bits))}, "
+                "dual_next_task="
+                f"{int(qd_to_numpy(dual.next_task))}"
+            )
+        return (
+            f"ET check: {stage} detected "
+            f"{count} edge-triangle intersection pair(s). "
+            f"{contact_state}. "
+            f"Pairs: {', '.join(reports)}{more}"
+        )
 
     def set_dt_sq(self, dt_sq: float) -> None:
         set_contact_dt_sq(self.data, dt_sq)
@@ -299,8 +701,6 @@ def _wire_contact_params(
     intersection_check: bool = False,
     intersection_check_capacity: int = 1_024,
 ) -> None:
-    if data.is_wired_host:
-        raise RuntimeError("ContactSystem parameters are already wired")
     if d_hat <= 0.0:
         raise ValueError("contact/d_hat must be positive")
     if kappa <= 0.0:
@@ -309,8 +709,6 @@ def _wire_contact_params(
         raise ValueError("contact/init_collision_pair_capacity must be at least one")
     if intersection_check_capacity < 1:
         raise ValueError("contact/intersection_check_capacity must be at least one")
-    if bool(intersection_check) != data.intersection_check_host:
-        raise ValueError("ContactSystem intersection_check must be fixed before build")
 
     data.d_hat = qd.ndarray(qd.f64, shape=())
     data.kappa = qd.ndarray(qd.f64, shape=())
@@ -358,7 +756,6 @@ def _wire_contact_params(
         getattr(data, f"n_pairs_{channel}").from_numpy(np.array(0, dtype=np.int32))
         getattr(data, f"max_pairs_{channel}").from_numpy(np.array(init_pair_capacity, dtype=np.int32))
         getattr(data, f"ccd_alpha_{channel}").from_numpy(np.ones(init_pair_capacity, dtype=np.float64))
-    data.is_wired_host = True
 
 
 def set_contact_dt_sq(data, dt_sq: float) -> None:
@@ -372,7 +769,6 @@ def _wire_contact_friction_params(data, *, mu: float, eps_v: float) -> None:
         raise ValueError("ContactTabular friction_rate must be non-negative")
     if eps_v <= 0.0:
         raise ValueError("friction/eps_v must be positive")
-    data.has_friction = mu > 0.0
     data.default_friction_rate = qd.ndarray(qd.f64, shape=())
     data.default_friction_rate.from_numpy(np.array(mu, dtype=np.float64))
     data.friction_eps_v.from_numpy(np.array(eps_v, dtype=np.float64))
@@ -455,7 +851,6 @@ def _wire_contact_halfplanes(
     data.halfplane_contact_element_ids.from_numpy(
         plane_contact_element_ids if len(plane_contact_element_ids) else np.zeros(1, dtype=np.int32)
     )
-    data.has_halfplanes = len(plane_positions) != 0
 
 
 def _set_contact_adaptive_kappa(data, mode: str, tick: str, n_bodies: int, n_verts: int) -> None:
@@ -505,10 +900,6 @@ def _set_contact_adaptive_kappa(data, mode: str, tick: str, n_bodies: int, n_ver
 
 
 def _initialize_contact_data(data, n_verts: int) -> None:
-    if data.is_initialized_host:
-        raise RuntimeError("ContactSystem is already initialized")
-    if not data.is_wired_host:
-        raise RuntimeError("ContactSystem.wire_params() must run before init()")
     pair_capacity = data.pairs_pt.shape[0]
     doublet_capacity = _CONTACT_SORT_MIN_CAPACITY
     triplet_capacity = _CONTACT_SORT_MIN_CAPACITY
@@ -563,7 +954,6 @@ def _initialize_contact_data(data, n_verts: int) -> None:
     data.frame_ccd_alpha.from_numpy(np.array(1.0, dtype=np.float64))
     data.min_gap_ratio.from_numpy(np.array(1e300, dtype=np.float64))
     data.iter_min_gap_ratio.from_numpy(np.array(1e300, dtype=np.float64))
-    data.is_initialized_host = True
 
 
 def _allocate_contact_assembly_buffers(data, doublet_capacity: int, triplet_capacity: int) -> None:
@@ -612,7 +1002,7 @@ def _allocate_contact_assembly_buffers(data, doublet_capacity: int, triplet_capa
     )
     data.doublet_sort_scratch = qd.ndarray(
         qd.u32,
-        shape=(max(sort_scratch_slots(padded_doublets, data.sort_log256_max_n), 1),),
+        shape=(max(sort_scratch_slots(padded_doublets, _CONTACT_SORT_LOG256_MAX_N), 1),),
     )
     data.doublet_seg_flags = qd.ndarray(qd.i32, shape=(padded_doublets,))
     data.doublet_seg_ids = qd.ndarray(qd.i32, shape=(padded_doublets,))
@@ -621,7 +1011,7 @@ def _allocate_contact_assembly_buffers(data, doublet_capacity: int, triplet_capa
     )
     data.doublet_scan_scratch = qd.ndarray(
         qd.i32,
-        shape=(max(exclusive_scan_scratch_slots(padded_doublets, data.sort_log256_max_n), 1),),
+        shape=(max(exclusive_scan_scratch_slots(padded_doublets, _CONTACT_SORT_LOG256_MAX_N), 1),),
     )
 
     data.triplet_sort_keys = qd.ndarray(qd.u64, shape=(padded_triplets,))
@@ -635,7 +1025,7 @@ def _allocate_contact_assembly_buffers(data, doublet_capacity: int, triplet_capa
     )
     data.triplet_sort_scratch = qd.ndarray(
         qd.u32,
-        shape=(max(sort_scratch_slots(padded_triplets, data.sort_log256_max_n), 1),),
+        shape=(max(sort_scratch_slots(padded_triplets, _CONTACT_SORT_LOG256_MAX_N), 1),),
     )
     data.triplet_seg_flags = qd.ndarray(qd.i32, shape=(padded_triplets,))
     data.triplet_seg_ids = qd.ndarray(qd.i32, shape=(padded_triplets,))
@@ -644,7 +1034,7 @@ def _allocate_contact_assembly_buffers(data, doublet_capacity: int, triplet_capa
     )
     data.triplet_scan_scratch = qd.ndarray(
         qd.i32,
-        shape=(max(exclusive_scan_scratch_slots(padded_triplets, data.sort_log256_max_n), 1),),
+        shape=(max(exclusive_scan_scratch_slots(padded_triplets, _CONTACT_SORT_LOG256_MAX_N), 1),),
     )
     data.doublet_sort_size.from_numpy(np.array(0, dtype=np.int32))
     data.triplet_sort_size.from_numpy(np.array(0, dtype=np.int32))
@@ -752,13 +1142,13 @@ def realloc_contact_assembly_buffers(data, required_doublets: int, required_trip
         data.doublet_sort_perm_out = qd.ndarray(qd.i32, shape=(padded_doublets,))
         data.doublet_sort_scratch = qd.ndarray(
             qd.u32,
-            shape=(max(sort_scratch_slots(padded_doublets, data.sort_log256_max_n), 1),),
+            shape=(max(sort_scratch_slots(padded_doublets, _CONTACT_SORT_LOG256_MAX_N), 1),),
         )
         data.doublet_seg_flags = qd.ndarray(qd.i32, shape=(padded_doublets,))
         data.doublet_seg_ids = qd.ndarray(qd.i32, shape=(padded_doublets,))
         data.doublet_scan_scratch = qd.ndarray(
             qd.i32,
-            shape=(max(exclusive_scan_scratch_slots(padded_doublets, data.sort_log256_max_n), 1),),
+            shape=(max(exclusive_scan_scratch_slots(padded_doublets, _CONTACT_SORT_LOG256_MAX_N), 1),),
         )
         _grow_dynamic_radix_sort(data.doublet_sorter, qd.u32, padded_doublets)
         _grow_dynamic_exclusive_sum(data.doublet_scanner, padded_doublets)
@@ -779,13 +1169,13 @@ def realloc_contact_assembly_buffers(data, required_doublets: int, required_trip
         data.triplet_sort_perm_out = qd.ndarray(qd.i32, shape=(padded_triplets,))
         data.triplet_sort_scratch = qd.ndarray(
             qd.u32,
-            shape=(max(sort_scratch_slots(padded_triplets, data.sort_log256_max_n), 1),),
+            shape=(max(sort_scratch_slots(padded_triplets, _CONTACT_SORT_LOG256_MAX_N), 1),),
         )
         data.triplet_seg_flags = qd.ndarray(qd.i32, shape=(padded_triplets,))
         data.triplet_seg_ids = qd.ndarray(qd.i32, shape=(padded_triplets,))
         data.triplet_scan_scratch = qd.ndarray(
             qd.i32,
-            shape=(max(exclusive_scan_scratch_slots(padded_triplets, data.sort_log256_max_n), 1),),
+            shape=(max(exclusive_scan_scratch_slots(padded_triplets, _CONTACT_SORT_LOG256_MAX_N), 1),),
         )
         _grow_dynamic_radix_sort(data.triplet_sorter, qd.u64, padded_triplets)
         _grow_dynamic_exclusive_sum(data.triplet_scanner, padded_triplets)
@@ -804,74 +1194,6 @@ def realloc_contact_friction_pair_buffers(data, required: dict[str, int]) -> Non
         setattr(data, f"friction_pairs_{channel}", qd.ndarray(qd.i32, shape=(capacity, 2)))
         setattr(data, f"friction_flags_{channel}", qd.ndarray(qd.i32, shape=(capacity,)))
         getattr(data, f"max_friction_pairs_{channel}").from_numpy(np.array(capacity, dtype=np.int32))
-
-
-def get_contact_system_data(
-    *,
-    n_verts: int,
-    n_bodies: int,
-    d_hat: float,
-    kappa: float,
-    dt_sq: float,
-    init_pair_capacity: int,
-    contact_tabular: ContactTabular,
-    friction_mu: float,
-    friction_eps_v: float,
-    halfplane_positions: np.ndarray,
-    halfplane_normals: np.ndarray,
-    adaptive_kappa_mode: str,
-    adaptive_kappa_tick: str,
-    contact_element_ids: np.ndarray | None = None,
-    halfplane_contact_element_ids: np.ndarray | None = None,
-    intersection_check: bool = False,
-    intersection_check_capacity: int = 1_024,
-    genesis_legacy_sort_reduce: bool = False,
-) -> ContactSystem.Data:
-    """Construct complete contact data before system build and action registration."""
-    if n_verts < 0:
-        raise ValueError("ContactSystem n_verts must be non-negative")
-    if n_bodies < 0:
-        raise ValueError("ContactSystem n_bodies must be non-negative")
-
-    data = ContactSystem.Data()
-    data.is_wired_host = False
-    data.is_initialized_host = False
-    data.has_friction = False
-    data.has_halfplanes = False
-    data.has_codim = False
-    data.sort_log256_max_n = _CONTACT_SORT_LOG256_MAX_N
-    data.ccd_max_iters = _CCD_MAX_ITERS
-    data.intersection_check_host = bool(intersection_check)
-    data.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
-
-    _wire_contact_params(
-        data,
-        d_hat=d_hat,
-        kappa=kappa,
-        init_pair_capacity=init_pair_capacity,
-        intersection_check=intersection_check,
-        intersection_check_capacity=intersection_check_capacity,
-    )
-    set_contact_dt_sq(data, dt_sq)
-    _wire_contact_friction_params(data, mu=friction_mu, eps_v=friction_eps_v)
-    _wire_contact_tabular(data, contact_tabular)
-    _wire_contact_halfplanes(
-        data,
-        halfplane_positions,
-        halfplane_normals,
-        halfplane_contact_element_ids,
-    )
-    _set_contact_adaptive_kappa(
-        data,
-        adaptive_kappa_mode,
-        adaptive_kappa_tick,
-        n_bodies,
-        n_verts,
-    )
-    _initialize_contact_data(data, n_verts)
-    if contact_element_ids is not None:
-        set_contact_element_ids(data, contact_element_ids)
-    return data
 
 
 @qd.func(requires_top_level=True)
@@ -1076,7 +1398,7 @@ def ccd_alpha_pt_kernel(data, surface: qd.template(), vertex: qd.template()):
             ids[3],
             data.ccd_eta[()],
             pair_thickness_pt(vertex.thicknesses, ids[0], ids[1], ids[2], ids[3]),
-            data.ccd_max_iters,
+            50_000,
             result,
         )
         data.ccd_alpha_pt[pair_index] = result[0]
@@ -1105,7 +1427,7 @@ def ccd_alpha_ee_kernel(data, surface: qd.template(), vertex: qd.template()):
             ids[3],
             data.ccd_eta[()],
             pair_thickness_ee(vertex.thicknesses, ids[0], ids[1], ids[2], ids[3]),
-            data.ccd_max_iters,
+            50_000,
             result,
         )
         data.ccd_alpha_ee[pair_index] = result[0]
@@ -1140,7 +1462,7 @@ def halfplane_ccd_alpha_kernel(data, surface: qd.template(), vertex: qd.template
             normal.dot(plane_position),
             data.ccd_eta[()],
             pair_thickness_ph(vertex.thicknesses, vertex_id),
-            data.ccd_max_iters,
+            50_000,
             result,
         )
         data.ccd_alpha_ph[pair_index] = result[0]
@@ -1251,8 +1573,8 @@ def doublet_sort_seed(data):
 
 
 @qd.func(requires_top_level=True)
-def doublet_sort_radix(data):
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+def doublet_sort_radix(data, genesis_legacy_sort_reduce: qd.template()):
+    if qd.static(genesis_legacy_sort_reduce):
         sort(
             data.doublet_sort_keys,
             data.doublet_sort_keys_out,
@@ -1263,7 +1585,7 @@ def doublet_sort_radix(data):
             qd.u32,
             True,
             32,
-            data.sort_log256_max_n,
+            4,
         )
     else:
         dynamic_radix_sort(
@@ -1291,15 +1613,15 @@ def doublet_segment_flags(data):
 
 
 @qd.func(requires_top_level=True)
-def doublet_scan(data):
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+def doublet_scan(data, genesis_legacy_sort_reduce: qd.template()):
+    if qd.static(genesis_legacy_sort_reduce):
         exclusive_scan_add(
             data.doublet_seg_flags,
             data.doublet_seg_ids,
             data.doublet_scan_scratch,
             data.n_contact_doublets[()],
             qd.i32,
-            data.sort_log256_max_n,
+            4,
         )
     else:
         dynamic_exclusive_sum(
@@ -1320,8 +1642,8 @@ def doublet_zero_unique(data):
 
 
 @qd.func(requires_top_level=True)
-def doublet_fsr_merge(data):
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+def doublet_fsr_merge(data, genesis_legacy_sort_reduce: qd.template()):
+    if qd.static(genesis_legacy_sort_reduce):
         qd.loop_config(name="contact_doublet_fsr_merge_legacy")
         for index in range(data.n_contact_doublets[()]):
             source = qd.i32(data.doublet_sort_perm[index])
@@ -1383,8 +1705,8 @@ def triplet_sort_seed(data):
 
 
 @qd.func(requires_top_level=True)
-def triplet_sort_radix(data):
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+def triplet_sort_radix(data, genesis_legacy_sort_reduce: qd.template()):
+    if qd.static(genesis_legacy_sort_reduce):
         sort(
             data.triplet_sort_keys,
             data.triplet_sort_keys_out,
@@ -1395,7 +1717,7 @@ def triplet_sort_radix(data):
             qd.u64,
             True,
             64,
-            data.sort_log256_max_n,
+            4,
         )
     else:
         dynamic_radix_sort(
@@ -1423,15 +1745,15 @@ def triplet_segment_flags(data):
 
 
 @qd.func(requires_top_level=True)
-def triplet_scan(data):
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+def triplet_scan(data, genesis_legacy_sort_reduce: qd.template()):
+    if qd.static(genesis_legacy_sort_reduce):
         exclusive_scan_add(
             data.triplet_seg_flags,
             data.triplet_seg_ids,
             data.triplet_scan_scratch,
             data.n_contact_triplets[()],
             qd.i32,
-            data.sort_log256_max_n,
+            4,
         )
     else:
         dynamic_exclusive_sum(
@@ -1453,8 +1775,8 @@ def triplet_zero_unique(data):
 
 
 @qd.func(requires_top_level=True)
-def triplet_fsr_merge(data):
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+def triplet_fsr_merge(data, genesis_legacy_sort_reduce: qd.template()):
+    if qd.static(genesis_legacy_sort_reduce):
         qd.loop_config(name="contact_triplet_fsr_merge_legacy")
         for index in range(data.n_contact_triplets[()]):
             source = qd.i32(data.triplet_sort_perm[index])
@@ -1504,18 +1826,18 @@ def triplet_extract_unique(data):
 
 
 @qd.func(requires_top_level=True)
-def sort_reduce(data):
+def sort_reduce(data, genesis_legacy_sort_reduce: qd.template()):
     doublet_sort_seed(data)
-    doublet_sort_radix(data)
+    doublet_sort_radix(data, genesis_legacy_sort_reduce)
     doublet_segment_flags(data)
-    doublet_scan(data)
+    doublet_scan(data, genesis_legacy_sort_reduce)
     doublet_zero_unique(data)
-    doublet_fsr_merge(data)
+    doublet_fsr_merge(data, genesis_legacy_sort_reduce)
     doublet_extract_unique(data)
     triplet_sort_seed(data)
-    triplet_sort_radix(data)
+    triplet_sort_radix(data, genesis_legacy_sort_reduce)
     triplet_segment_flags(data)
-    triplet_scan(data)
+    triplet_scan(data, genesis_legacy_sort_reduce)
     triplet_zero_unique(data)
-    triplet_fsr_merge(data)
+    triplet_fsr_merge(data, genesis_legacy_sort_reduce)
     triplet_extract_unique(data)

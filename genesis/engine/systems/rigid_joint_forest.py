@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from .rigid_contact_proxy import RigidContactProxySystem
 
 
+@qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
 class RigidJointForestSystem(SimSystem):
     """Organize the minimal-coordinate link/proxy forest transform."""
 
@@ -36,20 +37,6 @@ class RigidJointForestSystem(SimSystem):
     class Data(SimData):
         """Complete forest topology and numerical scratch."""
 
-        is_initialized_host: bool
-        fused_enabled: bool
-        genesis_legacy_enabled: bool
-        use_fused_tree_path: bool
-        n_links_host: int
-        n_instances_host: int
-        parent_link_host: tuple[int, ...]
-        depth_host: tuple[int, ...]
-        edge_child_host: tuple[int, ...]
-        edge_dof_index_host: tuple[int, ...]
-        root_dof_index_host: tuple[int, ...]
-        n_edges_per_instance_host: int
-        has_contact_proxy: bool
-        n_entities_host: int
         n_bodies: qd.Ndarray
         n_mechanism_bodies: qd.Ndarray
         n_edges: qd.Ndarray
@@ -97,27 +84,64 @@ class RigidJointForestSystem(SimSystem):
         endpoint_t: qd.Tensor
         endpoint_quat: qd.Tensor
 
-    def __init__(self, data: Data) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.data = data
+        self.data = self.Data()
+        self._wire_args = None
+        self.is_initialized = False
+        self.fused_enabled = True
+        self.genesis_legacy_enabled = False
+        self.use_fused_tree_path = False
+        self.n_links = 0
+
+    def wire_data(
+        self,
+        rigid_solver,
+        *,
+        total_dof: int,
+        n_rigid_bodies: int,
+        proxy_dof_offset: int,
+        fused_enabled: bool = True,
+        genesis_legacy_enabled: bool = False,
+    ) -> None:
+        self.n_links = int(rigid_solver.n_links)
+        self.fused_enabled = bool(fused_enabled)
+        self.genesis_legacy_enabled = bool(genesis_legacy_enabled)
+        self._wire_args = {
+            "rigid_solver": rigid_solver,
+            "total_dof": total_dof,
+            "n_rigid_bodies": n_rigid_bodies,
+            "proxy_dof_offset": proxy_dof_offset,
+            "fused_enabled": fused_enabled,
+            "genesis_legacy_enabled": genesis_legacy_enabled,
+        }
+
+    def init(self) -> None:
+        if self.is_initialized:
+            raise RuntimeError("RigidJointForestSystem is already initialized")
+        if self._wire_args is None:
+            raise RuntimeError("RigidJointForestSystem data has not been wired")
+        _populate_rigid_joint_forest_data(
+            self,
+            self._wire_args.pop("rigid_solver"),
+            self.rigid.data,
+            proxy_data=self.contact_proxy.data,
+            n_proxy_pairs=self.contact_proxy.n_pairs,
+            **self._wire_args,
+        )
+        self._wire_args = None
+        self.is_initialized = True
 
     @property
     def selected_path(self) -> str:
-        if self.data.genesis_legacy_enabled:
+        if self.genesis_legacy_enabled:
             return "genesis_legacy"
-        if self.data.use_fused_tree_path:
+        if self.use_fused_tree_path:
             return "tree"
         return "level"
 
-    @property
-    def fused_enabled(self) -> bool:
-        return self.data.fused_enabled
-
-    @property
-    def genesis_legacy_enabled(self) -> bool:
-        return self.data.genesis_legacy_enabled
-
     def build(self) -> None:
+        from .global_linear_system import GlobalLinearSystem
         from .pcg_solver import PCGSolver
         from .rigid_contact_proxy import RigidContactProxySystem
 
@@ -125,16 +149,17 @@ class RigidJointForestSystem(SimSystem):
         self.contact_proxy = self.find(RigidContactProxySystem)
         if self.contact_proxy is None:
             raise RuntimeError("Registered RigidJointForestSystem requires RigidContactProxySystem")
+        self.linear_system_system = self.require(GlobalLinearSystem)
         pcg_solver = self.require(PCGSolver)
         self.pcg_operator_action = self.create_action(
             pcg_apply_operator,
-            self.data,
+            self,
             self.rigid.data,
             self.contact_proxy.data,
         )
         self.pcg_preconditioner_action = self.create_action(
             pcg_apply_preconditioner,
-            self.data,
+            self,
             self.rigid.data,
             self.contact_proxy.data,
         )
@@ -143,8 +168,65 @@ class RigidJointForestSystem(SimSystem):
             self.pcg_preconditioner_action,
         )
 
+    @qd.func(requires_top_level=True)
+    def on_compute_endpoint_fk(self):
+        compute_endpoint_fk(self.data, self.rigid.data, self.contact_proxy.data)
 
-def get_rigid_joint_forest_data(
+    @qd.func(requires_top_level=True)
+    def on_prepare_particular(self):
+        prepare_particular(self.data, self.rigid.data, self.contact_proxy.data)
+
+    @qd.func(requires_top_level=True)
+    def on_particular_spmv(self):
+        particular_spmv(
+            self.data,
+            self.rigid.data,
+            self.contact_proxy.data,
+            self.linear_system_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_project_physical_rhs(self):
+        project_physical_rhs(
+            self.data,
+            self.rigid.data,
+            self.contact_proxy.data,
+            self.linear_system_system.data,
+            self.genesis_legacy_enabled,
+            self.use_fused_tree_path,
+            self.n_links,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_build_preconditioner(self):
+        build_preconditioner(
+            self,
+            self.rigid.data,
+            self.contact_proxy.data,
+            self.linear_system_system.data,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_expand_solution(self):
+        expand_solution(
+            self,
+            self.rigid.data,
+            self.contact_proxy.data,
+            self.linear_system_system.data.x_sol,
+        )
+
+    @qd.func(requires_top_level=True)
+    def on_compute_merit_directional_derivative(self):
+        compute_merit_directional_derivative(
+            self.data,
+            self.rigid.data,
+            self.contact_proxy.data,
+            self.linear_system_system.data,
+        )
+
+
+def _populate_rigid_joint_forest_data(
+    system: RigidJointForestSystem,
     rigid_solver,
     rigid_data: RigidSystem.Data,
     *,
@@ -152,25 +234,21 @@ def get_rigid_joint_forest_data(
     n_rigid_bodies: int,
     proxy_dof_offset: int,
     proxy_data: RigidContactProxySystem.Data | None,
+    n_proxy_pairs: int,
     fused_enabled: bool = True,
     genesis_legacy_enabled: bool = False,
-) -> RigidJointForestSystem.Data:
-    """Construct forest topology and all work buffers before action registration."""
-    data = RigidJointForestSystem.Data()
-    data.is_initialized_host = False
-    data.fused_enabled = True
-    data.genesis_legacy_enabled = False
-    data.use_fused_tree_path = False
-    data.n_links_host = rigid_solver.n_links
-    data.n_instances_host = rigid_solver._B
-    parent_link = []
-    depth = []
-    edge_child = []
-    edge_dof_index = []
-    root_dof_index = []
+) -> None:
+    data = system.data
+    n_links = rigid_solver.n_links
+    n_instances = rigid_solver._B
+    parent_links = []
+    link_depths = []
+    edge_children = []
+    edge_dof_indices = []
+    root_dof_indices = []
     for link in rigid_solver.links:
-        parent_link.append(link.parent_idx)
-        depth.append(0 if link.parent_idx < 0 else depth[link.parent_idx] + 1)
+        parent_links.append(link.parent_idx)
+        link_depths.append(0 if link.parent_idx < 0 else link_depths[link.parent_idx] + 1)
         moving_joints = [joint for joint in link.joints if joint.n_dofs > 0]
         if link.parent_idx < 0:
             root_dof = -1
@@ -182,9 +260,9 @@ def get_rigid_joint_forest_data(
                 ):
                     raise RuntimeError("RigidJointForestSystem requires a fixed or six-DOF free Genesis root")
                 root_dof = moving_joints[0].dof_start
-            root_dof_index.append(root_dof)
+            root_dof_indices.append(root_dof)
         else:
-            root_dof_index.append(-1)
+            root_dof_indices.append(-1)
             if moving_joints:
                 if (
                     len(moving_joints) != 1
@@ -198,41 +276,28 @@ def get_rigid_joint_forest_data(
                     raise RuntimeError(
                         "RigidJointForestSystem requires scalar revolute or prismatic Genesis forest edges"
                     )
-                edge_child.append(link.idx)
-                edge_dof_index.append(moving_joints[0].dof_start)
-    data.parent_link_host = tuple(parent_link)
-    data.depth_host = tuple(depth)
-    data.edge_child_host = tuple(edge_child)
-    data.edge_dof_index_host = tuple(edge_dof_index)
-    data.root_dof_index_host = tuple(root_dof_index)
-    data.n_edges_per_instance_host = len(edge_child)
-    data.has_contact_proxy = False
-    data.fused_enabled = bool(fused_enabled)
-    data.genesis_legacy_enabled = bool(genesis_legacy_enabled)
-    data.has_contact_proxy = proxy_data is not None
-    if data.is_initialized_host:
-        raise RuntimeError("RigidJointForestSystem is already initialized")
-    n_links = data.n_links_host
-    n_instances = data.n_instances_host
+                edge_children.append(link.idx)
+                edge_dof_indices.append(moving_joints[0].dof_start)
+    if proxy_data is None:
+        raise RuntimeError("RigidJointForestSystem requires RigidContactProxySystem data")
     n_mechanism_bodies = n_links * n_instances
     if n_rigid_bodies < n_mechanism_bodies:
         raise ValueError("RigidJointForestSystem body count is smaller than Genesis link count")
     if total_dof < 0 or proxy_dof_offset < 0 or proxy_dof_offset > total_dof:
         raise ValueError("RigidJointForestSystem global DOF layout is invalid")
-    if data.has_contact_proxy:
-        required = proxy_dof_offset + proxy_data.n_pairs_host * 6
-        if required > total_dof:
-            raise ValueError("RigidJointForestSystem proxy dummy rows exceed global DOF layout")
+    required = proxy_dof_offset + n_proxy_pairs * 6
+    if required > total_dof:
+        raise ValueError("RigidJointForestSystem proxy dummy rows exceed global DOF layout")
 
     parents = np.full(n_mechanism_bodies, -1, dtype=np.int32)
     depths = np.zeros(n_mechanism_bodies, dtype=np.int32)
     for environment in range(n_instances):
         body_offset = environment * n_links
-        for link, parent_link in enumerate(data.parent_link_host):
+        for link, parent_link in enumerate(parent_links):
             body = body_offset + link
             if parent_link >= 0:
                 parents[body] = body_offset + parent_link
-                depths[body] = data.depth_host[link]
+                depths[body] = link_depths[link]
 
     children = [[] for _ in range(n_mechanism_bodies)]
     for body, parent in enumerate(parents):
@@ -263,14 +328,14 @@ def get_rigid_joint_forest_data(
     depth_start_host = np.zeros(n_links + 1, dtype=np.int32)
     np.cumsum(depth_counts, out=depth_start_host[1:])
     n_trees = len(tree_roots_host)
-    data.use_fused_tree_path = (
-        data.fused_enabled
-        and not data.genesis_legacy_enabled
+    system.use_fused_tree_path = (
+        fused_enabled
+        and not genesis_legacy_enabled
         and n_trees <= _FUSED_MAX_TREES
         and max_tree_size <= _FUSED_MAX_TREE_SIZE
     )
 
-    n_edges = data.n_edges_per_instance_host * n_instances
+    n_edges = len(edge_children) * n_instances
     parent_edge = np.full(n_mechanism_bodies, -1, dtype=np.int32)
     edge_parent = np.zeros(max(n_edges, 1), dtype=np.int32)
     edge_child = np.zeros(max(n_edges, 1), dtype=np.int32)
@@ -279,10 +344,10 @@ def get_rigid_joint_forest_data(
     edge = 0
     for environment in range(n_instances):
         body_offset = environment * n_links
-        dof_offset = environment * rigid_data.n_dofs_per_instance_host
+        dof_offset = environment * rigid_solver.n_dofs
         for child, dof in zip(
-            data.edge_child_host,
-            data.edge_dof_index_host,
+            edge_children,
+            edge_dof_indices,
             strict=True,
         ):
             body = body_offset + child
@@ -291,7 +356,7 @@ def get_rigid_joint_forest_data(
             edge_child[edge] = body
             edge_dof_index[edge] = dof_offset + dof
             edge += 1
-        for link, dof in enumerate(data.root_dof_index_host):
+        for link, dof in enumerate(root_dof_indices):
             if dof >= 0:
                 root_dof_index[body_offset + link] = dof_offset + dof
 
@@ -496,10 +561,6 @@ def get_rigid_joint_forest_data(
     data.precond_velocity.from_numpy(np.zeros((max(n_mechanism_bodies, 1), 6), dtype=np.float64))
     data.kkt_proxy_diagonal.from_numpy(np.zeros((capacity, 6, 6), dtype=np.float64))
 
-    data.n_entities_host = rigid_data.dyn_info.entities.link_start.shape[0]
-    data.is_initialized_host = True
-    return data
-
 
 @qd.func
 def _body_point_twist(
@@ -541,10 +602,10 @@ def compute_endpoint_fk(
     rigid: qd.template(),
     contact_proxy: qd.template(),
 ):
-    h = rigid.h
+    h = rigid.h[()]
     for q, environment in qd.ndrange(
         data.endpoint_qpos.shape[0],
-        data.n_instances_host,
+        rigid.n_instances[()],
     ):
         data.endpoint_qpos[q, environment] = rigid.rigid_info.qpos[
             q,
@@ -553,7 +614,7 @@ def compute_endpoint_fk(
 
     for link, environment in qd.ndrange(
         rigid.n_links[()],
-        data.n_instances_host,
+        rigid.n_instances[()],
     ):
         link_index = [link, environment] if qd.static(rigid.rigid_config.batch_links_info) else link
         for joint in range(
@@ -651,9 +712,10 @@ def compute_endpoint_fk(
                         ]
                     )
 
-    for task in range(data.n_entities_host * data.n_instances_host):
-        environment = task // data.n_entities_host
-        entity = task - environment * data.n_entities_host
+    for entity, environment in qd.ndrange(
+        rigid.dyn_info.entities.link_start.shape[0],
+        rigid.n_instances[()],
+    ):
         func_forward_kinematics_scratch(
             environment,
             environment,
@@ -833,9 +895,13 @@ def forest_expand_body_p(
 
 @qd.func(requires_top_level=True)
 def genesis_legacy_expand_reduced_direction(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    n_links: qd.template(),
 ):
-    for level in qd.static(range(data.n_links_host)):
+    for level in qd.static(range(n_links)):
         qd.loop_config(name="genesis_legacy_expand_level")
         for body in range(data.n_mechanism_bodies[()]):
             if level < data.n_levels[()] and data.depth[body] == level:
@@ -844,9 +910,13 @@ def genesis_legacy_expand_reduced_direction(
 
 @qd.func(requires_top_level=True)
 def forest_expand_level_p(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    n_links: qd.template(),
 ):
-    for level in qd.static(range(data.n_links_host)):
+    for level in qd.static(range(n_links)):
         qd.loop_config(name="forest_expand_level_p")
         for order_index in range(
             data.depth_start[level],
@@ -882,44 +952,77 @@ def forest_expand_tree_p(
 
 @qd.func(requires_top_level=True)
 def expand_reduced_direction(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     for body in range(data.n_bodies[()]):
         for component in qd.static(range(6)):
             data.body_twist[body, component] = 0.0
-    expand_reduced_direction_from_zero(data, rigid, contact_proxy, reduced)
+    expand_reduced_direction_from_zero(
+        data,
+        rigid,
+        contact_proxy,
+        reduced,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.func(requires_top_level=True)
 def expand_mechanism_direction(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
-    if qd.static(data.genesis_legacy_enabled):
-        genesis_legacy_expand_reduced_direction(data, rigid, contact_proxy, reduced)
-    elif qd.static(data.use_fused_tree_path):
+    if qd.static(genesis_legacy_enabled):
+        genesis_legacy_expand_reduced_direction(data, rigid, contact_proxy, reduced, n_links)
+    elif qd.static(use_fused_tree_path):
         forest_expand_tree_p(data, rigid, contact_proxy, reduced)
     else:
-        forest_expand_level_p(data, rigid, contact_proxy, reduced)
+        forest_expand_level_p(data, rigid, contact_proxy, reduced, n_links)
 
 
 @qd.func(requires_top_level=True)
 def expand_reduced_direction_from_zero(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
-    expand_mechanism_direction(data, rigid, contact_proxy, reduced)
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            mechanism = contact_proxy.mechanism_body[pair]
-            proxy = contact_proxy.proxy_body[pair]
-            tangent = qd.Matrix.zero(qd.f64, 6, 6)
-            mechanism_twist = qd.Vector.zero(qd.f64, 6)
-            for row in qd.static(range(6)):
-                mechanism_twist[row] = data.body_twist[mechanism, row]
-                for column in qd.static(range(6)):
-                    tangent[row, column] = contact_proxy.tangent_map[pair, row, column]
-            proxy_twist = expand_proxy_twist(tangent, mechanism_twist)
-            for component in qd.static(range(6)):
-                data.body_twist[proxy, component] = proxy_twist[component]
+    expand_mechanism_direction(
+        data,
+        rigid,
+        contact_proxy,
+        reduced,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
+    for pair in range(contact_proxy.n_pairs[()]):
+        mechanism = contact_proxy.mechanism_body[pair]
+        proxy = contact_proxy.proxy_body[pair]
+        tangent = qd.Matrix.zero(qd.f64, 6, 6)
+        mechanism_twist = qd.Vector.zero(qd.f64, 6)
+        for row in qd.static(range(6)):
+            mechanism_twist[row] = data.body_twist[mechanism, row]
+            for column in qd.static(range(6)):
+                tangent[row, column] = contact_proxy.tangent_map[pair, row, column]
+        proxy_twist = expand_proxy_twist(tangent, mechanism_twist)
+        for component in qd.static(range(6)):
+            data.body_twist[proxy, component] = proxy_twist[component]
 
 
 @qd.func(requires_top_level=True)
@@ -939,19 +1042,18 @@ def restrict_proxy_wrenches(
     rigid: qd.template(),
     contact_proxy: qd.template(),
 ):
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            mechanism = contact_proxy.mechanism_body[pair]
-            proxy = contact_proxy.proxy_body[pair]
-            tangent = qd.Matrix.zero(qd.f64, 6, 6)
-            proxy_wrench = qd.Vector.zero(qd.f64, 6)
-            for row in qd.static(range(6)):
-                proxy_wrench[row] = data.body_wrench[proxy, row]
-                for column in qd.static(range(6)):
-                    tangent[row, column] = contact_proxy.tangent_map[pair, row, column]
-            mapped = restrict_proxy_wrench(tangent, proxy_wrench)
-            for component in qd.static(range(6)):
-                qd.atomic_add(data.body_wrench[mechanism, component], mapped[component])
+    for pair in range(contact_proxy.n_pairs[()]):
+        mechanism = contact_proxy.mechanism_body[pair]
+        proxy = contact_proxy.proxy_body[pair]
+        tangent = qd.Matrix.zero(qd.f64, 6, 6)
+        proxy_wrench = qd.Vector.zero(qd.f64, 6)
+        for row in qd.static(range(6)):
+            proxy_wrench[row] = data.body_wrench[proxy, row]
+            for column in qd.static(range(6)):
+                tangent[row, column] = contact_proxy.tangent_map[pair, row, column]
+        mapped = restrict_proxy_wrench(tangent, proxy_wrench)
+        for component in qd.static(range(6)):
+            qd.atomic_add(data.body_wrench[mechanism, component], mapped[component])
 
 
 @qd.func
@@ -1093,9 +1195,13 @@ def forest_project_body_Ap(
 
 @qd.func(requires_top_level=True)
 def genesis_legacy_restrict_body_wrenches(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    n_links: qd.template(),
 ):
-    for reverse_level in qd.static(range(data.n_links_host)):
+    for reverse_level in qd.static(range(n_links)):
         level = data.max_depth[()] - reverse_level
         qd.loop_config(name="genesis_legacy_project_level")
         for body in range(data.n_mechanism_bodies[()]):
@@ -1105,10 +1211,14 @@ def genesis_legacy_restrict_body_wrenches(
 
 @qd.func(requires_top_level=True)
 def forest_project_level_Ap(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    n_links: qd.template(),
 ):
-    for reverse_level in qd.static(range(data.n_links_host)):
-        level = data.n_links_host - reverse_level - 1
+    for reverse_level in qd.static(range(n_links)):
+        level = n_links - reverse_level - 1
         qd.loop_config(name="forest_project_level_Ap")
         for order_index in range(
             data.depth_start[level],
@@ -1147,14 +1257,20 @@ def forest_project_tree_Ap(
 
 @qd.func(requires_top_level=True)
 def restrict_body_wrenches(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
-    if qd.static(data.genesis_legacy_enabled):
-        genesis_legacy_restrict_body_wrenches(data, rigid, contact_proxy, reduced)
-    elif qd.static(data.use_fused_tree_path):
+    if qd.static(genesis_legacy_enabled):
+        genesis_legacy_restrict_body_wrenches(data, rigid, contact_proxy, reduced, n_links)
+    elif qd.static(use_fused_tree_path):
         forest_project_tree_Ap(data, rigid, contact_proxy, reduced)
     else:
-        forest_project_level_Ap(data, rigid, contact_proxy, reduced)
+        forest_project_level_Ap(data, rigid, contact_proxy, reduced, n_links)
 
 
 @qd.func(requires_top_level=True)
@@ -1165,12 +1281,11 @@ def prepare_particular(
 ):
     for dof in range(data.total_dof[()]):
         data.physical_p[dof] = 0.0
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            for component in qd.static(range(6)):
-                data.physical_p[data.proxy_dof_offset[()] + pair * 6 + component] = contact_proxy.particular[
-                    pair, component
-                ]
+    for pair in range(contact_proxy.n_pairs[()]):
+        for component in qd.static(range(6)):
+            data.physical_p[data.proxy_dof_offset[()] + pair * 6 + component] = contact_proxy.particular[
+                pair, component
+            ]
 
 
 @qd.func(requires_top_level=True)
@@ -1184,63 +1299,100 @@ def particular_spmv(
 
 @qd.func(requires_top_level=True)
 def project_physical_rhs(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), linear_system_data: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    linear_system_data: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     for dof in range(data.proxy_dof_offset[()]):
-        linear_system_data.b_rhs[dof] = linear_system_data.b_rhs[dof] + data.physical_Ap[dof]
+        linear_system_data.write_rhs(dof, linear_system_data.read_rhs(dof) + data.physical_Ap[dof])
 
     clear_body_wrench(data, rigid, contact_proxy)
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            proxy = contact_proxy.proxy_body[pair]
-            offset = data.proxy_dof_offset[()] + pair * 6
-            proxy_wrench = qd.Vector.zero(qd.f64, 6)
-            normal = qd.Matrix.zero(qd.f64, 6, 6)
-            for row in qd.static(range(6)):
-                proxy_wrench[row] = linear_system_data.b_rhs[offset + row] + data.physical_Ap[offset + row]
-                data.body_wrench[proxy, row] = proxy_wrench[row]
-                for column in qd.static(range(6)):
-                    normal[row, column] = contact_proxy.normal_map[pair, row, column]
+    for pair in range(contact_proxy.n_pairs[()]):
+        proxy = contact_proxy.proxy_body[pair]
+        offset = data.proxy_dof_offset[()] + pair * 6
+        proxy_wrench = qd.Vector.zero(qd.f64, 6)
+        normal = qd.Matrix.zero(qd.f64, 6, 6)
+        for row in qd.static(range(6)):
+            proxy_wrench[row] = linear_system_data.read_rhs(offset + row) + data.physical_Ap[offset + row]
+            data.body_wrench[proxy, row] = proxy_wrench[row]
+            for column in qd.static(range(6)):
+                normal[row, column] = contact_proxy.normal_map[pair, row, column]
 
-            if contact_proxy.restoration_active[()] != 0:
-                slack_rhs = restrict_slack_wrench(normal, proxy_wrench) + qd.Vector(
-                    [
-                        contact_proxy.lambda_[pair, 0],
-                        contact_proxy.lambda_[pair, 1],
-                        contact_proxy.lambda_[pair, 2],
-                        contact_proxy.lambda_[pair, 3],
-                        contact_proxy.lambda_[pair, 4],
-                        contact_proxy.lambda_[pair, 5],
-                    ]
-                )
-                for component in qd.static(range(6)):
-                    linear_system_data.b_rhs[offset + component] = slack_rhs[component]
-            else:
-                for component in qd.static(range(6)):
-                    linear_system_data.b_rhs[offset + component] = 0.0
+        if contact_proxy.restoration_active[()] != 0:
+            slack_rhs = restrict_slack_wrench(normal, proxy_wrench) + qd.Vector(
+                [
+                    contact_proxy.lambda_[pair, 0],
+                    contact_proxy.lambda_[pair, 1],
+                    contact_proxy.lambda_[pair, 2],
+                    contact_proxy.lambda_[pair, 3],
+                    contact_proxy.lambda_[pair, 4],
+                    contact_proxy.lambda_[pair, 5],
+                ]
+            )
+            for component in qd.static(range(6)):
+                linear_system_data.write_rhs(offset + component, slack_rhs[component])
+        else:
+            for component in qd.static(range(6)):
+                linear_system_data.write_rhs(offset + component, 0.0)
     restrict_proxy_wrenches(data, rigid, contact_proxy)
-    restrict_body_wrenches(data, rigid, contact_proxy, linear_system_data.b_rhs)
+    restrict_body_wrenches(
+        data,
+        rigid,
+        contact_proxy,
+        linear_system_data.b_rhs,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.func(requires_top_level=True)
 def pcg_apply_operator(
-    data: qd.template(),
+    system: qd.template(),
     rigid: qd.template(),
     contact_proxy: qd.template(),
     linear_system_data: qd.template(),
     direction: qd.template(),
     output: qd.template(),
 ):
+    data = system.data
     for dof in range(linear_system_data.total_dof[()]):
         data.physical_Ap[dof] = qd.f64(0.0)
-    prepare_physical_direction(data, rigid, contact_proxy, direction)
+    prepare_physical_direction(
+        data,
+        rigid,
+        contact_proxy,
+        direction,
+        system.genesis_legacy_enabled,
+        system.use_fused_tree_path,
+        system.n_links,
+    )
     sym_bcoo_spmv_naive(linear_system_data.matrix, data.physical_p, data.physical_Ap)
-    finish_reduced_spmv(data, rigid, contact_proxy, direction, output)
+    finish_reduced_spmv(
+        data,
+        rigid,
+        contact_proxy,
+        direction,
+        output,
+        system.genesis_legacy_enabled,
+        system.use_fused_tree_path,
+        system.n_links,
+    )
 
 
 @qd.func(requires_top_level=True)
 def prepare_physical_direction(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    reduced: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     for dof in range(data.total_dof[()]):
         data.physical_p[dof] = reduced[dof]
@@ -1248,33 +1400,40 @@ def prepare_physical_direction(
             body = dof // 6
             component = dof - body * 6
             data.body_twist[body, component] = 0.0
-    expand_mechanism_direction(data, rigid, contact_proxy, reduced)
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            mechanism = contact_proxy.mechanism_body[pair]
-            proxy = contact_proxy.proxy_body[pair]
-            tangent = qd.Matrix.zero(qd.f64, 6, 6)
-            normal = qd.Matrix.zero(qd.f64, 6, 6)
-            mechanism_twist = qd.Vector.zero(qd.f64, 6)
-            slack = qd.Vector.zero(qd.f64, 6)
-            offset = data.proxy_dof_offset[()] + pair * 6
-            for row in qd.static(range(6)):
-                mechanism_twist[row] = data.body_twist[mechanism, row]
-                slack[row] = reduced[offset + row]
-                for column in qd.static(range(6)):
-                    tangent[row, column] = contact_proxy.tangent_map[
-                        pair,
-                        row,
-                        column,
-                    ]
-                    normal[row, column] = contact_proxy.normal_map[pair, row, column]
-            value = expand_proxy_twist(tangent, mechanism_twist)
-            for component in qd.static(range(6)):
-                data.body_twist[proxy, component] = value[component]
-            if contact_proxy.restoration_active[()] != 0:
-                value = value + expand_slack_twist(normal, slack)
-            for component in qd.static(range(6)):
-                data.physical_p[offset + component] = value[component]
+    expand_mechanism_direction(
+        data,
+        rigid,
+        contact_proxy,
+        reduced,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
+    for pair in range(contact_proxy.n_pairs[()]):
+        mechanism = contact_proxy.mechanism_body[pair]
+        proxy = contact_proxy.proxy_body[pair]
+        tangent = qd.Matrix.zero(qd.f64, 6, 6)
+        normal = qd.Matrix.zero(qd.f64, 6, 6)
+        mechanism_twist = qd.Vector.zero(qd.f64, 6)
+        slack = qd.Vector.zero(qd.f64, 6)
+        offset = data.proxy_dof_offset[()] + pair * 6
+        for row in qd.static(range(6)):
+            mechanism_twist[row] = data.body_twist[mechanism, row]
+            slack[row] = reduced[offset + row]
+            for column in qd.static(range(6)):
+                tangent[row, column] = contact_proxy.tangent_map[
+                    pair,
+                    row,
+                    column,
+                ]
+                normal[row, column] = contact_proxy.normal_map[pair, row, column]
+        value = expand_proxy_twist(tangent, mechanism_twist)
+        for component in qd.static(range(6)):
+            data.body_twist[proxy, component] = value[component]
+        if contact_proxy.restoration_active[()] != 0:
+            value = value + expand_slack_twist(normal, slack)
+        for component in qd.static(range(6)):
+            data.physical_p[offset + component] = value[component]
 
 
 @qd.func(requires_top_level=True)
@@ -1284,6 +1443,9 @@ def finish_reduced_spmv(
     contact_proxy: qd.template(),
     reduced: qd.template(),
     result: qd.template(),
+    genesis_legacy_enabled: qd.template(),
+    use_fused_tree_path: qd.template(),
+    n_links: qd.template(),
 ):
     for dof in range(data.proxy_dof_offset[()]):
         result[dof] = result[dof] + data.physical_Ap[dof]
@@ -1291,42 +1453,49 @@ def finish_reduced_spmv(
     # RigidSystem contributes Genesis native curvature. This projection
     # adds only the physical BCOO/contact wrench to generalized rows.
     clear_body_wrench(data, rigid, contact_proxy)
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            mechanism = contact_proxy.mechanism_body[pair]
-            proxy = contact_proxy.proxy_body[pair]
-            offset = data.proxy_dof_offset[()] + pair * 6
-            proxy_wrench = qd.Vector.zero(qd.f64, 6)
-            tangent = qd.Matrix.zero(qd.f64, 6, 6)
-            normal = qd.Matrix.zero(qd.f64, 6, 6)
-            metric = qd.Matrix.zero(qd.f64, 6, 6)
-            slack = qd.Vector.zero(qd.f64, 6)
-            for row in qd.static(range(6)):
-                proxy_wrench[row] = data.physical_Ap[offset + row]
-                data.body_wrench[proxy, row] = proxy_wrench[row]
-                slack[row] = reduced[offset + row]
-                for column in qd.static(range(6)):
-                    tangent[row, column] = contact_proxy.tangent_map[
-                        pair,
-                        row,
-                        column,
-                    ]
-                    normal[row, column] = contact_proxy.normal_map[pair, row, column]
-                    metric[row, column] = contact_proxy.metric[pair, row, column]
-            mapped = restrict_proxy_wrench(tangent, proxy_wrench)
+    for pair in range(contact_proxy.n_pairs[()]):
+        mechanism = contact_proxy.mechanism_body[pair]
+        proxy = contact_proxy.proxy_body[pair]
+        offset = data.proxy_dof_offset[()] + pair * 6
+        proxy_wrench = qd.Vector.zero(qd.f64, 6)
+        tangent = qd.Matrix.zero(qd.f64, 6, 6)
+        normal = qd.Matrix.zero(qd.f64, 6, 6)
+        metric = qd.Matrix.zero(qd.f64, 6, 6)
+        slack = qd.Vector.zero(qd.f64, 6)
+        for row in qd.static(range(6)):
+            proxy_wrench[row] = data.physical_Ap[offset + row]
+            data.body_wrench[proxy, row] = proxy_wrench[row]
+            slack[row] = reduced[offset + row]
+            for column in qd.static(range(6)):
+                tangent[row, column] = contact_proxy.tangent_map[
+                    pair,
+                    row,
+                    column,
+                ]
+                normal[row, column] = contact_proxy.normal_map[pair, row, column]
+                metric[row, column] = contact_proxy.metric[pair, row, column]
+        mapped = restrict_proxy_wrench(tangent, proxy_wrench)
+        for component in qd.static(range(6)):
+            qd.atomic_add(
+                data.body_wrench[mechanism, component],
+                mapped[component],
+            )
+        if contact_proxy.restoration_active[()] != 0:
+            slack_result = restrict_slack_wrench(normal, proxy_wrench) + metric @ slack
             for component in qd.static(range(6)):
-                qd.atomic_add(
-                    data.body_wrench[mechanism, component],
-                    mapped[component],
-                )
-            if contact_proxy.restoration_active[()] != 0:
-                slack_result = restrict_slack_wrench(normal, proxy_wrench) + metric @ slack
-                for component in qd.static(range(6)):
-                    result[offset + component] = result[offset + component] + slack_result[component]
-            else:
-                for component in qd.static(range(6)):
-                    result[offset + component] = result[offset + component] + reduced[offset + component]
-    restrict_body_wrenches(data, rigid, contact_proxy, result)
+                result[offset + component] = result[offset + component] + slack_result[component]
+        else:
+            for component in qd.static(range(6)):
+                result[offset + component] = result[offset + component] + reduced[offset + component]
+    restrict_body_wrenches(
+        data,
+        rigid,
+        contact_proxy,
+        result,
+        genesis_legacy_enabled,
+        use_fused_tree_path,
+        n_links,
+    )
 
 
 @qd.func(requires_top_level=True)
@@ -1359,42 +1528,55 @@ def forest_control_matvec(
         rigid.n_instances[()],
     ):
         dof_index = [dof, environment] if qd.static(rigid.rigid_config.batch_dofs_info) else dof
-        augmentation = rigid.dyn_info.dofs.armature[dof_index] + rigid.h * rigid.dyn_info.dofs.damping[dof_index]
+        augmentation = rigid.dyn_info.dofs.armature[dof_index] + rigid.h[()] * rigid.dyn_info.dofs.damping[dof_index]
         if rigid.dyn_state.dofs.ctrl_mode[dof, environment] <= gs.CTRL_MODE.VELOCITY:
-            augmentation = augmentation - rigid.dyn_info.dofs.act_bias[dof_index][2] * rigid.h
+            augmentation = augmentation - rigid.dyn_info.dofs.act_bias[dof_index][2] * rigid.h[()]
         reduced_index = rigid.dof_offset[()] + environment * rigid.n_dofs_per_instance[()] + dof
         result[reduced_index] = result[reduced_index] + augmentation * reduced[reduced_index]
 
 
 @qd.func(requires_top_level=True)
-def expand_solution(data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), solution: qd.template()):
-    expand_reduced_direction(data, rigid, contact_proxy, solution)
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            proxy = contact_proxy.proxy_body[pair]
-            offset = data.proxy_dof_offset[()] + pair * 6
-            normal = qd.Matrix.zero(qd.f64, 6, 6)
-            slack = qd.Vector.zero(qd.f64, 6)
-            for row in qd.static(range(6)):
-                slack[row] = solution[offset + row]
-                for column in qd.static(range(6)):
-                    normal[row, column] = contact_proxy.normal_map[pair, row, column]
-            value = qd.Vector.zero(qd.f64, 6)
+def expand_solution(
+    system: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    solution: qd.template(),
+):
+    data = system.data
+    expand_reduced_direction(
+        data,
+        rigid,
+        contact_proxy,
+        solution,
+        system.genesis_legacy_enabled,
+        system.use_fused_tree_path,
+        system.n_links,
+    )
+    for pair in range(contact_proxy.n_pairs[()]):
+        proxy = contact_proxy.proxy_body[pair]
+        offset = data.proxy_dof_offset[()] + pair * 6
+        normal = qd.Matrix.zero(qd.f64, 6, 6)
+        slack = qd.Vector.zero(qd.f64, 6)
+        for row in qd.static(range(6)):
+            slack[row] = solution[offset + row]
+            for column in qd.static(range(6)):
+                normal[row, column] = contact_proxy.normal_map[pair, row, column]
+        value = qd.Vector.zero(qd.f64, 6)
+        for component in qd.static(range(6)):
+            value[component] = contact_proxy.particular[pair, component] - data.body_twist[proxy, component]
+        if contact_proxy.restoration_active[()] != 0:
+            value = value - expand_slack_twist(normal, slack)
             for component in qd.static(range(6)):
-                value[component] = contact_proxy.particular[pair, component] - data.body_twist[proxy, component]
-            if contact_proxy.restoration_active[()] != 0:
-                value = value - expand_slack_twist(normal, slack)
-                for component in qd.static(range(6)):
-                    contact_proxy.slack[pair, component] = -slack[component]
-                qd.atomic_max(
-                    contact_proxy.restoration_max_slack[()],
-                    slack.norm(),
-                )
-            else:
-                for component in qd.static(range(6)):
-                    contact_proxy.slack[pair, component] = 0.0
+                contact_proxy.slack[pair, component] = -slack[component]
+            qd.atomic_max(
+                contact_proxy.restoration_max_slack[()],
+                slack.norm(),
+            )
+        else:
             for component in qd.static(range(6)):
-                contact_proxy.dq[pair, component] = value[component]
+                contact_proxy.slack[pair, component] = 0.0
+        for component in qd.static(range(6)):
+            contact_proxy.dq[pair, component] = value[component]
 
 
 @qd.func
@@ -1513,8 +1695,9 @@ def _root_basis(data: qd.template(), rigid: qd.template(), contact_proxy: qd.tem
 
 @qd.func(requires_top_level=True)
 def build_preconditioner(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), linear_system_data: qd.template()
+    system: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), linear_system_data: qd.template()
 ):
+    data = system.data
     for body in range(data.n_mechanism_bodies[()]):
         environment = body // rigid.n_links[()]
         link = body - environment * rigid.n_links[()]
@@ -1577,118 +1760,112 @@ def build_preconditioner(
             for column in qd.static(range(6)):
                 data.edge_hessian[edge, row, column] = 0.0
 
-    if qd.static(data.has_contact_proxy):
-        matrix = linear_system_data.matrix
-        proxy_block_base = data.proxy_dof_offset[()] // 3
-        proxy_block_end = proxy_block_base + contact_proxy.n_pairs[()] * 2
-        for index in range(matrix.bcoo_nnz[()]):
-            block_row = matrix.bcoo_row[index]
-            block_col = matrix.bcoo_col[index]
-            if (
-                block_row >= proxy_block_base
-                and block_row < proxy_block_end
-                and block_col >= proxy_block_base
-                and block_col < proxy_block_end
-            ):
-                local_row = block_row - proxy_block_base
-                local_col = block_col - proxy_block_base
-                pair_row = local_row // 2
-                pair_col = local_col // 2
-                row_block = local_row - pair_row * 2
-                col_block = local_col - pair_col * 2
-                hessian = qd.Matrix.zero(qd.f64, 3, 3)
+    matrix = linear_system_data.matrix
+    proxy_block_base = data.proxy_dof_offset[()] // 3
+    proxy_block_end = proxy_block_base + contact_proxy.n_pairs[()] * 2
+    for index in range(matrix.bcoo_nnz[()]):
+        block_row, block_col, hessian = matrix.read_bcoo(index)
+        if (
+            block_row >= proxy_block_base
+            and block_row < proxy_block_end
+            and block_col >= proxy_block_base
+            and block_col < proxy_block_end
+        ):
+            local_row = block_row - proxy_block_base
+            local_col = block_col - proxy_block_base
+            pair_row = local_row // 2
+            pair_col = local_col // 2
+            row_block = local_row - pair_row * 2
+            col_block = local_col - pair_col * 2
+
+            proxy_row = contact_proxy.proxy_body[pair_row]
+            proxy_col = contact_proxy.proxy_body[pair_col]
+            if proxy_row == proxy_col:
                 for row in qd.static(range(3)):
                     for column in qd.static(range(3)):
-                        hessian[row, column] = matrix.bcoo_val[index * 9 + row * 3 + column]
-
-                proxy_row = contact_proxy.proxy_body[pair_row]
-                proxy_col = contact_proxy.proxy_body[pair_col]
-                if proxy_row == proxy_col:
-                    for row in qd.static(range(3)):
-                        for column in qd.static(range(3)):
+                        qd.atomic_add(
+                            data.kkt_proxy_diagonal[
+                                proxy_row,
+                                row_block * 3 + row,
+                                col_block * 3 + column,
+                            ],
+                            hessian[row, column],
+                        )
+                        if block_row != block_col:
                             qd.atomic_add(
                                 data.kkt_proxy_diagonal[
                                     proxy_row,
-                                    row_block * 3 + row,
                                     col_block * 3 + column,
+                                    row_block * 3 + row,
                                 ],
                                 hessian[row, column],
                             )
-                            if block_row != block_col:
-                                qd.atomic_add(
-                                    data.kkt_proxy_diagonal[
-                                        proxy_row,
-                                        col_block * 3 + column,
-                                        row_block * 3 + row,
-                                    ],
-                                    hessian[row, column],
-                                )
 
-                tangent_row = qd.Matrix.zero(qd.f64, 3, 6)
-                tangent_col = qd.Matrix.zero(qd.f64, 3, 6)
-                for row in qd.static(range(3)):
+            tangent_row = qd.Matrix.zero(qd.f64, 3, 6)
+            tangent_col = qd.Matrix.zero(qd.f64, 3, 6)
+            for row in qd.static(range(3)):
+                for column in qd.static(range(6)):
+                    tangent_row[row, column] = contact_proxy.tangent_map[
+                        pair_row,
+                        row_block * 3 + row,
+                        column,
+                    ]
+                    tangent_col[row, column] = contact_proxy.tangent_map[
+                        pair_col,
+                        col_block * 3 + row,
+                        column,
+                    ]
+            mapped = tangent_row.transpose() @ hessian @ tangent_col
+            owner_row = contact_proxy.mechanism_body[pair_row]
+            owner_col = contact_proxy.mechanism_body[pair_col]
+            if owner_row == owner_col:
+                for row in qd.static(range(6)):
                     for column in qd.static(range(6)):
-                        tangent_row[row, column] = contact_proxy.tangent_map[
-                            pair_row,
-                            row_block * 3 + row,
-                            column,
-                        ]
-                        tangent_col[row, column] = contact_proxy.tangent_map[
-                            pair_col,
-                            col_block * 3 + row,
-                            column,
-                        ]
-                mapped = tangent_row.transpose() @ hessian @ tangent_col
-                owner_row = contact_proxy.mechanism_body[pair_row]
-                owner_col = contact_proxy.mechanism_body[pair_col]
-                if owner_row == owner_col:
-                    for row in qd.static(range(6)):
-                        for column in qd.static(range(6)):
+                        qd.atomic_add(
+                            data.articulated_inertia[
+                                owner_row,
+                                row,
+                                column,
+                            ],
+                            mapped[row, column],
+                        )
+                        if block_row != block_col:
                             qd.atomic_add(
                                 data.articulated_inertia[
                                     owner_row,
+                                    column,
+                                    row,
+                                ],
+                                mapped[row, column],
+                            )
+            elif data.parent_body[owner_col] == owner_row:
+                edge = data.parent_edge[owner_col]
+                if edge >= 0:
+                    for row in qd.static(range(6)):
+                        for column in qd.static(range(6)):
+                            qd.atomic_add(
+                                data.edge_hessian[
+                                    edge,
                                     row,
                                     column,
                                 ],
                                 mapped[row, column],
                             )
-                            if block_row != block_col:
-                                qd.atomic_add(
-                                    data.articulated_inertia[
-                                        owner_row,
-                                        column,
-                                        row,
-                                    ],
-                                    mapped[row, column],
-                                )
-                elif data.parent_body[owner_col] == owner_row:
-                    edge = data.parent_edge[owner_col]
-                    if edge >= 0:
-                        for row in qd.static(range(6)):
-                            for column in qd.static(range(6)):
-                                qd.atomic_add(
-                                    data.edge_hessian[
-                                        edge,
-                                        row,
-                                        column,
-                                    ],
-                                    mapped[row, column],
-                                )
-                elif data.parent_body[owner_row] == owner_col:
-                    edge = data.parent_edge[owner_row]
-                    if edge >= 0:
-                        for row in qd.static(range(6)):
-                            for column in qd.static(range(6)):
-                                qd.atomic_add(
-                                    data.edge_hessian[
-                                        edge,
-                                        column,
-                                        row,
-                                    ],
-                                    mapped[row, column],
-                                )
+            elif data.parent_body[owner_row] == owner_col:
+                edge = data.parent_edge[owner_row]
+                if edge >= 0:
+                    for row in qd.static(range(6)):
+                        for column in qd.static(range(6)):
+                            qd.atomic_add(
+                                data.edge_hessian[
+                                    edge,
+                                    column,
+                                    row,
+                                ],
+                                mapped[row, column],
+                            )
 
-    for reverse_level in qd.static(range(data.n_links_host)):
+    for reverse_level in qd.static(range(system.n_links)):
         level = data.max_depth[()] - reverse_level
         for body in range(data.n_mechanism_bodies[()]):
             if reverse_level < data.max_depth[()] and data.depth[body] == level:
@@ -1720,11 +1897,11 @@ def build_preconditioner(
                         ]
                         <= gs.CTRL_MODE.VELOCITY
                     ):
-                        actuator_damping = -rigid.dyn_info.dofs.act_bias[dof_index][2] * rigid.h
+                        actuator_damping = -rigid.dyn_info.dofs.act_bias[dof_index][2] * rigid.h[()]
                     pivot = qd.max(
                         basis.dot(articulated @ basis)
                         + rigid.dyn_info.dofs.armature[dof_index]
-                        + rigid.h * rigid.dyn_info.dofs.damping[dof_index]
+                        + rigid.h[()] * rigid.dyn_info.dofs.damping[dof_index]
                         + actuator_damping,
                         qd.f64(1.0e-12),
                     )
@@ -1766,11 +1943,11 @@ def build_preconditioner(
                     ]
                     <= gs.CTRL_MODE.VELOCITY
                 ):
-                    actuator_damping = -rigid.dyn_info.dofs.act_bias[dof_index][2] * rigid.h
+                    actuator_damping = -rigid.dyn_info.dofs.act_bias[dof_index][2] * rigid.h[()]
                 root_hessian[dof, dof] = (
                     root_hessian[dof, dof]
                     + rigid.dyn_info.dofs.armature[dof_index]
-                    + rigid.h * rigid.dyn_info.dofs.damping[dof_index]
+                    + rigid.h[()] * rigid.dyn_info.dofs.damping[dof_index]
                     + actuator_damping
                 )
             inverse = root_hessian.inverse()
@@ -1781,38 +1958,37 @@ def build_preconditioner(
                         column,
                     ]
 
-    if qd.static(data.has_contact_proxy):
-        for pair in range(contact_proxy.n_pairs[()]):
-            if contact_proxy.restoration_active[()] != 0:
-                proxy = contact_proxy.proxy_body[pair]
-                diagonal = qd.Matrix.zero(qd.f64, 6, 6)
-                normal = qd.Matrix.zero(qd.f64, 6, 6)
-                metric = qd.Matrix.zero(qd.f64, 6, 6)
-                for row in qd.static(range(6)):
-                    for column in qd.static(range(6)):
-                        diagonal[row, column] = data.kkt_proxy_diagonal[
-                            proxy,
-                            row,
-                            column,
-                        ]
-                        normal[row, column] = contact_proxy.normal_map[
-                            pair,
-                            row,
-                            column,
-                        ]
-                        metric[row, column] = contact_proxy.metric[
-                            pair,
-                            row,
-                            column,
-                        ]
-                inverse = (normal.transpose() @ diagonal @ normal + metric).inverse()
-                for row in qd.static(range(6)):
-                    for column in qd.static(range(6)):
-                        data.kkt_proxy_diagonal[
-                            proxy,
-                            row,
-                            column,
-                        ] = inverse[row, column]
+    for pair in range(contact_proxy.n_pairs[()]):
+        if contact_proxy.restoration_active[()] != 0:
+            proxy = contact_proxy.proxy_body[pair]
+            diagonal = qd.Matrix.zero(qd.f64, 6, 6)
+            normal = qd.Matrix.zero(qd.f64, 6, 6)
+            metric = qd.Matrix.zero(qd.f64, 6, 6)
+            for row in qd.static(range(6)):
+                for column in qd.static(range(6)):
+                    diagonal[row, column] = data.kkt_proxy_diagonal[
+                        proxy,
+                        row,
+                        column,
+                    ]
+                    normal[row, column] = contact_proxy.normal_map[
+                        pair,
+                        row,
+                        column,
+                    ]
+                    metric[row, column] = contact_proxy.metric[
+                        pair,
+                        row,
+                        column,
+                    ]
+            inverse = (normal.transpose() @ diagonal @ normal + metric).inverse()
+            for row in qd.static(range(6)):
+                for column in qd.static(range(6)):
+                    data.kkt_proxy_diagonal[
+                        proxy,
+                        row,
+                        column,
+                    ] = inverse[row, column]
 
 
 @qd.func(requires_top_level=True)
@@ -1982,6 +2158,7 @@ def forest_precond_apply_level(
     contact_proxy: qd.template(),
     residual: qd.template(),
     result: qd.template(),
+    n_links: qd.template(),
 ):
     for dof in range(rigid.n_storage_dofs[()]):
         result[rigid.dof_offset[()] + dof] = 0.0
@@ -1990,7 +2167,7 @@ def forest_precond_apply_level(
             data.precond_force[body, component] = 0.0
             data.precond_velocity[body, component] = 0.0
 
-    for reverse_level in qd.static(range(data.n_links_host)):
+    for reverse_level in qd.static(range(n_links)):
         level = data.max_depth[()] - reverse_level
         for body in range(data.n_mechanism_bodies[()]):
             if reverse_level < data.max_depth[()] and data.depth[body] == level:
@@ -2040,7 +2217,7 @@ def forest_precond_apply_level(
                 result[rigid.dof_offset[()] + root_dof + component] = solved[component]
                 data.precond_velocity[body, component] = velocity[component]
 
-    for level_slot in qd.static(range(data.n_links_host)):
+    for level_slot in qd.static(range(n_links)):
         level = level_slot + 1
         for body in range(data.n_mechanism_bodies[()]):
             if level_slot < data.max_depth[()] and data.depth[body] == level:
@@ -2070,7 +2247,57 @@ def forest_precond_apply_level(
         offset = rigid.dof_offset[()] + dof
         result[offset] = residual[offset]
 
-    if qd.static(data.has_contact_proxy):
+    for pair in range(contact_proxy.n_pairs[()]):
+        offset = data.proxy_dof_offset[()] + pair * 6
+        if contact_proxy.restoration_active[()] == 0:
+            for component in qd.static(range(6)):
+                result[offset + component] = residual[offset + component]
+        else:
+            proxy = contact_proxy.proxy_body[pair]
+            inverse = qd.Matrix.zero(qd.f64, 6, 6)
+            rhs = qd.Vector.zero(qd.f64, 6)
+            for row in qd.static(range(6)):
+                rhs[row] = residual[offset + row]
+                for column in qd.static(range(6)):
+                    inverse[row, column] = data.kkt_proxy_diagonal[
+                        proxy,
+                        row,
+                        column,
+                    ]
+            value = inverse @ rhs
+            for component in qd.static(range(6)):
+                result[offset + component] = value[component]
+
+
+@qd.func(requires_top_level=True)
+def pcg_apply_preconditioner(
+    system: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    residual: qd.template(),
+    output: qd.template(),
+):
+    apply_preconditioner(system, rigid, contact_proxy, residual, output)
+
+
+@qd.func(requires_top_level=True)
+def apply_preconditioner(
+    system: qd.template(),
+    rigid: qd.template(),
+    contact_proxy: qd.template(),
+    residual: qd.template(),
+    result: qd.template(),
+):
+    data = system.data
+    if qd.static(system.use_fused_tree_path):
+        forest_precond_apply_tree_shared(data, rigid, contact_proxy, residual, result)
+        for dof in range(
+            rigid.n_dofs[()],
+            rigid.n_storage_dofs[()],
+        ):
+            offset = rigid.dof_offset[()] + dof
+            result[offset] = residual[offset]
+
         for pair in range(contact_proxy.n_pairs[()]):
             offset = data.proxy_dof_offset[()] + pair * 6
             if contact_proxy.restoration_active[()] == 0:
@@ -2091,59 +2318,8 @@ def forest_precond_apply_level(
                 value = inverse @ rhs
                 for component in qd.static(range(6)):
                     result[offset + component] = value[component]
-
-
-@qd.func(requires_top_level=True)
-def pcg_apply_preconditioner(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    residual: qd.template(),
-    output: qd.template(),
-):
-    apply_preconditioner(data, rigid, contact_proxy, residual, output)
-
-
-@qd.func(requires_top_level=True)
-def apply_preconditioner(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    residual: qd.template(),
-    result: qd.template(),
-):
-    if qd.static(data.use_fused_tree_path):
-        forest_precond_apply_tree_shared(data, rigid, contact_proxy, residual, result)
-        for dof in range(
-            rigid.n_dofs[()],
-            rigid.n_storage_dofs[()],
-        ):
-            offset = rigid.dof_offset[()] + dof
-            result[offset] = residual[offset]
-
-        if qd.static(data.has_contact_proxy):
-            for pair in range(contact_proxy.n_pairs[()]):
-                offset = data.proxy_dof_offset[()] + pair * 6
-                if contact_proxy.restoration_active[()] == 0:
-                    for component in qd.static(range(6)):
-                        result[offset + component] = residual[offset + component]
-                else:
-                    proxy = contact_proxy.proxy_body[pair]
-                    inverse = qd.Matrix.zero(qd.f64, 6, 6)
-                    rhs = qd.Vector.zero(qd.f64, 6)
-                    for row in qd.static(range(6)):
-                        rhs[row] = residual[offset + row]
-                        for column in qd.static(range(6)):
-                            inverse[row, column] = data.kkt_proxy_diagonal[
-                                proxy,
-                                row,
-                                column,
-                            ]
-                    value = inverse @ rhs
-                    for component in qd.static(range(6)):
-                        result[offset + component] = value[component]
     else:
-        forest_precond_apply_level(data, rigid, contact_proxy, residual, result)
+        forest_precond_apply_level(data, rigid, contact_proxy, residual, result, system.n_links)
 
 
 @qd.func(requires_top_level=True)
@@ -2158,7 +2334,7 @@ def compute_merit_directional_derivative(
     for dof in range(data.proxy_dof_offset[()]):
         qd.atomic_add(
             contact_proxy.merit_gtd[()],
-            -contact_proxy.merit_gradient[dof] * linear_system_data.x_sol[dof],
+            -contact_proxy.merit_gradient[dof] * linear_system_data.read_solution(dof),
         )
     for pair in range(contact_proxy.n_pairs[()]):
         offset = data.proxy_dof_offset[()] + pair * 6

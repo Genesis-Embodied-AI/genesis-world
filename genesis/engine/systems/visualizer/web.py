@@ -376,6 +376,8 @@ INDEX_HTML = r"""<!doctype html>
       body.append(section("Action", keyValues({
         owner: action.owner,
         kernel: action.kernel,
+        kind: action.kind,
+        transientArity: action.transient_arity,
         data: (action.data_refs || action.data_types || []).map(
           (ref, index) => ref || action.data_types[index]
         ).join(", "),

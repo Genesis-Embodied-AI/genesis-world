@@ -7,7 +7,7 @@ import trimesh
 import genesis as gs
 from genesis.engine.systems import ContactTabular, build_scene_engine
 from genesis.engine.systems.contact import CONTACT_CONFIG_DEFAULTS
-from genesis.engine.systems.sim_engine import ContactCheckpoint, _step_kernel
+from genesis.engine.systems.sim_engine import ContactCheckpoint
 from genesis.utils.misc import qd_to_numpy
 
 
@@ -113,10 +113,10 @@ def test_qcloth_contact_graph_step(
     engine.step()
 
     assert int(qd_to_numpy(engine.frame_failed)) == 0
-    assert int(qd_to_numpy(engine.contact_data.intersection_flag)) == 0
-    assert int(qd_to_numpy(engine.contact_data.n_pairs_ph)) > 0
-    assert int(qd_to_numpy(engine.contact_data.n_active_pairs)) > 0
-    assert np.isfinite(qd_to_numpy(engine.fem.x)).all()
+    assert int(qd_to_numpy(engine.contact_system.data.intersection_flag)) == 0
+    assert int(qd_to_numpy(engine.contact_system.data.n_pairs_ph)) > 0
+    assert int(qd_to_numpy(engine.contact_system.data.n_active_pairs)) > 0
+    assert np.isfinite(qd_to_numpy(engine.fem_system.data.x)).all()
 
 
 @pytest.mark.required
@@ -144,27 +144,27 @@ def test_contact_checkpoint_capacity_growth(tmp_path, show_viewer):
         ),
     )
 
-    assert engine.contact_data.pairs_ph.shape[0] > 1
-    engine_data = engine.data
-    contact_data = engine.contact_data
-    engine.contact_data.max_contact_doublets.from_numpy(np.array(1, dtype=np.int32))
-    engine.contact_data.max_contact_triplets.from_numpy(np.array(1, dtype=np.int32))
-    engine.global_linear_system_data.matrix.max_triplets.from_numpy(np.array(1, dtype=np.int32))
+    assert engine.contact_system.data.pairs_ph.shape[0] > 1
+    frame_failed = engine.frame_failed
+    contact_data = engine.contact_system.data
+    engine.contact_system.data.max_contact_doublets.from_numpy(np.array(1, dtype=np.int32))
+    engine.contact_system.data.max_contact_triplets.from_numpy(np.array(1, dtype=np.int32))
+    engine.global_linear_system_system.data.matrix.max_triplets.from_numpy(np.array(1, dtype=np.int32))
     engine.step()
 
-    assert engine.data is engine_data
-    assert engine.contact_data is contact_data
-    assert int(qd_to_numpy(engine.contact_data.max_friction_pairs_ph)) >= int(
-        qd_to_numpy(engine.contact_data.n_friction_pairs_ph)
+    assert engine.frame_failed is frame_failed
+    assert engine.contact_system.data is contact_data
+    assert int(qd_to_numpy(engine.contact_system.data.max_friction_pairs_ph)) >= int(
+        qd_to_numpy(engine.contact_system.data.n_friction_pairs_ph)
     )
-    assert int(qd_to_numpy(engine.contact_data.max_contact_doublets)) >= int(
-        qd_to_numpy(engine.contact_data.n_counted_doublets)
-    ) + int(qd_to_numpy(engine.contact_data.n_friction_demand_doublets))
-    assert int(qd_to_numpy(engine.contact_data.max_contact_triplets)) >= int(
-        qd_to_numpy(engine.contact_data.n_counted_triplets)
-    ) + int(qd_to_numpy(engine.contact_data.n_friction_demand_triplets))
-    assert int(qd_to_numpy(engine.global_linear_system_data.matrix.max_triplets)) >= int(
-        qd_to_numpy(engine.global_linear_system_data.matrix.n_triplets)
+    assert int(qd_to_numpy(engine.contact_system.data.max_contact_doublets)) >= int(
+        qd_to_numpy(engine.contact_system.data.n_counted_doublets)
+    ) + int(qd_to_numpy(engine.contact_system.data.n_friction_demand_doublets))
+    assert int(qd_to_numpy(engine.contact_system.data.max_contact_triplets)) >= int(
+        qd_to_numpy(engine.contact_system.data.n_counted_triplets)
+    ) + int(qd_to_numpy(engine.contact_system.data.n_friction_demand_triplets))
+    assert int(qd_to_numpy(engine.global_linear_system_system.data.matrix.max_triplets)) >= int(
+        qd_to_numpy(engine.global_linear_system_system.data.matrix.n_triplets)
     )
 
 
@@ -195,22 +195,13 @@ def test_contact_checkpoint_yield_skips_pcg(tmp_path, show_viewer):
     )
 
     sentinel = 123
-    engine.global_linear_system_data.matrix.max_triplets.from_numpy(np.array(1, dtype=np.int32))
-    engine.pcg_solver_data.n_iterations.from_numpy(np.array(sentinel, dtype=np.int32))
-    status = _step_kernel(
-        engine.data,
-        engine.contact_data.overflow_flag,
-        engine.contact_data.count_overflow_flag,
-        engine.contact_data.contact_padding_overflow,
-        engine.global_linear_system_data.matrix.triplet_overflow,
-        engine.contact_data.friction_overflow_flag,
-        engine.contact_data.et_overflow_flag,
-        engine.graph_fastcache_key,
-    )
+    engine.global_linear_system_system.data.matrix.max_triplets.from_numpy(np.array(1, dtype=np.int32))
+    engine.pcg_solver_system.data.n_iterations.from_numpy(np.array(sentinel, dtype=np.int32))
+    status = engine.step_graph()
 
     assert status.yielded
     assert status.checkpoint == ContactCheckpoint.SORT
-    assert int(qd_to_numpy(engine.pcg_solver_data.n_iterations)) == sentinel
+    assert int(qd_to_numpy(engine.pcg_solver_system.data.n_iterations)) == sentinel
 
 
 @pytest.mark.required
@@ -323,16 +314,16 @@ def test_crossed_vertical_cloths_drop_without_penetration(show_viewer):
     saw_friction_energy = False
     for _ in range(120):
         engine.step()
-        assert int(qd_to_numpy(engine.contact_data.intersection_flag)) == 0
-        saw_halfplane_contact |= int(qd_to_numpy(engine.contact_data.n_pairs_ph)) > 0
-        saw_friction_energy |= float(qd_to_numpy(engine.contact_data.friction_energy)) > 0.0
+        assert int(qd_to_numpy(engine.contact_system.data.intersection_flag)) == 0
+        saw_halfplane_contact |= int(qd_to_numpy(engine.contact_system.data.n_pairs_ph)) > 0
+        saw_friction_energy |= float(qd_to_numpy(engine.contact_system.data.friction_energy)) > 0.0
 
-        n_pt = int(qd_to_numpy(engine.contact_data.n_pairs_pt))
+        n_pt = int(qd_to_numpy(engine.contact_system.data.n_pairs_pt))
         if n_pt:
-            pairs = qd_to_numpy(engine.contact_data.pairs_pt)[:n_pt]
-            surface_vertices = qd_to_numpy(engine.global_surface_data.surf_verts)
-            triangles = qd_to_numpy(engine.global_surface_data.surf_triangles)
-            body_ids = qd_to_numpy(engine.global_vertex_data.body_id)
+            pairs = qd_to_numpy(engine.contact_system.data.pairs_pt)[:n_pt]
+            surface_vertices = qd_to_numpy(engine.global_surface_system.data.surf_verts)
+            triangles = qd_to_numpy(engine.global_surface_system.data.surf_triangles)
+            body_ids = qd_to_numpy(engine.global_vertex_system.data.body_id)
             for surface_vertex, face in pairs:
                 point_body = body_ids[surface_vertices[surface_vertex]]
                 face_body = body_ids[triangles[face, 0]]
@@ -343,6 +334,6 @@ def test_crossed_vertical_cloths_drop_without_penetration(show_viewer):
     assert saw_halfplane_contact
     assert saw_cross_cloth_candidate
     assert saw_friction_energy
-    final_positions = qd_to_numpy(engine.fem.x)
+    final_positions = qd_to_numpy(engine.fem_system.data.x)
     assert np.isfinite(final_positions).all()
     assert final_positions[:, 2].min() > 0.0
