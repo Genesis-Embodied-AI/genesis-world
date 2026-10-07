@@ -12,10 +12,10 @@ def cipc_pair_area_weight(wa, wb, d_hat):
 
 @qd.func
 def cipc_scatter_doublets(
-    contact: qd.template(),
-    gradient: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    gradient: qd.template(),  # qd.Vector
     flag,
-    global_ids: qd.template(),
+    global_ids: qd.template(),  # qd.Vector
 ):
     count = _popcount4(flag)
     offsets = qd.Vector.zero(qd.i32, 4)
@@ -32,11 +32,11 @@ def cipc_scatter_doublets(
 
 @qd.func
 def cipc_fill_triplet_entry(
-    contact: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
     output,
-    hessian: qd.template(),
-    offsets: qd.template(),
-    global_ids: qd.template(),
+    hessian: qd.template(),  # qd.Vector
+    offsets: qd.template(),  # qd.Vector
+    global_ids: qd.template(),  # qd.Vector
     left,
     right,
 ):
@@ -62,10 +62,10 @@ def cipc_fill_triplet_entry(
 
 @qd.func
 def cipc_scatter_triplets_upper(
-    contact: qd.template(),
-    hessian: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    hessian: qd.template(),  # qd.Vector
     flag,
-    global_ids: qd.template(),
+    global_ids: qd.template(),  # qd.Vector
 ):
     count = _popcount4(flag)
     triplet_count = count * (count + 1) // 2
@@ -90,11 +90,11 @@ def cipc_scatter_triplets_upper(
 
 @qd.func
 def cipc_fill_triplet_entry_rank1(
-    contact: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
     output,
-    values: qd.template(),
+    values: qd.template(),  # qd.Vector
     coefficient,
-    global_ids: qd.template(),
+    global_ids: qd.template(),  # qd.Vector
     left,
     right,
 ):
@@ -119,10 +119,10 @@ def cipc_fill_triplet_entry_rank1(
 
 @qd.func
 def cipc_scatter_triplets_upper_rank1(
-    contact: qd.template(),
-    values: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    values: qd.template(),  # qd.Vector
     coefficient,
-    global_ids: qd.template(),
+    global_ids: qd.template(),  # qd.Vector
 ):
     begin = qd.atomic_add(contact.n_contact_triplets[()], 10)
     output_offset = qd.i32(0)

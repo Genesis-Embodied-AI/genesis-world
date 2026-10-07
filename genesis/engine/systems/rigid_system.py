@@ -146,7 +146,10 @@ class RigidSystem(SimSystem):
         initialize_newton(self)
 
     @qd.func(requires_top_level=True)
-    def on_assemble(self, displacement_coordinates: qd.template()):
+    def on_assemble(
+        self,
+        displacement_coordinates: qd.template(),  # bool
+    ):
         assemble(
             self,
             self.sim_config_system.data,
@@ -155,7 +158,10 @@ class RigidSystem(SimSystem):
         )
 
     @qd.func(requires_top_level=True)
-    def on_negate_direction(self, displacement_coordinates: qd.template()):
+    def on_negate_direction(
+        self,
+        displacement_coordinates: qd.template(),  # bool
+    ):
         negate_dq(
             self,
             self.global_linear_system_system.data,
@@ -179,7 +185,10 @@ class RigidSystem(SimSystem):
         set_newton_active(self, is_active)
 
     @qd.func(requires_top_level=True)
-    def on_build_preconditioner(self, compute_envelope: qd.template()):
+    def on_build_preconditioner(
+        self,
+        compute_envelope: qd.template(),  # bool
+    ):
         build_preconditioner(self, compute_envelope)
 
     @qd.func(requires_top_level=True)
@@ -189,7 +198,7 @@ class RigidSystem(SimSystem):
 
 @qd.func(requires_top_level=True)
 def predict(
-    system: qd.template(),
+    system: qd.template(),  # RigidSystem
 ):
     data = system.data
     func_step_1(
@@ -206,7 +215,7 @@ def predict(
 
 @qd.func(requires_top_level=True)
 def assemble_candidate_rows(
-    system: qd.template(),
+    system: qd.template(),  # RigidSystem
 ):
     data = system.data
     if qd.static(system.has_constraints):
@@ -237,7 +246,7 @@ def assemble_candidate_rows(
 
 @qd.func(requires_top_level=True)
 def initialize_newton(
-    system: qd.template(),
+    system: qd.template(),  # RigidSystem
 ):
     data = system.data
     if qd.static(system.has_constraints):
@@ -261,7 +270,10 @@ def initialize_newton(
 
 
 @qd.func(requires_top_level=True)
-def set_newton_active(system: qd.template(), is_active):
+def set_newton_active(
+    system: qd.template(),  # RigidSystem
+    is_active,
+):
     data = system.data
     for i_b in range(data.n_instances[()]):
         has_constraints = data.constraint_state.n_constraints[i_b] > 0 and is_active != 0
@@ -271,7 +283,10 @@ def set_newton_active(system: qd.template(), is_active):
 
 
 @qd.func(requires_top_level=True)
-def build_preconditioner(system: qd.template(), compute_envelope: qd.template()):
+def build_preconditioner(
+    system: qd.template(),  # RigidSystem
+    compute_envelope: qd.template(),  # bool
+):
     data = system.data
     solver.func_hessian_and_cholesky_factor_direct(
         data.constraint_state,
@@ -284,10 +299,10 @@ def build_preconditioner(system: qd.template(), compute_envelope: qd.template())
 
 @qd.func(requires_top_level=True)
 def assemble(
-    system: qd.template(),
-    sim_config: qd.template(),
-    global_linear_system_data: qd.template(),
-    displacement_coordinates: qd.template(),
+    system: qd.template(),  # RigidSystem
+    sim_config: qd.template(),  # SimConfig.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    displacement_coordinates: qd.template(),  # bool
 ):
     data = system.data
     for _ in range(1):
@@ -313,7 +328,10 @@ def assemble(
 
 
 @qd.func(requires_top_level=True)
-def energy(system: qd.template(), sim_config: qd.template()):
+def energy(
+    system: qd.template(),  # RigidSystem
+    sim_config: qd.template(),  # SimConfig.Data
+):
     data = system.data
     for _ in range(1):
         data.rigid_energy[()] = qd.f64(0.0)
@@ -324,30 +342,30 @@ def energy(system: qd.template(), sim_config: qd.template()):
 
 @qd.func(requires_top_level=True)
 def pcg_apply_operator(
-    system: qd.template(),
-    linear_system_data: qd.template(),
-    direction: qd.template(),
-    output: qd.template(),
+    system: qd.template(),  # RigidSystem
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    direction: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
 ):
     apply_hessian(system, direction, output, False)
 
 
 @qd.func(requires_top_level=True)
 def pcg_apply_reduced_operator(
-    system: qd.template(),
-    linear_system_data: qd.template(),
-    direction: qd.template(),
-    output: qd.template(),
+    system: qd.template(),  # RigidSystem
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    direction: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
 ):
     apply_hessian(system, direction, output, True)
 
 
 @qd.func(requires_top_level=True)
 def apply_hessian(
-    system: qd.template(),
-    x: qd.template(),
-    y: qd.template(),
-    displacement_coordinates: qd.template(),
+    system: qd.template(),  # RigidSystem
+    x: qd.template(),  # qd.Ndarray
+    y: qd.template(),  # qd.Ndarray
+    displacement_coordinates: qd.template(),  # bool
 ):
     data = system.data
     for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
@@ -418,16 +436,20 @@ def apply_hessian(
 
 
 @qd.func(requires_top_level=True)
-def pcg_apply_preconditioner(system: qd.template(), residual: qd.template(), output: qd.template()):
+def pcg_apply_preconditioner(
+    system: qd.template(),  # RigidSystem
+    residual: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
+):
     apply_preconditioner(system, residual, output, False)
 
 
 @qd.func(requires_top_level=True)
 def apply_preconditioner(
-    system: qd.template(),
-    residual: qd.template(),
-    result: qd.template(),
-    displacement_coordinates: qd.template(),
+    system: qd.template(),  # RigidSystem
+    residual: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
+    displacement_coordinates: qd.template(),  # bool
 ):
     data = system.data
     if qd.static(system.has_constraints):
@@ -462,9 +484,9 @@ def apply_preconditioner(
 
 @qd.func(requires_top_level=True)
 def negate_dq(
-    system: qd.template(),
-    global_linear_system_data: qd.template(),
-    displacement_coordinates: qd.template(),
+    system: qd.template(),  # RigidSystem
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    displacement_coordinates: qd.template(),  # bool
 ):
     data = system.data
     if qd.static(system.has_constraints):
@@ -482,7 +504,7 @@ def negate_dq(
 
 @qd.func(requires_top_level=True)
 def record_start_point(
-    system: qd.template(),
+    system: qd.template(),  # RigidSystem
 ):
     data = system.data
     if qd.static(system.has_constraints):
@@ -495,7 +517,10 @@ def record_start_point(
 
 
 @qd.func(requires_top_level=True)
-def step_forward(system: qd.template(), alpha):
+def step_forward(
+    system: qd.template(),  # RigidSystem
+    alpha,
+):
     data = system.data
     if qd.static(system.has_constraints):
         for i_d, i_b in qd.ndrange(data.n_dofs_per_instance[()], data.n_instances[()]):
@@ -529,7 +554,7 @@ def step_forward(system: qd.template(), alpha):
 
 @qd.func(requires_top_level=True)
 def update_velocity(
-    system: qd.template(),
+    system: qd.template(),  # RigidSystem
 ):
     data = system.data
     if qd.static(system.has_constraints):

@@ -125,7 +125,10 @@ class GlobalBodyManager(SimSystem):
 
 
 @qd.func(requires_top_level=True)
-def compute_vertex_offsets(data: qd.template(), fem: qd.template()):
+def compute_vertex_offsets(
+    data: qd.template(),  # GlobalBodyManager.Data
+    fem: qd.template(),  # FiniteElementMethod.Data
+):
     for i_body in range(fem.n_bodies[()] + 1):
         data.vertex_offsets[i_body] = fem.body_vertex_offsets[i_body]
     for i_body in range(fem.n_bodies[()]):
@@ -133,7 +136,11 @@ def compute_vertex_offsets(data: qd.template(), fem: qd.template()):
 
 
 @qd.func
-def is_body_contact_ignored(data: qd.template(), source, target):
+def is_body_contact_ignored(
+    data: qd.template(),  # GlobalBodyManager.Data
+    source,
+    target,
+):
     ignored = False
     begin = data.body_contact_ignorance_ranges[source]
     end = data.body_contact_ignorance_ranges[source + 1]

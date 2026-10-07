@@ -70,7 +70,12 @@ from .contact_function.pair_d_hat import pair_d_hat_ee, pair_d_hat_ph, pair_d_ha
 
 
 @qd.func
-def pair_vert_kappa_scale(contact: qd.template(), vertex: qd.template(), global_ids: qd.template(), count):
+def pair_vert_kappa_scale(
+    contact: qd.template(),  # ContactSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    global_ids: qd.template(),  # qd.Vector
+    count,
+):
     scale = contact.contact_kappa_scale[()]
     mode = contact.adaptive_kappa_mode[()]
     if mode == 2:
@@ -86,10 +91,10 @@ def pair_vert_kappa_scale(contact: qd.template(), vertex: qd.template(), global_
 
 @qd.func
 def report_pair_min_gap(
-    contact: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     gap,
-    global_ids: qd.template(),
+    global_ids: qd.template(),  # qd.Vector
     count,
 ):
     qd.atomic_min(contact.min_gap_ratio[()], gap)
@@ -107,7 +112,10 @@ def report_pair_min_gap(
 
 
 @qd.func
-def _pt_enabled(contact: qd.template(), ids: qd.template()):
+def _pt_enabled(
+    contact: qd.template(),  # ContactSystem.Data
+    ids: qd.template(),  # qd.Vector
+):
     return ct_enabled_pt(
         contact.enable_table,
         contact.n_contact_elements[()],
@@ -119,7 +127,10 @@ def _pt_enabled(contact: qd.template(), ids: qd.template()):
 
 
 @qd.func
-def _ee_enabled(contact: qd.template(), ids: qd.template()):
+def _ee_enabled(
+    contact: qd.template(),  # ContactSystem.Data
+    ids: qd.template(),  # qd.Vector
+):
     return ct_enabled_ee(
         contact.enable_ee_table,
         contact.n_contact_elements[()],
@@ -131,7 +142,10 @@ def _ee_enabled(contact: qd.template(), ids: qd.template()):
 
 
 @qd.func
-def _ph_enabled(contact: qd.template(), vertex_id):
+def _ph_enabled(
+    contact: qd.template(),  # ContactSystem.Data
+    vertex_id,
+):
     return ct_enabled(
         contact.enable_table,
         contact.n_contact_elements[()],
@@ -142,13 +156,13 @@ def _ph_enabled(contact: qd.template(), vertex_id):
 
 @qd.func
 def _embed_pe(
-    positions: qd.template(),
-    offsets: qd.template(),
+    positions: qd.template(),  # qd.Matrix
+    offsets: qd.template(),  # qd.Vector
     d_hat,
     xi,
     kappa,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     gradient_pe = qd.Vector.zero(qd.f64, 9)
     hessian_pe = qd.Vector.zero(qd.f64, 81)
@@ -181,13 +195,13 @@ def _embed_pe(
 
 @qd.func
 def _embed_pp(
-    positions: qd.template(),
-    offsets: qd.template(),
+    positions: qd.template(),  # qd.Matrix
+    offsets: qd.template(),  # qd.Vector
     d_hat,
     xi,
     kappa,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     gradient_pp = qd.Vector.zero(qd.f64, 6)
     hessian_pp = qd.Vector.zero(qd.f64, 36)
@@ -217,16 +231,16 @@ def _embed_pp(
 
 @qd.func
 def _embed_friction_pe(
-    current: qd.template(),
-    lagged: qd.template(),
-    offsets: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    offsets: qd.template(),  # qd.Vector
     d_hat,
     xi,
     kappa,
     mu,
     eps_vh,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     current_pe = qd.Matrix.zero(qd.f64, 3, 3)
     lagged_pe = qd.Matrix.zero(qd.f64, 3, 3)
@@ -260,16 +274,16 @@ def _embed_friction_pe(
 
 @qd.func
 def _embed_friction_pp(
-    current: qd.template(),
-    lagged: qd.template(),
-    offsets: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    offsets: qd.template(),  # qd.Vector
     d_hat,
     xi,
     kappa,
     mu,
     eps_vh,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     current_pp = qd.Matrix.zero(qd.f64, 2, 3)
     lagged_pp = qd.Matrix.zero(qd.f64, 2, 3)
@@ -302,7 +316,11 @@ def _embed_friction_pp(
 
 
 @qd.func
-def _scale_pair(gradient: qd.template(), hessian: qd.template(), scale):
+def _scale_pair(
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
+    scale,
+):
     for component in qd.static(range(12)):
         gradient[component] = gradient[component] * scale
     for component in range(144):
@@ -310,7 +328,11 @@ def _scale_pair(gradient: qd.template(), hessian: qd.template(), scale):
 
 
 @qd.func(requires_top_level=True)
-def friction_pair_filter_pt_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_pair_filter_pt_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_pt[()]):
         vert_index = contact.pairs_pt[pair_index, 0]
         face_index = contact.pairs_pt[pair_index, 1]
@@ -353,7 +375,11 @@ def friction_pair_filter_pt_kernel(contact: qd.template(), surface: qd.template(
 
 
 @qd.func(requires_top_level=True)
-def friction_pair_filter_ee_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_pair_filter_ee_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_ee[()]):
         edge_a = contact.pairs_ee[pair_index, 0]
         edge_b = contact.pairs_ee[pair_index, 1]
@@ -419,9 +445,9 @@ def friction_pair_filter_ee_kernel(contact: qd.template(), surface: qd.template(
 
 @qd.func(requires_top_level=True)
 def halfplane_friction_pair_filter_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
 ):
     for pair_index in range(contact.n_pairs_ph[()]):
         surface_vertex = contact.pairs_ph[pair_index, 0]
@@ -454,9 +480,9 @@ def halfplane_friction_pair_filter_kernel(
 
 @qd.func(requires_top_level=True)
 def cipc_friction_assemble_pt_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     dt,
 ):
     for pair_index in range(contact.n_friction_pairs_pt[()]):
@@ -549,9 +575,9 @@ def cipc_friction_assemble_pt_kernel(
 
 @qd.func(requires_top_level=True)
 def cipc_friction_assemble_ee_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     dt,
 ):
     for pair_index in range(contact.n_friction_pairs_ee[()]):
@@ -649,9 +675,9 @@ def cipc_friction_assemble_ee_kernel(
 
 @qd.func(requires_top_level=True)
 def cipc_friction_energy_pt_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     dt,
 ):
     for pair_index in range(contact.n_friction_pairs_pt[()]):
@@ -745,9 +771,9 @@ def cipc_friction_energy_pt_kernel(
 
 @qd.func(requires_top_level=True)
 def cipc_friction_energy_ee_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     dt,
 ):
     for pair_index in range(contact.n_friction_pairs_ee[()]):
@@ -845,7 +871,11 @@ def cipc_friction_energy_ee_kernel(
 
 
 @qd.func(requires_top_level=True)
-def cipc_count_active_pt_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_count_active_pt_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_pt[()]):
         vert_index = contact.pairs_pt[pair_index, 0]
         face_index = contact.pairs_pt[pair_index, 1]
@@ -883,7 +913,11 @@ def cipc_count_active_pt_kernel(contact: qd.template(), surface: qd.template(), 
 
 
 @qd.func(requires_top_level=True)
-def cipc_count_active_ee_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_count_active_ee_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_ee[()]):
         edge_a = contact.pairs_ee[pair_index, 0]
         edge_b = contact.pairs_ee[pair_index, 1]
@@ -946,7 +980,11 @@ def cipc_count_active_ee_kernel(contact: qd.template(), surface: qd.template(), 
 
 
 @qd.func(requires_top_level=True)
-def cipc_count_active_ph_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_count_active_ph_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_ph[()]):
         surface_vertex = contact.pairs_ph[pair_index, 0]
         plane = contact.pairs_ph[pair_index, 1]
@@ -970,7 +1008,11 @@ def cipc_count_active_ph_kernel(contact: qd.template(), surface: qd.template(), 
 
 
 @qd.func(requires_top_level=True)
-def cipc_filter_assemble_pt_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_filter_assemble_pt_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_pt[()]):
         vert_index = contact.pairs_pt[pair_index, 0]
         face_index = contact.pairs_pt[pair_index, 1]
@@ -1059,7 +1101,11 @@ def cipc_filter_assemble_pt_kernel(contact: qd.template(), surface: qd.template(
 
 
 @qd.func(requires_top_level=True)
-def cipc_filter_assemble_ee_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_filter_assemble_ee_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     qd.loop_config(name="cipc_filter_assemble_ee")
     for pair_index in range(contact.n_pairs_ee[()]):
         edge_a = contact.pairs_ee[pair_index, 0]
@@ -1324,7 +1370,11 @@ def cipc_filter_assemble_ee_kernel(contact: qd.template(), surface: qd.template(
 
 
 @qd.func(requires_top_level=True)
-def cipc_filter_assemble_ph_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_filter_assemble_ph_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_ph[()]):
         surface_vertex = contact.pairs_ph[pair_index, 0]
         plane = contact.pairs_ph[pair_index, 1]
@@ -1387,9 +1437,9 @@ def cipc_filter_assemble_ph_kernel(contact: qd.template(), surface: qd.template(
 
 @qd.func(requires_top_level=True)
 def cipc_halfplane_friction_assemble_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     dt,
 ):
     for pair_index in range(contact.n_friction_pairs_ph[()]):
@@ -1461,9 +1511,9 @@ def cipc_halfplane_friction_assemble_kernel(
 
 @qd.func(requires_top_level=True)
 def cipc_halfplane_friction_energy_kernel(
-    contact: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
     dt,
 ):
     for pair_index in range(contact.n_friction_pairs_ph[()]):
@@ -1521,7 +1571,11 @@ def cipc_halfplane_friction_energy_kernel(
 
 
 @qd.func(requires_top_level=True)
-def cipc_filter_energy_pt_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_filter_energy_pt_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_pt[()]):
         vert_index = contact.pairs_pt[pair_index, 0]
         face_index = contact.pairs_pt[pair_index, 1]
@@ -1571,7 +1625,11 @@ def cipc_filter_energy_pt_kernel(contact: qd.template(), surface: qd.template(),
 
 
 @qd.func(requires_top_level=True)
-def cipc_filter_energy_ee_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_filter_energy_ee_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_ee[()]):
         edge_a = contact.pairs_ee[pair_index, 0]
         edge_b = contact.pairs_ee[pair_index, 1]
@@ -1670,7 +1728,11 @@ def cipc_filter_energy_ee_kernel(contact: qd.template(), surface: qd.template(),
 
 
 @qd.func(requires_top_level=True)
-def cipc_filter_energy_ph_kernel(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def cipc_filter_energy_ph_kernel(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(contact.n_pairs_ph[()]):
         surface_vertex = contact.pairs_ph[pair_index, 0]
         plane = contact.pairs_ph[pair_index, 1]
@@ -1699,7 +1761,10 @@ def cipc_filter_energy_ph_kernel(contact: qd.template(), surface: qd.template(),
 
 
 @qd.func(requires_top_level=True)
-def snapshot_lagged_positions(contact: qd.template(), vertex: qd.template()):
+def snapshot_lagged_positions(
+    contact: qd.template(),  # ContactSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(vertex.n_verts[()]):
         for axis in qd.static(range(3)):
             contact.lagged_positions[i_vertex, axis] = vertex.positions[i_vertex, axis]
@@ -1715,22 +1780,38 @@ def snapshot_lagged_positions(contact: qd.template(), vertex: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def friction_pair_filter_pt(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_pair_filter_pt(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     friction_pair_filter_pt_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def friction_pair_filter_ee(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_pair_filter_ee(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     friction_pair_filter_ee_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def friction_pair_filter_ph(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_pair_filter_ph(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     halfplane_friction_pair_filter_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def friction_snapshot(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_snapshot(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     snapshot_lagged_positions(contact, vertex)
     friction_pair_filter_pt(contact, surface, vertex)
     friction_pair_filter_ee(contact, surface, vertex)
@@ -1739,22 +1820,38 @@ def friction_snapshot(contact: qd.template(), surface: qd.template(), vertex: qd
 
 
 @qd.func(requires_top_level=True)
-def count_active_pt(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def count_active_pt(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_count_active_pt_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def count_active_ee(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def count_active_ee(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_count_active_ee_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def count_active_ph(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def count_active_ph(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_count_active_ph_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def count_active(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def count_active(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     count_active_pt(contact, surface, vertex)
     count_active_ee(contact, surface, vertex)
     if qd.static(contact.has_halfplanes):
@@ -1762,22 +1859,38 @@ def count_active(contact: qd.template(), surface: qd.template(), vertex: qd.temp
 
 
 @qd.func(requires_top_level=True)
-def filter_assemble_pt(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_assemble_pt(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_filter_assemble_pt_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def filter_assemble_ee(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_assemble_ee(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_filter_assemble_ee_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def filter_assemble_ph(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_assemble_ph(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_filter_assemble_ph_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def friction_assemble_pt(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_assemble_pt(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_friction_assemble_pt_kernel(
         contact,
         surface,
@@ -1787,7 +1900,11 @@ def friction_assemble_pt(contact: qd.template(), surface: qd.template(), vertex:
 
 
 @qd.func(requires_top_level=True)
-def friction_assemble_ee(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_assemble_ee(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_friction_assemble_ee_kernel(
         contact,
         surface,
@@ -1797,7 +1914,11 @@ def friction_assemble_ee(contact: qd.template(), surface: qd.template(), vertex:
 
 
 @qd.func(requires_top_level=True)
-def friction_assemble_ph(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_assemble_ph(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_halfplane_friction_assemble_kernel(
         contact,
         surface,
@@ -1807,7 +1928,11 @@ def friction_assemble_ph(contact: qd.template(), surface: qd.template(), vertex:
 
 
 @qd.func(requires_top_level=True)
-def filter_assemble(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_assemble(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     filter_assemble_pt(contact, surface, vertex)
     filter_assemble_ee(contact, surface, vertex)
     if qd.static(contact.has_friction):
@@ -1820,22 +1945,38 @@ def filter_assemble(contact: qd.template(), surface: qd.template(), vertex: qd.t
 
 
 @qd.func(requires_top_level=True)
-def filter_energy_pt(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_energy_pt(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_filter_energy_pt_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def filter_energy_ee(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_energy_ee(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_filter_energy_ee_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def filter_energy_ph(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def filter_energy_ph(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_filter_energy_ph_kernel(contact, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def friction_energy_pt(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_energy_pt(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_friction_energy_pt_kernel(
         contact,
         surface,
@@ -1845,7 +1986,11 @@ def friction_energy_pt(contact: qd.template(), surface: qd.template(), vertex: q
 
 
 @qd.func(requires_top_level=True)
-def friction_energy_ee(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_energy_ee(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_friction_energy_ee_kernel(
         contact,
         surface,
@@ -1855,7 +2000,11 @@ def friction_energy_ee(contact: qd.template(), surface: qd.template(), vertex: q
 
 
 @qd.func(requires_top_level=True)
-def friction_energy_ph(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def friction_energy_ph(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     cipc_halfplane_friction_energy_kernel(
         contact,
         surface,
@@ -1865,7 +2014,11 @@ def friction_energy_ph(contact: qd.template(), surface: qd.template(), vertex: q
 
 
 @qd.func(requires_top_level=True)
-def contact_energy(contact: qd.template(), surface: qd.template(), vertex: qd.template()):
+def contact_energy(
+    contact: qd.template(),  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     filter_energy_pt(contact, surface, vertex)
     filter_energy_ee(contact, surface, vertex)
     if qd.static(contact.has_friction):

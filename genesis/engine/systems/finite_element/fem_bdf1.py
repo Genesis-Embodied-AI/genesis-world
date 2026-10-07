@@ -39,15 +39,12 @@ class FEMBDF1(SimSystem):
     def init(self) -> None:
         pass
 
-    def triplet_count(self) -> int:
-        return self.fem_system._finite_element.n_verts
-
 
 @qd.func(requires_top_level=True)
 def report_fem_bdf1_extent(
-    fem: qd.template(),
-    linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     for _ in range(1):
         linear_system_data.set_subsystem_extent(linear_system_id, fem.n_fem_verts[()])
@@ -55,8 +52,8 @@ def report_fem_bdf1_extent(
 
 @qd.func(requires_top_level=True)
 def predict_fem_bdf1(
-    fem: qd.template(),
-    sim_config: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    sim_config: qd.template(),  # SimConfig.Data
 ):
     for i_vertex in range(fem.n_fem_verts[()]):
         for axis in qd.static(range(3)):
@@ -69,8 +66,8 @@ def predict_fem_bdf1(
 
 @qd.func(requires_top_level=True)
 def compute_fem_bdf1_energy(
-    fem: qd.template(),
-    sim_config: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    sim_config: qd.template(),  # SimConfig.Data
 ):
     for i_vertex in range(fem.n_fem_verts[()]):
         if fem.is_fixed[i_vertex] == 0:
@@ -83,10 +80,10 @@ def compute_fem_bdf1_energy(
 
 @qd.func(requires_top_level=True)
 def assemble_fem_bdf1(
-    fem: qd.template(),
-    sim_config: qd.template(),
-    global_linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    sim_config: qd.template(),  # SimConfig.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     for i_vertex in range(fem.n_fem_verts[()]):
         triplet_offset = global_linear_system_data.subsystem_offset(linear_system_id)

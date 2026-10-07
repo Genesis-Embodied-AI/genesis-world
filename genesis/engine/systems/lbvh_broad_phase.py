@@ -215,24 +215,32 @@ class LBVHBroadPhase(SimSystem):
 
 
 @qd.func(requires_top_level=True)
-def triangle_build(system: qd.template(), surface: qd.template(), vertex: qd.template()):
+def triangle_build(
+    system: qd.template(),  # LBVHBroadPhase
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     if qd.static(system.has_triangle_bvh):
         build_tri(system.data.triangle_bvh, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
-def edge_build(system: qd.template(), surface: qd.template(), vertex: qd.template()):
+def edge_build(
+    system: qd.template(),  # LBVHBroadPhase
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     if qd.static(system.has_edge_bvh):
         build_edge(system.data.edge_bvh, surface, vertex)
 
 
 @qd.func(requires_top_level=True)
 def pt_query(
-    system: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    system: qd.template(),  # LBVHBroadPhase
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data
 ):
     if qd.static(system.has_triangle_bvh):
         if qd.static(system.use_warp_pt):
@@ -265,11 +273,11 @@ def pt_query(
 
 @qd.func(requires_top_level=True)
 def ee_query(
-    system: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    system: qd.template(),  # LBVHBroadPhase
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data
 ):
     if qd.static(system.has_edge_bvh):
         if qd.static(system.use_dual_ee):
@@ -302,11 +310,11 @@ def ee_query(
 
 @qd.func(requires_top_level=True)
 def trajectory_query(
-    system: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    system: qd.template(),  # LBVHBroadPhase
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data
 ):
     pt_query(system, surface, vertex, body, contact)
     ee_query(system, surface, vertex, body, contact)
@@ -314,11 +322,11 @@ def trajectory_query(
 
 @qd.func(requires_top_level=True)
 def detect_initial_intersections(
-    system: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    system: qd.template(),  # LBVHBroadPhase
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data
 ):
     if qd.static(system.has_triangle_bvh):
         query_et(

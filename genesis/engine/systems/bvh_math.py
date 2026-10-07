@@ -48,10 +48,10 @@ def f64_to_f32_ru(value: qd.f64):
 
 @qd.func
 def aabb_init(
-    aabbs: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
     idx: qd.i32,
-    half: qd.template(),
-    use_dop14f: qd.template(),
+    half: qd.template(),  # int
+    use_dop14f: qd.template(),  # bool
 ):
     """Reset aabbs[idx] to the empty sentinel (lower=+inf, upper=-inf).
 
@@ -73,11 +73,11 @@ def aabb_init(
 
 @qd.func
 def aabb_expand(
-    aabbs: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
     idx: qd.i32,
     r: qd.f64,
-    half: qd.template(),
-    use_dop14f: qd.template(),
+    half: qd.template(),  # int
+    use_dop14f: qd.template(),  # bool
 ):
     """Expand a bound by ``r``.
 
@@ -100,13 +100,13 @@ def aabb_expand(
 
 @qd.func
 def aabb_combine_point(
-    aabbs: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
     idx: qd.i32,
     px: qd.f64,
     py: qd.f64,
     pz: qd.f64,
-    half: qd.template(),
-    use_dop14f: qd.template(),
+    half: qd.template(),  # int
+    use_dop14f: qd.template(),  # bool
 ):
     """Expand aabbs[idx] to include point (px, py, pz)."""
     projections = qd.Vector([px, py, pz, px + py + pz, px + py - pz, px - py + pz, px - py - pz])
@@ -124,11 +124,11 @@ def aabb_combine_point(
 
 @qd.func
 def aabb_combine_aabb(
-    dst: qd.template(),
+    dst: qd.template(),  # qd.Ndarray
     dst_idx: qd.i32,
-    src: qd.template(),
+    src: qd.template(),  # qd.Ndarray
     src_idx: qd.i32,
-    half: qd.template(),
+    half: qd.template(),  # int
 ):
     """Expand dst[dst_idx] to include src[src_idx]."""
     for k in qd.static(range(half)):
@@ -138,11 +138,11 @@ def aabb_combine_aabb(
 
 @qd.func
 def aabb_overlap(
-    a: qd.template(),
+    a: qd.template(),  # qd.Ndarray
     a_idx: qd.i32,
-    b: qd.template(),
+    b: qd.template(),  # qd.Ndarray
     b_idx: qd.i32,
-    half: qd.template(),
+    half: qd.template(),  # int
 ):
     """Return 1 if AABB a and b overlap, 0 otherwise.
 
@@ -157,12 +157,12 @@ def aabb_overlap(
 
 @qd.func
 def aabb_overlap_gap(
-    a: qd.template(),
+    a: qd.template(),  # qd.Ndarray
     a_idx: qd.i32,
-    b: qd.template(),
+    b: qd.template(),  # qd.Ndarray
     b_idx: qd.i32,
     gap: qd.f64,
-    half: qd.template(),
+    half: qd.template(),  # int
 ):
     """Return 1 if AABB a and b overlap within gap tolerance, 0 otherwise.
 
@@ -181,9 +181,9 @@ def aabb_overlap_gap(
 
 @qd.func
 def aabb_center(
-    aabbs: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
     idx: qd.i32,
-    half: qd.template(),
+    half: qd.template(),  # int
 ):
     """Return the center of aabbs[idx]."""
     c = qd.Vector.zero(qd.f64, 3)
@@ -233,7 +233,7 @@ def common_upper_bits(a: qd.u64, b: qd.u64):
 
 @qd.func
 def determine_range(
-    codes: qd.template(),
+    codes: qd.template(),  # qd.Ndarray
     n: qd.i32,
     idx: qd.i32,
 ):
@@ -300,7 +300,7 @@ def determine_range(
 
 @qd.func
 def find_split(
-    codes: qd.template(),
+    codes: qd.template(),  # qd.Ndarray
     n: qd.i32,
     first: qd.i32,
     last: qd.i32,

@@ -33,7 +33,11 @@ def make_scalar(value: int) -> ScalarData:
 
 
 @qd.func(requires_top_level=True)
-def add_action_data(left: qd.template(), right: qd.template(), output: qd.template()):
+def add_action_data(
+    left: qd.template(),  # ScalarData
+    right: qd.template(),  # ScalarData
+    output: qd.template(),  # qd.Ndarray
+):
     for _ in range(1):
         output[()] = left.value[()] + right.value[()]
 

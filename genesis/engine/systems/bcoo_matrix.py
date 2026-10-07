@@ -33,9 +33,7 @@ class BCOOMatrix:
     sort_end_bit: int
     sort_log256_max_n: int
     scan_log256_max_n: int
-    genesis_legacy_sort_reduce_host: bool
-    max_triplets_host: int
-    padded_triplets_host: int
+    legacy_sort_reduce: bool
     n_triplets: qd.Ndarray
     max_triplets: qd.Ndarray
     padded_triplets: qd.Ndarray
@@ -101,9 +99,7 @@ class BCOOMatrix:
         self.sort_end_bit = 64
         self.sort_log256_max_n = sort_log256_max_n
         self.scan_log256_max_n = scan_log256_max_n
-        self.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
-        self.max_triplets_host = triplet_capacity
-        self.padded_triplets_host = padded_capacity
+        self.legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
         self.n_triplets = scalar(qd.i32, initial_triplets, np.int32)
         self.max_triplets = scalar(qd.i32, triplet_capacity, np.int32)
         self.padded_triplets = scalar(qd.i32, triplet_capacity, np.int32)
@@ -161,10 +157,8 @@ class BCOOMatrix:
             symmetric=self.symmetric,
             initial_triplets=0 if live_size is None else live_size,
             max_triplets=capacity,
-            genesis_legacy_sort_reduce=self.genesis_legacy_sort_reduce_host,
+            genesis_legacy_sort_reduce=self.legacy_sort_reduce,
         )
-        self.max_triplets_host = replacement.max_triplets_host
-        self.padded_triplets_host = replacement.padded_triplets_host
         self.triplet_row = replacement.triplet_row
         self.triplet_col = replacement.triplet_col
         self.triplet_val = replacement.triplet_val
@@ -207,7 +201,13 @@ class BCOOMatrix:
             self.sort_size[()] = count
 
     @qd.func
-    def write_triplet(self, slot, row, col, block: qd.template()):
+    def write_triplet(
+        self,
+        slot,
+        row,
+        col,
+        block: qd.template(),  # qd.Matrix
+    ):
         """Write one block according to this matrix's storage contract."""
         assert slot >= 0 and slot < self.n_triplets[()] and self.n_triplets[()] <= self.max_triplets[()], (
             f"BCOOMatrix write_triplet slot={slot}, row={row}, col={col}, "
@@ -273,13 +273,17 @@ class BCOOMatrix:
 
 
 @qd.func(requires_top_level=True)
-def zero_bcoo_triplets(matrix: qd.template()):
+def zero_bcoo_triplets(
+    matrix: qd.template(),  # BCOOMatrix
+):
     for i in range(matrix.n_triplets[()] * matrix.block_scalar_count):
         matrix.triplet_val[i] = 0.0
 
 
 @qd.func(requires_top_level=True)
-def compose_bcoo_sort_keys_padded(matrix: qd.template()):
+def compose_bcoo_sort_keys_padded(
+    matrix: qd.template(),  # BCOOMatrix
+):
     qd.loop_config(name="body_compose_sort_keys")
     for i in range(matrix.triplet_keys.shape[0]):
         if i < matrix.padded_triplets[()]:
@@ -292,8 +296,10 @@ def compose_bcoo_sort_keys_padded(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def sort_bcoo_triplets(matrix: qd.template()):
-    if qd.static(matrix.genesis_legacy_sort_reduce_host):
+def sort_bcoo_triplets(
+    matrix: qd.template(),  # BCOOMatrix
+):
+    if qd.static(matrix.legacy_sort_reduce):
         sort(
             matrix.triplet_keys,
             matrix.sort_keys_out,
@@ -318,7 +324,9 @@ def sort_bcoo_triplets(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def mark_bcoo_segment_flags(matrix: qd.template()):
+def mark_bcoo_segment_flags(
+    matrix: qd.template(),  # BCOOMatrix
+):
     qd.loop_config(name="body_segment_flags")
     for i in range(matrix.triplet_keys.shape[0]):
         if i < matrix.padded_triplets[()]:
@@ -331,8 +339,10 @@ def mark_bcoo_segment_flags(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def scan_bcoo_segments(matrix: qd.template()):
-    if qd.static(matrix.genesis_legacy_sort_reduce_host):
+def scan_bcoo_segments(
+    matrix: qd.template(),  # BCOOMatrix
+):
+    if qd.static(matrix.legacy_sort_reduce):
         exclusive_scan_add(
             matrix.seg_flags,
             matrix.seg_ids,
@@ -351,7 +361,9 @@ def scan_bcoo_segments(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def zero_bcoo_values(matrix: qd.template()):
+def zero_bcoo_values(
+    matrix: qd.template(),  # BCOOMatrix
+):
     for _ in range(1):
         matrix.bcoo_nnz[()] = 0
     qd.loop_config(name="body_zero_bcoo")
@@ -361,8 +373,10 @@ def zero_bcoo_values(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def reduce_bcoo_segments(matrix: qd.template()):
-    if qd.static(matrix.genesis_legacy_sort_reduce_host):
+def reduce_bcoo_segments(
+    matrix: qd.template(),  # BCOOMatrix
+):
+    if qd.static(matrix.legacy_sort_reduce):
         qd.loop_config(name="body_fsr_merge_legacy")
         for i in range(matrix.n_triplets[()]):
             source = qd.i32(matrix.triplet_perm[i])
@@ -402,7 +416,9 @@ def reduce_bcoo_segments(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def extract_unique_bcoo_entries(matrix: qd.template()):
+def extract_unique_bcoo_entries(
+    matrix: qd.template(),  # BCOOMatrix
+):
     qd.loop_config(name="body_extract_unique")
     for i in range(matrix.triplet_keys.shape[0]):
         if i < matrix.padded_triplets[()] and i < matrix.n_triplets[()] and matrix.seg_flags[i] != 0:
@@ -415,7 +431,9 @@ def extract_unique_bcoo_entries(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def validate_bcoo(matrix: qd.template()):
+def validate_bcoo(
+    matrix: qd.template(),  # BCOOMatrix
+):
     for _ in range(1):
         matrix.bcoo_valid[()] = qd.i32(matrix.triplet_overflow[()] == 0)
     qd.loop_config(name="body_validate_bcoo")
@@ -435,7 +453,9 @@ def validate_bcoo(matrix: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def sort_reduce_bcoo(matrix: qd.template()):
+def sort_reduce_bcoo(
+    matrix: qd.template(),  # BCOOMatrix
+):
     compose_bcoo_sort_keys_padded(matrix)
     sort_bcoo_triplets(matrix)
     mark_bcoo_segment_flags(matrix)

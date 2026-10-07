@@ -37,7 +37,7 @@ from .fsr_reduce import (
 )
 from .sim_system import ActionKind, SimAction, SimData, SimSystem, validate_action_protocol
 
-_CONTACT_SORT_MIN_CAPACITY = 4_865
+CONTACT_ASSEMBLY_CAPACITY = 4_865
 _CONTACT_SORT_LOG256_MAX_N = 4
 _CCD_MAX_ITERS = 50_000
 _CCD_ETA = 0.2
@@ -45,10 +45,6 @@ _CCD_ETA = 0.2
 
 def _padded64(value: int) -> int:
     return max(((value + 63) // 64) * 64, 64)
-
-
-def get_contact_assembly_capacity() -> int:
-    return _CONTACT_SORT_MIN_CAPACITY
 
 
 @qd.data_oriented  # WORKAROUND: Quadrants bound @qd.func self must be data-oriented.
@@ -216,7 +212,6 @@ class ContactSystem(SimSystem):
         self.has_friction = False
         self.has_halfplanes = False
         self.has_codim = False
-        self.is_initialized = False
 
     def wire_data(
         self,
@@ -326,8 +321,6 @@ class ContactSystem(SimSystem):
         self.contact_assemble_init_actions.register(init_action)
 
     def init(self) -> None:
-        if self.is_initialized:
-            raise RuntimeError("ContactSystem is already initialized")
         if self._wire_args is None:
             raise RuntimeError("ContactSystem data has not been wired")
         args = self._wire_args
@@ -372,7 +365,6 @@ class ContactSystem(SimSystem):
         for action in self.contact_assemble_init_actions.actions:
             action.invoke()
         self._wire_args = None
-        self.is_initialized = True
 
     @qd.func(requires_top_level=True)
     def on_reset_initial_intersections(self):
@@ -901,8 +893,8 @@ def _set_contact_adaptive_kappa(data, mode: str, tick: str, n_bodies: int, n_ver
 
 def _initialize_contact_data(data, n_verts: int) -> None:
     pair_capacity = data.pairs_pt.shape[0]
-    doublet_capacity = _CONTACT_SORT_MIN_CAPACITY
-    triplet_capacity = _CONTACT_SORT_MIN_CAPACITY
+    doublet_capacity = CONTACT_ASSEMBLY_CAPACITY
+    triplet_capacity = CONTACT_ASSEMBLY_CAPACITY
 
     data.n_verts = qd.ndarray(qd.i32, shape=())
     data.n_verts.from_numpy(np.array(n_verts, dtype=np.int32))
@@ -1319,7 +1311,11 @@ def reset_collision_counts(data):
 
 
 @qd.func(requires_top_level=True)
-def halfplane_query(data, surface: qd.template(), vertex: qd.template()):
+def halfplane_query(
+    data,  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(surface.n_surf_verts[()] * data.n_halfplanes[()]):
         surface_vertex = pair_index // data.n_halfplanes[()]
         plane = pair_index - surface_vertex * data.n_halfplanes[()]
@@ -1377,7 +1373,11 @@ def reset_frame_ccd(data):
 
 
 @qd.func(requires_top_level=True)
-def ccd_alpha_pt_kernel(data, surface: qd.template(), vertex: qd.template()):
+def ccd_alpha_pt_kernel(
+    data,  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(data.n_pairs_pt[()]):
         surface_vertex = data.pairs_pt[pair_index, 0]
         face = data.pairs_pt[pair_index, 1]
@@ -1406,7 +1406,11 @@ def ccd_alpha_pt_kernel(data, surface: qd.template(), vertex: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def ccd_alpha_ee_kernel(data, surface: qd.template(), vertex: qd.template()):
+def ccd_alpha_ee_kernel(
+    data,  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(data.n_pairs_ee[()]):
         edge_a = data.pairs_ee[pair_index, 0]
         edge_b = data.pairs_ee[pair_index, 1]
@@ -1435,7 +1439,11 @@ def ccd_alpha_ee_kernel(data, surface: qd.template(), vertex: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def halfplane_ccd_alpha_kernel(data, surface: qd.template(), vertex: qd.template()):
+def halfplane_ccd_alpha_kernel(
+    data,  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for pair_index in range(data.n_pairs_ph[()]):
         surface_vertex = data.pairs_ph[pair_index, 0]
         plane = data.pairs_ph[pair_index, 1]
@@ -1479,7 +1487,11 @@ def reduce_ccd_alpha_final_kernel(data):
 
 
 @qd.func(requires_top_level=True)
-def ccd(data, surface: qd.template(), vertex: qd.template()):
+def ccd(
+    data,  # ContactSystem.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     ccd_alpha_pt_kernel(data, surface, vertex)
     ccd_alpha_ee_kernel(data, surface, vertex)
     halfplane_ccd_alpha_kernel(data, surface, vertex)
@@ -1573,7 +1585,10 @@ def doublet_sort_seed(data):
 
 
 @qd.func(requires_top_level=True)
-def doublet_sort_radix(data, genesis_legacy_sort_reduce: qd.template()):
+def doublet_sort_radix(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     if qd.static(genesis_legacy_sort_reduce):
         sort(
             data.doublet_sort_keys,
@@ -1613,7 +1628,10 @@ def doublet_segment_flags(data):
 
 
 @qd.func(requires_top_level=True)
-def doublet_scan(data, genesis_legacy_sort_reduce: qd.template()):
+def doublet_scan(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     if qd.static(genesis_legacy_sort_reduce):
         exclusive_scan_add(
             data.doublet_seg_flags,
@@ -1642,7 +1660,10 @@ def doublet_zero_unique(data):
 
 
 @qd.func(requires_top_level=True)
-def doublet_fsr_merge(data, genesis_legacy_sort_reduce: qd.template()):
+def doublet_fsr_merge(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     if qd.static(genesis_legacy_sort_reduce):
         qd.loop_config(name="contact_doublet_fsr_merge_legacy")
         for index in range(data.n_contact_doublets[()]):
@@ -1705,7 +1726,10 @@ def triplet_sort_seed(data):
 
 
 @qd.func(requires_top_level=True)
-def triplet_sort_radix(data, genesis_legacy_sort_reduce: qd.template()):
+def triplet_sort_radix(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     if qd.static(genesis_legacy_sort_reduce):
         sort(
             data.triplet_sort_keys,
@@ -1745,7 +1769,10 @@ def triplet_segment_flags(data):
 
 
 @qd.func(requires_top_level=True)
-def triplet_scan(data, genesis_legacy_sort_reduce: qd.template()):
+def triplet_scan(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     if qd.static(genesis_legacy_sort_reduce):
         exclusive_scan_add(
             data.triplet_seg_flags,
@@ -1775,7 +1802,10 @@ def triplet_zero_unique(data):
 
 
 @qd.func(requires_top_level=True)
-def triplet_fsr_merge(data, genesis_legacy_sort_reduce: qd.template()):
+def triplet_fsr_merge(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     if qd.static(genesis_legacy_sort_reduce):
         qd.loop_config(name="contact_triplet_fsr_merge_legacy")
         for index in range(data.n_contact_triplets[()]):
@@ -1826,7 +1856,10 @@ def triplet_extract_unique(data):
 
 
 @qd.func(requires_top_level=True)
-def sort_reduce(data, genesis_legacy_sort_reduce: qd.template()):
+def sort_reduce(
+    data,  # ContactSystem.Data
+    genesis_legacy_sort_reduce: qd.template(),  # bool
+):
     doublet_sort_seed(data)
     doublet_sort_radix(data, genesis_legacy_sort_reduce)
     doublet_segment_flags(data)

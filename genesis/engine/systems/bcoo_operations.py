@@ -4,7 +4,11 @@ import quadrants as qd
 
 
 @qd.func(requires_top_level=True)
-def sym_bcoo_spmv_naive(matrix: qd.template(), x: qd.template(), y: qd.template()):
+def sym_bcoo_spmv_naive(
+    matrix: qd.template(),  # BCOOMatrix
+    x: qd.template(),  # qd.Ndarray
+    y: qd.template(),  # qd.Ndarray
+):
     """Naively accumulate a symmetric BCOO ``matrix @ x`` into ``y``.
 
     The matrix stores one triangle, so off-diagonal blocks are mirrored during

@@ -221,7 +221,9 @@ class GlobalLinearSystem(SimSystem):
 
 
 @qd.func(requires_top_level=True)
-def derive_extents(data: qd.template()):
+def derive_extents(
+    data: qd.template(),  # GlobalLinearSystem.Data
+):
     for _ in range(1):
         total = qd.i32(0)
         for slot in range(data.n_extent_slots[()]):
@@ -232,23 +234,28 @@ def derive_extents(data: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def compute_n_triplets(data: qd.template(), contact_data: qd.template()):
+def compute_n_triplets(
+    data: qd.template(),  # GlobalLinearSystem.Data
+    contact_data: qd.template(),  # ContactSystem.Data
+):
     for _ in range(1):
         total = data.n_elastic[()] + contact_data.n_unique_triplets[()]
         data.matrix.report_triplet_demand(total)
 
 
 @qd.func(requires_top_level=True)
-def zero_rhs(data: qd.template()):
+def zero_rhs(
+    data: qd.template(),  # GlobalLinearSystem.Data
+):
     for i in range(data.total_dof[()]):
         data.b_rhs[i] = qd.f64(0.0)
 
 
 @qd.func(requires_top_level=True)
 def pcg_apply_operator(
-    data: qd.template(),
-    _linear_system_data: qd.template(),
-    direction: qd.template(),
-    output: qd.template(),
+    data: qd.template(),  # GlobalLinearSystem.Data
+    _linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    direction: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
 ):
     sym_bcoo_spmv_naive(data.matrix, direction, output)

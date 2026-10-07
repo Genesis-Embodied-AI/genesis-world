@@ -88,11 +88,11 @@ def init_linear_pcg(
 
 @qd.func(requires_top_level=True)
 def pcg_dot_rz(
-    data: qd.template(),
-    lhs: qd.template(),
-    rhs: qd.template(),
-    output: qd.template(),
-    gate_active: qd.template(),
+    data: qd.template(),  # LinearPCG.Data
+    lhs: qd.template(),  # qd.Ndarray
+    rhs: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
+    gate_active: qd.template(),  # bool
 ):
     qd.loop_config(name="pcg_dot_rz_partial", block_dim=256)
     for thread in range(16384):
@@ -121,7 +121,9 @@ def pcg_dot_rz(
 
 
 @qd.func(requires_top_level=True)
-def pcg_dot_pAp(data: qd.template()):
+def pcg_dot_pAp(
+    data: qd.template(),  # LinearPCG.Data
+):
     qd.loop_config(name="pcg_dot_pAp_partial", block_dim=256)
     for thread in range(16384):
         value = qd.f64(0.0)
@@ -147,9 +149,9 @@ def pcg_dot_pAp(data: qd.template()):
 
 @qd.func(requires_top_level=True)
 def initialize_linear_pcg(
-    data: qd.template(),
-    linear_system_data: qd.template(),
-    action_provider: qd.template(),
+    data: qd.template(),  # LinearPCG.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    action_provider: qd.template(),  # PCGSolver
 ):
     for i_d in range(data.total_dof[()]):
         linear_system_data.write_solution(i_d, qd.f64(0.0))
@@ -181,11 +183,11 @@ def initialize_linear_pcg(
 
 @qd.func(requires_top_level=True)
 def iterate_linear_pcg(
-    data: qd.template(),
-    linear_system_data: qd.template(),
-    action_provider: qd.template(),
-    tolerance: qd.template(),
-    max_iterations: qd.template(),
+    data: qd.template(),  # LinearPCG.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    action_provider: qd.template(),  # PCGSolver
+    tolerance: qd.template(),  # float
+    max_iterations: qd.template(),  # int
 ):
     for i_d in range(data.total_dof[()]):
         if data.is_active[()] != 0:
@@ -249,13 +251,13 @@ def iterate_linear_pcg(
 
 @qd.func(requires_top_level=True)
 def solve_linear_pcg(
-    data: qd.template(),
-    linear_system_data: qd.template(),
-    action_provider: qd.template(),
-    tolerance: qd.template(),
-    max_iterations: qd.template(),
-    max_pcg_iterations: qd.template(),
-    total_pcg_iterations: qd.template(),
+    data: qd.template(),  # LinearPCG.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    action_provider: qd.template(),  # PCGSolver
+    tolerance: qd.template(),  # float
+    max_iterations: qd.template(),  # int
+    max_pcg_iterations: qd.template(),  # qd.Ndarray
+    total_pcg_iterations: qd.template(),  # qd.Ndarray
 ):
     initialize_linear_pcg(data, linear_system_data, action_provider)
     while qd.graph.do_while(data.condition):

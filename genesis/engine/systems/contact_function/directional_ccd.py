@@ -42,7 +42,7 @@ def closest_pt(
     t2x: qd.f64,
     t2y: qd.f64,
     t2z: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     """Closest point on triangle to point. Writes ``out[0..2]`` = closest point, ``out[3]`` = dist.
 
@@ -165,7 +165,7 @@ def closest_ee(
     q2x: qd.f64,
     q2y: qd.f64,
     q2z: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     """Closest points of two segments. Writes ``out[0..2]`` = ca, ``out[3..5]`` = cb, ``out[6]`` = dist.
 
@@ -270,8 +270,8 @@ def directional_point_triangle_ccd(
     dt2z: qd.f64,
     eta: qd.f64,
     thickness: qd.f64,
-    max_iters: qd.template(),
-    result: qd.template(),
+    max_iters: qd.template(),  # int
+    result: qd.template(),  # qd.Vector
 ):
     """Directional CCD for point-triangle. Writes ``result[0]`` = toc.
 
@@ -391,8 +391,8 @@ def directional_edge_edge_ccd(
     deb1z: qd.f64,
     eta: qd.f64,
     thickness: qd.f64,
-    max_iters: qd.template(),
-    result: qd.template(),
+    max_iters: qd.template(),  # int
+    result: qd.template(),  # qd.Vector
 ):
     """Directional CCD for edge-edge. Writes ``result[0]`` = toc.
 
@@ -506,7 +506,7 @@ def halfplane_ccd(
     Nz: qd.f64,
     eta: qd.f64,
     thickness: qd.f64,
-    result: qd.template(),
+    result: qd.template(),  # qd.Vector
 ):
     """Analytic ray-plane CCD. Writes ``result[0]`` = toi.
 

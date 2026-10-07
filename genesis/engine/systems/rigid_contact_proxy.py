@@ -237,7 +237,6 @@ class RigidContactProxySystem(SimSystem):
         super().__init__()
         self.data = self.Data()
         self._wire_args = None
-        self.is_initialized = False
         self.n_links = 0
         self.n_instances = 0
         self.n_bodies = 0
@@ -246,8 +245,8 @@ class RigidContactProxySystem(SimSystem):
     def wire_data(
         self,
         *,
-        n_links_host: int,
-        n_instances_host: int,
+        n_links: int,
+        n_instances: int,
         n_rigid_bodies: int,
         mechanism_body: np.ndarray,
         proxy_body: np.ndarray,
@@ -261,13 +260,13 @@ class RigidContactProxySystem(SimSystem):
         test_merit_energy_bias: float = 0.0,
         ls_forensics_test_energy_bias: float = 0.0,
     ) -> None:
-        self.n_links = int(n_links_host)
-        self.n_instances = int(n_instances_host)
+        self.n_links = int(n_links)
+        self.n_instances = int(n_instances)
         self.n_bodies = int(n_rigid_bodies)
         self.n_pairs = len(np.ascontiguousarray(mechanism_body).reshape(-1))
         self._wire_args = {
-            "n_links_host": n_links_host,
-            "n_instances_host": n_instances_host,
+            "n_links": n_links,
+            "n_instances": n_instances,
             "n_rigid_bodies": n_rigid_bodies,
             "mechanism_body": mechanism_body,
             "proxy_body": proxy_body,
@@ -283,13 +282,10 @@ class RigidContactProxySystem(SimSystem):
         }
 
     def init(self) -> None:
-        if self.is_initialized:
-            raise RuntimeError("RigidContactProxySystem is already initialized")
         if self._wire_args is None:
             raise RuntimeError("RigidContactProxySystem data has not been wired")
         _populate_rigid_contact_proxy_data(self.data, **self._wire_args)
         self._wire_args = None
-        self.is_initialized = True
 
     def build(self) -> None:
         from .contact_system import ContactSystem
@@ -411,7 +407,10 @@ class RigidContactProxySystem(SimSystem):
         )
 
     @qd.func(requires_top_level=True)
-    def on_contribute_newton_max_displacement(self, max_displacement: qd.template()):
+    def on_contribute_newton_max_displacement(
+        self,
+        max_displacement: qd.template(),  # qd.Ndarray
+    ):
         contribute_newton_max_disp(
             self.data,
             self.rigid.data,
@@ -421,7 +420,10 @@ class RigidContactProxySystem(SimSystem):
         )
 
     @qd.func(requires_top_level=True)
-    def on_apply_convergence(self, converged: qd.template()):
+    def on_apply_convergence(
+        self,
+        converged: qd.template(),  # qd.Ndarray
+    ):
         apply_convergence(self.data, self.rigid.data, self.forest.data, converged)
 
     @qd.func(requires_top_level=True)
@@ -447,7 +449,10 @@ class RigidContactProxySystem(SimSystem):
         )
 
     @qd.func(requires_top_level=True)
-    def on_compute_restoration_energy(self, use_trial: qd.template()):
+    def on_compute_restoration_energy(
+        self,
+        use_trial: qd.template(),  # bool
+    ):
         compute_restoration_energy(
             self.data,
             self.rigid.data,
@@ -476,7 +481,7 @@ class RigidContactProxySystem(SimSystem):
         step,
         max_steps,
         exhausted,
-        converged: qd.template(),
+        converged: qd.template(),  # qd.Ndarray
     ):
         return check_line_search(
             self.data,
@@ -570,8 +575,8 @@ def _initialize_merit_gradient(data: RigidContactProxySystem.Data, capacity: int
 def _populate_rigid_contact_proxy_data(
     data: RigidContactProxySystem.Data,
     *,
-    n_links_host: int,
-    n_instances_host: int,
+    n_links: int,
+    n_instances: int,
     n_rigid_bodies: int,
     mechanism_body: np.ndarray,
     proxy_body: np.ndarray,
@@ -602,7 +607,7 @@ def _populate_rigid_contact_proxy_data(
         raise ValueError("RigidContactProxySystem mapping arrays must have equal length")
     if n_rigid_bodies < 0:
         raise ValueError("RigidContactProxySystem body count must be non-negative")
-    if np.any(mechanism < 0) or np.any(mechanism >= n_links_host * n_instances_host):
+    if np.any(mechanism < 0) or np.any(mechanism >= n_links * n_instances):
         raise ValueError("RigidContactProxySystem mechanism body is out of range")
     if np.any(proxies < 0) or np.any(proxies >= n_rigid_bodies):
         raise ValueError("RigidContactProxySystem proxy body is out of range")
@@ -771,7 +776,10 @@ def _populate_rigid_contact_proxy_data(
 
 @qd.func(requires_top_level=True)
 def capture_physical_gradient(
-    data: qd.template(), rigid: qd.template(), forest: qd.template(), linear_system_data: qd.template()
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
 ):
     for dof in range(data.merit_gradient_capacity[()]):
         data.merit_gradient[dof] = linear_system_data.read_rhs(dof)
@@ -779,9 +787,9 @@ def capture_physical_gradient(
 
 @qd.func(requires_top_level=True)
 def initialize_merit(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for _ in range(1):
         data.merit_active[()] = 0
@@ -793,16 +801,16 @@ def initialize_merit(
 
 @qd.func
 def check_line_search(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
     energy0,
     trial_energy,
     alpha,
     step,
     max_steps,
     exhausted,
-    converged: qd.template(),
+    converged: qd.template(),  # qd.Ndarray
 ):
     energy_roundoff = 1.0e-12 * (1.0 + qd.abs(energy0))
     energy_ok = trial_energy <= energy0 + energy_roundoff
@@ -927,7 +935,13 @@ def check_line_search(
 
 
 @qd.func
-def _current_mechanism_pose(data: qd.template(), rigid: qd.template(), forest: qd.template(), link, environment):
+def _current_mechanism_pose(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    link,
+    environment,
+):
     link_index = [link, environment] if qd.static(rigid.rigid_config.batch_links_info) else link
     link_position = rigid.dyn_state.links.pos[link, environment]
     link_quaternion = rigid.dyn_state.links.quat[link, environment]
@@ -946,9 +960,9 @@ def _current_mechanism_pose(data: qd.template(), rigid: qd.template(), forest: q
 
 @qd.func(requires_top_level=True)
 def initialize_proxy_state(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for pair in range(data.n_pairs[()]):
         mechanism = data.mechanism_body[pair]
@@ -975,9 +989,9 @@ def initialize_proxy_state(
 
 @qd.func(requires_top_level=True)
 def prepare_metric(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for pair in range(data.n_pairs[()]):
         mechanism = data.mechanism_body[pair]
@@ -1002,9 +1016,9 @@ def prepare_metric(
 
 @qd.func(requires_top_level=True)
 def reset_frame(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for _ in range(1):
         data.filter_size[()] = 0
@@ -1040,9 +1054,9 @@ def reset_frame(
 
 @qd.func(requires_top_level=True)
 def mark_mechanism_constrained(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for pair in range(data.n_pairs[()]):
         mechanism = data.mechanism_body[pair]
@@ -1053,7 +1067,11 @@ def mark_mechanism_constrained(
 
 @qd.func(requires_top_level=True)
 def prepare_tolerance(
-    data: qd.template(), rigid: qd.template(), forest: qd.template(), sim_config: qd.template(), contact: qd.template()
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    sim_config: qd.template(),  # SimConfig.Data
+    contact: qd.template(),  # ContactSystem.Data
 ):
     for _ in range(1):
         data.solve_tolerance[()] = qd.min(
@@ -1065,9 +1083,9 @@ def prepare_tolerance(
 
 @qd.func(requires_top_level=True)
 def initialize_newton(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for _ in range(1):
         if data.restoration_active[()] != 0:
@@ -1080,7 +1098,12 @@ def initialize_newton(
 
 
 @qd.func(requires_top_level=True)
-def apply_convergence(data: qd.template(), rigid: qd.template(), forest: qd.template(), converged: qd.template()):
+def apply_convergence(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    converged: qd.template(),  # qd.Ndarray
+):
     for _ in range(1):
         data.physical_converged[()] = converged[()]
         if data.restoration_active[()] != 0:
@@ -1097,7 +1120,12 @@ def apply_convergence(data: qd.template(), rigid: qd.template(), forest: qd.temp
 
 
 @qd.func(requires_top_level=True)
-def prepare_path_limit(data: qd.template(), rigid: qd.template(), forest: qd.template(), contact: qd.template()):
+def prepare_path_limit(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    contact: qd.template(),  # ContactSystem.Data
+):
     for _ in range(1):
         data.fk_alpha[()] = 1.0
     for pair in range(data.n_pairs[()]):
@@ -1146,9 +1174,9 @@ def prepare_path_limit(data: qd.template(), rigid: qd.template(), forest: qd.tem
 
 @qd.func(requires_top_level=True)
 def evaluate_trial_guard(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for _ in range(1):
         data.trial_max_residual[()] = 0.0
@@ -1186,7 +1214,10 @@ def evaluate_trial_guard(
 
 @qd.func(requires_top_level=True)
 def compute_restoration_energy(
-    data: qd.template(), rigid: qd.template(), forest: qd.template(), use_trial: qd.template()
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    use_trial: qd.template(),  # bool
 ):
     for _ in range(1):
         data.restoration_energy[()] = 0.0
@@ -1209,9 +1240,9 @@ def compute_restoration_energy(
 
 @qd.func
 def trigger_restoration(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     triggered = False
     if (
@@ -1230,7 +1261,12 @@ def trigger_restoration(
 
 
 @qd.func(requires_top_level=True)
-def finalize_restoration_step(data: qd.template(), rigid: qd.template(), forest: qd.template(), alpha):
+def finalize_restoration_step(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    alpha,
+):
     for _ in range(1):
         if data.restoration_active[()] != 0 and data.restoration_reprice_flag[()] == 0 and alpha > 0.0:
             data.dual_update_flag[()] = qd.i32(data.trial_max_residual[()] > data.solve_tolerance[()])
@@ -1261,9 +1297,9 @@ def finalize_restoration_step(data: qd.template(), rigid: qd.template(), forest:
 
 @qd.func(requires_top_level=True)
 def recover_reaction(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for pair in range(data.n_pairs[()]):
         offset = forest.proxy_dof_offset[()] + pair * 6
@@ -1282,9 +1318,9 @@ def recover_reaction(
 
 @qd.func(requires_top_level=True)
 def prepare_constraint(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for _ in range(1):
         data.max_surface_residual[()] = 0.0
@@ -1335,7 +1371,12 @@ def prepare_constraint(
 
 
 @qd.func(requires_top_level=True)
-def initialize_global_vertices(data: qd.template(), rigid: qd.template(), forest: qd.template(), vertex: qd.template()):
+def initialize_global_vertices(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for local_vertex in range(data.n_verts[()]):
         pair = data.vertex_pair[local_vertex]
         local_position = qd.Vector.zero(qd.f64, 3)
@@ -1357,7 +1398,12 @@ def initialize_global_vertices(data: qd.template(), rigid: qd.template(), forest
 
 
 @qd.func(requires_top_level=True)
-def forward_global_vertices(data: qd.template(), rigid: qd.template(), forest: qd.template(), vertex: qd.template()):
+def forward_global_vertices(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for local_vertex in range(data.n_verts[()]):
         pair = data.vertex_pair[local_vertex]
         local_position = qd.Vector.zero(qd.f64, 3)
@@ -1376,7 +1422,10 @@ def forward_global_vertices(data: qd.template(), rigid: qd.template(), forest: q
 
 @qd.func(requires_top_level=True)
 def publish_trajectory_end_positions(
-    data: qd.template(), rigid: qd.template(), forest: qd.template(), vertex: qd.template()
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
 ):
     for local_vertex in range(data.n_verts[()]):
         pair = data.vertex_pair[local_vertex]
@@ -1413,11 +1462,11 @@ def publish_trajectory_end_positions(
 
 @qd.func(requires_top_level=True)
 def contribute_newton_max_disp(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
-    vertex: qd.template(),
-    max_disp: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    max_disp: qd.template(),  # qd.Ndarray
 ):
     for local_vertex in range(data.n_verts[()]):
         pair = data.vertex_pair[local_vertex]
@@ -1443,9 +1492,9 @@ def contribute_newton_max_disp(
 
 @qd.func(requires_top_level=True)
 def record_start_point(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for pair in range(data.n_pairs[()]):
         for axis in qd.static(range(3)):
@@ -1455,7 +1504,12 @@ def record_start_point(
 
 
 @qd.func(requires_top_level=True)
-def step_forward(data: qd.template(), rigid: qd.template(), forest: qd.template(), alpha):
+def step_forward(
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    alpha,
+):
     for pair in range(data.n_pairs[()]):
         angular = qd.Vector.zero(qd.f64, 3)
         for axis in qd.static(range(3)):
@@ -1472,9 +1526,9 @@ def step_forward(data: qd.template(), rigid: qd.template(), forest: qd.template(
 
 @qd.func(requires_top_level=True)
 def copy_previous_state(
-    data: qd.template(),
-    rigid: qd.template(),
-    forest: qd.template(),
+    data: qd.template(),  # RigidContactProxySystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
 ):
     for pair in range(data.n_pairs[()]):
         for axis in qd.static(range(3)):

@@ -48,8 +48,8 @@ class FiniteElementMethod(SimSystem):
         super().__init__()
         self.data = self.Data()
         self._finite_element: FiniteElement | None = None
-        self._global_vert_offset_host = 0
-        self._global_body_offset_host = 0
+        self._global_vert_offset = 0
+        self._global_body_offset = 0
         self.predict_actions = self.create_action_collection()
         self.init_actions = self.create_action_collection()
         self.extent_actions = self.create_action_collection()
@@ -156,25 +156,21 @@ class FiniteElementMethod(SimSystem):
         )
         self.init_actions.register(init_action)
 
-    def report_global_vertex_extent(self) -> int:
-        if self._finite_element is None:
-            raise RuntimeError("FiniteElementMethod data has not been wired")
-        return max(self._finite_element.n_verts, 1)
-
     def receive_global_vertex_range(self, offset: int, count: int) -> None:
-        if count != self.report_global_vertex_extent():
-            raise ValueError("FiniteElementMethod global vertex range has the wrong extent")
-        self._global_vert_offset_host = int(offset)
-
-    def report_global_body_extent(self) -> int:
-        if self._finite_element is None:
+        finite_element = self._finite_element
+        if finite_element is None:
             raise RuntimeError("FiniteElementMethod data has not been wired")
-        return self._finite_element.n_bodies
+        if count != max(finite_element.n_verts, 1):
+            raise ValueError("FiniteElementMethod global vertex range has the wrong extent")
+        self._global_vert_offset = int(offset)
 
     def receive_global_body_range(self, offset: int, count: int) -> None:
-        if count != self.report_global_body_extent():
+        finite_element = self._finite_element
+        if finite_element is None:
+            raise RuntimeError("FiniteElementMethod data has not been wired")
+        if count != finite_element.n_bodies:
             raise ValueError("FiniteElementMethod global body range has the wrong extent")
-        self._global_body_offset_host = int(offset)
+        self._global_body_offset = int(offset)
 
     def init(self, dof_offset: int) -> None:
         if not self.predict_actions._actions:
@@ -204,8 +200,8 @@ class FiniteElementMethod(SimSystem):
         self.data.n_tris = array(qd.i32, (), np.array(finite_element.n_tris, dtype=np.int32))
         self.data.n_bodies = array(qd.i32, (), np.array(finite_element.n_bodies, dtype=np.int32))
         self.data.dof_offset = array(qd.i32, (), np.array(dof_offset, dtype=np.int32))
-        self.data.global_vert_offset = array(qd.i32, (), np.array(self._global_vert_offset_host, dtype=np.int32))
-        self.data.global_body_offset = array(qd.i32, (), np.array(self._global_body_offset_host, dtype=np.int32))
+        self.data.global_vert_offset = array(qd.i32, (), np.array(self._global_vert_offset, dtype=np.int32))
+        self.data.global_body_offset = array(qd.i32, (), np.array(self._global_body_offset, dtype=np.int32))
         self.data.x = array(qd.f64, (vert_capacity, 3), positions)
         self.data.x_prev = array(qd.f64, (vert_capacity, 3), positions)
         self.data.velocities = array(
@@ -288,8 +284,8 @@ class FiniteElementMethod(SimSystem):
             action.invoke()
         self.resolve_actions()
         self._finite_element = None
-        self._global_vert_offset_host = 0
-        self._global_body_offset_host = 0
+        self._global_vert_offset = 0
+        self._global_body_offset = 0
 
     def resolve_actions(
         self,
@@ -352,7 +348,10 @@ class FiniteElementMethod(SimSystem):
         negate_fem_dx(self.data, self.global_linear_system.data)
 
     @qd.func(requires_top_level=True)
-    def on_contribute_newton_max_displacement(self, max_displacement: qd.template()):
+    def on_contribute_newton_max_displacement(
+        self,
+        max_displacement: qd.template(),  # qd.Ndarray
+    ):
         contribute_fem_newton_max_disp(self.data, max_displacement)
 
     @qd.func(requires_top_level=True)
@@ -381,7 +380,10 @@ class FiniteElementMethod(SimSystem):
 
 
 @qd.func(requires_top_level=True)
-def sync_fem_from_scene(data: qd.template(), vertex: qd.template()):
+def sync_fem_from_scene(
+    data: qd.template(),  # FiniteElementMethod.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_fem_verts[()]):
         scene_vertex = data.bridge_vertex[i_vertex]
         environment = data.bridge_environment[i_vertex]
@@ -409,7 +411,10 @@ def sync_fem_from_scene(data: qd.template(), vertex: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def initialize_fem_global_vertices(data: qd.template(), vertex: qd.template()):
+def initialize_fem_global_vertices(
+    data: qd.template(),  # FiniteElementMethod.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_fem_verts[()]):
         global_vertex = data.global_vert_offset[()] + i_vertex
         vertex.body_id[global_vertex] = data.global_body_offset[()] + data.body_id[i_vertex]
@@ -422,7 +427,10 @@ def initialize_fem_global_vertices(data: qd.template(), vertex: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def forward_fem_global_vertices(data: qd.template(), vertex: qd.template()):
+def forward_fem_global_vertices(
+    data: qd.template(),  # FiniteElementMethod.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_fem_verts[()]):
         global_vertex = data.global_vert_offset[()] + i_vertex
         for axis in qd.static(range(3)):
@@ -430,7 +438,10 @@ def forward_fem_global_vertices(data: qd.template(), vertex: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def publish_fem_trajectory_end_positions(data: qd.template(), vertex: qd.template()):
+def publish_fem_trajectory_end_positions(
+    data: qd.template(),  # FiniteElementMethod.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_fem_verts[()]):
         global_vertex = data.global_vert_offset[()] + i_vertex
         for axis in qd.static(range(3)):
@@ -438,13 +449,18 @@ def publish_fem_trajectory_end_positions(data: qd.template(), vertex: qd.templat
 
 
 @qd.func(requires_top_level=True)
-def reset_fem_energy(data: qd.template()):
+def reset_fem_energy(
+    data: qd.template(),  # FiniteElementMethod.Data
+):
     for _ in range(1):
         data.fem_energy[()] = qd.f64(0.0)
 
 
 @qd.func(requires_top_level=True)
-def negate_fem_dx(data: qd.template(), global_linear_system_data: qd.template()):
+def negate_fem_dx(
+    data: qd.template(),  # FiniteElementMethod.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         for axis in qd.static(range(3)):
             value = qd.f64(0.0)
@@ -454,21 +470,29 @@ def negate_fem_dx(data: qd.template(), global_linear_system_data: qd.template())
 
 
 @qd.func(requires_top_level=True)
-def contribute_fem_newton_max_disp(data: qd.template(), max_disp: qd.template()):
+def contribute_fem_newton_max_disp(
+    data: qd.template(),  # FiniteElementMethod.Data
+    max_disp: qd.template(),  # qd.Ndarray
+):
     for i_vert in range(data.n_fem_verts[()]):
         for axis in qd.static(range(3)):
             qd.atomic_max(max_disp[()], qd.abs(data.dx[i_vert, axis]))
 
 
 @qd.func(requires_top_level=True)
-def record_fem_start_point(data: qd.template()):
+def record_fem_start_point(
+    data: qd.template(),  # FiniteElementMethod.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         for axis in qd.static(range(3)):
             data.x_temp[i_vert, axis] = data.x[i_vert, axis]
 
 
 @qd.func(requires_top_level=True)
-def step_fem_forward(data: qd.template(), alpha):
+def step_fem_forward(
+    data: qd.template(),  # FiniteElementMethod.Data
+    alpha,
+):
     for i_vert in range(data.n_fem_verts[()]):
         if data.is_fixed[i_vert] == 0:
             for axis in qd.static(range(3)):
@@ -476,7 +500,10 @@ def step_fem_forward(data: qd.template(), alpha):
 
 
 @qd.func(requires_top_level=True)
-def update_fem_velocity(data: qd.template(), sim_config: qd.template()):
+def update_fem_velocity(
+    data: qd.template(),  # FiniteElementMethod.Data
+    sim_config: qd.template(),  # SimConfig.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         for axis in qd.static(range(3)):
             if data.is_fixed[i_vert] != 0:
@@ -486,14 +513,18 @@ def update_fem_velocity(data: qd.template(), sim_config: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def copy_fem_x_prev(data: qd.template()):
+def copy_fem_x_prev(
+    data: qd.template(),  # FiniteElementMethod.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         for axis in qd.static(range(3)):
             data.x_prev[i_vert, axis] = data.x[i_vert, axis]
 
 
 @qd.kernel
-def forward_fem_scene_vertices(data: qd.template()):
+def forward_fem_scene_vertices(
+    data: qd.template(),  # FiniteElementMethod.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         scene_vert = data.bridge_vertex[i_vert]
         environment = data.bridge_environment[i_vert]

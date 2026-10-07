@@ -79,9 +79,8 @@ class SimEngine:
 
         self.systems: dict[type, SimSystem] = {}
         self._dependencies: dict[SimSystem, bool] = {}
-        self.is_built_host = False
-        self.is_initialized_host = False
-        self.params_wired_host = False
+        self._is_built = False
+        self._solver_params = None
         self.genesis_serial_pipeline = False
         self.has_rigid = False
         self.has_fem = False
@@ -112,7 +111,7 @@ class SimEngine:
         self.add_system(self.sim_config_system)
 
     def configure_genesis_serial_pipeline(self, enabled: bool) -> None:
-        if self.is_built_host:
+        if self._is_built:
             raise RuntimeError("Pipeline scheduling must be configured before build_systems()")
         self.genesis_serial_pipeline = bool(enabled)
 
@@ -134,7 +133,7 @@ class SimEngine:
             self._visualizer_server = None
 
     def add_system(self, system: SimSystem) -> None:
-        if self.is_built_host:
+        if self._is_built:
             raise RuntimeError("add_system() is only valid before build_systems()")
         system_type = type(system)
         if system_type in self.systems:
@@ -166,7 +165,7 @@ class SimEngine:
         return dict(self._dependencies)
 
     def build_systems(self) -> None:
-        if self.is_built_host:
+        if self._is_built:
             raise RuntimeError("SimEngine systems are already built")
         systems = tuple(self.systems.values())
         for system in systems:
@@ -178,7 +177,7 @@ class SimEngine:
             system._end_build()
 
     def build(self) -> None:
-        if self.is_built_host:
+        if self._is_built:
             raise RuntimeError("SimEngine is already built")
         self.rigid = self.find(RigidSystem)
         self.fem_system = self.find(FiniteElementMethod)
@@ -218,7 +217,7 @@ class SimEngine:
             raise RuntimeError("ContactSystem requires broad-phase and contact constitution systems")
         if not self.has_rigid and not self.has_fem:
             raise RuntimeError("SimEngine requires RigidSystem or FiniteElementMethod")
-        self.is_built_host = True
+        self._is_built = True
 
     def _make_graph_fastcache_key(self) -> int:
         """Encode Python-static graph topology that Quadrants cannot infer from ndarray arguments."""
@@ -243,7 +242,7 @@ class SimEngine:
             broad_phase is not None and broad_phase.genesis_legacy_sort_reduce,
             broad_phase is not None and broad_phase.genesis_legacy_fp64_bounds,
             broad_phase is not None and broad_phase.genesis_legacy_refit,
-            self.global_linear_system_system.data.matrix.genesis_legacy_sort_reduce_host,
+            self.global_linear_system_system.data.matrix.legacy_sort_reduce,
             contact is not None and contact.genesis_legacy_sort_reduce,
             self.rigid_forest is not None and self.rigid_forest.fused_enabled,
             self.rigid_forest is not None and self.rigid_forest.genesis_legacy_enabled,
@@ -259,7 +258,7 @@ class SimEngine:
         max_ls_iter: int,
         pcg_tol_rate: float,
     ) -> None:
-        if not self.is_built_host:
+        if not self._is_built:
             raise RuntimeError("build_systems() must run before wire_solver_params()")
         self.sim_config_system.wire(
             dt=dt,
@@ -268,11 +267,9 @@ class SimEngine:
             max_pcg_iter=max_pcg_iter,
             max_ls_iter=max_ls_iter,
         )
-        self.max_ls_iter_host = max_ls_iter
-        self.pcg_tol_rate_host = pcg_tol_rate
-        self.params_wired_host = True
+        self._solver_params = (int(max_ls_iter), float(pcg_tol_rate))
 
-    def _initialize_runtime_fields(self) -> None:
+    def _initialize_runtime_fields(self, max_ls_iter: int) -> None:
         """Allocate mutable engine-owned graph state before binding pipelines."""
         self.newton_cond = qd.ndarray(qd.i32, shape=())
         self.ls_cond = qd.ndarray(qd.i32, shape=())
@@ -286,16 +283,17 @@ class SimEngine:
         self.max_disp = qd.ndarray(qd.f64, shape=())
         self.energy_delta = qd.ndarray(qd.f64, shape=())
         self.checkpoint_never_yield = qd.ndarray(qd.i32, shape=())
-        self.energy_buf = qd.ndarray(qd.f64, shape=(self.max_ls_iter_host + 1,))
+        self.energy_buf = qd.ndarray(qd.f64, shape=(max_ls_iter + 1,))
         self.max_pcg_iters.from_numpy(np.array(0, dtype=np.int32))
         self.total_pcg_iters.from_numpy(np.array(0, dtype=np.int32))
         self.checkpoint_never_yield.from_numpy(np.array(0, dtype=np.int32))
 
     def init(self) -> None:
-        if self.is_initialized_host:
+        if self.step_pipeline is not None:
             raise RuntimeError("SimEngine is already initialized")
-        if not self.params_wired_host:
+        if self._solver_params is None:
             raise RuntimeError("wire_solver_params() must run before init()")
+        max_ls_iter, pcg_tol_rate = self._solver_params
 
         self.sim_config_system.init()
         if self.global_body_system is not None:
@@ -334,9 +332,9 @@ class SimEngine:
             or linear_data.matrix.triplet_row.shape[0] < max_contact_body_triplets
         ):
             raise RuntimeError("GlobalLinearSystem data was not sized for the built simulation")
-        self.pcg_solver_system.init(dof_offset, n_block_rows, self.pcg_tol_rate_host)
+        self.pcg_solver_system.init(dof_offset, n_block_rows, pcg_tol_rate)
 
-        self._initialize_runtime_fields()
+        self._initialize_runtime_fields(max_ls_iter)
         init_yield_callbacks = {}
         step_yield_callbacks = {
             ContactCheckpoint.SORT: self.global_linear_system_system.on_triplet_overflow_yield,
@@ -385,7 +383,7 @@ class SimEngine:
         self.initialize_global_resources()
         if self.contact_system is not None:
             self._initialize_contact()
-        self.is_initialized_host = True
+        self._solver_params = None
 
     def sync_from_solvers(self) -> None:
         """Synchronize externally authored Scene state without rebuilding graph resources."""
@@ -398,18 +396,19 @@ class SimEngine:
         self.contact_system.raise_if_initial_intersection()
 
     def step(self) -> None:
-        if not self.is_initialized_host:
+        pipeline = self.step_pipeline
+        if pipeline is None:
             raise RuntimeError("SimEngine.init() must run before step()")
         contact = None if self.contact_system is None else self.contact_system.data
         linear = self.global_linear_system_system.data
-        self.step_pipeline.run()
+        pipeline.run()
         if self.fem_system is not None:
             forward_fem_scene_vertices(self.fem_system.data)
         if bool(qd_to_numpy(self.frame_failed)):
             details = [
-                f"newton={self.get_newton_iters()}",
-                f"pcg={self.get_max_pcg_iters()}",
-                f"line_search={self.get_max_ls_iters()}",
+                f"newton={int(qd_to_numpy(self.newton_iter))}",
+                f"pcg={int(qd_to_numpy(self.max_pcg_iters))}",
+                f"line_search={int(qd_to_numpy(self.ls_iter))}",
                 f"triplet_overflow={int(qd_to_numpy(linear.matrix.triplet_overflow))}",
                 f"bcoo_valid={int(qd_to_numpy(linear.matrix.bcoo_valid))}",
             ]
@@ -448,18 +447,6 @@ class SimEngine:
                                 f" thickness={thickness:.6g})"
                             )
             raise RuntimeError(f"SimEngine Newton solve failed ({', '.join(details)})")
-
-    def get_newton_iters(self) -> int:
-        return int(qd_to_numpy(self.newton_iter))
-
-    def get_max_pcg_iters(self) -> int:
-        return int(qd_to_numpy(self.max_pcg_iters))
-
-    def get_total_pcg_iters(self) -> int:
-        return int(qd_to_numpy(self.total_pcg_iters))
-
-    def get_max_ls_iters(self) -> int:
-        return int(qd_to_numpy(self.ls_iter))
 
     @qd.kernel(fastcache=True)
     def initialize_global_resources(self):

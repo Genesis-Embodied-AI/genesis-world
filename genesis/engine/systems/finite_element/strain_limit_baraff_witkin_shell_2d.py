@@ -27,7 +27,6 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
         super().__init__()
         self.data = self.Data()
         self._inputs = None
-        self._initialized = False
 
     def build(self) -> None:
         self.fem_system = self.require(FiniteElementMethod)
@@ -55,7 +54,7 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
         lambda_param: np.ndarray,
         strain_limit_multiplier: np.ndarray,
     ) -> None:
-        if self._initialized:
+        if hasattr(self.data, "n_tris"):
             raise RuntimeError("StrainLimitBaraffWitkinShell2D data is already initialized")
         self._inputs = _strain_limit_inputs(
             tri_indices,
@@ -83,13 +82,7 @@ class StrainLimitBaraffWitkinShell2D(SimSystem):
         self.data.mu = array(qd.f64, mu_values)
         self.data.lambda_ = array(qd.f64, lambda_values)
         self.data.strain_limit_multiplier = array(qd.f64, multiplier_values)
-        self._initialized = True
         self._inputs = None
-
-    def triplet_count(self) -> int:
-        if self._inputs is None:
-            raise RuntimeError("StrainLimitBaraffWitkinShell2D triplet count is available only before initialization")
-        return len(self._inputs[0]) * 6
 
 
 def _strain_limit_inputs(
@@ -143,10 +136,10 @@ def wire_strain_limit_baraff_witkin_shell_2d_data(
 
 @qd.func(requires_top_level=True)
 def report_strain_limit_extent(
-    fem: qd.template(),
-    data: qd.template(),
-    global_linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    data: qd.template(),  # StrainLimitBaraffWitkinShell2D.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     for _ in range(1):
         global_linear_system_data.set_subsystem_extent(linear_system_id, data.n_tris[()] * 6)
@@ -154,11 +147,11 @@ def report_strain_limit_extent(
 
 @qd.func(requires_top_level=True)
 def assemble_strain_limit(
-    fem: qd.template(),
-    data: qd.template(),
-    sim_config: qd.template(),
-    global_linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    data: qd.template(),  # StrainLimitBaraffWitkinShell2D.Data
+    sim_config: qd.template(),  # SimConfig.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     for i in range(data.n_tris[()]):
         triplet_offset = global_linear_system_data.subsystem_offset(linear_system_id)
@@ -232,9 +225,9 @@ def assemble_strain_limit(
 
 @qd.func(requires_top_level=True)
 def compute_strain_limit_energy(
-    fem: qd.template(),
-    data: qd.template(),
-    sim_config: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    data: qd.template(),  # StrainLimitBaraffWitkinShell2D.Data
+    sim_config: qd.template(),  # SimConfig.Data
 ):
     for i in range(data.n_tris[()]):
         tri = data.tri_indices[i]

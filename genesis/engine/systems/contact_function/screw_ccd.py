@@ -8,7 +8,12 @@ from .directional_ccd import closest_ee, closest_pt
 
 
 @qd.func
-def _load_screw_vertex(vertex: qd.template(), vertex_id, path: qd.template(), meta: qd.template()):
+def _load_screw_vertex(
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    vertex_id,
+    path: qd.template(),  # qd.Matrix
+    meta: qd.template(),  # qd.Vector
+):
     for axis in qd.static(range(3)):
         x0 = vertex.positions[vertex_id, axis]
         path[0, axis] = x0
@@ -28,7 +33,11 @@ def _load_screw_vertex(vertex: qd.template(), vertex_id, path: qd.template(), me
 
 
 @qd.func
-def _screw_eval(path: qd.template(), meta: qd.template(), time):
+def _screw_eval(
+    path: qd.template(),  # qd.Matrix
+    meta: qd.template(),  # qd.Vector
+    time,
+):
     result = qd.Vector.zero(qd.f64, 3)
     if meta[0] == 0.0:
         for axis in qd.static(range(3)):
@@ -70,7 +79,10 @@ def _screw_eval(path: qd.template(), meta: qd.template(), time):
 
 
 @qd.func
-def _screw_remainder(path: qd.template(), current: qd.template()):
+def _screw_remainder(
+    path: qd.template(),  # qd.Matrix
+    current: qd.template(),  # qd.Vector
+):
     return qd.Vector(
         [
             path[0, 0] + path[1, 0] - current[0],
@@ -81,7 +93,10 @@ def _screw_remainder(path: qd.template(), current: qd.template()):
 
 
 @qd.func
-def _screw_curvature(meta: qd.template(), time):
+def _screw_curvature(
+    meta: qd.template(),  # qd.Vector
+    time,
+):
     remainder_angle = (1.0 - time) * meta[0]
     return remainder_angle * remainder_angle * meta[1]
 
@@ -103,15 +118,15 @@ def _advance_fraction(gap, rate, curvature):
 
 @qd.func
 def screw_point_triangle_ccd(
-    vertex: qd.template(),
+    vertex: qd.template(),  # GlobalVertexManager.Data
     point_id,
     triangle_0_id,
     triangle_1_id,
     triangle_2_id,
     eta,
     thickness,
-    max_iters: qd.template(),
-    result: qd.template(),
+    max_iters: qd.template(),  # int
+    result: qd.template(),  # qd.Vector
 ):
     point_path = qd.Matrix.zero(qd.f64, 5, 3)
     triangle_0_path = qd.Matrix.zero(qd.f64, 5, 3)
@@ -230,15 +245,15 @@ def screw_point_triangle_ccd(
 
 @qd.func
 def screw_edge_edge_ccd(
-    vertex: qd.template(),
+    vertex: qd.template(),  # GlobalVertexManager.Data
     edge_a_0_id,
     edge_a_1_id,
     edge_b_0_id,
     edge_b_1_id,
     eta,
     thickness,
-    max_iters: qd.template(),
-    result: qd.template(),
+    max_iters: qd.template(),  # int
+    result: qd.template(),  # qd.Vector
 ):
     paths = qd.Matrix.zero(qd.f64, 20, 3)
     metadata = qd.Matrix.zero(qd.f64, 4, 2)
@@ -381,14 +396,14 @@ def screw_edge_edge_ccd(
 
 @qd.func
 def screw_halfplane_ccd(
-    vertex: qd.template(),
+    vertex: qd.template(),  # GlobalVertexManager.Data
     vertex_id,
-    normal: qd.template(),
+    normal: qd.template(),  # qd.Vector
     plane_distance,
     eta,
     thickness,
-    max_iters: qd.template(),
-    result: qd.template(),
+    max_iters: qd.template(),  # int
+    result: qd.template(),  # qd.Vector
 ):
     path = qd.Matrix.zero(qd.f64, 5, 3)
     meta = qd.Vector.zero(qd.f64, 2)

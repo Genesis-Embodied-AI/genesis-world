@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import inspect
+from pathlib import Path
 
 import pytest
 import quadrants as qd
@@ -49,7 +50,11 @@ class FakeActionData(SimData):
 
 
 @qd.func
-def combine_action_data(left: qd.template(), right: qd.template(), scale: int) -> int:
+def combine_action_data(
+    left: qd.template(),  # FakeActionData
+    right: qd.template(),  # FakeActionData
+    scale: int,
+) -> int:
     return left.value * scale + right.value
 
 
@@ -258,7 +263,11 @@ def test_sim_system_rejects_indirect_and_multiple_inheritance():
     ],
 )
 def test_fixed_lifecycle_apis_are_named_top_level_bound_funcs(system_type, method_arities):
-    assert issubclass(system_type.Data, SimData)
+    data_type = getattr(system_type, "Data", None)
+    if system_type is ConsistentIPCContactConstitution:
+        assert data_type is None
+    else:
+        assert issubclass(data_type, SimData)
     for method_name, transient_arity in method_arities.items():
         method = system_type.__dict__[method_name]
         assert method._is_quadrants_function
@@ -271,6 +280,16 @@ def test_fixed_inline_bound_func_metadata():
     assert method._is_quadrants_function
     assert not getattr(method, "_qd_requires_top_level", False)
     assert len(inspect.signature(method.fn).parameters) == 8
+
+
+def test_system_template_parameters_document_concrete_types():
+    systems_root = Path(__file__).parents[2] / "genesis" / "engine" / "systems"
+    undocumented = []
+    for path in systems_root.rglob("*.py"):
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if ": qd.template()" in line and "#" not in line:
+                undocumented.append(f"{path.relative_to(systems_root)}:{line_number}")
+    assert undocumented == []
 
 
 def test_action_invokes_pure_function_with_ordered_data_inputs():

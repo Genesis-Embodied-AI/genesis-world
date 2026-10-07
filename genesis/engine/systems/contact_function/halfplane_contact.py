@@ -32,7 +32,7 @@ def halfplane_barrier_gradient(
     nx: qd.f64,
     ny: qd.f64,
     nz: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     scale = g_b * 2.0 * d
     out[0] = scale * nx
@@ -48,7 +48,7 @@ def halfplane_barrier_hessian(
     nx: qd.f64,
     ny: qd.f64,
     nz: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Matrix
 ):
     coefficient = qd.max(4.0 * d_sq * H_b + 2.0 * g_b, 0.0)
     out[0] = coefficient * nx * nx
@@ -63,14 +63,19 @@ def halfplane_barrier_hessian(
 
 
 @qd.func
-def halfplane_friction_tangent_basis(nx, ny, nz, basis: qd.template()):
+def halfplane_friction_tangent_basis(
+    nx,
+    ny,
+    nz,
+    basis: qd.template(),  # qd.Matrix
+):
     _orthogonal_basis_from_normal(nx, ny, nz, basis)
 
 
 @qd.func
 def halfplane_friction_energy(
-    x: qd.template(),
-    lagged_x: qd.template(),
+    x: qd.template(),  # qd.Vector
+    lagged_x: qd.template(),  # qd.Vector
     nx,
     ny,
     nz,
@@ -89,16 +94,16 @@ def halfplane_friction_energy(
 
 @qd.func
 def halfplane_friction_grad_hess(
-    x: qd.template(),
-    lagged_x: qd.template(),
+    x: qd.template(),  # qd.Vector
+    lagged_x: qd.template(),  # qd.Vector
     nx,
     ny,
     nz,
     mu,
     normal_force,
     eps_vh,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     basis = qd.Matrix.zero(qd.f64, 3, 2)
     halfplane_friction_tangent_basis(nx, ny, nz, basis)

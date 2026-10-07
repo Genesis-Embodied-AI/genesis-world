@@ -38,7 +38,6 @@ class RigidContactAssemble(SimSystem):
         super().__init__()
         self.data = self.Data()
         self.scan_log256_max_n = 4
-        self.is_initialized = False
 
     def build(self) -> None:
         self.contact_system = self.require(ContactSystem)
@@ -72,8 +71,6 @@ class RigidContactAssemble(SimSystem):
         self.contact_system.on_contact_assemble(self.init_action)
 
     def init(self) -> None:
-        if self.is_initialized:
-            raise RuntimeError("RigidContactAssemble is already initialized")
         contact = self.contact_system.data
         triplet_capacity = contact.unique_triplet_rows.shape[0]
         doublet_capacity = contact.unique_doublet_vertices.shape[0]
@@ -106,7 +103,6 @@ class RigidContactAssemble(SimSystem):
         data.rigid_doublet_total = qd.ndarray(qd.i32, shape=())
         data.pair_triplet_total.from_numpy(np.array(0, dtype=np.int32))
         data.rigid_doublet_total.from_numpy(np.array(0, dtype=np.int32))
-        self.is_initialized = True
 
     def realloc_assembly_buffers(self, contact) -> None:
         realloc_rigid_contact_assembly_buffers(self, contact)
@@ -122,8 +118,6 @@ class RigidContactAssemble(SimSystem):
 
 def realloc_rigid_contact_assembly_buffers(system: RigidContactAssemble, contact) -> None:
     """Grow only assembly buffers whose capacities are insufficient."""
-    if not system.is_initialized:
-        raise RuntimeError("RigidContactAssemble must be initialized before reallocation")
     data = system.data
 
     triplet_capacity = contact.unique_triplet_rows.shape[0]
@@ -181,13 +175,13 @@ def realloc_rigid_contact_assembly_buffers(system: RigidContactAssemble, contact
 
 @qd.func(requires_top_level=True)
 def classify(
-    system: qd.template(),
-    proxy: qd.template(),
-    forest: qd.template(),
-    vertex: qd.template(),
-    contact: qd.template(),
-    linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    system: qd.template(),  # RigidContactAssemble
+    proxy: qd.template(),  # RigidContactProxySystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    contact: qd.template(),  # ContactSystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     data = system.data
     for index in range(contact.n_unique_triplets[()]):
@@ -255,7 +249,11 @@ def classify(
 
 @qd.func
 def _proxy_vertex_data(
-    data: qd.template(), proxy: qd.template(), forest: qd.template(), vertex: qd.template(), global_vertex
+    data: qd.template(),  # RigidContactAssemble.Data
+    proxy: qd.template(),  # RigidContactProxySystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    global_vertex,
 ):
     local_vertex = global_vertex - proxy.global_vert_offset[()]
     pair = proxy.vertex_pair[local_vertex]
@@ -267,14 +265,14 @@ def _proxy_vertex_data(
 
 @qd.func(requires_top_level=True)
 def distribute_gradient(
-    system: qd.template(),
-    proxy: qd.template(),
-    forest: qd.template(),
-    vertex: qd.template(),
-    contact: qd.template(),
-    fem_data: qd.template(),
-    linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    system: qd.template(),  # RigidContactAssemble
+    proxy: qd.template(),  # RigidContactProxySystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    contact: qd.template(),  # ContactSystem.Data
+    fem_data: qd.template(),  # FiniteElementMethod.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     data = system.data
     for index in range(contact.n_unique_doublets[()]):
@@ -331,14 +329,14 @@ def distribute_gradient(
 
 @qd.func(requires_top_level=True)
 def distribute_triplets(
-    system: qd.template(),
-    proxy: qd.template(),
-    forest: qd.template(),
-    vertex: qd.template(),
-    contact: qd.template(),
-    fem_data: qd.template(),
-    linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    system: qd.template(),  # RigidContactAssemble
+    proxy: qd.template(),  # RigidContactProxySystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    contact: qd.template(),  # ContactSystem.Data
+    fem_data: qd.template(),  # FiniteElementMethod.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     data = system.data
     for index in range(contact.n_unique_triplets[()]):
@@ -440,15 +438,15 @@ def distribute_triplets(
 
 @qd.func(requires_top_level=True)
 def distribute(
-    system: qd.template(),
-    proxy: qd.template(),
-    forest: qd.template(),
-    vertex: qd.template(),
-    contact: qd.template(),
-    fem_data: qd.template(),
-    _sim_config_data: qd.template(),
-    linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    system: qd.template(),  # RigidContactAssemble
+    proxy: qd.template(),  # RigidContactProxySystem.Data
+    forest: qd.template(),  # RigidJointForestSystem.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    contact: qd.template(),  # ContactSystem.Data
+    fem_data: qd.template(),  # FiniteElementMethod.Data
+    _sim_config_data: qd.template(),  # SimConfig.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     distribute_gradient(
         system,

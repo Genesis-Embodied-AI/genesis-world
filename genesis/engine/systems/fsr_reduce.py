@@ -7,9 +7,9 @@ import quadrants as qd
 def _segment_metadata(
     gid,
     n,
-    seg_ids: qd.template(),
-    sorted_keys: qd.template(),
-    sentinel: qd.template(),
+    seg_ids: qd.template(),  # qd.Ndarray
+    sorted_keys: qd.template(),  # qd.Ndarray
+    sentinel: qd.template(),  # int
 ):
     lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
     valid = gid < n and sorted_keys[gid] != sentinel
@@ -59,14 +59,14 @@ def _head_segmented_reduce_add(
 
 @qd.func(requires_top_level=True)
 def fast_segmented_reduce_doublet(
-    seg_ids: qd.template(),
-    sorted_perm: qd.template(),
-    sorted_keys: qd.template(),
-    values: qd.template(),
-    output: qd.template(),
-    n: qd.template(),
-    padded_n: qd.template(),
-    capacity: qd.template(),
+    seg_ids: qd.template(),  # qd.Ndarray
+    sorted_perm: qd.template(),  # qd.Ndarray
+    sorted_keys: qd.template(),  # qd.Ndarray
+    values: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
+    n: qd.template(),  # qd.Ndarray
+    padded_n: qd.template(),  # qd.Ndarray
+    capacity: qd.template(),  # int
 ):
     qd.loop_config(name="fast_segmented_reduce_doublet", block_dim=256)
     for gid in range(capacity):
@@ -99,14 +99,14 @@ def fast_segmented_reduce_doublet(
 
 @qd.func(requires_top_level=True)
 def fast_segmented_reduce_triplet(
-    seg_ids: qd.template(),
-    sorted_perm: qd.template(),
-    sorted_keys: qd.template(),
-    values: qd.template(),
-    output: qd.template(),
-    n: qd.template(),
-    padded_n: qd.template(),
-    capacity: qd.template(),
+    seg_ids: qd.template(),  # qd.Ndarray
+    sorted_perm: qd.template(),  # qd.Ndarray
+    sorted_keys: qd.template(),  # qd.Ndarray
+    values: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
+    n: qd.template(),  # qd.Ndarray
+    padded_n: qd.template(),  # qd.Ndarray
+    capacity: qd.template(),  # int
 ):
     qd.loop_config(name="fast_segmented_reduce_triplet", block_dim=256)
     for gid in range(capacity):
@@ -147,16 +147,16 @@ def fast_segmented_reduce_triplet(
 
 @qd.func(requires_top_level=True)
 def fast_segmented_reduce_body(
-    seg_ids: qd.template(),
-    sorted_perm: qd.template(),
-    sorted_keys: qd.template(),
-    values: qd.template(),
-    output: qd.template(),
-    n: qd.template(),
-    padded_n: qd.template(),
-    capacity: qd.template(),
-    value_type: qd.template(),
-    block_scalar_count: qd.template(),
+    seg_ids: qd.template(),  # qd.Ndarray
+    sorted_perm: qd.template(),  # qd.Ndarray
+    sorted_keys: qd.template(),  # qd.Ndarray
+    values: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
+    n: qd.template(),  # qd.Ndarray
+    padded_n: qd.template(),  # qd.Ndarray
+    capacity: qd.template(),  # int
+    value_type: qd.template(),  # Quadrants scalar data type
+    block_scalar_count: qd.template(),  # int
 ):
     qd.loop_config(name="fast_segmented_reduce_body", block_dim=256)
     for gid in range(capacity):

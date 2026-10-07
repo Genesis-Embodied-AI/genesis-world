@@ -19,12 +19,12 @@ from .gipc_barrier import gipc_normal_force
 
 @qd.func
 def _tangent_displacement(
-    current: qd.template(),
-    lagged: qd.template(),
-    basis: qd.template(),
-    weights: qd.template(),
-    count: qd.template(),
-    output: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    basis: qd.template(),  # qd.Matrix
+    weights: qd.template(),  # qd.Vector
+    count: qd.template(),  # int
+    output: qd.template(),  # qd.Vector
 ):
     for point in qd.static(range(count)):
         for tangent_axis in qd.static(range(2)):
@@ -36,15 +36,15 @@ def _tangent_displacement(
 
 @qd.func
 def gipc_friction_grad_hess_pt(
-    current: qd.template(),
-    lagged: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
     d_hat,
     kappa,
     mu,
     eps_vh,
     xi,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     distance_squared = pt_distance2(
         lagged[0, 0],
@@ -81,7 +81,15 @@ def gipc_friction_grad_hess_pt(
 
 
 @qd.func
-def gipc_friction_energy_pt(current: qd.template(), lagged: qd.template(), d_hat, kappa, mu, eps_vh, xi):
+def gipc_friction_energy_pt(
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    d_hat,
+    kappa,
+    mu,
+    eps_vh,
+    xi,
+):
     distance_squared = pt_distance2(
         lagged[0, 0],
         lagged[0, 1],
@@ -109,15 +117,15 @@ def gipc_friction_energy_pt(current: qd.template(), lagged: qd.template(), d_hat
 
 @qd.func
 def gipc_friction_grad_hess_ee(
-    current: qd.template(),
-    lagged: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
     d_hat,
     kappa,
     mu,
     eps_vh,
     xi,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     distance_squared = ee_distance2(
         lagged[0, 0],
@@ -154,7 +162,15 @@ def gipc_friction_grad_hess_ee(
 
 
 @qd.func
-def gipc_friction_energy_ee(current: qd.template(), lagged: qd.template(), d_hat, kappa, mu, eps_vh, xi):
+def gipc_friction_energy_ee(
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    d_hat,
+    kappa,
+    mu,
+    eps_vh,
+    xi,
+):
     distance_squared = ee_distance2(
         lagged[0, 0],
         lagged[0, 1],
@@ -182,15 +198,15 @@ def gipc_friction_energy_ee(current: qd.template(), lagged: qd.template(), d_hat
 
 @qd.func
 def gipc_friction_grad_hess_pe(
-    current: qd.template(),
-    lagged: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
     d_hat,
     kappa,
     mu,
     eps_vh,
     xi,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     distance_squared = pe_distance2(
         lagged[0, 0],
@@ -223,7 +239,15 @@ def gipc_friction_grad_hess_pe(
 
 
 @qd.func
-def gipc_friction_energy_pe(current: qd.template(), lagged: qd.template(), d_hat, kappa, mu, eps_vh, xi):
+def gipc_friction_energy_pe(
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    d_hat,
+    kappa,
+    mu,
+    eps_vh,
+    xi,
+):
     distance_squared = pe_distance2(
         lagged[0, 0],
         lagged[0, 1],
@@ -247,15 +271,15 @@ def gipc_friction_energy_pe(current: qd.template(), lagged: qd.template(), d_hat
 
 @qd.func
 def gipc_friction_grad_hess_pp(
-    current: qd.template(),
-    lagged: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
     d_hat,
     kappa,
     mu,
     eps_vh,
     xi,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     distance_squared = pp_distance2(
         lagged[0, 0],
@@ -284,7 +308,15 @@ def gipc_friction_grad_hess_pp(
 
 
 @qd.func
-def gipc_friction_energy_pp(current: qd.template(), lagged: qd.template(), d_hat, kappa, mu, eps_vh, xi):
+def gipc_friction_energy_pp(
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    d_hat,
+    kappa,
+    mu,
+    eps_vh,
+    xi,
+):
     distance_squared = pp_distance2(
         lagged[0, 0],
         lagged[0, 1],

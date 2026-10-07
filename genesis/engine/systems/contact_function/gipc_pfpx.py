@@ -24,7 +24,7 @@ def gipc_pfpx_pt(
     x3y: qd.f64,
     x3z: qd.f64,
     d_hat_sqrt: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     """PT PFPx: writes 12 values into out[0..11] (column 8 of 12x9 matrix)."""
     t2 = 1.0 / d_hat_sqrt
@@ -82,7 +82,7 @@ def gipc_pfpx_ee(
     x3y: qd.f64,
     x3z: qd.f64,
     d_hat_sqrt: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     """EE PFPx: writes 12 values into out[0..11] (column 8 of 12x9 matrix)."""
     t12 = -x1x + x0x
@@ -143,7 +143,7 @@ def gipc_pfpx_pp(
     x1y: qd.f64,
     x1z: qd.f64,
     d_hat_sqrt: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     """PP PFPx: writes 6 values into out[0..5]."""
     t8 = 1.0 / d_hat_sqrt
@@ -174,7 +174,7 @@ def gipc_pfpx_pe(
     x2y: qd.f64,
     x2z: qd.f64,
     d_hat_sqrt: qd.f64,
-    out: qd.template(),
+    out: qd.template(),  # qd.Vector
 ):
     """PE PFPx: writes 9 values into out[0..8] (column 3 of 9x4 matrix)."""
     t8 = 1.0 / d_hat_sqrt
@@ -228,8 +228,8 @@ def gipc_pfpx_ee_mollified(
     x3y: qd.f64,
     x3z: qd.f64,
     d_hat_sqrt: qd.f64,
-    c4: qd.template(),
-    c8: qd.template(),
+    c4: qd.template(),  # qd.Vector
+    c8: qd.template(),  # qd.Vector
 ):
     """EE mollified PFPx columns 4 and 8."""
     t12 = x0x - x1x
@@ -323,8 +323,8 @@ def gipc_pfpx_pp_mollified(
     x3y: qd.f64,
     x3z: qd.f64,
     d_hat_sqrt: qd.f64,
-    c4: qd.template(),
-    c8: qd.template(),
+    c4: qd.template(),  # qd.Vector
+    c8: qd.template(),  # qd.Vector
 ):
     """PP mollified PFPx columns 4 and 8.
 
@@ -393,8 +393,8 @@ def gipc_pfpx_pe_mollified(
     x3y: qd.f64,
     x3z: qd.f64,
     d_hat_sqrt: qd.f64,
-    c4: qd.template(),
-    c8: qd.template(),
+    c4: qd.template(),  # qd.Vector
+    c8: qd.template(),  # qd.Vector
 ):
     """PE mollified PFPx columns 4 and 8.
 

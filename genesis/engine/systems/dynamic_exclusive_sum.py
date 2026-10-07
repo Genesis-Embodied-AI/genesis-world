@@ -38,7 +38,10 @@ class DynamicExclusiveSum:
         self.tile_counter.from_numpy(np.array(0, dtype=np.int32))
 
     @qd.func(requires_top_level=True)
-    def clear(self, n: qd.template()):
+    def clear(
+        self,
+        n: qd.template(),  # int
+    ):
         qd.loop_config(name="des_init_tile_state", block_dim=128)
         needed_blocks = qd.max(
             (n + 3071) // 3072,
@@ -52,9 +55,9 @@ class DynamicExclusiveSum:
     @qd.func(requires_top_level=True)
     def scan(
         self,
-        values: qd.template(),
-        output: qd.template(),
-        n: qd.template(),
+        values: qd.template(),  # qd.Ndarray
+        output: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
     ):
         self.clear(n)
         qd.loop_config(name="des_scan", block_dim=128)
@@ -160,9 +163,9 @@ class DynamicExclusiveSum:
 
 @qd.func(requires_top_level=True)
 def dynamic_exclusive_sum(
-    scanner: qd.template(),
-    values: qd.template(),
-    output: qd.template(),
-    n: qd.template(),
+    scanner: qd.template(),  # DynamicExclusiveSum
+    values: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
+    n: qd.template(),  # int
 ):
     scanner.scan(values, output, n)

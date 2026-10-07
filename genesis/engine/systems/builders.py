@@ -6,7 +6,7 @@ import numpy as np
 
 from .consistent_ipc_contact import ConsistentIPCContactConstitution
 from .contact import CONTACT_CONFIG_DEFAULTS, ContactTabular
-from .contact_system import ContactSystem, get_contact_assembly_capacity
+from .contact_system import CONTACT_ASSEMBLY_CAPACITY, ContactSystem
 from .finite_element import (
     FEMBDF1,
     FEMDiagPreconditioner,
@@ -78,10 +78,9 @@ def build_scene_engine(
     )
     max_contact_body_triplets = 0
     if enable_contact:
-        assembly_capacity = get_contact_assembly_capacity()
-        max_contact_body_triplets = assembly_capacity
+        max_contact_body_triplets = CONTACT_ASSEMBLY_CAPACITY
         if rigid_proxy_geometry is not None:
-            max_contact_body_triplets = assembly_capacity * 5
+            max_contact_body_triplets = CONTACT_ASSEMBLY_CAPACITY * 5
 
     engine = SimEngine()
     engine.configure_genesis_serial_pipeline(bool(int(resolved_contact_config["extras/pipeline/genesis_serial"])))
@@ -117,8 +116,8 @@ def build_scene_engine(
             if rigid_proxy_geometry is not None:
                 rigid_contact_proxy = RigidContactProxySystem()
                 rigid_contact_proxy.wire_data(
-                    n_links_host=scene.rigid_solver.n_links,
-                    n_instances_host=scene.rigid_solver._B,
+                    n_links=scene.rigid_solver.n_links,
+                    n_instances=scene.rigid_solver._B,
                     n_rigid_bodies=rigid_proxy_geometry.n_rigid_bodies,
                     mechanism_body=rigid_proxy_geometry.mechanism_body,
                     proxy_body=rigid_proxy_geometry.proxy_body,

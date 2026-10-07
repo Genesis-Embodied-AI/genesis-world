@@ -31,12 +31,12 @@ def _barrier_lambda0(I5: qd.f64, dH_tilde: qd.f64, kappa: qd.f64, d_tilde: qd.f6
 
 @qd.func
 def _write_rank1(
-    values: qd.template(),
-    size: qd.template(),
+    values: qd.template(),  # qd.Vector
+    size: qd.template(),  # int
     gradient_scale: qd.f64,
     hessian_scale: qd.f64,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     for row in qd.static(range(size)):
         gradient[row] = gradient_scale * values[row]
@@ -61,8 +61,8 @@ def gipc_barrier_grad_hess_pt(
     d_hat: qd.f64,
     xi: qd.f64,
     kappa: qd.f64,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     normal_x = (v2y - v1y) * (v3z - v1z) - (v2z - v1z) * (v3y - v1y)
     normal_y = (v2z - v1z) * (v3x - v1x) - (v2x - v1x) * (v3z - v1z)
@@ -125,8 +125,8 @@ def gipc_barrier_grad_hess_ee(
     d_hat: qd.f64,
     xi: qd.f64,
     kappa: qd.f64,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     edge_a_x = v1x - v0x
     edge_a_y = v1y - v0y
@@ -198,9 +198,9 @@ def gipc_barrier_grad_hess_ee_rank1(
     d_hat: qd.f64,
     xi: qd.f64,
     kappa: qd.f64,
-    v_out: qd.template(),
-    grad_scale: qd.template(),
-    hess_coef: qd.template(),
+    v_out: qd.template(),  # qd.Vector
+    grad_scale: qd.template(),  # qd.Vector
+    hess_coef: qd.template(),  # qd.Vector
 ):
     edge_a_x = v1x - v0x
     edge_a_y = v1y - v0y
@@ -258,8 +258,8 @@ def gipc_barrier_grad_hess_pp(
     d_hat: qd.f64,
     xi: qd.f64,
     kappa: qd.f64,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     dx = v0x - v1x
     dy = v0y - v1y
@@ -301,8 +301,8 @@ def gipc_barrier_grad_hess_pe(
     d_hat: qd.f64,
     xi: qd.f64,
     kappa: qd.f64,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     cross_x = (v1y - v0y) * (v2z - v0z) - (v1z - v0z) * (v2y - v0y)
     cross_y = (v1z - v0z) * (v2x - v0x) - (v1x - v0x) * (v2z - v0z)
@@ -350,16 +350,16 @@ def gipc_barrier_grad_hess_pe(
 
 @qd.func
 def _barrier_grad_hess_mollified_impl(
-    column4: qd.template(),
-    column8: qd.template(),
+    column4: qd.template(),  # qd.Vector
+    column8: qd.template(),  # qd.Vector
     distance_squared,
     I1,
     eps_x,
     d_hat,
     xi,
     kappa,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     if I1 == 0.0:
         for component in qd.static(range(12)):
@@ -428,8 +428,8 @@ def gipc_barrier_grad_hess_ee_mollified(
     xi,
     kappa,
     distance_squared,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     edge_a_x = v1x - v0x
     edge_a_y = v1y - v0y
@@ -510,8 +510,8 @@ def gipc_barrier_grad_hess_pp_mollified(
     d_hat,
     xi,
     kappa,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     distance_x = v0x - v1x
     distance_y = v0y - v1y
@@ -596,8 +596,8 @@ def gipc_barrier_grad_hess_pe_mollified(
     d_hat,
     xi,
     kappa,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     edge_x = v2x - v1x
     edge_y = v2y - v1y

@@ -26,7 +26,6 @@ class QuadraticBending(SimSystem):
         super().__init__()
         self.data = self.Data()
         self._inputs = None
-        self._initialized = False
 
     def build(self) -> None:
         self.fem_system = self.require(FiniteElementMethod)
@@ -54,7 +53,7 @@ class QuadraticBending(SimSystem):
         Q0: np.ndarray,
         vert_bend_k: np.ndarray,
     ) -> None:
-        if self._initialized:
+        if hasattr(self.data, "n_hinges"):
             raise RuntimeError("QuadraticBending data is already initialized")
         self._inputs = _quadratic_bending_inputs(
             hinge_indices,
@@ -97,13 +96,7 @@ class QuadraticBending(SimSystem):
             (vertex_capacity,),
             vertex_stiffness if len(vertex_stiffness) else np.zeros(vertex_capacity, dtype=np.float64),
         )
-        self._initialized = True
         self._inputs = None
-
-    def triplet_count(self) -> int:
-        if self._inputs is None:
-            raise RuntimeError("QuadraticBending triplet count is available only before initialization")
-        return len(self._inputs[0]) * 10
 
 
 def _quadratic_bending_inputs(
@@ -159,10 +152,10 @@ def wire_quadratic_bending_data(
 
 @qd.func(requires_top_level=True)
 def report_quadratic_bending_extent(
-    fem: qd.template(),
-    data: qd.template(),
-    global_linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    data: qd.template(),  # QuadraticBending.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     for _ in range(1):
         global_linear_system_data.set_subsystem_extent(linear_system_id, data.n_hinges[()] * 10)
@@ -170,11 +163,11 @@ def report_quadratic_bending_extent(
 
 @qd.func(requires_top_level=True)
 def assemble_quadratic_bending(
-    fem: qd.template(),
-    data: qd.template(),
-    sim_config: qd.template(),
-    global_linear_system_data: qd.template(),
-    linear_system_id: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    data: qd.template(),  # QuadraticBending.Data
+    sim_config: qd.template(),  # SimConfig.Data
+    global_linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    linear_system_id: qd.template(),  # int
 ):
     for i in range(data.n_hinges[()]):
         triplet_offset = global_linear_system_data.subsystem_offset(linear_system_id)
@@ -221,9 +214,9 @@ def assemble_quadratic_bending(
 
 @qd.func(requires_top_level=True)
 def compute_quadratic_bending_energy(
-    fem: qd.template(),
-    data: qd.template(),
-    sim_config: qd.template(),
+    fem: qd.template(),  # FiniteElementMethod.Data
+    data: qd.template(),  # QuadraticBending.Data
+    sim_config: qd.template(),  # SimConfig.Data
 ):
     for i in range(data.n_hinges[()]):
         dt2 = sim_config.dt[()] * sim_config.dt[()]

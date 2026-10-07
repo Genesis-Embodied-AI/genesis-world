@@ -6,7 +6,9 @@ from genesis.utils import geom as gu
 
 
 @qd.func
-def rigid_contact_proxy_skew(value: qd.template()):
+def rigid_contact_proxy_skew(
+    value: qd.template(),  # qd.Vector
+):
     result = qd.Matrix.zero(qd.f64, 3, 3)
     result[0, 1] = -value[2]
     result[0, 2] = value[1]
@@ -18,7 +20,9 @@ def rigid_contact_proxy_skew(value: qd.template()):
 
 
 @qd.func
-def so3_left_jacobian_inverse(phi: qd.template()):
+def so3_left_jacobian_inverse(
+    phi: qd.template(),  # qd.Vector
+):
     theta_sq = phi.dot(phi)
     hat = rigid_contact_proxy_skew(phi)
     coefficient = qd.f64(0.0)
@@ -32,12 +36,16 @@ def so3_left_jacobian_inverse(phi: qd.template()):
 
 
 @qd.func
-def so3_right_jacobian_inverse(phi: qd.template()):
+def so3_right_jacobian_inverse(
+    phi: qd.template(),  # qd.Vector
+):
     return so3_left_jacobian_inverse(-phi)
 
 
 @qd.func
-def so3_left_jacobian(phi: qd.template()):
+def so3_left_jacobian(
+    phi: qd.template(),  # qd.Vector
+):
     theta_sq = phi.dot(phi)
     hat = rigid_contact_proxy_skew(phi)
     result = qd.Matrix.identity(qd.f64, 3)
@@ -77,12 +85,12 @@ def fk_defect_prefix_cap(h0, h_slack, curvature, limit):
 
 @qd.func
 def rigid_contact_proxy_constraint(
-    mechanism_position: qd.template(),
-    mechanism_quaternion: qd.template(),
-    proxy_position: qd.template(),
-    proxy_quaternion: qd.template(),
-    translation: qd.template(),
-    rotation: qd.template(),
+    mechanism_position: qd.template(),  # qd.Vector
+    mechanism_quaternion: qd.template(),  # qd.Vector
+    proxy_position: qd.template(),  # qd.Vector
+    proxy_quaternion: qd.template(),  # qd.Vector
+    translation: qd.template(),  # qd.Vector
+    rotation: qd.template(),  # qd.Vector
 ):
     relative_quaternion = gu.qd_quat_mul(proxy_quaternion, gu.qd_inv_quat(mechanism_quaternion))
     relative_rotation = gu.qd_quat_to_rotvec(relative_quaternion, qd.f64(1.0e-12))
@@ -93,12 +101,12 @@ def rigid_contact_proxy_constraint(
 
 @qd.func
 def rigid_contact_proxy_prepare_maps(
-    translation: qd.template(),
-    rotation: qd.template(),
-    constraint: qd.template(),
-    tangent_map: qd.template(),
-    normal_map: qd.template(),
-    particular: qd.template(),
+    translation: qd.template(),  # qd.Vector
+    rotation: qd.template(),  # qd.Vector
+    constraint: qd.template(),  # qd.Vector
+    tangent_map: qd.template(),  # qd.Matrix
+    normal_map: qd.template(),  # qd.Matrix
+    particular: qd.template(),  # qd.Vector
 ):
     left_jacobian = so3_left_jacobian(rotation)
     right_jacobian_inverse = so3_right_jacobian_inverse(rotation)
@@ -125,20 +133,32 @@ def rigid_contact_proxy_prepare_maps(
 
 
 @qd.func
-def expand_proxy_twist(tangent_map: qd.template(), link_twist: qd.template()):
+def expand_proxy_twist(
+    tangent_map: qd.template(),  # qd.Matrix
+    link_twist: qd.template(),  # qd.Vector
+):
     return tangent_map @ link_twist
 
 
 @qd.func
-def restrict_proxy_wrench(tangent_map: qd.template(), proxy_wrench: qd.template()):
+def restrict_proxy_wrench(
+    tangent_map: qd.template(),  # qd.Matrix
+    proxy_wrench: qd.template(),  # qd.Vector
+):
     return tangent_map.transpose() @ proxy_wrench
 
 
 @qd.func
-def expand_slack_twist(normal_map: qd.template(), slack: qd.template()):
+def expand_slack_twist(
+    normal_map: qd.template(),  # qd.Matrix
+    slack: qd.template(),  # qd.Vector
+):
     return normal_map @ slack
 
 
 @qd.func
-def restrict_slack_wrench(normal_map: qd.template(), proxy_wrench: qd.template()):
+def restrict_slack_wrench(
+    normal_map: qd.template(),  # qd.Matrix
+    proxy_wrench: qd.template(),  # qd.Vector
+):
     return normal_map.transpose() @ proxy_wrench

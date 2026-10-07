@@ -4,7 +4,12 @@ import quadrants as qd
 
 
 @qd.func
-def point_in_triangle(point: qd.template(), a: qd.template(), b: qd.template(), c: qd.template()):
+def point_in_triangle(
+    point: qd.template(),  # qd.Vector
+    a: qd.template(),  # qd.Vector
+    b: qd.template(),  # qd.Vector
+    c: qd.template(),  # qd.Vector
+):
     u = b - a
     v = c - a
     w = point - a
@@ -24,10 +29,10 @@ def point_in_triangle(point: qd.template(), a: qd.template(), b: qd.template(), 
 
 @qd.func
 def segment_segment_intersect(
-    a: qd.template(),
-    direction_a: qd.template(),
-    b: qd.template(),
-    direction_b: qd.template(),
+    a: qd.template(),  # qd.Vector
+    direction_a: qd.template(),  # qd.Vector
+    b: qd.template(),  # qd.Vector
+    direction_b: qd.template(),  # qd.Vector
 ):
     ab = b - a
     cross_directions = direction_a.cross(direction_b)
@@ -42,11 +47,11 @@ def segment_segment_intersect(
 
 @qd.func
 def triangle_edge_intersect(
-    triangle_a: qd.template(),
-    triangle_b: qd.template(),
-    triangle_c: qd.template(),
-    edge_a: qd.template(),
-    edge_b: qd.template(),
+    triangle_a: qd.template(),  # qd.Vector
+    triangle_b: qd.template(),  # qd.Vector
+    triangle_c: qd.template(),  # qd.Vector
+    edge_a: qd.template(),  # qd.Vector
+    edge_b: qd.template(),  # qd.Vector
 ):
     normal = (triangle_b - triangle_a).cross(triangle_c - triangle_a)
     distance_a = (edge_a - triangle_a).dot(normal)

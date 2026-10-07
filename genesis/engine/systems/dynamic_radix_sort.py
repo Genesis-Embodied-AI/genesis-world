@@ -10,9 +10,9 @@ _ITEMS_PER_THREAD = 24
 
 @qd.func
 def _rank_warp_striped_items(
-    digits: qd.template(),
-    ranks: qd.template(),
-    block_prefixes: qd.template(),
+    digits: qd.template(),  # qd.Vector
+    ranks: qd.template(),  # qd.Vector
+    block_prefixes: qd.template(),  # qd.simt.block.SharedArray
 ):
     tid = qd.simt.block.thread_idx()
     lane = qd.i32(qd.simt.subgroup.invocation_id())
@@ -101,7 +101,7 @@ class DynamicRadixSort:
 
         self.key_dtype = key_dtype
         n_passes = 4 if key_dtype == qd.u32 else 8
-        self.n_passes_host = n_passes
+        self.n_passes = n_passes
         n_blocks = max(
             (capacity + _BLOCK_THREADS * _ITEMS_PER_THREAD - 1) // (_BLOCK_THREADS * _ITEMS_PER_THREAD),
             1,
@@ -143,22 +143,26 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def clear_bins(self):
         qd.loop_config(name="drs_memset_bins", block_dim=256)
-        for index in range(self.n_passes_host * 256):
+        for index in range(self.n_passes * 256):
             radix_pass = index // 256
             digit = index - radix_pass * 256
             self.bins[radix_pass, digit] = 0
 
     @qd.func(requires_top_level=True)
-    def histogram(self, keys: qd.template(), n: qd.template()):
+    def histogram(
+        self,
+        keys: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
+    ):
         qd.loop_config(name="drs_histogram", block_dim=128)
         for thread in range(128 * 128):
             tid = qd.simt.block.thread_idx()
             block = thread // 128
             histogram = qd.simt.block.SharedArray(
-                (self.n_passes_host * 256,),
+                (self.n_passes * 256,),
                 qd.i32,
             )
-            for radix_pass in qd.static(range(self.n_passes_host)):
+            for radix_pass in qd.static(range(self.n_passes)):
                 for item in qd.static(range(2)):
                     histogram[radix_pass * 256 + item * 128 + tid] = 0
             qd.simt.block.sync()
@@ -175,7 +179,7 @@ class DynamicRadixSort:
                             key32 = keys[index]
                         else:
                             key64 = keys[index]
-                    for radix_pass in qd.static(range(self.n_passes_host)):
+                    for radix_pass in qd.static(range(self.n_passes)):
                         digit = qd.i32(0)
                         if valid:
                             shift = qd.static(radix_pass * 8)
@@ -189,7 +193,7 @@ class DynamicRadixSort:
                             )
                 base = base + 128 * 128 * 16
             qd.simt.block.sync()
-            for radix_pass in qd.static(range(self.n_passes_host)):
+            for radix_pass in qd.static(range(self.n_passes)):
                 for item in qd.static(range(2)):
                     digit = item * 128 + tid
                     qd.atomic_add(
@@ -201,7 +205,7 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def scan_bins(self):
         qd.loop_config(name="drs_exclusive_sum", block_dim=256)
-        for index in range(self.n_passes_host * 256):
+        for index in range(self.n_passes * 256):
             radix_pass = index // 256
             digit = index - radix_pass * 256
             value = self.bins[radix_pass, digit]
@@ -215,8 +219,8 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def clear_pass(
         self,
-        radix_pass: qd.template(),
-        n: qd.template(),
+        radix_pass: qd.template(),  # int
+        n: qd.template(),  # int
     ):
         qd.loop_config(name="drs_memset_lookback", block_dim=256)
         needed_blocks = qd.max(
@@ -233,12 +237,12 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def onesweep_pass(
         self,
-        keys_in: qd.template(),
-        keys_out: qd.template(),
-        perm_in: qd.template(),
-        perm_out: qd.template(),
-        n: qd.template(),
-        radix_pass: qd.template(),
+        keys_in: qd.template(),  # qd.Ndarray
+        keys_out: qd.template(),  # qd.Ndarray
+        perm_in: qd.template(),  # qd.Ndarray
+        perm_out: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
+        radix_pass: qd.template(),  # int
     ):
         qd.loop_config(name="drs_onesweep", block_dim=256)
         needed_blocks = qd.max(
@@ -424,16 +428,16 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def sort(
         self,
-        keys_a: qd.template(),
-        keys_b: qd.template(),
-        perm_a: qd.template(),
-        perm_b: qd.template(),
-        n: qd.template(),
+        keys_a: qd.template(),  # qd.Ndarray
+        keys_b: qd.template(),  # qd.Ndarray
+        perm_a: qd.template(),  # qd.Ndarray
+        perm_b: qd.template(),  # qd.Ndarray
+        n: qd.template(),  # int
     ):
         self.clear_bins()
         self.histogram(keys_a, n)
         self.scan_bins()
-        for radix_pass in qd.static(range(self.n_passes_host)):
+        for radix_pass in qd.static(range(self.n_passes)):
             self.clear_pass(radix_pass, n)
             if qd.static(radix_pass % 2 == 0):
                 self.onesweep_pass(
@@ -457,12 +461,12 @@ class DynamicRadixSort:
 
 @qd.func(requires_top_level=True)
 def dynamic_radix_sort(
-    sorter: qd.template(),
-    keys_a: qd.template(),
-    keys_b: qd.template(),
-    perm_a: qd.template(),
-    perm_b: qd.template(),
-    n: qd.template(),
+    sorter: qd.template(),  # DynamicRadixSort
+    keys_a: qd.template(),  # qd.Ndarray
+    keys_b: qd.template(),  # qd.Ndarray
+    perm_a: qd.template(),  # qd.Ndarray
+    perm_b: qd.template(),  # qd.Ndarray
+    n: qd.template(),  # int
 ):
     sorter.sort(
         keys_a,

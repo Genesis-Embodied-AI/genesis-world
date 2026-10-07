@@ -4,7 +4,11 @@ import quadrants as qd
 
 
 @qd.func
-def Ds3x2(x0: qd.template(), x1: qd.template(), x2: qd.template()):
+def Ds3x2(
+    x0: qd.template(),  # qd.Vector(3)
+    x1: qd.template(),  # qd.Vector(3)
+    x2: qd.template(),  # qd.Vector(3)
+):
     result = qd.Matrix.zero(qd.f64, 3, 2)
     for axis in qd.static(range(3)):
         result[axis, 0] = x1[axis] - x0[axis]
@@ -13,12 +17,17 @@ def Ds3x2(x0: qd.template(), x1: qd.template(), x2: qd.template()):
 
 
 @qd.func
-def F3x2(Ds: qd.template(), Dm_inv: qd.template()):
+def F3x2(
+    Ds: qd.template(),  # qd.Matrix(3, 2)
+    Dm_inv: qd.template(),  # qd.Matrix(2, 2)
+):
     return Ds @ Dm_inv
 
 
 @qd.func
-def dFdX(Dm_inv: qd.template()):
+def dFdX(
+    Dm_inv: qd.template(),  # qd.Matrix(2, 2)
+):
     result = qd.Matrix.zero(qd.f64, 6, 9)
     d0 = Dm_inv[0, 0]
     d1 = Dm_inv[1, 0]
@@ -35,7 +44,12 @@ def dFdX(Dm_inv: qd.template()):
 
 
 @qd.func
-def E(F: qd.template(), stretchS, shearS, strainLimitMultiplier):
+def E(
+    F: qd.template(),  # qd.Matrix(3, 2)
+    stretchS,
+    shearS,
+    strainLimitMultiplier,
+):
     u = qd.Vector([F[0, 0], F[1, 0], F[2, 0]])
     v = qd.Vector([F[0, 1], F[1, 1], F[2, 1]])
     I6 = u.dot(v)
@@ -51,7 +65,12 @@ def E(F: qd.template(), stretchS, shearS, strainLimitMultiplier):
 
 
 @qd.func
-def dEdF(F: qd.template(), stretchS, shearS, strainLimitMultiplier):
+def dEdF(
+    F: qd.template(),  # qd.Matrix(3, 2)
+    stretchS,
+    shearS,
+    strainLimitMultiplier,
+):
     u = qd.Vector([F[0, 0], F[1, 0], F[2, 0]])
     v = qd.Vector([F[0, 1], F[1, 1], F[2, 1]])
     I6 = u.dot(v)
@@ -77,7 +96,12 @@ def dEdF(F: qd.template(), stretchS, shearS, strainLimitMultiplier):
 
 
 @qd.func
-def ddEddF(F: qd.template(), stretchS, shearS, strainLimitMultiplier):
+def ddEddF(
+    F: qd.template(),  # qd.Matrix(3, 2)
+    stretchS,
+    shearS,
+    strainLimitMultiplier,
+):
     u = qd.Vector([F[0, 0], F[1, 0], F[2, 0]])
     v = qd.Vector([F[0, 1], F[1, 1], F[2, 1]])
     norm_u = u.norm()

@@ -7,7 +7,11 @@ from .global_body_manager import is_body_contact_ignored
 
 
 @qd.func
-def _node_pair_enabled(body_mgr: qd.template(), left_body, right_body):
+def _node_pair_enabled(
+    body_mgr: qd.template(),  # GlobalBodyManager.Data
+    left_body,
+    right_body,
+):
     enabled = True
     if (
         left_body >= 0
@@ -23,10 +27,10 @@ def _node_pair_enabled(body_mgr: qd.template(), left_body, right_body):
 
 @qd.func
 def _ee_pair_enabled(
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
     edge_a,
     edge_b,
 ):
@@ -60,10 +64,10 @@ def _ee_emit_pair(
     emit,
     edge_a,
     edge_b,
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     lane = qd.simt.subgroup.invocation_id()
     mask = qd.simt.subgroup.ballot(qd.i32(emit))
@@ -84,10 +88,10 @@ def _ee_emit_pair(
 
 @qd.func
 def _pt_pair_enabled(
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
     vertex_index,
     face,
 ):
@@ -128,10 +132,10 @@ def _pt_emit_pair(
     emit,
     query,
     face,
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     lane = qd.simt.subgroup.invocation_id()
     mask = qd.simt.subgroup.ballot(qd.i32(emit))

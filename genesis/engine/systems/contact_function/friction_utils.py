@@ -25,18 +25,23 @@ def f2_term(epsvh):
 
 
 @qd.func
-def friction_energy(mu, normal_force, eps_vh, tangent_displacement: qd.template()):
+def friction_energy(
+    mu,
+    normal_force,
+    eps_vh,
+    tangent_displacement: qd.template(),  # qd.Vector
+):
     squared_norm = tangent_displacement[0] ** 2 + tangent_displacement[1] ** 2
     return mu * normal_force * f0(squared_norm, eps_vh)
 
 
 @qd.func
 def friction_gradient(
-    output: qd.template(),
+    output: qd.template(),  # qd.Vector
     mu,
     normal_force,
     eps_vh,
-    tangent_displacement: qd.template(),
+    tangent_displacement: qd.template(),  # qd.Vector
 ):
     squared_norm = tangent_displacement[0] ** 2 + tangent_displacement[1] ** 2
     scale = mu * normal_force * f1_div_rel_dx_norm(squared_norm, eps_vh)
@@ -46,11 +51,11 @@ def friction_gradient(
 
 @qd.func
 def friction_hessian(
-    output: qd.template(),
+    output: qd.template(),  # qd.Matrix
     mu,
     normal_force,
     eps_vh,
-    tangent_displacement: qd.template(),
+    tangent_displacement: qd.template(),  # qd.Vector
 ):
     u0 = tangent_displacement[0]
     u1 = tangent_displacement[1]
@@ -80,7 +85,12 @@ def friction_hessian(
 
 
 @qd.func
-def _normalize3(x, y, z, output: qd.template()):
+def _normalize3(
+    x,
+    y,
+    z,
+    output: qd.template(),  # qd.Vector
+):
     inverse_norm = 1.0 / qd.sqrt(x * x + y * y + z * z)
     output[0] = x * inverse_norm
     output[1] = y * inverse_norm
@@ -88,7 +98,12 @@ def _normalize3(x, y, z, output: qd.template()):
 
 
 @qd.func
-def _orthogonal_basis_from_normal(nx, ny, nz, basis: qd.template()):
+def _orthogonal_basis_from_normal(
+    nx,
+    ny,
+    nz,
+    basis: qd.template(),  # qd.Matrix
+):
     tangent_x = qd.f64(0.0)
     tangent_y = -nz
     tangent_z = ny
@@ -108,8 +123,8 @@ def _orthogonal_basis_from_normal(nx, ny, nz, basis: qd.template()):
 
 @qd.func
 def pt_friction_tangent_basis(
-    positions: qd.template(),
-    basis: qd.template(),
+    positions: qd.template(),  # qd.Matrix
+    basis: qd.template(),  # qd.Matrix
 ):
     tangent = qd.Vector.zero(qd.f64, 3)
     _normalize3(
@@ -135,7 +150,10 @@ def pt_friction_tangent_basis(
 
 
 @qd.func
-def pt_friction_closest_point(positions: qd.template(), beta: qd.template()):
+def pt_friction_closest_point(
+    positions: qd.template(),  # qd.Matrix
+    beta: qd.template(),  # qd.Vector
+):
     edge0 = qd.Vector(
         [
             positions[2, 0] - positions[1, 0],
@@ -181,7 +199,10 @@ def pt_friction_closest_point(positions: qd.template(), beta: qd.template()):
 
 
 @qd.func
-def ee_friction_tangent_basis(positions: qd.template(), basis: qd.template()):
+def ee_friction_tangent_basis(
+    positions: qd.template(),  # qd.Matrix
+    basis: qd.template(),  # qd.Matrix
+):
     tangent = qd.Vector.zero(qd.f64, 3)
     _normalize3(
         positions[1, 0] - positions[0, 0],
@@ -210,7 +231,10 @@ def ee_friction_tangent_basis(positions: qd.template(), basis: qd.template()):
 
 
 @qd.func
-def ee_friction_closest_point(positions: qd.template(), gamma: qd.template()):
+def ee_friction_closest_point(
+    positions: qd.template(),  # qd.Matrix
+    gamma: qd.template(),  # qd.Vector
+):
     edge_a = qd.Vector(
         [
             positions[1, 0] - positions[0, 0],
@@ -243,7 +267,10 @@ def ee_friction_closest_point(positions: qd.template(), gamma: qd.template()):
 
 
 @qd.func
-def pe_friction_tangent_basis(positions: qd.template(), basis: qd.template()):
+def pe_friction_tangent_basis(
+    positions: qd.template(),  # qd.Matrix
+    basis: qd.template(),  # qd.Matrix
+):
     tangent = qd.Vector.zero(qd.f64, 3)
     _normalize3(
         positions[2, 0] - positions[1, 0],
@@ -262,7 +289,9 @@ def pe_friction_tangent_basis(positions: qd.template(), basis: qd.template()):
 
 
 @qd.func
-def pe_friction_closest_point(positions: qd.template()):
+def pe_friction_closest_point(
+    positions: qd.template(),  # qd.Matrix
+):
     edge = qd.Vector(
         [
             positions[2, 0] - positions[1, 0],
@@ -281,7 +310,10 @@ def pe_friction_closest_point(positions: qd.template()):
 
 
 @qd.func
-def pp_friction_tangent_basis(positions: qd.template(), basis: qd.template()):
+def pp_friction_tangent_basis(
+    positions: qd.template(),  # qd.Matrix
+    basis: qd.template(),  # qd.Matrix
+):
     direction = qd.Vector(
         [
             positions[1, 0] - positions[0, 0],
@@ -300,16 +332,16 @@ def pp_friction_tangent_basis(positions: qd.template(), basis: qd.template()):
 
 @qd.func
 def friction_from_weights(
-    current: qd.template(),
-    lagged: qd.template(),
-    basis: qd.template(),
-    weights: qd.template(),
-    count: qd.template(),
+    current: qd.template(),  # qd.Matrix
+    lagged: qd.template(),  # qd.Matrix
+    basis: qd.template(),  # qd.Matrix
+    weights: qd.template(),  # qd.Vector
+    count: qd.template(),  # int
     mu,
     normal_force,
     eps_vh,
-    gradient: qd.template(),
-    hessian: qd.template(),
+    gradient: qd.template(),  # qd.Vector
+    hessian: qd.template(),  # qd.Matrix
 ):
     tangent_displacement = qd.Vector.zero(qd.f64, 2)
     for point in qd.static(range(count)):

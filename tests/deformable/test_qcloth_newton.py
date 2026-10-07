@@ -220,7 +220,7 @@ def test_qcloth_freefall_matches_reference_converged_step(tmp_path, show_viewer)
         rtol=0.0,
         atol=2.0e-14,
     )
-    assert engine.get_newton_iters() == 2
+    assert int(qd_to_numpy(engine.newton_iter)) == 2
 
 
 @pytest.mark.required

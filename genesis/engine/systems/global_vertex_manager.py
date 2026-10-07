@@ -149,14 +149,18 @@ class GlobalVertexManager(SimSystem):
 
 
 @qd.func(requires_top_level=True)
-def record_safe_positions(data: qd.template()):
+def record_safe_positions(
+    data: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_verts[()]):
         for axis in qd.static(range(3)):
             data.safe_positions[i_vertex, axis] = data.positions[i_vertex, axis]
 
 
 @qd.func(requires_top_level=True)
-def reset_trajectory(data: qd.template()):
+def reset_trajectory(
+    data: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_verts[()]):
         for axis in qd.static(range(3)):
             value = data.positions[i_vertex, axis]
@@ -171,6 +175,8 @@ def reset_trajectory(data: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def zero_in_contact(data: qd.template()):
+def zero_in_contact(
+    data: qd.template(),  # GlobalVertexManager.Data
+):
     for i_vertex in range(data.n_verts[()]):
         data.in_contact[i_vertex] = 0

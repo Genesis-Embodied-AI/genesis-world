@@ -52,11 +52,11 @@ _BVH_STACK_CAPACITY = 64
 
 @qd.func
 def _edge_node_overlap(
-    aabbs: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
     node,
-    edge_a: qd.template(),
-    edge_b: qd.template(),
-    half: qd.template(),
+    edge_a: qd.template(),  # qd.Vector
+    edge_b: qd.template(),  # qd.Vector
+    half: qd.template(),  # int
 ):
     projection_a = qd.Vector(
         [
@@ -91,10 +91,10 @@ def _edge_node_overlap(
 
 @qd.func
 def _edge_triangle_intersects(
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
     edge,
     face,
 ):
@@ -193,13 +193,13 @@ def _edge_triangle_intersects(
 
 @qd.func
 def _swept_point_overlap(
-    aabbs: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
     node,
-    start: qd.template(),
-    endpoint: qd.template(),
+    start: qd.template(),  # qd.Vector
+    endpoint: qd.template(),  # qd.Vector
     gap,
-    half: qd.template(),
-    use_dop14f: qd.template(),
+    half: qd.template(),  # int
+    use_dop14f: qd.template(),  # bool
 ):
     result = qd.i32(1)
     start_projection = qd.Vector(
@@ -272,12 +272,12 @@ def _bin_max_f32(a: qd.f32, b: qd.f32):
 
 @qd.func
 def _aabb_reduce_phase1(
-    aabbs: qd.template(),
-    partials: qd.template(),
-    n_rt: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
+    partials: qd.template(),  # qd.Ndarray
+    n_rt: qd.template(),  # qd.Ndarray
     total_threads: qd.i32,
-    block: qd.template(),
-    half: qd.template(),
+    block: qd.template(),  # int
+    half: qd.template(),  # int
 ):
     """Phase 1: each block reduces its tile of leaf AABBs into per-block partials.
 
@@ -310,11 +310,11 @@ def _aabb_reduce_phase1(
 
 @qd.func
 def _aabb_reduce_phase2(
-    partials: qd.template(),
-    aabbs: qd.template(),
-    n_blocks_rt: qd.template(),
-    block: qd.template(),
-    half: qd.template(),
+    partials: qd.template(),  # qd.Ndarray
+    aabbs: qd.template(),  # qd.Ndarray
+    n_blocks_rt: qd.template(),  # qd.Ndarray
+    block: qd.template(),  # int
+    half: qd.template(),  # int
 ):
     """Phase 2: single block reduces ALL per-block partials into aabbs[0].
 
@@ -350,12 +350,12 @@ def _aabb_reduce_phase2(
 
 @qd.func
 def _aabb_reduce_phase1_f32(
-    aabbs: qd.template(),
-    partials: qd.template(),
-    n_rt: qd.template(),
+    aabbs: qd.template(),  # qd.Ndarray
+    partials: qd.template(),  # qd.Ndarray
+    n_rt: qd.template(),  # qd.Ndarray
     total_threads: qd.i32,
-    block: qd.template(),
-    half: qd.template(),
+    block: qd.template(),  # int
+    half: qd.template(),  # int
 ):
     """DOP14f phase 1: reduce leaf bounds without widening back to f64."""
     loop_config(name="bvh_scene_reduce_phase1_dop14f", block_dim=block)
@@ -384,11 +384,11 @@ def _aabb_reduce_phase1_f32(
 
 @qd.func
 def _aabb_reduce_phase2_f32(
-    partials: qd.template(),
-    aabbs: qd.template(),
-    n_blocks_rt: qd.template(),
-    block: qd.template(),
-    half: qd.template(),
+    partials: qd.template(),  # qd.Ndarray
+    aabbs: qd.template(),  # qd.Ndarray
+    n_blocks_rt: qd.template(),  # qd.Ndarray
+    block: qd.template(),  # int
+    half: qd.template(),  # int
 ):
     """DOP14f phase 2: merge block partials into the scene bound."""
     loop_config(name="bvh_scene_reduce_phase2_dop14f", block_dim=block)
@@ -423,7 +423,7 @@ class LBVH:
 
         sort_end_bit: int
         sort_log256_max_n: int
-        genesis_legacy_sort_reduce_host: bool
+        legacy_sort_reduce: bool
         sentinel: int
         stack_capacity: int
         bvh_block: int
@@ -443,8 +443,8 @@ class LBVH:
         ee_warp_threads: int
         bound_type: str
         bounds_width: int
-        use_dop14f_host: bool
-        genesis_legacy_refit_host: bool
+        use_dop14f: bool
+        legacy_refit: bool
         bounds_storage_width: int
         n_prims: qd.Ndarray
         ee_warp_stack_overflow: qd.Ndarray
@@ -487,7 +487,7 @@ def initialize_lbvh_data(
     # arguments and enter the fastcache key.
     data.sort_end_bit = 64
     data.sort_log256_max_n = 4
-    data.genesis_legacy_sort_reduce_host = bool(genesis_legacy_sort_reduce)
+    data.legacy_sort_reduce = bool(genesis_legacy_sort_reduce)
     data.sentinel = 0xFFFFFFFF
     data.stack_capacity = _BVH_STACK_CAPACITY
     data.bvh_block = 256
@@ -523,10 +523,10 @@ def initialize_lbvh_data(
         raise ValueError(f"Unsupported LBVH bound type {bound_type!r}")
     data.bound_type = bound_type
     data.bounds_width = 14 if bound_type == "dop14" else 6
-    data.use_dop14f_host = bound_type == "dop14" and not genesis_legacy_fp64_bounds
-    data.genesis_legacy_refit_host = bool(genesis_legacy_refit)
-    data.bounds_storage_width = 16 if data.use_dop14f_host else data.bounds_width
-    bounds_dtype = qd.f32 if data.use_dop14f_host else qd.f64
+    data.use_dop14f = bound_type == "dop14" and not genesis_legacy_fp64_bounds
+    data.legacy_refit = bool(genesis_legacy_refit)
+    data.bounds_storage_width = 16 if data.use_dop14f else data.bounds_width
+    bounds_dtype = qd.f32 if data.use_dop14f else qd.f64
 
     if max_queries <= 0:
         max_queries = n_prims
@@ -573,7 +573,11 @@ def initialize_lbvh_data(
 
 
 @qd.func(requires_top_level=True)
-def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
+def calc_leaf_aabb_tri(
+    data,  # LBVH.Data
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+):
     """Compute swept leaf AABBs for triangles (stride=3).
 
     Matches the pinned reference ``calc_leaf_aabb`` with stride=3.
@@ -582,7 +586,7 @@ def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
     loop_config(name="bvh_calc_leaf_aabb_tri")
     for idx in range(n):
         leaf = n - 1 + idx
-        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f_host)
+        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f)
         for k in qd.static(range(3)):
             vi = surf_mgr.surf_triangles[idx, k]
             px = vtx_mgr.positions[vi, 0]
@@ -595,7 +599,7 @@ def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 py,
                 pz,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
             endpoint_x = vtx_mgr.trajectory_end_positions[vi, 0]
             endpoint_y = vtx_mgr.trajectory_end_positions[vi, 1]
@@ -607,7 +611,7 @@ def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 endpoint_y,
                 endpoint_z,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         max_thickness = qd.f64(0.0)
         max_path_inflation = qd.f64(0.0)
@@ -621,7 +625,7 @@ def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 leaf,
                 max_thickness,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         if max_path_inflation > 0.0:
             aabb_expand(
@@ -629,14 +633,14 @@ def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 leaf,
                 max_path_inflation,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         aabb_expand(
             data.aabbs,
             leaf,
             vtx_mgr.d_hats[surf_mgr.surf_triangles[idx, 0]],
             data.bounds_width // 2,
-            data.use_dop14f_host,
+            data.use_dop14f,
         )
         body_id = vtx_mgr.body_id[surf_mgr.surf_triangles[idx, 0]]
         for k in qd.static(range(1, 3)):
@@ -646,7 +650,11 @@ def calc_leaf_aabb_tri(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def calc_leaf_aabb_edge(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
+def calc_leaf_aabb_edge(
+    data,  # LBVH.Data
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+):
     """Compute swept leaf AABBs for edges (stride=2).
 
     Matches the pinned reference ``calc_leaf_aabb`` with stride=2.
@@ -655,7 +663,7 @@ def calc_leaf_aabb_edge(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
     loop_config(name="bvh_calc_leaf_aabb_edge")
     for idx in range(n):
         leaf = n - 1 + idx
-        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f_host)
+        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f)
         for k in qd.static(range(2)):
             vi = surf_mgr.surf_edges[idx, k]
             px = vtx_mgr.positions[vi, 0]
@@ -668,7 +676,7 @@ def calc_leaf_aabb_edge(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 py,
                 pz,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
             endpoint_x = vtx_mgr.trajectory_end_positions[vi, 0]
             endpoint_y = vtx_mgr.trajectory_end_positions[vi, 1]
@@ -680,7 +688,7 @@ def calc_leaf_aabb_edge(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 endpoint_y,
                 endpoint_z,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         max_thickness = qd.f64(0.0)
         max_path_inflation = qd.f64(0.0)
@@ -694,7 +702,7 @@ def calc_leaf_aabb_edge(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 leaf,
                 max_thickness,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         if max_path_inflation > 0.0:
             aabb_expand(
@@ -702,14 +710,14 @@ def calc_leaf_aabb_edge(data, surf_mgr: qd.template(), vtx_mgr: qd.template()):
                 leaf,
                 max_path_inflation,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         aabb_expand(
             data.aabbs,
             leaf,
             vtx_mgr.d_hats[surf_mgr.surf_edges[idx, 0]],
             data.bounds_width // 2,
-            data.use_dop14f_host,
+            data.use_dop14f,
         )
         body_id = vtx_mgr.body_id[surf_mgr.surf_edges[idx, 0]]
         if vtx_mgr.body_id[surf_mgr.surf_edges[idx, 1]] != body_id:
@@ -728,7 +736,7 @@ def reduce_scene_aabb(data):
     """
     n_blocks = data.n_reduce_blocks[()]
     total_threads = n_blocks * data.bvh_block
-    if qd.static(data.use_dop14f_host):
+    if qd.static(data.use_dop14f):
         _aabb_reduce_phase1_f32(
             data.aabbs,
             data.red_partials,
@@ -744,7 +752,7 @@ def reduce_scene_aabb(data):
             data.bvh_block,
             data.bounds_width // 2,
         )
-    if qd.static(not data.use_dop14f_host):
+    if qd.static(not data.use_dop14f):
         _aabb_reduce_phase1(
             data.aabbs,
             data.red_partials,
@@ -771,7 +779,7 @@ def calc_morton(data):
     """
     n = data.n_prims[()]
     sort_count = n
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+    if qd.static(data.legacy_sort_reduce):
         sort_count = data.morton.shape[0]
     loop_config(name="bvh_calc_morton")
     for idx in range(sort_count):
@@ -807,7 +815,7 @@ def sort_morton(data):
 
     The retained generic Quadrants radix sort is an explicit A/B fallback.
     """
-    if qd.static(data.genesis_legacy_sort_reduce_host):
+    if qd.static(data.legacy_sort_reduce):
         sort(
             data.morton,
             data.morton_tmp,
@@ -958,12 +966,12 @@ def calc_internal_aabb(data):
             else:
                 lidx = qd.i32(data.nodes_left[qd.i32(parent)])
                 ridx = qd.i32(data.nodes_right[qd.i32(parent)])
-                if qd.static(data.genesis_legacy_refit_host):
+                if qd.static(data.legacy_refit):
                     aabb_init(
                         data.aabbs,
                         qd.i32(parent),
                         data.bounds_width // 2,
-                        data.use_dop14f_host,
+                        data.use_dop14f,
                     )
                     aabb_combine_aabb(
                         data.aabbs,
@@ -1002,7 +1010,12 @@ def calc_internal_aabb(data):
 
 
 @qd.func(requires_top_level=True)
-def calc_leaf_aabb_tri_toy(data, surf_mgr: qd.template(), vtx_mgr: qd.template(), d_hat: qd.f64):
+def calc_leaf_aabb_tri_toy(
+    data,  # LBVH.Data
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    d_hat: qd.f64,
+):
     """Toy-mode: leaf AABBs for triangles with d_hat expansion.
 
     Matches the pinned reference ``toy/lbvh.cu::calc_leaf_aabb_face_kernel``.
@@ -1010,7 +1023,7 @@ def calc_leaf_aabb_tri_toy(data, surf_mgr: qd.template(), vtx_mgr: qd.template()
     n = data.n_prims[()]
     for idx in range(n):
         leaf = n - 1 + idx
-        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f_host)
+        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f)
         for k in qd.static(range(3)):
             vi = surf_mgr.surf_triangles[idx, k]
             px = vtx_mgr.positions[vi, 0]
@@ -1023,19 +1036,24 @@ def calc_leaf_aabb_tri_toy(data, surf_mgr: qd.template(), vtx_mgr: qd.template()
                 py,
                 pz,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         aabb_expand(
             data.aabbs,
             leaf,
             d_hat,
             data.bounds_width // 2,
-            data.use_dop14f_host,
+            data.use_dop14f,
         )
 
 
 @qd.func(requires_top_level=True)
-def calc_leaf_aabb_edge_toy(data, surf_mgr: qd.template(), vtx_mgr: qd.template(), d_hat: qd.f64):
+def calc_leaf_aabb_edge_toy(
+    data,  # LBVH.Data
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    d_hat: qd.f64,
+):
     """Toy-mode: leaf AABBs for edges with d_hat expansion.
 
     Matches the pinned reference ``toy/lbvh.cu::calc_leaf_aabb_edge_kernel``.
@@ -1043,7 +1061,7 @@ def calc_leaf_aabb_edge_toy(data, surf_mgr: qd.template(), vtx_mgr: qd.template(
     n = data.n_prims[()]
     for idx in range(n):
         leaf = n - 1 + idx
-        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f_host)
+        aabb_init(data.aabbs, leaf, data.bounds_width // 2, data.use_dop14f)
         for k in qd.static(range(2)):
             vi = surf_mgr.surf_edges[idx, k]
             px = vtx_mgr.positions[vi, 0]
@@ -1056,24 +1074,24 @@ def calc_leaf_aabb_edge_toy(data, surf_mgr: qd.template(), vtx_mgr: qd.template(
                 py,
                 pz,
                 data.bounds_width // 2,
-                data.use_dop14f_host,
+                data.use_dop14f,
             )
         aabb_expand(
             data.aabbs,
             leaf,
             d_hat,
             data.bounds_width // 2,
-            data.use_dop14f_host,
+            data.use_dop14f,
         )
 
 
 @qd.func(requires_top_level=True)
 def query_pt_toy(
     data,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs_val: qd.i32,
     d_hat: qd.f64,
 ):
@@ -1194,10 +1212,10 @@ def query_pt_toy(
 @qd.func(requires_top_level=True)
 def query_ee_toy(
     data,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs_val: qd.i32,
     d_hat: qd.f64,
 ):
@@ -1356,15 +1374,15 @@ def build_edge(data, surf_mgr, vtx_mgr):
 @qd.func(requires_top_level=True)
 def query_pt_batched(
     data,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    body_mgr: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    body_mgr: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs_val: qd.i32,
     d_hat: qd.f64,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     """Retained per-thread PT swept broadphase.
 
@@ -1405,7 +1423,7 @@ def query_pt_batched(
                     query_endpoint,
                     query_gap,
                     data.bounds_width // 2,
-                    data.use_dop14f_host,
+                    data.use_dop14f,
                 )
             else:
                 for axis in qd.static(range(3)):
@@ -1482,7 +1500,7 @@ def query_pt_batched(
                     query_endpoint,
                     query_gap,
                     data.bounds_width // 2,
-                    data.use_dop14f_host,
+                    data.use_dop14f,
                 )
             if not _node_pair_enabled(body_mgr, vtx_mgr.body_id[vidx], data.node_body_id[L_idx]):
                 L_overlap = 0
@@ -1537,7 +1555,7 @@ def query_pt_batched(
                     query_endpoint,
                     query_gap,
                     data.bounds_width // 2,
-                    data.use_dop14f_host,
+                    data.use_dop14f,
                 )
             if not _node_pair_enabled(body_mgr, vtx_mgr.body_id[vidx], data.node_body_id[R_idx]):
                 R_overlap = 0
@@ -1568,15 +1586,15 @@ def query_pt_batched(
 @qd.func(requires_top_level=True)
 def query_pt_warp(
     data,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    body_mgr: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    body_mgr: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs_val: qd.i32,
     d_hat: qd.f64,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     """Warp-per-query swept PT traversal."""
     n_queries = surf_mgr.n_surf_verts[()]
@@ -1664,7 +1682,7 @@ def query_pt_warp(
                         start_projection[axis],
                         endpoint_projection[axis],
                     )
-                    if qd.static(data.use_dop14f_host):
+                    if qd.static(data.use_dop14f):
                         scale = qd.f64(1.0)
                         if qd.static(axis >= 3):
                             scale = qd.f64(1.7320508075688772)
@@ -1683,7 +1701,7 @@ def query_pt_warp(
                     overlap = qd.i32(1)
                     if qd.static(data.bounds_width == 14):
                         for axis in qd.static(range(7)):
-                            if qd.static(data.use_dop14f_host):
+                            if qd.static(data.use_dop14f):
                                 if data.aabbs[0, axis] >= query_projection_upper_gap_f32[axis] or (
                                     query_projection_lower_gap_f32[axis] >= data.aabbs[0, axis + 7]
                                 ):
@@ -1767,7 +1785,7 @@ def query_pt_warp(
                                 overlap = qd.i32(1)
                                 if qd.static(data.bounds_width == 14):
                                     for axis in qd.static(range(7)):
-                                        if qd.static(data.use_dop14f_host):
+                                        if qd.static(data.use_dop14f):
                                             if (
                                                 data.aabbs[
                                                     child,
@@ -1847,17 +1865,17 @@ def _query_et_child(
     data,
     child,
     edge,
-    edge_position_a: qd.template(),
-    edge_position_b: qd.template(),
+    edge_position_a: qd.template(),  # qd.Vector
+    edge_position_b: qd.template(),  # qd.Vector
     stack_top,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    body_mgr: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    body_mgr: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     if _edge_node_overlap(
         data.aabbs,
@@ -1893,14 +1911,14 @@ def _query_et_child(
 @qd.func(requires_top_level=True)
 def query_et(
     data,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    body_mgr: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    body_mgr: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     for edge in range(surf_mgr.n_surf_edges[()]):
         if contact.intersection_check[()] != 0 and data.n_prims[()] > 1:
@@ -1962,15 +1980,15 @@ def query_et(
 @qd.func(requires_top_level=True)
 def query_ee_warp(
     data,
-    surf_mgr: qd.template(),
-    vtx_mgr: qd.template(),
-    body_mgr: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    surf_mgr: qd.template(),  # GlobalSurfaceManager.Data
+    vtx_mgr: qd.template(),  # GlobalVertexManager.Data
+    body_mgr: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs_val: qd.i32,
     d_hat: qd.f64,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     qd.loop_config(name="query_ee_warp_reset")
     for _ in range(1):

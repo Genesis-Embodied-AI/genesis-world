@@ -44,7 +44,9 @@ class FEMDiagPreconditioner(SimSystem):
 
 
 @qd.func(requires_top_level=True)
-def initialize_fem_diag_preconditioner(data: qd.template()):
+def initialize_fem_diag_preconditioner(
+    data: qd.template(),  # FEMDiagPreconditioner.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         for i in qd.static(range(3)):
             for j in qd.static(range(3)):
@@ -52,7 +54,10 @@ def initialize_fem_diag_preconditioner(data: qd.template()):
 
 
 @qd.func(requires_top_level=True)
-def gather_fem_diag_preconditioner(data: qd.template(), linear_system_data: qd.template()):
+def gather_fem_diag_preconditioner(
+    data: qd.template(),  # FEMDiagPreconditioner.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+):
     matrix = linear_system_data.matrix
     for i_entry in range(matrix.bcoo_nnz[()]):
         block_offset = data.dof_offset[()] // 3
@@ -65,7 +70,9 @@ def gather_fem_diag_preconditioner(data: qd.template(), linear_system_data: qd.t
 
 
 @qd.func(requires_top_level=True)
-def invert_fem_diag_preconditioner(data: qd.template()):
+def invert_fem_diag_preconditioner(
+    data: qd.template(),  # FEMDiagPreconditioner.Data
+):
     for i_vert in range(data.n_fem_verts[()]):
         block = qd.Matrix.zero(qd.f64, 3, 3)
         for i in qd.static(range(3)):
@@ -79,18 +86,18 @@ def invert_fem_diag_preconditioner(data: qd.template()):
 
 @qd.func(requires_top_level=True)
 def pcg_apply_preconditioner(
-    data: qd.template(),
-    residual: qd.template(),
-    output: qd.template(),
+    data: qd.template(),  # FEMDiagPreconditioner.Data
+    residual: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
 ):
     apply_fem_diag_preconditioner(data, residual, output)
 
 
 @qd.func(requires_top_level=True)
 def apply_fem_diag_preconditioner(
-    data: qd.template(),
-    residual: qd.template(),
-    result: qd.template(),
+    data: qd.template(),  # FEMDiagPreconditioner.Data
+    residual: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
 ):
     for i_vert in range(data.n_fem_verts[()]):
         global_offset = data.dof_offset[()] + i_vert * 3

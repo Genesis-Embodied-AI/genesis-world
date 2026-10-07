@@ -19,7 +19,12 @@ import quadrants as qd
 
 
 @qd.func
-def gipc_make_pd(a: qd.f64, b: qd.f64, c: qd.f64, out: qd.template()):
+def gipc_make_pd(
+    a: qd.f64,
+    b: qd.f64,
+    c: qd.f64,
+    out: qd.template(),  # qd.Matrix
+):
     """PSD-project symmetric ``[[a, b], [b, c]]`` into ``out = (a', b', c')``.
 
     Negative eigenvalues are clamped to zero. A matrix that is already PSD is

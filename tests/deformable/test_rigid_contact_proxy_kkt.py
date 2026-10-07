@@ -97,7 +97,6 @@ def create_rigid_contact_assemble_data(contact):
 @qd.data_oriented
 class ProxyContactFixture:
     def __init__(self):
-        self.genesis_legacy_sort_reduce_host = False
         self.n_unique_doublets = qd.ndarray(qd.i32, shape=())
         self.n_unique_triplets = qd.ndarray(qd.i32, shape=())
         self.unique_doublet_vertices = qd.ndarray(qd.i32, shape=(3,))
@@ -596,8 +595,8 @@ def test_proxy_system_initializes_on_genesis_inertial_pose(forest_path):
     rigid_storage_dofs = int(qd_to_numpy(rigid.n_storage_dofs))
     total_dof = rigid_storage_dofs + 6
     proxy = create_rigid_contact_proxy_data(
-        n_links_host=scene.rigid_solver.n_links,
-        n_instances_host=scene.rigid_solver._B,
+        n_links=scene.rigid_solver.n_links,
+        n_instances=scene.rigid_solver._B,
         n_rigid_bodies=2,
         mechanism_body=np.array([0], dtype=np.int32),
         proxy_body=np.array([1], dtype=np.int32),
@@ -822,8 +821,8 @@ def test_proxy_contact_routes_emit_block_counts():
     )
     geometry.vertex_pair = np.array([0, 0], dtype=np.int32)
     proxy = create_rigid_contact_proxy_data(
-        n_links_host=1,
-        n_instances_host=1,
+        n_links=1,
+        n_instances=1,
         n_rigid_bodies=2,
         mechanism_body=np.array([0], dtype=np.int32),
         proxy_body=np.array([1], dtype=np.int32),
@@ -900,7 +899,8 @@ def test_standard_pcg_kkt_builder_path():
     assert engine.rigid_contact_proxy is not None
     assert engine.rigid_forest is not None
     assert engine.rigid_contact_assemble is not None
-    assert engine.rigid_forest.selected_path == "tree"
+    assert engine.rigid_forest.use_fused_tree_path
+    assert not engine.rigid_forest.genesis_legacy_enabled
     engine.step()
 
     mechanism = int(qd_to_numpy(engine.rigid_contact_proxy.data.mechanism_body)[0])
@@ -1188,8 +1188,8 @@ def test_franka_forest_paths_match_P_and_PT():
     empty_geometry.local_positions = np.empty((0, 3), dtype=np.float64)
     empty_geometry.vertex_pair = np.empty(0, dtype=np.int32)
     proxy = create_rigid_contact_proxy_data(
-        n_links_host=scene.rigid_solver.n_links,
-        n_instances_host=scene.rigid_solver._B,
+        n_links=scene.rigid_solver.n_links,
+        n_instances=scene.rigid_solver._B,
         n_rigid_bodies=n_bodies,
         mechanism_body=np.empty(0, dtype=np.int32),
         proxy_body=np.empty(0, dtype=np.int32),
@@ -1354,7 +1354,8 @@ def test_franka_cloth_reduced_kkt_step():
         },
         contact_tabular=contact_tabular,
     )
-    assert engine.rigid_forest.selected_path == "tree"
+    assert engine.rigid_forest.use_fused_tree_path
+    assert not engine.rigid_forest.genesis_legacy_enabled
     assert not engine.rigid.has_collision
 
     home_qpos = np.array(
@@ -1372,13 +1373,13 @@ def test_franka_cloth_reduced_kkt_step():
     newton_iterations = []
     for _ in range(3):
         engine.step()
-        newton_iterations.append(engine.get_newton_iters())
+        newton_iterations.append(int(qd_to_numpy(engine.newton_iter)))
 
     edge_count = int(qd_to_numpy(engine.rigid_forest.data.n_edges))
     assert edge_count == 9
     assert int(qd_to_numpy(engine.rigid.data.constraint_state.n_constraints)[0]) > 0
     assert max(newton_iterations) <= 4
-    assert engine.get_total_pcg_iters() >= engine.get_max_pcg_iters()
+    assert int(qd_to_numpy(engine.total_pcg_iters)) >= int(qd_to_numpy(engine.max_pcg_iters))
     assert int(qd_to_numpy(engine.frame_failed)) == 0
     assert float(qd_to_numpy(engine.rigid_contact_proxy.data.max_surface_residual)) <= float(
         qd_to_numpy(engine.rigid_contact_proxy.data.solve_tolerance)

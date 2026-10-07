@@ -86,7 +86,10 @@ class SimAction:
     # Quadrants does not recognize a data-oriented @qd.func __call__ through
     # its public callable API. Keep an explicit method until that is supported.
     @qd.pyfunc
-    def invoke(self, transient_args: qd.template() = ()):
+    def invoke(
+        self,
+        transient_args: qd.template() = (),  # tuple[object, ...]
+    ):
         self.kernel(*(self.data + transient_args))
 
 

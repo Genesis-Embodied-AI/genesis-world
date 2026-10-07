@@ -12,7 +12,10 @@ from .gpu_occupancy import cuda_resident_blocks
 
 
 @qd.func
-def _dual_ee_node_area(bvh: qd.template(), node):
+def _dual_ee_node_area(
+    bvh: qd.template(),  # LBVH.Data
+    node,
+):
     half = bvh.bounds_width // 2
     x = qd.f64(bvh.aabbs[node, half]) - qd.f64(bvh.aabbs[node, 0])
     y = qd.f64(bvh.aabbs[node, half + 1]) - qd.f64(bvh.aabbs[node, 1])
@@ -21,7 +24,11 @@ def _dual_ee_node_area(bvh: qd.template(), node):
 
 
 @qd.func
-def _dual_ee_canonical_node_pair(left, right, output: qd.template()):
+def _dual_ee_canonical_node_pair(
+    left,
+    right,
+    output: qd.template(),  # qd.Vector
+):
     output[0] = left
     output[1] = right
     if left > right:
@@ -31,15 +38,15 @@ def _dual_ee_canonical_node_pair(left, right, output: qd.template()):
 
 @qd.func
 def _dual_ee_expand_pair(
-    bvh: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
+    bvh: qd.template(),  # LBVH.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
     left_node,
     right_node,
-    children: qd.template(),
-    result: qd.template(),
+    children: qd.template(),  # qd.Matrix
+    result: qd.template(),  # qd.Vector
 ):
     result[0] = 0
     result[1] = 0
@@ -229,7 +236,11 @@ def handle_overflow(data) -> bool:
 
 
 @qd.func(requires_top_level=True)
-def reset(data, bvh: qd.template(), n_pairs: qd.template()):
+def reset(
+    data,  # DualEEQueryState.Data
+    bvh: qd.template(),  # LBVH.Data
+    n_pairs: qd.template(),  # qd.Ndarray
+):
     qd.loop_config(name="dual_ee_reset_query")
     for _ in range(1):
         n_pairs[()] = 0
@@ -263,16 +274,16 @@ def reset(data, bvh: qd.template(), n_pairs: qd.template()):
 @qd.func(requires_top_level=True)
 def expand_frontier(
     data,
-    bvh: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    bvh: qd.template(),  # LBVH.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
-    input_a: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
+    input_a: qd.template(),  # bool
 ):
     group_size = qd_subgroup.group_size()
     n = qd.i32(0)
@@ -343,7 +354,11 @@ def expand_frontier(
 
 
 @qd.func(requires_top_level=True)
-def prepare_frontier(data, overflow_flag: qd.template(), frontier_in_a: qd.template()):
+def prepare_frontier(
+    data,  # DualEEQueryState.Data
+    overflow_flag: qd.template(),  # qd.Ndarray
+    frontier_in_a: qd.template(),  # bool
+):
     qd.loop_config(name="dual_ee_prepare_frontier")
     for _ in range(1):
         if data.loop_cond[()] != 0:
@@ -386,16 +401,16 @@ def prepare_frontier(data, overflow_flag: qd.template(), frontier_in_a: qd.templ
 @qd.func(requires_top_level=True)
 def dfs(
     data,
-    bvh: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    bvh: qd.template(),  # LBVH.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
-    use_a: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
+    use_a: qd.template(),  # bool
 ):
     group_size = qd_subgroup.group_size()
     qd.loop_config(name="dual_ee_dfs", block_dim=data.block_size)
@@ -483,15 +498,15 @@ def dfs(
 @qd.func(requires_top_level=True)
 def query(
     data,
-    bvh: qd.template(),
-    surface: qd.template(),
-    vertex: qd.template(),
-    body: qd.template(),
-    contact: qd.template(),
-    pairs: qd.template(),
-    n_pairs: qd.template(),
+    bvh: qd.template(),  # LBVH.Data
+    surface: qd.template(),  # GlobalSurfaceManager.Data
+    vertex: qd.template(),  # GlobalVertexManager.Data
+    body: qd.template(),  # GlobalBodyManager.Data
+    contact: qd.template(),  # ContactSystem.Data or contact-predicate protocol
+    pairs: qd.template(),  # qd.Ndarray
+    n_pairs: qd.template(),  # qd.Ndarray
     max_pairs,
-    overflow_flag: qd.template(),
+    overflow_flag: qd.template(),  # qd.Ndarray
 ):
     reset(data, bvh, n_pairs)
     for level in qd.static(range(18)):

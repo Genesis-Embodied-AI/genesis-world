@@ -27,7 +27,6 @@ class PCGSolver(SimSystem):
     def __init__(self) -> None:
         super().__init__()
         self.data = self.Data()
-        self.is_initialized_host = False
         self.primary_operators = self.create_action_collection()
         self.operators = self.create_action_collection()
         self.reduced_primary_operators = self.create_action_collection()
@@ -241,8 +240,6 @@ class PCGSolver(SimSystem):
         )
 
     def init(self, total_dof: int, n_block_rows: int, pcg_tol_rate: float) -> None:
-        if self.is_initialized_host:
-            raise RuntimeError("PCGSolver is already initialized")
         if min(total_dof, n_block_rows) < 0:
             raise ValueError("PCGSolver dimensions must be non-negative")
         (
@@ -269,14 +266,13 @@ class PCGSolver(SimSystem):
         self.data.pcg_tol_rate = qd.ndarray(qd.f64, shape=())
         self.data.n_block_rows.from_numpy(np.array(n_block_rows, dtype=np.int32))
         self.data.pcg_tol_rate.from_numpy(np.array(pcg_tol_rate, dtype=np.float64))
-        self.is_initialized_host = True
 
     @qd.func(requires_top_level=True)
     def solve(
         self,
         max_iterations,
-        max_pcg_iterations: qd.template(),
-        total_pcg_iterations: qd.template(),
+        max_pcg_iterations: qd.template(),  # qd.Ndarray
+        total_pcg_iterations: qd.template(),  # qd.Ndarray
     ):
         solve_pcg(
             self.data,
@@ -290,12 +286,12 @@ class PCGSolver(SimSystem):
 
 @qd.func(requires_top_level=True)
 def solve_pcg(
-    data: qd.template(),
-    linear_system_data: qd.template(),
-    action_provider: qd.template(),
+    data: qd.template(),  # PCGSolver.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    action_provider: qd.template(),  # PCGSolver
     max_iterations,
-    max_pcg_iterations: qd.template(),
-    total_pcg_iterations: qd.template(),
+    max_pcg_iterations: qd.template(),  # qd.Ndarray
+    total_pcg_iterations: qd.template(),  # qd.Ndarray
 ):
     for solver_action in qd.static(action_provider.solver_actions):
         solver_action.invoke(

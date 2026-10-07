@@ -16,7 +16,13 @@ def pp_distance2(x0: qd.f64, x1: qd.f64, x2: qd.f64, x3: qd.f64, x4: qd.f64, x5:
 
 @qd.func
 def pp_distance2_gradient(
-    x0: qd.f64, x1: qd.f64, x2: qd.f64, x3: qd.f64, x4: qd.f64, x5: qd.f64, _g_out: qd.template()
+    x0: qd.f64,
+    x1: qd.f64,
+    x2: qd.f64,
+    x3: qd.f64,
+    x4: qd.f64,
+    x5: qd.f64,
+    _g_out: qd.template(),  # qd.Vector
 ):
     x6 = qd.f64(x0 - x3)
     x7 = qd.f64(x1 - x4)
@@ -30,7 +36,15 @@ def pp_distance2_gradient(
 
 
 @qd.func
-def pp_distance2_hessian(x0: qd.f64, x1: qd.f64, x2: qd.f64, x3: qd.f64, x4: qd.f64, x5: qd.f64, _h_out: qd.template()):
+def pp_distance2_hessian(
+    x0: qd.f64,
+    x1: qd.f64,
+    x2: qd.f64,
+    x3: qd.f64,
+    x4: qd.f64,
+    x5: qd.f64,
+    _h_out: qd.template(),  # qd.Matrix
+):
     _h_out[0] = qd.f64(2)
     _h_out[1] = qd.f64(0)
     _h_out[2] = qd.f64(0)
@@ -99,7 +113,7 @@ def pe_distance2_gradient(
     x6: qd.f64,
     x7: qd.f64,
     x8: qd.f64,
-    _g_out: qd.template(),
+    _g_out: qd.template(),  # qd.Vector
 ):
     x9 = qd.f64(-x7)
     x10 = qd.f64(x4 + x9)
@@ -145,7 +159,7 @@ def pe_distance2_hessian(
     x6: qd.f64,
     x7: qd.f64,
     x8: qd.f64,
-    _h_out: qd.template(),
+    _h_out: qd.template(),  # qd.Matrix
 ):
     x9 = qd.f64(-x7)
     x10 = qd.f64(x4 + x9)
@@ -412,7 +426,7 @@ def pt_distance2_gradient(
     x9: qd.f64,
     x10: qd.f64,
     x11: qd.f64,
-    _g_out: qd.template(),
+    _g_out: qd.template(),  # qd.Vector
 ):
     x12 = qd.f64(-x4)
     x13 = qd.f64(x10 + x12)
@@ -479,7 +493,7 @@ def pt_distance2_hessian(
     x9: qd.f64,
     x10: qd.f64,
     x11: qd.f64,
-    _h_out: qd.template(),
+    _h_out: qd.template(),  # qd.Matrix
 ):
     x12 = qd.f64(-x4)
     x13 = qd.f64(x10 + x12)
@@ -997,7 +1011,7 @@ def ee_distance2_gradient(
     x9: qd.f64,
     x10: qd.f64,
     x11: qd.f64,
-    _g_out: qd.template(),
+    _g_out: qd.template(),  # qd.Vector
 ):
     x12 = qd.f64(-x7)
     x13 = qd.f64(x10 + x12)
@@ -1065,7 +1079,7 @@ def ee_distance2_hessian(
     x9: qd.f64,
     x10: qd.f64,
     x11: qd.f64,
-    _h_out: qd.template(),
+    _h_out: qd.template(),  # qd.Matrix
 ):
     x12 = qd.f64(-x7)
     x13 = qd.f64(x10 + x12)

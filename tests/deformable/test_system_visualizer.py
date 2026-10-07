@@ -142,11 +142,9 @@ class FakeEngine:
             CollisionSystem: collision,
             IntegratorSystem: integrator,
         }
-        self.is_built_host = True
         self.engine_state = FakeBuffer((), "i32")
         self.monitor = FakeBuffer((), "i32")
         self.step_pipeline = FakePipeline()
-        self.step_pipeline._action_data = [integrator.data, collision.data]
         self._private_value = "must not be exposed"
 
 

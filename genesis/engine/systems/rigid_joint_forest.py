@@ -88,7 +88,6 @@ class RigidJointForestSystem(SimSystem):
         super().__init__()
         self.data = self.Data()
         self._wire_args = None
-        self.is_initialized = False
         self.fused_enabled = True
         self.genesis_legacy_enabled = False
         self.use_fused_tree_path = False
@@ -117,8 +116,6 @@ class RigidJointForestSystem(SimSystem):
         }
 
     def init(self) -> None:
-        if self.is_initialized:
-            raise RuntimeError("RigidJointForestSystem is already initialized")
         if self._wire_args is None:
             raise RuntimeError("RigidJointForestSystem data has not been wired")
         _populate_rigid_joint_forest_data(
@@ -130,15 +127,6 @@ class RigidJointForestSystem(SimSystem):
             **self._wire_args,
         )
         self._wire_args = None
-        self.is_initialized = True
-
-    @property
-    def selected_path(self) -> str:
-        if self.genesis_legacy_enabled:
-            return "genesis_legacy"
-        if self.use_fused_tree_path:
-            return "tree"
-        return "level"
 
     def build(self) -> None:
         from .global_linear_system import GlobalLinearSystem
@@ -303,13 +291,13 @@ def _populate_rigid_joint_forest_data(
     for body, parent in enumerate(parents):
         if parent >= 0:
             children[int(parent)].append(body)
-    tree_roots_host = np.flatnonzero(parents < 0).astype(np.int32)
+    tree_roots = np.flatnonzero(parents < 0).astype(np.int32)
     tree_ids = np.full(n_rigid_bodies, -1, dtype=np.int32)
-    tree_body_start_host = [0]
-    tree_body_list_host = []
+    tree_body_starts = [0]
+    tree_body_order = []
     tree_local_index = np.full(n_rigid_bodies, -1, dtype=np.int32)
     max_tree_size = 0
-    for tree, root in enumerate(tree_roots_host):
+    for tree, root in enumerate(tree_roots):
         stack = [int(root)]
         tree_bodies = []
         while stack:
@@ -319,15 +307,15 @@ def _populate_rigid_joint_forest_data(
         for local, body in enumerate(tree_bodies):
             tree_ids[body] = tree
             tree_local_index[body] = local
-        tree_body_list_host.extend(tree_bodies)
-        tree_body_start_host.append(len(tree_body_list_host))
+        tree_body_order.extend(tree_bodies)
+        tree_body_starts.append(len(tree_body_order))
         max_tree_size = max(max_tree_size, len(tree_bodies))
 
-    depth_order_host = np.argsort(depths, kind="stable").astype(np.int32)
+    depth_order = np.argsort(depths, kind="stable").astype(np.int32)
     depth_counts = np.bincount(depths, minlength=n_links)
-    depth_start_host = np.zeros(n_links + 1, dtype=np.int32)
-    np.cumsum(depth_counts, out=depth_start_host[1:])
-    n_trees = len(tree_roots_host)
+    depth_starts = np.zeros(n_links + 1, dtype=np.int32)
+    np.cumsum(depth_counts, out=depth_starts[1:])
+    n_trees = len(tree_roots)
     system.use_fused_tree_path = (
         fused_enabled
         and not genesis_legacy_enabled
@@ -478,30 +466,30 @@ def _populate_rigid_joint_forest_data(
     )
     data.depth.from_numpy(np.pad(depths, (0, capacity - len(depths))))
     data.tree_id.from_numpy(tree_ids)
-    data.depth_start.from_numpy(depth_start_host)
+    data.depth_start.from_numpy(depth_starts)
     data.depth_order.from_numpy(
         np.pad(
-            depth_order_host,
-            (0, mechanism_capacity - len(depth_order_host)),
+            depth_order,
+            (0, mechanism_capacity - len(depth_order)),
         )
     )
     data.tree_roots.from_numpy(
         np.pad(
-            tree_roots_host,
-            (0, tree_capacity - len(tree_roots_host)),
+            tree_roots,
+            (0, tree_capacity - len(tree_roots)),
         )
     )
     data.tree_body_start.from_numpy(
         np.pad(
-            np.asarray(tree_body_start_host, dtype=np.int32),
-            (0, tree_capacity + 1 - len(tree_body_start_host)),
+            np.asarray(tree_body_starts, dtype=np.int32),
+            (0, tree_capacity + 1 - len(tree_body_starts)),
             mode="edge",
         )
     )
     data.tree_body_list.from_numpy(
         np.pad(
-            np.asarray(tree_body_list_host, dtype=np.int32),
-            (0, mechanism_capacity - len(tree_body_list_host)),
+            np.asarray(tree_body_order, dtype=np.int32),
+            (0, mechanism_capacity - len(tree_body_order)),
         )
     )
     data.tree_local_index.from_numpy(tree_local_index)
@@ -564,7 +552,13 @@ def _populate_rigid_joint_forest_data(
 
 @qd.func
 def _body_point_twist(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), link, environment, joint, dof
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    link,
+    environment,
+    joint,
+    dof,
 ):
     joint_index = [joint, environment] if qd.static(rigid.rigid_config.batch_joints_info) else joint
     dof_index = [dof, environment] if qd.static(rigid.rigid_config.batch_dofs_info) else dof
@@ -598,9 +592,9 @@ def _body_point_twist(
 
 @qd.func(requires_top_level=True)
 def compute_endpoint_fk(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
 ):
     h = rigid.h[()]
     for q, environment in qd.ndrange(
@@ -788,7 +782,11 @@ def compute_endpoint_fk(
 
 @qd.func
 def forest_expand_body_p_cached(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template(), body
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    body,
 ):
     environment = body // rigid.n_links[()]
     link = body - environment * rigid.n_links[()]
@@ -849,7 +847,11 @@ def forest_expand_body_p_cached(
 
 @qd.func
 def forest_expand_body_p(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template(), body
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    body,
 ):
     environment = body // rigid.n_links[()]
     link = body - environment * rigid.n_links[()]
@@ -895,11 +897,11 @@ def forest_expand_body_p(
 
 @qd.func(requires_top_level=True)
 def genesis_legacy_expand_reduced_direction(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    n_links: qd.template(),  # int
 ):
     for level in qd.static(range(n_links)):
         qd.loop_config(name="genesis_legacy_expand_level")
@@ -910,11 +912,11 @@ def genesis_legacy_expand_reduced_direction(
 
 @qd.func(requires_top_level=True)
 def forest_expand_level_p(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    n_links: qd.template(),  # int
 ):
     for level in qd.static(range(n_links)):
         qd.loop_config(name="forest_expand_level_p")
@@ -933,7 +935,10 @@ def forest_expand_level_p(
 
 @qd.func(requires_top_level=True)
 def forest_expand_tree_p(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
 ):
     qd.loop_config(name="forest_expand_tree_p", block_dim=128)
     for tree in range(8):
@@ -952,13 +957,13 @@ def forest_expand_tree_p(
 
 @qd.func(requires_top_level=True)
 def expand_reduced_direction(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     for body in range(data.n_bodies[()]):
         for component in qd.static(range(6)):
@@ -976,13 +981,13 @@ def expand_reduced_direction(
 
 @qd.func(requires_top_level=True)
 def expand_mechanism_direction(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     if qd.static(genesis_legacy_enabled):
         genesis_legacy_expand_reduced_direction(data, rigid, contact_proxy, reduced, n_links)
@@ -994,13 +999,13 @@ def expand_mechanism_direction(
 
 @qd.func(requires_top_level=True)
 def expand_reduced_direction_from_zero(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     expand_mechanism_direction(
         data,
@@ -1027,9 +1032,9 @@ def expand_reduced_direction_from_zero(
 
 @qd.func(requires_top_level=True)
 def clear_body_wrench(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
 ):
     for body in range(data.n_bodies[()]):
         for component in qd.static(range(6)):
@@ -1038,9 +1043,9 @@ def clear_body_wrench(
 
 @qd.func(requires_top_level=True)
 def restrict_proxy_wrenches(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
 ):
     for pair in range(contact_proxy.n_pairs[()]):
         mechanism = contact_proxy.mechanism_body[pair]
@@ -1058,12 +1063,12 @@ def restrict_proxy_wrenches(
 
 @qd.func
 def forest_project_body_Ap_cached(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
     body,
-    use_atomics: qd.template(),
+    use_atomics: qd.template(),  # bool
 ):
     environment = body // rigid.n_links[()]
     link = body - environment * rigid.n_links[()]
@@ -1136,12 +1141,12 @@ def forest_project_body_Ap_cached(
 
 @qd.func
 def forest_project_body_Ap(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
     body,
-    use_atomics: qd.template(),
+    use_atomics: qd.template(),  # bool
 ):
     environment = body // rigid.n_links[()]
     link = body - environment * rigid.n_links[()]
@@ -1195,11 +1200,11 @@ def forest_project_body_Ap(
 
 @qd.func(requires_top_level=True)
 def genesis_legacy_restrict_body_wrenches(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    n_links: qd.template(),  # int
 ):
     for reverse_level in qd.static(range(n_links)):
         level = data.max_depth[()] - reverse_level
@@ -1211,11 +1216,11 @@ def genesis_legacy_restrict_body_wrenches(
 
 @qd.func(requires_top_level=True)
 def forest_project_level_Ap(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    n_links: qd.template(),  # int
 ):
     for reverse_level in qd.static(range(n_links)):
         level = n_links - reverse_level - 1
@@ -1236,7 +1241,10 @@ def forest_project_level_Ap(
 
 @qd.func(requires_top_level=True)
 def forest_project_tree_Ap(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), reduced: qd.template()
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
 ):
     qd.loop_config(name="forest_project_tree_Ap", block_dim=128)
     for tree in range(8):
@@ -1257,13 +1265,13 @@ def forest_project_tree_Ap(
 
 @qd.func(requires_top_level=True)
 def restrict_body_wrenches(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     if qd.static(genesis_legacy_enabled):
         genesis_legacy_restrict_body_wrenches(data, rigid, contact_proxy, reduced, n_links)
@@ -1275,9 +1283,9 @@ def restrict_body_wrenches(
 
 @qd.func(requires_top_level=True)
 def prepare_particular(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
 ):
     for dof in range(data.total_dof[()]):
         data.physical_p[dof] = 0.0
@@ -1290,7 +1298,10 @@ def prepare_particular(
 
 @qd.func(requires_top_level=True)
 def particular_spmv(
-    data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), linear_system_data: qd.template()
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
 ):
     for dof in range(data.total_dof[()]):
         data.physical_Ap[dof] = 0.0
@@ -1299,13 +1310,13 @@ def particular_spmv(
 
 @qd.func(requires_top_level=True)
 def project_physical_rhs(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    linear_system_data: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     for dof in range(data.proxy_dof_offset[()]):
         linear_system_data.write_rhs(dof, linear_system_data.read_rhs(dof) + data.physical_Ap[dof])
@@ -1352,12 +1363,12 @@ def project_physical_rhs(
 
 @qd.func(requires_top_level=True)
 def pcg_apply_operator(
-    system: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    linear_system_data: qd.template(),
-    direction: qd.template(),
-    output: qd.template(),
+    system: qd.template(),  # RigidJointForestSystem
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
+    direction: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
 ):
     data = system.data
     for dof in range(linear_system_data.total_dof[()]):
@@ -1386,13 +1397,13 @@ def pcg_apply_operator(
 
 @qd.func(requires_top_level=True)
 def prepare_physical_direction(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     for dof in range(data.total_dof[()]):
         data.physical_p[dof] = reduced[dof]
@@ -1438,14 +1449,14 @@ def prepare_physical_direction(
 
 @qd.func(requires_top_level=True)
 def finish_reduced_spmv(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    result: qd.template(),
-    genesis_legacy_enabled: qd.template(),
-    use_fused_tree_path: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
+    genesis_legacy_enabled: qd.template(),  # bool
+    use_fused_tree_path: qd.template(),  # bool
+    n_links: qd.template(),  # int
 ):
     for dof in range(data.proxy_dof_offset[()]):
         result[dof] = result[dof] + data.physical_Ap[dof]
@@ -1500,9 +1511,9 @@ def finish_reduced_spmv(
 
 @qd.func(requires_top_level=True)
 def forest_inertia_wrench(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
 ):
     qd.loop_config(name="forest_inertia_wrench")
     for body in range(data.n_bodies[()]):
@@ -1516,11 +1527,11 @@ def forest_inertia_wrench(
 
 @qd.func(requires_top_level=True)
 def forest_control_matvec(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    reduced: qd.template(),
-    result: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    reduced: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
 ):
     qd.loop_config(name="forest_control_matvec")
     for dof, environment in qd.ndrange(
@@ -1537,10 +1548,10 @@ def forest_control_matvec(
 
 @qd.func(requires_top_level=True)
 def expand_solution(
-    system: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    solution: qd.template(),
+    system: qd.template(),  # RigidJointForestSystem
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    solution: qd.template(),  # qd.Ndarray
 ):
     data = system.data
     expand_reduced_direction(
@@ -1580,7 +1591,13 @@ def expand_solution(
 
 
 @qd.func
-def curvature_bound(data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), body, radius):
+def curvature_bound(
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    body,
+    radius,
+):
     reach = radius
     speed = qd.f64(0.0)
     angular_speed = qd.f64(0.0)
@@ -1654,7 +1671,12 @@ def curvature_bound(data: qd.template(), rigid: qd.template(), contact_proxy: qd
 
 
 @qd.func
-def _motion_matrix(data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), arm: qd.template()):
+def _motion_matrix(
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    arm: qd.template(),  # qd.Vector
+):
     motion = qd.Matrix.identity(qd.f64, 6)
     skew = rigid_contact_proxy_skew(arm)
     for row in qd.static(range(3)):
@@ -1664,7 +1686,12 @@ def _motion_matrix(data: qd.template(), rigid: qd.template(), contact_proxy: qd.
 
 
 @qd.func
-def _root_basis(data: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), body):
+def _root_basis(
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    body,
+):
     basis_matrix = qd.Matrix.zero(qd.f64, 6, 6)
     environment = body // rigid.n_links[()]
     link = body - environment * rigid.n_links[()]
@@ -1695,7 +1722,10 @@ def _root_basis(data: qd.template(), rigid: qd.template(), contact_proxy: qd.tem
 
 @qd.func(requires_top_level=True)
 def build_preconditioner(
-    system: qd.template(), rigid: qd.template(), contact_proxy: qd.template(), linear_system_data: qd.template()
+    system: qd.template(),  # RigidJointForestSystem
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
 ):
     data = system.data
     for body in range(data.n_mechanism_bodies[()]):
@@ -1993,11 +2023,11 @@ def build_preconditioner(
 
 @qd.func(requires_top_level=True)
 def forest_precond_apply_tree_shared(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    residual: qd.template(),
-    result: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    residual: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
 ):
     qd.loop_config(name="forest_precond_apply_tree_shared", block_dim=32)
     for task in range(data.n_trees[()] * 32):
@@ -2153,12 +2183,12 @@ def forest_precond_apply_tree_shared(
 
 @qd.func(requires_top_level=True)
 def forest_precond_apply_level(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    residual: qd.template(),
-    result: qd.template(),
-    n_links: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    residual: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
+    n_links: qd.template(),  # int
 ):
     for dof in range(rigid.n_storage_dofs[()]):
         result[rigid.dof_offset[()] + dof] = 0.0
@@ -2271,22 +2301,22 @@ def forest_precond_apply_level(
 
 @qd.func(requires_top_level=True)
 def pcg_apply_preconditioner(
-    system: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    residual: qd.template(),
-    output: qd.template(),
+    system: qd.template(),  # RigidJointForestSystem
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    residual: qd.template(),  # qd.Ndarray
+    output: qd.template(),  # qd.Ndarray
 ):
     apply_preconditioner(system, rigid, contact_proxy, residual, output)
 
 
 @qd.func(requires_top_level=True)
 def apply_preconditioner(
-    system: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    residual: qd.template(),
-    result: qd.template(),
+    system: qd.template(),  # RigidJointForestSystem
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    residual: qd.template(),  # qd.Ndarray
+    result: qd.template(),  # qd.Ndarray
 ):
     data = system.data
     if qd.static(system.use_fused_tree_path):
@@ -2324,10 +2354,10 @@ def apply_preconditioner(
 
 @qd.func(requires_top_level=True)
 def compute_merit_directional_derivative(
-    data: qd.template(),
-    rigid: qd.template(),
-    contact_proxy: qd.template(),
-    linear_system_data: qd.template(),
+    data: qd.template(),  # RigidJointForestSystem.Data
+    rigid: qd.template(),  # RigidSystem.Data
+    contact_proxy: qd.template(),  # RigidContactProxySystem.Data
+    linear_system_data: qd.template(),  # GlobalLinearSystem.Data
 ):
     for _ in range(1):
         contact_proxy.merit_gtd[()] = 0.0
