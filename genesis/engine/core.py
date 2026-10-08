@@ -1,7 +1,8 @@
 """Composition core of the simulation engine: Systems own Data, Actions bind functions to it, pipelines run them.
 
-Data follows the conventions of genesis.utils.array_class: a `@qd.data_oriented` class with `qd.Tensor` fields
-allocated by `V()`, named with a `State` / `Info` suffix, created empty with its System and filled by its init Action.
+A Data subclass follows the conventions of genesis.utils.array_class: a `@qd.data_oriented` class with `qd.Tensor`
+fields allocated by `V()`, named with a `State` / `Info` suffix, created empty with its System and filled by its init
+Action.
 
 A System is a backend unit the user never names: it is constructed from the scene and declares on its class
 the Systems it depends on (Require / Find), the Actions it hands out (@System.action) and the ActionCollections it
@@ -27,6 +28,15 @@ from genesis.utils.misc import check_inheritance_depth
 
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
+
+
+# ------------------------------------------------------------------------------------
+# --------------------------------------- Data ---------------------------------------
+# ------------------------------------------------------------------------------------
+
+
+class Data:
+    """The state of one System, as device arrays that its Actions bind and its kernels read and write."""
 
 
 # ------------------------------------------------------------------------------------

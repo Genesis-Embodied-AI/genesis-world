@@ -9,7 +9,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.core import Find, Require, System
+from genesis.engine.core import Data, Find, Require, System
 from genesis.utils.array_class import V_VEC
 
 from integrator_engine import Integrator
@@ -17,7 +17,7 @@ from rigid_system import Rigid
 
 
 @qd.data_oriented
-class ClothState:
+class ClothState(Data):
     verts_pos: qd.Tensor
     verts_vel: qd.Tensor
 

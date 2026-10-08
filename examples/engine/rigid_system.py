@@ -9,14 +9,14 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.core import Require, System, register_system
+from genesis.engine.core import Data, Require, System, register_system
 from genesis.utils.array_class import V
 
 from integrator_engine import Integrator, IntegratorEngine
 
 
 @qd.data_oriented
-class RigidState:
+class RigidState(Data):
     dofs_pos: qd.Tensor
     dofs_vel: qd.Tensor
 

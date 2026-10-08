@@ -7,7 +7,7 @@ state to the Integrator, which advances every DOF with the explicit Euler method
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.core import Engine, HostAction, InlineAction, Pipeline, Require, StageAction, System
+from genesis.engine.core import Data, Engine, HostAction, InlineAction, Pipeline, Require, StageAction, System
 from genesis.utils.array_class import V
 from genesis.utils.misc import qd_to_numpy
 
@@ -17,7 +17,7 @@ from genesis.utils.misc import qd_to_numpy
 
 
 @qd.data_oriented
-class IntegratorInfo:
+class IntegratorInfo(Data):
     dt: qd.Tensor
     segments_n_dofs: qd.Tensor
     segments_dof_start: qd.Tensor
@@ -25,7 +25,7 @@ class IntegratorInfo:
 
 
 @qd.data_oriented
-class IntegratorState:
+class IntegratorState(Data):
     dofs_pos: qd.Tensor
     dofs_vel: qd.Tensor
 
