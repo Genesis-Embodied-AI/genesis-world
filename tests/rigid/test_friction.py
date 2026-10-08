@@ -1,3 +1,5 @@
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import pytest
 import torch
@@ -1087,3 +1089,55 @@ def test_kinetic_friction(n_envs, show_viewer):
     # Each box decelerates at its own mu * g, independently of how fast it was launched.
     deceleration = (speed_0 - speed_1) / (N_SLIDE * scene.sim.dt)
     assert_allclose(deceleration[is_sliding], (friction * GRAVITY).expand_as(height_0)[is_sliding], rtol=0.01)
+
+
+@pytest.mark.required
+def test_unset_coup_friction_follows_sliding_friction(show_viewer):
+    mjcf = ET.Element("mujoco", model="frictions")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, x, friction in (("rough", 2.0, 0.7), ("smooth", 3.0, 0.25)):
+        body = ET.SubElement(worldbody, "body", name=name, pos=f"{x} 0 0.5")
+        ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", friction=str(friction))
+
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -2.0, 1.2),
+            camera_lookat=(1.5, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    material_friction = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.Rigid(
+            friction=0.4,
+        ),
+    )
+    explicit_coup = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(1.0, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.Rigid(
+            friction=0.4,
+            coup_friction=0.15,
+        ),
+    )
+    authored = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=ET.tostring(mjcf, encoding="unicode"),
+        ),
+        material=gs.materials.Rigid(),
+    )
+    scene.build()
+
+    assert material_friction.material.coup_friction is None
+    assert_allclose(material_friction.geoms[0].coup_friction, 0.4, tol=1e-6)
+
+    assert_allclose(explicit_coup.geoms[0].coup_friction, 0.15, tol=1e-6)
+
+    assert authored.material.coup_friction is None
+    assert_allclose(authored.get_link("rough").geoms[0].coup_friction, 0.7, tol=1e-6)
+    assert_allclose(authored.get_link("smooth").geoms[0].coup_friction, 0.25, tol=1e-6)
