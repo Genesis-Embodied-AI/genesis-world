@@ -337,11 +337,23 @@ class RigidInfo:
     EPS: qd.Tensor
 
 
+def _is_tensor_addressable(shape, dtype) -> bool:
+    """
+    Whether every backend can address all the elements of a solver tensor of this shape and dtype.
+
+    A tensor holds at most 2^31 - 1 elements, and at most 2 GiB on Metal.
+    """
+    # FIXME: quadrants#963 - Metal silently mis-addresses the tensors above 2 GiB instead of raising.
+    if gs.backend == gs.metal:
+        return math.prod(shape) * np.dtype(dtype).itemsize <= 2**31
+    return math.prod(shape) <= np.iinfo(np.int32).max
+
+
 def get_rigid_info(solver, kinematic_only):
     _B = solver._B
 
     mass_mat_shape = (solver.n_dofs_, solver.n_dofs_, _B)
-    if math.prod(mass_mat_shape) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable(mass_mat_shape, gs.np_float):
         gs.raise_exception(
             f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={_B}) is too large."
         )
@@ -1024,7 +1036,7 @@ def get_constraint_state(constraint_solver, solver, collider):
     jac_dofs_idx_shape = (len_constraints_, min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))), _B)
     jac_n_dofs_shape = (len_constraints_, _B)
 
-    if math.prod(jac_shape) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable(jac_shape, gs.np_float):
         gs.raise_exception(
             f"Jacobian shape (n_constraints={len_constraints_}, n_dofs={solver.n_dofs_}, n_envs={_B}) is too large."
         )
@@ -2027,7 +2039,7 @@ class SDFInfo:
 
 
 def get_sdf_info(n_geoms, n_cells, n_coarse_cells):
-    if math.prod((n_cells, 3)) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable((n_cells, 3), gs.np_float):
         gs.raise_exception(
             f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider manually setting larger "
             "'sdf_cell_size' in 'gs.materials.Rigid' options."
@@ -2691,7 +2703,7 @@ class VVertsState:
 def get_vverts_state(solver, is_active=True):
     if not is_active:
         return VVertsState(pos=V(dtype=gs.qd_vec3, shape=()))
-    if math.prod((solver.n_custom_vverts_, solver._B, 3)) > np.iinfo(np.int32).max:
+    if not _is_tensor_addressable((solver.n_custom_vverts_, solver._B, 3), gs.np_float):
         gs.raise_exception(
             f"Custom-vverts state shape (n_custom_vverts={solver.n_custom_vverts_}, B={solver._B}, 3) is too large. "
             "Consider opting fewer kinematic entities into 'enable_custom_vverts=True', or reducing 'n_envs'."
