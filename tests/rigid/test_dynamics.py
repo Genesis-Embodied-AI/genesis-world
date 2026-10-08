@@ -1186,11 +1186,13 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
     )
 
     accelerations = []
+    warmstarts = []
 
     def solve_compared(*args):
         nonlocal selected
         inputs = [qd_to_numpy(tensor, copy=True) for tensor in solve_inputs]
         accelerations.clear()
+        warmstarts[:] = inputs[:1]
         # The candidate order is fixed, so solving with index 0 last leaves the trajectory to one implementation.
         for selected in (1, 0):
             for tensor, value in zip(solve_inputs, inputs):
@@ -1200,13 +1202,19 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
 
     monkeypatch.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_compared)
 
+    # Every box is pushed and twisted by a new random wrench each step, a fraction of what tips or slides it, so that no
+    # solve starts from a warm start that already resolves it: resting boxes would leave both implementations returning
+    # that common warm start untouched.
+    dofs_force_scale = np.tile((1.0, 1.0, 1.0, 0.02, 0.02, 0.02), len(positions))
     for i_step in range(N_STEPS):
+        solver.control_dofs_force(np.random.uniform(-1.0, 1.0, size=(2, solver.n_dofs)) * dofs_force_scale)
         scene.step()
         assert not solver.get_error_envs_mask().any()
         # Neither implementation may be compared on a solve that had nothing to resolve
         assert (qd_to_numpy(constraint_state.n_constraints) > 32).all()
 
         compared, reference = accelerations
+        assert not np.allclose(reference, *warmstarts, rtol=0.0, atol=tol)
         # The two implementations spread every reduction, factor and solve differently, so their accelerations land
         # within rounding of each other and never on the same value: a gap of exactly zero means one of them ran twice.
         assert np.abs(compared.astype(np.float64) - reference.astype(np.float64)).max() > 0.0

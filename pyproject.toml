@@ -203,6 +203,7 @@ addopts = [
     # Note that the retry mechanism is not compatible with "--forked".
     "-m not (benchmarks or examples)",
 ]
+xfail_strict = true
 filterwarnings = [
     "ignore::_pytest.warning_types.PytestUnknownMarkWarning",
     "ignore::DeprecationWarning",
