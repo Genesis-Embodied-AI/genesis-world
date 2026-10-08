@@ -716,9 +716,10 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["pendulum_with_joint_dynamics", "joint_with_partial_dynamics"])
 @pytest.mark.parametrize("joint_damping, joint_friction", [(1.0, 2.0), (1.0, None), (None, 2.0)])
-def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
+def test_urdf_joint_dynamics(joint_damping, joint_friction, model_name, xml_path):
     # A <dynamics> tag authoring only one of damping/friction leaves the other one unset. It must fall back to zero
-    # like an absent tag rather than reaching the solver as a null value.
+    # like an absent tag rather than reaching the solver as a null value. Likewise, a <limit> tag authoring no effort
+    # leaves the actuation force unbounded.
     scene = gs.Scene()
     robot = scene.add_entity(
         gs.morphs.URDF(
@@ -734,6 +735,10 @@ def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
     assert_allclose(robot.joints[1].desc.dofs_damping, expected_damping, tol=gs.EPS)
     assert_allclose(robot.joints[0].desc.dofs_frictionloss, 0.0, tol=gs.EPS)
     assert_allclose(robot.joints[1].desc.dofs_frictionloss, expected_frictionloss, tol=gs.EPS)
+    expected_effort = 100.0 if model_name == "pendulum_with_joint_dynamics" else np.inf
+    lower, upper = robot.get_dofs_force_range(dofs_idx_local=robot.joints[1].dofs_idx_local)
+    assert_allclose(lower, -expected_effort, tol=gs.EPS)
+    assert_allclose(upper, expected_effort, tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s
