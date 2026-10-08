@@ -47,6 +47,29 @@ def raise_exception_from(msg="Something went wrong.", cause=None) -> NoReturn:
     raise gs.GenesisException(msg) from cause
 
 
+def check_inheritance_depth(cls: type, root: type, max_depth: int) -> None:
+    """Raise unless a class derives from a root class through single inheritance alone, at most a given depth below it.
+
+    `cls` is the class being defined, called from `root.__init_subclass__`. Every class from `cls` up to `root` has
+    `root` as its only ancestor line, and `max_depth` bounds how many of them sit below `root`, `cls` included. A depth
+    of 0 makes `root` final, and a depth of 1 accepts direct subclasses of `root` alone and makes them final.
+    """
+    depth = 0
+    ancestor = cls
+    while ancestor is not root:
+        depth += 1
+        if depth > max_depth:
+            if max_depth == 0:
+                gs.raise_exception(f"{root.__name__} is final, so {cls.__name__} cannot inherit from it.")
+            gs.raise_exception(
+                f"{cls.__name__} must inherit at most {max_depth} level(s) below {root.__name__}, which subclasses "
+                "are final."
+            )
+        if len(ancestor.__bases__) != 1:
+            gs.raise_exception(f"{cls.__name__} must inherit from {root.__name__} through single inheritance alone.")
+        (ancestor,) = ancestor.__bases__
+
+
 class redirect_libc_stderr:
     """
     Context-manager that temporarily redirects C / C++ std::cerr (i.e. the C `stderr` file descriptor 2) to a given
