@@ -987,3 +987,34 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
         for part, cached_part in zip(parts, cached_parts):
             assert_allclose(part.vertices, cached_part.vertices * (scale / SCALES[0]), rtol=1e-6)
             assert_equal(part.faces, cached_part.faces)
+
+
+# ==================== Decimation Tests ====================
+
+
+@pytest.mark.required
+def test_decimate_target_above_post_validate_face_count():
+    # 'decimate' checks 'len(faces) > decimate_face_num' *before* calling 'process(validate=True)', which merges
+    # duplicate/degenerate faces. The post-validate mesh can therefore hold fewer faces than the target, which
+    # 'fast_simplification' rejects. A duplicated-face tetrahedron, as raw CAD exports commonly are, hits this: 8
+    # faces pass the guard, validation collapses them to 4, and the target of 5 becomes unreachable.
+    DECIMATE_FACE_NUM = 5
+    verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+    tmesh = trimesh.Trimesh(verts, np.vstack((faces, faces)), process=False)
+
+    validated = tmesh.copy()
+    validated.process(validate=True)
+    assert len(tmesh.faces) > DECIMATE_FACE_NUM > len(validated.faces)
+
+    gmesh = gs.Mesh.from_trimesh(
+        mesh=tmesh,
+        decimate=True,
+        decimate_face_num=DECIMATE_FACE_NUM,
+        decimate_aggressiveness=2,  # lossless=False, so 'target_count' is actually validated
+    )
+    assert gmesh.metadata["decimated"]
+    # Clamped to the post-validate face count, the target is a no-op: the tetrahedron survives untouched.
+    assert len(gmesh.trimesh.faces) == len(validated.faces)
+    assert gmesh.trimesh.is_watertight
+    assert_allclose(gmesh.trimesh.volume, 1.0 / 6.0, tol=gs.EPS)
