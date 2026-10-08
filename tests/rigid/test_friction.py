@@ -1098,6 +1098,8 @@ def test_unset_coup_friction_follows_sliding_friction(show_viewer):
     for name, x, friction in (("rough", 2.0, 0.7), ("smooth", 3.0, 0.25)):
         body = ET.SubElement(worldbody, "body", name=name, pos=f"{x} 0 0.5")
         ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", friction=str(friction))
+    plain = ET.SubElement(worldbody, "body", name="plain", pos="4 0 0.5")
+    ET.SubElement(plain, "geom", type="box", size="0.05 0.05 0.05")
 
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -1141,3 +1143,4 @@ def test_unset_coup_friction_follows_sliding_friction(show_viewer):
     assert authored.material.coup_friction is None
     assert_allclose(authored.get_link("rough").geoms[0].coup_friction, 0.7, tol=1e-6)
     assert_allclose(authored.get_link("smooth").geoms[0].coup_friction, 0.25, tol=1e-6)
+    assert_allclose(authored.get_link("plain").geoms[0].coup_friction, 1.0, tol=1e-6)

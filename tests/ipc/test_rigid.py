@@ -1,4 +1,5 @@
 import math
+import xml.etree.ElementTree as ET
 from itertools import permutations
 from typing import TYPE_CHECKING, cast
 
@@ -894,3 +895,38 @@ def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
     if z_actual.ndim > 1:
         z_target = z_target[:, np.newaxis]
     assert_allclose(z_actual, z_target, atol=0.005)
+
+
+@pytest.mark.required
+def test_unset_coup_friction_requires_one_coefficient(show_viewer):
+    mixed = ET.Element("mujoco", model="mixed")
+    body = ET.SubElement(ET.SubElement(mixed, "worldbody"), "body", name="pair", pos="0 0 0.5")
+    ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", friction="0.7")
+    ET.SubElement(body, "geom", type="box", size="0.04 0.04 0.04", pos="0 0 0.1", friction="0.25")
+    file = ET.tostring(mixed, encoding="unicode")
+
+    rejected = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(), show_viewer=show_viewer)
+    rejected.add_entity(morph=gs.morphs.MJCF(file=file), material=gs.materials.Rigid())
+    with pytest.raises(gs.GenesisException, match="coup_friction"):
+        rejected.build()
+
+    scene = gs.Scene(
+        coupler_options=gs.options.IPCCouplerOptions(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.2, -0.8, 0.6),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=file,
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.3,
+        ),
+    )
+    scene.build()
+
+    for geom in entity.geoms:
+        assert_allclose(geom.coup_friction, 0.3, tol=1e-6)

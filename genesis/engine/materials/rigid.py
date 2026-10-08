@@ -46,10 +46,11 @@ class Rigid(Kinematic["RigidEntity"]):
     needs_coup : bool, optional
         Whether the material participates in coupling with other solvers. Default is True.
     coup_friction : float, optional
-        Coulomb friction against a body owned by another solver. When unset, each geom uses its sliding friction,
-        the material ``friction`` where set, otherwise the coefficient parsed from the asset, otherwise 1. Set a
-        value to give coupling a different grip from rigid-rigid contact: a lower value lets the body slip against
-        soft and particle materials while rigid contacts keep their own coefficient. Default is None.
+        Coulomb friction against a body owned by another solver. When unset, each geom uses its sliding friction:
+        the material ``friction`` where set, otherwise the coefficient parsed from the asset, otherwise 1. IPC stores
+        one coefficient per entity, so an entity whose geoms resolve to different values has to set ``coup_friction``.
+        Set a value to give coupling a different grip from rigid-rigid contact: a lower value lets the body slip
+        against soft and particle materials while rigid contacts keep their own coefficient. Default is None.
     coup_softness : float, optional
         Softness of coupling interaction. Must be non-negative. Default is 0.002.
     coup_restitution : float, optional
