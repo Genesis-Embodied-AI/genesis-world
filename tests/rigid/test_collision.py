@@ -1221,6 +1221,31 @@ def test_contact_pruning(gjk_collision, show_viewer):
             color=(1, 0, 0, 0.8),
         ),
     )
+
+    # The pruning groups the contacts by link pair, which must stay apart however large and close their indices, so the
+    # box comes after a sphere apart from everything and two walls come after the box
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(10.0, 10.0, 10.0),
+            radius=0.01,
+            fixed=True,
+        ),
+    )
+    sub_meshes = []
+    for sx, sy, sz in product((-1, 0, +1), repeat=3):
+        mesh = trimesh.creation.box(extents=(2 / 3 * GEOM_HALF_SIZE,) * 3)
+        mesh.apply_translation((2 / 3 * sx * GEOM_HALF_SIZE, 2 / 3 * sy * GEOM_HALF_SIZE, 2 / 3 * sz * GEOM_HALF_SIZE))
+        sub_meshes.append(mesh)
+    box = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=sub_meshes,
+        ),
+        surface=gs.surfaces.Default(
+            smooth=False,
+        ),
+        visualize_contact=True,
+        vis_mode="collision",
+    )
     scene.add_entity(
         morph=gs.morphs.Box(
             size=(1.0, GEOM_HALF_SIZE, 1.0),
@@ -1241,23 +1266,10 @@ def test_contact_pruning(gjk_collision, show_viewer):
             color=(0, 0, 1, 0.8),
         ),
     )
-
-    sub_meshes = []
-    for sx, sy, sz in product((-1, 0, +1), repeat=3):
-        mesh = trimesh.creation.box(extents=(2 / 3 * GEOM_HALF_SIZE,) * 3)
-        mesh.apply_translation((2 / 3 * sx * GEOM_HALF_SIZE, 2 / 3 * sy * GEOM_HALF_SIZE, 2 / 3 * sz * GEOM_HALF_SIZE))
-        sub_meshes.append(mesh)
-    box = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=sub_meshes,
-        ),
-        surface=gs.surfaces.Default(
-            smooth=False,
-        ),
-        visualize_contact=True,
-        vis_mode="collision",
-    )
     scene.build(n_envs=2)
+    # The box sits in the corner of the three walls in the first environment, and on the edge of the two walls after it
+    # in the second one, where its only contacts come from the two link pairs of closest indices
+    box.set_pos(((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)))
 
     for step_idx in range(200):
         scene.step()
@@ -1304,7 +1316,7 @@ def test_contact_pruning(gjk_collision, show_viewer):
                     f"{n_hull_vertices} are vertices of the bucket's 2D convex hull. The pruning kernel should have "
                     f"dropped these {len(idxs) - n_hull_vertices} redundant contact(s):\n{details}"
                 )
-    assert_allclose(box.get_pos(), 0.0, atol=2e-3)
+    assert_allclose(box.get_pos(), ((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)), atol=2e-3)
 
 
 @pytest.mark.required

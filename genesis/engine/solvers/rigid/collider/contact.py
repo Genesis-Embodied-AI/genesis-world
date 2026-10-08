@@ -806,8 +806,7 @@ def func_contact_heapsort(
 def func_contact_link_pair_end(i_b: int, i_cb_start: int, n_con: int, collider_state: array_class.ColliderState):
     """End of the bucket of contacts sharing the link pair of the contact at 'i_cb_start', sorted by link pair.
 
-    Bucket boundaries are derived from the link ids, not from f32 sort-key equality: the key lmin * 1e7 + lmax loses the
-    lmax bits above 2^24, so distinct link pairs can share a key and key-equality scanning would merge their buckets.
+    Bucket boundaries are derived from the link ids, which the sort groups contiguously.
     """
     i_pc0 = collider_state.contact_sort_idx[i_cb_start, i_b]
     i_la0 = collider_state.contact_data.link_a[i_pc0, i_b]
@@ -1266,9 +1265,8 @@ def func_clamp_prune_contacts_coop(
     func_clamp_prune_contacts. Deterministic ordering of the kept contacts is applied later in
     add_inequality_constraints.
     Difference from func_clamp_prune_contacts: 32 warp lanes split the per-env work:
-      - PARALLEL: per-contact init, phase-1a bitonic sort and within-bucket ranks, phase-2 mean-normal / centroid
-        reductions, coplanarity reduction, in-plane projection writes and lexicographic ranks (when at most 32
-        contacts are sorted; falls back to serial heapsort otherwise).
+      - PARALLEL: per-contact init, phase-1 ranks, phase-2 mean-normal / centroid reductions,
+        coplanarity reduction, in-plane projection writes and lexicographic ranks.
       - SERIAL on lane 0: bucket walk control, support polygon, hull-mark, deep-pen restore, and the phase-3 compact.
     """
     _B = collider_state.n_contacts.shape[0]
@@ -1276,11 +1274,9 @@ def func_clamp_prune_contacts_coop(
     max_contacts = collider_info.max_contacts[None]
     tol = collider_info.contact_pruning_tolerance[None]
     prune_deep_penetration_ratio = collider_info.prune_deep_penetration_ratio[None]
-    LP_KEY_STRIDE = gs.qd_float(1.0e7)
     EPS = rigid_info.EPS[None]
 
     _K = qd.static(32)
-    _LOG2_K = qd.static(_K.bit_length() - 1)  # = log2(_K), assuming _K is a power of two.
     qd.loop_config(name="clamp_prune_contacts_coop", block_dim=_K)
     for i_flat in range(_B * _K):
         tid = i_flat % _K
@@ -1303,118 +1299,77 @@ def func_clamp_prune_contacts_coop(
             i_c_ += _K
 
         if n_con - n_hib >= 3:
-            # PARALLEL: phase 1a key init, 32 lanes stride over the live contacts (see func_clamp_prune_contacts).
-            # contact_sort_idx identity was already written in the unconditional init block above so the phase-1a
-            # sort can read+sort it in place.
-            i_c_ = n_hib + tid
-            while i_c_ < n_con:
-                i_la = collider_state.contact_data.link_a[i_c_, i_b]
-                i_lb = collider_state.contact_data.link_b[i_c_, i_b]
-                i_l_min = qd.min(i_la, i_lb)
-                i_l_max = qd.max(i_la, i_lb)
-                collider_state.contact_sort_key[i_c_, i_b] = qd.cast(i_l_min, gs.qd_float) * LP_KEY_STRIDE + qd.cast(
-                    i_l_max, gs.qd_float
-                )
-                i_c_ += _K
-
-            # Phase 1a sort: bitonic sort across _K lanes when n_con <= _K, serial-on-lane-0 heapsort otherwise.
-            if n_con - n_hib <= _K:
-                # Load with sentinel for out-of-range lanes (pushes them to the end of ascending sort).
-                my_key = qd.cast(gs.qd_float(1.0e30), gs.qd_float)
-                my_idx = qd.i32(-1)
-                i_c_lane = n_hib + tid
-                if i_c_lane < n_con:
-                    my_key = collider_state.contact_sort_key[i_c_lane, i_b]
-                    my_idx = collider_state.contact_sort_idx[i_c_lane, i_b]
-
-                my_key, my_idx = qd.simt.subgroup.bitonic_sort_kv_tiled(my_key, my_idx, _LOG2_K)
-
-                # Write back the sorted values for the real range.
-                if i_c_lane < n_con:
-                    collider_state.contact_sort_key[i_c_lane, i_b] = my_key
-                    collider_state.contact_sort_idx[i_c_lane, i_b] = my_idx
-            elif tid == 0:
-                # Serial fallback on lane 0 for n_con > 32
-                func_contact_heapsort(i_b, n_hib, n_con, collider_state, CONTACT_ORDER.LINK_PAIR)
-
+            # Phase 1: contacts in a deterministic order, grouped by link pair then sorted within each pair (see
+            # func_clamp_prune_contacts). All lanes rank the live contacts at once, each lane counting those that
+            # precede each of its own in the order of link pair, then intrinsic order, its leading keys held by the
+            # lane and the full comparison run only on their tie. The link indices are compared themselves, as a key
+            # packing them loses exactness and lets distinct pairs interleave in the order of their contact indices,
+            # which the racy atomic slot reservation of the narrowphase sets. The contacts are read in their identity
+            # order, which leaves the ranking free of the reads of the permutation it writes.
+            for i_chunk_ in range((n_con - n_hib + _K - 1) // _K):
+                i_c = n_hib + i_chunk_ * _K + tid
+                if i_c < n_con:
+                    collider_state.contact_proj_v[i_c, i_b] = func_contact_frame_order_key(
+                        i_c, i_b, dyn_state, collider_state
+                    )
             qd.simt.subgroup.sync()
-
-            # Deterministic within-bucket order: see func_clamp_prune_contacts. A bucket of at most one contact per lane
-            # is sorted by all lanes at once, each lane ranking its own contact among the others in the intrinsic
-            # order, its leading keys held by the lane and the full comparison run only on their tie. A larger bucket
-            # is sorted serially on lane 0.
-            i_cb_start = n_hib
-            while i_cb_start < n_con:
-                i_cb_end = func_contact_link_pair_end(i_b, i_cb_start, n_con, collider_state)
-                n_cb = i_cb_end - i_cb_start
-                if n_cb >= 2:
-                    i_cb_ = i_cb_start + tid
-                    while i_cb_ < i_cb_end:
-                        i_p = collider_state.contact_sort_idx[i_cb_, i_b]
-                        collider_state.contact_proj_v[i_p, i_b] = func_contact_frame_order_key(
-                            i_p, i_b, dyn_state, collider_state
+            for i_chunk_ in range((n_con - n_hib + _K - 1) // _K):
+                i_p = n_hib + i_chunk_ * _K + tid
+                if i_p < n_con:
+                    i_la_p = collider_state.contact_data.link_a[i_p, i_b]
+                    i_lb_p = collider_state.contact_data.link_b[i_p, i_b]
+                    key_p = qd.Vector(
+                        [
+                            qd.min(i_la_p, i_lb_p),
+                            qd.max(i_la_p, i_lb_p),
+                            collider_state.contact_data.geom_a[i_p, i_b],
+                            collider_state.contact_data.geom_b[i_p, i_b],
+                            collider_state.contact_proj_v[i_p, i_b],
+                        ],
+                        dt=gs.qd_float,
+                    )
+                    rank = gs.qd_int(0)
+                    for i_q in range(n_hib, n_con):
+                        i_la_q = collider_state.contact_data.link_a[i_q, i_b]
+                        i_lb_q = collider_state.contact_data.link_b[i_q, i_b]
+                        key_q = qd.Vector(
+                            [
+                                qd.min(i_la_q, i_lb_q),
+                                qd.max(i_la_q, i_lb_q),
+                                collider_state.contact_data.geom_a[i_q, i_b],
+                                collider_state.contact_data.geom_b[i_q, i_b],
+                                collider_state.contact_proj_v[i_q, i_b],
+                            ],
+                            dt=gs.qd_float,
                         )
-                        i_cb_ += _K
-                    qd.simt.subgroup.sync()
-                    if n_cb <= _K:
-                        is_lane = tid < n_cb
-                        i_p = gs.qd_int(-1)
-                        rank = gs.qd_int(0)
-                        if is_lane:
-                            i_p = collider_state.contact_sort_idx[i_cb_start + tid, i_b]
-                            key_p = qd.Vector(
-                                [
-                                    collider_state.contact_data.geom_a[i_p, i_b],
-                                    collider_state.contact_data.geom_b[i_p, i_b],
-                                    collider_state.contact_proj_v[i_p, i_b],
-                                ],
-                                dt=gs.qd_float,
-                            )
-                            for i_u in range(n_cb):
-                                i_q = collider_state.contact_sort_idx[i_cb_start + i_u, i_b]
-                                key_q = qd.Vector(
-                                    [
-                                        collider_state.contact_data.geom_a[i_q, i_b],
-                                        collider_state.contact_data.geom_b[i_q, i_b],
-                                        collider_state.contact_proj_v[i_q, i_b],
-                                    ],
-                                    dt=gs.qd_float,
-                                )
-                                is_before = False
-                                is_tied = True
-                                for i_k in qd.static(range(3)):
-                                    if is_tied:
-                                        if key_q[i_k] < key_p[i_k]:
-                                            is_before = True
-                                            is_tied = False
-                                        elif key_q[i_k] > key_p[i_k]:
-                                            is_tied = False
-                                if is_tied and i_q != i_p:
-                                    # Contact q precedes unless it sorts after, ties going to the lower index. One loop
-                                    # runs both comparisons, so that the comparison is inlined once.
-                                    is_after_pq = False
-                                    is_after_qp = False
-                                    for i_cmp in range(2):
-                                        i_x, i_y = i_p, i_q
-                                        if i_cmp == 1:
-                                            i_x, i_y = i_q, i_p
-                                        is_after = func_contact_is_after(
-                                            i_b, i_x, i_y, collider_state, CONTACT_ORDER.INTRINSIC
-                                        )
-                                        if i_cmp == 0:
-                                            is_after_pq = is_after
-                                        else:
-                                            is_after_qp = is_after
-                                    is_before = is_after_pq or (i_q < i_p and not is_after_qp)
-                                if is_before:
-                                    rank += 1
-                        qd.simt.subgroup.sync()
-                        if is_lane:
-                            collider_state.contact_sort_idx[i_cb_start + rank, i_b] = i_p
-                    elif tid == 0:
-                        func_contact_heapsort(i_b, i_cb_start, i_cb_end, collider_state, CONTACT_ORDER.INTRINSIC)
-                    qd.simt.subgroup.sync()
-                i_cb_start = i_cb_end
+                        is_before = False
+                        is_tied = True
+                        for i_k in qd.static(range(5)):
+                            if is_tied:
+                                if key_q[i_k] < key_p[i_k]:
+                                    is_before = True
+                                    is_tied = False
+                                elif key_q[i_k] > key_p[i_k]:
+                                    is_tied = False
+                        if is_tied and i_q != i_p:
+                            # Contact q precedes unless it sorts after, ties going to the lower index. One loop runs
+                            # both comparisons, so that the comparison is inlined once.
+                            is_after_pq = False
+                            is_after_qp = False
+                            for i_cmp in range(2):
+                                i_x, i_y = i_p, i_q
+                                if i_cmp == 1:
+                                    i_x, i_y = i_q, i_p
+                                is_after = func_contact_is_after(i_b, i_x, i_y, collider_state, CONTACT_ORDER.INTRINSIC)
+                                if i_cmp == 0:
+                                    is_after_pq = is_after
+                                else:
+                                    is_after_qp = is_after
+                            is_before = is_after_pq or (i_q < i_p and not is_after_qp)
+                        if is_before:
+                            rank += 1
+                    collider_state.contact_sort_idx[n_hib + rank, i_b] = i_p
+            qd.simt.subgroup.sync()
 
             # Phase 2: bucket walk control runs on all 32 lanes (inputs are DRAM-cached). Inside a bucket, mean-normal
             # / centroid sums, the coplanarity-check max-reduction and the lexicographic ranking of the projections run
@@ -1425,7 +1380,6 @@ def func_clamp_prune_contacts_coop(
                 n_cb = i_cb_end - i_cb_start
 
                 if n_cb >= 3:
-                    is_lex_ranked = n_cb <= _K
                     i_pc0 = collider_state.contact_sort_idx[i_cb_start, i_b]
                     normal_ref = collider_state.contact_data.normal[i_pc0, i_b]
                     normal_ref_x = normal_ref[0]
@@ -1555,23 +1509,20 @@ def func_clamp_prune_contacts_coop(
                             i_cb_ += _K
 
                         # COOP lexicographic order of the projections (see func_contact_support_hull): each lane ranks
-                        # its contacts among those of the bucket, which sorts a bucket of at most one contact per lane
-                        # at once, a larger one being left for lane 0 to sort
+                        # its contacts among those of the bucket
                         qd.simt.subgroup.sync()
                         i_cb_ = i_cb_start + tid
                         while i_cb_ < i_cb_end:
-                            i_lex = i_cb_
-                            if is_lex_ranked:
-                                i_lex = i_cb_start
-                                pos_u = collider_state.contact_sort_key[i_cb_, i_b]
-                                pos_v = collider_state.contact_proj_v[i_cb_, i_b]
-                                for i_cr in range(i_cb_start, i_cb_end):
-                                    pos_ur = collider_state.contact_sort_key[i_cr, i_b]
-                                    pos_vr = collider_state.contact_proj_v[i_cr, i_b]
-                                    if pos_ur < pos_u or (
-                                        pos_ur <= pos_u and (pos_vr < pos_v or (pos_vr <= pos_v and i_cr < i_cb_))
-                                    ):
-                                        i_lex += 1
+                            i_lex = i_cb_start
+                            pos_u = collider_state.contact_sort_key[i_cb_, i_b]
+                            pos_v = collider_state.contact_proj_v[i_cb_, i_b]
+                            for i_cr in range(i_cb_start, i_cb_end):
+                                pos_ur = collider_state.contact_sort_key[i_cr, i_b]
+                                pos_vr = collider_state.contact_proj_v[i_cr, i_b]
+                                if pos_ur < pos_u or (
+                                    pos_ur <= pos_u and (pos_vr < pos_v or (pos_vr <= pos_v and i_cr < i_cb_))
+                                ):
+                                    i_lex += 1
                             collider_state.contact_lex_idx[i_lex, i_b] = i_cb_
                             i_cb_ += _K
 
@@ -1581,7 +1532,7 @@ def func_clamp_prune_contacts_coop(
 
                     if tid == 0 and coplanar:
                         n_hull = func_contact_support_hull(
-                            i_b, i_cb_start, i_cb_end, collider_state, tol, EPS, sort_positions=not is_lex_ranked
+                            i_b, i_cb_start, i_cb_end, collider_state, tol, EPS, sort_positions=False
                         )
 
                         for i_h in range(n_hull):
