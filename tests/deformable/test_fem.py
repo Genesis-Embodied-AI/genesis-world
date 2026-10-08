@@ -4,6 +4,7 @@ import igl
 import numpy as np
 import pytest
 import torch
+import trimesh
 
 import genesis as gs
 from genesis.utils.misc import tensor_to_array
@@ -153,6 +154,25 @@ def test_maxvolume(box_obj_path, show_viewer):
         f"Mesh with maxvolume=0.01 generated {len(fem2.elems)} elements; "
         f"expected more than {len(fem1.elems)} elements without a volume limit."
     )
+
+
+@pytest.mark.required
+def test_reject_defective_fem_mesh_with_actionable_error(tmp_path, show_viewer):
+    # Two unit boxes glued face-to-face but kept as two separate closed surfaces: the shared face is duplicated,
+    # so the mesh is non-manifold and TetGen refuses to tetrahedralize it.
+    box_a = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+    box_b = trimesh.creation.box(
+        extents=(1.0, 1.0, 1.0), transform=trimesh.transformations.translation_matrix((1.0, 0.0, 0.0))
+    )
+    mesh_path = tmp_path / "non_manifold.obj"
+    trimesh.util.concatenate([box_a, box_b]).export(mesh_path)
+
+    scene = gs.Scene(show_viewer=show_viewer)
+    with pytest.raises(gs.GenesisException, match="Tetrahedralization failed for mesh .*repair the mesh"):
+        scene.add_entity(
+            morph=gs.morphs.Mesh(file=str(mesh_path)),
+            material=gs.materials.FEM.Elastic(),
+        )
 
 
 @pytest.mark.required
