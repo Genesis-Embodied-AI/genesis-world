@@ -134,8 +134,9 @@ def _frame_fields(sim: "Simulator", kinds: frozenset[DataKind]) -> list[FrameFie
 def _read_frame(sim: "Simulator", kinds: frozenset[DataKind]) -> np.ndarray:
     """Return one frame as a flat uint8 buffer laid out as '_frame_fields' states.
 
-    Where zero-copy views exist the arrays are concatenated on the device and cross to the host once. Otherwise each
-    array crosses on its own and the concatenation runs on the host.
+    On a GPU backend with zero-copy views the arrays are concatenated on the device and cross to the host once.
+    Otherwise numpy concatenates them on the host, since on the CPU backend torch copies a large array on its thread
+    pool, which contends with the simulation threads right after a step.
     """
     flags = [
         flag
@@ -143,7 +144,7 @@ def _read_frame(sim: "Simulator", kinds: frozenset[DataKind]) -> np.ndarray:
         if isinstance(solver, KinematicSolver)
         for flag in (solver.is_forward_pos_updated, solver.is_forward_vel_updated)
     ]
-    if gs.use_zerocopy:
+    if gs.use_zerocopy and gs.backend != gs.cpu:
         parts = [qd_to_torch(value).contiguous().reshape(-1).view(torch.uint8) for _, value, _ in sim.data(kinds)]
         parts.append(sim.steps.reshape(-1).view(torch.uint8))
         parts.append(torch.tensor(flags, dtype=torch.uint8, device=gs.device))
@@ -222,7 +223,8 @@ class TrajectoryFileWriter(BaseFileWriter):
         self._last_fields = _frame_fields(sim, CHECKPOINT_FILE_KINDS)
         self._frame_size = sum(field.nbytes for field in self._fields)
         self._steps_field = next(field for field in self._fields if field.name == STEPS_FIELD)
-        self._chunk = bytearray()
+        self._chunks_frames = np.empty((2, self._options.chunk_size, self._frame_size), dtype=np.uint8)
+        self._i_open_chunk = 0
         self._n_chunk_frames = 0
         self._previous: np.ndarray | None = None
         self._n_frames = 0
@@ -263,8 +265,11 @@ class TrajectoryFileWriter(BaseFileWriter):
         # that frame with the whole state (see 'cleanup').
         if self._n_chunk_frames == self._options.chunk_size:
             self._start_chunk_write()
-        delta = data if self._previous is None else np.bitwise_xor(data, self._previous)
-        self._chunk += delta.tobytes()
+        frame = self._chunks_frames[self._i_open_chunk, self._n_chunk_frames]
+        if self._previous is None:
+            frame[:] = data
+        else:
+            np.bitwise_xor(data, self._previous, out=frame)
         self._previous = data
         self._n_chunk_frames += 1
 
@@ -275,8 +280,9 @@ class TrajectoryFileWriter(BaseFileWriter):
             self._writer = None
         if self._n_chunk_frames == 0 or self._file is None:
             return
-        chunk, n_chunk_frames = bytes(self._chunk), self._n_chunk_frames
-        self._chunk.clear()
+        n_chunk_frames = self._n_chunk_frames
+        chunk = self._chunks_frames[self._i_open_chunk, :n_chunk_frames]
+        self._i_open_chunk = 1 - self._i_open_chunk
         self._n_chunk_frames = 0
         self._previous = None
         self._writer = threading.Thread(target=self._write_chunk, args=(chunk, n_chunk_frames), daemon=True)
@@ -309,7 +315,7 @@ class TrajectoryFileWriter(BaseFileWriter):
         self._written += len(record)
         self._n_frames += n_record_frames
 
-    def _write_chunk(self, chunk: bytes, n_chunk_frames: int):
+    def _write_chunk(self, chunk: np.ndarray, n_chunk_frames: int):
         """Compress and append one chunk on the writer thread. A failure is raised on the stepping thread (see 'step')."""
         try:
             payload = zlib.compress(chunk)
@@ -326,7 +332,6 @@ class TrajectoryFileWriter(BaseFileWriter):
             field = self._steps_field
             steps = self._previous[field.offset : field.offset + field.nbytes].view(field.dtype).reshape(field.shape)
             if np.array_equal(steps, tensor_to_array(sim.steps)):
-                del self._chunk[-self._frame_size :]
                 self._n_chunk_frames -= 1
         self._start_chunk_write()
         self._previous = None
