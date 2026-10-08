@@ -662,21 +662,25 @@ def _add_sphere_link(urdf, link_name, geom_pos, mass=None, inertia=None, inertia
 @pytest.fixture
 def joint_with_partial_dynamics(joint_damping, joint_friction):
     # Inertia is deliberately left undefined: recomputing it from geometry is the path along which an unset
-    # <dynamics> attribute reaches the solver instead of being replaced beforehand. The <limit> tag authors no effort.
+    # <dynamics> attribute reaches the solver instead of being replaced beforehand. The <limit> tags author no effort,
+    # a zero effort and a negative effort respectively.
     urdf = ET.Element("robot", name="joint_with_partial_dynamics")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.0")
-    _add_sphere_link(urdf, "PendulumArm_0", "0.0 0.0 0.09")
-    joint = ET.SubElement(urdf, "joint", name="PendulumJoint_0", type="continuous")
-    ET.SubElement(joint, "origin", xyz="0.0 0.0 0.0", rpy="0.0 0.0 0.0")
-    ET.SubElement(joint, "axis", xyz="1 0 0")
-    ET.SubElement(joint, "parent", link="base_link")
-    ET.SubElement(joint, "child", link="PendulumArm_0")
-    ET.SubElement(joint, "limit", velocity="30.0")
-    dynamics = ET.SubElement(joint, "dynamics")
-    if joint_damping is not None:
-        dynamics.set("damping", str(joint_damping))
-    if joint_friction is not None:
-        dynamics.set("friction", str(joint_friction))
+    for i, effort in enumerate((None, "0.0", "-50.0")):
+        _add_sphere_link(urdf, f"PendulumArm_{i}", "0.0 0.0 0.09")
+        joint = ET.SubElement(urdf, "joint", name=f"PendulumJoint_{i}", type="continuous")
+        ET.SubElement(joint, "origin", xyz="0.0 0.0 0.0", rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "axis", xyz="1 0 0")
+        ET.SubElement(joint, "parent", link="base_link")
+        ET.SubElement(joint, "child", link=f"PendulumArm_{i}")
+        limit = ET.SubElement(joint, "limit", velocity="30.0")
+        if effort is not None:
+            limit.set("effort", effort)
+        dynamics = ET.SubElement(joint, "dynamics")
+        if joint_damping is not None:
+            dynamics.set("damping", str(joint_damping))
+        if joint_friction is not None:
+            dynamics.set("friction", str(joint_friction))
     return urdf
 
 
