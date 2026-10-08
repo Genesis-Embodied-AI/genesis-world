@@ -548,6 +548,11 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
     The function runs eagerly on devices that TorchInductor cannot target on this machine, and when an input requires
     gradient, which would double the traced graphs for a backward pass that is never on a hot path. A compiled kernel
     returns the same bits on every call for the same inputs, which may differ from the eager result by rounding.
+
+    Called from code that an enclosing `torch.compile` is tracing, the decorator skips the probe and its own kernel and
+    runs the function in place on the broadcast tensors, leaving the compilation to the enclosing graph. The function
+    must therefore read its elements along its last `elems_ndim[i]` dimensions whatever the leading batch dimensions,
+    memory layout or broadcasting of its inputs, and never write into them.
     """
 
     def decorator(fn: Callable) -> Callable:
@@ -574,6 +579,14 @@ def torch_compile(*, elems_ndim: tuple[int, ...]) -> Callable[[Callable], Callab
             # Broadcasting is rare enough for its slow shape inference to be worth skipping when all shapes agree
             if any(shape != batch_shape for shape in batch_shapes[1:]):
                 batch_shape = torch.broadcast_shapes(*batch_shapes)
+            if torch.compiler.is_compiling():
+                # Under an enclosing torch.compile the support probe cannot be traced, and the enclosing graph
+                # compiles the function body itself: broadcast the batch dimensions and run it in place.
+                tensors = tuple(
+                    tensor if tensor is None else tensor.expand((*batch_shape, *tensor.shape[tensor.ndim - n :]))
+                    for tensor, n in zip(tensors, elems_ndim)
+                )
+                return fn(*tensors, *args, **kwargs)
             n_elems = math.prod(batch_shape)
             device_type = next(tensor for tensor in tensors if tensor is not None).device.type
             is_compiled = _is_torch_compile_supported(device_type)
