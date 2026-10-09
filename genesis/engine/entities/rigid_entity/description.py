@@ -528,6 +528,7 @@ class KinematicEntityDescription(EntityDescription):
                         vg_infos,
                         bool(v_l_info["is_robot"]),
                         resolution,
+                        from_visual=morph.inertia_from_visual,
                     )
                     resolution.links_inertial_info[i_link].append(inertial_info)
                     v_joints = [description_from_info(RigidJointDescription, j_info) for j_info in v_j_infos]
@@ -575,7 +576,17 @@ class KinematicEntityDescription(EntityDescription):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
-                inertial_info = self._resolve_inertial(None, None, None, None, cg_infos, vg_infos, False, resolution)
+                inertial_info = self._resolve_inertial(
+                    None,
+                    None,
+                    None,
+                    None,
+                    cg_infos,
+                    vg_infos,
+                    False,
+                    resolution,
+                    from_visual=isinstance(morph, gs.morphs.Mesh) and morph.inertia_from_visual,
+                )
                 resolution.links_inertial_info[0].append(inertial_info)
                 # Such a morph states no joint parameters, so its variant moves through the joints of the primary
                 link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
@@ -1406,15 +1417,32 @@ class KinematicEntityDescription(EntityDescription):
         return cg_infos, vg_infos
 
     def _resolve_inertial(
-        self, explicit_mass, explicit_com, explicit_quat, explicit_inertia, cg_infos, vg_infos, is_robot, resolution
+        self,
+        explicit_mass,
+        explicit_com,
+        explicit_quat,
+        explicit_inertia,
+        cg_infos,
+        vg_infos,
+        is_robot,
+        resolution,
+        from_visual=False,
     ):
         """Compute a link's load-time inertial data (see 'LinkInertialInfo').
 
         The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density,
         so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
-        geoms for a link without collision geometry.
+        geoms for a link without collision geometry. With 'from_visual', visual geometry supplies both estimates when
+        inertia needs estimating and collision geometry has no authored density.
         """
+        if (
+            from_visual
+            and vg_infos
+            and all(g_info.get("density") is None for g_info in cg_infos)
+            and not (explicit_mass is not None and explicit_mass > 0.0 and explicit_inertia is not None)
+        ):
+            cg_infos = vg_infos
         hint = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *hint, clamp_min_mass=False
@@ -1439,8 +1467,7 @@ class KinematicEntityDescription(EntityDescription):
                 else:
                     rho = RHO_ROBOT if is_robot else RHO_OBJECT
 
-            # The estimate comes from the collision geometry of the link when it has any, and from its visual
-            # geometry otherwise. A link with neither contributes nothing, so only the asset's values remain.
+            # A link without geometry contributes nothing, so only the asset's values remain
             dynamics_hint = compose_inertial_from_g_infos(cg_infos or vg_infos, rho)
         return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)
 
@@ -1449,7 +1476,7 @@ class KinematicEntityDescription(EntityDescription):
 
         Only root (floating-base) links carry the morph 'offset_pos'/'offset_quat' and the 'aligned' flag. The
         relative getters strip the resulting body-frame offset to report the user's original pose. Separately, every
-        link's finalized inertia (explicit values, else from its collision geometry) is resolved here - the one point
+        link's finalized inertia (explicit values, else from its selected geometry) is resolved here - the one point
         where the collision geometry is available to both kinematic and rigid entities - and returned, so that
         '_align_free_roots' derives the COM/principal anchor identically for both.
         """
@@ -1467,6 +1494,7 @@ class KinematicEntityDescription(EntityDescription):
             vg_infos,
             l_info["is_robot"],
             resolution,
+            from_visual=isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual,
         )
         resolution.links_inertial_info.append([inertial_info])
 
