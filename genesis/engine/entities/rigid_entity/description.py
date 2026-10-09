@@ -17,13 +17,13 @@ from itertools import chain
 from typing import Any, Sequence, TypeVar
 
 import numpy as np
+
 import trimesh
 from typing_extensions import Self
 
 import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.materials.base import Material
-from genesis.engine.mesh import InertialProperties
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
@@ -32,6 +32,7 @@ from genesis.utils import mesh as mu
 from genesis.utils import mjcf as mju
 from genesis.utils import terrain as tu
 from genesis.utils import urdf as uu
+from genesis.utils.mesh import InertialProperties
 from genesis.utils.misc import get_assets_dir
 
 from ..base_entity import EntityDescription
@@ -296,6 +297,13 @@ def is_link_fixed(links: Sequence[KinematicLinkDescription], idx: int) -> bool:
         idx = l_desc.parent_idx
 
 
+def _is_link_info_fixed(links: Sequence[KinematicLinkDescription], l_info: dict, j_infos: Sequence[dict]) -> bool:
+    """Whether a link about to be described reaches the world through fixed joints alone (see 'is_link_fixed')."""
+    return all(j_info["type"] is gs.JOINT_TYPE.FIXED for j_info in j_infos) and (
+        l_info["parent_idx"] == -1 or is_link_fixed(links, l_info["parent_idx"])
+    )
+
+
 @dataclass
 class Resolution:
     """Transient state of one resolution, dropped once the description is complete.
@@ -520,6 +528,7 @@ class KinematicEntityDescription(EntityDescription):
                     zip(v_l_infos, v_links_j_infos, cg_vg_infos)
                 ):
                     inertial_info = self._resolve_inertial(
+                        morph.inertia_from_visual and not is_link_fixed(self.links, i_link),
                         None if is_inertia_recomputed else v_l_info.get("inertial_mass"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_pos"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_quat"),
@@ -575,7 +584,10 @@ class KinematicEntityDescription(EntityDescription):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
-                inertial_info = self._resolve_inertial(None, None, None, None, cg_infos, vg_infos, False, resolution)
+                is_from_visual = isinstance(morph, gs.morphs.Mesh) and morph.inertia_from_visual and not morph.fixed
+                inertial_info = self._resolve_inertial(
+                    is_from_visual, None, None, None, None, cg_infos, vg_infos, False, resolution
+                )
                 resolution.links_inertial_info[0].append(inertial_info)
                 # Such a morph states no joint parameters, so its variant moves through the joints of the primary
                 link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
@@ -839,6 +851,15 @@ class KinematicEntityDescription(EntityDescription):
         if isinstance(morph, gs.morphs.MJCF):
             # Mujoco's unified MJCF+URDF parser systematically for MJCF files
             l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, self.surface, resolution.options)
+            if (
+                morph.recompute_inertia
+                and isinstance(self.material, gs.materials.Rigid)
+                and self.material.rho is not None
+            ):
+                gs.logger.warning(
+                    "(MJCF) Recomputing inertia from the geom densities of the MJCF file (1000 kg/m^3 where omitted) "
+                    "instead of material 'rho'."
+                )
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
             # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
@@ -1179,7 +1200,7 @@ class KinematicEntityDescription(EntityDescription):
                 inertial_info = []
                 explicit_mass_flags = set()
                 for i_l in subtree:
-                    props, is_mass_explicit, _ = resolution.links_inertial_info[i_l][i_v]
+                    props, is_mass_explicit, _, _ = resolution.links_inertial_info[i_l][i_v]
                     # The stash holds the unit-density estimate, so a mass however small is a body of the composite, and
                     # only a link without geometry or authored mass is left out.
                     if props.mass <= 0.0:
@@ -1331,8 +1352,13 @@ class KinematicEntityDescription(EntityDescription):
         """
         # An explicitly set material density overrides any asset-authored per-geom density, as material friction does
         # for authored frictions. Dropping the keys up front keeps the align anchor, its all-or-none source check,
-        # and the build-time inertial estimate consistently uniform-density.
-        if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
+        # and the build-time inertial estimate consistently uniform-density. MJCF is the exception, because the format
+        # assigns a density to every geom (see '_parse_scene').
+        if (
+            not isinstance(morph, gs.morphs.MJCF)
+            and isinstance(self.material, gs.materials.Rigid)
+            and self.material.rho is not None
+        ):
             for g_info in g_infos:
                 g_info.pop("density", None)
 
@@ -1406,26 +1432,84 @@ class KinematicEntityDescription(EntityDescription):
         return cg_infos, vg_infos
 
     def _resolve_inertial(
-        self, explicit_mass, explicit_com, explicit_quat, explicit_inertia, cg_infos, vg_infos, is_robot, resolution
+        self,
+        from_visual,
+        explicit_mass,
+        explicit_com,
+        explicit_quat,
+        explicit_inertia,
+        cg_infos,
+        vg_infos,
+        is_robot,
+        resolution,
     ):
         """Compute a link's load-time inertial data (see 'LinkInertialInfo').
 
-        The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density,
-        so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
-        by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
-        geoms for a link without collision geometry.
+        Two estimates come out of the link's geometry: the alignment anchor ('props'), where a geom without a density
+        gets unit density, and the dynamics estimate ('hint'), where it gets the material density.
+
+        By default, the dynamics estimate uses the collision geometry, or the visual geometry when the link has no
+        collision geom, and the alignment anchor uses the collision geometry alone.
+
+        With 'from_visual', both estimates use the visual geometry instead, unless a collision geom states a density.
+        A link without visual geoms keeps using its collision geometry. The caller sets 'from_visual' from
+        'inertia_from_visual' for moving links only, because attaching a world-fixed link to a moving parent recomputes
+        its inertia from its geoms anyway.
+
+        A link whose asset states both its mass and its inertia uses the estimate only to check them, so it always uses
+        the collision geometry and skips the costlier visual estimate.
         """
-        hint = compose_inertial_from_g_infos(cg_infos, rho=1.0)
+        is_inertial_explicit = explicit_mass is not None and explicit_mass > 0.0 and explicit_inertia is not None
+        is_from_visual = from_visual and not is_inertial_explicit
+        if is_from_visual and vg_infos and all(g_info.get("density") is None for g_info in cg_infos):
+            g_infos = vg_infos
+        else:
+            g_infos = cg_infos if cg_infos else vg_infos
+        is_hint_from_visual = is_from_visual and bool(vg_infos) and g_infos is vg_infos
+
+        # Assets may have open meshes which do not enclose the volume. Merge them into one surface in the link frame to
+        # compute the volume estimate. Only the geometry is merged, which spares packing their textures into one atlas.
+        if is_from_visual and g_infos is vg_infos:
+            closed_g_infos, open_g_infos = [], []
+            for g_info in g_infos:
+                is_open_mesh = (
+                    g_info.get("type", gs.GEOM_TYPE.MESH) == gs.GEOM_TYPE.MESH
+                    and not g_info["vmesh"].trimesh.is_watertight
+                )
+                (open_g_infos if is_open_mesh else closed_g_infos).append(g_info)
+
+            if len(open_g_infos) > 1:
+                verts, faces, n_verts = [], [], 0
+                for g_info in open_g_infos:
+                    tmesh = g_info["vmesh"].trimesh
+                    pos, quat = g_info.get("pos", gu.zero_pos()), g_info.get("quat", gu.identity_quat())
+                    verts.append(gu.transform_by_trans_quat(tmesh.vertices, pos, quat))
+                    faces.append(tmesh.faces + n_verts)
+                    n_verts += len(tmesh.vertices)
+                fused_vmesh = gs.Mesh.from_trimesh(
+                    trimesh.Trimesh(np.concatenate(verts), np.concatenate(faces), process=False)
+                )
+                fused_g_info = {
+                    **open_g_infos[0],
+                    "vmesh": fused_vmesh,
+                    "pos": gu.zero_pos(),
+                    "quat": gu.identity_quat(),
+                }
+                g_infos = [*closed_g_infos, fused_g_info]
+
+        anchor_g_infos = g_infos if is_from_visual else cg_infos
+        hint = compose_inertial_from_g_infos(anchor_g_infos, rho=1.0, use_enclosed_volume=is_from_visual)
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *hint, clamp_min_mass=False
         )
+        is_hint_void = is_hint_from_visual and hint.mass <= 0.0
         if explicit_mass is not None and explicit_mass > 0.0:
             is_mass_explicit = True
         else:
-            geoms_with_density = sum(g_info.get("density") is not None for g_info in cg_infos)
+            geoms_with_density = sum(g_info.get("density") is not None for g_info in anchor_g_infos)
             if geoms_with_density == 0:
                 is_mass_explicit = False
-            elif geoms_with_density == len(cg_infos):
+            elif geoms_with_density == len(anchor_g_infos):
                 is_mass_explicit = True
             else:
                 is_mass_explicit = None
@@ -1439,26 +1523,30 @@ class KinematicEntityDescription(EntityDescription):
                 else:
                     rho = RHO_ROBOT if is_robot else RHO_OBJECT
 
-            # The estimate comes from the collision geometry of the link when it has any, and from its visual
-            # geometry otherwise. A link with neither contributes nothing, so only the asset's values remain.
-            dynamics_hint = compose_inertial_from_g_infos(cg_infos or vg_infos, rho)
-        return LinkInertialInfo(props, is_mass_explicit, dynamics_hint)
+            dynamics_hint = compose_inertial_from_g_infos(g_infos, rho, use_enclosed_volume=is_from_visual)
+        return LinkInertialInfo(props, is_mass_explicit, dynamics_hint, is_hint_void)
 
     def _align_link(self, l_info, j_infos, cg_infos, vg_infos, morph, resolution: Resolution):
         """Carry the morph pose offset into a root link, record the offset it leaves, and resolve its inertia.
 
         Only root (floating-base) links carry the morph 'offset_pos'/'offset_quat' and the 'aligned' flag. The
         relative getters strip the resulting body-frame offset to report the user's original pose. Separately, every
-        link's finalized inertia (explicit values, else from its collision geometry) is resolved here - the one point
-        where the collision geometry is available to both kinematic and rigid entities - and returned, so that
-        '_align_free_roots' derives the COM/principal anchor identically for both.
+        link's finalized inertia (explicit values, else from its geometry, see '_resolve_inertial') is resolved here -
+        the one point where the parsed geometry is available to both kinematic and rigid entities - and returned, so
+        that '_align_free_roots' derives the COM/principal anchor identically for both.
         """
 
         # Resolve the local inertia of this link (primary variant). recompute_inertia discards explicit values
         # for non-world-fixed links, exactly as the link description does; an aligned free body's subtree is never
         # world-fixed, so it suffices to honor the morph flag here.
         is_inertia_recomputed = isinstance(morph, gs.options.morphs.FileMorph) and morph.recompute_inertia
+        is_from_visual = (
+            isinstance(morph, gs.options.morphs.FileMorph)
+            and morph.inertia_from_visual
+            and not _is_link_info_fixed(self.links, l_info, j_infos)
+        )
         inertial_info = self._resolve_inertial(
+            is_from_visual,
             None if is_inertia_recomputed else l_info.get("inertial_mass"),
             None if is_inertia_recomputed else l_info.get("inertial_pos"),
             None if is_inertia_recomputed else l_info.get("inertial_quat"),
@@ -1538,17 +1626,22 @@ class RigidEntityDescription(KinematicEntityDescription):
         like that asset loaded on its own. A Mesh or Primitive variant authors no inertial, and a morph asking for the
         inertia to be recomputed drops what its file stated.
         """
+        is_fixed = is_link_fixed(self.links, i_link)
         mass, com, quat, inertia = None, None, None, None
-        if v_l_info is not None and not (morph.recompute_inertia and not is_link_fixed(self.links, i_link)):
+        if v_l_info is not None and not (morph.recompute_inertia and not is_fixed):
             mass, com, quat, inertia = (
                 v_l_info.get("inertial_mass"),
                 v_l_info.get("inertial_pos"),
                 v_l_info.get("inertial_quat"),
                 v_l_info.get("inertial_i"),
             )
-        inertial = finalize_inertial(
-            mass, com, quat, inertia, *inertial_info.hint, clamp_min_mass=not is_link_fixed(self.links, i_link)
-        )
+        if not is_fixed and (mass is None or inertia is None):
+            if inertial_info.is_hint_void:
+                gs.raise_exception(
+                    f"The visual geometry of link '{self.links[i_link].name}' encloses no volume. "
+                    "Specify its inertial in the asset, or pass 'inertia_from_visual=False'."
+                )
+        inertial = finalize_inertial(mass, com, quat, inertia, *inertial_info.hint, clamp_min_mass=not is_fixed)
         return RigidVariantLinkDescription(
             pos=link_pos,
             quat=link_quat,
@@ -1616,9 +1709,7 @@ class RigidEntityDescription(KinematicEntityDescription):
         the asset carries only while the inertia it derives from is the simulated one, and holds the sentinel
         otherwise for the solver's refresh to complete at build.
         """
-        is_fixed = all(j_info["type"] is gs.JOINT_TYPE.FIXED for j_info in j_infos) and (
-            l_info["parent_idx"] == -1 or is_link_fixed(self.links, l_info["parent_idx"])
-        )
+        is_fixed = _is_link_info_fixed(self.links, l_info, j_infos)
         is_inertia_recomputed = (
             not is_fixed and isinstance(morph, gs.options.morphs.FileMorph) and morph.recompute_inertia
         )
@@ -1697,8 +1788,13 @@ class RigidEntityDescription(KinematicEntityDescription):
         if mass is None or inertia is None:
             if not is_fixed and vg_infos and not cg_infos:
                 gs.logger.info(
-                    f"Mass is not specified and collision geoms can not be found for link '{l_info['name']}'. "
-                    f"Using visual geoms to compute inertial properties."
+                    f"Inertia is not specified and collision geoms can not be found for link '{l_info['name']}'. "
+                    f"Estimating the inertial properties from its visual geoms."
+                )
+            if not is_fixed and inertial_info.is_hint_void:
+                gs.raise_exception(
+                    f"The visual geometry of link '{l_info['name']}' encloses no volume. "
+                    "Specify its inertial in the asset, or pass 'inertia_from_visual=False'."
                 )
             # The parsed inverse weight matches the inertia the asset declares. The inertia recomputed here breaks
             # that match, so the value is discarded
