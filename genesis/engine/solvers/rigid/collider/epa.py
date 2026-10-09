@@ -981,8 +981,12 @@ def func_safe_epa(
                 lower2 = face_dist2
                 nearest_i_f = i_f
 
+        # The nearest face reaching the upper bound within the tolerance has converged, even past it by the rounding of
+        # both bounds. Only a face beyond it is invalid (lower bound of depth larger than upper bound), which leaves the
+        # previous nearest face.
+        if nearest_i_f != -1 and lower2 > upper2 and qd.sqrt(lower2) - upper < tolerance:
+            break
         if lower2 > upper2 or nearest_i_f == -1:
-            # Invalid face found, stop the algorithm (lower bound of depth is larger than upper bound)
             nearest_i_f = prev_nearest_i_f
             break
 
@@ -1116,6 +1120,39 @@ def func_safe_epa(
             # No face candidate left
             nearest_i_f = -1
             break
+
+    # Two parallel faces of the geometries form a flat face of the Minkowski difference, split into coplanar triangles
+    # at the same distance from the origin, so that the nearest face may be one whose plane the origin projects onto
+    # outside of it. The witness points then extrapolate past the faces of the geometries, by the barycentric coordinate
+    # of the origin projection times the size of the face. Walking across the edge opposite the most negative coordinate
+    # to the coplanar neighbour, whose normal agrees within the relative reprojection error, reaches the triangle that
+    # holds it.
+    is_walking = nearest_i_f != -1
+    for i_walk in range(gjk_state.polytope.nfaces_map[i_b]):
+        if is_walking:
+            face_iv1 = gjk_state.polytope_faces.verts_idx[i_b, nearest_i_f][0]
+            face_iv2 = gjk_state.polytope_faces.verts_idx[i_b, nearest_i_f][1]
+            face_iv3 = gjk_state.polytope_faces.verts_idx[i_b, nearest_i_f][2]
+            face_v1 = gjk_state.polytope_verts.mink[i_b, face_iv1]
+            face_v2 = gjk_state.polytope_verts.mink[i_b, face_iv2]
+            face_v3 = gjk_state.polytope_verts.mink[i_b, face_iv3]
+            proj_o, _ = func_project_origin_to_plane(face_v1, face_v2, face_v3, collider_info)
+            _lambda = func_triangle_affine_coords(proj_o, face_v1, face_v2, face_v3)
+            i_e = 1
+            lambda_min = _lambda[0]
+            if _lambda[1] < lambda_min:
+                i_e, lambda_min = 2, _lambda[1]
+            if _lambda[2] < lambda_min:
+                i_e, lambda_min = 0, _lambda[2]
+            is_walking = False
+            if lambda_min < 0.0:
+                i_f_adj = gjk_state.polytope_faces.adj_idx[i_b, nearest_i_f][i_e]
+                if gjk_state.polytope_faces.map_idx[i_b, i_f_adj] != -2:
+                    normal_adj = gjk_state.polytope_faces.normal[i_b, i_f_adj]
+                    normal_gap = normal_adj - gjk_state.polytope_faces.normal[i_b, nearest_i_f]
+                    if normal_gap.norm() <= collider_info.gjk.polytope_max_rel_reprojection_error[None]:
+                        nearest_i_f = i_f_adj
+                        is_walking = True
 
     if nearest_i_f != -1:
         # Nearest face found
@@ -1350,9 +1387,18 @@ def func_plane_normal(
     # The three cross products are one quantity up to sign, so they differ only in rounding, and a sliver triangle
     # cancels catastrophically in some of the orderings while resolving in the others. Every ordering is therefore
     # tried before reporting the triangle degenerate: the whole point of the sequence is that a vanishing cross
-    # product says nothing about the ones not yet computed. Reporting it instead discards the contact entirely.
-    for i in qd.static(range(3)):
+    # product says nothing about the ones not yet computed. Reporting it instead discards the contact entirely. The
+    # rounding error of a cross product grows with the product of the lengths of its edges, so the ordering that leaves
+    # out the longest edge comes first: on a sliver, crossing its two long edges would tilt the normal enough to shift
+    # the distance of the far vertex by much more than the rounding of the vertices.
+    i_first = 1
+    if d21.norm_sqr() >= qd.max(d31.norm_sqr(), d32.norm_sqr()):
+        i_first = 2
+    elif d31.norm_sqr() >= d32.norm_sqr():
+        i_first = 0
+    for i_order in qd.static(range(3)):
         if not finished:
+            i = (i_first + i_order) % 3
             n = gs.qd_vec3(0.0, 0.0, 0.0)
             if i == 0:
                 # Normal = (v1 - v2) x (v3 - v2)

@@ -1548,6 +1548,7 @@ def func_recompute_perturbed_contact(
     contact_pos: qd.types.vector(3),
     normal_0: qd.types.vector(3),
     contact_pos_0: qd.types.vector(3),
+    penetration_0: float,
     qrot: qd.types.vector(4),
     ga_pos_original: qd.types.vector(3),
     ga_quat_original: qd.types.vector(4),
@@ -1559,6 +1560,8 @@ def func_recompute_perturbed_contact(
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
+    geom_pair_scale: float,
+    tolerance: float,
     used_gjk: bool,
 ):
     """
@@ -1572,6 +1575,14 @@ def func_recompute_perturbed_contact(
     resulting Minkowski triangle gives the exact contact normal, with the penetration as the portal's distance to the
     Minkowski origin. The position comes last, from the recovered normal and penetration, since only those say how far
     apart the two surfaces are.
+
+    A perturbed detection may land where the unperturbed geoms are apart, past the edge of their contact patch, while
+    contact 0 'contact_pos_0' of penetration 'penetration_0' lies inside it. Its contact then moves towards contact 0
+    to where the penetration interpolated linearly between both vanishes, and is returned at zero penetration. Along
+    the contact plane, the penetration is the height of the surface of a convex geom minus that of another one, which
+    is concave, so it is non-negative at this point, inside the patch or on its edge, whatever the shapes. This takes a
+    difference of penetration between both points beyond the acceptance threshold 'tolerance', since the error of the
+    point is that of the penetrations divided by it.
     """
     # qrot is applied to geom A and its inverse to geom B; precompute the rotation matrix once (R for qrot, its
     # transpose for the inverse) and reuse it for every un-rotation below instead of re-deriving it per call.
@@ -1671,6 +1682,19 @@ def func_recompute_perturbed_contact(
     # Averaging the two witnesses instead subtracts the whole separation, sliding the contact off that feature by an
     # amount that grows with the square of the perturbation angle, which no precision reaches.
     contact_pos = contact_point_b - 0.5 * penetration * normal
+
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        # A candidate apart from the other geom beyond the acceptance threshold lies past the edge of the patch
+        EPS = rigid_info.EPS[None]
+        if (
+            penetration <= (-EPS * geom_pair_scale if is_exact else -tolerance)
+            and penetration_0 > 0.0
+            and penetration_0 - penetration > tolerance
+        ):
+            # Each contact lies halfway between the surfaces of both geoms, below them where they overlap and above them
+            # where they are apart, so the point where the penetration vanishes lies on both surfaces
+            contact_pos += penetration / (penetration - penetration_0) * (contact_pos_0 - contact_pos)
+            penetration = gs.qd_float(0.0)
 
     # Apply the smooth-primitive position reconstruction here, after the perturbation has been reverted, so it uses the
     # final (corrected) normal and the unperturbed pose - the canonical state the solver stores.
@@ -2155,6 +2179,7 @@ def func_convex_convex_contact(
                         contact_pos,
                         normal_0,
                         contact_pos_0,
+                        penetration_0,
                         qrot,
                         ga_pos_original,
                         ga_quat_original,
@@ -2166,6 +2191,8 @@ def func_convex_convex_contact(
                         rigid_info,
                         collider_info,
                         rigid_config,
+                        geom_pair_scale,
+                        tolerance,
                         _used_gjk,
                     )
 
@@ -2423,6 +2450,7 @@ def _func_multicontact_detect(
 
     contact0_normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
     contact0_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
+    contact0_penetration = collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0]
     has_contact0 = not is_gjk_preferred_0
     is_gjk_multi_done = False
     n_con = gs.qd_int(0)
@@ -2590,6 +2618,7 @@ def _func_multicontact_detect(
                         )
                         contact0_normal = normal
                         contact0_pos = contact_pos
+                        contact0_penetration = penetration
                         slot_status = MULTICONTACT_SLOT.BASE
                         slot_normal = normal
                         slot_pos = contact_pos
@@ -2614,6 +2643,7 @@ def _func_multicontact_detect(
                         contact_pos,
                         contact0_normal,
                         contact0_pos,
+                        contact0_penetration,
                         qrot,
                         ga_pos_original,
                         ga_quat_original,
@@ -2625,6 +2655,8 @@ def _func_multicontact_detect(
                         rigid_info,
                         collider_info,
                         rigid_config,
+                        geom_pair_scale,
+                        tolerance,
                         is_gjk_used,
                     )
                 slot_status = MULTICONTACT_SLOT.EXACT if is_exact else MULTICONTACT_SLOT.APPROX
@@ -2991,7 +3023,7 @@ def func_narrowphase_contact0(
     for flat_idx in range(_grid_size):
         i_b = flat_idx // n_chunks
         chunk = flat_idx % n_chunks
-        n_pairs = collider_state.n_broad_pairs[i_b]
+        n_pairs = qd.min(collider_state.n_broad_pairs[i_b], max_broad_pairs)
         pair_start = chunk * n_pairs // n_chunks
         pair_end = (chunk + 1) * n_pairs // n_chunks
 
@@ -3240,7 +3272,7 @@ def func_narrow_phase_convex_vs_convex(
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
-        for i_pair in range(collider_state.n_broad_pairs[i_b]):
+        for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 
@@ -3437,7 +3469,7 @@ def func_narrow_phase_convex_specializations(
     _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
-        for i_pair in range(collider_state.n_broad_pairs[i_b]):
+        for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 
@@ -3500,7 +3532,7 @@ def func_narrow_phase_any_vs_terrain(
     _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
-        for i_pair in range(collider_state.n_broad_pairs[i_b]):
+        for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 
@@ -3543,7 +3575,7 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
     _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
-        for i_pair in range(collider_state.n_broad_pairs[i_b]):
+        for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 

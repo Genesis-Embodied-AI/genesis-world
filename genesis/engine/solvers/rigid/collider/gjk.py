@@ -404,20 +404,15 @@ def func_gjk_contact(
 
             normal = normal / normal_len
 
-            # For a penetrating contact the contact normal is the EPA nearest-face normal (the Minkowski penetration
-            # direction), which is well-conditioned. The witness-point difference w2 - w1 is the tiny penetration
-            # vector built from barycentric blends of large (geom-scale) support points, so in fp32 it is numerically
-            # fragile for a shallow contact and can tilt the normal by tens of degrees (catastrophic for grazing
-            # convex-decomposition piece contacts). It is kept only as the sign reference, and as the normal itself
-            # when no polytope was built (nearest_face < 0). Mujoco-compatibility mode keeps the witness normal to
-            # reproduce MuJoCo's contact set exactly.
+            # The witness difference w2 - w1 of a shallow contact is a tiny vector blended from geom-scale support
+            # points, which fp32 rounding tilts by up to tens of degrees, catastrophic for grazing contacts between
+            # convex-decomposition pieces, and can even flip. The EPA nearest-face normal is well-conditioned, pointing
+            # out of the Minkowski difference 'obj1 - obj2', opposite to w2 - w1. The witness normal remains when no
+            # polytope was built, and in MuJoCo-compatibility mode to reproduce its contact set exactly.
             if qd.static(not rigid_config.enable_mujoco_compatibility):
                 i_f = gjk_state.nearest_face[i_b]
                 if i_f >= 0:
-                    face_normal = gjk_state.polytope_faces.normal[i_b, i_f]
-                    if face_normal.dot(normal) < 0.0:
-                        face_normal = -face_normal
-                    normal = face_normal
+                    normal = -gjk_state.polytope_faces.normal[i_b, i_f]
 
             gjk_state.contact_pos[i_b, n_contacts] = contact_pos
             gjk_state.normal[i_b, n_contacts] = normal

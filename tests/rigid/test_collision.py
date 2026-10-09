@@ -731,21 +731,24 @@ def test_box_stacks_stability(detection, show_viewer, tol):
     scene.build(n_envs=N_ENVS)
 
     # Under the default impedance, the residual softness of the contacts tips the tallest piles standing on the
-    # narrowest supports at the smallest scale, although they are statically stable. At rest, the contacts then sink
-    # by about the gravity acceleration times the squared time constant, scaled by (1 - d) / d for an impedance d. The
-    # time constant grows with the square root of the scale, which sinks every pile by a depth in proportion to its
-    # size: the piles stay geometrically similar, and this depth stays above the resolution of the coordinates of the
-    # largest ones, which stand the farthest from the origin. The boxes are built axis-aligned, so their bounding boxes
-    # give the size each environment simulates.
+    # narrowest supports at the smallest scale, although they are statically stable. At rest, a contact sinks by about
+    # the gravity acceleration times the squared time constant, scaled by (1 - d) / d for an impedance d and by the load
+    # it carries: the mass of the boxes it supports times the sum of the inverse masses of the two bodies it separates,
+    # the fixed base adding none. The time constant grows with the square root of the scale, which sinks every pile by a
+    # depth in proportion to its size: the piles stay geometrically similar, and this depth stays above the resolution
+    # of the coordinates of the largest ones, which stand the farthest from the origin. The boxes are built
+    # axis-aligned, so their bounding boxes give the size each environment simulates.
     sol_params = gu.default_solver_params()
-    sol_params[2:4] = CONTACT_IMPEDANCE
-    piles_rest_depth, piles_boxes_size = [], []
+    piles_rest_depth, piles_boxes_size, piles_boxes_mass = [], [], []
     for scale, pile_pos, base, boxes in piles:
         sol_params[0] = CONSTRAINT_TIMECONST * np.sqrt(scale / SCALES[0])
+        sol_params[2:4] = CONTACT_IMPEDANCE
+        rest_depth = GRAVITY * sol_params[0] ** 2 * (1.0 - CONTACT_IMPEDANCE) / CONTACT_IMPEDANCE
         for entity in (base, *boxes):
             for geom in entity.geoms:
                 geom.set_sol_params(sol_params)
-        piles_rest_depth.append(GRAVITY * sol_params[0] ** 2 * (1.0 - CONTACT_IMPEDANCE) / CONTACT_IMPEDANCE)
+        piles_rest_depth.append(rest_depth)
+        piles_boxes_mass.append(np.stack([tensor_to_array(box.get_mass()) for box in boxes]))
         aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
         piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])
 
@@ -754,7 +757,9 @@ def test_box_stacks_stability(detection, show_viewer, tol):
             scene.reset()
         piles_boxes_pos_rest = []
         piles_boxes_up_axis = []
-        for (scale, pile_pos, base, boxes), rest_depth, boxes_size in zip(piles, piles_rest_depth, piles_boxes_size):
+        for (scale, pile_pos, base, boxes), rest_depth, boxes_size, boxes_mass in zip(
+            piles, piles_rest_depth, piles_boxes_size, piles_boxes_mass
+        ):
             n_boxes = len(boxes)
             # Each box lies on a face no taller than the narrowest side of the face
             is_up_axis = np.arange(3) == BOX_UP_AXES[:, None]
@@ -797,9 +802,14 @@ def test_box_stacks_stability(detection, show_viewer, tol):
             base_half = np.maximum(0.5 * 0.5 * scale * BASE_SIZE[:2] - TILT * (pile_top - pile_pos[2])[:, None], 0.0)
             levels_xy += pile_pos[:2] + np.random.uniform(low=-1.0, high=1.0, size=(N_ENVS, 2)) * base_half - com_xy
 
-            # Lower every box onto the one below until they touch, then by the depth at which they rest. Raised along
-            # the vertical, a pair of boxes separates at the lowest height at which one of their separating axes (the
-            # face normals of either box and the cross products of their edges) separates them.
+            # Lower every box onto the one below until they touch, then by the depth at which its contact rests under
+            # the load it carries. Raised along the vertical, a pair of boxes separates at the lowest height at which
+            # one of their separating axes (the face normals of either box and the cross products of their edges)
+            # separates them.
+            levels_mass = np.take_along_axis(boxes_mass, levels, axis=0)
+            levels_mass_above = np.cumsum(levels_mass[::-1], axis=0)[::-1]
+            levels_mass_inv = 1.0 / levels_mass + np.concatenate((np.zeros((1, N_ENVS)), 1.0 / levels_mass[:-1]))
+            levels_rest_depth = rest_depth * levels_mass_above * levels_mass_inv
             levels_R = np.take_along_axis(gu.quat_to_R(boxes_quat), levels[..., None, None], axis=0)
             levels_z = np.empty((n_boxes, N_ENVS))
             below_R = np.broadcast_to(np.eye(3), (N_ENVS, 3, 3))
@@ -817,7 +827,7 @@ def test_box_stacks_stability(detection, show_viewer, tol):
                 offset = np.concatenate((levels_xy[i_l] - below_pos[:, :2], -below_pos[:, 2:]), axis=-1)
                 axes_height = (axes_support - (axes * offset[:, None]).sum(axis=-1)) / axes[..., 2]
                 levels_z[i_l] = np.where(axes[..., 2] > gs.EPS, axes_height, np.inf).min(axis=-1)
-                levels_z[i_l] -= rest_depth
+                levels_z[i_l] -= levels_rest_depth[i_l]
                 below_R, below_half = levels_R[i_l], levels_half[i_l]
                 below_pos = np.concatenate((levels_xy[i_l], levels_z[i_l, :, None]), axis=-1)
 
@@ -923,7 +933,9 @@ def test_box_stacks_stability(detection, show_viewer, tol):
 
                         # When at most four corners of the patch touch the other face, each of those pressed into it
                         # carries a contact, unless the pruning drops it: the triangle a corner forms with its two
-                        # neighbors then covers less than the pruning tolerance of the patch area.
+                        # neighbors then covers less than the pruning tolerance of the patch area. Detection merges the
+                        # contacts closer than the multi-contact tolerance, which scales with the smaller box of the
+                        # pair, so a contact stands for every corner within this distance.
                         if (patch_depth > -depth_guard).sum() <= 4:
                             patch_prev, patch_next = np.roll(patch, 1, axis=0), np.roll(patch, -1, axis=0)
                             corners_edges = np.stack((patch - patch_prev, patch_next - patch), axis=-2)
@@ -933,7 +945,9 @@ def test_box_stacks_stability(detection, show_viewer, tol):
                             is_pressed = patch_depth > depth_guard
                             corners_pair_dist = np.linalg.norm(patch[:, None] - pair_pos, axis=-1)
                             corners_dist = corners_pair_dist.min(axis=-1, initial=np.inf)
-                            assert (corners_dist[is_pressed & is_kept] < 1e-3 * scale).all()
+                            pair_scale = np.linalg.norm(links_half[[i_lower, i_upper], i_b], axis=-1).min()
+                            corners_tol = scene.rigid_solver.collider._mc_tolerance * pair_scale
+                            assert (corners_dist[is_pressed & is_kept] < corners_tol).all()
 
                         # Otherwise, detection reports only a few points per pair, so their hull only has to span the
                         # pressed part of the patch: its smallest width is compared with that of this part.
