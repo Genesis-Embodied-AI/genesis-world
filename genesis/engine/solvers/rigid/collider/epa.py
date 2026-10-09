@@ -1136,7 +1136,7 @@ def func_safe_epa(
             face_v1 = gjk_state.polytope_verts.mink[i_b, face_iv1]
             face_v2 = gjk_state.polytope_verts.mink[i_b, face_iv2]
             face_v3 = gjk_state.polytope_verts.mink[i_b, face_iv3]
-            proj_o, _ = func_project_origin_to_plane(face_v1, face_v2, face_v3, collider_info)
+            proj_o, proj_flag = func_project_origin_to_plane(face_v1, face_v2, face_v3, collider_info)
             _lambda = func_triangle_affine_coords(proj_o, face_v1, face_v2, face_v3)
             i_e = 1
             lambda_min = _lambda[0]
@@ -1145,9 +1145,11 @@ def func_safe_epa(
             if _lambda[2] < lambda_min:
                 i_e, lambda_min = 0, _lambda[2]
             is_walking = False
-            if lambda_min < 0.0:
+            # A face onto whose plane the origin cannot be projected gives no coordinates to walk by, and only the faces
+            # of the map passed the bounds of the depth
+            if proj_flag == RETURN_CODE.SUCCESS and lambda_min < 0.0:
                 i_f_adj = gjk_state.polytope_faces.adj_idx[i_b, nearest_i_f][i_e]
-                if gjk_state.polytope_faces.map_idx[i_b, i_f_adj] != -2:
+                if gjk_state.polytope_faces.map_idx[i_b, i_f_adj] >= 0:
                     normal_adj = gjk_state.polytope_faces.normal[i_b, i_f_adj]
                     normal_gap = normal_adj - gjk_state.polytope_faces.normal[i_b, nearest_i_f]
                     if normal_gap.norm() <= collider_info.gjk.polytope_max_rel_reprojection_error[None]:
