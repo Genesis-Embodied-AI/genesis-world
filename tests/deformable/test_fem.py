@@ -168,11 +168,12 @@ def test_reject_defective_fem_mesh_with_actionable_error(tmp_path, show_viewer):
     trimesh.util.concatenate([box_a, box_b]).export(mesh_path)
 
     scene = gs.Scene(show_viewer=show_viewer)
-    with pytest.raises(gs.GenesisException, match="Tetrahedralization failed for mesh .*repair the mesh"):
+    with pytest.raises(gs.GenesisException, match="Tetrahedralization failed for mesh .*repair the mesh") as excinfo:
         scene.add_entity(
             morph=gs.morphs.Mesh(file=str(mesh_path)),
             material=gs.materials.FEM.Elastic(),
         )
+    assert str(mesh_path) in str(excinfo.value)
 
 
 @pytest.mark.required
