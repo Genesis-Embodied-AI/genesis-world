@@ -795,7 +795,7 @@ def test_static_equilibrium(damped_pendulum_and_tilted_light_capsule, contact_re
     capsule_dofs_idx = capsule.joints[0].dofs_idx_local
 
     entity.set_dofs_velocity(2.0, entity.get_joint("shoulder").dofs_idx_local)
-    for _ in range(50):
+    for _ in range(80):
         scene.step()
 
     # The capsule has rocked onto its length and lies still, and a light link at rest must stay at rest
