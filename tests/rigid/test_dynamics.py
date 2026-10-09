@@ -3,9 +3,11 @@ import math
 import numpy as np
 import pytest
 import torch
+
 from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
@@ -1070,23 +1072,19 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
 @pytest.mark.parametrize("precision", ["32", "64"])
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_cholesky_tiling(monkeypatch, tol):
-    import genesis.engine.solvers
-
-    rigid_solver_build_orig = genesis.engine.solvers.RigidSolver.build
+    rigid_sim_static_config_init_orig = array_class.RigidSimStaticConfig.__init__
 
     values = []
     for enable_tiled_cholesky in (True, False):
+        # Static configs are frozen and shared by every scene holding the same values, so the flags are forced where
+        # the solver constructs its config rather than written on the built solver.
+        def rigid_sim_static_config_init(self, **kwargs):
+            kwargs["enable_tiled_cholesky_mass_matrix"] = enable_tiled_cholesky
+            if not enable_tiled_cholesky:
+                kwargs["enable_fused_smooth_acc_solve"] = False
+            rigid_sim_static_config_init_orig(self, **kwargs)
 
-        def rigid_solver_build(self):
-            nonlocal enable_tiled_cholesky
-
-            rigid_solver_build_orig(self)
-            self.rigid_config.enable_tiled_cholesky_mass_matrix = enable_tiled_cholesky
-            self.rigid_config.enable_fused_smooth_acc_solve &= enable_tiled_cholesky
-            if enable_tiled_cholesky:
-                self.rigid_config.tiled_n_dofs_per_entity = 32
-
-        monkeypatch.setattr("genesis.engine.solvers.RigidSolver.build", rigid_solver_build)
+        monkeypatch.setattr(array_class.RigidSimStaticConfig, "__init__", rigid_sim_static_config_init)
 
         scene = gs.Scene(
             rigid_options=gs.options.RigidOptions(

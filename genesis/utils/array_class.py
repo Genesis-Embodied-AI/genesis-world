@@ -13,7 +13,7 @@ import quadrants as qd
 from quadrants.lang import impl
 
 import genesis as gs
-from genesis.utils.misc import qd_to_torch
+from genesis.utils.misc import qd_to_torch, register_cache_clear
 
 
 def _tensor_backend():
@@ -36,9 +36,21 @@ def maybe_shape(shape, is_on):
     return shape if is_on else ()
 
 
+_STATIC_CONFIGS: dict[tuple, Any] = {}
+register_cache_clear(_STATIC_CONFIGS.clear)
+
+
 @dataclass_transform(eq_default=True, kw_only_default=False, frozen_default=True)
 class AutoInitMeta(type):
-    """Metaclass that generates __init__ from annotations, like a mutable dataclass."""
+    """Metaclass generating __init__ from annotations like a frozen dataclass, sharing one instance per set of values.
+
+    Kernels specialize on a static config by reference, so sharing lets a rebuilt scene reuse its compiled kernels. The
+    instances live for the process, since collecting one would drop the kernels specialized on it.
+    """
+
+    def __call__(cls, *args, **kwargs):
+        config = super().__call__(*args, **kwargs)
+        return _STATIC_CONFIGS.setdefault((cls, tuple(sorted(vars(config).items()))), config)
 
     def __new__(cls, name, bases, namespace):
         names = tuple(namespace["__annotations__"].keys())
@@ -69,9 +81,13 @@ class AutoInitMeta(type):
 
             # Set attributes
             for key, value in assigned.items():
-                setattr(self, key, value)
+                object.__setattr__(self, key, value)
+
+        def __setattr__(self, key, value):
+            raise AttributeError(f"{name} is shared by every scene holding the same values and cannot be modified")
 
         namespace["__init__"] = __init__
+        namespace["__setattr__"] = __setattr__
 
         return super().__new__(cls, name, bases, namespace)
 

@@ -587,14 +587,15 @@ def texcoord_1_accessor_zero_glb(asset_tmp_path):
 @pytest.fixture(scope="session")
 def material_variants_glb(asset_tmp_path):
     """Path to a GLB with materials on distinct base/emissive texCoord sets and on every alpha mode, and a triangle
-    carrying all of them but one.
+    carrying all of them but two.
 
     The first materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base
     color with an emissive atlas on texCoord 1, and a KHR_materials_unlit material whose red base atlas stands in for
     the unlit imagery. The red base atlas is index 0. Then come a masked, a masked with an alpha factor of 0.6, a
-    blended and an opaque material, on an RGBA atlas whose alpha is a ramp. The triangle holds every material but the
-    unlit one as primitives, with the same texture coordinates stored as float in set 0 and as normalized
-    UNSIGNED_SHORT, an encoding core glTF allows, in set 1."""
+    blended and an opaque material, on an RGBA atlas whose alpha is a ramp, and last a
+    KHR_materials_pbrSpecularGlossiness material with the red atlas as diffuse. The triangle holds every material but
+    the unlit and the specular-glossiness ones as primitives, with the same texture coordinates stored as float in set
+    0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows, in set 1."""
     images = []
     for color in (np.array([220, 30, 30], np.uint8), np.array([30, 220, 30], np.uint8)):
         buffer = io.BytesIO()
@@ -680,6 +681,9 @@ def material_variants_glb(asset_tmp_path):
                     ("blended", "BLEND", 0.5, 1.0),
                     ("opaque", "OPAQUE", 0.5, 1.0),
                 )
+            ),
+            pygltflib.Material(
+                extensions={"KHR_materials_pbrSpecularGlossiness": {"diffuseTexture": {"index": 0, "texCoord": 0}}},
             ),
         ],
         textures=[pygltflib.Texture(source=i) for i in range(3)],

@@ -8,10 +8,17 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.mesh import get_hashkey
+from genesis.utils.misc import SizeCappedCache, qd_to_numpy
 
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+
+
+# Per geom, the index of its furthest vertex along each sampled direction, reused by any geom with the same vertices.
+# A geom takes about 130 KiB, so 256 MiB keeps about 2000 distinct geoms before dropping the least recently used.
+_SUPPORT_VID_CACHE = SizeCappedCache(max_bytes=256 * 1024 * 1024)
 
 
 class SupportField:
@@ -68,9 +75,9 @@ class SupportField:
         support_cell_start = []
         n_support_cells = 0
         if self.solver.n_geoms > 0:
-            init_pos = self.solver.dyn_info.verts.init_pos.to_numpy()
-            geoms_vert_start = self.solver.dyn_info.geoms.vert_start.to_numpy()
-            geoms_vert_end = self.solver.dyn_info.geoms.vert_end.to_numpy()
+            init_pos = qd_to_numpy(self.solver.dyn_info.verts.init_pos)
+            geoms_vert_start = qd_to_numpy(self.solver.dyn_info.geoms.vert_start)
+            geoms_vert_end = qd_to_numpy(self.solver.dyn_info.geoms.vert_end)
             for i_g, geom in enumerate(self.solver.geoms):
                 support_cell_start.append(n_support_cells)
 
@@ -81,13 +88,16 @@ class SupportField:
 
                 this_pos = init_pos[geoms_vert_start[i_g] : geoms_vert_end[i_g]]
 
-                window_size = int(5e8 // this_pos.shape[0])
-                max_indices = np.empty(num_v, dtype=np.intp)
-
-                for i in range(0, num_v, window_size):
-                    end = min(i + window_size, num_v)
-                    dot_chunk = v1[i:end] @ this_pos.T
-                    max_indices[i:end] = np.argmax(dot_chunk, axis=1)
+                key = get_hashkey(this_pos, self._support_res)
+                max_indices = _SUPPORT_VID_CACHE.get(key)
+                if max_indices is None:
+                    window_size = int(5e8 // this_pos.shape[0])
+                    max_indices = np.empty(num_v, dtype=gs.np_int)
+                    for i in range(0, num_v, window_size):
+                        end = min(i + window_size, num_v)
+                        dot_chunk = v1[i:end] @ this_pos.T
+                        max_indices[i:end] = np.argmax(dot_chunk, axis=1)
+                    _SUPPORT_VID_CACHE.put(key, max_indices, max_indices.nbytes)
 
                 support = this_pos[max_indices]
 
