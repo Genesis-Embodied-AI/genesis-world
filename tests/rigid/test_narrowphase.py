@@ -31,15 +31,22 @@ resetting errno explicit in this test.
 import copy
 import importlib.util
 import xml.etree.ElementTree as ET
+from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, cast
 
 import numpy as np
 import pytest
 
+import trimesh
+from scipy.spatial import ConvexHull
+
 import genesis as gs
-from ..utils.assertions import assert_allclose
+import genesis.utils.geom as gu
+from genesis.utils.misc import tensor_to_array
+
 from ..conftest import TOL_SINGLE
+from ..utils.assertions import assert_allclose
 
 if TYPE_CHECKING:
     from genesis.engine.entities import RigidEntity
@@ -63,7 +70,9 @@ GJK_NORMAL_TOL = 1e-2
 
 
 def _check_expected_values(contacts, description, exp_pen, exp_normal, method_name, pen_tol, normal_tol):
-    """Check that contacts match the expected penetration and/or normal, when provided.
+    """Check that the deepest contact matches the expected penetration and/or normal, when provided.
+
+    The other contacts of the pair are found on its perturbed copies, so that they penetrate no deeper.
 
     Parameters
     ----------
@@ -75,14 +84,15 @@ def _check_expected_values(contacts, description, exp_pen, exp_normal, method_na
     if not contacts or len(contacts["geom_a"]) == 0:
         return
 
+    i_deepest = np.argmax(contacts["penetration"])
     if exp_pen is not None:
-        pen = contacts["penetration"][0]
+        pen = contacts["penetration"][i_deepest]
         assert abs(pen - exp_pen) < pen_tol, (
             f"[{method_name}] {description}: penetration {pen:.6f} != expected {exp_pen:.6f} (tol={pen_tol})"
         )
 
     if exp_normal is not None:
-        normal = np.array(contacts["normal"][0])
+        normal = np.array(contacts["normal"][i_deepest])
         exp_n = np.array(exp_normal, dtype=gs.np_float)
         exp_n_len = np.linalg.norm(exp_n)
         assert gs.EPS is not None
@@ -225,7 +235,7 @@ def insert_errno_before_call(lines, function_call_pattern, errno_value, comment,
     return lines
 
 
-def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, comment):
+def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, comment, index_var="i_b"):
     """Insert errno marker before ALL occurrences of a function call.
 
     Finds all call sites first, then inserts markers from bottom to top to preserve indices.
@@ -236,10 +246,15 @@ def insert_errno_before_all_calls(lines, function_call_pattern, errno_value, com
             idx = line.find(function_call_pattern)
             if idx != -1:
                 if idx == 0 or not (line[idx - 1].isalnum() or line[idx - 1] == "_"):
+                    stripped = line.strip()
+                    if stripped.startswith("def ") or stripped.startswith("@"):
+                        continue
                     call_indices.append(i)
+    if not call_indices:
+        raise ValueError(f"Could not find function call: {function_call_pattern}")
     for call_line_idx in reversed(call_indices):
         indent_size = len(lines[call_line_idx]) - len(lines[call_line_idx].lstrip())
-        errno_line = f"{' ' * indent_size}errno[i_b] |= {errno_value}  # {comment}"
+        errno_line = f"{' ' * indent_size}errno[{index_var}] |= {errno_value}  # {comment}"
         lines.insert(call_line_idx, errno_line)
     return lines
 
@@ -290,9 +305,9 @@ def create_modified_narrowphase_file(tmp_path: Path):
         lines, "gjk.func_gjk_contact(", ERRNO_CALLED_GJK_K2, "MODIFIED: GJK called for collision detection"
     )
 
-    # Split path: mark the multicontact dispatch call (in this forced-GJK scene the multicontact pass always resolves
+    # Split path: mark every multicontact dispatch call (in this forced-GJK scene the multicontact pass always resolves
     # contacts with GJK), indexing errno by the env of the queue entry it dispatches.
-    lines = insert_errno_before_call(
+    lines = insert_errno_before_all_calls(
         lines,
         "_func_multicontact_detect(",
         ERRNO_CALLED_GJK_K2,
@@ -508,6 +523,16 @@ def test_capsule_capsule_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewe
             assert has_collision_gjk == should_collide
 
             _check_expected_values(contacts_gjk, description, exp_pen, exp_normal, "GJK", GJK_PEN_TOL, GJK_NORMAL_TOL)
+
+            # Every contact lies within both capsules, no farther than the radius from their segments
+            for pos, euler in ((pos0, euler0), (pos1, euler1)):
+                axis = gs.utils.geom.quat_to_R(
+                    gs.utils.geom.xyz_to_quat(xyz=np.array(euler, dtype=gs.np_float), degrees=True)
+                )[:, 2]
+                offsets = contacts_gjk["position"] - pos
+                offsets_axial = np.clip(offsets @ axis, -half_length, half_length)
+                dists = np.linalg.norm(offsets - offsets_axial[:, None] * axis, axis=-1)
+                assert (dists <= radius + GJK_PEN_TOL).all()
 
             # If both detected a collision, compare the full contact manifold. Each analytical contact is matched to
             # its nearest GJK contact by position (order-independent), then position, penetration and normal are
@@ -1048,3 +1073,222 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
         order = np.lexsort((positions[:, 1].round(4), positions[:, 0].round(4)))
         assert_allclose(positions[order], expected, atol=1e-5)
         assert_allclose(penetrations, 1e-3, atol=1e-5)
+
+
+@pytest.mark.slow  # ~150s
+@pytest.mark.required
+@pytest.mark.xfail(reason="Multi-contact detection misses some corners of the contact patch.")
+@pytest.mark.parametrize("gjk_collision", [True, False])
+def test_multi_contact_overlap_corners(gjk_collision, show_viewer, tol):
+    # A box rests on a wider one at a random yaw and offset in each environment, so that the overlap of their faces
+    # takes every shape a pair of rectangles can clip into: slivers, short edges, near-collinear corners, octagons. The
+    # contacts of a pair lie within this overlap at its exact depth, and on each of its corners when it has at most 4.
+    N_ENVS = 128
+    PENETRATION = 1e-4
+    PRUNING_TOLERANCE = 0.02
+    BASE_SIZE = (1.0, 0.6, 0.1)
+    BOX_SIZE = (0.5, 0.4, 0.1)
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=gjk_collision,
+            contact_pruning_tolerance=PRUNING_TOLERANCE,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -1.5, 1.5),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Box(
+            size=BASE_SIZE,
+            pos=(0.0, 0.0, 0.5 * BASE_SIZE[2]),
+            fixed=True,
+        ),
+    )
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=BOX_SIZE,
+        ),
+    )
+    scene.build(n_envs=N_ENVS)
+
+    yaw = np.random.uniform(0.0, 2.0 * np.pi, N_ENVS)
+    is_aligned = np.random.random(N_ENVS) < 0.3
+    yaw_aligned = 0.5 * np.pi * np.random.randint(4, size=is_aligned.sum())
+    yaw[is_aligned] = yaw_aligned + np.random.uniform(-1e-3, 1e-3, is_aligned.sum())
+    offset = np.random.uniform(-0.6, 0.6, (N_ENVS, 2))
+    box_z = BASE_SIZE[2] + 0.5 * BOX_SIZE[2] - PENETRATION
+    box.set_pos(np.concatenate((offset, np.full((N_ENVS, 1), box_z)), axis=-1))
+    box.set_quat(np.stack((np.cos(0.5 * yaw), np.zeros(N_ENVS), np.zeros(N_ENVS), np.sin(0.5 * yaw)), axis=-1))
+    scene.step()
+    contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+
+    corners_sign = np.array(((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)))
+    for i_b in range(N_ENVS):
+        # The overlap clips the top face of the base by the half-planes of the bottom face of the box
+        rot = np.array(((np.cos(yaw[i_b]), -np.sin(yaw[i_b])), (np.sin(yaw[i_b]), np.cos(yaw[i_b]))))
+        clip = offset[i_b] + (0.5 * corners_sign * BOX_SIZE[:2]) @ rot.T
+        clip_edges = np.roll(clip, -1, axis=0) - clip
+        half_normals = np.stack((-clip_edges[:, 1], clip_edges[:, 0]), axis=-1)
+        half_normals *= np.sign(((clip.mean(axis=0) - clip) * half_normals).sum(axis=-1))[:, None]
+        overlap = 0.5 * corners_sign * BASE_SIZE[:2]
+        for half_normal, half_offset in zip(half_normals, -(half_normals * clip).sum(axis=-1)):
+            overlap_side = half_offset + overlap @ half_normal
+            overlap_clipped = []
+            for point, point_next, side, side_next in zip(
+                overlap, np.roll(overlap, -1, axis=0), overlap_side, np.roll(overlap_side, -1)
+            ):
+                if side >= 0.0:
+                    overlap_clipped.append(point)
+                if side * side_next < 0.0:
+                    overlap_clipped.append(point + (point_next - point) * side / (side - side_next))
+            overlap = np.array(overlap_clipped).reshape((-1, 2))
+        overlap = overlap[np.linalg.norm(overlap - np.roll(overlap, 1, axis=0), axis=-1) > gs.EPS]
+
+        # Faces overlapping along a point or a segment at most have no contact
+        contacts_pos = contacts["position"][i_b][:, :2]
+        if len(overlap) < 3:
+            assert len(contacts_pos) == 0
+            continue
+
+        # Every contact lies within the overlap, at the depth of the box
+        overlap_edges = np.roll(overlap, -1, axis=0) - overlap
+        overlap_normals = np.stack((-overlap_edges[:, 1], overlap_edges[:, 0]), axis=-1)
+        overlap_normals *= np.sign(((overlap.mean(axis=0) - overlap) * overlap_normals).sum(axis=-1))[:, None]
+        overlap_normals /= np.linalg.norm(overlap_normals, axis=-1, keepdims=True)
+        assert ((contacts_pos[:, None] - overlap[None]) * overlap_normals[None]).sum(axis=-1).min(initial=0.0) > -tol
+        assert_allclose(contacts["penetration"][i_b], PENETRATION, tol=tol)
+
+        # An overlap of at most 4 corners has a contact on each of them, unless the pruning drops it: the triangle a
+        # corner forms with its two neighbors then covers less than the pruning tolerance of the overlap area.
+        if len(overlap) <= 4:
+            overlap_prev, overlap_next = np.roll(overlap, 1, axis=0), np.roll(overlap, -1, axis=0)
+            corners_edges = np.stack((overlap - overlap_prev, overlap_next - overlap), axis=-2)
+            corners_area = 0.5 * np.abs(np.linalg.det(corners_edges))
+            overlap_area = 0.5 * np.abs(np.linalg.det(np.stack((overlap, overlap_next), axis=-2)).sum())
+            is_kept = corners_area > PRUNING_TOLERANCE * overlap_area
+            corners_dist = np.linalg.norm(overlap[:, None] - contacts_pos[None], axis=-1)
+            assert (corners_dist.min(axis=1, initial=np.inf)[is_kept] < tol).all()
+
+
+@pytest.mark.required
+@pytest.mark.xfail(reason="Multi-contact detection misses some corners of the contact patch.")
+def test_maximum_contact_area(show_viewer, tol):
+    # A pillar of three, four or six sides rests on a wider pillar of seven, both of random convex sections, at evenly
+    # spread yaws and a random tilt within the reach of the multi-contact perturbation, each pair at its own scale. The
+    # overlap of their faces is the bottom face of the narrow pillar. GJK keeps the first contact exact, so that only the
+    # multi-contact perturbation is on trial.
+    N_YAWS = 16
+    N_TRIALS = 4
+    TOPS_N_SIDES = (3, 4, 6, 3, 4, 6, 3, 4, 6)
+    SCALES = np.geomspace(0.05, 5.0, len(TOPS_N_SIDES))
+    TILT_RATIO = 0.5
+    PENETRATION = 1e-4
+    BASE_RADIUS = 0.5
+    TOP_RADIUS = 0.15
+    PILLAR_HEIGHT = 0.1
+    # Multi-contact detection guarantees every corner of a patch of at most four corners whose interior angle does not
+    # exceed this bound. A larger patch gets five contacts spanning close to the largest pentagon it contains.
+    CORNER_ANGLE_MAX = 0.75 * np.pi
+    AREA_RATIO_MIN = 0.75
+
+    # Each convex section takes its vertices on a circle stretched along one axis by up to 3, at jittered angles. The
+    # jitter bounds the gaps between them, so that the wide section always contains a disk around its center. The narrow
+    # sections of at most four sides are drawn again until every interior angle complies with the guarantee.
+    bases_mesh, tops_mesh, tops_corners = [], [], []
+    for scale, n_sides_top in zip(SCALES, TOPS_N_SIDES):
+        for n_sides, radius, aspect_max, meshes in (
+            (7, BASE_RADIUS, 1.0, bases_mesh),
+            (n_sides_top, TOP_RADIUS, 3.0, tops_mesh),
+        ):
+            while True:
+                angles = 2.0 * np.pi * (np.arange(n_sides) + np.random.uniform(-0.25, 0.25, n_sides)) / n_sides
+                corners = np.stack((np.random.uniform(1.0, aspect_max) * np.cos(angles), np.sin(angles)), axis=-1)
+                corners *= scale * radius / np.linalg.norm(corners, axis=-1).max()
+                dirs_in = corners - np.roll(corners, 1, axis=0)
+                dirs_out = np.roll(corners, -1, axis=0) - corners
+                corners_turn = np.arccos(
+                    (dirs_in * dirs_out).sum(axis=-1)
+                    / (np.linalg.norm(dirs_in, axis=-1) * np.linalg.norm(dirs_out, axis=-1))
+                )
+                if n_sides > 4 or (np.pi - corners_turn <= CORNER_ANGLE_MAX).all():
+                    break
+            heights = scale * np.repeat((0.0, PILLAR_HEIGHT), n_sides)[:, None]
+            meshes.append(trimesh.Trimesh(np.concatenate((np.tile(corners, (2, 1)), heights), axis=-1)).convex_hull)
+        tops_corners.append(corners)
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -60.0, 60.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=[gs.morphs.MeshSet(files=(mesh,), fixed=True) for mesh in bases_mesh],
+        vis_mode="collision",
+    )
+    top = scene.add_entity(
+        morph=[gs.morphs.MeshSet(files=(mesh,)) for mesh in tops_mesh],
+        visualize_contact=True,
+        vis_mode="collision",
+    )
+    scene.build(n_envs=len(SCALES) * N_YAWS, env_spacing=(6.0, 6.0))
+
+    # Environments come in one block per variant, sweeping the yaws of the narrow pillar
+    envs_scale = np.repeat(SCALES, N_YAWS)
+    yaws = np.tile(2.0 * np.pi * np.arange(N_YAWS) / N_YAWS, len(SCALES))
+    quats_yaw = gu.rotvec_to_quat(yaws[:, None] * np.array((0.0, 0.0, 1.0)))
+    envs_corners = [np.pad(tops_corners[i_b // N_YAWS], ((0, 0), (0, 1))) for i_b in range(scene.n_envs)]
+    tilt_max = TILT_RATIO * scene.rigid_solver.collider._mc_perturbation
+    for _ in range(N_TRIALS):
+        # The narrow pillar lies inside the disk that the wide section contains, anywhere within it, with its deepest
+        # corner pressed into the wide one by the penetration
+        tilts_angle = np.random.uniform(0.0, 2.0 * np.pi, scene.n_envs)
+        tilts = np.random.uniform(0.0, tilt_max, scene.n_envs)[:, None] * np.stack(
+            (np.cos(tilts_angle), np.sin(tilts_angle), np.zeros(scene.n_envs)), axis=-1
+        )
+        quats = gu.transform_quat_by_quat(quats_yaw, gu.rotvec_to_quat(tilts))
+        envs_R = gu.quat_to_R(quats)
+        envs_corners_z = np.array([(corners @ R.T)[:, 2].max() for corners, R in zip(envs_corners, envs_R)])
+        offsets = envs_scale[:, None] * np.random.uniform(-TOP_RADIUS, TOP_RADIUS, (scene.n_envs, 2))
+        tops_z = envs_scale * (PILLAR_HEIGHT - PENETRATION) - envs_corners_z
+        top.set_pos(np.concatenate((offsets, tops_z[:, None]), axis=-1))
+        top.set_quat(quats)
+        if show_viewer:
+            scene.visualizer.update()
+        scene.rigid_solver.collider.clear()
+        scene.rigid_solver.collider.detection()
+        contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+
+        tops_pos = tensor_to_array(top.get_pos())
+        for i_b in range(scene.n_envs):
+            corners = tops_pos[i_b] + envs_corners[i_b] @ envs_R[i_b].T
+            contacts_pos = contacts["position"][i_b]
+            depth_max = envs_scale[i_b] * PILLAR_HEIGHT - corners[:, 2].min()
+            assert ((contacts["penetration"][i_b] > 0.0) & (contacts["penetration"][i_b] < depth_max + tol)).all()
+            # Every contact lies within the patch. A contact sits midway between its witnesses, which lie its penetration
+            # apart along a normal that may follow the tilted face, so it leaves the patch by half the penetration times
+            # the tilt at most.
+            edges = np.roll(corners[:, :2], -1, axis=0) - corners[:, :2]
+            edges_normal = np.stack((edges[:, 1], -edges[:, 0]), axis=-1) / np.linalg.norm(edges, axis=-1)[:, None]
+            edges_normal *= np.sign(((corners[:, :2] - corners[:, :2].mean(axis=0)) * edges_normal).sum(axis=-1))[
+                :, None
+            ]
+            contacts_side = ((contacts_pos[:, None, :2] - corners[None, :, :2]) * edges_normal[None]).sum(axis=-1)
+            contacts_side_max = 0.5 * contacts["penetration"][i_b] * np.linalg.norm(tilts[i_b]) + tol * envs_scale[i_b]
+            assert (contacts_side < contacts_side_max[:, None]).all()
+            if len(corners) <= 4:
+                corners_dist = np.linalg.norm(corners[:, None, :2] - contacts_pos[None, :, :2], axis=-1).min(axis=1)
+                assert (corners_dist < tol * envs_scale[i_b]).all()
+            else:
+                area_max = max(
+                    ConvexHull(corners[pentagon, :2]).volume
+                    for pentagon in map(list, combinations(range(len(corners)), 5))
+                )
+                assert ConvexHull(contacts_pos[:, :2]).volume > AREA_RATIO_MIN * area_max

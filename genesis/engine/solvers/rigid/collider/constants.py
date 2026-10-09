@@ -60,6 +60,19 @@ class PORTAL_STATUS(IntEnum):
     EXACT = 4
 
 
+class CONTACT_ORDER(IntEnum):
+    """
+    Order in which the contact pruning sorts the contacts of an environment or of one of its link-pair buckets.
+    """
+
+    # By link pair, with the link indices of each contact, to group them into buckets
+    LINK_PAIR = 0
+    # By the intrinsic data of each contact: geom pair, frame-local position, then penetration
+    INTRINSIC = 1
+    # By the projection of each contact on the plane of its bucket, lexicographically
+    POSITION = 2
+
+
 class MULTICONTACT_SLOT(IntEnum):
     """
     What a candidate slot of the split multi-contact pass holds, which decides how the gather accepts it.
