@@ -25,7 +25,7 @@ from .contact import (
     func_rotate_frame,
     func_set_contact,
 )
-from .utils import func_point_in_geom_aabb
+from .utils import func_closest_points_on_segments, func_point_in_geom_aabb
 
 
 @qd.func
@@ -1569,22 +1569,24 @@ def func_recompute_perturbed_contact(
     Both geoms of a pair are convex, so that all its contacts share the separating direction 'normal_0' of contact 0,
     which the projected contact takes. The perturbed detection returns a witness point on each geom, which the
     perturbation 'qrot' of its own geom (geom A by 'qrot', geom B by its inverse) un-rotates into an exact material
-    point of the unperturbed geom. The depth is measured along 'normal_0' at the witness of one geom, below which that
-    geom holds no point. A convex geom holds every triangle spanned by its material points, so that the support points
-    of the other geom that the detection found, un-rotated alike, bound its surface from beyond at the witness when
-    their triangle covers it along 'normal_0'. A plane geom A bounds it everywhere. The depth is then a lower bound,
-    exact between flat faces. Otherwise, as for detections that leave no support points, the depth is the separation of
-    both witnesses along 'normal_0', which the opposite un-rotations of both geoms shift apart along the contact plane
-    by an amount of the second order in the perturbation angle.
+    point of the unperturbed geom. The depth is measured along 'normal_0' at the witness standing on the feature of the
+    contact. Two edges touch where they cross along 'normal_0', which gives the exact depth. An edge lying on the face
+    of the other geom touches it at the end that the perturbation deepens, the one it looks for. A convex geom holds
+    every triangle spanned by its material points, so that the support points of the other geom that the detection
+    found, un-rotated alike, bound its surface from beyond at the witness when their triangle covers it along
+    'normal_0'. A plane geom A bounds it everywhere. The depth is then a lower bound, exact between flat faces.
+    Otherwise, the depth is read off the tangent plane of the other geom at its witness, normal to the perturbed normal
+    un-rotated alike: exact against a flat face, accurate to the second order in the distance between both witnesses
+    against a smooth surface, and an over-estimate against a vertex.
 
     A projected contact of negative depth lies past the edge of the patch. It moves towards contact 0 'contact_pos_0'
     of depth 'penetration_0' to where the depth interpolated linearly between both vanishes, and is returned at zero
     depth. Along the contact plane, the depth is the height of the surface of a convex geom minus that of another one,
-    which is concave, and both depths bound it from below, so that it is non-negative at this point, inside the patch
+    which is concave, so that it is non-negative at this point where both depths bound it from below, inside the patch
     or on its edge, and exactly zero between flat faces. This takes a difference of depth between both points beyond
     the acceptance threshold 'tolerance', since the error of the point is that of the depths divided by it.
 
-    Returns the normal, the depth, the position, and whether a support triangle or a plane bounds the depth.
+    Returns the normal, the depth, the position, and whether the depth is exact or bounded from below.
     """
     EPS = rigid_info.EPS[None]
 
@@ -1599,6 +1601,8 @@ def func_recompute_perturbed_contact(
     depth = normal_0.dot(witness_b - witness_a)
     contact_pos = witness_b - 0.5 * depth * normal_0
     is_bounded = False
+    # Whether the witness of geom B rather than geom A stands on the feature of the contact, where the depth is measured
+    is_anchored_b = False
     if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
         # The plane of geom A passes through its witness of contact 0, with the normal of contact 0
         depth = normal_0.dot(witness_b - contact_pos_0) + 0.5 * penetration_0
@@ -1607,11 +1611,12 @@ def func_recompute_perturbed_contact(
     elif not (
         (dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE)
         or (used_gjk and gjk_state.nearest_face[i_scratch] < 0)
+        or (not used_gjk and mpr_state.portal_status[i_scratch] == PORTAL_STATUS.NONE)
     ):
         # Support points of the detection: the MPR portal (indices 1-3), or the GJK EPA face nearest to the origin. The
-        # analytic capsule-capsule detection runs neither, and a shallow GJK contact builds no polytope.
-        supports_a = qd.Matrix.zero(gs.qd_float, 3, 3)
-        supports_b = qd.Matrix.zero(gs.qd_float, 3, 3)
+        # analytic capsule-capsule detection runs neither, a shallow GJK contact builds no polytope, and the degenerate
+        # paths of MPR leave the portal unwritten.
+        supports = qd.Matrix.zero(gs.qd_float, 6, 3)
         for i_v in qd.static(range(3)):
             support_a = mpr_state.simplex_support.v1[i_v + 1, i_scratch]
             support_b = mpr_state.simplex_support.v2[i_v + 1, i_scratch]
@@ -1623,37 +1628,124 @@ def func_recompute_perturbed_contact(
             support_a = R_inv @ (support_a - contact_pos_0) + contact_pos_0
             support_b = R @ (support_b - contact_pos_0) + contact_pos_0
             for i_3 in qd.static(range(3)):
-                supports_a[i_v, i_3] = support_a[i_3]
-                supports_b[i_v, i_3] = support_b[i_3]
+                supports[i_v, i_3] = support_a[i_3]
+                supports[3 + i_v, i_3] = support_b[i_3]
 
-        # The support triangle of each geom bounds its surface at the witness of the other geom, when it covers it
-        # along the normal of contact 0: geom B from above at the witness of geom A, geom A from below at that of geom
-        # B. A triangle that a vertex or an edge reduces to a point or a segment covers nothing. Both bounds being lower
-        # bounds of the depth at their own witness, the deeper one is kept.
+        # The support points of a geom that line up along the normal of contact 0 span a vertex or an edge of it, rows 3
+        # * i_g of the triangle of support points of geom i_g, whose two farthest points are the ends of the edge
+        is_degenerate = qd.Vector([0, 0], dt=gs.qd_int)
+        is_edge = qd.Vector([0, 0], dt=gs.qd_int)
+        ends = qd.Matrix.zero(gs.qd_float, 4, 3)
         for i_g in qd.static(range(2)):
-            v_1 = qd.Vector([supports_b[0, 0], supports_b[0, 1], supports_b[0, 2]], dt=gs.qd_float)
-            v_2 = qd.Vector([supports_b[1, 0], supports_b[1, 1], supports_b[1, 2]], dt=gs.qd_float)
-            v_3 = qd.Vector([supports_b[2, 0], supports_b[2, 1], supports_b[2, 2]], dt=gs.qd_float)
-            witness = witness_a
-            if qd.static(i_g == 1):
-                v_1 = qd.Vector([supports_a[0, 0], supports_a[0, 1], supports_a[0, 2]], dt=gs.qd_float)
-                v_2 = qd.Vector([supports_a[1, 0], supports_a[1, 1], supports_a[1, 2]], dt=gs.qd_float)
-                v_3 = qd.Vector([supports_a[2, 0], supports_a[2, 1], supports_a[2, 2]], dt=gs.qd_float)
-                witness = witness_b
-            edge_1, edge_2, offset = v_2 - v_1, v_3 - v_1, witness - v_1
-            area = edge_1.cross(edge_2).dot(normal_0)
-            if qd.abs(area) > EPS * edge_1.norm() * edge_2.norm():
-                lambda_2 = offset.cross(edge_2).dot(normal_0) / area
-                lambda_3 = edge_1.cross(offset).dot(normal_0) / area
-                if lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0:
-                    height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
-                    bound = height - normal_0.dot(witness_a)
-                    if qd.static(i_g == 1):
-                        bound = normal_0.dot(witness_b) - height
-                    if not is_bounded or bound > depth:
-                        depth = bound
-                        contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
-                        is_bounded = True
+            v_1 = qd.Vector([supports[3 * i_g, 0], supports[3 * i_g, 1], supports[3 * i_g, 2]], dt=gs.qd_float)
+            v_2 = qd.Vector(
+                [supports[3 * i_g + 1, 0], supports[3 * i_g + 1, 1], supports[3 * i_g + 1, 2]], dt=gs.qd_float
+            )
+            v_3 = qd.Vector(
+                [supports[3 * i_g + 2, 0], supports[3 * i_g + 2, 1], supports[3 * i_g + 2, 2]], dt=gs.qd_float
+            )
+            edge_1, edge_2 = v_2 - v_1, v_3 - v_1
+            if qd.abs(edge_1.cross(edge_2).dot(normal_0)) <= EPS * edge_1.norm() * edge_2.norm():
+                is_degenerate[i_g] = 1
+                end_0, end_1 = v_1, v_2
+                if edge_2.norm_sqr() > (end_1 - end_0).norm_sqr():
+                    end_1 = v_3
+                if (v_3 - v_2).norm_sqr() > (end_1 - end_0).norm_sqr():
+                    end_0, end_1 = v_2, v_3
+                if (end_1 - end_0).norm_sqr() > EPS * geom_pair_scale**2:
+                    is_edge[i_g] = 1
+                    for i_3 in qd.static(range(3)):
+                        ends[2 * i_g, i_3] = end_0[i_3]
+                        ends[2 * i_g + 1, i_3] = end_1[i_3]
+        is_anchored_b = is_degenerate[1] == 1 and is_degenerate[0] == 0
+
+        if is_edge[0] == 1 and is_edge[1] == 1:
+            # Two edges touch where they cross seen along the normal of contact 0, both closest points being material
+            # points on one line along it, which makes the depth exact
+            edge_a_0 = qd.Vector([ends[0, 0], ends[0, 1], ends[0, 2]], dt=gs.qd_float)
+            edge_a_1 = qd.Vector([ends[1, 0], ends[1, 1], ends[1, 2]], dt=gs.qd_float)
+            edge_b_0 = qd.Vector([ends[2, 0], ends[2, 1], ends[2, 2]], dt=gs.qd_float)
+            edge_b_1 = qd.Vector([ends[3, 0], ends[3, 1], ends[3, 2]], dt=gs.qd_float)
+            proj_a_0 = edge_a_0 - edge_a_0.dot(normal_0) * normal_0
+            proj_a_1 = edge_a_1 - edge_a_1.dot(normal_0) * normal_0
+            proj_b_0 = edge_b_0 - edge_b_0.dot(normal_0) * normal_0
+            proj_b_1 = edge_b_1 - edge_b_1.dot(normal_0) * normal_0
+            len_sqr_a = (proj_a_1 - proj_a_0).norm_sqr()
+            len_sqr_b = (proj_b_1 - proj_b_0).norm_sqr()
+            if len_sqr_a > EPS * geom_pair_scale**2 and len_sqr_b > EPS * geom_pair_scale**2:
+                closest_a, closest_b = func_closest_points_on_segments(proj_a_0, proj_a_1, proj_b_0, proj_b_1, EPS)
+                if (closest_b - closest_a).norm_sqr() <= EPS * geom_pair_scale**2:
+                    ratio_a = (closest_a - proj_a_0).dot(proj_a_1 - proj_a_0) / len_sqr_a
+                    ratio_b = (closest_b - proj_b_0).dot(proj_b_1 - proj_b_0) / len_sqr_b
+                    witness_a = edge_a_0 + ratio_a * (edge_a_1 - edge_a_0)
+                    witness_b = edge_b_0 + ratio_b * (edge_b_1 - edge_b_0)
+                    depth = normal_0.dot(witness_b - witness_a)
+                    contact_pos = 0.5 * (witness_a + witness_b)
+                    is_bounded = True
+        else:
+            # Along an edge lying on the face of the other geom, the depth varies linearly, so that the point the
+            # detection lands on along it is arbitrary up to rounding when the tilt hardly deepens one end more than
+            # the other. The perturbation looks for the end of the patch that its tilt deepens, which is one end of the
+            # edge, an exact material point. Each geom turns about contact 0, geom A by 'qrot' towards the negative
+            # side of the normal and geom B by its inverse towards the positive one.
+            for i_g in qd.static(range(2)):
+                if is_edge[i_g] == 1:
+                    end_0 = qd.Vector([ends[2 * i_g, 0], ends[2 * i_g, 1], ends[2 * i_g, 2]], dt=gs.qd_float)
+                    end_1 = qd.Vector(
+                        [ends[2 * i_g + 1, 0], ends[2 * i_g + 1, 1], ends[2 * i_g + 1, 2]], dt=gs.qd_float
+                    )
+                    R_g = R if qd.static(i_g == 0) else R_inv
+                    lift_0 = normal_0.dot(R_g @ (end_0 - contact_pos_0) - (end_0 - contact_pos_0))
+                    lift_1 = normal_0.dot(R_g @ (end_1 - contact_pos_0) - (end_1 - contact_pos_0))
+                    if qd.static(i_g == 0):
+                        lift_0, lift_1 = -lift_0, -lift_1
+                    if qd.abs(lift_1 - lift_0) > EPS * (qd.abs(lift_0) + qd.abs(lift_1)):
+                        end = end_1 if lift_1 > lift_0 else end_0
+                        if qd.static(i_g == 0):
+                            witness_a = end
+                        else:
+                            witness_b = end
+
+            # The support triangle of each geom bounds its surface at the witness of the other geom, when it covers it
+            # along the normal of contact 0: geom B from above at the witness of geom A, geom A from below at that of
+            # geom B. A triangle that a vertex or an edge reduces to a point or a segment covers nothing. Both bounds
+            # being lower bounds of the depth at their own witness, the deeper one is kept.
+            for i_g in qd.static(range(2)):
+                i_r = 3 * (1 - i_g)
+                v_1 = qd.Vector([supports[i_r, 0], supports[i_r, 1], supports[i_r, 2]], dt=gs.qd_float)
+                v_2 = qd.Vector([supports[i_r + 1, 0], supports[i_r + 1, 1], supports[i_r + 1, 2]], dt=gs.qd_float)
+                v_3 = qd.Vector([supports[i_r + 2, 0], supports[i_r + 2, 1], supports[i_r + 2, 2]], dt=gs.qd_float)
+                witness = witness_a if qd.static(i_g == 0) else witness_b
+                edge_1, edge_2, offset = v_2 - v_1, v_3 - v_1, witness - v_1
+                area = edge_1.cross(edge_2).dot(normal_0)
+                if qd.abs(area) > EPS * edge_1.norm() * edge_2.norm():
+                    lambda_2 = offset.cross(edge_2).dot(normal_0) / area
+                    lambda_3 = edge_1.cross(offset).dot(normal_0) / area
+                    if lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0:
+                        height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
+                        bound = height - normal_0.dot(witness_a)
+                        if qd.static(i_g == 1):
+                            bound = normal_0.dot(witness_b) - height
+                        if not is_bounded or bound > depth:
+                            depth = bound
+                            contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
+                            is_bounded = True
+
+    if not is_bounded:
+        # The perturbed normal supports both geoms at their witnesses, so that each geom un-rotates it into the normal
+        # of its tangent plane there. The depth is measured at the witness standing on the feature of the contact,
+        # below or above the tangent plane of the other geom: exact against a flat face, accurate to the second order
+        # in the distance between both witnesses against a smooth surface, and deeper than the contact against a
+        # vertex.
+        tangent_normal = R @ normal
+        if is_anchored_b:
+            tangent_normal = R_inv @ normal
+        tangent_slope = tangent_normal.dot(normal_0)
+        if qd.abs(tangent_slope) > EPS:
+            depth = tangent_normal.dot(witness_b - witness_a) / tangent_slope
+            contact_pos = witness_a + 0.5 * depth * normal_0
+            if is_anchored_b:
+                contact_pos = witness_b - 0.5 * depth * normal_0
 
     if qd.static(not rigid_config.enable_mujoco_compatibility):
         # A projected contact apart from the other geom beyond the acceptance threshold lies past the edge of the patch
