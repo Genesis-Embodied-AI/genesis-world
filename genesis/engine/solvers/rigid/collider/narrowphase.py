@@ -1558,151 +1558,119 @@ def func_recompute_perturbed_contact(
     gjk_state: array_class.GJKState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     geom_pair_scale: float,
     tolerance: float,
     used_gjk: bool,
 ):
     """
-    Recompute a perturbed multi-contact point exactly, by un-rotating the portal the perturbed detection found.
+    Project a contact found on the perturbed geoms onto the contact patch of contact 0, at a lower bound of its depth.
 
-    Multi-contact spreads contact points by detecting collisions on slightly rotated copies of the two geometries.
-    The contact normal and penetration must be recovered for the unperturbed configuration. The contact normal is a
-    property of the Minkowski difference (both geometries), so neither geom's surface normal alone captures it.
-    Instead the MPR portal - the triangle of support-point pairs bounding the contact - is un-rotated back to the
-    unperturbed pose (each support point by the inverse of its own geom's perturbation), and the face normal of the
-    resulting Minkowski triangle gives the exact contact normal, with the penetration as the portal's distance to the
-    Minkowski origin. The position comes last, from the recovered normal and penetration, since only those say how far
-    apart the two surfaces are.
+    Both geoms of a pair are convex, so that all its contacts share the separating direction 'normal_0' of contact 0,
+    which the projected contact takes. The perturbed detection returns a witness point on each geom, which the
+    perturbation 'qrot' of its own geom (geom A by 'qrot', geom B by its inverse) un-rotates into an exact material
+    point of the unperturbed geom. The depth is measured along 'normal_0' at the witness of one geom, below which that
+    geom holds no point. A convex geom holds every triangle spanned by its material points, so that the support points
+    of the other geom that the detection found, un-rotated alike, bound its surface from beyond at the witness when
+    their triangle covers it along 'normal_0'. A plane geom A bounds it everywhere. The depth is then a lower bound,
+    exact between flat faces. Otherwise, as for detections that leave no support points, the depth is the separation of
+    both witnesses along 'normal_0', which the opposite un-rotations of both geoms shift apart along the contact plane
+    by an amount of the second order in the perturbation angle.
 
-    A perturbed detection may land where the unperturbed geoms are apart, past the edge of their contact patch, while
-    contact 0 'contact_pos_0' of penetration 'penetration_0' lies inside it. Its contact then moves towards contact 0
-    to where the penetration interpolated linearly between both vanishes, and is returned at zero penetration. Along
-    the contact plane, the penetration is the height of the surface of a convex geom minus that of another one, which
-    is concave, so it is non-negative at this point, inside the patch or on its edge, whatever the shapes. This takes a
-    difference of penetration between both points beyond the acceptance threshold 'tolerance', since the error of the
-    point is that of the penetrations divided by it.
+    A projected contact of negative depth lies past the edge of the patch. It moves towards contact 0 'contact_pos_0'
+    of depth 'penetration_0' to where the depth interpolated linearly between both vanishes, and is returned at zero
+    depth. Along the contact plane, the depth is the height of the surface of a convex geom minus that of another one,
+    which is concave, and both depths bound it from below, so that it is non-negative at this point, inside the patch
+    or on its edge, and exactly zero between flat faces. This takes a difference of depth between both points beyond
+    the acceptance threshold 'tolerance', since the error of the point is that of the depths divided by it.
+
+    Returns the normal, the depth, the position, and whether a support triangle or a plane bounds the depth.
     """
-    # qrot is applied to geom A and its inverse to geom B; precompute the rotation matrix once (R for qrot, its
-    # transpose for the inverse) and reuse it for every un-rotation below instead of re-deriving it per call.
-    R = gu.qd_quat_to_R(qrot, rigid_info.EPS[None])
+    EPS = rigid_info.EPS[None]
+
+    # qrot is applied to geom A and its inverse to geom B
+    R = gu.qd_quat_to_R(qrot, EPS)
     R_inv = R.transpose()
-    contact_point_a = R_inv @ ((contact_pos - 0.5 * penetration * normal) - contact_pos_0) + contact_pos_0
-    contact_point_b = R @ ((contact_pos + 0.5 * penetration * normal) - contact_pos_0) + contact_pos_0
+    witness_a = R_inv @ ((contact_pos - 0.5 * penetration * normal) - contact_pos_0) + contact_pos_0
+    witness_b = R @ ((contact_pos + 0.5 * penetration * normal) - contact_pos_0) + contact_pos_0
 
-    # The unperturbed contact normal is recovered per detection method, using only the data that method exposes. The
-    # multi-contact perturbation is symmetric (geom A by +qrot, geom B by -qrot, over +/- axis pairs), so methods that
-    # keep the perturbed normal still yield an unbiased contact set: the per-contact tilts cancel in aggregate (no
-    # drift), and the pruning kernel's mean normal averages them back to the true normal (the patch stays coplanar).
-    #  - PLANE: the normal is rigid to the plane geom (geom A, rotated by qrot), so un-rotating it by qrot is exact.
-    #  - CAPSULE-CAPSULE: an analytic closest-segment contact, with no portal or witness pair; the only available
-    #    correction is the first-order twist of the perturbed normal back towards the unperturbed one.
-    #  - MPR: it exposes no witness pair, only a portal; the un-rotated portal support simplex gives the exact normal
-    #    as the Minkowski-triangle face normal (vertex-face / edge-edge contacts included).
-    #  - GJK: same construction from the EPA polytope face nearest to the origin (its three support pairs).
-    # is_exact reports whether the recovered penetration is exact (a true contact depth) rather than an approximate
-    # first-order value. The caller uses it to pick the contact-acceptance threshold: an exact penetration can be
-    # discarded as soon as it is non-positive (fictitious contact), while an approximate one keeps a negative tolerance.
-    is_exact = False
-    needs_twist = False
+    # Geom A lies on the positive side of the normal, so that the depth at the witness of geom A is the height of the
+    # surface of geom B above it, and the depth at the witness of geom B its height above the surface of geom A
+    depth = normal_0.dot(witness_b - witness_a)
+    contact_pos = witness_b - 0.5 * depth * normal_0
+    is_bounded = False
     if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
-        normal = R_inv @ normal
-        penetration = normal.dot(contact_point_b - contact_point_a)
-        is_exact = True
-    elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
-        # Analytic closest-segment contact: no portal or witness pair (and its portal_status / nearest_face are stale,
-        # since it runs neither MPR nor GJK), so the only correction available is the first-order twist.
-        needs_twist = True
-    elif used_gjk and gjk_state.nearest_face[i_scratch] < 0:
-        # Shallow GJK contact (no EPA polytope was built): no support face, but the perturbed witness delta is the
-        # perturbed normal by construction, so keep it; the +/- symmetry keeps the contact set unbiased in aggregate.
-        pass
-    elif not used_gjk and mpr_state.portal_status[i_scratch] < PORTAL_STATUS.LOWER_BOUND:
-        # MPR left no trustworthy refined contact-face portal (degenerate touch/segment path, or the origin projects
-        # far outside the portal); reconstructing from it would yield a spurious edge/corner normal. A LOWER_BOUND
-        # portal keeps the reconstruction: its support triangle still spans the contact face, only its depth is
-        # inexact.
-        needs_twist = True
-    else:
-        # Support pairs of the contact face: the MPR portal (indices 1-3), or the GJK EPA face nearest to the origin.
-        a1 = mpr_state.simplex_support.v1[1, i_scratch]
-        b1 = mpr_state.simplex_support.v2[1, i_scratch]
-        a2 = mpr_state.simplex_support.v1[2, i_scratch]
-        b2 = mpr_state.simplex_support.v2[2, i_scratch]
-        a3 = mpr_state.simplex_support.v1[3, i_scratch]
-        b3 = mpr_state.simplex_support.v2[3, i_scratch]
-        if used_gjk:
-            i_f = gjk_state.nearest_face[i_scratch]
-            iv1 = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][0]
-            iv2 = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][1]
-            iv3 = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][2]
-            a1 = gjk_state.polytope_verts.obj1[i_scratch, iv1]
-            b1 = gjk_state.polytope_verts.obj2[i_scratch, iv1]
-            a2 = gjk_state.polytope_verts.obj1[i_scratch, iv2]
-            b2 = gjk_state.polytope_verts.obj2[i_scratch, iv2]
-            a3 = gjk_state.polytope_verts.obj1[i_scratch, iv3]
-            b3 = gjk_state.polytope_verts.obj2[i_scratch, iv3]
-        # contact_pos_0 cancels in the edge differences, so the face normal needs only support-point deltas.
-        edge1 = R_inv @ (a2 - a1) - R @ (b2 - b1)
-        edge2 = R_inv @ (a3 - a1) - R @ (b3 - b1)
-        portal_normal = edge1.cross(edge2)
-        portal_norm_sqr = portal_normal.norm_sqr()
-        # The face normal is reliable only when the support triangle is well-conditioned. For a nearly coplanar
-        # contact (e.g. flat box-on-box) the support points can be almost collinear, making the face normal
-        # numerically unstable; fall back to the twist there. Compared squared to avoid the edge-length square roots.
-        if portal_norm_sqr > 0.01 * edge1.norm_sqr() * edge2.norm_sqr():
-            normal = portal_normal / qd.sqrt(portal_norm_sqr)
-            if normal.dot(normal_0) < 0.0:
-                normal = -normal
-            # The depth read off the portal is exact only when the origin projects inside it (Theorem 4.2); a
-            # LOWER_BOUND portal keeps the reconstructed normal but leaves the depth to the first-order witness
-            # separation below, and its candidate to the lenient acceptance.
-            is_exact = used_gjk or mpr_state.portal_status[i_scratch] == PORTAL_STATUS.EXACT
-            if is_exact:
-                # m1 (one un-rotated Minkowski support point on the face) is only needed for the exact penetration.
-                m1 = R_inv @ (a1 - contact_pos_0) - R @ (b1 - contact_pos_0)
-                penetration = -normal.dot(m1)
-        else:
-            needs_twist = True
+        # The plane of geom A passes through its witness of contact 0, with the normal of contact 0
+        depth = normal_0.dot(witness_b - contact_pos_0) + 0.5 * penetration_0
+        contact_pos = witness_b - 0.5 * depth * normal_0
+        is_bounded = True
+    elif not (
+        (dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE)
+        or (used_gjk and gjk_state.nearest_face[i_scratch] < 0)
+    ):
+        # Support points of the detection: the MPR portal (indices 1-3), or the GJK EPA face nearest to the origin. The
+        # analytic capsule-capsule detection runs neither, and a shallow GJK contact builds no polytope.
+        supports_a = qd.Matrix.zero(gs.qd_float, 3, 3)
+        supports_b = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for i_v in qd.static(range(3)):
+            support_a = mpr_state.simplex_support.v1[i_v + 1, i_scratch]
+            support_b = mpr_state.simplex_support.v2[i_v + 1, i_scratch]
+            if used_gjk:
+                i_f = gjk_state.nearest_face[i_scratch]
+                i_pv = gjk_state.polytope_faces.verts_idx[i_scratch, i_f][i_v]
+                support_a = gjk_state.polytope_verts.obj1[i_scratch, i_pv]
+                support_b = gjk_state.polytope_verts.obj2[i_scratch, i_pv]
+            support_a = R_inv @ (support_a - contact_pos_0) + contact_pos_0
+            support_b = R @ (support_b - contact_pos_0) + contact_pos_0
+            for i_3 in qd.static(range(3)):
+                supports_a[i_v, i_3] = support_a[i_3]
+                supports_b[i_v, i_3] = support_b[i_3]
 
-    # Single first-order fallback for every case that could not recover an exact normal (analytic capsule-capsule,
-    # degenerate MPR, near-collinear portal). Computed once, and only when actually needed.
-    if needs_twist:
-        mc_perturbation = collider_info.mc_perturbation[None]
-        twist_rotvec = qd.math.clamp(normal.cross(normal_0), -mc_perturbation, mc_perturbation)
-        normal = normal + twist_rotvec.cross(normal)
-    if not is_exact:
-        penetration = normal.dot(contact_point_b - contact_point_a)
-
-    # Each un-rotated witness point is an exact material point of its own geom, but the two un-rotations turn in
-    # opposite directions and so slide the pair tangentially past each other, by twice the perturbation angle times
-    # their distance from contact 0. Only their separation along the recovered normal carries contact information, so
-    # the position steps back from geom B's witness by half of it, landing on the feature the perturbation found.
-    # Averaging the two witnesses instead subtracts the whole separation, sliding the contact off that feature by an
-    # amount that grows with the square of the perturbation angle, which no precision reaches.
-    contact_pos = contact_point_b - 0.5 * penetration * normal
+        # The support triangle of each geom bounds its surface at the witness of the other geom, when it covers it
+        # along the normal of contact 0: geom B from above at the witness of geom A, geom A from below at that of geom
+        # B. A triangle that a vertex or an edge reduces to a point or a segment covers nothing. Both bounds being lower
+        # bounds of the depth at their own witness, the deeper one is kept.
+        for i_g in qd.static(range(2)):
+            v_1 = qd.Vector([supports_b[0, 0], supports_b[0, 1], supports_b[0, 2]], dt=gs.qd_float)
+            v_2 = qd.Vector([supports_b[1, 0], supports_b[1, 1], supports_b[1, 2]], dt=gs.qd_float)
+            v_3 = qd.Vector([supports_b[2, 0], supports_b[2, 1], supports_b[2, 2]], dt=gs.qd_float)
+            witness = witness_a
+            if qd.static(i_g == 1):
+                v_1 = qd.Vector([supports_a[0, 0], supports_a[0, 1], supports_a[0, 2]], dt=gs.qd_float)
+                v_2 = qd.Vector([supports_a[1, 0], supports_a[1, 1], supports_a[1, 2]], dt=gs.qd_float)
+                v_3 = qd.Vector([supports_a[2, 0], supports_a[2, 1], supports_a[2, 2]], dt=gs.qd_float)
+                witness = witness_b
+            edge_1, edge_2, offset = v_2 - v_1, v_3 - v_1, witness - v_1
+            area = edge_1.cross(edge_2).dot(normal_0)
+            if qd.abs(area) > EPS * edge_1.norm() * edge_2.norm():
+                lambda_2 = offset.cross(edge_2).dot(normal_0) / area
+                lambda_3 = edge_1.cross(offset).dot(normal_0) / area
+                if lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0:
+                    height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
+                    bound = height - normal_0.dot(witness_a)
+                    if qd.static(i_g == 1):
+                        bound = normal_0.dot(witness_b) - height
+                    if not is_bounded or bound > depth:
+                        depth = bound
+                        contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
+                        is_bounded = True
 
     if qd.static(not rigid_config.enable_mujoco_compatibility):
-        # A candidate apart from the other geom beyond the acceptance threshold lies past the edge of the patch
-        EPS = rigid_info.EPS[None]
+        # A projected contact apart from the other geom beyond the acceptance threshold lies past the edge of the patch
         if (
-            penetration <= (-EPS * geom_pair_scale if is_exact else -tolerance)
+            depth <= (-EPS * geom_pair_scale if is_bounded else -tolerance)
             and penetration_0 > 0.0
-            and penetration_0 - penetration > tolerance
+            and penetration_0 - depth > tolerance
         ):
-            # Each contact lies halfway between the surfaces of both geoms, below them where they overlap and above them
-            # where they are apart, so the point where the penetration vanishes lies on both surfaces
-            contact_pos += penetration / (penetration - penetration_0) * (contact_pos_0 - contact_pos)
-            penetration = gs.qd_float(0.0)
+            contact_pos += depth / (depth - penetration_0) * (contact_pos_0 - contact_pos)
+            depth = gs.qd_float(0.0)
 
-    # Apply the smooth-primitive position reconstruction here, after the perturbation has been reverted, so it uses the
-    # final (corrected) normal and the unperturbed pose - the canonical state the solver stores.
+    # The smooth-primitive position reconstruction runs on the unperturbed pose, the canonical state the solver stores
     contact_pos = func_apply_smooth_refinement(
         i_ga,
         i_gb,
-        normal,
-        penetration,
+        normal_0,
+        depth,
         contact_pos,
         ga_pos_original,
         ga_quat_original,
@@ -1711,7 +1679,7 @@ def func_recompute_perturbed_contact(
         dyn_info,
         rigid_config,
     )
-    return normal, penetration, contact_pos, is_exact
+    return normal_0, depth, contact_pos, is_bounded
 
 
 @qd.func
@@ -2189,7 +2157,6 @@ def func_convex_convex_contact(
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         rigid_config,
                         geom_pair_scale,
                         tolerance,
@@ -2653,7 +2620,6 @@ def _func_multicontact_detect(
                         gjk_state,
                         dyn_info,
                         rigid_info,
-                        collider_info,
                         rigid_config,
                         geom_pair_scale,
                         tolerance,
