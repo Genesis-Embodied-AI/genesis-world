@@ -1467,13 +1467,24 @@ def merge_submeshes(verts_list, faces_list):
     return verts, faces, verts_maps
 
 
-def tetrahedralize_mesh(mesh, tet_cfg):
+def tetrahedralize_mesh(mesh, tet_cfg, mesh_path=None):
     tet = tetgen.TetGen(mesh.vertices.astype(np.float64, copy=False), mesh.faces.astype(np.int32, copy=False))
 
     # Build and apply the switches string directly, since
     # the Python wrapper sometimes ignores certain kwargs
     # (e.g. maxvolume). See: https://github.com/pyvista/tetgen/issues/24
-    verts, elems, *_ = tet.tetrahedralize(switches=make_tetgen_switches(tet_cfg))
+    try:
+        verts, elems, *_ = tet.tetrahedralize(switches=make_tetgen_switches(tet_cfg))
+    except RuntimeError as e:
+        mesh_descr = f" ({mesh_path})" if mesh_path else ""
+        gs.raise_exception_from(
+            f"Tetrahedralization failed for mesh{mesh_descr} with {len(mesh.vertices)} vertices and {len(mesh.faces)} "
+            f"faces. {e} This usually indicates a defective surface mesh, e.g. non-manifold edges, self-intersecting "
+            "faces, or duplicated / nearly-overlapping segments. Please repair the mesh with an external tool (e.g. "
+            "pymeshfix, MeshLab, Blender) and retry, or set 'convexify=True' on the morph if tetrahedralization is not "
+            "required.",
+            e,
+        )
 
     return verts, elems
 
