@@ -2,9 +2,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+from PIL import Image
 import pytest
 import trimesh
-from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
 
@@ -681,11 +682,90 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 
 @pytest.fixture(scope="session")
+def authored_geom_density_mjcf():
+    """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
+    mjcf = ET.Element("mujoco", model="authored_geom_density")
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, attrib in (
+        ("on_geom", dict(density="250")),
+        ("on_class", {"class": "water"}),
+        ("on_default", dict(density="1000")),
+        ("unstated", {}),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos="0.0 0.0 1.0")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
+
+    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
+    ET.SubElement(mixed, "freejoint")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
+    fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
+    ET.SubElement(fused, "freejoint")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
+
+    # A zero-density geom is a massless marker carried by a link with nonzero inertia
+    weightless = ET.SubElement(fused, "body", name="weightless")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_geom_density_defaults():
+    models = []
+    for root_density, discard_visual, material_density in (
+        (None, False, None),
+        (None, True, None),
+        (700.0, False, None),
+        (700.0, True, None),
+        (None, True, 2000.0),
+    ):
+        mjcf = ET.Element("mujoco")
+        ET.SubElement(mjcf, "compiler", inertiafromgeom="false", discardvisual=str(discard_visual).lower())
+        default = ET.SubElement(mjcf, "default")
+        if root_density is not None:
+            ET.SubElement(default, "geom", density=str(root_density))
+        ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="mounted")
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
+        for i_g, attrib in enumerate(
+            ({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(density="500"))
+        ):
+            ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
+        replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
+        ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")
+        models.append((ET.tostring(mjcf, encoding="unicode"), root_density, material_density))
+    return models
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia():
     """Generate a URDF with a single link that has no inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.09")
     return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def visual_collision_inertia():
+    urdf = ET.Element("robot", name="visual_collision_inertia")
+    link = ET.SubElement(urdf, "link", name="base_link")
+    for tag, size, pos in (("visual", "0.2 0.4 0.6", "0.2 0.0 0.0"), ("collision", "0.1 0.1 0.1", "0.0 0.0 0.0")):
+        geom = ET.SubElement(link, tag)
+        ET.SubElement(geom, "origin", xyz=pos)
+        ET.SubElement(ET.SubElement(geom, "geometry"), "box", size=size)
+    missing = ET.tostring(urdf, encoding="unicode")
+    inertial = ET.SubElement(link, "inertial")
+    ET.SubElement(inertial, "mass", value="2.0")
+    ET.SubElement(inertial, "inertia", ixx="0.01", iyy="0.02", izz="0.025", ixy="0", ixz="0", iyz="0")
+    return missing, ET.tostring(urdf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
