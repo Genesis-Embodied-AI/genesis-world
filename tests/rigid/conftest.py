@@ -2,9 +2,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+from PIL import Image
 import pytest
 import trimesh
-from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
 
@@ -681,10 +682,190 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 
 @pytest.fixture(scope="session")
+def authored_geom_density_mjcf():
+    """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
+    mjcf = ET.Element("mujoco", model="authored_geom_density")
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, attrib in (
+        ("on_geom", dict(density="250")),
+        ("on_class", {"class": "water"}),
+        ("on_default", dict(density="1000")),
+        ("unstated", {}),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos="0.0 0.0 1.0")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
+
+    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
+    ET.SubElement(mixed, "freejoint")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
+    fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
+    ET.SubElement(fused, "freejoint")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
+
+    # A zero-density geom is a massless marker carried by a link with nonzero inertia
+    weightless = ET.SubElement(fused, "body", name="weightless")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_geom_density_defaults():
+    models = []
+    for root_density, discard_visual, material_density in (
+        (None, False, None),
+        (None, True, None),
+        (700.0, False, None),
+        (700.0, True, None),
+        (None, True, 2000.0),
+    ):
+        mjcf = ET.Element("mujoco")
+        ET.SubElement(mjcf, "compiler", inertiafromgeom="false", discardvisual=str(discard_visual).lower())
+        default = ET.SubElement(mjcf, "default")
+        if root_density is not None:
+            ET.SubElement(default, "geom", density=str(root_density))
+        ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="mounted")
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
+        for i_g, attrib in enumerate(
+            ({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(density="500"))
+        ):
+            ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
+        replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
+        ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")
+        models.append((ET.tostring(mjcf, encoding="unicode"), root_density, material_density))
+    return models
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia():
     """Generate a URDF with a single link that has no inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia")
     _add_sphere_link(urdf, "base_link", "0.0 0.0 0.09")
+    return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def visual_collision_inertia():
+    urdf = ET.Element("robot", name="visual_collision_inertia")
+    link = ET.SubElement(urdf, "link", name="base_link")
+    for tag, size, pos in (("visual", "0.2 0.4 0.6", "0.2 0.0 0.0"), ("collision", "0.1 0.1 0.1", "0.0 0.0 0.0")):
+        geom = ET.SubElement(link, tag)
+        ET.SubElement(geom, "origin", xyz=pos)
+        ET.SubElement(ET.SubElement(geom, "geometry"), "box", size=size)
+    missing = ET.tostring(urdf, encoding="unicode")
+    inertial = ET.SubElement(link, "inertial")
+    ET.SubElement(inertial, "mass", value="2.0")
+    ET.SubElement(inertial, "inertia", ixx="0.01", iyy="0.02", izz="0.025", ixy="0", ixz="0", iyz="0")
+    return missing, ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def primitive_collision_urdf(asset_tmp_path):
+    mesh_path = str(asset_tmp_path / "collision_cube.glb")
+    trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(mesh_path)
+    urdf = ET.Element("robot", name="primitive_collision")
+    link = ET.SubElement(urdf, "link", name="base_link")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.1 0.2 0.3")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(collision, "origin", xyz="0.5 0 0")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "mesh", filename=mesh_path)
+    return ET.tostring(urdf, encoding="unicode")
+
+
+def _add_simplified_collision_link(urdf, link_name, visual_meshes, scale):
+    """Append a link with visual meshes, a smaller collision sphere, and unspecified inertia."""
+    link = ET.SubElement(urdf, "link", name=link_name)
+    for visual_mesh in visual_meshes:
+        visual = ET.SubElement(link, "visual")
+        geometry = ET.SubElement(visual, "geometry")
+        ET.SubElement(geometry, "mesh", filename=visual_mesh, scale=f"{scale} {scale} {scale}")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "sphere", radius="0.04")
+
+
+@pytest.fixture(scope="session")
+def simplified_collision_links(asset_tmp_path):
+    """Return a URDF of links drawn with visual meshes a collision sphere simplifies, and the volumes they close to.
+
+    Each child hangs from the base by a fixed joint and carries one case of the visual surface:
+    - 'base_link': a watertight sphere.
+    - 'pipe_link': an open pipe, whose convex hull fills the bore and overestimates the volume. The surface is split
+      across two visual meshes that each sample the whole pipe, as an asset splits one surface by material, so
+      estimating them one by one counts the pipe twice. Its faces wind inward, as exported meshes commonly do.
+    - 'double_sided_link': an open box whose every face is stored twice, once per orientation and on vertices of its
+      own, as a mesh drawn from both sides is commonly exported, so the two copies cancel out. Every other pair lists
+      its inward copy first, so the first copy of each face is wound inconsistently.
+    - 'multipart_link': a hollow box drawn as an outer and an inner surface, both wound outward, beside a solid box
+      wound inward, as an exported part mirrored by its transform is.
+    """
+    urdf = ET.Element("robot", name="simplified_collision_links")
+    _add_simplified_collision_link(urdf, "base_link", [os.path.join(get_assets_dir(), "meshes", "sphere.obj")], 0.05)
+
+    pipe = trimesh.creation.annulus(r_min=0.08, r_max=0.1, height=0.2)
+    pipe_volume = pipe.volume
+    pipe.update_faces(np.abs(pipe.face_normals[:, 2]) < 0.5)
+    pipe.invert()
+    pipe_paths = []
+    for i_half, faces in enumerate((pipe.faces[::2], pipe.faces[1::2])):
+        pipe_paths.append(str(asset_tmp_path / f"open_pipe_{i_half}.obj"))
+        trimesh.Trimesh(vertices=pipe.vertices, faces=faces, process=False).export(pipe_paths[-1])
+
+    box = trimesh.creation.box(extents=(0.1, 0.08, 0.06))
+    box_volume = box.volume
+    box.update_faces(box.face_normals[:, 2] < 0.5)
+    faces_pair = np.stack((box.faces, box.faces[:, ::-1] + len(box.vertices)), axis=1)
+    faces_pair[1::2] = faces_pair[1::2, ::-1]
+    box_path = str(asset_tmp_path / "double_sided_open_box.obj")
+    trimesh.Trimesh(
+        vertices=np.concatenate((box.vertices, box.vertices)),
+        faces=faces_pair.reshape(-1, 3),
+        process=False,
+    ).export(box_path)
+
+    outer = trimesh.creation.box(extents=(0.1, 0.1, 0.1))
+    inner = trimesh.creation.box(extents=(0.06, 0.06, 0.06))
+    solid = trimesh.creation.box(extents=(0.08, 0.08, 0.08))
+    solid.apply_translation((0.2, 0.0, 0.0))
+    multipart_volume = outer.volume - inner.volume + solid.volume
+    solid.invert()
+    multipart_path = str(asset_tmp_path / "multipart_box.obj")
+    trimesh.util.concatenate((outer, inner, solid)).export(multipart_path)
+
+    for i_link, (link_name, mesh_paths) in enumerate(
+        (("pipe_link", pipe_paths), ("double_sided_link", [box_path]), ("multipart_link", [multipart_path]))
+    ):
+        _add_simplified_collision_link(urdf, link_name, mesh_paths, 1.0)
+        joint = ET.SubElement(urdf, "joint", name=f"{link_name}_joint", type="fixed")
+        ET.SubElement(joint, "origin", xyz=f"{0.4 * (i_link + 1)} 0.0 0.0", rpy="0.0 0.0 0.0")
+        ET.SubElement(joint, "parent", link="base_link")
+        ET.SubElement(joint, "child", link=link_name)
+    return ET.tostring(urdf, encoding="unicode"), pipe_volume, box_volume, multipart_volume
+
+
+@pytest.fixture(scope="session")
+def simplified_collision_flat_sheet(asset_tmp_path):
+    """Generate a URDF whose link is drawn with a double-sided flat square, which encloses no volume."""
+    square = trimesh.creation.box(extents=(0.1, 0.1, 0.0))
+    square.update_faces(square.face_normals[:, 2] > 0.5)
+    mesh_path = str(asset_tmp_path / "double_sided_flat_sheet.obj")
+    trimesh.Trimesh(
+        vertices=square.vertices,
+        faces=np.concatenate((square.faces, square.faces[:, ::-1])),
+        process=False,
+    ).export(mesh_path)
+
+    urdf = ET.Element("robot", name="simplified_collision_flat_sheet")
+    _add_simplified_collision_link(urdf, "base_link", [mesh_path], 1.0)
     return ET.tostring(urdf, encoding="unicode")
 
 
