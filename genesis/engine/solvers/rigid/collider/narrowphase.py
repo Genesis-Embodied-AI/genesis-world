@@ -1747,9 +1747,8 @@ def func_recompute_perturbed_contact(
                 contact_pos = witness_b - 0.5 * depth * normal_0
 
     # A contact of negative depth lies past the edge of the patch, and moves towards contact 0 to where the depth
-    # interpolated between both vanishes. The interpolation divides by the difference of depth between both contacts,
-    # which must exceed its own error: the rounding of both depths and the stopping tolerance of the detection of
-    # contact 0.
+    # interpolated between both vanishes. The interpolation divides by their difference of depth, which must exceed its
+    # own error: the rounding of both depths and the stopping tolerance of the detection of contact 0.
     depth_noise = EPS * geom_pair_scale
     if used_gjk_0:
         if not func_is_discrete_geoms(i_ga, i_gb, dyn_info):
