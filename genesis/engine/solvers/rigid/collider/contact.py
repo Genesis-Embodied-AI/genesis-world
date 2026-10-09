@@ -843,7 +843,7 @@ def func_contact_support_hull(
     i_cb_end: int,
     collider_state: array_class.ColliderState,
     tol: float,
-    eps: float,
+    rounding: float,
     sort_positions: bool,
 ):
     """Find the support polygon of a bucket of coplanar contacts, as the vertices of their convex hull in the plane.
@@ -857,6 +857,9 @@ def func_contact_support_hull(
     sort does not as soon as the edge is nearly parallel to the first sort axis, so a tolerance on the turns of the
     chain itself would drop a corner in place of a point of the edge. Every step is linear in the number of contacts
     but the sort, which is linearithmic.
+
+    'rounding' is the length within which points of the bucket count as lying on one line, relative to the size of the
+    bucket so that the outcome does not depend on where it stands.
 
     Return the number of hull vertices, stored in 'contact_hull_stack' from 'i_cb_start' on.
     """
@@ -911,20 +914,46 @@ def func_contact_support_hull(
     # still loses one of them. Areas are compared twice over to spare the halving. A removed vertex is marked by
     # encoding its contact index as negative, since its neighbours read it afterwards.
     hull_area_2 = gs.qd_float(0.0)
+    hull_perimeter = gs.qd_float(0.0)
     for i_h in range(n_hull):
         pos_p = func_contact_hull_vertex_pos(i_b, i_cb_start, i_h, n_hull, collider_state)
         pos_n = func_contact_hull_vertex_pos(i_b, i_cb_start, i_h + 1, n_hull, collider_state)
         hull_area_2 += pos_p[0] * pos_n[1] - pos_p[1] * pos_n[0]
+        hull_perimeter += (pos_n - pos_p).norm()
     area_tol = tol * qd.abs(hull_area_2)
-    # A vertex collinear with its neighbours up to the rounding 'eps' of the sine of the turn there goes regardless,
-    # since removing any set of them leaves the hull as it is. The pass repeats on the hull it leaves until it removes
-    # nothing, a run of nearly collinear points losing one point in two per pass. Every loss of a pass is taken on the
-    # hull as the pass found it, so a window slides along the hull with the positions of the vertex, of its two
-    # neighbours and of the next one, and the losses of the first three of them.
+
+    # A hull whose area is within the rounding of its sum is a segment, every point within rounding of one line. Its
+    # support is its two ends, the two vertices farthest apart, which a sweep to the farthest vertex from any one, then
+    # from that one, finds. The turns along it, all of rounding size, would decide nothing.
+    is_hull_segment = n_hull > 2 and qd.abs(hull_area_2) <= rounding * hull_perimeter
+    if is_hull_segment:
+        i_end_0 = 0
+        i_end_1 = 0
+        for i_sweep in qd.static(range(2)):
+            pos_from = func_contact_hull_vertex_pos(i_b, i_cb_start, i_end_0, n_hull, collider_state)
+            dist_sqr_max = gs.qd_float(-1.0)
+            for i_h in range(n_hull):
+                dist_sqr = (
+                    func_contact_hull_vertex_pos(i_b, i_cb_start, i_h, n_hull, collider_state) - pos_from
+                ).norm_sqr()
+                if dist_sqr > dist_sqr_max:
+                    dist_sqr_max = dist_sqr
+                    i_end_1 = i_h
+            if qd.static(i_sweep == 0):
+                i_end_0 = i_end_1
+        i_c_0 = collider_state.contact_hull_stack[i_cb_start + i_end_0, i_b]
+        i_c_1 = collider_state.contact_hull_stack[i_cb_start + i_end_1, i_b]
+        collider_state.contact_hull_stack[i_cb_start, i_b] = i_c_0
+        collider_state.contact_hull_stack[i_cb_start + 1, i_b] = i_c_1
+        n_hull = 2
+    # A vertex turning by less than 'rounding' along its edges is collinear with its neighbours and goes regardless,
+    # while a genuine triangle keeps its three vertices, each carrying its whole area. The pass repeats until it
+    # removes nothing, each pass taking its losses on the hull as it found it, through a window sliding along the hull
+    # over the vertex, its two neighbours and the next one, and the losses of the first three.
     n_kept = n_hull
     is_converged = False
     for i_pass in range(n_hull):
-        if not is_converged and n_kept > 3:
+        if not is_converged and n_kept > 2:
             poss = qd.Matrix.zero(gs.qd_float, 5, 2)
             losses = qd.Vector.zero(gs.qd_float, 3)
             for i_k in qd.static(range(5)):
@@ -940,7 +969,7 @@ def func_contact_support_hull(
                 dir_in = qd.Vector([poss[1, 0] - poss[0, 0], poss[1, 1] - poss[0, 1]])
                 dir_out = qd.Vector([poss[2, 0] - poss[1, 0], poss[2, 1] - poss[1, 1]])
                 is_between = dir_in.dot(dir_out) > 0.0
-                is_collinear = losses[1] <= eps * qd.sqrt(dir_in.norm_sqr() * dir_out.norm_sqr())
+                is_vertex_collinear = losses[1] <= rounding * (dir_in.norm() + dir_out.norm())
                 is_least = True
                 for i_k in qd.static((0, 2)):
                     is_least = is_least and (
@@ -952,7 +981,7 @@ def func_contact_support_hull(
                             )
                         )
                     )
-                if is_between and losses[1] <= area_tol and (is_collinear or is_least):
+                if is_between and (is_vertex_collinear or (losses[1] <= area_tol and is_least)):
                     i_c = collider_state.contact_hull_stack[i_cb_start + i_h, i_b]
                     collider_state.contact_hull_stack[i_cb_start + i_h, i_b] = -1 - i_c
                 pos_last = func_contact_hull_vertex_pos(i_b, i_cb_start, i_h + 3, n_kept, collider_state)
@@ -1196,7 +1225,13 @@ def func_clamp_prune_contacts(
                             for i_cb in range(i_cb_start, i_cb_end):
                                 collider_state.contact_lex_idx[i_cb, i_b] = i_cb
                             n_hull = func_contact_support_hull(
-                                i_b, i_cb_start, i_cb_end, collider_state, tol, EPS, sort_positions=True
+                                i_b,
+                                i_cb_start,
+                                i_cb_end,
+                                collider_state,
+                                tol,
+                                qd.sqrt(EPS * max_in_plane_r2),
+                                sort_positions=True,
                             )
 
                             # Overwrite contact_keep[b_start..b_end) with the final drop/keep flags: drop everything,
@@ -1532,7 +1567,13 @@ def func_clamp_prune_contacts_coop(
 
                     if tid == 0 and coplanar:
                         n_hull = func_contact_support_hull(
-                            i_b, i_cb_start, i_cb_end, collider_state, tol, EPS, sort_positions=False
+                            i_b,
+                            i_cb_start,
+                            i_cb_end,
+                            collider_state,
+                            tol,
+                            qd.sqrt(EPS * max_in_plane_r2),
+                            sort_positions=False,
                         )
 
                         for i_h in range(n_hull):
