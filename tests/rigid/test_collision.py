@@ -12,6 +12,7 @@ from scipy.spatial.qhull import QhullError
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.collision import solve_contype_conaffinity
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1998,3 +1999,94 @@ def test_neutral_self_collision_masks_across_merged_entities(merged_overlapping_
     palm_geom = hand.get_link("palm").geoms[0].idx
     assert_equal(collision_pair_idx[a2_geom, palm_geom], -1)
     assert_equal(collision_pair_idx[palm_geom, a2_geom], -1)
+
+
+@pytest.mark.required
+def test_contact_exclude_filtering(show_viewer):
+    mjcf = ET.Element("mujoco", model="contact_exclude")
+    contact = ET.SubElement(mjcf, "contact")
+    ET.SubElement(contact, "exclude", body1="base_excluded", body2="passer_excluded")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for body_name, x_pos in (("base_excluded", -1.0), ("base_colliding", 1.0)):
+        body = ET.SubElement(worldbody, "body", name=body_name)
+        ET.SubElement(body, "geom", type="box", size="0.4 0.4 0.2", pos=f"{x_pos} 0 0.2")
+    for body_name, x_pos in (("passer_excluded", -1.0), ("passer_colliding", 1.0)):
+        body = ET.SubElement(worldbody, "body", name=body_name, pos=f"{x_pos} 0 0.7")
+        ET.SubElement(body, "joint", type="free")
+        ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2")
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, -9.81),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=ET.tostring(mjcf, encoding="unicode"),
+        ),
+        visualize_contact=True,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    scene.build()
+
+    for _ in range(80):
+        scene.step()
+
+    # Both boxes are dropped from the same height onto identical bases, so only the excluded pair may interpenetrate:
+    # the excluded box falls through its base down to the ground, while its twin rests on top of the other base.
+    assert_allclose(entity.get_link("passer_excluded").get_pos(), (-1.0, 0.0, 0.2), atol=1e-3)
+    assert_allclose(entity.get_link("passer_colliding").get_pos(), (1.0, 0.0, 0.6), atol=1e-3)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("density", [0.0, 0.05, 0.25, 0.5, 0.75, 1.0])
+def test_contype_conaffinity_realizes_requested_collision_matrix(density):
+    rng = np.random.default_rng(0)
+    for _ in range(64):
+        num_geoms = int(rng.integers(1, 32))
+        invalid_pairs = {
+            frozenset((i_ga, i_gb))
+            for i_ga in range(num_geoms)
+            for i_gb in range(i_ga + 1, num_geoms)
+            if rng.random() < density
+        }
+        masks = solve_contype_conaffinity(num_geoms, invalid_pairs)
+
+        assert masks is not None
+        for i_ga, (contype, conaffinity) in enumerate(masks):
+            assert 0 < (contype | conaffinity).bit_length() <= 31
+            for i_gb in range(i_ga + 1, num_geoms):
+                is_colliding = bool((contype & masks[i_gb][1]) | (masks[i_gb][0] & conaffinity))
+                assert is_colliding != (frozenset((i_ga, i_gb)) in invalid_pairs)
+
+
+@pytest.mark.required
+def test_contype_conaffinity_bit_search_within_max_bits():
+    # Every geom forbidding every other one needs one bit per geom to group, so a single-bit budget answers with the
+    # bit search instead. One bit realizes that matrix by leaving every 'contype' empty, which disables every pair.
+    num_geoms = 5
+    invalid_pairs = {frozenset((i_ga, i_gb)) for i_ga in range(num_geoms) for i_gb in range(i_ga + 1, num_geoms)}
+    masks = solve_contype_conaffinity(num_geoms, invalid_pairs, max_bits=1)
+
+    assert masks is not None
+    for i_ga, (contype, conaffinity) in enumerate(masks):
+        assert contype | conaffinity
+        for i_gb in range(i_ga + 1, num_geoms):
+            assert not ((contype & masks[i_gb][1]) | (masks[i_gb][0] & conaffinity))
+
+    # A matrix that one bit cannot realize is reported as such, so that callers fall back on their default masks.
+    assert solve_contype_conaffinity(3, {frozenset((0, 1)), frozenset((0, 2))}, max_bits=1) is None
+
+
+@pytest.mark.required
+def test_contype_conaffinity_assignment_is_deterministic():
+    pairs = [(0, 1), (1, 2), (3, 4), (0, 3), (2, 5)]
+    masks = solve_contype_conaffinity(6, {frozenset(pair) for pair in pairs})
+    expected_masks = tuple(masks)
+
+    # Identical collision matrices share an assignment whatever the order of their pairs, and editing the list one
+    # caller received must not change what the next caller receives.
+    masks[0] = (0, 0)
+    assert_equal(solve_contype_conaffinity(6, {frozenset(pair) for pair in reversed(pairs)}), expected_masks)
