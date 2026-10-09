@@ -82,10 +82,8 @@ class MULTICONTACT_SLOT(IntEnum):
     EMPTY = 0
     # The first contact of the pair, accepted as it is
     BASE = 1
-    # A perturbed contact whose recovered penetration is exact, discarded as soon as it is non-positive
-    EXACT = 2
-    # A perturbed contact whose recovered penetration is first-order, kept within a negative tolerance
-    APPROX = 3
+    # A contact of a perturbed detection, kept unless it repeats a contact already kept
+    PERTURBED = 2
 
 
 class EPA_POLY_INIT_RETURN_CODE(IntEnum):

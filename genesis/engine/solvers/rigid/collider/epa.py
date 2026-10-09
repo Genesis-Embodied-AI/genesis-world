@@ -981,9 +981,8 @@ def func_safe_epa(
                 lower2 = face_dist2
                 nearest_i_f = i_f
 
-        # The nearest face reaching the upper bound within the tolerance has converged, even past it by the rounding of
-        # both bounds. Only a face beyond it is invalid (lower bound of depth larger than upper bound), which leaves the
-        # previous nearest face.
+        # A nearest face past the upper bound by less than the tolerance has converged, the rounding of both bounds
+        # allowing it. A face farther than that is invalid, which leaves the previous nearest face.
         if nearest_i_f != -1 and lower2 > upper2 and qd.sqrt(lower2) - upper < tolerance:
             break
         if lower2 > upper2 or nearest_i_f == -1:
@@ -1122,11 +1121,9 @@ def func_safe_epa(
             break
 
     # Two parallel faces of the geometries form a flat face of the Minkowski difference, split into coplanar triangles
-    # at the same distance from the origin, so that the nearest face may be one whose plane the origin projects onto
-    # outside of it. The witness points then extrapolate past the faces of the geometries, by the barycentric coordinate
-    # of the origin projection times the size of the face. Walking across the edge opposite the most negative coordinate
-    # to the coplanar neighbour, whose normal agrees within the relative reprojection error, reaches the triangle that
-    # holds it.
+    # at one distance from the origin, so that the nearest face may be one whose plane the origin projects onto outside
+    # of it, its witness points then extrapolating past the faces. Walking to the coplanar neighbour across the edge
+    # opposite the most negative barycentric coordinate reaches the triangle holding the projection.
     is_walking = nearest_i_f != -1
     for i_walk in range(gjk_state.polytope.nfaces_map[i_b]):
         if is_walking:
@@ -1386,13 +1383,10 @@ def func_plane_normal(
     d31 = v3 - v1
     d32 = v3 - v2
 
-    # The three cross products are one quantity up to sign, so they differ only in rounding, and a sliver triangle
-    # cancels catastrophically in some of the orderings while resolving in the others. Every ordering is therefore
-    # tried before reporting the triangle degenerate: the whole point of the sequence is that a vanishing cross
-    # product says nothing about the ones not yet computed. Reporting it instead discards the contact entirely. The
-    # rounding error of a cross product grows with the product of the lengths of its edges, so the ordering that leaves
-    # out the longest edge comes first: on a sliver, crossing its two long edges would tilt the normal enough to shift
-    # the distance of the far vertex by much more than the rounding of the vertices.
+    # The three cross products are one quantity up to sign and rounding, which grows with the product of the lengths of
+    # their edges, so the ordering leaving out the longest edge comes first: crossing the two long edges of a sliver
+    # tilts its normal far beyond the rounding of its vertices. A vanishing product says nothing about the other
+    # orderings, so all of them are tried before the triangle is reported degenerate, which discards the contact.
     i_first = 1
     if d21.norm_sqr() >= qd.max(d31.norm_sqr(), d32.norm_sqr()):
         i_first = 2

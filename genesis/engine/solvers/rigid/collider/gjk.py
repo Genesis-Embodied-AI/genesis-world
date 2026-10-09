@@ -1398,7 +1398,7 @@ def func_is_new_simplex_vertex_degenerate(
     """
     Check if the simplex becomes degenerate after inserting a new vertex, assuming that the current simplex is okay.
     """
-    is_degenerate = False
+    is_simplex_degenerate = False
 
     # Check if the new vertex is not very close to the existing vertices
     nverts = gjk_state.simplex.nverts[i_b]
@@ -1406,19 +1406,19 @@ def func_is_new_simplex_vertex_degenerate(
         if (gjk_state.simplex_vertex.mink[i_b, i] - mink).norm_sqr() < (
             collider_info.gjk.simplex_max_degeneracy_sq[None]
         ):
-            is_degenerate = True
+            is_simplex_degenerate = True
             break
 
-    if not is_degenerate:
+    if not is_simplex_degenerate:
         # Check the validity based on the simplex dimension
         if nverts == 2:
             # Becomes a triangle if valid, check if the three vertices are not collinear
-            is_degenerate = func_is_colinear(
+            is_simplex_degenerate = func_is_colinear(
                 gjk_state.simplex_vertex.mink[i_b, 0], gjk_state.simplex_vertex.mink[i_b, 1], mink, collider_info
             )
         elif nverts == 3:
             # Becomes a tetrahedron if valid, check if the four vertices are not coplanar
-            is_degenerate = func_is_coplanar(
+            is_simplex_degenerate = func_is_coplanar(
                 gjk_state.simplex_vertex.mink[i_b, 0],
                 gjk_state.simplex_vertex.mink[i_b, 1],
                 gjk_state.simplex_vertex.mink[i_b, 2],
@@ -1426,7 +1426,7 @@ def func_is_new_simplex_vertex_degenerate(
                 collider_info,
             )
 
-    return is_degenerate
+    return is_simplex_degenerate
 
 
 @qd.func
