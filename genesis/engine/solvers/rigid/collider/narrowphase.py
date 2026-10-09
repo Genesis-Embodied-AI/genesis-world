@@ -1565,7 +1565,7 @@ def func_recompute_perturbed_contact(
     used_gjk_0: bool,
 ):
     """
-    Project a contact found on the perturbed geoms onto the contact patch of contact 0, at a lower bound of its depth.
+    Project a contact found on the perturbed geoms onto the contact patch of contact 0.
 
     Every contact of the convex pair takes the normal 'normal_0' of contact 0. The witnesses of the perturbed
     detection, un-rotated by the perturbation 'qrot' of their own geom (geom A by 'qrot', geom B by its inverse), are
@@ -1576,8 +1576,9 @@ def func_recompute_perturbed_contact(
 
     A contact of negative depth, past the edge of the patch, moves towards contact 0 'contact_pos_0' of depth
     'penetration_0' to where the depth interpolated between both vanishes, and is returned at zero depth. The depth
-    across the contact plane being concave, this point lies on the patch. 'used_gjk_0' says whether GJK rather than MPR
-    detected contact 0, which sets the accuracy of its depth.
+    across the contact plane being concave, this point lies on the patch. 'used_gjk_0' says whether
+    Gilbert-Johnson-Keerthi (GJK) rather than Minkowski portal refinement (MPR) detected contact 0, which sets the
+    accuracy of its depth.
 
     Returns the normal, the non-negative depth and the position.
     """
@@ -1592,6 +1593,8 @@ def func_recompute_perturbed_contact(
     # Geom A lies on the positive side of the normal, so that the depth at the witness of geom A is the height of the
     # surface of geom B above it, and the depth at the witness of geom B its height above the surface of geom A
     depth = normal_0.dot(witness_b - witness_a)
+    # The point steps back from the witness of geom B by half the depth: averaging both witnesses would slide it off the
+    # feature by an amount quadratic in the perturbation angle
     contact_pos = witness_b - 0.5 * depth * normal_0
     is_depth_lower_bound = False
     # Whether the witness of geom B rather than geom A stands on the feature of the contact, where the depth is measured
@@ -1606,9 +1609,10 @@ def func_recompute_perturbed_contact(
         or (used_gjk and gjk_state.nearest_face[i_scratch] < 0)
         or (not used_gjk and mpr_state.portal_status[i_scratch] == PORTAL_STATUS.NONE)
     ):
-        # Support points of the detection: the MPR portal (indices 1-3), or the GJK EPA face nearest to the origin. The
-        # analytic capsule-capsule detection runs neither, a shallow GJK contact builds no polytope, and the degenerate
-        # paths of MPR leave the portal unwritten.
+        # Support points of the detection: the Minkowski portal refinement (MPR) portal (indices 1-3), or the face of
+        # the expanding polytope algorithm (EPA) of Gilbert-Johnson-Keerthi (GJK) nearest to the origin. The analytic
+        # capsule-capsule detection runs neither, a shallow GJK contact builds no polytope, and the degenerate paths of
+        # MPR leave the portal unwritten.
         supports = qd.Matrix.zero(gs.qd_float, 6, 3)
         for i_v in qd.static(range(3)):
             support_a = mpr_state.simplex_support.v1[i_v + 1, i_scratch]
@@ -1624,8 +1628,8 @@ def func_recompute_perturbed_contact(
                 supports[i_v, i_3] = support_a[i_3]
                 supports[3 + i_v, i_3] = support_b[i_3]
 
-        # The support points of a geom that line up along the normal of contact 0 span a vertex or an edge of it, rows 3
-        # * i_g of the triangle of support points of geom i_g, whose two farthest points are the ends of the edge
+        # The support points of a geom that line up along the normal of contact 0 span a vertex or an edge of it, rows
+        # 3 * i_g of the triangle of support points of geom i_g, whose two farthest points are the ends of the edge
         is_supports_degenerate = qd.Vector([0, 0], dt=gs.qd_int)
         is_supports_edge = qd.Vector([0, 0], dt=gs.qd_int)
         ends = qd.Matrix.zero(gs.qd_float, 4, 3)
@@ -1881,7 +1885,7 @@ def func_convex_convex_contact(
         penetration_0 = gs.qd_float(0.0)
         normal_0 = qd.Vector.zero(gs.qd_float, 3)
         contact_pos_0 = qd.Vector.zero(gs.qd_float, 3)
-        used_gjk_0 = False
+        is_gjk_used_0 = False
 
         # Whether narrowphase detected a contact.
         is_col = False
@@ -2189,7 +2193,7 @@ def func_convex_convex_contact(
 
             if i_detection == 0:
                 is_col_0, normal_0, penetration_0, contact_pos_0 = is_col, normal, penetration, contact_pos
-                used_gjk_0 = prefer_gjk
+                is_gjk_used_0 = prefer_gjk
                 if is_col_0:
                     func_add_contact(
                         i_ga,
@@ -2255,7 +2259,7 @@ def func_convex_convex_contact(
                         rigid_config,
                         geom_pair_scale,
                         _used_gjk,
-                        used_gjk_0,
+                        is_gjk_used_0,
                     )
 
                 # For MuJoCo-compatible GJK, set penetration of perturbed contacts to equal the initial contact's

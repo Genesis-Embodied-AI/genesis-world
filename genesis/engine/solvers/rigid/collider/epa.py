@@ -1143,7 +1143,7 @@ def func_safe_epa(
                 i_e, lambda_min = 0, _lambda[2]
             is_walking = False
             # A face onto whose plane the origin cannot be projected gives no coordinates to walk by, and only the faces
-            # of the map passed the bounds of the depth
+            # still in the map lie within the bounds of the depth
             if proj_flag == RETURN_CODE.SUCCESS and lambda_min < 0.0:
                 i_f_adj = gjk_state.polytope_faces.adj_idx[i_b, nearest_i_f][i_e]
                 if gjk_state.polytope_faces.map_idx[i_b, i_f_adj] >= 0:

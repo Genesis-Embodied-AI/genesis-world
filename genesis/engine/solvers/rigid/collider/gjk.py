@@ -406,9 +406,10 @@ def func_gjk_contact(
 
             # The witness difference w2 - w1 of a shallow contact is a tiny vector blended from geom-scale support
             # points, which fp32 rounding tilts by up to tens of degrees, catastrophic for grazing contacts between
-            # convex-decomposition pieces, and can even flip. The EPA nearest-face normal is well-conditioned, pointing
-            # out of the Minkowski difference 'obj1 - obj2', opposite to w2 - w1. The witness normal remains when no
-            # polytope was built, and in MuJoCo-compatibility mode to reproduce its contact set exactly.
+            # convex-decomposition pieces, and can even flip. The normal of the face nearest to the origin in the
+            # expanding polytope algorithm (EPA) is well-conditioned, pointing out of the Minkowski difference
+            # 'obj1 - obj2', opposite to w2 - w1. The witness normal remains when no polytope was built, and in
+            # MuJoCo-compatibility mode to reproduce its contact set exactly.
             if qd.static(not rigid_config.enable_mujoco_compatibility):
                 i_f = gjk_state.nearest_face[i_b]
                 if i_f >= 0:

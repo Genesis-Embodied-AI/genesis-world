@@ -733,7 +733,7 @@ def test_box_stacks_stability(detection, show_viewer, tol):
     # Under the default impedance, the residual softness of the contacts tips the tallest piles standing on the
     # narrowest supports at the smallest scale, although they are statically stable. At rest, a contact sinks by about
     # the gravity acceleration times the squared time constant, scaled by (1 - d) / d for an impedance d and by the load
-    # it carries: the mass of the boxes it supports times the sum of the inverse masses of the two bodies it separates,
+    # it carries: the mass of the boxes it supports times the sum of the inverse masses of the two links it separates,
     # the fixed base adding none. The time constant grows with the square root of the scale, which sinks every pile by a
     # depth in proportion to its size: the piles stay geometrically similar, and this depth stays above the resolution
     # of the coordinates of the largest ones, which stand the farthest from the origin. The boxes are built
@@ -743,11 +743,10 @@ def test_box_stacks_stability(detection, show_viewer, tol):
     for scale, pile_pos, base, boxes in piles:
         sol_params[0] = CONSTRAINT_TIMECONST * np.sqrt(scale / SCALES[0])
         sol_params[2:4] = CONTACT_IMPEDANCE
-        rest_depth = GRAVITY * sol_params[0] ** 2 * (1.0 - CONTACT_IMPEDANCE) / CONTACT_IMPEDANCE
         for entity in (base, *boxes):
             for geom in entity.geoms:
                 geom.set_sol_params(sol_params)
-        piles_rest_depth.append(rest_depth)
+        piles_rest_depth.append(GRAVITY * sol_params[0] ** 2 * (1.0 - CONTACT_IMPEDANCE) / CONTACT_IMPEDANCE)
         piles_boxes_mass.append(np.stack([tensor_to_array(box.get_mass()) for box in boxes]))
         aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
         piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])

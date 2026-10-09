@@ -764,9 +764,9 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
     # of the scale from the mass and one from gravity; a torque one more from its lever arm.
     FORCE_TOL = max(tol, (500.0 if is_fp64 else 50.0) * tol * scale**4)
     TORQUE_TOL = max(tol, (10.0 if is_fp64 else 5.0) * tol * scale**5)
-    # Rest bounds, which 'signorini' meets to a fraction of a thousandth. 'convex' lets a sliding contact leave the plane
-    # and slip short of its friction cone (see contact_resolution in genesis/constants.py), so a body may end hopping or
-    # creeping, which costs its bounds an order or two.
+    # Rest bounds, which 'signorini' meets to a fraction of a thousandth. 'convex' lets a sliding contact leave the
+    # plane and slip short of its friction cone (see contact_resolution in genesis/constants.py), so a box may end
+    # hopping or creeping, which costs its bounds an order or two.
     GROUND_TOL = max(tol, (2e-4 if is_signorini else 2e-2) * scale)
     REST_LIN_VEL_TOL = max(tol, ((5e-5 if is_fp64 else 1e-3) if is_signorini else 2e-3) * scale)
     REST_ANG_VEL_TOL = (5e-4 if is_fp64 else 2e-3) if is_signorini else 2e-2

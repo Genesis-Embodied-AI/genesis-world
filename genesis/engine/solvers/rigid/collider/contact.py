@@ -922,9 +922,9 @@ def func_contact_support_hull(
         hull_perimeter += (pos_n - pos_p).norm()
     area_tol = tol * qd.abs(hull_area_2)
 
-    # A hull whose area is within the rounding of its sum is a segment, every point within rounding of one line. Its
-    # support is its two ends, the two vertices farthest apart, which a sweep to the farthest vertex from any one, then
-    # from that one, finds. The turns along it, all of rounding size, would decide nothing.
+    # A hull whose doubled area is within 'rounding' times its perimeter is a segment, every point within rounding of
+    # one line. Its support is its two ends, the two vertices farthest apart, which a sweep to the farthest vertex from
+    # any one, then from that one, finds. The turns along it, all of rounding size, would decide nothing.
     is_hull_segment = n_hull > 2 and qd.abs(hull_area_2) <= rounding * hull_perimeter
     if is_hull_segment:
         i_end_0 = 0
