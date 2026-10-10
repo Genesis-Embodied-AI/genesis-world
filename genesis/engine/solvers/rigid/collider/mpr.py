@@ -399,6 +399,29 @@ def mpr_find_pos(
             b[i] = 1.0
         sum_ = 3.0
 
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        # The origin projecting outside the portal triangle leaves a negative weight, which extrapolates both witnesses
+        # past the support points of their own geom, out of both geoms. The point of the triangle closest to the origin
+        # lies on one of its edges, where the weights of its two ends place each witness on a segment of its own geom.
+        if b[1] < 0.0 or b[2] < 0.0 or b[3] < 0.0:
+            dist_sqr_min = gs.qd_float(-1.0)
+            for k in qd.static(range(3)):
+                k_start, k_end = k + 1, (k + 1) % 3 + 1
+                v_start = mpr_state.simplex_support.v[k_start, i_b]
+                edge = mpr_state.simplex_support.v[k_end, i_b] - v_start
+                edge_sqr = edge.norm_sqr()
+                t = gs.qd_float(0.0)
+                if edge_sqr > 0.0:
+                    t = qd.math.clamp(-v_start.dot(edge) / edge_sqr, 0.0, 1.0)
+                dist_sqr = (v_start + t * edge).norm_sqr()
+                if dist_sqr_min < 0.0 or dist_sqr < dist_sqr_min:
+                    dist_sqr_min = dist_sqr
+                    for i in qd.static(range(4)):
+                        b[i] = 0.0
+                    b[k_start] = 1.0 - t
+                    b[k_end] = t
+            sum_ = 1.0
+
     p1 = gs.qd_vec3([0.0, 0.0, 0.0])
     p2 = gs.qd_vec3([0.0, 0.0, 0.0])
     for i in qd.static(range(4)):
