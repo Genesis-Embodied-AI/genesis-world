@@ -676,6 +676,32 @@ def test_per_env_time(show_viewer, n_envs, tol):
 
 
 @pytest.mark.required
+def test_partial_reset_keeps_other_pbd_envs(show_viewer):
+    """Resetting one environment must not restore particles in the others."""
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=0.002, substeps=2),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.025,
+            lower_bound=(-0.25, -0.25, 0.0),
+            upper_bound=(0.25, 0.25, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.4), size=(0.075, 0.075, 0.075)),
+        material=gs.materials.PBD.Liquid(sampler="regular"),
+    )
+    scene.build(n_envs=2)
+    scene.step()
+    before = entity.get_particles_pos()
+    scene.reset(envs_idx=[1])
+    after = entity.get_particles_pos()
+    assert torch.equal(after[0], before[0])
+    assert not torch.equal(after[1], before[1])
+    assert_allclose(scene.get_time(), [0.002, 0.0], atol=1e-12)
+
+
+@pytest.mark.required
 def test_derived_substeps(show_viewer, tol):
     GRAVITY = -9.81
     N_STEPS = 10

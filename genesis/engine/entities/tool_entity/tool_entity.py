@@ -310,9 +310,39 @@ class ToolEntity(Entity):
 
         return state
 
-    def set_state(self, f, state):
-        f = self._sim.cur_substep_local
-        self.set_frame(f, state.pos, state.quat, state.vel, state.ang)
+    def set_state(self, f, state, envs_idx=None):
+        if envs_idx is None:
+            self.set_frame(f, state.pos, state.quat, state.vel, state.ang)
+        else:
+            self._kernel_set_frame_envs(
+                f,
+                state.pos,
+                state.quat,
+                state.vel,
+                state.ang,
+                self._sim.scene._sanitize_envs_idx(envs_idx),
+            )
+
+    @qd.kernel
+    def _kernel_set_frame_envs(
+        self,
+        f: qd.i32,
+        pos: qd.types.ndarray(),
+        quat: qd.types.ndarray(),
+        vel: qd.types.ndarray(),
+        ang: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+    ):
+        for i_b_ in range(envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
+            for i in qd.static(range(3)):
+                self.pos[f, i_b][i] = pos[i_b, i]
+            for i in qd.static(range(4)):
+                self.quat[f, i_b][i] = quat[i_b, i]
+            for i in qd.static(range(3)):
+                self.vel[f, i_b][i] = vel[i_b, i]
+            for i in qd.static(range(3)):
+                self.ang[f, i_b][i] = ang[i_b, i]
 
     def build(self):
         self.pos = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # positon
