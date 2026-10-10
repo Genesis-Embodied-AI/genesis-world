@@ -910,7 +910,7 @@ def test_many_objects_collision(convexify, show_viewer, tol):
     vmax_trace, wmax_trace, energy_trace = [], [], []
     for i in range(1600):
         # Slowing down the fall to ensure the first contact between thin pieces is shallow enough to avoid interlock
-        ratio = math.exp(-0.015 * i)
+        ratio = math.exp(-0.01 * i)
         scene.rigid_solver.set_dofs_damping(
             (*((0.5 * ratio,) * 3), *((0.02 * ratio,) * 3)) * len(objs),
             dofs_idx=slice(objs[0].dof_start, objs[-1].dof_end),
