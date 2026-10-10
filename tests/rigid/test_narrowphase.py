@@ -41,12 +41,16 @@ import pytest
 import trimesh
 from scipy.spatial import ConvexHull
 
+import quadrants as qd
+
 import genesis as gs
+import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.utils.misc import tensor_to_array
+from genesis.engine.solvers.rigid.collider import support_field
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 if TYPE_CHECKING:
     from genesis.engine.entities import RigidEntity
@@ -1292,3 +1296,107 @@ def test_maximum_contact_area(show_viewer, tol):
                     for pentagon in map(list, combinations(range(len(corners)), 5))
                 )
                 assert ConvexHull(contacts_pos[:, :2]).volume > AREA_RATIO_MIN * area_max
+
+
+@pytest.mark.required
+def test_mesh_support_exactness(show_viewer, tol):
+    # The support table of a mesh returns, for any direction, a vertex that supports it, wherever it falls on the grid of
+    # directions the table is laid on: across its cells, on their boundaries, along the normals of the hull faces, and
+    # along the arcs between the normals of adjacent hull faces, where vertices tie. Meshes range from the eight corners
+    # of a box, whose supports tie along the axes, to a couple of hundred vertices, at scales from 0.05 to 5. The table
+    # also counts the vertices tied for a support, every one of which the cell of the direction lists.
+    N_RANDOM_DIRECTIONS = 20000
+    N_ARC_SAMPLES = 8
+    MESHES_N_VERTS = (40, 200)
+    SCALES = (0.05, 1.0, 5.0)
+
+    meshes = [trimesh.creation.box(extents=(SCALES[0], 2.0 * SCALES[0], 3.0 * SCALES[0]))]
+    for n_verts, scale in zip(MESHES_N_VERTS, SCALES[1:]):
+        verts = np.random.normal(size=(n_verts, 3))
+        verts /= np.linalg.norm(verts, axis=-1, keepdims=True)
+        meshes.append(trimesh.Trimesh(scale * verts * np.random.uniform(0.5, 1.5, 3)).convex_hull)
+
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, -15.0, 8.0),
+            camera_lookat=(4.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entities = [
+        scene.add_entity(
+            morph=gs.morphs.MeshSet(
+                files=(mesh,),
+                pos=(4.0 * i_e, 0.0, 0.0),
+            ),
+            vis_mode="collision",
+        )
+        for i_e, mesh in enumerate(meshes)
+    ]
+    scene.build()
+
+    @qd.kernel
+    def query_supports(
+        i_g: int,
+        directions: qd.types.ndarray(),
+        supports: qd.types.ndarray(),
+        supports_count: qd.types.ndarray(),
+        collider_info: array_class.ColliderInfo,
+    ):
+        for i_d in range(directions.shape[0]):
+            direction = qd.Vector([directions[i_d, 0], directions[i_d, 1], directions[i_d, 2]], dt=gs.qd_float)
+            support, _ = support_field._func_support_mesh(i_g, direction, collider_info)
+            for k in qd.static(range(3)):
+                supports[i_d, k] = support[k]
+            supports_count[i_d] = support_field._func_count_supports_mesh(i_g, direction, collider_info)
+
+    # Directions on the boundaries of the cells of both charts, the second chart seeing a direction (x, y, z) of the
+    # mesh frame as (x, -z, y)
+    support_res = qd_to_numpy(scene.rigid_solver.collider.collider_info.support_field.support_res).item()
+    theta = np.random.randint(support_res, size=N_RANDOM_DIRECTIONS // 4) / support_res * 2.0 * np.pi
+    phi = np.random.uniform(0.25 * np.pi, 0.75 * np.pi, N_RANDOM_DIRECTIONS // 4)
+    directions_meridian = np.stack((np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)), axis=-1)
+    theta = np.random.uniform(0.0, 2.0 * np.pi, N_RANDOM_DIRECTIONS // 4)
+    phi = np.random.randint(support_res // 4, 3 * support_res // 4 + 1, N_RANDOM_DIRECTIONS // 4) / support_res * np.pi
+    directions_parallel = np.stack((np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)), axis=-1)
+    directions_boundary = np.concatenate((directions_meridian, directions_parallel))
+    directions_boundary = np.concatenate((directions_boundary, directions_boundary[:, (0, 2, 1)] * (1.0, 1.0, -1.0)))
+
+    for entity in entities:
+        geom = entity.geoms[0]
+        verts = geom.init_verts
+        hull = ConvexHull(verts)
+        faces_normal = hull.equations[:, :3]
+        arcs_weight = np.random.uniform(0.0, 1.0, (len(faces_normal), N_ARC_SAMPLES, 1))
+        directions_arc = (
+            arcs_weight * faces_normal[:, None] + (1.0 - arcs_weight) * faces_normal[hull.neighbors[:, 0], None]
+        ).reshape((-1, 3))
+        directions = np.concatenate(
+            (
+                np.random.normal(size=(N_RANDOM_DIRECTIONS, 3)),
+                directions_boundary,
+                faces_normal,
+                directions_arc,
+                np.eye(3),
+                -np.eye(3),
+            )
+        )
+        directions = (directions / np.linalg.norm(directions, axis=-1, keepdims=True)).astype(gs.np_float)
+        supports = np.zeros_like(directions)
+        supports_count = np.zeros(len(directions), dtype=gs.np_int)
+        query_supports(geom.idx, directions, supports, supports_count, scene.rigid_solver.collider.collider_info)
+        assert_allclose((supports * directions).sum(axis=-1), (directions @ verts.T).max(axis=-1), tol=tol)
+
+    # A direction in a coordinate plane ties exactly two corners of the box, along an arc between two face normals that
+    # lies on the boundaries of the equatorial cells, and an axis of the box ties the four corners of a face.
+    directions_sign = np.random.choice((-1.0, 1.0), (N_RANDOM_DIRECTIONS, 3))
+    directions = directions_sign * np.random.uniform(0.2, 1.0, (N_RANDOM_DIRECTIONS, 3))
+    directions[np.arange(N_RANDOM_DIRECTIONS), np.random.randint(3, size=N_RANDOM_DIRECTIONS)] = 0.0
+    directions = np.concatenate((directions, np.eye(3), -np.eye(3)))
+    directions = (directions / np.linalg.norm(directions, axis=-1, keepdims=True)).astype(gs.np_float)
+    supports = np.zeros_like(directions)
+    supports_count = np.zeros(len(directions), dtype=gs.np_int)
+    query_supports(
+        entities[0].geoms[0].idx, directions, supports, supports_count, scene.rigid_solver.collider.collider_info
+    )
+    assert_equal(supports_count, np.repeat((2, 4), (N_RANDOM_DIRECTIONS, 6)))

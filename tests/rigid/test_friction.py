@@ -697,7 +697,7 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
 
 
 # The mesh box at the larger scale is the demanding case, so it is the required one: it reaches a face normal's support
-# through the sampled table rather than analytically, and its measured spreads sit closest to their bounds. The two ends
+# through the support table rather than analytically, and its measured spreads sit closest to their bounds. The two ends
 # of the sweep are four orders of magnitude apart, which is what forces every tolerance the step goes through to be
 # relative to the quantity it bounds.
 @pytest.mark.parametrize(
@@ -795,7 +795,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
         ),
     )
     # The box is swept over both geometries because they reach the support of a face normal, a direction where several
-    # vertices tie, by different means: the primitive resolves it analytically and the mesh reads the sampled table.
+    # vertices tie, by different means: the primitive resolves it analytically and the mesh reads the support table.
     # Either may pick a different tied vertex for a rotated copy, and only sweeping both holds each manifold.
     if is_box_mesh:
         box_morph = gs.morphs.MeshSet(

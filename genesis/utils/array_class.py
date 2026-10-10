@@ -1982,17 +1982,23 @@ class GJKStaticConfig(metaclass=AutoInitMeta):
 class SupportFieldInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
+    # First cell of the table of each geom
     support_cell_start: qd.Tensor
+    # First extra candidate of each cell, past those of its record, its extras ending where those of the next start
+    support_list_start: qd.Tensor
+    # Mesh-frame position and index of each candidate vertex: the record of every cell at twice the index of the cell,
+    # holding the first two candidates of the cell (a single candidate twice), then the extra candidates of all cells
     support_v: qd.Tensor
     support_vid: qd.Tensor
     support_res: qd.Tensor
 
 
-def get_support_field_info(n_geoms, n_support_cells, support_res):
+def get_support_field_info(n_geoms, n_support_cells, n_support_candidates, support_res):
     return SupportFieldInfo(
         support_cell_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
-        support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_cells, 1),)),
-        support_vid=V(dtype=gs.qd_int, shape=(max(n_support_cells, 1),)),
+        support_list_start=V(dtype=gs.qd_int, shape=(n_support_cells + 1,)),
+        support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_candidates, 1),)),
+        support_vid=V(dtype=gs.qd_int, shape=(max(n_support_candidates, 1),)),
         support_res=V_SCALAR_FROM(dtype=gs.qd_int, value=support_res),
     )
 

@@ -222,8 +222,8 @@ def support_driver(
             # Terrain is global and not perturbed, so we use the global state directly
             v, _ = support_field._func_support_prism(i_b, direction, collider_state)
     else:
-        # The reference engine's fallback pipeline scans mesh vertices exhaustively for its supports; the sampled
-        # support table it replaces may return a different vertex of a tied flat face (see _func_support_world).
+        # The reference engine's fallback pipeline scans mesh vertices exhaustively for its supports, which returns the
+        # first of tied vertices where the support table returns any of them (see _func_support_world).
         v, v_, vid = support_field._func_support_world(
             i_g,
             direction,
