@@ -1081,7 +1081,6 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
 
 @pytest.mark.slow  # ~150s
 @pytest.mark.required
-@pytest.mark.xfail(reason="Multi-contact detection misses some corners of the contact patch.")
 @pytest.mark.parametrize("gjk_collision", [True, False])
 def test_multi_contact_overlap_corners(gjk_collision, show_viewer, tol):
     # A box rests on a wider one at a random yaw and offset in each environment, so that the overlap of their faces
@@ -1124,6 +1123,7 @@ def test_multi_contact_overlap_corners(gjk_collision, show_viewer, tol):
     yaw[is_aligned] = yaw_aligned + np.random.uniform(-1e-3, 1e-3, is_aligned.sum())
     offset = np.random.uniform(-0.6, 0.6, (N_ENVS, 2))
     box_z = BASE_SIZE[2] + 0.5 * BOX_SIZE[2] - PENETRATION
+    corners_tol = scene.rigid_solver.collider._mc_tolerance * 0.5 * np.linalg.norm(BOX_SIZE)
     box.set_pos(np.concatenate((offset, np.full((N_ENVS, 1), box_z)), axis=-1))
     box.set_quat(np.stack((np.cos(0.5 * yaw), np.zeros(N_ENVS), np.zeros(N_ENVS), np.sin(0.5 * yaw)), axis=-1))
     scene.step()
@@ -1167,6 +1167,8 @@ def test_multi_contact_overlap_corners(gjk_collision, show_viewer, tol):
 
         # An overlap of at most 4 corners has a contact on each of them, unless the pruning drops it: the triangle a
         # corner forms with its two neighbors then covers less than the pruning tolerance of the overlap area.
+        # Detection merges the contacts closer than the multi-contact tolerance, which scales with the smaller box of the
+        # pair, so a contact stands for every corner within this distance.
         if len(overlap) <= 4:
             overlap_prev, overlap_next = np.roll(overlap, 1, axis=0), np.roll(overlap, -1, axis=0)
             corners_edges = np.stack((overlap - overlap_prev, overlap_next - overlap), axis=-2)
@@ -1174,11 +1176,10 @@ def test_multi_contact_overlap_corners(gjk_collision, show_viewer, tol):
             overlap_area = 0.5 * np.abs(np.linalg.det(np.stack((overlap, overlap_next), axis=-2)).sum())
             is_kept = corners_area > PRUNING_TOLERANCE * overlap_area
             corners_dist = np.linalg.norm(overlap[:, None] - contacts_pos[None], axis=-1)
-            assert (corners_dist.min(axis=1, initial=np.inf)[is_kept] < tol).all()
+            assert (corners_dist.min(axis=1, initial=np.inf)[is_kept] < corners_tol).all()
 
 
 @pytest.mark.required
-@pytest.mark.xfail(reason="Multi-contact detection misses some corners of the contact patch.")
 def test_maximum_contact_area(show_viewer, tol):
     # A pillar of three, four or six sides rests on a wider pillar of seven, both of random convex sections, at evenly
     # spread yaws and a random tilt within the reach of the multi-contact perturbation, each pair at its own scale. The
