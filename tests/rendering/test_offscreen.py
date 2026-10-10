@@ -1377,7 +1377,7 @@ def test_camera_gimbal_lock_singularity(renderer, show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.parametrize("force_show_viewer", [False, True])
-def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show_viewer):
+def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show_viewer, tol):
     if force_show_viewer and not IS_INTERACTIVE_VIEWER_AVAILABLE:
         pytest.skip(SKIP_NO_VIEWER)
 
@@ -1486,6 +1486,32 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     # With split_envs, renders are batched: (n_rendered_envs, H, W, 3)
     assert rgb.shape == (len(RENDERED_ENVS), *CAM_RES, 3)
     assert rgb_debug.shape == (len(RENDERED_ENVS), *CAM_RES, 3)
+
+    cam.set_pose(pos=(0.0, 0.0, 4.0), lookat=(0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0), envs_idx=1)
+    rgb_selected, *_ = cam.render(rgb=True)
+    assert_pixel_match(rgb_selected[1], rgb[1])
+    assert np.abs(rgb_selected[0].astype(gs.np_float) - rgb[0].astype(gs.np_float)).mean() > 5.0
+    assert_equal(cam.get_pos(envs_idx=1).shape, (3,))
+    assert_allclose(cam.get_pos(envs_idx=1), (0.0, 0.0, 4.0), tol=tol)
+
+    positions = [(0.0, 0.0, 4.0), (3.5, 0.0, 2.5)]
+    lookats = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.5)]
+    ups = [(0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+    transforms = gu.pos_lookat_up_to_T(np.array(positions), np.array(lookats), np.array(ups))
+    cam.set_pose(pos=positions, lookat=lookats, up=ups, envs_idx=[2, 1])
+    for getter, pose_expected in (
+        (cam.get_pos, positions),
+        (cam.get_lookat, lookats),
+        (cam.get_up, transforms[:, :3, 1]),
+        (cam.get_transform, transforms),
+    ):
+        assert_allclose(getter(), pose_expected[::-1], tol=tol)
+        assert_allclose(getter(envs_idx=[2, 1]), pose_expected, tol=tol)
+    assert_allclose(gu.quat_to_R(cam.get_quat()), transforms[::-1, :3, :3], tol=tol)
+    assert_allclose(gu.quat_to_R(cam.get_quat(envs_idx=[2, 1])), transforms[:, :3, :3], tol=tol)
+    with pytest.raises(gs.GenesisException, match="rendered_envs_idx"):
+        cam.set_pose(pos=(0.0, 0.0, 4.0), envs_idx=0)
+    cam.set_pose(pos=(3.5, 0.0, 2.5), lookat=(0.0, 0.0, 0.5), up=(0.0, 0.0, 1.0))
 
     # Batched set_pose: keep side view for env 0, switch to top-down view for env 1
     rgb_before = rgb.copy()
