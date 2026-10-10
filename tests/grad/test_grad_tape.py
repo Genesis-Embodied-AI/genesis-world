@@ -9,8 +9,9 @@ from ..utils.assertions import assert_allclose, assert_equal
 from .utils import make_diff_scene_pair
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("model_name", ["grad_free", "grad_revolute", "grad_free_with_revolute"])
+@pytest.mark.parametrize(
+    "model_name", ["grad_free", "grad_revolute", pytest.param("grad_free_with_revolute", marks=pytest.mark.required)]
+)
 def test_horizon_truncation_matches_independent_scenes(model_name, request, show_viewer):
     mjcf = request.getfixturevalue(model_name)
     tol = dict(atol=1e-5, rtol=1e-4)

@@ -12,9 +12,19 @@ from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 from ..utils.assertions import assert_allclose
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-@pytest.mark.parametrize("shape", ["ground_box", "box", "sphere", "capsule"])
+@pytest.mark.parametrize(
+    "shape, backend",
+    [
+        pytest.param("ground_box", gs.cpu, marks=pytest.mark.required),
+        pytest.param("ground_box", gs.gpu, marks=pytest.mark.required),
+        pytest.param("box", gs.cpu, marks=pytest.mark.required),
+        pytest.param("box", gs.gpu, marks=pytest.mark.required),
+        pytest.param("sphere", gs.cpu, marks=pytest.mark.required),
+        pytest.param("sphere", gs.gpu, marks=pytest.mark.required),
+        ("capsule", gs.cpu),
+        pytest.param("capsule", gs.gpu, marks=pytest.mark.required),
+    ],
+)
 def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, show_viewer):
     def _build_contact_scene(shape, mjcf_capsule, *, requires_grad, show_viewer=False):
         scene = gs.Scene(

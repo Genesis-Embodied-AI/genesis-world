@@ -76,9 +76,8 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
     return scene
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_export_and_load_rigid(
     n_envs, xml_path, mimic_hinges, urdf_with_external_assets, xacro_robot, tmp_path, show_viewer, caplog
 ):
@@ -420,8 +419,7 @@ def test_export_and_load_rigid(
         assert first.read(ARRAY_MEMBER) == second.read(ARRAY_MEMBER)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
     scene = checkpoint_scene
     box = scene.entities[1]
@@ -589,8 +587,7 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
         checkpoint_scene.export(tmp_path / f"wind{SCENE_FORMAT}")
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 @pytest.mark.parametrize("requires_grad", [False, True])
 def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_viewer):
     scene = checkpoint_scene

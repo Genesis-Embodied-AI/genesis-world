@@ -136,8 +136,7 @@ def test_bake(usd_file, tmp_path):
     assert is_any_baked
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("scale", [1.0, 2.0])
+@pytest.mark.parametrize("scale", [1.0, pytest.param(2.0, marks=pytest.mark.required)])
 def test_massapi_invalid_defaults_mjcf_vs_usd(asset_tmp_path, scale):
     # USD Physics MassAPI defines attributes with sentinel default values - centerOfMass (-inf, -inf, -inf),
     # principalAxes (0, 0, 0, 0), diagonalInertia (0, 0, 0), mass (0) - that must be treated as unset and

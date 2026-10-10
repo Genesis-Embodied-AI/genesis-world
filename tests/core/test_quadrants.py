@@ -126,11 +126,20 @@ def gs_static_child(args: list[str]):
     sys.exit(RET_SUCCESS)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("backend", [None])  # Disable genesis initialization at worker level
-@pytest.mark.parametrize("test_backend", ["cpu", "gpu"])
-@pytest.mark.parametrize("use_ndarray", [False, True])
-@pytest.mark.parametrize("enable_multicontact, expected_num_contacts", [(False, 1), (True, 4)])
+@pytest.mark.parametrize(
+    "enable_multicontact, expected_num_contacts, use_ndarray, test_backend",
+    [
+        pytest.param(False, 1, False, "cpu", marks=pytest.mark.required),
+        pytest.param(True, 4, False, "cpu", marks=pytest.mark.required),
+        (False, 1, True, "cpu"),
+        pytest.param(True, 4, True, "cpu", marks=pytest.mark.required),
+        pytest.param(False, 1, False, "gpu", marks=pytest.mark.required),
+        pytest.param(True, 4, False, "gpu", marks=pytest.mark.required),
+        pytest.param(False, 1, True, "gpu", marks=pytest.mark.required),
+        pytest.param(True, 4, True, "gpu", marks=pytest.mark.required),
+    ],
+)
 def test_static(
     enable_multicontact: bool,
     expected_num_contacts: int,
