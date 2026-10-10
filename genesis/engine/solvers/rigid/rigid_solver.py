@@ -15,6 +15,7 @@ from genesis.engine.materials import Rigid
 from genesis.engine.states import KinematicSolverCheckpoint, RigidSolverState
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
+from genesis.typing import Vec2FType, Vec3FType
 from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
@@ -572,6 +573,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             enable_signorini_contact=self._contact_resolution == gs.contact_resolution.signorini,
             enable_torsional_friction=self._options.enable_torsional_friction,
             enable_rolling_friction=self._options.enable_rolling_friction,
+            enable_screw_constraints=self._options.enable_screw_constraints,
             enable_multi_contact=self._enable_multi_contact,
             enable_collision=self._enable_collision,
             enable_joint_limit=self._enable_joint_limit,
@@ -759,6 +761,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 gs.raise_exception("Noslip is not supported yet when requires_grad is True.")
             if self._options.enable_torsional_friction or self._options.enable_rolling_friction:
                 gs.raise_exception("Torsional and rolling friction are not supported yet when requires_grad is True.")
+            if self._options.enable_screw_constraints:
+                gs.raise_exception("Screw constraints are not supported yet when requires_grad is True.")
 
     def _create_data_manager(self):
         # We initialize data even if the solver is not active because the coupler needs arguments like
@@ -3066,12 +3070,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             frictionloss = qd_to_torch(self.dyn_info.dofs.frictionloss, transpose=True)
 
         # Frictionloss constraint forces mapped back to DOF space. Frictionloss constraints occupy the contiguous block
-        # [n_constraints_equality, n_constraints_equality + n_constraints_frictionloss) of the constraint list and have
-        # an identity Jacobian, so `efc_force` at a frictionloss row is exactly the DOF-space frictionloss effort. The
-        # assembly loop appends them in ascending DOF order (it iterates links -> joints -> DOFs serially within each
-        # env, matching the global DOF numbering), so the k-th frictionloss row is the k-th DOF with nonzero
-        # frictionloss. Its row index is therefore `n_constraints_equality + rank`, with `rank` the running count of
-        # frictionloss-enabled DOFs (-1 for DOFs without frictionloss, which contribute zero).
+        # [n_constraints_equality, n_constraints_equality + n_constraints_frictionloss) of the constraint list, the DOF
+        # rows first (the rows of screw constraints follow them). A DOF row has an identity Jacobian, so `efc_force` at
+        # that row is exactly the DOF-space frictionloss effort. The assembly loop appends the DOF rows in ascending DOF
+        # order (it iterates links -> joints -> DOFs serially within each env, matching the global DOF numbering), so
+        # the k-th frictionloss row is the k-th DOF with nonzero frictionloss. Its row index is therefore
+        # `n_constraints_equality + rank`, with `rank` the running count of frictionloss-enabled DOFs (-1 for DOFs
+        # without frictionloss, which contribute zero).
         efc_force = qd_to_torch(self.constraint_solver.efc_force, envs_idx, transpose=True)
         n_constraints_equality = qd_to_torch(self.constraint_solver.n_constraints_equality, envs_idx)
         has_frictionloss = frictionloss > gs.EPS
@@ -3374,10 +3379,103 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_set_geoms_friction_rolling(geoms_idx, friction_rolling, self.dyn_info, self.rigid_config)
 
     def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        return self.constraint_solver.add_weld_constraint(link1_idx, link2_idx, envs_idx)
+        # The only type-specific entry is the torque scale of the rotation rows.
+        self.constraint_solver.add_dynamic_constraint(
+            gs.EQUALITY_TYPE.WELD,
+            link1_idx,
+            link2_idx,
+            anchor_link_idx=link1_idx,
+            anchor_pos=np.zeros(3, dtype=gs.np_float),
+            eq_data_tail=(1.0,),
+            envs_idx=envs_idx,
+        )
 
     def delete_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        return self.constraint_solver.delete_weld_constraint(link1_idx, link2_idx, envs_idx)
+        self.constraint_solver.delete_dynamic_constraint(gs.EQUALITY_TYPE.WELD, link1_idx, link2_idx, envs_idx)
+
+    def add_screw_constraint(
+        self,
+        link1_idx: int,
+        link2_idx: int,
+        axis: Vec3FType,
+        pitch: float,
+        pos: Vec3FType | None = None,
+        limit: Vec2FType | None = None,
+        frictionloss: float = 0.0,
+        envs_idx=None,
+    ):
+        """
+        Constrain a link to screw along an axis attached to another link, starting from their current relative pose.
+
+        The two links stop colliding with each other while the constraint holds.
+
+        Parameters
+        ----------
+        link1_idx : int
+            The global index of the link carrying the screw axis, such as a bolt.
+        link2_idx : int
+            The global index of the link screwing along the axis, such as a nut.
+        axis : array_like
+            The direction of the screw axis, in the frame of link1.
+        pitch : float
+            The travel of link2 along the axis per full turn about it [m], positive for a right-handed screw, as
+            thread pitches are given (3 mm for an M24 x 3 thread). Zero gives a revolute motion, and infinity a
+            prismatic one.
+        pos : None | array_like, optional
+            A point of the screw axis, in the frame of link1. If None, the axis passes through the origin of link2.
+            Defaults to None.
+        limit : None | array_like, optional
+            The lower and upper travel of link2 along the axis [m], counted from the current pose, such as the seat of
+            a nut. If None, the travel is unbounded. Defaults to None.
+        frictionloss : float, optional
+            The dry friction torque about the axis [N*m], or the dry friction force along it [N] for an infinite pitch.
+            Defaults to 0.0.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments will be considered. Defaults to None.
+        """
+        if not self._options.enable_screw_constraints:
+            gs.raise_exception("Screw constraints require 'RigidOptions(enable_screw_constraints=True)'.")
+        axis = np.asarray(axis, dtype=gs.np_float)
+        axis_norm = np.linalg.norm(axis)
+        anchor_pos = np.zeros(3, dtype=gs.np_float) if pos is None else np.asarray(pos, dtype=gs.np_float)
+        limit = np.array((-np.inf, np.inf) if limit is None else limit, dtype=gs.np_float)
+        if (
+            axis.shape != (3,)
+            or not gs.EPS <= axis_norm < np.inf
+            or np.isnan(pitch)
+            or anchor_pos.shape != (3,)
+            or not np.isfinite(anchor_pos).all()
+            or limit.shape != (2,)
+            or not limit[0] <= limit[1]
+            or not frictionloss >= 0.0
+        ):
+            gs.raise_exception(
+                "Invalid screw constraint: 'axis' must be a finite non-zero 3D vector, 'pitch' a number, 'pos' a "
+                "finite 3D point, 'limit' an ordered (lower, upper) pair and 'frictionloss' non-negative. Got "
+                f"axis={axis}, pitch={pitch}, pos={pos}, limit={limit} and frictionloss={frictionloss}."
+            )
+
+        # The pitch enters the constraint per radian, as the direction (cos, sin) of (1, pitch / 2pi), which stays
+        # finite for a zero pitch and an infinite one (see func_screw_frame).
+        if np.isinf(pitch):
+            pitch_cos, pitch_sin = 0.0, 1.0
+        else:
+            pitch_norm = np.hypot(1.0, pitch / (2.0 * np.pi))
+            pitch_cos, pitch_sin = 1.0 / pitch_norm, pitch / (2.0 * np.pi) / pitch_norm
+
+        anchor_link_idx = link2_idx if pos is None else link1_idx
+        self.constraint_solver.add_dynamic_constraint(
+            gs.EQUALITY_TYPE.SCREW,
+            link1_idx,
+            link2_idx,
+            anchor_link_idx,
+            anchor_pos,
+            eq_data_tail=(*(axis / axis_norm), pitch_cos, pitch_sin, *limit, frictionloss),
+            envs_idx=envs_idx,
+        )
+
+    def delete_screw_constraint(self, link1_idx: int, link2_idx: int, envs_idx=None):
+        self.constraint_solver.delete_dynamic_constraint(gs.EQUALITY_TYPE.SCREW, link1_idx, link2_idx, envs_idx)
 
     def get_weld_constraints(self, as_tensor: bool = True, to_torch: bool = True):
         return self.constraint_solver.get_weld_constraints(as_tensor, to_torch)

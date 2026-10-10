@@ -289,6 +289,24 @@ def mimic_hinges():
 
 
 @pytest.fixture(scope="session")
+def swinging_spindle():
+    """Generate an MJCF model for a spindle swinging about a horizontal hinge, carrying a nut free in every direction."""
+    mjcf = ET.Element("mujoco", model="swinging_spindle")
+    ET.SubElement(ET.SubElement(mjcf, "default"), "joint", armature="0")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    spindle = ET.SubElement(worldbody, "body", name="spindle", pos="8.0 0.0 0.5")
+    ET.SubElement(spindle, "joint", name="swing", type="hinge", axis="1 0 0")
+    ET.SubElement(spindle, "geom", type="cylinder", size="0.01 0.1", mass="0.5")
+    nut = ET.SubElement(spindle, "body", name="nut", pos="0.0 0.0 0.05")
+    for axis_name, axis in (("x", "1 0 0"), ("y", "0 1 0"), ("z", "0 0 1")):
+        ET.SubElement(nut, "joint", name=f"slide_{axis_name}", type="slide", axis=axis)
+    for axis_name, axis in (("x", "1 0 0"), ("y", "0 1 0"), ("z", "0 0 1")):
+        ET.SubElement(nut, "joint", name=f"hinge_{axis_name}", type="hinge", axis=axis)
+    ET.SubElement(nut, "geom", type="box", size="0.03 0.02 0.01", mass="0.1")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def scaled_mjcf_joint_equalities():
     mjcf = ET.Element("mujoco", model="scaled_mjcf_joint_equalities")
     worldbody = ET.SubElement(mjcf, "worldbody")

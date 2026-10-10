@@ -155,6 +155,10 @@ def test_dynamic_weld(show_viewer, tol):
     for i in range(70):
         scene.step()
 
+    with pytest.raises(gs.GenesisException, match="enable_screw_constraints"):
+        scene.sim.rigid_solver.add_screw_constraint(
+            cube.base_link.idx, end_effector.idx, axis=(0.0, 0.0, 1.0), pitch=0.0
+        )
     # add weld constraint and move back up. The hanging box is welded in the air afterwards, so that deleting the
     # cube weld goes through the swap-remove path and must preserve the full record of the hanging box weld.
     scene.sim.rigid_solver.add_weld_constraint(cube.base_link.idx, end_effector.idx, envs_idx=(0, 1, 2))
@@ -185,6 +189,168 @@ def test_dynamic_weld(show_viewer, tol):
     assert_allclose(torch.diff(cubes_pos[[0, 1, 3]], dim=0), 0.0, tol=1e-2)
     assert_allclose(cubes_pos[2] - cubes_pos[0], ee_pos_up - ee_pos_down, tol=1e-3)
     assert_allclose(hanging_box.get_pos(), HANGING_BOX_POS, tol=1e-3)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
+    DT = 0.01
+    SUBSTEPS = 2
+    GRAVITY = 9.81
+    PITCH = 0.06
+    LIMIT_LOWER = -0.01
+    POST_POS = (2.0, 0.5, 0.25)
+    NUT_Z = 0.4
+    N_STEPS_SCREWED = 30
+    HINGE_SPIN_RATE = 2.0
+    SPINDLE_SWING_RATE = 5.0
+    N_STEPS_RELEASED = 10
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            integrator=gs.integrator.Euler,
+            max_dynamic_constraints=8,
+            enable_screw_constraints=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.0, -3.5, 1.0),
+            camera_lookat=(3.0, 0.0, 0.2),
+        ),
+        show_viewer=show_viewer,
+    )
+    post = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.02, 0.02, 0.5),
+            pos=POST_POS,
+            fixed=True,
+        ),
+    )
+    nut_helix, nut_slider, nut_hinge, nut_held, nut_seated, nut_capped, nut_braked = (
+        scene.add_entity(
+            gs.morphs.Box(
+                size=(0.1, 0.1, 0.02),
+                pos=(x, 0.0, NUT_Z),
+            ),
+        )
+        for x in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    )
+    spindle = scene.add_entity(
+        gs.morphs.MJCF(
+            file=swinging_spindle,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    rigid = scene.sim.rigid_solver
+    post_idx = post.base_link.idx
+    rigid.add_screw_constraint(post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH)
+    rigid.add_screw_constraint(post_idx, nut_slider.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=np.inf)
+    rigid.add_screw_constraint(post_idx, nut_hinge.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=0.0)
+    rigid.add_screw_constraint(post_idx, nut_held.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, frictionloss=1.0)
+    # The axis of the seated nut goes through a point given in the frame of the post rather than through the nut.
+    axis_pos = np.subtract((4.0, 0.0, NUT_Z), POST_POS)
+    rigid.add_screw_constraint(
+        post_idx, nut_seated.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, pos=axis_pos, limit=(LIMIT_LOWER, np.inf)
+    )
+    # The axis of the capped nut points down, so its fall is a positive travel that the upper limit stops.
+    rigid.add_screw_constraint(
+        post_idx, nut_capped.base_link.idx, axis=(0.0, 0.0, -1.0), pitch=PITCH, limit=(-np.inf, -LIMIT_LOWER)
+    )
+    # Friction along the axis of a slider, well above the weight of the nut.
+    rigid.add_screw_constraint(
+        post_idx, nut_braked.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=np.inf, frictionloss=10.0
+    )
+    # The nut is a child of the spindle, whose swing turns the screw axis.
+    rigid.add_screw_constraint(
+        spindle.get_link("spindle").idx, spindle.get_link("nut").idx, axis=(0.0, 0.0, 1.0), pitch=PITCH
+    )
+    nut_hinge.set_dofs_velocity(HINGE_SPIN_RATE, dofs_idx_local=5)
+    spindle.set_dofs_velocity(SPINDLE_SWING_RATE, dofs_idx_local=0)
+    with pytest.raises(gs.GenesisException, match="already coupled"):
+        rigid.add_screw_constraint(nut_helix.base_link.idx, post_idx, axis=(0.0, 0.0, 1.0), pitch=PITCH)
+    with pytest.raises(gs.GenesisException, match="max_dynamic_constraints"):
+        rigid.add_weld_constraint(post_idx, nut_helix.base_link.idx)
+    with pytest.raises(gs.GenesisException, match="Invalid screw constraint"):
+        rigid.add_screw_constraint(post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, np.inf), pitch=PITCH)
+    with pytest.raises(gs.GenesisException, match="Invalid screw constraint"):
+        rigid.add_screw_constraint(post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=np.nan)
+    with pytest.raises(gs.GenesisException, match="Invalid screw constraint"):
+        rigid.add_screw_constraint(post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, pos=(0.0, 0.0))
+    with pytest.raises(gs.GenesisException, match="Invalid screw constraint"):
+        rigid.add_screw_constraint(
+            post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, limit=(0.1, 0.0)
+        )
+    with pytest.raises(gs.GenesisException, match="Invalid screw constraint"):
+        rigid.add_screw_constraint(
+            post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, frictionloss=np.nan
+        )
+    scene_with_grad = gs.Scene(
+        sim_options=gs.options.SimOptions(requires_grad=True),
+        rigid_options=gs.options.RigidOptions(enable_screw_constraints=True),
+    )
+    scene_with_grad.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))
+    with pytest.raises(gs.GenesisException, match="Screw constraints are not supported yet"):
+        scene_with_grad.build()
+    with pytest.raises(gs.GenesisException, match="max_dynamic_constraints"):
+        gs.options.RigidOptions(max_dynamic_constraints=0, enable_screw_constraints=True)
+    assert_equal(rigid.get_equality_constraints()["type"], gs.EQUALITY_TYPE.SCREW)
+
+    # The nut descends with the acceleration g_eff of a mass m sliding along the axis while spinning with an axial
+    # inertia I, the two being coupled by the travel per radian p: g_eff = g * m * p^2 / (m * p^2 + I). The
+    # compliance of the coupling row lets the turn lag the travel slightly, hence the relative tolerances.
+    mass = tensor_to_array(nut_helix.get_links_mass())[0]
+    inertia = tensor_to_array(nut_helix.get_links_inertia())[0, 2, 2]
+    pitch_rad = PITCH / (2.0 * np.pi)
+    g_eff = GRAVITY * mass * pitch_rad**2 / (mass * pitch_rad**2 + inertia)
+    # Semi-implicit Euler moves a body under a constant acceleration a by -a * dt^2 * n * (n + 1) / 2 after n substeps.
+    n_substeps = N_STEPS_SCREWED * SUBSTEPS
+    fall_factor = (DT / SUBSTEPS) ** 2 * n_substeps * (n_substeps + 1) / 2
+    for _ in range(N_STEPS_SCREWED):
+        scene.step()
+    # The post is fixed and the screw axis is the world z axis, so the travel of a nut is its height change.
+    travel_helix = nut_helix.get_pos()[..., 2] - NUT_Z
+    assert_allclose(travel_helix, -g_eff * fall_factor, rtol=0.01)
+    assert_allclose(
+        gu.quat_to_rotvec(tensor_to_array(nut_helix.get_quat()))[..., 2], travel_helix / pitch_rad, tol=0.02
+    )
+    assert_allclose(nut_helix.get_pos()[..., :2], (0.0, 0.0), tol=1e-3)
+    assert_allclose(nut_slider.get_pos()[..., 2] - NUT_Z, -GRAVITY * fall_factor, tol=tol)
+    assert_allclose(nut_slider.get_quat(), (1.0, 0.0, 0.0, 0.0), tol=1e-3)
+    assert_allclose(nut_hinge.get_pos()[..., 2], NUT_Z, tol=1e-3)
+    hinge_turn = gu.quat_to_rotvec(tensor_to_array(nut_hinge.get_quat()))[..., 2]
+    assert_allclose(hinge_turn, HINGE_SPIN_RATE * N_STEPS_SCREWED * DT, tol=1e-2)
+    assert_allclose(nut_braked.get_pos()[..., 2], NUT_Z, tol=5e-3)
+    assert_allclose(nut_held.get_pos()[..., 2], NUT_Z, tol=1e-3)
+    # The joints of the nut measure its motion in the frame of the spindle: 3 slides, then 3 hinges.
+    spindle_nut_qpos = spindle.get_qpos()[..., 1:]
+    assert_allclose(spindle_nut_qpos[..., 2], pitch_rad * spindle_nut_qpos[..., 5], tol=1e-4)
+    assert_allclose(spindle_nut_qpos[..., [0, 1, 3, 4]], 0.0, tol=5e-3)
+
+    # Once deleted in the last environment, the helix nut falls freely there and keeps screwing down everywhere else.
+    rigid.delete_screw_constraint(nut_helix.base_link.idx, post_idx, envs_idx=[n_envs - 1] if n_envs > 0 else None)
+    vel_z = nut_helix.get_vel()[..., 2]
+    for _ in range(N_STEPS_RELEASED):
+        scene.step()
+    is_deleted = np.arange(max(n_envs, 1)) == max(n_envs, 1) - 1
+    vel_z_delta = np.atleast_1d(tensor_to_array(nut_helix.get_vel()[..., 2] - vel_z))
+    assert_allclose(vel_z_delta[is_deleted], -GRAVITY * N_STEPS_RELEASED * DT, tol=tol)
+    assert_allclose(vel_z_delta[~is_deleted], -g_eff * N_STEPS_RELEASED * DT, rtol=0.01)
+    n_screws = (rigid.get_equality_constraints()["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
+    assert_equal(n_screws, 8 - is_deleted)
+    for nut_stopped in (nut_seated, nut_capped):
+        assert_allclose(nut_stopped.get_pos()[..., 2] - NUT_Z, LIMIT_LOWER, tol=5e-4)
+        assert_allclose(nut_stopped.get_vel(), 0.0, tol=2e-3)
+    if n_envs > 0:
+        rigid.add_screw_constraint(
+            post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, envs_idx=[n_envs - 1, n_envs - 1]
+        )
+        n_screws = (rigid.get_equality_constraints()["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
+        assert_equal(n_screws, 8)
 
 
 @pytest.mark.slow  # ~200s
@@ -299,7 +465,7 @@ def test_get_constraints_api(show_viewer, tol):
 
     link_a, link_b = robot.base_link.idx, cube.base_link.idx
     scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
-    with np.testing.assert_raises(AssertionError):
+    with pytest.raises(gs.GenesisException, match="already coupled"):
         scene.sim.rigid_solver.add_weld_constraint(link_a, link_b, envs_idx=[1])
 
     for as_tensor, to_torch in ((True, True), (True, False), (False, True), (False, False)):
