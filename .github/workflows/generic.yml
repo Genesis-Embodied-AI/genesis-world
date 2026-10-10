@@ -167,7 +167,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest -v -ra --logical --dev --backend ${{ matrix.GS_BACKEND }} -m 'required and not slow' --forked ./tests
+          pytest -v -ra --logical ${{ matrix.GS_ENABLE_NDARRAY != '0' && '--dev' || '' }} --backend ${{ matrix.GS_BACKEND }} -m 'required and not slow' --forked ./tests
 
       - name: Save Updated Quadrants Kernel Cache
         if: >-

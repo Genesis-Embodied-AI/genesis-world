@@ -324,7 +324,7 @@ jobs:
             # tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
 
             # Given no expression, the selection of 'pyproject.toml' stays in charge.
-            pytest -v -ra --backend gpu --dev --forked ./tests \
+            pytest -v -ra --backend gpu ${{ matrix.GS_ENABLE_NDARRAY != '0' && '--dev' || '' }} --forked ./tests \
                 ${{ inputs.unit_tests_markexpr && format('-m "{0}"', inputs.unit_tests_markexpr) }}
 
             # tmate -S /tmp/tmate.sock wait tmate-exit
