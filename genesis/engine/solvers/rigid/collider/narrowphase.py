@@ -1904,6 +1904,8 @@ def func_convex_convex_contact(
                 collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.GJK
                 or collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.MJ_GJK
             )
+            # Whether GJK ran, which the analytic detections and the plane bypass whatever the algorithm prefers
+            is_gjk_used = False
 
             # Apply perturbations to thread-local state
             if multi_contact and is_col_0:
@@ -2103,6 +2105,7 @@ def func_convex_convex_contact(
                                     gjk_static_config,
                                 )
 
+                            is_gjk_used = True
                             is_col = gjk_state.is_col[i_b] == 1
                             penetration = gjk_state.penetration[i_b]
                             n_contacts = gjk_state.n_contacts[i_b]
@@ -2193,7 +2196,7 @@ def func_convex_convex_contact(
 
             if i_detection == 0:
                 is_col_0, normal_0, penetration_0, contact_pos_0 = is_col, normal, penetration, contact_pos
-                is_gjk_used_0 = prefer_gjk
+                is_gjk_used_0 = is_gjk_used
                 if is_col_0:
                     func_add_contact(
                         i_ga,
@@ -2235,7 +2238,6 @@ def func_convex_convex_contact(
                 if qd.static(
                     collider_static_config.ccd_algorithm not in (CCD_ALGORITHM_CODE.MJ_MPR, CCD_ALGORITHM_CODE.MJ_GJK)
                 ):
-                    _used_gjk = prefer_gjk
                     normal, penetration, contact_pos = func_recompute_perturbed_contact(
                         i_ga,
                         i_gb,
@@ -2258,7 +2260,7 @@ def func_convex_convex_contact(
                         collider_info,
                         rigid_config,
                         geom_pair_scale,
-                        _used_gjk,
+                        is_gjk_used,
                         is_gjk_used_0,
                     )
 
@@ -2521,6 +2523,8 @@ def _func_multicontact_detect(
     axis_0 = qd.Vector.zero(gs.qd_float, 3)
     axis_1 = qd.Vector.zero(gs.qd_float, 3)
     is_axes_computed = False
+    # Whether GJK detected contact 0, which the MPR seed, the analytic detections and the plane do not
+    is_gjk_used_0 = False
     for i_det in range(i_det_start, i_det_end):
         is_initial_detection = i_det == 0
         is_active = is_gjk_preferred_0
@@ -2678,6 +2682,7 @@ def _func_multicontact_detect(
                         contact0_normal = normal
                         contact0_pos = contact_pos
                         contact0_penetration = penetration
+                        is_gjk_used_0 = is_gjk_used
                         slot_status = MULTICONTACT_SLOT.BASE
                         slot_normal = normal
                         slot_pos = contact_pos
@@ -2715,7 +2720,7 @@ def _func_multicontact_detect(
                         rigid_config,
                         geom_pair_scale,
                         is_gjk_used,
-                        is_gjk_preferred_0,
+                        is_gjk_used_0,
                     )
                 slot_status = MULTICONTACT_SLOT.PERTURBED
                 slot_normal = normal
