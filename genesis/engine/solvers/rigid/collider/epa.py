@@ -55,8 +55,8 @@ def func_epa(
     tolerance = collider_info.gjk.tolerance[None]
 
     # Index of the nearest face
-    nearest_i_f = -1
-    prev_nearest_i_f = -1
+    i_f_nearest = -1
+    i_f_nearest_prev = -1
 
     discrete = func_is_discrete_geoms(i_ga, i_gb, dyn_info)
     if discrete:
@@ -65,7 +65,7 @@ def func_epa(
 
     k_max = collider_info.gjk.epa_max_iterations[None]
     for k in range(k_max):
-        prev_nearest_i_f = nearest_i_f
+        i_f_nearest_prev = i_f_nearest
 
         # Find the polytope face with the smallest distance to the origin
         lower2 = collider_info.gjk.FLOAT_MAX_SQ[None]
@@ -76,11 +76,11 @@ def func_epa(
 
             if face_dist2 < lower2:
                 lower2 = face_dist2
-                nearest_i_f = i_f
+                i_f_nearest = i_f
 
-        if lower2 > upper2 or nearest_i_f < 0:
+        if lower2 > upper2 or i_f_nearest < 0:
             # Invalid face found, stop the algorithm (lower bound of depth is larger than upper bound)
-            nearest_i_f = prev_nearest_i_f
+            i_f_nearest = i_f_nearest_prev
             break
 
         if lower2 <= collider_info.gjk.FLOAT_MIN_SQ[None]:
@@ -89,7 +89,7 @@ def func_epa(
 
         # Find a new support point w from the nearest face's normal
         lower = qd.sqrt(lower2)
-        dir = gjk_state.polytope_faces.normal[i_b, nearest_i_f]
+        dir = gjk_state.polytope_faces.normal[i_b, i_f_nearest]
         wi = func_epa_support(
             i_ga,
             i_gb,
@@ -136,16 +136,16 @@ def func_epa(
         gjk_state.polytope.horizon_w[i_b] = w
 
         # Compute horizon
-        horizon_flag = func_epa_horizon(i_b, nearest_i_f, gjk_state, collider_info)
+        horizon_flag = func_epa_horizon(i_b, i_f_nearest, wi, gjk_state, collider_info, rounding_eps=0.0)
 
         if horizon_flag:
             # There was an error in the horizon construction, so the horizon edge is not a closed loop.
-            nearest_i_f = -1
+            i_f_nearest = -1
             break
 
         if gjk_state.polytope.horizon_nedges[i_b] < 3:
             # Should not happen, because at least three edges should be in the horizon from one deleted face.
-            nearest_i_f = -1
+            i_f_nearest = -1
             break
 
         # Check if the memory space is enough for attaching new faces
@@ -190,7 +190,7 @@ def func_epa(
             )
             if dist2 <= 0:
                 # Unrecoverable numerical issue
-                nearest_i_f = -1
+                i_f_nearest = -1
                 break
 
             if (dist2 >= lower2) and (dist2 <= upper2):
@@ -203,14 +203,14 @@ def func_epa(
         # Clear the horizon data for the next iteration
         gjk_state.polytope.horizon_nedges[i_b] = 0
 
-        if (gjk_state.polytope.nfaces_map[i_b] == 0) or (nearest_i_f == -1):
+        if (gjk_state.polytope.nfaces_map[i_b] == 0) or (i_f_nearest == -1):
             # No face candidate left
             break
 
-    if nearest_i_f != -1:
+    if i_f_nearest != -1:
         # Nearest face found
-        dist2 = gjk_state.polytope_faces.dist2[i_b, nearest_i_f]
-        func_epa_witness(i_ga, i_gb, i_b, nearest_i_f, gjk_state)
+        dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
+        func_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state)
         gjk_state.n_witness[i_b] = 1
         gjk_state.distance[i_b] = -qd.sqrt(dist2)
     else:
@@ -218,7 +218,7 @@ def func_epa(
         gjk_state.n_witness[i_b] = 0
         gjk_state.distance[i_b] = 0
 
-    return nearest_i_f
+    return i_f_nearest
 
 
 @qd.func
@@ -255,16 +255,26 @@ def func_epa_witness(i_ga: int, i_gb: int, i_b: int, i_f: int, gjk_state: array_
 
 @qd.func
 def func_epa_horizon(
-    i_b: int, nearest_i_f: int, gjk_state: array_class.GJKState, collider_info: array_class.ColliderInfo
+    i_b: int,
+    i_f_nearest: int,
+    i_w: int,
+    gjk_state: array_class.GJKState,
+    collider_info: array_class.ColliderInfo,
+    rounding_eps: float,
 ):
     """
     Compute the horizon, which represents the area of the polytope that is visible from the vertex w, and thus
     should be deleted for the expansion of the polytope.
+
+    'i_w' is the polytope vertex of w, and 'rounding_eps' the relative rounding of floating-point values. A face that
+    leaves on the horizon an edge forming with w a triangle flat up to the rounding of its vertices also counts as
+    visible: w lies on its plane, and the face attached to that edge would have no orientation. Zero keeps the strict
+    visibility test.
     """
     w = gjk_state.polytope.horizon_w[i_b]
 
     # Initialize the stack by inserting the nearest face
-    gjk_state.polytope_horizon_stack.face_idx[i_b, 0] = nearest_i_f
+    gjk_state.polytope_horizon_stack.face_idx[i_b, 0] = i_f_nearest
     gjk_state.polytope_horizon_stack.edge_idx[i_b, 0] = 0
     top = 1
     is_first = True
@@ -287,6 +297,27 @@ def func_epa_horizon(
         # 1. The face normal should point towards the vertex w
         # 2. The vertex w should be on the other side of the face to the origin
         is_visible = gjk_state.polytope_faces.normal[i_b, i_f].dot(w - v) > collider_info.gjk.FLOAT_MIN[None]
+        if rounding_eps > 0.0 and not is_visible and not is_first:
+            # Every vertex of the polytope is the difference of the support points of both geoms, which rounds with
+            # their magnitude. The cross product of two edges from w is exact up to the sum of the lengths of the edges
+            # times the rounding of the three vertices, doubled to cover the rounding of the products. Both sides are
+            # compared squared, the sums of norms bounded by their sums of squares as (a + b)^2 <= 2 (a^2 + b^2) and
+            # (sum of 6 norms)^2 <= 6 (sum of their squares), which widens the bound by at most root twelve.
+            i_v1 = gjk_state.polytope_faces.verts_idx[i_b, i_f][i_e]
+            i_v2 = gjk_state.polytope_faces.verts_idx[i_b, i_f][(i_e + 1) % 3]
+            edge_1 = gjk_state.polytope_verts.mink[i_b, i_v1] - w
+            edge_2 = gjk_state.polytope_verts.mink[i_b, i_v2] - w
+            supports_norm_sqr = (
+                gjk_state.polytope_verts.obj1[i_b, i_w].norm_sqr()
+                + gjk_state.polytope_verts.obj2[i_b, i_w].norm_sqr()
+                + gjk_state.polytope_verts.obj1[i_b, i_v1].norm_sqr()
+                + gjk_state.polytope_verts.obj2[i_b, i_v1].norm_sqr()
+                + gjk_state.polytope_verts.obj1[i_b, i_v2].norm_sqr()
+                + gjk_state.polytope_verts.obj2[i_b, i_v2].norm_sqr()
+            )
+            edges_norm_sqr = edge_1.norm_sqr() + edge_2.norm_sqr()
+            if edge_1.cross(edge_2).norm_sqr() <= 48.0 * rounding_eps**2 * edges_norm_sqr * supports_norm_sqr:
+                is_visible = True
 
         # The first face is always considered visible.
         if is_visible or is_first:
@@ -958,8 +989,8 @@ def func_safe_epa(
     tolerance = collider_info.gjk.tolerance[None]
 
     # Index of the nearest face
-    nearest_i_f = gs.qd_int(-1)
-    prev_nearest_i_f = gs.qd_int(-1)
+    i_f_nearest = gs.qd_int(-1)
+    i_f_nearest_prev = gs.qd_int(-1)
 
     discrete = func_is_discrete_geoms(i_ga, i_gb, dyn_info)
     if discrete:
@@ -968,7 +999,7 @@ def func_safe_epa(
 
     k_max = collider_info.gjk.epa_max_iterations[None]
     for k in range(k_max):
-        prev_nearest_i_f = nearest_i_f
+        i_f_nearest_prev = i_f_nearest
 
         # Find the polytope face with the smallest distance to the origin
         lower2 = collider_info.gjk.FLOAT_MAX_SQ[None]
@@ -979,19 +1010,19 @@ def func_safe_epa(
 
             if face_dist2 < lower2:
                 lower2 = face_dist2
-                nearest_i_f = i_f
+                i_f_nearest = i_f
 
         # A nearest face past the upper bound by less than the tolerance has converged, the rounding of both bounds
         # allowing it. A face farther than that is invalid, which leaves the previous nearest face.
-        if nearest_i_f != -1 and lower2 > upper2 and qd.sqrt(lower2) - upper < tolerance:
+        if i_f_nearest != -1 and lower2 > upper2 and qd.sqrt(lower2) - upper < tolerance:
             break
-        if lower2 > upper2 or nearest_i_f == -1:
-            nearest_i_f = prev_nearest_i_f
+        if lower2 > upper2 or i_f_nearest == -1:
+            i_f_nearest = i_f_nearest_prev
             break
 
         # Find a new support point w from the nearest face's normal
         lower = qd.sqrt(lower2)
-        dir = gjk_state.polytope_faces.normal[i_b, nearest_i_f]
+        dir = gjk_state.polytope_faces.normal[i_b, i_f_nearest]
         wi = func_epa_support(
             i_ga,
             i_gb,
@@ -1045,16 +1076,18 @@ def func_safe_epa(
         gjk_state.polytope.horizon_w[i_b] = w
 
         # Compute horizon
-        horizon_flag = func_epa_horizon(i_b, nearest_i_f, gjk_state, collider_info)
+        horizon_flag = func_epa_horizon(
+            i_b, i_f_nearest, wi, gjk_state, collider_info, rounding_eps=rigid_info.EPS[None]
+        )
 
         if horizon_flag:
             # There was an error in the horizon construction, so the horizon edge is not a closed loop.
-            nearest_i_f = -1
+            i_f_nearest = -1
             break
 
         if gjk_state.polytope.horizon_nedges[i_b] < 3:
             # Should not happen, because at least three edges should be in the horizon from one deleted face.
-            nearest_i_f = -1
+            i_f_nearest = -1
             break
 
         # Check if the memory space is enough for attaching new faces
@@ -1115,27 +1148,27 @@ def func_safe_epa(
                 gjk_state.polytope.nfaces_map[i_b] += 1
 
         if attach_flag != RETURN_CODE.SUCCESS:
-            nearest_i_f = -1
+            i_f_nearest = -1
             break
 
         # Clear the horizon data for the next iteration
         gjk_state.polytope.horizon_nedges[i_b] = 0
 
-        if (gjk_state.polytope.nfaces_map[i_b] == 0) or (nearest_i_f == -1):
+        if (gjk_state.polytope.nfaces_map[i_b] == 0) or (i_f_nearest == -1):
             # No face candidate left
-            nearest_i_f = -1
+            i_f_nearest = -1
             break
 
     # Two parallel faces of the geometries form a flat face of the Minkowski difference, split into coplanar triangles
     # at one distance from the origin, so that the nearest face may be one whose plane the origin projects onto outside
     # of it, its witness points then extrapolating past the faces. Walking to the coplanar neighbour across the edge
     # opposite the most negative barycentric coordinate reaches the triangle holding the projection.
-    is_walking = nearest_i_f != -1
+    is_walking = i_f_nearest != -1
     for i_walk in range(gjk_state.polytope.nfaces_map[i_b]):
         if is_walking:
-            face_iv1 = gjk_state.polytope_faces.verts_idx[i_b, nearest_i_f][0]
-            face_iv2 = gjk_state.polytope_faces.verts_idx[i_b, nearest_i_f][1]
-            face_iv3 = gjk_state.polytope_faces.verts_idx[i_b, nearest_i_f][2]
+            face_iv1 = gjk_state.polytope_faces.verts_idx[i_b, i_f_nearest][0]
+            face_iv2 = gjk_state.polytope_faces.verts_idx[i_b, i_f_nearest][1]
+            face_iv3 = gjk_state.polytope_faces.verts_idx[i_b, i_f_nearest][2]
             face_v1 = gjk_state.polytope_verts.mink[i_b, face_iv1]
             face_v2 = gjk_state.polytope_verts.mink[i_b, face_iv2]
             face_v3 = gjk_state.polytope_verts.mink[i_b, face_iv3]
@@ -1151,18 +1184,18 @@ def func_safe_epa(
             # A face onto whose plane the origin cannot be projected gives no coordinates to walk by, and only the faces
             # still in the map lie within the bounds of the depth
             if proj_flag == RETURN_CODE.SUCCESS and lambda_min < 0.0:
-                i_f_adj = gjk_state.polytope_faces.adj_idx[i_b, nearest_i_f][i_e]
+                i_f_adj = gjk_state.polytope_faces.adj_idx[i_b, i_f_nearest][i_e]
                 if gjk_state.polytope_faces.map_idx[i_b, i_f_adj] >= 0:
                     normal_adj = gjk_state.polytope_faces.normal[i_b, i_f_adj]
-                    normal_gap = normal_adj - gjk_state.polytope_faces.normal[i_b, nearest_i_f]
+                    normal_gap = normal_adj - gjk_state.polytope_faces.normal[i_b, i_f_nearest]
                     if normal_gap.norm() <= collider_info.gjk.polytope_max_rel_reprojection_error[None]:
-                        nearest_i_f = i_f_adj
+                        i_f_nearest = i_f_adj
                         is_walking = True
 
-    if nearest_i_f != -1:
+    if i_f_nearest != -1:
         # Nearest face found
-        dist2 = gjk_state.polytope_faces.dist2[i_b, nearest_i_f]
-        flag = func_safe_epa_witness(i_ga, i_gb, i_b, nearest_i_f, gjk_state, collider_info)
+        dist2 = gjk_state.polytope_faces.dist2[i_b, i_f_nearest]
+        flag = func_safe_epa_witness(i_ga, i_gb, i_b, i_f_nearest, gjk_state, collider_info)
         if flag == RETURN_CODE.SUCCESS:
             gjk_state.n_witness[i_b] = 1
             gjk_state.distance[i_b] = -qd.sqrt(dist2)
@@ -1170,13 +1203,13 @@ def func_safe_epa(
             # Failed to compute witness points, so the objects are not colliding
             gjk_state.n_witness[i_b] = 0
             gjk_state.distance[i_b] = 0.0
-            nearest_i_f = -1
+            i_f_nearest = -1
     else:
         # No face found, so the objects are not colliding
         gjk_state.n_witness[i_b] = 0
         gjk_state.distance[i_b] = 0.0
 
-    return nearest_i_f
+    return i_f_nearest
 
 
 @qd.func

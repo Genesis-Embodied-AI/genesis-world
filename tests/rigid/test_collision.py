@@ -645,6 +645,50 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
             assert not is_pair_detected[pairs_depth < -pairs_tol].any()
 
 
+@pytest.mark.required
+def test_box_contact_true_penetration(show_viewer, tol):
+    # The penetration of two aligned boxes is their least overlap along their common axes
+    N_ENVS = 64
+    N_ROUNDS = 8
+    BOX_SIZE = np.array((4.0, 0.25, 0.25))
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -8.0, 4.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    box_1, box_2 = (
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                size=BOX_SIZE,
+            ),
+            vis_mode="collision",
+        )
+        for _ in range(2)
+    )
+    scene.build(n_envs=N_ENVS)
+
+    for _ in range(N_ROUNDS):
+        # Two identical boxes posed exactly aligned at random orientations, overlapping end to end
+        quats = gu.random_quaternion(N_ENVS)
+        overlaps = np.random.uniform(0.01, 0.5, size=(N_ENVS, 3)) * BOX_SIZE
+        offsets_local = np.random.choice((-1.0, 1.0), size=(N_ENVS, 3)) * (BOX_SIZE - overlaps)
+        box_1.set_quat(quats)
+        box_2.set_pos(gu.transform_by_quat(offsets_local, quats))
+        box_2.set_quat(quats)
+
+        scene.rigid_solver.collider.clear()
+        scene.rigid_solver.collider.detection()
+        contacts = box_1.get_contacts(with_entity=box_2)
+        penetrations = np.where(tensor_to_array(contacts["valid_mask"]), tensor_to_array(contacts["penetration"]), 0.0)
+        assert_allclose(penetrations.max(axis=-1), overlaps.min(axis=-1), tol=tol)
+
+
 @pytest.mark.slow  # ~150s
 @pytest.mark.required
 @pytest.mark.parametrize(
