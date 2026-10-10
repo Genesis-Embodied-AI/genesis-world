@@ -2,6 +2,8 @@ import math
 import re
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from unittest.mock import patch
 
@@ -309,6 +311,47 @@ def test_geom_tensor_identity(batch_shape):
 
         np.testing.assert_allclose(np_args[0], np_args[-1], atol=1e2 * gs.EPS)
         np.testing.assert_allclose(tensor_to_array(tc_args[0]), tensor_to_array(tc_args[-1]), atol=1e2 * gs.EPS)
+
+
+def _forbid_dynamo_dispatch():
+    return patch("genesis.utils.misc._torch_compile_dispatch", side_effect=AssertionError("dispatched by TorchDynamo"))
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("batch_shape", [(4096,), (10, 40, 25), ()])
+def test_geom_compiled_call_skips_dynamo(batch_shape):
+    """Once compiled, a geometry helper calls its kernel directly instead of dispatching through TorchDynamo again,
+    whose per-call host time leaves the GPU idle between the small kernels of a simulation step."""
+    quat = torch.nn.functional.normalize(torch.randn((*batch_shape, 4), dtype=gs.tc_float, device=gs.device), dim=-1)
+    vec = torch.randn((*batch_shape, 3), dtype=gs.tc_float, device=gs.device)
+    # The first call compiles the kernel, or runs eagerly where TorchInductor cannot target this device
+    expected = gu.transform_by_quat(vec, quat)
+    with _forbid_dynamo_dispatch():
+        out = gu.transform_by_quat(vec, quat)
+    assert_equal(out, expected)
+
+
+@pytest.mark.required
+def test_geom_compiled_call_concurrent_warmup():
+    """Threads compiling kernels for different inputs at the same time each keep the kernel of their own call."""
+    # MPS has no double precision
+    dtypes = (torch.float32,) if gs.device.type == "mps" else (torch.float32, torch.float64)
+    inputs = []
+    for dtype in dtypes:
+        for batch_size in (1, 4096):
+            quat = torch.nn.functional.normalize(torch.randn((batch_size, 4), dtype=dtype, device=gs.device), dim=-1)
+            inputs.append((torch.randn((batch_size, 3), dtype=dtype, device=gs.device), quat))
+    barrier = threading.Barrier(len(inputs))
+
+    def warmup(vec_quat):
+        barrier.wait()
+        return gu.transform_by_quat(*vec_quat)
+
+    with ThreadPoolExecutor(len(inputs)) as pool:
+        expected = list(pool.map(warmup, inputs))
+    with _forbid_dynamo_dispatch():
+        for (vec, quat), out in zip(inputs, expected):
+            assert_equal(gu.transform_by_quat(vec, quat), out)
 
 
 @pytest.mark.required
