@@ -288,7 +288,7 @@ def test_geom_quadrants_identity(batch_shape):
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
-def test_geom_tensor_identity(batch_shape):
+def test_geom_tensor_identity(batch_shape, tol):
     for py_funcs, shape_args in (
         ((gu.R_to_rot6d, gu.rot6d_to_R), ([3, 3], [6])),
         ((gu.R_to_quat, gu.quat_to_R), ([3, 3], [4])),
@@ -309,6 +309,22 @@ def test_geom_tensor_identity(batch_shape):
 
         np.testing.assert_allclose(np_args[0], np_args[-1], atol=1e2 * gs.EPS)
         np.testing.assert_allclose(tensor_to_array(tc_args[0]), tensor_to_array(tc_args[-1]), atol=1e2 * gs.EPS)
+
+    axis = np.random.randn(*batch_shape, 3).astype(gs.np_float)
+    axis /= np.linalg.norm(axis, axis=-1, keepdims=True)
+    for theta in np.array(
+        [-1.5 * np.pi, -0.5 * np.pi, -1e-4, -1e-8, 0.0, 1e-8, 1e-4, 0.5 * np.pi, 1.5 * np.pi], dtype=gs.np_float
+    ):
+        angles = np.full(batch_shape, theta, dtype=gs.np_float) if batch_shape else theta
+        rotvec = axis * theta
+        rotation = R.from_rotvec(rotvec.reshape((-1, 3))).as_matrix().reshape((*batch_shape, 3, 3))
+        assert_allclose(gu.axis_angle_to_R(axis, angles), rotation, tol=tol)
+        if abs(theta) > gs.EPS:
+            assert_allclose(gu.rotvec_to_R(rotvec), rotation, tol=tol)
+    assert_allclose(gu.z_to_R(axis), gu.quat_to_R(gu.z_to_quat(axis)), tol=tol)
+    rotation = np.empty((*batch_shape, 3, 3), dtype=gs.np_float)
+    gu.z_to_R(axis, out=rotation)
+    assert_allclose(rotation, gu.quat_to_R(gu.z_to_quat(axis)), tol=tol)
 
 
 @pytest.mark.required
