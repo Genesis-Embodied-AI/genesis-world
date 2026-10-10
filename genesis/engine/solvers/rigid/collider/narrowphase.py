@@ -1642,7 +1642,13 @@ def func_recompute_perturbed_contact(
                 [supports[3 * i_g + 2, 0], supports[3 * i_g + 2, 1], supports[3 * i_g + 2, 2]], dt=gs.qd_float
             )
             edge_1, edge_2 = v_2 - v_1, v_3 - v_1
-            if qd.abs(edge_1.cross(edge_2).dot(normal_0)) <= EPS * edge_1.norm() * edge_2.norm():
+            # The triangle spans no area when its height is within the rounding of the coordinates of its points, which
+            # the un-rotation about contact 0 makes relative to their distance from the origin. Rounding alone can also
+            # split one support vertex into two of its points, so the height is measured against its longest edge. Both
+            # sides are compared squared, (a + b)^2 <= 2 (a^2 + b^2) widening the rounding bound by at most root two.
+            edge_max_sqr = qd.max(edge_1.norm_sqr(), edge_2.norm_sqr(), (v_3 - v_2).norm_sqr())
+            area_normal = edge_1.cross(edge_2).dot(normal_0)
+            if area_normal**2 <= 2.0 * EPS**2 * edge_max_sqr * (edge_max_sqr + 4.0 * contact_pos_0.norm_sqr()):
                 is_supports_degenerate[i_g] = 1
                 # The ends of the edge are the two points farthest apart along the contact plane, where it lies
                 span_12 = edge_1 - edge_1.dot(normal_0) * normal_0
@@ -1693,6 +1699,8 @@ def func_recompute_perturbed_contact(
             # the other. The perturbation looks for the end of the patch that its tilt deepens, which is one end of the
             # edge, an exact material point. Each geom turns about contact 0, geom A by 'qrot' towards the negative
             # side of the normal and geom B by its inverse towards the positive one.
+            ends_deepened = qd.Matrix.zero(gs.qd_float, 2, 3)
+            has_end_deepened = qd.Vector.zero(gs.qd_int, 2)
             for i_g in qd.static(range(2)):
                 if is_supports_edge[i_g] == 1:
                     end_0 = qd.Vector([ends[2 * i_g, 0], ends[2 * i_g, 1], ends[2 * i_g, 2]], dt=gs.qd_float)
@@ -1706,35 +1714,49 @@ def func_recompute_perturbed_contact(
                         lift_0, lift_1 = -lift_0, -lift_1
                     if qd.abs(lift_1 - lift_0) > EPS * (qd.abs(lift_0) + qd.abs(lift_1)):
                         end = end_1 if lift_1 > lift_0 else end_0
-                        if qd.static(i_g == 0):
-                            witness_a = end
-                        else:
-                            witness_b = end
+                        has_end_deepened[i_g] = 1
+                        for i_3 in qd.static(range(3)):
+                            ends_deepened[i_g, i_3] = end[i_3]
 
-            # The support triangle of each geom bounds its surface at the witness of the other geom, when it covers it
-            # along the normal of contact 0: geom B from above at the witness of geom A, geom A from below at that of
-            # geom B. A triangle that a vertex or an edge reduces to a point or a segment covers nothing. Both bounds
-            # being lower bounds of the depth at their own witness, the deeper one is kept.
+            # The support triangle of each geom, where it covers the witness of the other geom along the normal of
+            # contact 0, bounds its surface there, which gives a lower bound of the depth. The deepened end of an edge
+            # replaces the witness of its geom only where covered, since the edge may run past the other geom.
             for i_g in qd.static(range(2)):
                 i_r = 3 * (1 - i_g)
                 v_1 = qd.Vector([supports[i_r, 0], supports[i_r, 1], supports[i_r, 2]], dt=gs.qd_float)
                 v_2 = qd.Vector([supports[i_r + 1, 0], supports[i_r + 1, 1], supports[i_r + 1, 2]], dt=gs.qd_float)
                 v_3 = qd.Vector([supports[i_r + 2, 0], supports[i_r + 2, 1], supports[i_r + 2, 2]], dt=gs.qd_float)
-                witness = witness_a if qd.static(i_g == 0) else witness_b
-                edge_1, edge_2, offset = v_2 - v_1, v_3 - v_1, witness - v_1
+                edge_1, edge_2 = v_2 - v_1, v_3 - v_1
                 area = edge_1.cross(edge_2).dot(normal_0)
-                if qd.abs(area) > EPS * edge_1.norm() * edge_2.norm():
-                    lambda_2 = offset.cross(edge_2).dot(normal_0) / area
-                    lambda_3 = edge_1.cross(offset).dot(normal_0) / area
-                    if lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0:
-                        height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
-                        bound = height - normal_0.dot(witness_a)
-                        if qd.static(i_g == 1):
-                            bound = normal_0.dot(witness_b) - height
-                        if not is_depth_lower_bound or bound > depth:
-                            depth = bound
-                            contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
-                            is_depth_lower_bound = True
+                is_covered = False
+                for i_w in qd.static(range(2)):
+                    # The deepened end first, then the witness of the detection
+                    witness = witness_a if qd.static(i_g == 0) else witness_b
+                    is_candidate = not is_covered
+                    if qd.static(i_w == 0):
+                        witness = qd.Vector(
+                            [ends_deepened[i_g, 0], ends_deepened[i_g, 1], ends_deepened[i_g, 2]], dt=gs.qd_float
+                        )
+                        is_candidate = has_end_deepened[i_g] == 1
+                    if is_candidate:
+                        if is_supports_degenerate[1 - i_g] == 0:
+                            offset = witness - v_1
+                            lambda_2 = offset.cross(edge_2).dot(normal_0) / area
+                            lambda_3 = edge_1.cross(offset).dot(normal_0) / area
+                            if lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0:
+                                is_covered = True
+                                if qd.static(i_g == 0):
+                                    witness_a = witness
+                                else:
+                                    witness_b = witness
+                                height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
+                                bound = height - normal_0.dot(witness_a)
+                                if qd.static(i_g == 1):
+                                    bound = normal_0.dot(witness_b) - height
+                                if not is_depth_lower_bound or bound > depth:
+                                    depth = bound
+                                    contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
+                                    is_depth_lower_bound = True
 
     if not is_depth_lower_bound:
         # The un-rotated perturbed normal is the normal of the tangent plane of the other geom at its witness, against
