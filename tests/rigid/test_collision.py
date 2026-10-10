@@ -457,20 +457,24 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
-    # Every box takes each shape in some environments, in an order shuffled per box. The pairs are laid out in the view
-    # as a grid, each one away from the camera in proportion to its scale, so that all of them look alike while lying at
-    # depths far enough apart for their boxes to never reach each other. The smallest ones also sit near the origin,
-    # where rounding errors are the smallest.
+    # Every box takes each shape in some environments, in an order shuffled per box. Both boxes of the pair at unit
+    # scale share their order, so that identical boxes posed aligned overlap nearly as much along two of their axes. The
+    # pairs are laid out in the view as a grid, each one away from the camera in proportion to its scale, so that all of
+    # them look alike while lying at depths far enough apart for their boxes to never reach each other. The smallest
+    # ones also sit near the origin, where rounding errors are the smallest.
     pairs_boxes = []
     for i_s, scale in enumerate(SCALES):
         view_x, view_y = 0.7 * (2 * (i_s % 2) - 1), 0.3 * (2 * (i_s // 2) - 1)
         pair_pos = 3.0 * scale * np.array((view_x, 1.0 + view_y, view_y - 1.0))
+        boxes_size = [np.random.permutation(BOXES_SIZE) for _ in range(2)]
+        if np.isclose(scale, 1.0):
+            boxes_size[1] = boxes_size[0]
         pairs_boxes.append(
             [
                 scene.add_entity(
                     morph=[
                         gs.morphs.Box(pos=pair_pos + (0.0, 0.0, 3.0 * scale * i_box), size=scale * box_size)
-                        for box_size in np.random.permutation(BOXES_SIZE)
+                        for box_size in boxes_size[i_box]
                     ],
                     vis_mode="collision",
                 )
@@ -647,7 +651,8 @@ def test_box_contact_minimal_separation(detection, show_viewer, tol):
 
 @pytest.mark.required
 def test_box_contact_true_penetration(show_viewer, tol):
-    # The penetration of two aligned boxes is their least overlap along their common axes
+    # Every contact of two aligned boxes takes their overlap along the axis its normal follows, and the shallowest one
+    # their least overlap
     N_ENVS = 64
     N_ROUNDS = 8
     BOX_SIZE = np.array((4.0, 0.25, 0.25))
@@ -685,8 +690,12 @@ def test_box_contact_true_penetration(show_viewer, tol):
         scene.rigid_solver.collider.clear()
         scene.rigid_solver.collider.detection()
         contacts = box_1.get_contacts(with_entity=box_2)
-        penetrations = np.where(tensor_to_array(contacts["valid_mask"]), tensor_to_array(contacts["penetration"]), 0.0)
-        assert_allclose(penetrations.max(axis=-1), overlaps.min(axis=-1), tol=tol)
+        is_contact_valid = tensor_to_array(contacts["valid_mask"])
+        penetrations = tensor_to_array(contacts["penetration"])
+        normals_local = gu.inv_transform_by_quat(tensor_to_array(contacts["normal"]), quats[:, None])
+        normals_overlap = np.take_along_axis(overlaps, np.abs(normals_local).argmax(axis=-1), axis=-1)
+        assert_allclose(penetrations[is_contact_valid], normals_overlap[is_contact_valid], tol=tol)
+        assert_allclose(np.where(is_contact_valid, penetrations, np.inf).min(axis=-1), overlaps.min(axis=-1), tol=tol)
 
 
 @pytest.mark.slow  # ~150s
