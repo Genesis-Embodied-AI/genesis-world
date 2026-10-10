@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Any, Generic, NamedTuple, Sequence, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, NamedTuple, Sequence, TypeVar
 
 import numpy as np
 from pydantic import BeforeValidator, Field, StrictBool, StrictInt, field_validator
@@ -627,6 +627,19 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
         Whether to return the per-ray hit points. Defaults to True. When False, ``read().points`` is None and only
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
         Pick False for distance-only sensing (e.g. depth images); keep True when the point cloud is needed.
+    ray_alignment : str, optional
+        The frame in which the rays are projected. Defaults to "base".
+
+        - "base": the ray starts and directions track the full position and orientation of the sensor link.
+        - "yaw": the ray starts and directions track the link position and the yaw component of its orientation
+          alone, so the pattern stays level when the link rolls or pitches. Useful for terrain height maps.
+        - "world": the ray starts track the link position alone and the directions are fixed in the world frame.
+          Useful for querying the scene in a global frame, e.g. alongside a map built by the robot.
+    exclude_link_idx : array-like[int], optional
+        The global indices of the rigid links whose collision geometry the rays pass through, typically the robot's
+        own links for a terrain scan. Defaults to none. Excluding any link on any raycaster adds a per-triangle check
+        to the ray casts of every raycaster in the scene. It cannot be combined with an entity whose material has
+        use_visual_raycasting=True.
     debug_sphere_radius: float, optional
         The radius of each debug sphere drawn in the scene. Defaults to 0.02.
     debug_ray_start_color: array-like[float, float, float, float], optional
@@ -641,10 +654,21 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     no_hit_value: float | None = None
     return_world_frame: StrictBool = False
     return_points: StrictBool = True
+    ray_alignment: Literal["base", "yaw", "world"] = "base"
+    exclude_link_idx: OptionalIArrayType = Field(default_factory=tuple)
 
     debug_sphere_radius: PositiveFloat = 0.02
     debug_ray_start_color: Vec4FType = (0.5, 0.5, 1.0, 1.0)
     debug_ray_hit_color: Vec4FType = (1.0, 0.5, 0.5, 1.0)
+
+    def validate_scene(self, scene: "Scene"):
+        super().validate_scene(scene)
+        if self.exclude_link_idx:
+            n_links = scene.sim.rigid_solver.n_links
+            if np.any(np.array(self.exclude_link_idx) < 0) or np.any(np.array(self.exclude_link_idx) >= n_links):
+                gs.raise_exception(
+                    f"{type(self).__name__}: exclude_link_idx must be in [0, {n_links}). Got {self.exclude_link_idx}."
+                )
 
     def model_post_init(self, context: Any) -> None:
         if self.no_hit_value is None:

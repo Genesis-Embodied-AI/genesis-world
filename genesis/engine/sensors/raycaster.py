@@ -12,7 +12,7 @@ from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, kernel_update_all_verts
 from genesis.options.sensors import Raycaster as RaycasterOptions
 from genesis.options.sensors import RaycastPattern
-from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
+from genesis.utils.geom import normalize, quat_to_xyz, transform_by_quat, transform_by_trans_quat, xyz_to_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_numpy, qd_to_torch
 from genesis.utils.raycast_qd import (
     kernel_cast_rays,
@@ -494,6 +494,11 @@ class RaycasterSharedMetadata(KinematicSensorMetadataMixin, SimpleSensorMetadata
     max_ranges: torch.Tensor = make_tensor_field((0,))
     no_hit_values: torch.Tensor = make_tensor_field((0,))
     return_world_frame: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_bool)
+    yaw_aligned_sensors_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    world_aligned_sensors_idx: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
+    # [n_sensors, n_links] over the rigid links, True where the sensor ignores the faces of that link
+    is_link_excluded: torch.Tensor = make_tensor_field((0, 0), dtype_factory=lambda: gs.tc_bool)
+    has_excluded_links: bool = False
 
     patterns: list[RaycastPattern] = field(default_factory=list)
     ray_dirs: torch.Tensor = make_tensor_field((0, 3))
@@ -538,6 +543,13 @@ class RaycasterSensor(
                 "Raycaster sensor has no geometry to raycast against: rigid_solver is inactive and no entity "
                 "has material.use_visual_raycasting=True."
             )
+        if self._options.exclude_link_idx and any(
+            entry.raycast_mask is not None for entry in self._shared_context.bvh_contexts
+        ):
+            gs.raise_exception(
+                "Raycaster option 'exclude_link_idx' applies to collision geometry alone, so it cannot be combined with "
+                "an entity whose material has use_visual_raycasting=True."
+            )
 
         self._shared_metadata.patterns.append(self._options.pattern)
 
@@ -577,6 +589,21 @@ class RaycasterSensor(
         self._shared_metadata.return_world_frame = concat_with_tensor(
             self._shared_metadata.return_world_frame, self._options.return_world_frame
         )
+        if self._options.ray_alignment == "yaw":
+            self._shared_metadata.yaw_aligned_sensors_idx = concat_with_tensor(
+                self._shared_metadata.yaw_aligned_sensors_idx, self._idx
+            )
+        elif self._options.ray_alignment == "world":
+            self._shared_metadata.world_aligned_sensors_idx = concat_with_tensor(
+                self._shared_metadata.world_aligned_sensors_idx, self._idx
+            )
+        is_link_excluded = torch.zeros((1, self._manager._sim.rigid_solver.n_links), dtype=gs.tc_bool, device=gs.device)
+        is_link_excluded[0, self._options.exclude_link_idx] = True
+        self._shared_metadata.is_link_excluded = concat_with_tensor(
+            self._shared_metadata.is_link_excluded, is_link_excluded
+        )
+        if self._options.exclude_link_idx:
+            self._shared_metadata.has_excluded_links = True
         self._shared_metadata.min_ranges = concat_with_tensor(self._shared_metadata.min_ranges, self._options.min_range)
         self._shared_metadata.max_ranges = concat_with_tensor(self._shared_metadata.max_ranges, self._options.max_range)
         self._shared_metadata.no_hit_values = concat_with_tensor(
@@ -635,6 +662,15 @@ class RaycasterSensor(
             links_pos[:, group.sensor_cols, :] = pos
             links_quat[:, group.sensor_cols, :] = quat
 
+        # Ray alignment keeps the link position as the ray origin and replaces the link orientation, by its heading
+        # alone for "yaw" and by the identity for "world"
+        if shared_metadata.yaw_aligned_sensors_idx.numel():
+            links_rpy = quat_to_xyz(links_quat[:, shared_metadata.yaw_aligned_sensors_idx], rpy=True)
+            links_rpy[..., :2] = 0.0
+            links_quat[:, shared_metadata.yaw_aligned_sensors_idx] = xyz_to_quat(links_rpy, rpy=True)
+        if shared_metadata.world_aligned_sensors_idx.numel():
+            links_quat[:, shared_metadata.world_aligned_sensors_idx] = links_quat.new_tensor((1.0, 0.0, 0.0, 0.0))
+
         # The two collision tree sets of a solver cast in one launch, a visual set in one of its own. The launches
         # chain into one output buffer: the first initializes every slot (is_merge=False), each subsequent one merges
         # in closer hits, and the final one (is_last) settles misses to no_hit_value - see write_ray_hit.
@@ -662,7 +698,6 @@ class RaycasterSensor(
             shared_metadata.sensor_point_offsets,
             shared_metadata.sensor_point_counts,
             shared_metadata.sensor_return_points,
-            raw_data_T,
         )
         for i, (solver, entries) in enumerate(launches):
             entry_a, entry_b = entries[0], entries[-1]
@@ -677,6 +712,8 @@ class RaycasterSensor(
                     entry_a.env_bvh_idx,
                     entry_b.env_bvh_idx,
                     *sensor_tables,
+                    shared_metadata.is_link_excluded,
+                    raw_data_T,
                     solver.dyn_state,
                     entry_a.bvh_state.tree,
                     entry_b.bvh_state.tree,
@@ -686,12 +723,14 @@ class RaycasterSensor(
                     is_last=is_last,
                     is_env_major=is_env_major,
                     is_split=entry_b is not entry_a,
+                    exclude_links=shared_metadata.has_excluded_links,
                 )
             else:
                 kernel_cast_rays_visual(
                     shared_metadata.points_to_sensor_idx,
                     entry_a.env_bvh_idx,
                     *sensor_tables,
+                    raw_data_T,
                     solver.dyn_state,
                     entry_a.bvh_state.tree,
                     solver.dyn_info,
