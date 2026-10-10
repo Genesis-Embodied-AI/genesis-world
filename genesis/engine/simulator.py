@@ -17,6 +17,7 @@ from .sensors import SensorManager
 from .solvers import (
     FEMSolver,
     KinematicSolver,
+    MochiSolver,
     MPMSolver,
     PBDSolver,
     RigidSolver,
@@ -84,6 +85,7 @@ class Simulator(RBC):
         self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
         self.fem_solver = FEMSolver(self.scene, self, options.fem)
         self.sf_solver = SFSolver(self.scene, self, options.sf)
+        self.mochi_solver = MochiSolver(self.scene, self, options.mochi)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -95,6 +97,7 @@ class Simulator(RBC):
                 self.pbd_solver,
                 self.fem_solver,
                 self.sf_solver,
+                self.mochi_solver,
             ]
         )
 
@@ -139,16 +142,14 @@ class Simulator(RBC):
             # Note that adding to solver is handled in the hybrid entity
             entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
         else:
-            # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
-            # one declaring the most derived class simulates it (see 'Solver.material_cls').
-            solver = None
-            for candidate in self._solvers:
-                if candidate.material_cls is None or not isinstance(material, candidate.material_cls):
-                    continue
-                if solver is None or issubclass(candidate.material_cls, solver.material_cls):
-                    solver = candidate
-            if solver is None:
+            # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic' and
+            # 'Mochi.Rigid' from both 'Mochi.Base' and 'Rigid'. The one declaring the class that comes first in the
+            # method resolution order of the material simulates it (see 'Solver.material_cls').
+            materials_cls = type(material).__mro__
+            solvers = [solver for solver in self._solvers if solver.material_cls in materials_cls]
+            if not solvers:
                 gs.raise_exception(f"No solver simulates entities of material {type(material).__name__}.")
+            solver = min(solvers, key=lambda solver: materials_cls.index(solver.material_cls))
             entity = solver.add_entity(
                 self.n_entities, material, morph, surface, visualize_contact, name=name, desc=desc
             )
@@ -245,7 +246,7 @@ class Simulator(RBC):
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
-            if solver.n_entities > 0:
+            if solver.n_entities > 0 or solver.is_active:
                 solver.set_state(0, solver_state, envs_idx)
 
         if envs_idx is None:
@@ -347,8 +348,9 @@ class Simulator(RBC):
         # This will trigger GPU sync, but it is not a big deal at the point, since we are going to enqueue very large
         # kernel right away. Moreover, if computations are still not done at this point, then the queue will just
         # continue growing endlessly, which will not make the simulation faster either.
-        if self.rigid_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
-            self.rigid_solver.check_errno()
+        if self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            for solver in self._active_solvers:
+                solver.check_errno()
 
         # Reconstructing a checkpoint window replays steps the environments already simulated, so only a forward step
         # advances their clock. The backward pass winds it down again through `_step_grad`.

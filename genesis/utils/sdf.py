@@ -460,20 +460,32 @@ def sdf_func_grad_world_local_consistent(
         if sdf_func_is_outside_sdf_grid(geom_idx, pos_sdf, collider_info.sdf):
             grad_mesh = sdf_func_proxy_grad(geom_idx, pos_sdf, rigid_info, collider_info.sdf)
         else:
-            geom_sdf_res = collider_info.sdf.geoms_info.sdf_res[geom_idx]
-            cs = collider_info.sdf.geoms_info.sdf_cell_size[geom_idx]
-            base = qd.min(qd.floor(pos_sdf, gs.qd_int), geom_sdf_res - 2)
-            for offset in qd.grouped(qd.ndrange(2, 2, 2)):
-                pos_cell = base + offset
-                w_xyz = 1 - qd.abs(pos_sdf - pos_cell)
-                val = collider_info.sdf.geoms_sdf_val[
-                    sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, collider_info.sdf)
-                ]
-                grad_mesh[0] += (2 * offset[0] - 1) * w_xyz[1] * w_xyz[2] * val / cs[0]
-                grad_mesh[1] += w_xyz[0] * (2 * offset[1] - 1) * w_xyz[2] * val / cs[1]
-                grad_mesh[2] += w_xyz[0] * w_xyz[1] * (2 * offset[2] - 1) * val / cs[2]
+            grad_mesh = sdf_func_true_grad_consistent(geom_idx, pos_sdf, collider_info.sdf)
         grad_world = gu.qd_transform_by_quat(grad_mesh, geom_quat)
     return grad_world
+
+
+@qd.func
+def sdf_func_true_grad_consistent(geom_idx, pos_sdf, sdf_info: array_class.SDFInfo):
+    """
+    Analytic gradient of the trilinear value interpolant at an in-grid point, in the mesh frame (the SDF frame is a
+    scaled translation of the mesh frame, so only the per-axis cell size enters).
+
+    This is the exact derivative of sdf_func_true_sdf: a contact force built from it derives from the potential
+    whose penetration the value supplies, which sdf_func_true_grad (interpolated lattice gradients) only approximates.
+    """
+    geom_sdf_res = sdf_info.geoms_info.sdf_res[geom_idx]
+    cs = sdf_info.geoms_info.sdf_cell_size[geom_idx]
+    base = qd.min(qd.floor(pos_sdf, gs.qd_int), geom_sdf_res - 2)
+    grad_mesh = qd.Vector.zero(gs.qd_float, 3)
+    for offset in qd.grouped(qd.ndrange(2, 2, 2)):
+        pos_cell = base + offset
+        w_xyz = 1 - qd.abs(pos_sdf - pos_cell)
+        val = sdf_info.geoms_sdf_val[sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, sdf_info)]
+        grad_mesh[0] += (2 * offset[0] - 1) * w_xyz[1] * w_xyz[2] * val / cs[0]
+        grad_mesh[1] += w_xyz[0] * (2 * offset[1] - 1) * w_xyz[2] * val / cs[1]
+        grad_mesh[2] += w_xyz[0] * w_xyz[1] * (2 * offset[2] - 1) * val / cs[2]
+    return grad_mesh
 
 
 @qd.func

@@ -122,6 +122,30 @@ class SPHEntityState(RBC):
         return self._vel
 
 
+class MochiSoftEntityState:
+    """
+    Dynamic state queried from a MochiSoftEntity: vertex positions and velocities, shape (n_envs, n_vertices, 3).
+    """
+
+    def __init__(self, entity, s_global):
+        self._entity = entity
+        self._s_global = s_global
+        args = {"dtype": gs.tc_float, "requires_grad": False, "scene": entity.scene}
+        self.pos = gs.zeros((entity.sim._B, entity.n_vertices, 3), **args)
+        self.vel = gs.zeros((entity.sim._B, entity.n_vertices, 3), **args)
+
+    def serializable(self):
+        self._entity = None
+
+    @property
+    def entity(self):
+        return self._entity
+
+    @property
+    def s_global(self):
+        return self._s_global
+
+
 class FEMEntityState:
     """
     Dynamic state queried from a genesis FEMEntity.

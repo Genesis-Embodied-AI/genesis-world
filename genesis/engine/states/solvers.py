@@ -155,6 +155,51 @@ class RigidSolverState:
         return self._s_global
 
 
+class MochiSolverState:
+    """
+    Dynamic state queried from a MochiSolver: generalized coordinates and velocities, link poses, and the multistep
+    history the time integration extrapolates from.
+    """
+
+    def __init__(self, scene, s_global):
+        self.scene = scene
+        self._s_global = s_global
+
+        solver = scene.sim.mochi_solver
+        _B = solver._B
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": self.scene,
+        }
+        self.qpos = gs.zeros((_B, solver.n_qs), **args)
+        self.dofs_vel = gs.zeros((_B, solver.n_dofs), **args)
+        self.links_pos = gs.zeros((_B, solver.n_links, 3), **args)
+        self.links_quat = gs.zeros((_B, solver.n_links, 4), **args)
+        self.qpos_prev = gs.zeros((_B, 2, solver.n_qs), **args)
+        self.dofs_vel_prev = gs.zeros((_B, 2, solver.n_dofs), **args)
+        self.links_vel = gs.zeros((_B, solver.n_links, 3), **args)
+        self.links_ang = gs.zeros((_B, solver.n_links, 3), **args)
+        self.links_vsym = gs.zeros((_B, solver.n_links, 3, 3), **args)
+        self.links_vel_prev = gs.zeros((_B, 2, solver.n_links, 3), **args)
+        self.links_ang_prev = gs.zeros((_B, 2, solver.n_links, 3), **args)
+        self.links_vsym_prev = gs.zeros((_B, 2, solver.n_links, 3, 3), **args)
+        self.n_hist = gs.zeros((_B,), dtype=gs.tc_int, requires_grad=False, scene=self.scene)
+        # Deformable bodies: vertex positions and velocities with their multistep history.
+        n_soft_verts = solver.n_soft_verts
+        self.soft_pos = gs.zeros((_B, n_soft_verts, 3), **args)
+        self.soft_vel = gs.zeros((_B, n_soft_verts, 3), **args)
+        self.soft_pos_prev = gs.zeros((_B, 2, n_soft_verts, 3), **args)
+        self.soft_vel_prev = gs.zeros((_B, 2, n_soft_verts, 3), **args)
+
+    def serializable(self):
+        self.scene = None
+
+    @property
+    def s_global(self):
+        return self._s_global
+
+
 class ToolSolverState:
     """
     Dynamic state queried from a RigidSolver.

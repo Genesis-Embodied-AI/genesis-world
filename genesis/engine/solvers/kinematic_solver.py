@@ -398,11 +398,16 @@ class KinematicSolver(Solver):
         self.update_vgeoms()
         self.update_vverts_for_vgeoms(opt_in_vgeoms_idx)
 
+    def _resolve_para_level(self):
+        # Parallelization level of this solver's kernels. Subclasses may raise it above the scene's level (the
+        # MochiSolver parallelizes its item loops on a multi-threaded CPU backend).
+        return self.sim._para_level
+
     def _build_static_config(self):
         # Static config with all physics disabled
         self.rigid_config = array_class.RigidSimStaticConfig(
             backend=gs.backend,
-            para_level=self.sim._para_level,
+            para_level=self._resolve_para_level(),
             requires_grad=False,
             use_hibernation=False,
             batch_links_info=self._options.batch_links_info,

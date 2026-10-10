@@ -359,6 +359,10 @@ class Solver(RBC):
     def build(self):
         self._B = self._sim._B
 
+    def check_errno(self):
+        """Raise an exception for every error flag the kernels of this solver set since the build."""
+        pass
+
     @property
     def data(self) -> Iterator[array_class.DataItem]:
         """Yield every array and static config the solver holds, tagged by kind (see 'DataKind'), under the dotted name

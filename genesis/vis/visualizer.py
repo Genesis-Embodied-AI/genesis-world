@@ -250,6 +250,9 @@ class Visualizer(RBC):
         if self._scene.kinematic_solver.is_active:
             self._scene.kinematic_solver.update_vgeoms()
 
+        if self._scene.mochi_solver.is_active:
+            self._scene.mochi_solver.update_vgeoms()
+
         if self._scene.mpm_solver.is_active:
             self._scene.mpm_solver.update_render_fields()
 

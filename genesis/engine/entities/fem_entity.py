@@ -29,13 +29,17 @@ class FEMVisGeom(RBC):
     geoms or duplicated by texture seams share a single simulated vertex).
     """
 
-    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
+    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx, elems_idx=None, bary=None):
         self._uid = gs.UID()
         self._entity = entity
         self._vvert_start = vvert_start
         self._vface_start = vface_start
         self._vmesh = vmesh
         self._sim_verts_idx = sim_verts_idx
+        # Embedded (skinned) render mesh: each render vertex follows a barycentric combination of the four nodes of
+        # one simulated element instead of a single simulated vertex ('sim_verts_idx' is unused then).
+        self._elems_idx = elems_idx
+        self._bary = bary
 
     def get_trimesh(self):
         """The underlying `trimesh.Trimesh` of the render mesh."""
@@ -55,6 +59,16 @@ class FEMVisGeom(RBC):
     def vmesh(self):
         """The render mesh."""
         return self._vmesh
+
+    @property
+    def elems_idx(self):
+        """Element carrying each render vertex of an embedded render mesh (None for a vertex-mapped one)."""
+        return self._elems_idx
+
+    @property
+    def bary(self):
+        """Barycentric coordinates of each render vertex of an embedded render mesh in its element."""
+        return self._bary
 
     @property
     def sim_verts_idx(self):

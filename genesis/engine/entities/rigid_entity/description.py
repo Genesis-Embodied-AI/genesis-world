@@ -371,8 +371,11 @@ class KinematicEntityDescription(EntityDescription):
         for morph in morphs:
             if isinstance(morph, gs.morphs.FileMorph):
                 # Rigid entities will convexify geom by default
+                # Mochi entities keep the authored surface: contact samples the true collision triangles.
                 if morph.convexify is None:
-                    morph.convexify = isinstance(material, gs.materials.Rigid)
+                    morph.convexify = isinstance(material, gs.materials.Rigid) and not isinstance(
+                        material, gs.materials.Mochi.Base
+                    )
                 # Decimation simplifies away the very surface detail that a non-convex collision mesh is kept for, so
                 # it defaults off when convexify is off and on otherwise. Only applies to meshes that skip
                 # watertightening (already-watertight inputs); watertighten does its own feature-preserving QEM.

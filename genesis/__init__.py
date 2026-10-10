@@ -51,6 +51,8 @@ use_zerocopy: bool | None = None
 use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
 EPS: float | None = None
+# Number of quadrants CPU threads the current init settled on (1 unless raised by `cpu_threads` or QD_NUM_THREADS).
+cpu_threads_effective: int = 1
 
 
 ########################## init ##########################
@@ -66,6 +68,7 @@ def init(
     logger_verbose_time=False,
     performance_mode=False,
     use_deterministic_algorithms=None,
+    cpu_threads=None,
 ):
     global _initialized
     if _initialized:
@@ -222,13 +225,23 @@ def init(
 
     # FIXME: Enforcing Quadrants num threads to 1 by default when running on CPU
     # because it significantly improve performance.
+    global cpu_threads_effective
     qd_num_cpu_threads = os.environ.get("QD_NUM_THREADS")
     if qd_num_cpu_threads is not None:
+        cpu_threads_effective = int(qd_num_cpu_threads)
         qd_init_kwargs.update(
-            cpu_max_num_threads=int(qd_num_cpu_threads),
-            num_compile_threads=int(qd_num_cpu_threads),
+            cpu_max_num_threads=cpu_threads_effective,
+            num_compile_threads=cpu_threads_effective,
+        )
+    elif cpu_threads is not None:
+        if not (isinstance(cpu_threads, int) and cpu_threads >= 1):
+            raise_exception("`cpu_threads` must be a positive integer.")
+        cpu_threads_effective = cpu_threads
+        qd_init_kwargs.update(
+            cpu_max_num_threads=cpu_threads_effective,
         )
     else:
+        cpu_threads_effective = 1
         qd_init_kwargs.update(
             cpu_max_num_threads=1,
         )
