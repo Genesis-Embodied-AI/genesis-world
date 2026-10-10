@@ -702,11 +702,7 @@ def test_box_contact_true_penetration(show_viewer, tol):
 @pytest.mark.required
 @pytest.mark.parametrize(
     "detection",
-    [
-        pytest.param("mpr", marks=pytest.mark.xfail(reason="Lets some stacks of boxes drift.")),
-        pytest.param("gjk", marks=pytest.mark.xfail(reason="Lets some stacks of boxes drift.")),
-        "box_box",
-    ],
+    ["mpr", "gjk", "box_box"],
 )
 def test_box_stacks_stability(detection, show_viewer, tol):
     # Piles of boxes of random shapes, each lying on a random face at a random yaw with a tiny tilt, on fixed bases at

@@ -86,6 +86,23 @@ class MULTICONTACT_SLOT(IntEnum):
     PERTURBED = 2
 
 
+class MULTICONTACT_ENTRY(IntEnum):
+    """
+    Where contact 0 of a pair queued for the split multi-contact pass stands, which decides what each stage of the pass
+    runs for it (see func_narrowphase_multicontact).
+    """
+
+    # Stored in slot 0 without GJK: the MPR seed of the contact0 kernel, or the analytic detection that the first stage
+    # of the pass runs in place of GJK for a pair it resolves analytically
+    SEED = 0
+    # Left to the first stage of the pass, which detects it with GJK
+    GJK = 1
+    # Detected with GJK by the first stage and stored in slot 0
+    DETECTED = 2
+    # Nothing left to detect: GJK found no contact, a manifold that holds every contact, or a pair without multi-contact
+    DONE = 3
+
+
 class EPA_POLY_INIT_RETURN_CODE(IntEnum):
     """
     Return codes for the EPA polytope initialization.

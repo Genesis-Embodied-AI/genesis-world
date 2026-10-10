@@ -1303,11 +1303,15 @@ class NarrowphaseWorkQueues:
     mpr_normal: qd.Tensor
     mpr_penetration: qd.Tensor
     mpr_contact_status: qd.Tensor
-    # Whether contact0 preferred GJK (the per-pair MPR->GJK gate fired). The multicontact pass uses GJK for contact0
-    # when set, and otherwise tries MPR first and falls back to GJK per perturbed contact.
-    mpr_prefer_gjk: qd.Tensor
+    # Where contact 0 of the entry stands (see MULTICONTACT_ENTRY in collider/constants.py). The contact0 kernel leaves
+    # it to GJK when the per-pair MPR->GJK gate fired, and the perturbed contacts otherwise try MPR first and fall back
+    # to GJK per contact.
+    mpr_contact0_status: qd.Tensor
     mpr_queue_size: qd.Tensor
     mpr_work_counter: qd.Tensor
+    # Rotation axis of each perturbed detection of the entry, aimed at a corner of the contact patch (see
+    # func_contact_overlap_axes)
+    aim_axes: qd.Tensor
 
 
 def get_narrowphase_work_queues(max_entries, n_slots, active):
@@ -1322,9 +1326,10 @@ def get_narrowphase_work_queues(max_entries, n_slots, active):
         mpr_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
         mpr_penetration=V(dtype=gs.qd_float, shape=slots_shape),
         mpr_contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), active and n_slots > 1)),
-        mpr_prefer_gjk=V(dtype=gs.qd_int, shape=entries_shape),
+        mpr_contact0_status=V(dtype=gs.qd_int, shape=entries_shape),
         mpr_queue_size=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
         mpr_work_counter=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
+        aim_axes=V_MAT(4, 3, dtype=gs.qd_float, shape=entries_shape),
     )
 
 

@@ -14,7 +14,7 @@ import genesis.utils.sdf as sdf
 
 from . import capsule_contact, diff_gjk, gjk, mpr
 from .box_contact import func_box_box_contact, func_plane_box_contact, func_sphere_box_contact
-from .constants import CCD_ALGORITHM_CODE, MULTICONTACT_SLOT, PORTAL_STATUS
+from .constants import CCD_ALGORITHM_CODE, MULTICONTACT_ENTRY, MULTICONTACT_SLOT, PORTAL_STATUS
 from .contact import (
     func_add_contact,
     func_add_diff_contact_input,
@@ -1846,6 +1846,418 @@ def func_prefer_gjk_refinement(
 
 
 @qd.func
+def func_contact_overlap(
+    i_ga: int,
+    i_gb: int,
+    i_b: int,
+    normal: qd.types.vector(3),
+    contact_pos: qd.types.vector(3),
+    axis_0: qd.types.vector(3),
+    axis_1: qd.types.vector(3),
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+    collider_static_config: qd.template(),
+    geom_pair_scale: float,
+):
+    """Find the overlap of the faces of both geoms touching each other around their contact.
+
+    The face of each geom touching the other one is outlined by its support points along the contact normal 'normal'
+    tilted towards directions of the contact plane spanned by 'axis_0' and 'axis_1', at a cost independent of the vertex
+    count. The overlap is the intersection of both outlines in that plane, where the depth slope that their planes give
+    is positive, in plane coordinates relative to the contact 'contact_pos' (see func_contact_overlap_axes for the rest
+    of the aim).
+
+    Returns the corners of the overlap, their count, and the gradient of the depth across the contact plane.
+    """
+    EPS = rigid_info.EPS[None]
+    # Support points that coincide up to the rounding of their world coordinates and of contact 0 they are taken from,
+    # which grows with their distance to the origin, are one point. Distinct points lie a fraction of the geometry
+    # apart, far beyond the square root of the machine precision.
+    coincidence_tol = qd.sqrt(EPS) * geom_pair_scale + 2.0 * EPS * contact_pos.norm()
+
+    # Polygon of the face of each geom touching the other one, its corners in the plane coordinates of contact 0 plus
+    # their height along the normal, row 8 * i_g + i_k in counterclockwise order. A corner is the support point of the
+    # geom along the normal tilted by 45 deg towards a direction of the contact plane, geom A lying on the positive side
+    # of the normal so that its face looks backwards. The four directions along the plane axes give a polygon inscribed
+    # in each face. An edge of it may cut a corner of the face off, which matters to the overlap only where the other
+    # polygon reaches the edge or beyond it, so the support along the outward normal of such an edge is queried: a point
+    # beyond the edge is the corner it cuts off, which splits the edge in two, while a point on it leaves the edge exact.
+    # An edge the other polygon merely reaches matters too, as two equal faces whose supports along the plane axes tie
+    # cut the same corner off. Every corner of a face is found this way up to the capacity of 8 corners per face. Pairs are sorted by geom type, so that
+    # only geom A can be a plane and only geom B a terrain. One runtime loop inlines the support function once.
+    polygons = qd.Matrix.zero(gs.qd_float, 16, 3)
+    polygons_size = qd.Vector.zero(gs.qd_int, 2)
+    # A sphere, an ellipsoid or a capsule has no planar face of positive area, so their overlap with any face is empty.
+    # Against a plane, the overlap is the whole face of the other geom, a corner of which every tilt of the default
+    # perturbations reaches, so the pair keeps them.
+    is_outlined = dyn_info.geoms.type[i_ga] != gs.GEOM_TYPE.PLANE and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.TERRAIN
+    for i_g in qd.static(range(2)):
+        geom_type = dyn_info.geoms.type[i_ga if i_g == 0 else i_gb]
+        if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.ELLIPSOID or geom_type == gs.GEOM_TYPE.CAPSULE:
+            is_outlined = False
+    if is_outlined:
+        # Bit i_k of edges_exact[i_g] is set once the edge from corner i_k to the next one is known to bound the face.
+        # Each refinement query either adds a corner, at most 6 per face beyond the first two, or settles an edge, at most
+        # 8 per face, after the 8 queries along the plane axes.
+        edges_exact = qd.Vector.zero(gs.qd_int, 2)
+        is_converged = False
+        for i_query in range(8 + 2 * (6 + 8)):
+            if not is_converged:
+                i_g = i_query // 4
+                i_e = 0
+                angle = 0.5 * qd.math.pi * (i_query % 4)
+                dir_x, dir_y = qd.cos(angle), qd.sin(angle)
+                is_query = i_query < 8
+                if not is_query:
+                    # The first edge of either polygon that is not settled yet and that the other one reaches. An edge it
+                    # does not reach stays open, since the other polygon may still gain the corner that does.
+                    i_g = 0
+                    for i_c in range(2 * 8):
+                        i_gc = i_c // 8
+                        i_ec = i_c % 8
+                        n_points = polygons_size[i_gc]
+                        if not is_query and i_ec < n_points and n_points >= 2 and n_points < 8:
+                            if ((edges_exact[i_gc] >> i_ec) & 1) == 0:
+                                i_p = 8 * i_gc + i_ec
+                                i_q = 8 * i_gc + (i_ec + 1) % n_points
+                                e_x = polygons[i_q, 0] - polygons[i_p, 0]
+                                e_y = polygons[i_q, 1] - polygons[i_p, 1]
+                                e_norm = qd.sqrt(e_x**2 + e_y**2)
+                                is_reached = False
+                                for i_r in range(polygons_size[1 - i_gc]):
+                                    i_o = 8 * (1 - i_gc) + i_r
+                                    side = e_x * (polygons[i_o, 1] - polygons[i_p, 1]) - e_y * (
+                                        polygons[i_o, 0] - polygons[i_p, 0]
+                                    )
+                                    if side < coincidence_tol * e_norm:
+                                        is_reached = True
+                                if is_reached:
+                                    is_query = True
+                                    i_g, i_e = i_gc, i_ec
+                                    dir_x, dir_y = e_y / e_norm, -e_x / e_norm
+                    is_converged = not is_query
+                if is_query:
+                    is_b = i_g == 1
+                    direction = dir_x * axis_0 + dir_y * axis_1 + (normal if is_b else -normal)
+                    v = (
+                        mpr.support_driver(
+                            i_gb if is_b else i_ga,
+                            i_b,
+                            direction.normalized(EPS),
+                            gb_pos if is_b else ga_pos,
+                            gb_quat if is_b else ga_quat,
+                            collider_state,
+                            dyn_info,
+                            collider_info,
+                            rigid_config,
+                            collider_static_config,
+                        )
+                        - contact_pos
+                    )
+                    corner = qd.Vector([v.dot(axis_0), v.dot(axis_1), v.dot(normal)], dt=gs.qd_float)
+                    n_points = polygons_size[i_g]
+                    if i_query < 8:
+                        # Supports along the plane axes come in angular order, a point repeating the last one or the
+                        # first one closing the polygon is the same corner
+                        is_distinct = n_points == 0
+                        if n_points > 0:
+                            i_last = 8 * i_g + n_points - 1
+                            gap_x, gap_y = corner[0] - polygons[i_last, 0], corner[1] - polygons[i_last, 1]
+                            is_distinct = gap_x**2 + gap_y**2 > coincidence_tol**2
+                            if i_query % 4 == 3 and n_points > 1:
+                                gap_x, gap_y = corner[0] - polygons[8 * i_g, 0], corner[1] - polygons[8 * i_g, 1]
+                                is_distinct = is_distinct and gap_x**2 + gap_y**2 > coincidence_tol**2
+                        if is_distinct:
+                            for i_3 in qd.static(range(3)):
+                                polygons[8 * i_g + n_points, i_3] = corner[i_3]
+                            polygons_size[i_g] = n_points + 1
+                    else:
+                        i_p = 8 * i_g + i_e
+                        i_q = 8 * i_g + (i_e + 1) % n_points
+                        e_x, e_y = polygons[i_q, 0] - polygons[i_p, 0], polygons[i_q, 1] - polygons[i_p, 1]
+                        side = e_x * (corner[1] - polygons[i_p, 1]) - e_y * (corner[0] - polygons[i_p, 0])
+                        if side < -coincidence_tol * qd.sqrt(e_x**2 + e_y**2):
+                            # The corner splits the edge, shifting the corners after it by one
+                            for i_s in range(7):
+                                i_k = 7 - i_s
+                                if i_k > i_e + 1 and i_k <= n_points:
+                                    for i_3 in qd.static(range(3)):
+                                        polygons[8 * i_g + i_k, i_3] = polygons[8 * i_g + i_k - 1, i_3]
+                            for i_3 in qd.static(range(3)):
+                                polygons[8 * i_g + i_e + 1, i_3] = corner[i_3]
+                            polygons_size[i_g] = n_points + 1
+                            mask_low = edges_exact[i_g] & ((1 << i_e) - 1)
+                            mask_high = (edges_exact[i_g] >> (i_e + 1)) << (i_e + 2)
+                            edges_exact[i_g] = mask_low | mask_high
+                        else:
+                            edges_exact[i_g] = edges_exact[i_g] | (1 << i_e)
+
+    overlap = qd.Matrix.zero(gs.qd_float, 16, 2)
+    n_overlap = 0
+    slope = qd.Vector.zero(gs.qd_float, 2)
+    if is_outlined:
+        # Depth in the contact plane, the height of the face of geom B minus that of geom A, from the plane of each
+        # polygon: the normal of its points (Newell's method) through their centroid. Contact 0 lies on both planes of
+        # flat faces, while the outline of a rounded geom samples it far above the contact, where its depth leaves no
+        # part of the overlap pressed.
+        depth_origin = gs.qd_float(0.0)
+        for i_g in qd.static(range(2)):
+            plane_normal = qd.Vector.zero(gs.qd_float, 3)
+            centroid = qd.Vector.zero(gs.qd_float, 3)
+            n_points = polygons_size[i_g]
+            for i_k in range(n_points):
+                i_row = 8 * i_g + i_k
+                i_next = 8 * i_g + (i_k + 1) % n_points
+                plane_normal[0] += (polygons[i_row, 1] - polygons[i_next, 1]) * (
+                    polygons[i_row, 2] + polygons[i_next, 2]
+                )
+                plane_normal[1] += (polygons[i_row, 2] - polygons[i_next, 2]) * (
+                    polygons[i_row, 0] + polygons[i_next, 0]
+                )
+                plane_normal[2] += (polygons[i_row, 0] - polygons[i_next, 0]) * (
+                    polygons[i_row, 1] + polygons[i_next, 1]
+                )
+                for i_3 in qd.static(range(3)):
+                    centroid[i_3] += polygons[i_row, i_3] / n_points
+            gradient = qd.Vector.zero(gs.qd_float, 2)
+            if qd.abs(plane_normal[2]) > EPS * plane_normal.norm():
+                gradient = -qd.Vector([plane_normal[0], plane_normal[1]], dt=gs.qd_float) / plane_normal[2]
+            height_origin = centroid[2] - gradient[0] * centroid[0] - gradient[1] * centroid[1]
+            if qd.static(i_g == 1):
+                slope += gradient
+                depth_origin += height_origin
+            else:
+                slope -= gradient
+                depth_origin -= height_origin
+
+        # Clip the polygon of geom A by that of geom B (Sutherland-Hodgman), which keeps the orientation of the former,
+        # then by the half-plane where the faces interpenetrate, the patch being the part of their overlap that the
+        # depth bounds. A polygon of fewer than three points bounds no patch.
+        n_overlap = polygons_size[0]
+        for i_k in range(n_overlap):
+            overlap[i_k, 0] = polygons[i_k, 0]
+            overlap[i_k, 1] = polygons[i_k, 1]
+        n_clip = polygons_size[1]
+        if n_clip < 3:
+            n_overlap = 0
+        # The overlap lies within the subject polygon, which clipping only cuts, and within the convex hull of the clip
+        # polygon, which holds the intersection of the half-planes of its edges. It is thus empty when the depth, affine
+        # in the plane, is negative at every corner of either polygon, which spares the clipping of the faces apart from
+        # each other
+        is_pressed_subject = False
+        for i_k in range(n_overlap):
+            if depth_origin + slope[0] * overlap[i_k, 0] + slope[1] * overlap[i_k, 1] >= 0.0:
+                is_pressed_subject = True
+        is_pressed_clip = False
+        for i_e in range(n_clip):
+            if depth_origin + slope[0] * polygons[8 + i_e, 0] + slope[1] * polygons[8 + i_e, 1] >= 0.0:
+                is_pressed_clip = True
+        if not (is_pressed_subject and is_pressed_clip):
+            n_overlap = 0
+            n_clip = 0
+        clip_area = gs.qd_float(0.0)
+        for i_e in range(n_clip):
+            i_next = (i_e + 1) % n_clip
+            clip_area += polygons[8 + i_e, 0] * polygons[8 + i_next, 1] - polygons[8 + i_e, 1] * polygons[8 + i_next, 0]
+        orientation = 1.0 if clip_area >= 0.0 else -1.0
+        for i_e in range(n_clip + 1):
+            # Each clip keeps the side where the affine function 'offset + inward . p' is non-negative
+            inward = slope
+            offset = depth_origin
+            if i_e < n_clip:
+                a_x, a_y = polygons[8 + i_e, 0], polygons[8 + i_e, 1]
+                e_x = polygons[8 + (i_e + 1) % n_clip, 0] - a_x
+                e_y = polygons[8 + (i_e + 1) % n_clip, 1] - a_y
+                inward = orientation * qd.Vector([-e_y, e_x], dt=gs.qd_float)
+                offset = -(inward[0] * a_x + inward[1] * a_y)
+            overlap_out = qd.Matrix.zero(gs.qd_float, 16, 2)
+            n_out = 0
+            for i_k in range(n_overlap):
+                p_x, p_y = overlap[i_k, 0], overlap[i_k, 1]
+                q_x, q_y = overlap[(i_k + 1) % n_overlap, 0], overlap[(i_k + 1) % n_overlap, 1]
+                side_p = offset + inward[0] * p_x + inward[1] * p_y
+                side_q = offset + inward[0] * q_x + inward[1] * q_y
+                if side_p >= 0.0 and n_out < 16:
+                    overlap_out[n_out, 0], overlap_out[n_out, 1] = p_x, p_y
+                    n_out += 1
+                if side_p * side_q < 0.0 and n_out < 16:
+                    t = side_p / (side_p - side_q)
+                    overlap_out[n_out, 0] = p_x + t * (q_x - p_x)
+                    overlap_out[n_out, 1] = p_y + t * (q_y - p_y)
+                    n_out += 1
+            overlap = overlap_out
+            n_overlap = n_out
+
+        # Clipping places points of both polygons where an edge of one crosses a corner of the other, which are one
+        # corner
+        overlap_distinct = qd.Matrix.zero(gs.qd_float, 16, 2)
+        n_distinct = 0
+        for i_k in range(n_overlap):
+            is_distinct = n_distinct == 0
+            if n_distinct > 0:
+                gap = qd.Vector(
+                    [
+                        overlap[i_k, 0] - overlap_distinct[n_distinct - 1, 0],
+                        overlap[i_k, 1] - overlap_distinct[n_distinct - 1, 1],
+                    ]
+                )
+                is_distinct = gap.norm_sqr() > coincidence_tol**2
+            if is_distinct:
+                overlap_distinct[n_distinct, 0], overlap_distinct[n_distinct, 1] = overlap[i_k, 0], overlap[i_k, 1]
+                n_distinct += 1
+        if n_distinct > 1:
+            gap = qd.Vector(
+                [
+                    overlap_distinct[n_distinct - 1, 0] - overlap_distinct[0, 0],
+                    overlap_distinct[n_distinct - 1, 1] - overlap_distinct[0, 1],
+                ]
+            )
+            if gap.norm_sqr() <= coincidence_tol**2:
+                n_distinct -= 1
+        overlap = overlap_distinct
+        n_overlap = n_distinct
+
+    return overlap, n_overlap, slope
+
+
+@qd.func
+def func_contact_overlap_axes(
+    normal: qd.types.vector(3),
+    contact_pos: qd.types.vector(3),
+    axis_0: qd.types.vector(3),
+    axis_1: qd.types.vector(3),
+    slope: qd.types.vector(2),
+    overlap: qd.types.matrix(16, 2),
+    n_overlap: int,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    geom_pair_scale: float,
+):
+    """Aim the four perturbed detections of a contact at the corners of the overlap of both geoms around it.
+
+    A perturbed detection returns the point of the overlap that its tilt deepens the most, which is the corner whose
+    normal cone (the in-plane directions along which it lies farthest out) contains the deepening direction. The overlap
+    comes from func_contact_overlap, in the plane coordinates spanned by 'axis_0' and 'axis_1' around contact 0
+    'contact_pos' of normal 'normal'. Each detection deepens it along the middle of the normal cone of its corner, so
+    that it can neither tie with nor return a neighbouring corner. An overlap of more than four corners targets the four
+    that carry the most area together with the corner of contact 0, which needs no detection.
+
+    Returns the rotation axis of each detection, scaled to multiply the perturbation magnitude. A detection left without
+    corner to target gets a zero axis and is skipped. A degenerate overlap, of no area, keeps for every detection the
+    default combination of 'axis_0' and 'axis_1', so that a contact without patch is perturbed as it would be without
+    aim.
+    """
+    EPS = rigid_info.EPS[None]
+    # Coincidence of support points: see func_contact_overlap
+    coincidence_tol = qd.sqrt(EPS) * geom_pair_scale + 2.0 * EPS * contact_pos.norm()
+    # An overlap spanning no area beyond the rounding of its corners, as that of an edge lying on a face, has no corner
+    # to aim at, and its clipping keeps a number of corners that rounding decides
+    overlap_area = gs.qd_float(0.0)
+    for i_k in range(n_overlap):
+        i_next = (i_k + 1) % n_overlap
+        overlap_area += 0.5 * (overlap[i_k, 0] * overlap[i_next, 1] - overlap[i_k, 1] * overlap[i_next, 0])
+    is_overlap_degenerate = qd.abs(overlap_area) <= qd.sqrt(EPS) * geom_pair_scale**2
+
+    # The normal of each edge of the overlap, pointing outwards
+    orientation = 1.0 if overlap_area >= 0.0 else -1.0
+    edges_normal = qd.Matrix.zero(gs.qd_float, 16, 2)
+    for i_k in range(n_overlap):
+        i_next = (i_k + 1) % n_overlap
+        edges_normal[i_k, 0] = orientation * (overlap[i_next, 1] - overlap[i_k, 1])
+        edges_normal[i_k, 1] = orientation * (overlap[i_k, 0] - overlap[i_next, 0])
+
+    # Targets: every corner of an overlap of at most four. A larger overlap keeps the four corners that span the largest
+    # area together with the corner of contact 0 when it lies on one, which needs no detection, so that the contacts of
+    # the pair are as many corners of the patch. A target of -1 is skipped.
+    targets = qd.Vector([0, 1, 2, 3], dt=gs.qd_int)
+    if n_overlap > 4:
+        i_origin = -1
+        for i_k in range(n_overlap):
+            if overlap[i_k, 0] ** 2 + overlap[i_k, 1] ** 2 <= coincidence_tol**2:
+                i_origin = i_k
+        area_best = gs.qd_float(-1.0)
+        for i_0 in range(n_overlap):
+            for i_1 in range(i_0 + 1, n_overlap):
+                for i_2 in range(i_1 + 1, n_overlap):
+                    for i_3 in range(i_2 + 1, n_overlap):
+                        if i_origin != i_0 and i_origin != i_1 and i_origin != i_2 and i_origin != i_3:
+                            picks = qd.Vector([i_0, i_1, i_2, i_3], dt=gs.qd_int)
+                            area = gs.qd_float(0.0)
+                            for i_p in qd.static(range(4)):
+                                i_a, i_c = picks[i_p], picks[(i_p + 1) % 4]
+                                area += overlap[i_a, 0] * overlap[i_c, 1] - overlap[i_a, 1] * overlap[i_c, 0]
+                            area = qd.abs(area)
+                            if i_origin >= 0:
+                                # The corner of contact 0 lies between the picks that surround it in angular order
+                                i_prev, i_next = i_3, i_0
+                                for i_p in qd.static(range(4)):
+                                    if picks[i_p] < i_origin:
+                                        i_prev = picks[i_p]
+                                for i_p in qd.static(range(3, -1, -1)):
+                                    if picks[i_p] > i_origin:
+                                        i_next = picks[i_p]
+                                area += qd.abs(
+                                    (overlap[i_origin, 0] - overlap[i_prev, 0])
+                                    * (overlap[i_next, 1] - overlap[i_prev, 1])
+                                    - (overlap[i_origin, 1] - overlap[i_prev, 1])
+                                    * (overlap[i_next, 0] - overlap[i_prev, 0])
+                                )
+                            if area > area_best:
+                                area_best = area
+                                targets = picks
+
+    # Deepening direction of each target: the middle of the normal cone of its corner, bounded by the outward normals of
+    # its two edges. A tilt by 'mc_perturbation' about a unit axis deepens the overlap by twice this angle per unit
+    # length, both geoms rotating in opposite directions, and an aimed axis keeps the magnitude of the default one it
+    # replaces, so that every detection tilts by the same angle however sharp its corner. A corner at contact 0, the
+    # pivot of every tilt, has its contact already and no tilt deepens it.
+    axes = qd.Matrix.zero(gs.qd_float, 4, 3)
+    for i_t in qd.static(range(4)):
+        axis = (2 * ((i_t + 1) % 2) - 1) * axis_0 + (1 - 2 * (((i_t + 1) // 2) % 2)) * axis_1
+        if not is_overlap_degenerate:
+            axis_norm = axis.norm()
+            axis = qd.Vector.zero(gs.qd_float, 3)
+            i_k = targets[i_t]
+            if i_t < n_overlap and i_k >= 0:
+                if overlap[i_k, 0] ** 2 + overlap[i_k, 1] ** 2 > (EPS * geom_pair_scale) ** 2:
+                    i_prev = (i_k + n_overlap - 1) % n_overlap
+                    normal_prev = qd.Vector([edges_normal[i_prev, 0], edges_normal[i_prev, 1]]).normalized(EPS)
+                    normal_next = qd.Vector([edges_normal[i_k, 0], edges_normal[i_k, 1]]).normalized(EPS)
+                    # Inward normals of both sides of the normal cone, which holds the gradient of the tilted depth
+                    # 'slope + gain * deepening' as long as the corner is the deepest point of the overlap. Their
+                    # smallest margin is maximized: the corner that the depth leaves farthest behind gets the whole
+                    # tilt, while flat faces deepen along the middle of the cone.
+                    side_prev = (normal_next - normal_next.dot(normal_prev) * normal_prev).normalized(EPS)
+                    side_next = (normal_prev - normal_prev.dot(normal_next) * normal_next).normalized(EPS)
+                    gain = 2.0 * collider_info.mc_perturbation[None] * axis_norm
+                    margin_prev, margin_next = side_prev.dot(slope), side_next.dot(slope)
+                    deepening = side_prev
+                    if margin_next + gain <= margin_prev + gain * side_prev.dot(side_next):
+                        deepening = side_next
+                    elif margin_prev + gain > margin_next + gain * side_next.dot(side_prev):
+                        # Both margins are equal along the deepening direction that maximizes them
+                        sides_gap = side_prev - side_next
+                        sides_gap_norm = sides_gap.norm()
+                        along = sides_gap / sides_gap_norm
+                        across = qd.Vector([-along[1], along[0]])
+                        if across.dot(side_prev) < 0.0:
+                            across = -across
+                        ratio = (margin_next - margin_prev) / (gain * sides_gap_norm)
+                        deepening = ratio * along + qd.sqrt(qd.max(1.0 - ratio**2, 0.0)) * across
+                    axis = normal.cross(axis_norm * (deepening[0] * axis_0 + deepening[1] * axis_1))
+        for i_3 in qd.static(range(3)):
+            axes[i_t, i_3] = axis[i_3]
+    return axes
+
+
+@qd.func
 def func_convex_convex_contact(
     i_ga: int,
     i_gb: int,
@@ -1922,6 +2334,9 @@ def func_convex_convex_contact(
         axis_0 = qd.Vector.zero(gs.qd_float, 3)
         axis_1 = qd.Vector.zero(gs.qd_float, 3)
         qrot = qd.Vector.zero(gs.qd_float, 4)
+        overlap_axes = qd.Matrix.zero(gs.qd_float, 4, 3)
+        # A perturbed detection runs only when it has a corner of the contact patch to aim at
+        has_target_corner = True
 
         i_pair = collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
         for i_detection in range(5):
@@ -1942,9 +2357,14 @@ def func_convex_convex_contact(
                     axis = axis_0 if axis_idx == 0 else axis_1
                     qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
                 else:
-                    # Perturbation axis must not be aligned with the principal axes of inertia of the geometry,
-                    # otherwise it would be more sensitive to ill-conditioning.
-                    axis = (2 * (i_detection % 2) - 1) * axis_0 + (1 - 2 * ((i_detection // 2) % 2)) * axis_1
+                    # Each detection aims at a corner of the contact patch (see func_contact_overlap_axes)
+                    axis = qd.Vector.zero(gs.qd_float, 3)
+                    for i_t in qd.static(range(4)):
+                        if i_detection == i_t + 1:
+                            axis = qd.Vector(
+                                [overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]], dt=gs.qd_float
+                            )
+                    has_target_corner = axis.norm_sqr() > 0.0
                     qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
 
                 # Apply perturbation starting from original state
@@ -1955,7 +2375,9 @@ def func_convex_convex_contact(
                     gb_pos_original, gb_quat_original, contact_pos_0, gu.qd_inv_quat(qrot)
                 )
 
-            if (multi_contact and is_col_0) or (i_detection == 0):
+            # A detection left without corner to target runs nothing, and must not pass on the outcome of the last one
+            is_col = False
+            if (multi_contact and is_col_0 and has_target_corner) or (i_detection == 0):
                 if (
                     dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE
                     and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
@@ -2244,6 +2666,39 @@ def func_convex_convex_contact(
                         axis_0, axis_1 = func_contact_orthogonals(
                             i_ga, i_gb, i_b, normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
                         )
+                        if qd.static(not rigid_config.enable_mujoco_compatibility):
+                            overlap, n_overlap, slope = func_contact_overlap(
+                                i_ga,
+                                i_gb,
+                                i_b,
+                                normal,
+                                contact_pos,
+                                axis_0,
+                                axis_1,
+                                ga_pos_original,
+                                ga_quat_original,
+                                gb_pos_original,
+                                gb_quat_original,
+                                collider_state,
+                                dyn_info,
+                                rigid_info,
+                                collider_info,
+                                rigid_config,
+                                collider_static_config,
+                                geom_pair_scale,
+                            )
+                            overlap_axes = func_contact_overlap_axes(
+                                normal,
+                                contact_pos,
+                                axis_0,
+                                axis_1,
+                                slope,
+                                overlap,
+                                n_overlap,
+                                rigid_info,
+                                collider_info,
+                                geom_pair_scale,
+                            )
                         n_con = 1
 
                     if qd.static(
@@ -2354,6 +2809,7 @@ def _func_multicontact_run_detection(
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
     gjk_static_config: qd.template(),
+    geom_pair_scale: float,
     use_gjk: bool,
     is_initial_detection: bool,
 ):
@@ -2518,7 +2974,10 @@ def _func_multicontact_detect(
     i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
     i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
     i_pair = collider_state.narrowphase_work_queues.mpr_i_pair[i_work]
-    is_gjk_preferred_0 = collider_state.narrowphase_work_queues.mpr_prefer_gjk[i_work] == 1
+    contact0_status = collider_state.narrowphase_work_queues.mpr_contact0_status[i_work]
+    is_gjk_preferred_0 = contact0_status == MULTICONTACT_ENTRY.GJK
+    # Whether GJK detected contact 0, in an earlier stage (see MULTICONTACT_ENTRY) or in this one below
+    is_gjk_used_0 = contact0_status == MULTICONTACT_ENTRY.DETECTED
 
     ga_pos_original = dyn_state.geoms.pos[i_ga, i_b]
     ga_quat_original = dyn_state.geoms.quat[i_ga, i_b]
@@ -2545,7 +3004,7 @@ def _func_multicontact_detect(
     contact0_normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
     contact0_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
     contact0_penetration = collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0]
-    has_contact0 = not is_gjk_preferred_0
+    has_contact0 = contact0_status == MULTICONTACT_ENTRY.SEED or contact0_status == MULTICONTACT_ENTRY.DETECTED
     is_gjk_multi_done = False
     n_con = gs.qd_int(0)
     contact_pos_local = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
@@ -2556,9 +3015,10 @@ def _func_multicontact_detect(
     axis_0 = qd.Vector.zero(gs.qd_float, 3)
     axis_1 = qd.Vector.zero(gs.qd_float, 3)
     is_axes_computed = False
-    # Whether GJK detected contact 0, which the MPR seed, the analytic detections and the plane do not
-    is_gjk_used_0 = False
+    overlap_axes = qd.Matrix.zero(gs.qd_float, 4, 3)
     for i_det in range(i_det_start, i_det_end):
+        # A perturbed detection runs only when it has a corner of the contact patch to aim at
+        has_target_corner = True
         is_initial_detection = i_det == 0
         is_active = is_gjk_preferred_0
         if not is_initial_detection:
@@ -2580,9 +3040,13 @@ def _func_multicontact_detect(
                 is_slot_written = True
         if is_active:
             if not is_initial_detection and not is_axes_computed:
-                axis_0, axis_1 = func_contact_orthogonals(
-                    i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
-                )
+                if qd.static(rigid_config.enable_mujoco_compatibility):
+                    axis_0, axis_1 = func_contact_orthogonals(
+                        i_ga, i_gb, i_b, contact0_normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
+                    )
+                else:
+                    # Aimed by _func_multicontact_aim in the stage before the perturbed detections
+                    overlap_axes = collider_state.narrowphase_work_queues.aim_axes[i_work]
                 is_axes_computed = True
             # Declared ahead of the branches that assign them, as quadrants scoping requires.
             qrot = qd.Vector.zero(gs.qd_float, 4)
@@ -2598,8 +3062,14 @@ def _func_multicontact_detect(
                     axis = axis_0 if axis_idx == 0 else axis_1
                     qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
                 else:
-                    # Combined-axes perturbation: see the twin loop in func_convex_convex_contact.
-                    axis = (2 * (i_det % 2) - 1) * axis_0 + (1 - 2 * ((i_det // 2) % 2)) * axis_1
+                    # Each detection aims at a corner of the patch: see the twin loop in func_convex_convex_contact
+                    axis = qd.Vector.zero(gs.qd_float, 3)
+                    for i_t in qd.static(range(4)):
+                        if i_det == i_t + 1:
+                            axis = qd.Vector(
+                                [overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]], dt=gs.qd_float
+                            )
+                    has_target_corner = axis.norm_sqr() > 0.0
                     qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
                 ga_pos_current, ga_quat_current = func_rotate_frame(
                     ga_pos_original, ga_quat_original, contact0_pos, qrot
@@ -2618,7 +3088,7 @@ def _func_multicontact_detect(
             contact_pos = qd.Vector.zero(gs.qd_float, 3)
             penetration = gs.qd_float(0.0)
             is_gjk_used = False
-            is_detected = False
+            is_detected = not has_target_corner
             for i_try in range(2):
                 if not is_detected:
                     is_col, normal, contact_pos, penetration, is_gjk_used = _func_multicontact_run_detection(
@@ -2642,6 +3112,7 @@ def _func_multicontact_detect(
                         rigid_config,
                         collider_static_config,
                         gjk_static_config,
+                        geom_pair_scale,
                         use_gjk,
                         is_initial_detection,
                     )
@@ -2789,23 +3260,37 @@ def _func_multicontact_detect(
             collider_state.narrowphase_work_queues.mpr_penetration[i_work, i_det] = slot_penetration
             collider_state.narrowphase_work_queues.mpr_contact_status[i_work, i_det] = slot_status
 
+    # A contact 0 found with GJK is stored in slot 0 as the contact0 kernel stores the MPR seed, for the stages that aim
+    # and perturb around it, unless nothing is left to detect for the pair
+    is_detected_for_later = False
+    if is_gjk_preferred_0:
+        contact0_status = MULTICONTACT_ENTRY.DONE
+        if has_contact0 and is_multi_contact and not is_gjk_multi_done:
+            contact0_status = MULTICONTACT_ENTRY.DETECTED if is_gjk_used_0 else MULTICONTACT_ENTRY.SEED
+            is_detected_for_later = True
+            collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0] = contact0_pos
+            collider_state.narrowphase_work_queues.mpr_normal[i_work, 0] = contact0_normal
+            collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0] = contact0_penetration
+        collider_state.narrowphase_work_queues.mpr_contact0_status[i_work] = contact0_status
+
     if qd.static(gjk_static_config.enable_contact_patch):
-        _func_multicontact_write(
-            i_b,
-            i_ga,
-            i_gb,
-            i_pair,
-            n_con,
-            contact_pos_local,
-            normal_local,
-            penetration_local,
-            dyn_state,
-            collider_state,
-            dyn_info,
-            rigid_info,
-            collider_info,
-            errno,
-        )
+        if not is_detected_for_later:
+            _func_multicontact_write(
+                i_b,
+                i_ga,
+                i_gb,
+                i_pair,
+                n_con,
+                contact_pos_local,
+                normal_local,
+                penetration_local,
+                dyn_state,
+                collider_state,
+                dyn_info,
+                rigid_info,
+                collider_info,
+                errno,
+            )
 
 
 @qd.func
@@ -2991,6 +3476,59 @@ def _func_multicontact_gather(
 
 
 @qd.func
+def _func_multicontact_aim(
+    i_work: int,
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+    collider_static_config: qd.template(),
+):
+    """Aim the perturbed detections of a queued pair at the corners of the overlap of both geoms around contact 0.
+
+    The pair of multicontact queue entry 'i_work' is outlined around the contact 0 slot 0 holds, from the MPR seed or
+    from GJK, and the rotation axis of each of its perturbed detections is stored for _func_multicontact_detect (see
+    func_contact_overlap_axes).
+    """
+    i_b = collider_state.narrowphase_work_queues.mpr_i_b[i_work]
+    i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
+    i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
+    normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
+    contact_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
+
+    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    axis_0, axis_1 = func_contact_orthogonals(
+        i_ga, i_gb, i_b, normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
+    )
+    overlap, n_overlap, slope = func_contact_overlap(
+        i_ga,
+        i_gb,
+        i_b,
+        normal,
+        contact_pos,
+        axis_0,
+        axis_1,
+        dyn_state.geoms.pos[i_ga, i_b],
+        dyn_state.geoms.quat[i_ga, i_b],
+        dyn_state.geoms.pos[i_gb, i_b],
+        dyn_state.geoms.quat[i_gb, i_b],
+        collider_state,
+        dyn_info,
+        rigid_info,
+        collider_info,
+        rigid_config,
+        collider_static_config,
+        geom_pair_scale,
+    )
+    collider_state.narrowphase_work_queues.aim_axes[i_work] = func_contact_overlap_axes(
+        normal, contact_pos, axis_0, axis_1, slope, overlap, n_overlap, rigid_info, collider_info, geom_pair_scale
+    )
+
+
+@qd.func
 def func_narrowphase_multicontact(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
@@ -3005,51 +3543,108 @@ def func_narrowphase_multicontact(
     gjk_static_config: qd.template(),
     errno: qd.Tensor,
 ):
-    # While the GPU cores outnumber the work units, each queued pair splits into one unit per perturbed detection: the
-    # perturbed detections read contact 0 and nothing of one another, so they run in parallel. The first unit of a pair
-    # also stores its contact 0. A pair that re-detects contact 0 with GJK perturbs around the contact it finds, so its
-    # first unit runs every detection in order and the other units idle. A queue long enough to saturate the GPU keeps
-    # one unit per pair, which runs every detection in order, since the split then adds work without adding lanes. The
-    # contact patch keeps one unit per pair (see _func_multicontact_detect).
-    # The first contact is perturbed about two orthogonal axes in both directions
+    # The pass runs each queued pair in three stages, the stages of a pair sharing a block whose barrier separates them,
+    # so that each stage reads every slot the previous one wrote: the first unit of the pair stores contact 0, detecting
+    # it with GJK when the contact0 kernel left it so, then aims the perturbed detections at the corners of the contact
+    # patch around it (see _func_multicontact_aim), then every unit runs its share of the perturbed detections. While
+    # the GPU cores outnumber the work units, a pair splits into one unit per perturbed detection, which read contact 0
+    # and nothing of one another. A queue long enough to saturate the GPU keeps one unit per pair, since the split then
+    # adds work without adding lanes, and so does the contact patch, which gathers the contacts of a pair in its unit. A
+    # block claims as many pairs at once as it has units, which keeps the units of a pair in the same block. Every
+    # stage is a single call site, so that the detection pipeline and the outline are compiled once.
     N_PERTURBATIONS = qd.static(4)
+    BLOCK_DIM = qd.static(32)
+    qd.loop_config(name="narrowphase_multicontact", block_dim=BLOCK_DIM)
     for i_tid in range(collider_static_config.gpu_cores):
-        for _iter in range(collider_static_config.gpu_cores_per_unit):
-            n_queue = collider_state.narrowphase_work_queues.mpr_queue_size[0]
-            n_units = 1
-            if qd.static(not gjk_static_config.enable_contact_patch):
-                if N_PERTURBATIONS * n_queue <= collider_static_config.gpu_cores:
-                    n_units = N_PERTURBATIONS
-            i_flat = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_work_counter[0], 1)
-            if i_flat >= n_units * n_queue:
-                break
-            i_work = i_flat // n_units
-            i_unit = i_flat % n_units
-            i_det_start = i_unit + 1
-            i_det_end = i_unit + 2
-            if n_units == 1 or collider_state.narrowphase_work_queues.mpr_prefer_gjk[i_work] == 1:
-                i_det_start = 0
-                i_det_end = N_PERTURBATIONS + 1 if i_unit == 0 else 0
-            elif i_unit == 0:
-                i_det_start = 0
-            _func_multicontact_detect(
-                i_tid,
-                i_work,
-                i_det_start,
-                i_det_end,
-                geoms_init_AABB,
-                dyn_state,
-                collider_state,
-                mpr_state,
-                gjk_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                rigid_config,
-                collider_static_config,
-                gjk_static_config,
-                errno,
+        i_lane = i_tid % BLOCK_DIM
+        sh_work_start = qd.simt.block.SharedArray((1,), gs.qd_int)
+        n_queue = collider_state.narrowphase_work_queues.mpr_queue_size[0]
+        n_units = 1
+        if qd.static(not gjk_static_config.enable_contact_patch):
+            if N_PERTURBATIONS * n_queue <= collider_static_config.gpu_cores:
+                n_units = N_PERTURBATIONS
+        n_works_per_claim = BLOCK_DIM // n_units
+        for _claim in range(n_queue + 1):
+            # FIXME: quadrants#925 - an atomic carries a memory barrier that Metal lowers to a control barrier, so every
+            # lane takes part in the claim, the other lanes adding 0.
+            i_claim = qd.atomic_add(
+                collider_state.narrowphase_work_queues.mpr_work_counter[0],
+                n_works_per_claim if i_lane == 0 else 0,
             )
+            if i_lane == 0:
+                sh_work_start[0] = i_claim
+            qd.simt.block.sync()
+            i_work = sh_work_start[0] + i_lane // n_units
+            is_exhausted = sh_work_start[0] >= n_queue
+            qd.simt.block.sync()
+            if is_exhausted:
+                break
+            i_unit = i_lane % n_units
+            for i_stage in range(3):
+                contact0_status = MULTICONTACT_ENTRY.DONE
+                if i_work < n_queue:
+                    contact0_status = collider_state.narrowphase_work_queues.mpr_contact0_status[i_work]
+                is_contact0_known = (
+                    contact0_status == MULTICONTACT_ENTRY.SEED or contact0_status == MULTICONTACT_ENTRY.DETECTED
+                )
+                if i_stage == 1:
+                    if qd.static(rigid_config.enable_multi_contact and not rigid_config.enable_mujoco_compatibility):
+                        if i_unit == 0 and is_contact0_known:
+                            _func_multicontact_aim(
+                                i_work,
+                                geoms_init_AABB,
+                                dyn_state,
+                                collider_state,
+                                dyn_info,
+                                rigid_info,
+                                collider_info,
+                                rigid_config,
+                                collider_static_config,
+                            )
+                else:
+                    # The first stage stores contact 0, which marks the slot of the MPR seed and detects the contact the
+                    # GJK pairs left to it. The last one runs the perturbed detections of the unit, all of them on a
+                    # single unit, and stores the empty slots of a pair left without any. The contact patch reads
+                    # contact 0 back from slot 0 as its first contact, and gathers the contacts of a pair in its last
+                    # stage unless the first one held them all.
+                    i_det_start = 0
+                    i_det_end = 0
+                    if i_work < n_queue:
+                        if i_stage == 0:
+                            if i_unit == 0:
+                                if qd.static(gjk_static_config.enable_contact_patch):
+                                    if contact0_status == MULTICONTACT_ENTRY.GJK:
+                                        i_det_end = 1
+                                else:
+                                    i_det_end = 1
+                        elif qd.static(gjk_static_config.enable_contact_patch):
+                            if is_contact0_known:
+                                i_det_end = N_PERTURBATIONS + 1
+                        else:
+                            i_det_start = i_unit + 1
+                            i_det_end = i_unit + 2 if n_units > 1 else N_PERTURBATIONS + 1
+                    if i_det_start < i_det_end:
+                        _func_multicontact_detect(
+                            i_tid,
+                            i_work,
+                            i_det_start,
+                            i_det_end,
+                            geoms_init_AABB,
+                            dyn_state,
+                            collider_state,
+                            mpr_state,
+                            gjk_state,
+                            dyn_info,
+                            rigid_info,
+                            collider_info,
+                            rigid_config,
+                            collider_static_config,
+                            gjk_static_config,
+                            errno,
+                        )
+                # The slots live in device memory, which the block barrier of the SPIR-V backends leaves unordered
+                qd.simt.grid.mem_fence()
+                qd.simt.block.sync()
 
     # The top-level loops of a kernel run in order, so the gather reads every slot the units wrote and the counter
     # reset costs no launch of its own
@@ -3096,7 +3691,9 @@ def _func_enqueue_for_multicontact(
     collider_state.narrowphase_work_queues.mpr_contact_pos[idx, 0] = contact_pos_0
     collider_state.narrowphase_work_queues.mpr_normal[idx, 0] = normal_0
     collider_state.narrowphase_work_queues.mpr_penetration[idx, 0] = penetration_0
-    collider_state.narrowphase_work_queues.mpr_prefer_gjk[idx] = 1 if prefer_gjk else 0
+    collider_state.narrowphase_work_queues.mpr_contact0_status[idx] = (
+        MULTICONTACT_ENTRY.GJK if prefer_gjk else MULTICONTACT_ENTRY.SEED
+    )
 
 
 @qd.func
