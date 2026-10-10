@@ -946,10 +946,12 @@ def func_contact_support_hull(
         collider_state.contact_hull_stack[i_cb_start, i_b] = i_c_0
         collider_state.contact_hull_stack[i_cb_start + 1, i_b] = i_c_1
         n_hull = 2
-    # A vertex turning by less than 'rounding' along its edges is collinear with its neighbours and goes regardless,
-    # while a genuine triangle keeps its three vertices, each carrying its whole area. The pass repeats until it
-    # removes nothing, each pass taking its losses on the hull as it found it, through a window sliding along the hull
-    # over the vertex, its two neighbours and the next one, and the losses of the first three.
+    # A vertex turning by less than 'rounding' along its edges is collinear with its neighbours and goes whatever the
+    # area it carries, while a genuine triangle keeps its three vertices, each carrying its whole area. Collinear
+    # vertices obey the rule that spares one of two neighbours too: copies of one point a few roundings apart, which
+    # overlapping geoms report, are each collinear with the other, and removing both would remove their corner. The
+    # pass repeats until it removes nothing, each pass taking its losses on the hull as it found it, through a window
+    # sliding along the hull over the vertex, its two neighbours and the next one, and the losses of the first three.
     n_kept = n_hull
     is_converged = False
     for i_pass in range(n_hull):
@@ -981,7 +983,7 @@ def func_contact_support_hull(
                             )
                         )
                     )
-                if is_between and (is_vertex_collinear or (losses[1] <= area_tol and is_least)):
+                if is_between and is_least and (is_vertex_collinear or losses[1] <= area_tol):
                     i_c = collider_state.contact_hull_stack[i_cb_start + i_h, i_b]
                     collider_state.contact_hull_stack[i_cb_start + i_h, i_b] = -1 - i_c
                 pos_last = func_contact_hull_vertex_pos(i_b, i_cb_start, i_h + 3, n_kept, collider_state)
