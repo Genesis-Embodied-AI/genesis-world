@@ -687,8 +687,23 @@ class IPCCoupler(RBC):
         Friction is combined by geometric mean, resistance by harmonic mean (series spring).
         When an entity material does not define
         ``contact_resistance``, ``options.contact_resistance`` is used as the per-entity fallback.
-        Ground pairs combine entity parameters with the plane entity's material friction.
+        An unset ``coup_friction`` uses the sliding friction resolved onto the entity's geoms. IPC stores one
+        coefficient per entity, so those geoms have to agree. Ground pairs combine that coefficient with the plane's.
         """
+        coup_friction_by_entity = {}
+        for entity in (*self._ipc_abd_contacts, *self._ipc_ground_contacts):
+            coup_friction = entity.material.coup_friction
+            if coup_friction is None:
+                frictions = [geom.coup_friction for link in entity.links for geom in link.geoms]
+                assert frictions
+                coup_friction = frictions[0]
+                if any(not np.allclose(friction, coup_friction, atol=gs.EPS) for friction in frictions):
+                    gs.raise_exception(
+                        "Unset coup_friction resolves to more than one sliding friction on one entity. IPC stores "
+                        "one coefficient per entity, so set coup_friction on its rigid material."
+                    )
+            coup_friction_by_entity[entity] = coup_friction
+
         # Collect (ContactElement, friction_mu, resistance, is_abd) for all entity contact elements
         contact_infos: list[tuple[ContactElement, float, float, bool]] = []
         for entity, elem in (*self._ipc_cloth_contacts.items(), *self._ipc_fem_contacts.items()):
@@ -696,7 +711,7 @@ class IPCCoupler(RBC):
             resistance = entity.material.contact_resistance or self.options.contact_resistance
             contact_infos.append((elem, friction, resistance, False))
         for entity, elem in self._ipc_abd_contacts.items():
-            friction = entity.material.coup_friction
+            friction = coup_friction_by_entity[entity]
             resistance = entity.material.contact_resistance or self.options.contact_resistance
             contact_infos.append((elem, friction, resistance, True))
 
@@ -710,7 +725,7 @@ class IPCCoupler(RBC):
 
         # Register per-plane ground contact pairs
         for entity, ground_elem in self._ipc_ground_contacts.items():
-            plane_friction = entity.material.coup_friction
+            plane_friction = coup_friction_by_entity[entity]
             plane_resistance = entity.material.contact_resistance or self.options.contact_resistance
             for elem, friction, resistance, is_abd in contact_infos:
                 friction_ground = geometric_mean(friction, plane_friction)

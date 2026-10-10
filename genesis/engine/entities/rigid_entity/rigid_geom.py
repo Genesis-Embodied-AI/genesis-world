@@ -64,7 +64,9 @@ class RigidGeom(RBC):
         self._verts_state_start: int = verts_state_start
 
         self._coup_softness: float = self._material.coup_softness
-        self._coup_friction: float = self._material.coup_friction
+        # An unset coupling friction is this geom's own sliding friction, already resolved on the description.
+        material_coup_friction = self._material.coup_friction
+        self._coup_friction: float = self.desc.friction if material_coup_friction is None else material_coup_friction
         self._coup_restitution: float = self._material.coup_restitution
 
         # For heterogeneous simulation: which environments this geom is active in (None = all envs)
