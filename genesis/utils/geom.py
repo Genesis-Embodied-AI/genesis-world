@@ -2058,7 +2058,9 @@ def rotvec_to_quat(rotvec: np.ndarray, out: np.ndarray | None = None) -> np.ndar
 
 
 @nb.jit(nopython=True, cache=True)
-def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+def _np_axis_sin_cos_angle_to_R(
+    axis: np.ndarray, sin_theta: np.ndarray, cos_theta: np.ndarray, out: np.ndarray | None = None
+) -> np.ndarray:
     if isinstance(cos_theta, (float, np.float32, np.float64)):
         assert axis.ndim == 1
     else:
@@ -2071,9 +2073,10 @@ def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.nda
 
     axis_norm = np.sqrt(np.sum(np.square(axis.reshape((-1, 3))), -1).reshape((*axis.shape[:-1], 1)))
     axis = axis / axis_norm
+    if not isinstance(sin_theta, (float, np.float32, np.float64)):
+        sin_theta = sin_theta[..., None]
     if not isinstance(cos_theta, (float, np.float32, np.float64)):
         cos_theta = cos_theta[..., None]
-    sin_theta = np.sqrt(1.0 - cos_theta**2)
     cos1_axis = (1.0 - cos_theta) * axis
     sin_axis = sin_theta * axis
 
@@ -2095,7 +2098,7 @@ def _np_axis_cos_angle_to_R(axis: np.ndarray, cos_theta: np.ndarray, out: np.nda
 
 
 def axis_angle_to_R(axis: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    return _np_axis_cos_angle_to_R(axis, np.cos(theta))
+    return _np_axis_sin_cos_angle_to_R(axis, np.sin(theta), np.cos(theta))
 
 
 def rotvec_to_R(rotvec: np.ndarray) -> np.ndarray:
@@ -2142,7 +2145,7 @@ def z_to_R(v_a: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         else:
             axis_i[:] = 0.0, 1.0, 0.0
 
-    return _np_axis_cos_angle_to_R(axis, cos_theta, out)
+    return _np_axis_sin_cos_angle_to_R(axis, np.sqrt(1.0 - cos_theta**2), cos_theta, out)
 
 
 @nb.jit(nopython=True, cache=True)
