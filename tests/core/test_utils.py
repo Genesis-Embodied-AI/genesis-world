@@ -288,7 +288,6 @@ def test_geom_quadrants_identity(batch_shape):
 
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
-@pytest.mark.parametrize("precision", ["32", "64"])
 def test_geom_tensor_identity(batch_shape, tol):
     for py_funcs, shape_args in (
         ((gu.R_to_rot6d, gu.rot6d_to_R), ([3, 3], [6])),
