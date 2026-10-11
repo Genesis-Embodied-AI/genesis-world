@@ -493,8 +493,7 @@ class KinematicEntityDescription(EntityDescription):
                 cg_vg_infos = []
                 for v_l_info, v_j_infos, v_g_infos in zip(v_l_infos, v_links_j_infos, v_links_g_infos):
                     is_robot = v_l_info["is_robot"]
-                    cg_infos, vg_infos = self._resolve_geoms(morph, v_g_infos, is_robot)
-                    cg_vg_infos.append((cg_infos, vg_infos))
+                    cg_vg_infos.append(self._resolve_geoms(morph, v_g_infos, is_robot))
 
                 # Extract variant's init_qpos from parsed joint infos, composing the morph offset into the free joint so
                 # relative getters report the variant's authored frame.
@@ -516,7 +515,7 @@ class KinematicEntityDescription(EntityDescription):
                 # Resolve each link's inertial for this variant and stash it for the align anchor.
                 is_inertia_recomputed = morph.recompute_inertia
                 variant_links = []
-                for i_link, (v_l_info, v_j_infos, (cg_infos, vg_infos)) in enumerate(
+                for i_link, (v_l_info, v_j_infos, (cg_infos, vg_infos, inertial_cg_infos)) in enumerate(
                     zip(v_l_infos, v_links_j_infos, cg_vg_infos)
                 ):
                     inertial_info = self._resolve_inertial(
@@ -524,7 +523,7 @@ class KinematicEntityDescription(EntityDescription):
                         None if is_inertia_recomputed else v_l_info.get("inertial_pos"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_quat"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_i"),
-                        cg_infos,
+                        inertial_cg_infos,
                         vg_infos,
                         bool(v_l_info["is_robot"]),
                         resolution,
@@ -567,7 +566,7 @@ class KinematicEntityDescription(EntityDescription):
                     g_infos = self._load_primitive(morph, resolution, load_geom_only_for_heterogeneous=True)
                 if morph.fixed != self.morphs[0].fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
-                cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
+                cg_infos, vg_infos, inertial_cg_infos = self._resolve_geoms(morph, g_infos, is_robot=False)
 
                 # The COM/principal-axis anchoring is deferred to '_align_free_roots', which runs once every variant
                 # is described. Compose only the morph pose offset here.
@@ -575,7 +574,9 @@ class KinematicEntityDescription(EntityDescription):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
-                inertial_info = self._resolve_inertial(None, None, None, None, cg_infos, vg_infos, False, resolution)
+                inertial_info = self._resolve_inertial(
+                    None, None, None, None, inertial_cg_infos, vg_infos, False, resolution
+                )
                 resolution.links_inertial_info[0].append(inertial_info)
                 # Such a morph states no joint parameters, so its variant moves through the joints of the primary
                 link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
@@ -1294,10 +1295,10 @@ class KinematicEntityDescription(EntityDescription):
 
         # Split and convexify collision geometry. Must be done before alignment so that convexified geoms are used
         # to compute the inertia frame.
-        cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, l_info["is_robot"])
+        cg_infos, vg_infos, inertial_cg_infos = self._resolve_geoms(morph, g_infos, l_info["is_robot"])
 
         # Carry the morph pose offset into root links and align them to their collision-geometry COM/principal axes.
-        inertial_info = self._align_link(l_info, j_infos, cg_infos, vg_infos, morph, resolution)
+        inertial_info = self._align_link(l_info, j_infos, inertial_cg_infos, vg_infos, morph, resolution)
 
         self.links.append(self._describe_link(l_info, j_infos, cg_infos, vg_infos, morph, inertial_info))
 
@@ -1328,6 +1329,9 @@ class KinematicEntityDescription(EntityDescription):
         the threshold the morph carries. Both kinds of geometry stay as parsed info, so the inertial composition
         treats them alike and '_describe_geoms' resolves the collision coefficients later. A plain load and a
         heterogeneous variant both go through here.
+
+        The collision geometry the inertial is composed from is returned apart. A shell geom is weighed by the surface
+        it was authored with, which convexification and decomposition do not preserve, so it is taken as parsed.
         """
         # An explicitly set material density overrides any asset-authored per-geom density, as material friction does
         # for authored frictions. Dropping the keys up front keeps the align anchor, its all-or-none source check,
@@ -1335,6 +1339,9 @@ class KinematicEntityDescription(EntityDescription):
         if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
             for g_info in g_infos:
                 g_info.pop("density", None)
+        if isinstance(morph, gs.options.morphs.FileMorph) and morph.recompute_inertia_as_shell:
+            for g_info in g_infos:
+                g_info["shell"] = True
 
         cg_infos, vg_infos = [], []
         for g_info in g_infos:
@@ -1343,6 +1350,8 @@ class KinematicEntityDescription(EntityDescription):
                 cg_infos.append(g_info)
             if morph.visualization and not is_col:
                 vg_infos.append(g_info)
+
+        shell_cg_infos = [{**g_info} for g_info in cg_infos if g_info.get("shell")]
 
         # Post-process all collision meshes at once.
         # Destroying the original geometries should be avoided if possible as it will change the way objects
@@ -1403,7 +1412,8 @@ class KinematicEntityDescription(EntityDescription):
             mesh = g_info["mesh"]
             mesh.set_color((*np.random.rand(3), 0.7))
 
-        return cg_infos, vg_infos
+        inertial_cg_infos = [g_info for g_info in cg_infos if not g_info.get("shell")] + shell_cg_infos
+        return cg_infos, vg_infos, inertial_cg_infos
 
     def _resolve_inertial(
         self, explicit_mass, explicit_com, explicit_quat, explicit_inertia, cg_infos, vg_infos, is_robot, resolution

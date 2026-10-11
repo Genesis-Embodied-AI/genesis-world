@@ -745,6 +745,65 @@ def mjcf_geom_density_defaults():
 
 
 @pytest.fixture(scope="session")
+def mjcf_shell_inertia():
+    mjcf = ET.Element("mujoco", model="shell_inertia")
+    asset = ET.SubElement(mjcf, "asset")
+    mesh = trimesh.creation.box(extents=(0.2, 0.2, 0.2))
+    ET.SubElement(
+        asset,
+        "mesh",
+        name="shell_cube",
+        inertia="shell",
+        vertex=" ".join(map(str, mesh.vertices.reshape(-1))),
+        face=" ".join(map(str, mesh.faces.reshape(-1))),
+    )
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    sphere_link = ET.SubElement(worldbody, "body", name="sphere", pos="0 0 1")
+    ET.SubElement(sphere_link, "freejoint")
+    ET.SubElement(sphere_link, "geom", type="sphere", size="0.1", density="250", shellinertia="true")
+    mesh_link = ET.SubElement(worldbody, "body", name="mesh", pos="1 0 1")
+    ET.SubElement(mesh_link, "freejoint")
+    ET.SubElement(mesh_link, "geom", type="mesh", mesh="shell_cube", density="250")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_solid_and_shell_primitives():
+    models = []
+    for is_shell in (False, True):
+        mjcf = ET.Element("mujoco", model="primitives")
+        asset = ET.SubElement(mjcf, "asset")
+        mesh = trimesh.creation.annulus(r_min=0.05, r_max=0.1, height=0.05)
+        ET.SubElement(
+            asset,
+            "mesh",
+            name="annulus",
+            inertia="shell" if is_shell else "exact",
+            vertex=" ".join(map(str, mesh.vertices.reshape(-1))),
+            face=" ".join(map(str, mesh.faces.reshape(-1))),
+        )
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        for i_g, (name, attrib) in enumerate(
+            (
+                ("sphere", dict(type="sphere", size="0.1")),
+                ("capsule", dict(type="capsule", size="0.1 0.2")),
+                ("cylinder", dict(type="cylinder", size="0.1 0.2")),
+                ("box", dict(type="box", size="0.1 0.2 0.3")),
+                ("ellipsoid", dict(type="ellipsoid", size="0.1 0.2 0.3")),
+                ("annulus", dict(type="mesh", mesh="annulus")),
+            )
+        ):
+            body = ET.SubElement(worldbody, "body", name=name, pos=f"{i_g} 0 1")
+            ET.SubElement(body, "freejoint")
+            # MuJoCo takes the inertia type of a mesh from its asset
+            if is_shell and attrib["type"] != "mesh":
+                attrib["shellinertia"] = "true"
+            ET.SubElement(body, "geom", density="250", **attrib)
+        models.append(ET.tostring(mjcf, encoding="unicode"))
+    return models
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia():
     """Generate a URDF with a single link that has no inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia")

@@ -75,6 +75,71 @@ def get_local_inertial_from_geom(
     return InertialProperties(geom_mass, geom_com_local, geom_inertia_local)
 
 
+def get_local_shell_inertial_from_geom(
+    geom_type: gs.GEOM_TYPE, data: np.ndarray | None, mesh: "gs.Mesh | None", rho: float = 1.0
+) -> InertialProperties:
+    """Local inertial properties of one described geometry taken as a hollow surface, 'rho' being a mass per unit area.
+
+    Primitive types follow the formulas of MuJoCo for 'shellinertia', and a mesh integrates over its triangles, which
+    holds for an open mesh as well.
+    """
+    if geom_type == gs.GEOM_TYPE.PLANE:
+        return InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+
+    if geom_type == gs.GEOM_TYPE.SPHERE:
+        radius = data[0]
+        geom_mass = 4.0 * np.pi * radius**2 * rho
+        sq_moments = np.full(3, geom_mass * radius**2 / 3.0)
+    elif geom_type == gs.GEOM_TYPE.ELLIPSOID:
+        semi_axes = np.asarray(data[:3], dtype=np.float64)
+        hx, hy, hz = semi_axes
+        # Thomsen approximation of the area, and inertia as the limit of the difference between two nested solids
+        p = 1.6075
+        geom_mass = 4.0 * np.pi * (((hx * hy) ** p + (hy * hz) ** p + (hz * hx) ** p) / 3.0) ** (1.0 / p) * rho
+        sum_products = hx * hy + hy * hz + hz * hx
+        sq_moments = geom_mass * (semi_axes**2 * sum_products + 2.0 * hx * hy * hz * semi_axes) / (5.0 * sum_products)
+    elif geom_type in (gs.GEOM_TYPE.CYLINDER, gs.GEOM_TYPE.CAPSULE):
+        radius, height = data[:2]
+        m_side = 2.0 * np.pi * radius * height * rho
+        if geom_type == gs.GEOM_TYPE.CYLINDER:
+            # Two disks closing the ends
+            m_ends = 2.0 * np.pi * radius**2 * rho
+            sq_radial = m_side * radius**2 / 2.0 + m_ends * radius**2 / 4.0
+            sq_axial = m_side * height**2 / 12.0 + m_ends * height**2 / 4.0
+        else:
+            # Two hemispheres closing the ends
+            m_ends = 4.0 * np.pi * radius**2 * rho
+            sq_radial = m_side * radius**2 / 2.0 + m_ends * radius**2 / 3.0
+            sq_axial = m_side * height**2 / 12.0 + m_ends * (height**2 / 4.0 + height * radius / 2.0 + radius**2 / 3.0)
+        geom_mass = m_side + m_ends
+        sq_moments = np.array((sq_radial, sq_radial, sq_axial))
+    elif geom_type == gs.GEOM_TYPE.BOX:
+        lengths = np.asarray(data[:3], dtype=np.float64)
+        lx, ly, lz = lengths
+        faces_area = np.array((ly * lz, lx * lz, lx * ly))
+        geom_mass = 2.0 * faces_area.sum() * rho
+        sq_moments = rho * lengths**2 * (faces_area.sum() + 2.0 * faces_area) / 6.0
+    else:
+        faces_verts = np.asarray(mesh.verts, dtype=np.float64)[mesh.faces]
+        faces_area = 0.5 * np.linalg.norm(
+            np.cross(faces_verts[:, 1] - faces_verts[:, 0], faces_verts[:, 2] - faces_verts[:, 0]), axis=-1
+        )
+        area = faces_area.sum()
+        if area <= 0.0:
+            return InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+        geom_com_local = faces_area @ faces_verts.mean(axis=1) / area
+        faces_verts = faces_verts - geom_com_local
+        faces_verts_sum = faces_verts.sum(axis=1)
+        sq_moments = (rho / 12.0) * (
+            np.einsum("f,fvj,fvk->jk", faces_area, faces_verts, faces_verts)
+            + np.einsum("f,fj,fk->jk", faces_area, faces_verts_sum, faces_verts_sum)
+        )
+        geom_inertia_local = np.trace(sq_moments) * np.eye(3) - sq_moments
+        return InertialProperties(area * rho, geom_com_local, geom_inertia_local)
+
+    return InertialProperties(geom_mass, np.zeros(3), np.diag(sq_moments.sum() - sq_moments))
+
+
 class GeomInertialInfo(NamedTuple):
     """A geom's intrinsic 'inertial' (in the geom's own frame) placed at pose 'pos'/'quat' in the parent link, as
     consumed by 'compose_inertial_properties'."""
@@ -126,7 +191,8 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
     """Compose the inertial of the geoms one link holds, at 'rho' where a geom states no density of its own.
 
     Every primitive collision type is handled analytically, and a mesh defers to its cached unit-density mass
-    properties. A geom the link is only drawn with is taken as its visual mesh, so one call covers either kind.
+    properties. A geom the link is only drawn with is taken as its visual mesh, so one call covers either kind. A shell
+    geom weighs its surface instead of its volume, its density being a mass per unit area.
 
     Parameters
     ----------
@@ -143,7 +209,7 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
     return compose_inertial_properties(
         tuple(
             GeomInertialInfo(
-                get_local_inertial_from_geom(
+                (get_local_shell_inertial_from_geom if g_info.get("shell") else get_local_inertial_from_geom)(
                     gs.GEOM_TYPE.MESH if "vmesh" in g_info else g_info["type"],
                     None if "vmesh" in g_info else g_info.get("data"),
                     g_info["vmesh"] if "vmesh" in g_info else g_info["mesh"],

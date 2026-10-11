@@ -2,6 +2,7 @@ import math
 import os
 import xml.etree.ElementTree as ET
 
+import mujoco
 import numpy as np
 import pytest
 import torch
@@ -293,6 +294,96 @@ def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_default
         inertia[2, 2] = inertia[1, 1]
         assert_allclose(entity_mounted.base_link.get_mass(), masses.sum(), tol=1e-6)
         assert_allclose(entity_mounted.base_link.desc.inertia, inertia, rtol=1e-6)
+
+
+@pytest.mark.required
+def test_mjcf_shell_inertia(mjcf_shell_inertia, show_viewer):
+    RADIUS = 0.1
+    EXTENT = 0.2
+    SURFACE_DENSITY = 250.0
+    sphere_mass = 4.0 * np.pi * RADIUS**2 * SURFACE_DENSITY
+    sphere_inertia = 2.0 / 3.0 * sphere_mass * RADIUS**2
+    mesh_mass = 6.0 * EXTENT**2 * SURFACE_DENSITY
+    mesh_inertia = 5.0 / 18.0 * mesh_mass * EXTENT**2
+    expected = np.array(
+        [
+            [sphere_mass, sphere_inertia, sphere_inertia, sphere_inertia],
+            [mesh_mass, mesh_inertia, mesh_inertia, mesh_inertia],
+        ]
+    )
+    model = mujoco.MjModel.from_xml_string(mjcf_shell_inertia)
+    for i_l, name in enumerate(("sphere", "mesh")):
+        assert_allclose(model.body(name).mass, expected[i_l, 0], rtol=1e-6)
+        assert_allclose(model.body(name).inertia, expected[i_l, 1:], rtol=1e-6)
+
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    entity_loaded = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_shell_inertia,
+        ),
+        vis_mode="collision",
+    )
+    entity_recomputed = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_shell_inertia,
+            recompute_inertia=True,
+        ),
+        vis_mode="collision",
+    )
+    scene.build()
+
+    for entity in (entity_loaded, entity_recomputed):
+        inertial = np.array(
+            [
+                [entity.get_link(name).desc.mass, *np.linalg.eigvalsh(entity.get_link(name).desc.inertia)]
+                for name in ("sphere", "mesh")
+            ]
+        )
+        assert_allclose(inertial, expected, rtol=1e-6)
+
+
+@pytest.mark.required
+def test_recompute_inertia_as_shell(mjcf_solid_and_shell_primitives, show_viewer):
+    mjcf_solid, mjcf_shell = mjcf_solid_and_shell_primitives
+    model = mujoco.MjModel.from_xml_string(mjcf_shell)
+
+    with pytest.raises(gs.GenesisException, match="recompute_inertia"):
+        gs.morphs.MJCF(file=mjcf_solid, recompute_inertia_as_shell=True)
+
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_solid,
+            recompute_inertia=True,
+            recompute_inertia_as_shell=True,
+        ),
+    )
+    urdf = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=(
+                '<robot name="box"><link name="box"><collision><geometry><box size="0.2 0.4 0.6"/></geometry>'
+                "</collision></link></robot>"
+            ),
+            recompute_inertia=True,
+            recompute_inertia_as_shell=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=250.0,
+        ),
+    )
+    scene.build()
+
+    for link, name in (
+        *((entity.get_link(name), name) for name in ("sphere", "capsule", "cylinder", "box", "ellipsoid", "annulus")),
+        (urdf.base_link, "box"),
+    ):
+        assert_allclose(link.desc.mass, model.body(name).mass, rtol=1e-6)
+        # MuJoCo approximates the inertia of an ellipsoid by finite difference
+        assert_allclose(np.linalg.eigvalsh(link.desc.inertia), np.sort(model.body(name).inertia), rtol=1e-4)
 
 
 @pytest.mark.slow  # ~200s

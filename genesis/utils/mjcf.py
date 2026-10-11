@@ -244,24 +244,27 @@ def parse_xml(morph, surface, rigid_options=None):
     if isinstance(file, mujoco.MjModel):
         mj = file
         geoms_density = [None] * mj.ngeom
+        geoms_is_shell = [False] * mj.ngeom
     else:
         root, robot = prepare_xml(file, not morph.visualization, merge_fixed_links, exclude_ground_plane, links_to_keep)
         spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
-        geoms_density_map: dict[mujoco.MjsGeom, float | None] = {}
+        geoms_info_map: dict[mujoco.MjsGeom, tuple[float | None, bool]] = {}
         if robot is None:
-            # An omitted density takes the MJCF default of 1000, resolved by MuJoCo through the default classes
+            # An omitted density takes the MJCF default of 1000, resolved by MuJoCo through the default classes. The
+            # density of a shell is a mass per unit area.
             for geom in spec.geoms:
                 if geom.type == mujoco.mjtGeom.mjGEOM_MESH:
                     is_shell = spec.mesh(geom.meshname).inertia == mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
                 else:
                     is_shell = geom.typeinertia == mujoco.mjtGeomInertia.mjINERTIA_SHELL
-                geoms_density_map[geom] = geom.density if np.isnan(geom.mass) and not is_shell else None
+                geoms_info_map[geom] = (geom.density if np.isnan(geom.mass) else None, is_shell)
         mj = compile_model(spec, robot)
         geoms_density = [None] * mj.ngeom
+        geoms_is_shell = [False] * mj.ngeom
         if robot is None:
             # Compilation can discard visual geoms. Only retained geoms have valid final model IDs.
             for geom in spec.geoms:
-                geoms_density[geom.id] = geoms_density_map[geom]
+                geoms_density[geom.id], geoms_is_shell[geom.id] = geoms_info_map[geom]
 
     # We have another more informative warning later so we suppress this one
     # gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
@@ -269,7 +272,7 @@ def parse_xml(morph, surface, rigid_options=None):
     #     gs.logger.warning("(MJCF) Tendon not supported")
 
     # Parse all geometries grouped by parent joint (or world)
-    links_g_infos = parse_geoms(mj, geoms_density, morph.scale, surface, file)
+    links_g_infos = parse_geoms(mj, geoms_density, geoms_is_shell, morph.scale, surface, file)
 
     # Parse all bodies (links and joints)
     l_infos, links_j_infos = parse_links(mj, morph.scale)
@@ -530,7 +533,7 @@ def parse_links(mj, scale):
     return l_infos, j_infos
 
 
-def parse_geom(mj, i_g, density, scale, surface, xml_path):
+def parse_geom(mj, i_g, density, is_shell, scale, surface, xml_path):
     mj_geom = mj.geom(i_g)
 
     geom_size = mj_geom.size
@@ -756,6 +759,8 @@ def parse_geom(mj, i_g, density, scale, surface, xml_path):
         # Omit unspecified values because fusion grouping compares densities numerically
         if density is not None:
             g_infos[-1]["density"] = density
+        if is_shell:
+            g_infos[-1]["shell"] = True
 
     # Geometries of visual groups (0, 1 or 2) are rendered in accordance with MuJoCo, collision ones included
     if not is_col or info["group"] in (0, 1, 2):
@@ -765,7 +770,7 @@ def parse_geom(mj, i_g, density, scale, surface, xml_path):
     return g_infos
 
 
-def parse_geoms(mj, geoms_density, scale, surface, xml_path):
+def parse_geoms(mj, geoms_density, geoms_is_shell, scale, surface, xml_path):
     links_g_info = [[] for _ in range(mj.nbody)]
 
     # Loop over all geometries sequentially
@@ -775,7 +780,7 @@ def parse_geoms(mj, geoms_density, scale, surface, xml_path):
             continue
 
         # Parse a given geometry as its collision and visual geometries
-        g_infos = parse_geom(mj, i_g, geoms_density[i_g], scale, surface, xml_path)
+        g_infos = parse_geom(mj, i_g, geoms_density[i_g], geoms_is_shell[i_g], scale, surface, xml_path)
 
         # Ignore world when looking for collision geometries
         if mj.geom_bodyid[i_g] == 0:

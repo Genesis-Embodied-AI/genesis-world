@@ -563,6 +563,9 @@ class FileMorph(Morph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    recompute_inertia_as_shell : bool, optional
+        Recompute the inertia of every geometry as a hollow surface rather than a solid, density then being a mass per
+        unit area (kg/m^2). Requires 'recompute_inertia'. Defaults to False.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
@@ -601,6 +604,7 @@ class FileMorph(Morph):
     decompose_robot_error_threshold: float = Field(default=float("inf"), ge=0, allow_inf_nan=True)
     coacd_options: CoacdOptions | None = None
     recompute_inertia: StrictBool = False
+    recompute_inertia_as_shell: StrictBool = False
     align: StrictBool | None = None
     file_meshes_are_zup: StrictBool | None = True
     batch_fixed_verts: StrictBool = False
@@ -666,6 +670,9 @@ class FileMorph(Morph):
             kwargs.setdefault("file_meshes_are_zup", not parse_glb_with_zup)
 
         super().__init__(**kwargs)
+
+        if self.recompute_inertia_as_shell and not self.recompute_inertia:
+            gs.raise_exception("'recompute_inertia_as_shell' requires 'recompute_inertia'.")
 
         scale = np.atleast_1d(np.array(self.scale))
         if scale.ndim > 1 or scale.size not in (1, 3):
@@ -765,6 +772,9 @@ class Mesh(FileMorph, TetGenMixin):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    recompute_inertia_as_shell : bool, optional
+        Recompute the inertia of every geometry as a hollow surface rather than a solid, density then being a mass per
+        unit area (kg/m^2). Requires 'recompute_inertia'. Defaults to False.
     merge_submeshes_for_collision : bool, optional
         Whether to merge submeshes for collision. Defaults to False. **This is only used for RigidEntity.**
     visualization : bool, optional
@@ -960,6 +970,10 @@ class MJCF(FileMorph):
         broken assets from external providers that cannot be re-exported from source. Each collision geom keeps the
         density of the file (1000 kg/m^3 where omitted, as the MJCF format specifies), unless the material sets 'rho'.
         Default to False.
+    recompute_inertia_as_shell : bool, optional
+        Recompute the inertia of every geometry as a hollow surface rather than a solid, density then being a mass per
+        unit area (kg/m^2). Geoms that the file declares as shells are recomputed as such regardless. Requires
+        'recompute_inertia'. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1097,6 +1111,9 @@ class URDF(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    recompute_inertia_as_shell : bool, optional
+        Recompute the inertia of every geometry as a hollow surface rather than a solid, density then being a mass per
+        unit area (kg/m^2). Requires 'recompute_inertia'. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1236,6 +1253,9 @@ class Drone(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    recompute_inertia_as_shell : bool, optional
+        Recompute the inertia of every geometry as a hollow surface rather than a solid, density then being a mass per
+        unit area (kg/m^2). Requires 'recompute_inertia'. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1584,6 +1604,9 @@ class USD(FileMorph):
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
+    recompute_inertia_as_shell : bool, optional
+        Recompute the inertia of every geometry as a hollow surface rather than a solid, density then being a mass per
+        unit area (kg/m^2). Requires 'recompute_inertia'. Defaults to False.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
