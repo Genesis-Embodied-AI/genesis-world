@@ -218,6 +218,81 @@ def test_urdf_parsing(show_viewer, tol):
     _check_entity_positions(POS_OFFSET, tol=2e-3)
 
 
+@pytest.mark.required
+def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_defaults, show_viewer):
+    VOLUME = 0.2**3
+
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=authored_geom_density_mjcf,
+            recompute_inertia=True,
+            convexify=False,
+        ),
+        vis_mode="collision",
+    )
+    entity_scaled = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=authored_geom_density_mjcf,
+            scale=2.0,
+            recompute_inertia=True,
+        ),
+        vis_mode="collision",
+    )
+    entities_mounted = []
+    for xml, root_density, material_density in mjcf_geom_density_defaults:
+        entity_mounted = scene.add_entity(
+            morph=gs.morphs.MJCF(
+                file=xml,
+                batch_fixed_verts=True,
+            ),
+            material=gs.materials.Rigid(
+                rho=material_density,
+            ),
+            vis_mode="collision",
+        )
+        entity_mounted.attach(entity_scaled, parent_link_name="weightless")
+        entities_mounted.append(entity_mounted)
+    scene.build()
+
+    masses = {link.name: link.get_mass() for link in entity.links}
+    assert_allclose(masses["on_geom"], 250.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_default"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["unstated"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], (250.0 + 1000.0) * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
+    assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
+    assert_equal(entity.get_link("weightless").desc.inertia, 0.0)
+
+    assert_allclose(entity.get_link("mixed").get_pos(relative=False), (0.18, 0.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity.get_link("fused").get_pos(relative=False), (0.12, 0.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * VOLUME * 0.2**2 / 6.0, tol=gs.EPS)
+
+    for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused"):
+        link = entity.get_link(name)
+        scaled_link = entity_scaled.get_link(name)
+        assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, rtol=1e-6, err_msg=name)
+        assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=1e-6, err_msg=name)
+        assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, rtol=1e-6, err_msg=name)
+
+    # An explicit material density overrides every density of the file, as it does for URDF
+    for entity_mounted, (_, root_density, material_density) in zip(entities_mounted, mjcf_geom_density_defaults):
+        if material_density is not None:
+            masses = np.full(7, material_density) * VOLUME
+        else:
+            density = 1000.0 if root_density is None else root_density
+            masses = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * VOLUME
+        center = np.dot(masses, np.arange(7)) / masses.sum()
+        inertia = np.eye(3) * masses.sum() * 0.2**2 / 6.0
+        inertia[1, 1] += np.dot(masses, (np.arange(7) - center) ** 2)
+        inertia[2, 2] = inertia[1, 1]
+        assert_allclose(entity_mounted.base_link.get_mass(), masses.sum(), tol=1e-6)
+        assert_allclose(entity_mounted.base_link.desc.inertia, inertia, rtol=1e-6)
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_parsing_inertia_defaults(
