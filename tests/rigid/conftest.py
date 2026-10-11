@@ -689,6 +689,20 @@ def undefined_inertia():
 
 
 @pytest.fixture(scope="session")
+def primitive_collision_urdf(asset_tmp_path):
+    mesh_path = str(asset_tmp_path / "collision_cube.glb")
+    trimesh.creation.box(extents=(0.05, 0.05, 0.05)).export(mesh_path)
+    urdf = ET.Element("robot", name="primitive_collision")
+    link = ET.SubElement(urdf, "link", name="base_link")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.1 0.2 0.3")
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(collision, "origin", xyz="0.5 0 0")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "mesh", filename=mesh_path)
+    return ET.tostring(urdf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia_arm():
     """Generate a URDF of two links joined by a revolute joint, neither authoring an inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia_arm")
