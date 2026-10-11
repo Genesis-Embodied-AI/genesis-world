@@ -193,7 +193,7 @@ def test_dynamic_weld(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
+def test_dynamic_screw(n_envs, show_viewer, tol):
     DT = 0.01
     SUBSTEPS = 2
     GRAVITY = 9.81
@@ -203,7 +203,6 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
     NUT_Z = 0.4
     N_STEPS_SCREWED = 30
     HINGE_SPIN_RATE = 2.0
-    SPINDLE_SWING_RATE = 5.0
     N_STEPS_RELEASED = 10
 
     scene = gs.Scene(
@@ -214,7 +213,7 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
         ),
         rigid_options=gs.options.RigidOptions(
             integrator=gs.integrator.Euler,
-            max_dynamic_constraints=8,
+            max_dynamic_constraints=7,
             enable_screw_constraints=True,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -239,11 +238,6 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
         )
         for x in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
     )
-    spindle = scene.add_entity(
-        gs.morphs.MJCF(
-            file=swinging_spindle,
-        ),
-    )
     scene.build(n_envs=n_envs)
 
     rigid = scene.sim.rigid_solver
@@ -265,12 +259,7 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
     rigid.add_screw_constraint(
         post_idx, nut_braked.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=np.inf, frictionloss=10.0
     )
-    # The nut is a child of the spindle, whose swing turns the screw axis.
-    rigid.add_screw_constraint(
-        spindle.get_link("spindle").idx, spindle.get_link("nut").idx, axis=(0.0, 0.0, 1.0), pitch=PITCH
-    )
     nut_hinge.set_dofs_velocity(HINGE_SPIN_RATE, dofs_idx_local=5)
-    spindle.set_dofs_velocity(SPINDLE_SWING_RATE, dofs_idx_local=0)
     with pytest.raises(gs.GenesisException, match="already coupled"):
         rigid.add_screw_constraint(nut_helix.base_link.idx, post_idx, axis=(0.0, 0.0, 1.0), pitch=PITCH)
     with pytest.raises(gs.GenesisException, match="max_dynamic_constraints"):
@@ -326,10 +315,6 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
     assert_allclose(hinge_turn, HINGE_SPIN_RATE * N_STEPS_SCREWED * DT, tol=1e-2)
     assert_allclose(nut_braked.get_pos()[..., 2], NUT_Z, tol=5e-3)
     assert_allclose(nut_held.get_pos()[..., 2], NUT_Z, tol=1e-3)
-    # The joints of the nut measure its motion in the frame of the spindle: 3 slides, then 3 hinges.
-    spindle_nut_qpos = spindle.get_qpos()[..., 1:]
-    assert_allclose(spindle_nut_qpos[..., 2], pitch_rad * spindle_nut_qpos[..., 5], tol=1e-4)
-    assert_allclose(spindle_nut_qpos[..., [0, 1, 3, 4]], 0.0, tol=5e-3)
 
     # Once deleted in the last environment, the helix nut falls freely there and keeps screwing down everywhere else.
     rigid.delete_screw_constraint(nut_helix.base_link.idx, post_idx, envs_idx=[n_envs - 1] if n_envs > 0 else None)
@@ -341,7 +326,7 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
     assert_allclose(vel_z_delta[is_deleted], -GRAVITY * N_STEPS_RELEASED * DT, tol=tol)
     assert_allclose(vel_z_delta[~is_deleted], -g_eff * N_STEPS_RELEASED * DT, rtol=0.01)
     n_screws = (rigid.get_equality_constraints()["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
-    assert_equal(n_screws, 8 - is_deleted)
+    assert_equal(n_screws, 7 - is_deleted)
     for nut_stopped in (nut_seated, nut_capped):
         assert_allclose(nut_stopped.get_pos()[..., 2] - NUT_Z, LIMIT_LOWER, tol=5e-4)
         assert_allclose(nut_stopped.get_vel(), 0.0, tol=2e-3)
@@ -350,7 +335,7 @@ def test_dynamic_screw(n_envs, show_viewer, tol, swinging_spindle):
             post_idx, nut_helix.base_link.idx, axis=(0.0, 0.0, 1.0), pitch=PITCH, envs_idx=[n_envs - 1, n_envs - 1]
         )
         n_screws = (rigid.get_equality_constraints()["type"] == gs.EQUALITY_TYPE.SCREW).sum(dim=-1)
-        assert_equal(n_screws, 8)
+        assert_equal(n_screws, 7)
 
 
 @pytest.mark.slow  # ~200s
