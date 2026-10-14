@@ -158,11 +158,13 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         if self._mesh.vertices.shape[0] > 3 and len(self._mesh.faces) > decimate_face_num:
             self._mesh.process(validate=True)
+            # Merging duplicate/degenerate faces above may leave fewer faces than the target, which
+            # 'fast_simplification' rejects. Clamping to the current face count is a no-op that it accepts.
             self._mesh = trimesh.Trimesh(
                 *fast_simplification.simplify(
                     self._mesh.vertices,
                     self._mesh.faces,
-                    target_count=decimate_face_num,
+                    target_count=min(decimate_face_num, len(self._mesh.faces)),
                     agg=decimate_aggressiveness,
                     lossless=(decimate_aggressiveness == 0),
                 ),
