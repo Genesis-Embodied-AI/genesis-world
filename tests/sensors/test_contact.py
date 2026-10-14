@@ -110,6 +110,8 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
             jitter=0.01,
         )
     )
+    with pytest.raises(gs.GenesisException, match="pos_offset"):
+        gs.sensors.ContactForce(entity_idx=box.idx, pos_offset=(0.0, 0.0, 0.1))
     # Adding extra sensor sharing same dtype to force discontinuous memory layout for ground truth when batched
     scene.add_sensor(
         gs.sensors.IMU(
@@ -129,8 +131,9 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     # Add another cube on top of it make sure the forces are correctly aggregated
     box_3.set_dofs_position((-np.pi / 2, -np.pi / 4, -np.pi / 2), dofs_idx_local=slice(3, None))
 
-    # Note that it is necessary to do a first step, because the initial state right after reset is not valid
-    for _ in range(DELAY_STEPS + 1):
+    # Note that it is necessary to do a first step, because the initial state right after reset is not valid, then one
+    # more for the ring slot a jittered read of force_sensor_noisy may reach
+    for _ in range(DELAY_STEPS + 2):
         scene.step()
 
     # Make sure that box CoM is valid
@@ -182,6 +185,13 @@ def test_filter_link_idx(show_viewer, tol):
         ),
         show_viewer=show_viewer,
     )
+    # A non-rigid entity ahead of the rigid ones, so that scene and rigid solver entity indices differ
+    scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(1.0, 0.0, 0.5),
+        ),
+        material=gs.materials.Kinematic(),
+    )
     floor = scene.add_entity(
         morph=gs.morphs.Plane(),
     )
@@ -197,6 +207,8 @@ def test_filter_link_idx(show_viewer, tol):
             pos=(0.0, 0.5, 0.1),
         ),
     )
+    with pytest.raises(gs.GenesisException, match="entity_idx"):
+        scene.add_sensor(gs.sensors.Contact())
     sensor = scene.add_sensor(
         gs.sensors.Contact(
             entity_idx=box_on_floor.idx,
@@ -222,7 +234,7 @@ def test_filter_link_idx(show_viewer, tol):
     scene.build(n_envs=2)
     box.set_pos(
         (
-            (0.0, 0.5, 0.1),  # box not touching box_on_floor
+            (0.0, 0.5, 1.0),  # box falling, touching nothing
             (0.0, 0.0, 0.3),  # box on top of box_on_floor
         )
     )

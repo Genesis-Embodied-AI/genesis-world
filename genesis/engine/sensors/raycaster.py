@@ -12,7 +12,7 @@ from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, kernel_update_all_verts
 from genesis.options.sensors import Raycaster as RaycasterOptions
 from genesis.options.sensors import RaycastPattern
-from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
+from genesis.utils.geom import normalize, transform_by_trans_quat, transform_quat_by_quat
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, qd_to_numpy, qd_to_torch
 from genesis.utils.raycast_qd import (
     kernel_cast_rays,
@@ -29,9 +29,11 @@ from genesis.vis.rasterizer_context import RasterizerContext
 from .base_sensor import (
     KinematicSensorMetadataMixin,
     KinematicSensorMixin,
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
     SharedSensorContext,
-    SimpleSensorMetadata,
     SimpleSensor,
+    SimpleSensorMetadata,
 )
 
 if TYPE_CHECKING:
@@ -476,7 +478,7 @@ class RaycastContext(SharedSensorContext):
 
 
 @dataclass
-class RaycasterSharedMetadata(KinematicSensorMetadataMixin, SimpleSensorMetadata):
+class RaycasterSharedMetadata(OffsettableSensorMetadataMixin, KinematicSensorMetadataMixin, SimpleSensorMetadata):
     # The BVHs cast against each frame live on the shared ``RaycastContext`` (one per active solver per mesh type),
     # so a Raycaster and a DepthCamera share one set of trees. The cast entries chain into the output cache; see
     # write_ray_hit in raycast_qd.py for the merge scheme. Per-sensor link poses are gathered via
@@ -514,7 +516,9 @@ class RaycasterReturnType(NamedTuple):
 
 
 class RaycasterSensor(
-    KinematicSensorMixin, SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType]
+    OffsettableSensorMixin,
+    KinematicSensorMixin,
+    SimpleSensor[RaycasterOptions, RaycastContext, RaycasterSharedMetadata, RaycasterReturnType],
 ):
     def __init__(self, options: RaycasterOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
@@ -541,14 +545,9 @@ class RaycasterSensor(
 
         self._shared_metadata.patterns.append(self._options.pattern)
 
-        ray_starts = self._options.pattern.ray_starts.reshape(-1, 3)
-        self.ray_starts = transform_by_trans_quat(
-            ray_starts, self._shared_metadata.offsets_pos[0, -1, :], self._shared_metadata.offsets_quat[0, -1, :]
-        )
+        self.ray_starts = self._options.pattern.ray_starts.reshape(-1, 3)
         self._shared_metadata.ray_starts = torch.cat([self._shared_metadata.ray_starts, self.ray_starts])
-
-        ray_dirs = self._options.pattern.ray_dirs.reshape(-1, 3)
-        self.ray_dirs = transform_by_quat(ray_dirs, self._shared_metadata.offsets_quat[0, -1, :])
+        self.ray_dirs = self._options.pattern.ray_dirs.reshape(-1, 3)
         self._shared_metadata.ray_dirs = torch.cat([self._shared_metadata.ray_dirs, self.ray_dirs])
 
         num_rays = math.prod(self._options.pattern.return_shape)
@@ -609,17 +608,13 @@ class RaycasterSensor(
         # The BVHs were already refreshed once this step by SensorManager (``RaycastContext.update``); read them here.
         bvh_contexts = shared_context.bvh_contexts
 
-        # Allocate the link-pose scratch buffers on first cast (B and n_sensors are known here). Identity quat is baked
-        # into the initial allocation so static sensors (entity_idx<0) leave their rows at identity, letting the cast
-        # kernel apply pos_offset / euler_offset in world frame.
+        # Allocate the link-pose buffers on first cast, once B is known. Static sensors (entity_idx<0) keep identity
+        # rows, which places their mounting offsets in world frame.
         if shared_metadata.links_pos is None:
             B = bvh_contexts[0].solver._B
-            shared_metadata.links_pos = torch.zeros(
-                B, shared_metadata.n_sensors, 3, device=gs.device, dtype=gs.tc_float
-            )
-            shared_metadata.links_quat = torch.zeros(
-                B, shared_metadata.n_sensors, 4, device=gs.device, dtype=gs.tc_float
-            )
+            n_sensors = len(shared_metadata.patterns)
+            shared_metadata.links_pos = torch.zeros(B, n_sensors, 3, device=gs.device, dtype=gs.tc_float)
+            shared_metadata.links_quat = torch.zeros(B, n_sensors, 4, device=gs.device, dtype=gs.tc_float)
             shared_metadata.links_quat[:, :, 0] = 1.0
 
         # Gather link poses per sensor. Sensors are pre-bucketed into shared_metadata.solver_groups at build time so
@@ -634,6 +629,8 @@ class RaycasterSensor(
                 quat = quat[None]
             links_pos[:, group.sensor_cols, :] = pos
             links_quat[:, group.sensor_cols, :] = quat
+        sensors_pos = transform_by_trans_quat(shared_metadata.offsets_pos, links_pos, links_quat)
+        sensors_quat = transform_quat_by_quat(shared_metadata.offsets_quat, links_quat)
 
         # The two collision tree sets of a solver cast in one launch, a visual set in one of its own. The launches
         # chain into one output buffer: the first initializes every slot (is_merge=False), each subsequent one merges
@@ -651,10 +648,11 @@ class RaycasterSensor(
                 if entry.solver is solver and entry.raycast_mask is not None:
                     launches.append((solver, [entry]))
         sensor_tables = (
-            links_pos,
-            links_quat,
+            sensors_pos,
+            sensors_quat,
             shared_metadata.ray_starts,
             shared_metadata.ray_dirs,
+            shared_metadata.min_ranges,
             shared_metadata.max_ranges,
             shared_metadata.no_hit_values,
             shared_metadata.return_world_frame,
@@ -711,10 +709,14 @@ class RaycasterSensor(
 
         data = self.read(env_idx)
 
-        pos = self._link.get_pos(env_idx, relative=False)
-        quat = self._link.get_quat(env_idx, relative=False)
-        if pos.ndim == 2:
-            pos, quat = pos[0], quat[0]
+        i_b = 0 if env_idx is None else env_idx
+        pos = self._shared_metadata.offsets_pos[i_b, self._idx]
+        quat = self._shared_metadata.offsets_quat[i_b, self._idx]
+        if self._link is not None:
+            link_pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
+            link_quat = self._link.get_quat(env_idx, relative=False).reshape((4,))
+            pos = transform_by_trans_quat(pos, link_pos, link_quat)
+            quat = transform_quat_by_quat(quat, link_quat)
 
         ray_starts = transform_by_trans_quat(self.ray_starts, pos, quat)
 

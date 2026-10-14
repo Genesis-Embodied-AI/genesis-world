@@ -694,6 +694,7 @@ def write_ray_hit(
     ray_direction_world,
     ray_dir_local,
     is_world_frame: qd.types.ndarray(ndim=1),
+    min_ranges: qd.types.ndarray(ndim=1),
     max_ranges: qd.types.ndarray(ndim=1),
     no_hit_values: qd.types.ndarray(ndim=1),
     sensor_cache_offsets: qd.types.ndarray(ndim=1),
@@ -711,9 +712,10 @@ def write_ray_hit(
     output buffer (first pass is_merge=False, subsequent passes is_merge=True, final pass is_last=True): the first
     pass writes a value into every slot, and each later pass only overwrites a slot when it found a closer hit, so
     the chain composes with no scratch storage. A miss must not beat a real hit from another pass whatever the
-    sensor's ``no_hit_value`` (it may be below max_range, e.g. 0 or -1): a miss on a non-final pass seeds the slot
-    with ``max_range`` - a hit is always strictly below it, so a hit wins every distance comparison - and
-    ``no_hit_value`` is stamped only by the final pass, over any slot still holding that sentinel.
+    sensor's ``no_hit_value`` (it may be below max_range, e.g. 0 or -1): a miss on the first pass seeds the slot with
+    ``max_range`` - a hit is always strictly below it, so a hit wins every distance comparison - and ``no_hit_value``
+    is stamped only by the final pass, over any slot still holding that sentinel. The final pass also stamps it over a
+    hit closer than ``min_range``, which is settled only then because that hit still occludes what lies behind it.
 
     `sensor_return_points[i_s]` gates the hit-point writes; a distances-only sensor skips them.
     """
@@ -738,20 +740,15 @@ def write_ray_hit(
             output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = hit_point.y
             output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = hit_point.z
     elif not is_merge:
-        # First-pass miss: zero the point and seed the distance - no_hit_value if this pass is also the last (single
-        # BVH), else the max_range sentinel so a later pass's hit wins.
-        if sensor_return_points[i_s]:
-            output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
-            output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
-        if is_last:
+        output_hits[i_p_dist, i_b] = max_ranges[i_s]
+    if qd.static(is_last):
+        hit_distance_best = output_hits[i_p_dist, i_b]
+        if hit_distance_best >= max_ranges[i_s] or hit_distance_best < min_ranges[i_s]:
             output_hits[i_p_dist, i_b] = no_hit_values[i_s]
-        else:
-            output_hits[i_p_dist, i_b] = max_ranges[i_s]
-    elif is_last:
-        # Final-pass miss: a slot still at the sentinel means every pass missed, so stamp no_hit_value.
-        if output_hits[i_p_dist, i_b] >= max_ranges[i_s]:
-            output_hits[i_p_dist, i_b] = no_hit_values[i_s]
+            if sensor_return_points[i_s]:
+                output_hits[i_p_offset + i_p_sensor * 3 + 0, i_b] = 0.0
+                output_hits[i_p_offset + i_p_sensor * 3 + 1, i_b] = 0.0
+                output_hits[i_p_offset + i_p_sensor * 3 + 2, i_b] = 0.0
 
 
 @qd.func
@@ -803,6 +800,7 @@ def kernel_cast_rays(
     links_quat: qd.types.ndarray(ndim=3),  # [n_env, n_sensors, 4]
     ray_starts: qd.types.ndarray(ndim=2),  # [n_points, 3]
     ray_directions: qd.types.ndarray(ndim=2),  # [n_points, 3]
+    min_ranges: qd.types.ndarray(ndim=1),  # [n_sensors]
     max_ranges: qd.types.ndarray(ndim=1),  # [n_sensors]
     no_hit_values: qd.types.ndarray(ndim=1),  # [n_sensors]
     is_world_frame: qd.types.ndarray(ndim=1),  # [n_sensors]
@@ -886,6 +884,7 @@ def kernel_cast_rays(
             ray_direction_world,
             ray_dir_local,
             is_world_frame,
+            min_ranges,
             max_ranges,
             no_hit_values,
             sensor_cache_offsets,
@@ -907,6 +906,7 @@ def kernel_cast_rays_visual(
     links_quat: qd.types.ndarray(ndim=3),
     ray_starts: qd.types.ndarray(ndim=2),
     ray_directions: qd.types.ndarray(ndim=2),
+    min_ranges: qd.types.ndarray(ndim=1),
     max_ranges: qd.types.ndarray(ndim=1),
     no_hit_values: qd.types.ndarray(ndim=1),
     is_world_frame: qd.types.ndarray(ndim=1),
@@ -963,6 +963,7 @@ def kernel_cast_rays_visual(
             ray_direction_world,
             ray_dir_local,
             is_world_frame,
+            min_ranges,
             max_ranges,
             no_hit_values,
             sensor_cache_offsets,

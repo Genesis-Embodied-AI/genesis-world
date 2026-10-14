@@ -110,6 +110,8 @@ class SensorOptions(Options, Generic[SensorT]):
         Use pydantic's model_post_init() for validation that does not require scene context.
         """
         assert scene.sim is not None
+        if self.entity_idx >= len(scene.entities):
+            gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
         if self.delay > 0:
             delay_ratio = self.delay / scene.sim.dt
             delay_ts = round(delay_ratio)
@@ -133,23 +135,15 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
         The global entity index of the entity to which this sensor is attached. -1 or None for static sensors.
     link_idx_local : int, optional
         The local index of the link of the entity to which this sensor is attached.
-    pos_offset : array-like[float, float, float], optional
-        The positional offset of the sensor from the link.
-    euler_offset : array-like[float, float, float], optional
-        The rotational offset of the sensor from the link in degrees.
     """
 
     link_idx_local: NonNegativeInt = 0
-    pos_offset: Vec3FType = (0.0, 0.0, 0.0)
-    euler_offset: Vec3FType = (0.0, 0.0, 0.0)
 
     def validate_scene(self, scene: "Scene"):
         from genesis.engine.entities import KinematicEntity
 
         super().validate_scene(scene)
         if self.entity_idx >= 0:
-            if self.entity_idx >= len(scene.entities):
-                gs.raise_exception(f"Invalid entity index {self.entity_idx}.")
             entity = scene.entities[self.entity_idx]
             if not isinstance(entity, KinematicEntity):
                 gs.raise_exception(f"Entity at index {self.entity_idx} is not a KinematicEntity.")
@@ -157,39 +151,47 @@ class KinematicSensorOptionsMixin(SensorOptions[SensorT]):
                 gs.raise_exception(f"Invalid link index {self.link_idx_local} for entity {self.entity_idx}.")
 
 
-class RigidSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
+class OffsettableSensorOptionsMixin(KinematicSensorOptionsMixin[SensorT]):
     """
-    Options for sensors that require a RigidEntity specifically (e.g. contact, contact force, IMU, tactile).
+    Options for sensors mounted on their link at a fixed pose, which frames their measurements.
 
-    Any sensor whose output depends on physics quantities (contact pairs, friction, inertial dynamics) belongs
-    here.
+    Parameters
+    ----------
+    pos_offset : array-like[float, float, float], optional
+        The positional offset of the sensor from the link, or from the world origin for a static sensor.
+    euler_offset : array-like[float, float, float], optional
+        The rotational offset of the sensor from the link in degrees, or from the world frame for a static sensor.
+    """
+
+    pos_offset: Vec3FType = (0.0, 0.0, 0.0)
+    euler_offset: Vec3FType = (0.0, 0.0, 0.0)
+
+
+class RigidEntitySensorOptionsMixin(SensorOptions[SensorT]):
+    """
+    Options for sensors bound to a RigidEntity, whose output depends on physics quantities (contact pairs, friction,
+    inertial dynamics).
+
+    The attachment is mandatory: entity_idx must refer to an existing RigidEntity, and static sensors are rejected.
     """
 
     def validate_scene(self, scene: "Scene"):
         from genesis.engine.entities import RigidEntity
 
         super().validate_scene(scene)
-        if self.entity_idx >= 0:
-            entity = scene.entities[self.entity_idx]
-            if not isinstance(entity, RigidEntity):
-                gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
-
-
-class RigidEntitySensorOptionsMixin(RigidSensorOptionsMixin[SensorT]):
-    """
-    Options for a sensor bound to a whole RigidEntity (e.g. joint-space sensors), where the attachment is mandatory:
-    entity_idx must refer to an existing RigidEntity, static sensors are not allowed.
-
-    The link offset parameters are inherited from RigidSensorOptionsMixin but ignored by joint-space sensors.
-    """
-
-    def validate_scene(self, scene: "Scene"):
-        super().validate_scene(scene)
         if self.entity_idx < 0:
             gs.raise_exception(f"{type(self).__name__} requires entity_idx >= 0, got {self.entity_idx}.")
+        if not isinstance(scene.entities[self.entity_idx], RigidEntity):
+            gs.raise_exception(f"Entity at index {self.entity_idx} is not a RigidEntity.")
 
 
-class ContactFilterOptionsMixin(RigidSensorOptionsMixin[SensorT]):
+class RigidLinkSensorOptionsMixin(RigidEntitySensorOptionsMixin[SensorT], KinematicSensorOptionsMixin[SensorT]):
+    """
+    Options for sensors mounted on one link of a RigidEntity (e.g. contact, contact force, IMU, tactile).
+    """
+
+
+class ContactFilterOptionsMixin(RigidLinkSensorOptionsMixin[SensorT]):
     """
     Shared options for the contact sensors whose reading can be scoped to ignore contacts with chosen counterpart
     links -- Contact, ContactForce, and the contact-driven tactile probes (ContactProbe, ContactDepthProbe,
@@ -424,7 +426,9 @@ class TemperatureProperties(NamedTuple):
     emissivity: float = 0.9
 
 
-class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]):
+class TemperatureGrid(
+    RigidLinkSensorOptionsMixin["TemperatureGridSensor"], SimpleSensorOptions["TemperatureGridSensor"]
+):
     """
     Sensor that returns the temperature in Celsius of the associated RigidLink in its local frame.
 
@@ -471,7 +475,11 @@ class TemperatureGrid(RigidSensorOptionsMixin["TemperatureGridSensor"], SimpleSe
     debug_temperature_range: Vec2FType = (0.0, 100.0)
 
 
-class IMU(RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]):
+class IMU(
+    OffsettableSensorOptionsMixin["IMUSensor"],
+    RigidLinkSensorOptionsMixin["IMUSensor"],
+    SimpleSensorOptions["IMUSensor"],
+):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
     of the associated entity link.
@@ -569,7 +577,7 @@ class IMU(RigidSensorOptionsMixin["IMUSensor"], SimpleSensorOptions["IMUSensor"]
 
 
 class SurfaceDistanceProbe(
-    RigidSensorOptionsMixin["SurfaceDistanceProbeSensor"],
+    RigidLinkSensorOptionsMixin["SurfaceDistanceProbeSensor"],
     SimpleSensorOptions["SurfaceDistanceProbeSensor"],
     ProbeSensorOptionsMixin["SurfaceDistanceProbeSensor"],
 ):
@@ -607,7 +615,7 @@ class SurfaceDistanceProbe(
                 )
 
 
-class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
+class Raycaster(OffsettableSensorOptionsMixin["RaycasterSensor"], SimpleSensorOptions["RaycasterSensor"]):
     """
     Raycaster sensor that performs ray casting to get distance measurements and point clouds.
 
@@ -616,13 +624,15 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     pattern: RaycastPatternOptions
         The raycasting pattern for the sensor.
     min_range : float, optional
-        The minimum sensing range in meters. Defaults to 0.0.
+        The minimum sensing range in meters. A ray whose closest hit is nearer reads as a miss (``no_hit_value``), as
+        a surface inside the blind zone of a real range sensor still blocks what lies behind it. Defaults to 0.0.
     max_range : float, optional
         The maximum sensing range in meters. Defaults to 20.0.
     no_hit_value : float, optional
         The value to return for no hit. Defaults to max_range if not specified.
     return_world_frame : bool, optional
-        Whether to return points in the world frame. Defaults to False (local frame).
+        Whether to return points in the world frame. Defaults to False, where each point is the hit relative to its ray
+        start, along the axes of the sensor frame (the link frame rotated by ``euler_offset``).
     return_points : bool, optional
         Whether to return the per-ray hit points. Defaults to True. When False, ``read().points`` is None and only
         the hit distances are measured, cutting the sensor's memory footprint and per-step cost to about a quarter.
@@ -647,6 +657,7 @@ class Raycaster(KinematicSensorOptionsMixin["RaycasterSensor"], SimpleSensorOpti
     debug_ray_hit_color: Vec4FType = (1.0, 0.5, 0.5, 1.0)
 
     def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
         if self.no_hit_value is None:
             self.no_hit_value = self.max_range
         if self.max_range <= self.min_range:

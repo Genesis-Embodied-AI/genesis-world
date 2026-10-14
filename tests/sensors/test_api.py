@@ -250,11 +250,11 @@ def test_pipeline_contract(tol):
         step_counter: int = 0
 
     class FakeSimpleOptions(SimpleSensorOptions["FakeSimpleSensor"]):
-        pass
+        n_values: int = 1
 
     class FakeSimpleSensor(SimpleSensor[FakeSimpleOptions, None, FakeSimpleMetadata]):
         def _get_return_format(self):
-            return (1,)
+            return (self._options.n_values,)
 
         @classmethod
         def _get_cache_dtype(cls):
@@ -289,7 +289,9 @@ def test_pipeline_contract(tol):
             hardware_imp=tuple(H.tolist()),
         )
     )
-    s_baseline = scene.add_sensor(FakeSimpleOptions())
+    # Include a three-value sensor to intentionally shift values in the shared cache, to test that each sensor reads its
+    # own jitter rather than the one at its index among the cache values.
+    s_baseline = scene.add_sensor(FakeSimpleOptions(n_values=3))
     s_history = scene.add_sensor(FakeSimpleOptions(history_length=HISTORY_LEN))
     s_delay = scene.add_sensor(FakeSimpleOptions(delay=DELAY_STEPS * DT))
     s_both = scene.add_sensor(FakeSimpleOptions(history_length=HISTORY_LEN, delay=DELAY_STEPS * DT))
@@ -304,10 +306,10 @@ def test_pipeline_contract(tol):
     with pytest.raises(Exception, match="read delay"):
         s_baseline.set_jitter(DT)
 
-    n_steps = 8
+    n_steps = 16
     gt_observed = np.zeros((n_steps, len(paths)), dtype=np.float32)
     measured_observed = np.zeros((n_steps, len(paths)), dtype=np.float32)
-    baseline_observed = np.zeros(n_steps, dtype=np.float32)
+    baseline_observed = np.zeros((n_steps, 3), dtype=np.float32)
     history_observed = np.zeros((n_steps, HISTORY_LEN), dtype=np.float32)
     delay_observed = np.zeros(n_steps, dtype=np.float32)
     both_observed = np.zeros((n_steps, HISTORY_LEN), dtype=np.float32)
@@ -318,7 +320,7 @@ def test_pipeline_contract(tol):
         scene.step()
         gt_observed[i] = tensor_to_array(sensor.read_ground_truth()).reshape(-1)
         measured_observed[i] = tensor_to_array(sensor.read()).reshape(-1)
-        baseline_observed[i] = tensor_to_array(s_baseline.read()).item()
+        baseline_observed[i] = tensor_to_array(s_baseline.read())
         history_observed[i] = tensor_to_array(s_history.read()).reshape(-1)
         delay_observed[i] = tensor_to_array(s_delay.read()).item()
         both_observed[i] = tensor_to_array(s_both.read()).reshape(-1)
@@ -360,7 +362,7 @@ def test_pipeline_contract(tol):
             past_step = k - h
             expected_history[k - 1, h] = past_step if past_step >= 1 else 0.0
 
-    assert_allclose(baseline_observed, expected_baseline, tol=tol)
+    assert_allclose(baseline_observed, expected_baseline[:, None], tol=tol)
     # A delay under half a step rounds to zero slots, so the read is undelayed.
     assert_allclose(substep_delay_observed, expected_baseline, tol=tol)
     assert_allclose(delay_observed, expected_delay, tol=tol)
@@ -374,6 +376,7 @@ def test_pipeline_contract(tol):
         hi = np.where(raw - delay_steps >= 1, raw - delay_steps, 0.0)
         lo = np.where(raw - delay_steps - 1 >= 1, raw - delay_steps - 1, 0.0)
         assert ((observed >= lo) & (observed <= hi)).all()
+        assert (observed < hi).any()
 
 
 @pytest.mark.required
@@ -471,7 +474,7 @@ def test_add_and_read_all_registered_sensors():
         sensor_kwargs = {}
         if issubclass(option_cls, gs.sensors.BaseCameraOptions):
             continue  # skip camera options
-        if issubclass(option_cls, gs.sensors.RigidSensorOptionsMixin):
+        if issubclass(option_cls, gs.sensors.RigidEntitySensorOptionsMixin):
             sensor_kwargs.update(
                 entity_idx=box.idx,
             )

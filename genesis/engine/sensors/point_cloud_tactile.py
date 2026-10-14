@@ -1977,8 +1977,6 @@ class ElastomerTaxelSensor(
 
         solver = self._shared_metadata.solver
         B = self._manager._sim._B
-        if self._link is None:
-            gs.raise_exception("ElastomerTaxel must be attached to a rigid link with collision geometry.")
         # The class-wide contact_depth_query backend is resolved + activated by ContactDepthQuerySensorMixin.build.
 
         elastomer_geom_start_row = self._shared_metadata.elastomer_geom_idx.shape[0]

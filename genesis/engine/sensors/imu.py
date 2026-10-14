@@ -12,7 +12,14 @@ from genesis.options.sensors import IMU as IMUOptions
 from genesis.options.sensors import CrossCouplingAxisType
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
-from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
+from .base_sensor import (
+    OffsettableSensorMetadataMixin,
+    OffsettableSensorMixin,
+    RigidSensorMetadataMixin,
+    RigidSensorMixin,
+    SimpleSensor,
+    SimpleSensorMetadata,
+)
 
 if TYPE_CHECKING:
     from genesis.ext.pyrender.mesh import Mesh
@@ -102,7 +109,7 @@ def _get_cross_axis_coupling_to_alignment_matrix(
 
 
 @dataclass
-class IMUSharedMetadata(RigidSensorMetadataMixin, SimpleSensorMetadata):
+class IMUSharedMetadata(OffsettableSensorMetadataMixin, RigidSensorMetadataMixin, SimpleSensorMetadata):
     """
     Shared metadata between all IMU sensors.
     """
@@ -120,7 +127,11 @@ class IMUReturnType(NamedTuple):
     mag: torch.Tensor  # added magnetometer to complete 9-axis IMU
 
 
-class IMUSensor(RigidSensorMixin[IMUSharedMetadata], SimpleSensor[IMUOptions, None, IMUSharedMetadata, IMUReturnType]):
+class IMUSensor(
+    OffsettableSensorMixin,
+    RigidSensorMixin[IMUSharedMetadata],
+    SimpleSensor[IMUOptions, None, IMUSharedMetadata, IMUReturnType],
+):
     def __init__(
         self,
         options: IMUOptions,
