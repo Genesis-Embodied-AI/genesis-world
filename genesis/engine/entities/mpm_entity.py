@@ -375,6 +375,49 @@ class MPMEntity(ParticleEntity):
         return poss
 
     @gs.assert_built
+    def get_particles_stress(self, envs_idx=None):
+        """
+        Read the Cauchy stress of elastic particles in world coordinates.
+
+        Supports ``MPM.Elastic`` with either constitutive model. Stress is evaluated from the current deformation
+        gradient on demand, in pascals (force per current area). Inactive particles return zero. Active particles must
+        have positive volume. The returned snapshot has no gradient connection to the simulation.
+
+        Parameters
+        ----------
+        envs_idx : None | int | array_like, shape (M,), optional
+            Environments to read. If None, all environments are selected.
+
+        Returns
+        -------
+        stress : torch.Tensor, shape ([M,] n_particles, 3, 3)
+            Cauchy stress tensors. The batch dimension is omitted for a non-parallelized scene.
+        """
+        if type(self.material) is not gs.materials.MPM.Elastic:
+            gs.raise_exception("Stress readout is only supported for MPM.Elastic material.")
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        stress = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx, (3, 3))
+        errno = torch.zeros(1, dtype=gs.tc_int, device=gs.device)
+        kernel_get_particles_stress(
+            self._sim.cur_substep_local,
+            self._particle_start,
+            envs_idx,
+            stress,
+            self.solver.particles,
+            self.solver.particles_ng,
+            self.solver.particles_info,
+            self.material.update_stress,
+            self.n_particles,
+            has_svd=self.material.needs_svd,
+            errno=errno,
+        )
+        if errno.item():
+            gs.raise_exception("Cauchy stress requires positive volume for every active particle.")
+        if self._scene.n_envs == 0:
+            stress = stress[0]
+        return stress
+
+    @gs.assert_built
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
@@ -695,3 +738,51 @@ class MPMEntity(ParticleEntity):
 
     def _get_morph_identifier(self) -> str:
         return f"mpm_{super()._get_morph_identifier()}"
+
+
+@qd.kernel
+def kernel_get_particles_stress(
+    i_f: int,
+    i_p_start: int,
+    envs_idx: qd.types.ndarray(),
+    stress: qd.types.ndarray(),
+    particles: qd.template(),
+    particles_ng: qd.template(),
+    particles_info: qd.template(),
+    update_stress: qd.template(),
+    n_particles: int,
+    has_svd: qd.template(),
+    errno: qd.types.ndarray(),
+):
+    for i_p_, i_b_ in qd.ndrange(n_particles, envs_idx.shape[0]):
+        i_p = i_p_start + i_p_
+        i_b = envs_idx[i_b_]
+        stress_cauchy = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if particles_ng[i_f, i_p, i_b].active:
+            F = particles[i_f, i_p, i_b].F
+            J = F.determinant()
+            if J > 0.0:
+                U = qd.Matrix.identity(gs.qd_float, 3)
+                S = qd.Matrix.identity(gs.qd_float, 3)
+                V = qd.Matrix.identity(gs.qd_float, 3)
+                if qd.static(has_svd):
+                    U, S, V = qd.svd(F)
+                # The elastic constitutive function returns Kirchhoff stress, tau = J * sigma
+                stress_cauchy = (
+                    update_stress(
+                        U=U,
+                        S=S,
+                        V=V,
+                        F_tmp=F,
+                        F_new=F,
+                        J=J,
+                        Jp=particles[i_f, i_p, i_b].Jp,
+                        actu=particles[i_f, i_p, i_b].actu,
+                        m_dir=particles_info[i_p].muscle_direction,
+                    )
+                    / J
+                )
+            else:
+                qd.atomic_max(errno[0], 1)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            stress[i_b_, i_p_, i, j] = stress_cauchy[i, j]
