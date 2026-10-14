@@ -955,7 +955,9 @@ class MJCF(FileMorph):
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
-        broken assets from external providers that cannot be re-exported from source. Default to False.
+        broken assets from external providers that cannot be re-exported from source. Each collision geom keeps the
+        density of the file (1000 kg/m^3 where omitted, as the MJCF format specifies), unless the material sets 'rho'.
+        Default to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
