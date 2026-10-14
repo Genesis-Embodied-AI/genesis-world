@@ -774,7 +774,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.active)
+            envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+            self._kernel_set_state(f, state.pos, state.vel, state.active, envs_idx)
 
     @qd.kernel
     def _kernel_set_state(
@@ -783,8 +784,10 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         pos: qd.types.ndarray(),
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
     ):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+        for i_p, i_b_ in qd.ndrange(self._n_particles, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
             for j in qd.static(range(3)):
                 self.particles[i_p, i_b].pos[j] = pos[i_b, i_p, j]
                 self.particles[i_p, i_b].vel[j] = vel[i_b, i_p, j]

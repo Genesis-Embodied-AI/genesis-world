@@ -106,13 +106,13 @@ class LegacyCoupler(RBC):
             if envs_idx is None:
                 self.mpm_rigid_normal.fill(0)
             else:
-                self._kernel_reset_mpm(envs_idx)
+                self._kernel_reset_mpm(self.sim.scene._sanitize_envs_idx(envs_idx))
 
         if self._rigid_sph:
             if envs_idx is None:
                 self.sph_rigid_normal.fill(0)
             else:
-                self._kernel_reset_sph(envs_idx)
+                self._kernel_reset_sph(self.sim.scene._sanitize_envs_idx(envs_idx))
 
     @qd.kernel
     def _kernel_reset_mpm(self, envs_idx: qd.types.ndarray()):
