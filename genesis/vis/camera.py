@@ -583,6 +583,27 @@ class Camera(RBC):
         point_cloud = point_cloud[..., :3].reshape((*depth_arr.shape, 3))
         return point_cloud, mask
 
+    def _get_local_idx(self, envs_idx, *, keepdim=False) -> tuple[torch.Tensor, ...]:
+        """Map scene environment indices to their positions in `VisOptions.rendered_envs_idx`, as a pose index."""
+        if envs_idx is None:
+            return ()
+        if not self._is_batched:
+            gs.raise_exception("Camera does not support batching. Impossible to specify 'envs_idx'.")
+        if self._env_idx is not None:
+            gs.raise_exception("Camera already bound to a specific environment. Impossible to specify 'envs_idx'.")
+
+        rendered_envs_idx = torch.as_tensor(self._visualizer._context.rendered_envs_idx, device=gs.device)
+        is_match = self._visualizer._scene._sanitize_envs_idx(envs_idx)[:, None] == rendered_envs_idx
+        is_rendered, envs_idx_local = is_match.max(dim=-1)
+        if not is_rendered.all():
+            gs.raise_exception("Environment index not in 'VisOptions.rendered_envs_idx'.")
+        if not keepdim and (
+            isinstance(envs_idx, (int, np.integer))
+            or (isinstance(envs_idx, (np.ndarray, torch.Tensor)) and envs_idx.ndim == 0)
+        ):
+            envs_idx_local = envs_idx_local[0]
+        return (envs_idx_local,)
+
     def set_pose(self, transform=None, pos=None, lookat=None, up=None, envs_idx=None):
         """
         Set the pose of the camera.
@@ -600,31 +621,23 @@ class Camera(RBC):
             The lookat point of the camera.
         up : array-like, shape (3,) or (N, 3), optional
             The up vector of the camera.
-        envs_idx : array of indices in integers, optional
+        envs_idx : int or array of int, optional
             The environment indices for which to update the pose. If not provided, the camera pose will be set for the
-            specific environment bound to the camera if any, all the environments otherwise.
+            specific environment bound to the camera if any, all the rendered environments otherwise.
+            Batched input poses follow the selection order, or `VisOptions.rendered_envs_idx` order if not provided.
         """
         # Early return if nothing to do
         if pos is None and lookat is None and up is None and transform is None:
             return
 
         # Sanitize 'envs_idx' input argument
-        if envs_idx is not None:
-            if not self._is_batched:
-                gs.raise_exception("Camera does not support batching. Impossible to specify 'envs_idx'.")
-            if self._env_idx is not None:
-                gs.raise_exception("Camera already bound to a specific environment. Impossible to specify 'envs_idx'.")
-        if self._is_batched:
-            if envs_idx is None:
-                envs_idx = (self._env_idx,) if self._env_idx is not None else ()
-                n_envs = len(self._visualizer._context.rendered_envs_idx)
-            else:
-                envs_idx = self._visualizer._scene._sanitize_envs_idx(envs_idx)
-                if set(envs_idx).issubset(self._visualizer._context.rendered_envs_idx):
-                    gs.raise_exception("Environment index not in 'VisOptions.rendered_envs_idx'.")
-                n_envs = len(envs_idx)
+        if self._is_batched and envs_idx is None:
+            envs_idx_local = (self._env_idx,) if self._env_idx is not None else ()
+            n_envs = len(self._visualizer._context.rendered_envs_idx)
         else:
-            envs_idx = ()
+            envs_idx_local = self._get_local_idx(envs_idx, keepdim=True)
+            if self._is_batched:
+                n_envs = len(envs_idx_local[0])
 
         # Sanitize 'pos', 'lookat', 'up', 'transform' input arguments
         if pos is not None:
@@ -660,22 +673,22 @@ class Camera(RBC):
 
         # Compute redundant quantities
         if transform is None:
-            pos_ = pos if pos is not None else self._pos[envs_idx]
-            lookat_ = lookat if lookat is not None else self._lookat[envs_idx]
-            up_ = up if up is not None else self._up[envs_idx]
+            pos_ = pos if pos is not None else self._pos[envs_idx_local]
+            lookat_ = lookat if lookat is not None else self._lookat[envs_idx_local]
+            up_ = up if up is not None else self._up[envs_idx_local]
             transform = gu.pos_lookat_up_to_T(pos_, lookat_, up_)
         else:
             pos, lookat, up = gu.T_to_pos_lookat_up(transform)
 
         # Update camera transform
         if pos is not None:
-            self._pos[envs_idx] = pos
+            self._pos[envs_idx_local] = pos
         if lookat is not None:
-            self._lookat[envs_idx] = lookat
+            self._lookat[envs_idx_local] = lookat
         # Update up with the computed Y-axis from rotation matrix
-        self._up[envs_idx] = transform[..., :3, 1]
-        self._transform[envs_idx] = transform
-        self._quat[envs_idx] = gu.R_to_quat(transform[..., :3, :3])
+        self._up[envs_idx_local] = transform[..., :3, 1]
+        self._transform[envs_idx_local] = transform
+        self._quat[envs_idx_local] = gu.R_to_quat(transform[..., :3, :3])
 
         # Refresh rendering backend to taken into account updated camera pose
         if self._raytracer is not None:
@@ -829,45 +842,78 @@ class Camera(RBC):
             raise error
 
     def get_pos(self, envs_idx=None):
-        """The current position of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        pos = self._pos[envs_idx]
+        """
+        The current position of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
+        """
+        envs_idx_local = self._get_local_idx(envs_idx)
+        pos = self._pos[envs_idx_local]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
-            pos = pos + self._envs_offset[envs_idx]
+            pos = pos + self._envs_offset[envs_idx_local]
         return pos
 
     def get_lookat(self, envs_idx=None):
-        """The current lookat point of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        lookat = self._lookat[envs_idx]
+        """
+        The current lookat point of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
+        """
+        envs_idx_local = self._get_local_idx(envs_idx)
+        lookat = self._lookat[envs_idx_local]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
-            lookat = lookat + self._envs_offset[envs_idx]
+            lookat = lookat + self._envs_offset[envs_idx_local]
         return lookat
 
     def get_up(self, envs_idx=None):
-        """The current up vector of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        return self._up[envs_idx]
+        """
+        The current up vector of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
+        """
+        envs_idx_local = self._get_local_idx(envs_idx)
+        return self._up[envs_idx_local]
 
     def get_quat(self, envs_idx=None):
-        """The current quaternion of the camera."""
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        return self._quat[envs_idx]
+        """
+        The current quaternion of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
+        """
+        envs_idx_local = self._get_local_idx(envs_idx)
+        return self._quat[envs_idx_local]
 
     def get_transform(self, envs_idx=None):
         """
         The current transform matrix of the camera.
+
+        Parameters
+        ----------
+        envs_idx : int or array of int, optional
+            Scene environment indices for an unbound batched camera. Selected environments must be rendered.
+            If None, return the camera's pose or all rendered poses in `VisOptions.rendered_envs_idx` order.
         """
-        assert self._env_idx is None or envs_idx is None
-        envs_idx = () if envs_idx is None else envs_idx
-        transform = self._transform[envs_idx]
+        envs_idx_local = self._get_local_idx(envs_idx)
+        transform = self._transform[envs_idx_local]
         if self._batch_renderer is None and not self._visualizer._context.split_envs:
             transform = transform.clone()
-            transform[..., :3, 3] += self._envs_offset[envs_idx]
+            transform[..., :3, 3] += self._envs_offset[envs_idx_local]
         return transform
 
     def _repr_brief(self):
