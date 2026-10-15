@@ -1086,6 +1086,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             self._kernel_set_state(
                 0,
+                self._scene._envs_idx,
                 self._ckpt[ckpt_name]["pos"],
                 self._ckpt[ckpt_name]["vel"],
                 self._ckpt[ckpt_name]["active"],
@@ -1100,7 +1101,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.active)
+            if envs_idx is not None and f != self._sim.cur_substep_local:
+                self.copy_frame(self._sim.cur_substep_local, f)
+            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            self._kernel_set_state(f, envs_idx, state.pos, state.vel, state.active)
 
     def get_state(self, f):
         if self.is_active:
@@ -1428,16 +1432,19 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def _kernel_set_state(
         self,
         f: qd.i32,
+        envs_idx: qd.types.ndarray(),
         pos: qd.types.ndarray(),  # shape [B, n_vertices, 3]
         vel: qd.types.ndarray(),  # shape [B, n_vertices, 3]
         active: qd.types.ndarray(),  # shape [B, n_elements]
     ):
-        for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
+        for i_v, i_b_ in qd.ndrange(self.n_vertices, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
             for j in qd.static(range(3)):
                 self.elements_v[f, i_v, i_b].pos[j] = pos[i_b, i_v, j]
                 self.elements_v[f, i_v, i_b].vel[j] = vel[i_b, i_v, j]
 
-        for i_e, i_b in qd.ndrange(self.n_elements, self._B):
+        for i_e, i_b_ in qd.ndrange(self.n_elements, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
             self.elements_el_ng[f, i_e, i_b].active = active[i_b, i_e]
 
     @qd.kernel

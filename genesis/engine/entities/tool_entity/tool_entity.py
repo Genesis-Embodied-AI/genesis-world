@@ -259,12 +259,14 @@ class ToolEntity(Entity):
     def set_frame(
         self,
         f: qd.i32,
+        envs_idx: qd.types.ndarray(),
         pos: qd.types.ndarray(),
         quat: qd.types.ndarray(),
         vel: qd.types.ndarray(),
         ang: qd.types.ndarray(),
     ):
-        for i_b in range(self._sim._B):
+        for i_b_ in range(envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
                 self.pos[f, i_b][i] = pos[i_b, i]
             for i in qd.static(range(4)):
@@ -310,9 +312,11 @@ class ToolEntity(Entity):
 
         return state
 
-    def set_state(self, f, state):
-        f = self._sim.cur_substep_local
-        self.set_frame(f, state.pos, state.quat, state.vel, state.ang)
+    def set_state(self, f, state, envs_idx=None):
+        if envs_idx is not None and f != self._sim.cur_substep_local:
+            self.copy_frame(self._sim.cur_substep_local, f)
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        self.set_frame(f, envs_idx, state.pos, state.quat, state.vel, state.ang)
 
     def build(self):
         self.pos = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # positon

@@ -99,20 +99,20 @@ class LegacyCoupler(RBC):
         self._dx = 1 / 1024
         self._stencil_size = int(np.floor(self._dx / self.sph_solver.hash_grid_cell_size) + 2)
 
-        self.reset(envs_idx=self.sim.scene._envs_idx)
+        self.reset()
 
     def reset(self, envs_idx=None) -> None:
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             if envs_idx is None:
                 self.mpm_rigid_normal.fill(0)
             else:
-                self._kernel_reset_mpm(envs_idx)
+                self._kernel_reset_mpm(self.sim.scene._sanitize_envs_idx(envs_idx))
 
         if self._rigid_sph:
             if envs_idx is None:
                 self.sph_rigid_normal.fill(0)
             else:
-                self._kernel_reset_sph(envs_idx)
+                self._kernel_reset_sph(self.sim.scene._sanitize_envs_idx(envs_idx))
 
     @qd.kernel
     def _kernel_reset_mpm(self, envs_idx: qd.types.ndarray()):
