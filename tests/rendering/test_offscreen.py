@@ -438,6 +438,41 @@ def test_render_api_advanced(tmp_path, n_envs, show_viewer, png_snapshot, render
         raise
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("force_show_viewer", [False, True])
+def test_rasterizer_bound_camera_split_envs(show_viewer, force_show_viewer, tol):
+    if force_show_viewer and not IS_INTERACTIVE_VIEWER_AVAILABLE:
+        pytest.skip(SKIP_NO_VIEWER)
+
+    scene = gs.Scene(
+        vis_options=gs.options.VisOptions(split_envs=True, rendered_envs_idx=(3, 1), shadow=False),
+        viewer_options=gs.options.ViewerOptions(camera_pos=(2.0, 0.0, 1.0), camera_lookat=(0.0, 0.0, 0.5)),
+        show_viewer=show_viewer or force_show_viewer,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.3, 0.3, 0.3), pos=(0.0, 0.0, 0.5), fixed=True))
+    camera = scene.add_camera(res=(64, 64), pos=(2.0, 0.0, 1.0), lookat=(0.0, 0.0, 0.5), GUI=False)
+    camera_bound = scene.add_camera(res=(64, 64), pos=(2.0, 0.0, 1.0), lookat=(0.0, 0.0, 0.5), env_idx=3, GUI=False)
+    scene.build(n_envs=4)
+    box.set_pos([[0.0, 0.0, 0.5], [0.0, 0.4, 0.5], [0.0, 0.0, 0.5], [0.0, -0.4, 0.5]])
+    scene.step()
+
+    frames = camera.render(depth=True, segmentation=True, colorize_seg=False, normal=True)
+    frames_bound = camera_bound.render(depth=True, segmentation=True, colorize_seg=False, normal=True)
+    assert (frames[0][0] != frames[0][1]).any()
+    for frame, frame_bound in zip(frames, frames_bound):
+        assert frame_bound.shape == frame.shape[1:]
+        assert_equal(frame_bound, frame[0])
+    assert camera_bound.get_pos().shape == (3,)
+    assert camera_bound.get_transform().shape == (4, 4)
+
+    camera.set_pose(pos=(2.0, -0.3, 1.0))
+    camera_bound.set_pose(pos=(2.0, -0.3, 1.0))
+    assert_equal(camera_bound.render()[0], camera.render()[0][0])
+    assert_allclose(camera_bound.get_pos(), [2.0, -0.3, 1.0], tol=tol)
+    with pytest.raises(gs.GenesisException):
+        camera_bound.set_pose(pos=(2.0, 0.0, 1.0), envs_idx=[1])
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize(
