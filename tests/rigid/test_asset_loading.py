@@ -653,6 +653,32 @@ def test_mjcf_parsing_merge_fixed_links(xml_path, show_viewer):
     assert_allclose(robot.get_quat(), QUAT, tol=gs.EPS)
 
 
+@pytest.mark.required
+def test_urdf_legacy_parser_primitive_scale(primitive_collision_urdf, caplog):
+    scene = gs.Scene()
+    links = []
+    for scale in (1.0, 2.0):
+        with caplog.at_level("WARNING"):
+            entity = scene.add_entity(
+                morph=gs.morphs.URDF(
+                    file=primitive_collision_urdf,
+                    scale=scale,
+                    align=False,
+                ),
+                material=gs.materials.Rigid(
+                    rho=1000.0,
+                ),
+            )
+        links.append(entity.base_link)
+        assert_allclose(entity.base_link.geoms[0].data[:3], scale * np.array((0.1, 0.2, 0.3)), tol=gs.EPS)
+        assert_allclose(entity.base_link.desc.mass, 1000.0 * (0.1 * 0.2 * 0.3 + 0.05**3) * scale**3, rtol=1e-6)
+    assert_allclose(links[1].desc.inertial_pos, 2.0 * links[0].desc.inertial_pos, rtol=1e-6)
+    assert_allclose(links[1].desc.inertia, 2.0**5 * links[0].desc.inertia, rtol=1e-6)
+
+    # MuJoCo cannot load the GLB collision mesh, which sends the whole file through the legacy parser
+    assert any("legacy URDF parser" in record.getMessage() for record in caplog.records)
+
+
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_urdf_capsule(tmp_path, show_viewer, tol):

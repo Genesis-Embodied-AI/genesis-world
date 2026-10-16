@@ -431,6 +431,8 @@ def parse_urdf(morph, surface):
             j_info["pos"] *= morph.scale
         for g_info in link_g_infos:
             g_info["pos"] *= morph.scale
+            if g_info["data"] is not None:
+                g_info["data"] *= morph.scale
 
     # Re-order kinematic tree info
     l_infos, links_j_infos, links_g_infos, _ = order_links_depth_first(l_infos, links_j_infos, links_g_infos)
