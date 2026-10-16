@@ -209,7 +209,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Tetrahedralize the mesh.
         """
-        return mu.tetrahedralize_mesh(self._mesh, tet_cfg)
+        return mu.tetrahedralize_mesh(self._mesh, tet_cfg, mesh_path=self._metadata.get("mesh_path"))
 
     def particlize(
         self,

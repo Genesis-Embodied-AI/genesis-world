@@ -528,7 +528,8 @@ class FEMEntity(Entity):
             if not is_mesh_morph:
                 surface_verts = surface_verts + self._morph.pos
             surface_trimesh = trimesh.Trimesh(vertices=surface_verts, faces=surface_faces, process=False)
-            verts, elems = eu.mesh_to_elements(surface_trimesh, tet_cfg=self.tet_cfg)
+            mesh_path = self._morph.file if is_mesh_morph else None
+            verts, elems = eu.mesh_to_elements(surface_trimesh, tet_cfg=self.tet_cfg, mesh_path=mesh_path)
             if is_mesh_morph:
                 verts = verts + self._morph.pos
             verts, elems = eu.split_all_surface_tets(verts, elems)

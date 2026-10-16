@@ -6,7 +6,7 @@ import genesis as gs
 from . import mesh as mu
 
 
-def mesh_to_elements(mesh, tet_cfg=dict()):
+def mesh_to_elements(mesh, tet_cfg=dict(), mesh_path=None):
     """Tetrahedralize a surface trimesh, with the result cached on disk keyed on vertices, faces and configuration."""
     cache = mu.get_tet_cache(mesh.vertices, mesh.faces, tet_cfg)
 
@@ -17,7 +17,7 @@ def mesh_to_elements(mesh, tet_cfg=dict()):
         return elements
 
     with gs.logger.timer(f"Tetrahedralization with configuration {tet_cfg} and generating `.tet` file:"):
-        elements = mu.tetrahedralize_mesh(mesh, tet_cfg)
+        elements = mu.tetrahedralize_mesh(mesh, tet_cfg, mesh_path=mesh_path)
         cache.save(elements)
     return elements
 
