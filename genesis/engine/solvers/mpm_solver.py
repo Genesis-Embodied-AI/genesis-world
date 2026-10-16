@@ -225,9 +225,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                     "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
                 )
 
-            if self._enable_CPIC and self.sim.rigid_solver.is_active and self.sim.rigid_solver.n_geoms:
-                self.sim.rigid_solver.collider._sdf.activate()
-
             self.init_particle_fields()
             self.init_grid_fields()
             self.init_vvert_fields()
@@ -577,7 +574,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.sim.coupler.rigid_solver.dyn_info.geoms,
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
+            self.sim.coupler.rigid_solver.sdf._sdf_info,
             self.sim.coupler.rigid_solver.collider.collider_config,
         )
 
@@ -588,7 +585,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.sim.coupler.rigid_solver.dyn_info.geoms,
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
+            self.sim.coupler.rigid_solver.sdf._sdf_info,
             self.sim.coupler.rigid_solver.collider.collider_config,
         )
         self.svd_grad(f)

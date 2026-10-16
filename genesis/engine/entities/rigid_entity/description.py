@@ -1210,7 +1210,8 @@ class KinematicEntityDescription(EntityDescription):
                         "links or none of them."
                     )
                 # A body without inertia gets no anchor and keeps its frame, like the articulated body above. The solver
-                # and the setters then read it as unaligned (see 'func_midpoint_is_aligned' and '_init_tree_fields').
+                # and the setters then read it as unaligned (see 'func_midpoint_is_aligned' and
+                # 'rigid_init_tree_fields').
                 if not inertial_info:
                     root.is_aligned = False
                     continue
@@ -1240,7 +1241,7 @@ class KinematicEntityDescription(EntityDescription):
                 # Every link keeps its own mass and inertia. The inertial frame moves with the geoms into the anchored
                 # frame: getters and wrenches read it as 'link_COM', and the inverse weight derives from it. The solver
                 # composes the body from its links each step, so the composite is diagonal there (see
-                # '_init_tree_fields').
+                # 'rigid_init_tree_fields').
                 if isinstance(root, RigidLinkDescription):
                     for i_l in subtree:
                         desc = variant_links[i_l]

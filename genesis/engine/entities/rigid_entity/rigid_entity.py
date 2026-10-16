@@ -444,7 +444,7 @@ class KinematicEntity(Entity):
         # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,
         # and the attached links now extend that body. Its frame and qpos stay where they are, so the anchor stops
         # standing for the body: the mass block keeps its off-diagonal terms and the midpoint pass turns the body about
-        # its actual center of mass (see '_init_tree_fields' and 'func_midpoint_is_aligned').
+        # its actual center of mass (see 'rigid_init_tree_fields' and 'func_midpoint_is_aligned').
         root_link.desc.is_aligned = False
 
         # Apply the explicit mounting transform. Forward kinematics interprets the base link's local pose relative to

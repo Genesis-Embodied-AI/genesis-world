@@ -1,6 +1,5 @@
 from collections.abc import Iterator
-from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -24,7 +23,6 @@ from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
     indices_to_mask,
-    qd_to_numpy,
     qd_to_torch,
     qd_zero_grad,
     sanitize_indexed_tensor,
@@ -56,15 +54,6 @@ from .rigid.abd.forward_kinematics import (
     kernel_masked_forward_velocity,
     kernel_update_vgeoms,
     kernel_update_vverts_for_vgeoms,
-)
-from .rigid.abd.misc import (
-    kernel_init_dof_fields,
-    kernel_init_entity_fields,
-    kernel_init_joint_fields,
-    kernel_init_link_fields,
-    kernel_init_vgeom_fields,
-    kernel_init_vvert_fields,
-    kernel_update_heterogeneous_links_vgeom,
 )
 
 if TYPE_CHECKING:
@@ -157,12 +146,32 @@ def _fill_base_link_geom_offsets(offset_pos, offset_quat, entity, geoms, ranges)
 IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
 
 
+def forward_to_system(name: str, default: Any = None, *, settable: bool = False) -> property:
+    """Attribute of a solver that forwards to the System owning its data, `default` before the engine builds it.
+
+    A settable attribute is state the user-facing API writes, such as the flags telling whether the cartesian space is
+    up to date, which only exists once the System does.
+    """
+
+    def get(solver):
+        system = solver._system
+        return default if system is None else getattr(system, name)
+
+    def set(solver, value):
+        if solver._system is None:
+            gs.raise_exception(f"{type(solver).__name__}.{name} is set only once the scene is built.")
+        setattr(solver._system, name, value)
+
+    return property(get, set if settable else None)
+
+
 class KinematicSolver(Solver):
     """
     Base solver for articulated kinematic entities (FK, rendering, state get/set).
 
-    Provides the full build pipeline, field init methods, counter properties,
-    render methods, and IO sanitization shared by both KinematicSolver and RigidSolver.
+    Provides the structural build of the entities, counter properties, render methods, and IO sanitization shared by
+    both KinematicSolver and RigidSolver. The data and the simulation belong to the System the engine builds for the
+    solver (see KinematicSolverSystem), which the data attributes of the solver forward to.
 
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
@@ -170,6 +179,22 @@ class KinematicSolver(Solver):
     material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
+
+    rigid_config = forward_to_system("rigid_config")
+    data_manager = forward_to_system("data_manager")
+    rigid_info = forward_to_system("rigid_info")
+    _rigid_adjoint_cache = forward_to_system("_rigid_adjoint_cache")
+    dyn_info = forward_to_system("dyn_info")
+    dyn_state = forward_to_system("dyn_state")
+    kinematics_scratch = forward_to_system("kinematics_scratch")
+    qpos = forward_to_system("qpos")
+    qpos0 = forward_to_system("qpos0")
+    links_T = forward_to_system("links_T")
+    _vfaces_raycast_mask = forward_to_system("_vfaces_raycast_mask")
+    collider = forward_to_system("collider_data")
+    constraint_solver = forward_to_system("constraint_solver")
+    _is_forward_pos_updated = forward_to_system("_is_forward_pos_updated", False, settable=True)
+    _is_forward_vel_updated = forward_to_system("_is_forward_vel_updated", False, settable=True)
 
     def __init__(self, scene: "Scene", sim: "Simulator", options: "KinematicOptions") -> None:
         super().__init__(scene, sim, options)
@@ -179,15 +204,8 @@ class KinematicSolver(Solver):
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
-        self.collider = None
-        self.constraint_solver = None
-
-        self.qpos = None
-
-        self._is_forward_pos_updated: bool = False
-        self._is_forward_vel_updated: bool = False
-
-        self._vfaces_raycast_mask: torch.Tensor | None = None
+        # The System owning the data of this solver, which the engine builds once this solver has built its entities
+        self._system = None
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- add_entity -------------------------------------
@@ -365,68 +383,12 @@ class KinematicSolver(Solver):
         self._links_tree_level = np.where(links_tree_root_idx >= 0, links_depth - links_depth[links_tree_root_idx], -1)
 
         # Heterogeneous simulation stores the link, joint and dof info per environment, every variant stating its own
-        # (see '_dispatch_heterogeneous_kinematics'). We must update options because the getters read from them.
+        # (see 'dispatch_heterogeneous_kinematics' in kinematic_solver_system.py). We must update options because the
+        # getters read from them.
         if self._enable_heterogeneous:
             self._options.batch_links_info = True
             self._options.batch_joints_info = True
             self._options.batch_dofs_info = True
-
-        self._build_static_config()
-        self._create_data_manager()
-
-        self._init_dof_fields()
-        self._init_vvert_fields()
-        self._init_vgeom_fields()
-        self._init_link_fields()
-        self._init_tree_fields()
-        self._init_entity_fields()
-        self._init_vfaces_raycast_mask()
-
-        self._init_vverts_state()
-
-    def _init_vverts_state(self):
-        # Seed vverts_state.pos with one FK pass so opt-in entities show their initial pose from frame 0 even before
-        # the user touches the buffer with set_vverts.
-        if self.n_custom_vverts == 0:
-            return
-        opt_in_vgeoms_idx = np.array(
-            [vgeom.idx for entity in self._entities if entity._morph.enable_custom_vverts for vgeom in entity.vgeoms],
-            dtype=gs.np_int,
-        )
-        if opt_in_vgeoms_idx.size == 0:
-            return
-        self.update_vgeoms()
-        self.update_vverts_for_vgeoms(opt_in_vgeoms_idx)
-
-    def _build_static_config(self):
-        # Static config with all physics disabled
-        self.rigid_config = array_class.RigidSimStaticConfig(
-            backend=gs.backend,
-            para_level=self.sim._para_level,
-            requires_grad=False,
-            use_hibernation=False,
-            batch_links_info=self._options.batch_links_info,
-            batch_dofs_info=self._options.batch_dofs_info,
-            batch_joints_info=self._options.batch_joints_info,
-            enable_mujoco_compatibility=False,
-            enable_elliptic_friction=False,
-            enable_signorini_contact=False,
-            enable_multi_contact=False,
-            enable_collision=False,
-            enable_joint_limit=False,
-            box_box_detection=False,
-            sparse_solve=False,
-            integrator=gs.integrator.approximate_implicitfast,
-            solver_type=0,
-        )
-
-    def _create_data_manager(self):
-        self.data_manager = array_class.DataManager(self, kinematic_only=True)
-        self.rigid_info = self.data_manager.rigid_info
-        self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
-        self.kinematics_scratch = self.data_manager.kinematics_scratch
 
     @property
     def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
@@ -442,439 +404,17 @@ class KinematicSolver(Solver):
         yield from array_class.iter_data(self, "_is_forward_vel_updated", array_class.DataKind.DERIVED)
 
     # ------------------------------------------------------------------------------------
-    # --------------------------------- hook methods -------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def _sanitize_joint_sol_params(self, sol_params):
-        """Hook: sanitize joint constraint solver params. No-op in base (no constraints)."""
-        return sol_params
-
-    def _sanitize_geom_sol_params(self, sol_params):
-        """Hook: sanitize geom constraint solver params. No-op in base (no constraints)."""
-        return sol_params
-
-    # ------------------------------------------------------------------------------------
-    # --------------------------------- init methods -------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def _init_dof_fields(self):
-        joints = self.joints
-        has_dofs = sum(joint.n_dofs for joint in joints) > 0
-        if has_dofs:
-            kernel_init_dof_fields(
-                np.concatenate(
-                    [(joint.link._entity_idx_in_solver,) * joint.n_dofs for joint in joints if joint.n_dofs],
-                    dtype=gs.np_int,
-                ),
-                np.concatenate([joint.desc.dofs_motion_ang for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_motion_vel for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_limit for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_invweight for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_stiffness for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_damping for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_frictionloss for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_armature for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_act_gain for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_act_bias for joint in joints], dtype=gs.np_float),
-                np.concatenate([joint.desc.dofs_force_range for joint in joints], dtype=gs.np_float),
-                self.dyn_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-
-        self.dyn_state.dofs.force.fill(0)
-
-    def _init_tree_fields(self):
-        """Initialize the fields describing the kinematic roots and trees (see roots_link_idx and trees_root_idx in
-        array_class.py).
-
-        The links come parent first and each branch occupies a contiguous index range, so the dofs of a tree form one
-        contiguous range and the trees are disjoint in dof space.
-        """
-        # A static link belongs to no tree, and a scene without any tree keeps its padded tree slot empty (see
-        # trees_root_idx in array_class.py)
-        links_tree_idx = np.full(self.n_links_, -1, dtype=gs.np_int)
-        if self._n_roots:
-            roots_link_idx, links_root_rank = np.unique(self._links_root_idx, return_inverse=True)
-            roots_link_end = np.zeros(self._n_roots, dtype=gs.np_int)
-            np.maximum.at(roots_link_end, links_root_rank, np.arange(1, self.n_links + 1, dtype=gs.np_int))
-            self.rigid_info.roots_link_idx.from_numpy(roots_link_idx)
-            self.rigid_info.links_root_end.from_numpy(roots_link_end[links_root_rank])
-        if self._n_trees:
-            links_n_dofs = np.array([link.n_dofs for link in self.links], dtype=gs.np_int)
-            links_dof_start = np.array([link.dof_start for link in self.links], dtype=gs.np_int)
-            links_dof_end = np.array([link.dof_end for link in self.links], dtype=gs.np_int)
-            tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
-            trees_root_idx, links_tree_rank = np.unique(self._links_tree_root_idx[tree_links], return_inverse=True)
-            trees_n_dofs = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.add.at(trees_n_dofs, links_tree_rank, links_n_dofs[tree_links])
-            # A dof-less link carries no dof range of its own
-            dof_links = np.flatnonzero(links_n_dofs[tree_links])
-            trees_dof_start = np.full(self._n_trees, self.n_dofs, dtype=gs.np_int)
-            np.minimum.at(trees_dof_start, links_tree_rank[dof_links], links_dof_start[tree_links][dof_links])
-            trees_dof_end = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.maximum.at(trees_dof_end, links_tree_rank[dof_links], links_dof_end[tree_links][dof_links])
-            if (trees_dof_end - trees_dof_start != trees_n_dofs).any():
-                gs.raise_exception("The dofs of a kinematic tree must be contiguous.")
-            trees_link_end = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.maximum.at(trees_link_end, links_tree_rank, tree_links + 1)
-            trees_n_links = np.zeros(self._n_trees, dtype=gs.np_int)
-            np.add.at(trees_n_links, links_tree_rank, 1)
-            trees_order = np.argsort(trees_dof_start)
-            trees_rank = np.empty(self._n_trees, dtype=gs.np_int)
-            trees_rank[trees_order] = np.arange(self._n_trees, dtype=gs.np_int)
-            links_tree_idx[tree_links] = trees_rank[links_tree_rank]
-            self.rigid_info.trees_root_idx.from_numpy(trees_root_idx[trees_order])
-            self.rigid_info.trees_link_end.from_numpy(trees_link_end[trees_order])
-            self.rigid_info.trees_n_links.from_numpy(trees_n_links[trees_order])
-            self.rigid_info.trees_dof_start.from_numpy(trees_dof_start[trees_order])
-            self.rigid_info.trees_n_dofs.from_numpy(trees_n_dofs[trees_order])
-        else:
-            self.rigid_info.trees_root_idx.fill(0)
-            self.rigid_info.trees_link_end.fill(0)
-        self.rigid_info.links_tree_idx.from_numpy(links_tree_idx)
-
-        # Fill the level tables of every tree and root for the level sweep (see trees_levels_links_idx in
-        # array_class.py). A scene without any tree keeps its padded tree slot at zero levels.
-        if self._n_roots and self.rigid_config.enable_level_sweep:
-            for links_group_idx, links_group_level, n_groups, groups_fields in (
-                (
-                    links_tree_idx,
-                    self._links_tree_level,
-                    self.n_trees_,
-                    (
-                        self.rigid_info.trees_level_start,
-                        self.rigid_info.trees_n_levels,
-                        self.rigid_info.trees_levels_links_idx,
-                        None,
-                        self.rigid_info.trees_levels_links_end,
-                    ),
-                ),
-                (
-                    links_root_rank,
-                    self._links_root_level,
-                    self._n_roots,
-                    (
-                        self.rigid_info.roots_level_start,
-                        self.rigid_info.roots_n_levels,
-                        self.rigid_info.roots_levels_links_idx,
-                        self.rigid_info.roots_levels_links_start,
-                        self.rigid_info.roots_levels_links_end,
-                    ),
-                ),
-            ):
-                group_links = np.arange(self.n_links, dtype=gs.np_int)[links_group_idx >= 0]
-                links_group = links_group_idx[group_links]
-                links_level = links_group_level[group_links]
-                groups_n_levels = np.zeros(n_groups, dtype=gs.np_int)
-                np.maximum.at(groups_n_levels, links_group, links_level + 1)
-                groups_level_start = np.zeros(n_groups, dtype=gs.np_int)
-                np.cumsum(np.bincount(links_group, minlength=n_groups)[:-1], out=groups_level_start[1:])
-                # The links of every group, group after group, level after level, and each level in ascending order
-                entries_order = np.lexsort((group_links, links_level, links_group))
-                groups_levels_links_idx = group_links[entries_order]
-                entries_group = links_group[entries_order]
-                entries_level = links_level[entries_order]
-                entries_idx = np.arange(len(groups_levels_links_idx), dtype=gs.np_int)
-                # An entry ends its level where the next entry starts another level or another group
-                is_level_last = np.ones(len(groups_levels_links_idx), dtype=bool)
-                is_level_last[:-1] = (np.diff(entries_group) != 0) | (np.diff(entries_level) != 0)
-                levels_last_entry = entries_idx[is_level_last]
-                groups_levels_links_end = levels_last_entry[np.searchsorted(levels_last_entry, entries_idx)] + 1
-                is_level_first = np.ones(len(groups_levels_links_idx), dtype=bool)
-                is_level_first[1:] = is_level_last[:-1]
-                levels_first_entry = entries_idx[is_level_first]
-                groups_levels_links_start = levels_first_entry[
-                    np.searchsorted(levels_first_entry, entries_idx, side="right") - 1
-                ]
-                for field, value in zip(
-                    groups_fields,
-                    (
-                        groups_level_start,
-                        groups_n_levels,
-                        groups_levels_links_idx,
-                        groups_levels_links_start,
-                        groups_levels_links_end,
-                    ),
-                ):
-                    if field is not None and len(value):
-                        field.from_numpy(value)
-            child_links = np.arange(self.n_links, dtype=gs.np_int)[self._links_parent_idx >= 0]
-            links_child_start = np.zeros(self.n_links_ + 1, dtype=gs.np_int)
-            np.cumsum(
-                np.bincount(self._links_parent_idx[child_links], minlength=self.n_links_), out=links_child_start[1:]
-            )
-            self.rigid_info.links_child_start.from_numpy(links_child_start)
-            if len(child_links):
-                self.rigid_info.links_child_idx.from_numpy(
-                    child_links[np.lexsort((-child_links, self._links_parent_idx[child_links]))]
-                )
-
-    def _init_link_fields(self):
-        if self.links:
-            links = self.links
-            kernel_init_link_fields(
-                np.array([link.parent_idx for link in links], dtype=gs.np_int),
-                np.array([link.root_idx for link in links], dtype=gs.np_int),
-                np.array([link.q_start for link in links], dtype=gs.np_int),
-                np.array([link.dof_start for link in links], dtype=gs.np_int),
-                np.array([link.joint_start for link in links], dtype=gs.np_int),
-                np.array([link.q_end for link in links], dtype=gs.np_int),
-                np.array([link.dof_end for link in links], dtype=gs.np_int),
-                np.array([link.joint_end for link in links], dtype=gs.np_int),
-                np.array([link._entity_idx_in_solver for link in links], dtype=gs.np_int),
-                np.array([link.geom_start for link in links], dtype=gs.np_int),
-                np.array([link.geom_end for link in links], dtype=gs.np_int),
-                np.array([link.vgeom_start for link in links], dtype=gs.np_int),
-                np.array([link.vgeom_end for link in links], dtype=gs.np_int),
-                np.array([link.is_fixed for link in links], dtype=gs.np_bool),
-                np.array([link.desc.pos for link in links], dtype=gs.np_float),
-                np.array([link.desc.quat for link in links], dtype=gs.np_float),
-                self.dyn_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-
-        if self.joints:
-            joints = self.joints
-            joints_sol_params = np.array([joint.desc.sol_params for joint in joints], dtype=gs.np_float)
-            joints_sol_params = self._sanitize_joint_sol_params(joints_sol_params)
-
-            kernel_init_joint_fields(
-                np.array([joint.q_start for joint in joints], dtype=gs.np_int),
-                np.array([joint.dof_start for joint in joints], dtype=gs.np_int),
-                np.array([joint.q_end for joint in joints], dtype=gs.np_int),
-                np.array([joint.dof_end for joint in joints], dtype=gs.np_int),
-                np.array([joint.type for joint in joints], dtype=gs.np_int),
-                joints_sol_params,
-                np.array([joint.pos for joint in joints], dtype=gs.np_float),
-                self.dyn_info,
-                self.rigid_config,
-            )
-
-        self._dispatch_heterogeneous_kinematics()
-
-        # Set initial qpos
-        self.qpos = self.rigid_info.qpos
-        self.qpos0 = self.rigid_info.qpos0
-        if self.n_qs > 0:
-            init_qpos = np.tile(np.expand_dims(self.init_qpos, -1), (1, self._B))
-
-            # Dispatch per-variant init_qpos for heterogeneous entities
-            for entity in self.entities:
-                if not entity._desc.variants:
-                    continue
-                n_variants = len(entity._desc.variants)
-                variant_idx = _balanced_variant_mapping(n_variants, self._B)
-                q_s, q_e = entity.q_start, entity.q_start + entity.n_qs
-                for i_b in range(self._B):
-                    init_qpos[q_s:q_e, i_b] = entity._desc.variants[variant_idx[i_b]].init_qpos
-
-            self.qpos0.from_numpy(init_qpos)
-            dofs_limit = np.broadcast_to(
-                qd_to_numpy(self.dyn_info.dofs.limit, transpose=True), (self._B, self.n_dofs_, 2)
-            )
-            is_init_qpos_out_of_bounds = False
-            for joint in self.joints:
-                if joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC):
-                    is_init_qpos_out_of_bounds |= (dofs_limit[:, joint.dof_start, 0] > init_qpos[joint.q_start]).any()
-                    is_init_qpos_out_of_bounds |= (init_qpos[joint.q_start] > dofs_limit[:, joint.dof_start, 1]).any()
-            if is_init_qpos_out_of_bounds:
-                gs.logger.warning("Neutral robot position (qpos0) exceeds joint limits.")
-            self.qpos.from_numpy(init_qpos)
-
-        self.links_T = self.rigid_info.links_T
-
-        # Dispatch heterogeneous variant vgeom ranges per-environment
-        self._dispatch_heterogeneous_vgeoms()
-
-    def _dispatch_heterogeneous_kinematics(self):
-        """Write the link frames and the joint and dof parameters of each heterogeneous variant to the envs carrying it.
-
-        The init kernels broadcast those of the primary to every environment, while heterogeneous simulation batches
-        the link, joint and dof info (see 'build').
-        """
-        entities = [entity for entity in self._entities if entity._desc.variants]
-        if not entities:
-            return
-
-        # Field layout, batch second, since the arrays are written back as fields
-        links_pos = qd_to_numpy(self.dyn_info.links.pos, transpose=False, copy=True)
-        links_quat = qd_to_numpy(self.dyn_info.links.quat, transpose=False, copy=True)
-        joints_pos = qd_to_numpy(self.dyn_info.joints.pos, transpose=False, copy=True)
-        joints_sol_params = qd_to_numpy(self.dyn_info.joints.sol_params, transpose=False, copy=True)
-        dofs_info = self.dyn_info.dofs
-        dofs_fields = (
-            (dofs_info.motion_ang, "dofs_motion_ang"),
-            (dofs_info.motion_vel, "dofs_motion_vel"),
-            (dofs_info.limit, "dofs_limit"),
-            (dofs_info.stiffness, "dofs_stiffness"),
-            (dofs_info.damping, "dofs_damping"),
-            (dofs_info.frictionloss, "dofs_frictionloss"),
-            (dofs_info.armature, "dofs_armature"),
-            (dofs_info.act_gain, "dofs_act_gain"),
-            (dofs_info.act_bias, "dofs_act_bias"),
-            (dofs_info.force_range, "dofs_force_range"),
-        )
-        dofs_values = [qd_to_numpy(field, transpose=False, copy=True) for field, _ in dofs_fields]
-
-        for entity in entities:
-            variants_links = [entity._desc.links, *(variant.links for variant in entity._desc.variants[1:])]
-            envs_variant_idx = _balanced_variant_mapping(len(variants_links), self._B)
-            links_slice = slice(entity.link_start, entity.link_end)
-            variants_links_pos = np.stack([[l_desc.pos for l_desc in links] for links in variants_links])
-            variants_links_quat = np.stack([[l_desc.quat for l_desc in links] for links in variants_links])
-            links_pos[links_slice] = variants_links_pos[envs_variant_idx].swapaxes(0, 1)
-            links_quat[links_slice] = variants_links_quat[envs_variant_idx].swapaxes(0, 1)
-
-            # A file morph drops its joints without degrees of freedom, so a fixed one may leave the entity without any
-            if entity.n_joints == 0:
-                continue
-            variants_joints = [
-                [asdict(j_desc) for l_desc in links for j_desc in l_desc.joints] for links in variants_links
-            ]
-            joints_slice = slice(entity.joint_start, entity.joint_end)
-            variants_joints_pos = np.stack([[j_fields["pos"] for j_fields in joints] for joints in variants_joints])
-            joints_pos[joints_slice] = variants_joints_pos[envs_variant_idx].swapaxes(0, 1)
-            variants_sol_params = np.stack(
-                [[j_fields["sol_params"] for j_fields in joints] for joints in variants_joints]
-            )
-            variants_sol_params = self._sanitize_joint_sol_params(variants_sol_params).reshape(
-                variants_sol_params.shape
-            )
-            joints_sol_params[joints_slice] = variants_sol_params[envs_variant_idx].swapaxes(0, 1)
-            dofs_slice = slice(entity.dof_start, entity.dof_end)
-            for dofs_value, (_, name) in zip(dofs_values, dofs_fields):
-                variants_value = np.stack(
-                    [np.concatenate([j_fields[name] for j_fields in joints]) for joints in variants_joints]
-                )
-                dofs_value[dofs_slice] = variants_value[envs_variant_idx].swapaxes(0, 1)
-
-        self.dyn_info.links.pos.from_numpy(links_pos)
-        self.dyn_info.links.quat.from_numpy(links_quat)
-        self.dyn_info.joints.pos.from_numpy(joints_pos)
-        self.dyn_info.joints.sol_params.from_numpy(joints_sol_params)
-        for (field, _), dofs_value in zip(dofs_fields, dofs_values):
-            field.from_numpy(dofs_value)
-
-        # The state of a fixed root link is set at init alone (see kernel_init_link_fields), so it takes the frame of
-        # the variant its environment carries too
-        fixed_roots_idx = [entity.link_start for entity in entities if entity.base_link.is_fixed]
-        if fixed_roots_idx:
-            links_state_pos = qd_to_numpy(self.dyn_state.links.pos, transpose=False, copy=True)
-            links_state_quat = qd_to_numpy(self.dyn_state.links.quat, transpose=False, copy=True)
-            links_state_pos[fixed_roots_idx] = links_pos[fixed_roots_idx]
-            links_state_quat[fixed_roots_idx] = links_quat[fixed_roots_idx]
-            self.dyn_state.links.pos.from_numpy(links_state_pos)
-            self.dyn_state.links.quat.from_numpy(links_state_quat)
-
-    def _dispatch_heterogeneous_vgeoms(self):
-        """Override per-link vgeom ranges for heterogeneous variants. RigidSolver extends this."""
-        for link in self.links:
-            if link._variant_vgeom_ranges is None:
-                continue
-
-            n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
-
-            vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-
-            kernel_update_heterogeneous_links_vgeom(link.idx, vgeom_starts, vgeom_ends, self.dyn_info)
-
-            for vgeom in link.vgeoms:
-                active_envs_mask = (vgeom_starts <= vgeom.idx) & (vgeom.idx < vgeom_ends)
-                vgeom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (vgeom.active_envs_idx,) = np.where(active_envs_mask)
-
-    def _init_vvert_fields(self):
-        if self.n_vverts == 0:
-            return
-
-        vgeoms = self.vgeoms
-        vverts = np.concatenate([vg.init_vverts for vg in vgeoms], dtype=gs.np_float)
-        vnormals = np.concatenate([vg.init_vnormals for vg in vgeoms], dtype=gs.np_float)
-        vfaces = np.concatenate([vg.init_vfaces + vg._vvert_start for vg in vgeoms], dtype=gs.np_int)
-        vverts_vgeom_idx = np.concatenate([np.full(vg.n_vverts, vg.idx) for vg in vgeoms], dtype=gs.np_int)
-        vverts_state_idx = np.full(self.n_vverts, -1, dtype=gs.np_int)
-        for entity in self._entities:
-            if not entity._morph.enable_custom_vverts:
-                continue
-            entity_custom_offset = entity._custom_vvert_start - entity._vvert_start
-            for vgeom in entity.vgeoms:
-                local = np.arange(vgeom.n_vverts, dtype=gs.np_int)
-                vverts_state_idx[vgeom._vvert_start + local] = vgeom._vvert_start + entity_custom_offset + local
-        kernel_init_vvert_fields(
-            vverts_vgeom_idx, vverts_state_idx, vverts, vfaces, vnormals, self.dyn_info, self.rigid_config
-        )
-
-    def _init_vgeom_fields(self):
-        if self.n_vgeoms > 0:
-            vgeoms = self.vgeoms
-            kernel_init_vgeom_fields(
-                np.array([vgeom.link.idx for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vvert_start for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vface_start for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vvert_end for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
-                np.array([vgeom.init_pos for vgeom in vgeoms], dtype=gs.np_float),
-                np.array([vgeom.init_quat for vgeom in vgeoms], dtype=gs.np_float),
-                np.array([vgeom.desc.vmesh.color for vgeom in vgeoms], dtype=gs.np_float),
-                self.dyn_info,
-                self.rigid_config,
-            )
-
-    def _init_vfaces_raycast_mask(self):
-        """Fit the static per-vface visual-raycasting opt-in mask; see the vfaces_raycast_mask property.
-
-        Sized over the padded vgeom count so the gather also covers a solver holding no vgeom at all, whose vface
-        fields still carry one padding slot: nothing opts in there, so every entry stays 0.
-        """
-        vgeom_enabled = torch.zeros(self.n_vgeoms_, dtype=gs.tc_bool, device=gs.device)
-        for entity in self.entities:
-            if not entity.material.use_visual_raycasting:
-                continue
-            for vgeom in entity.vgeoms:
-                vgeom_enabled[vgeom.idx] = 1
-        self._vfaces_raycast_mask = vgeom_enabled[qd_to_torch(self.dyn_info.vfaces.vgeom_idx)]
-
-    def _init_entity_fields(self):
-        if self._entities:
-            entities = self._entities
-            kernel_init_entity_fields(
-                np.array([entity.dof_start for entity in entities], dtype=gs.np_int),
-                np.array([entity.dof_end for entity in entities], dtype=gs.np_int),
-                np.array([entity.link_start for entity in entities], dtype=gs.np_int),
-                np.array([entity.link_end for entity in entities], dtype=gs.np_int),
-                np.array([0 for entity in entities], dtype=gs.np_int),
-                np.array([0 for entity in entities], dtype=gs.np_int),
-                np.array([0.0 for entity in entities], dtype=gs.np_float),
-                np.array([False for entity in entities], dtype=gs.np_bool),
-                self.dyn_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-
-    # ------------------------------------------------------------------------------------
-    # -------------------------------- simulation no-ops ----------------------------------
+    # ------------------------------------ simulation ------------------------------------
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
-        pass
+        self._system.substep_pre_coupling(f)
 
     def substep_pre_coupling_grad(self, f):
         pass
 
     def substep_post_coupling(self, f):
-        if not self._is_forward_pos_updated or not self._is_forward_vel_updated:
-            kernel_forward_kinematics(
-                self.scene._envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
-            self._is_forward_pos_updated = True
-            self._is_forward_vel_updated = True
+        self._system.substep_post_coupling(f)
 
     def substep_post_coupling_grad(self, f):
         pass

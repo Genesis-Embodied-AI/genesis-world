@@ -1203,7 +1203,7 @@ def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
             constraint_solver.func_solve_body(*args)
             accelerations.append(qd_to_numpy(constraint_state.qacc, copy=True))
 
-    monkeypatch.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_compared)
+    monkeypatch.setattr("genesis.engine.systems.constraint_solver_system.func_solve_body", solve_compared)
 
     # Every box is pushed and twisted by a new random wrench each step, a fraction of what tips or slides it, so that no
     # solve starts from a warm start that already resolves it: resting boxes would leave both implementations returning

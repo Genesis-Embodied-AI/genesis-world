@@ -92,16 +92,16 @@ def _sort_relevant_dofs_descending(
 
 
 if TYPE_CHECKING:
-    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+    from genesis.engine.systems.rigid_solver_system import RigidSolverSystem
 
 
 IS_OLD_TORCH = tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8)
 
 
 class ConstraintSolver:
-    def __init__(self, rigid_solver: "RigidSolver"):
+    def __init__(self, rigid_solver: "RigidSolverSystem"):
         self._solver = rigid_solver
-        self._collider = rigid_solver.collider
+        self._collider = rigid_solver.collider_data
         self._B = rigid_solver._B
         self._para_level = rigid_solver._para_level
 
@@ -122,7 +122,7 @@ class ConstraintSolver:
         # When 'max_contacts' is set, it overrides the post-pruning contact budget enforced by the collider.
         # Resolve the max_contacts option in place: from the collider's post-pruning budget when unset, else clamped
         # to the candidate budget and written back so the collider honors the user's cap. Downstream reads the option.
-        collider_info = rigid_solver.collider.collider_info
+        collider_info = rigid_solver.collider_data.collider_info
         if rigid_solver._options.max_contacts is None:
             rigid_solver._options.max_contacts = collider_info.max_contacts[None]
         else:
@@ -5891,7 +5891,7 @@ def kernel_resolve_post(
     noslip: qd.template(),
     errno: qd.Tensor,
 ):
-    """Run func_resolve_post on its own, outside the substep graph that captures it (see kernel_substep_post)."""
+    """Run func_resolve_post on its own, outside the substep graph that captures it (see func_substep_resolve_post)."""
     func_resolve_post(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno)
 
 

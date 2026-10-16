@@ -346,8 +346,8 @@ class RigidInfo:
     trees_n_dofs: qd.Tensor
     links_tree_idx: qd.Tensor
     # trees_levels_links_idx lists the links of every tree level by level for the level sweep (see
-    # func_sweep_links_by_level and KinematicSolver._init_tree_fields). The levels of tree i_t start at entry
-    # trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry i_k ends before entry
+    # func_sweep_links_by_level and init_tree_fields in kinematic_solver_system.py). The levels of tree i_t start at
+    # entry trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry i_k ends before entry
     # trees_levels_links_end[i_k]. The root tables list all the links of every root the same way, and the level of entry
     # i_k starts at entry roots_levels_links_start[i_k].
     trees_level_start: qd.Tensor

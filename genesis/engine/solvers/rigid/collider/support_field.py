@@ -12,7 +12,7 @@ import genesis.utils.geom as gu
 
 
 if TYPE_CHECKING:
-    from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+    from genesis.engine.systems.rigid_solver_system import RigidSolverSystem
 
 
 # Rotation from the mesh frame to the frame of each spherical chart. The second chart carries its poles a quarter turn
@@ -38,7 +38,7 @@ class SupportField:
     their list. A lookup runs on the critical path of collision detection, where that wait costs more than the reads.
     """
 
-    def __init__(self, rigid_solver: "RigidSolver") -> None:
+    def __init__(self, rigid_solver: "RigidSolverSystem") -> None:
         self.solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.

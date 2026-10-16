@@ -19,8 +19,6 @@ from genesis.utils.misc import (
     DeprecationError,
     assign_indexed_tensor,
     broadcast_tensor,
-    get_gpu_core_count,
-    get_gpu_shared_tile_sizes,
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
@@ -31,10 +29,10 @@ from genesis.utils.misc import (
 from ..base_solver import GravityMixin, MutatedLinks, StateChange, TimeBasedMixin, mutates
 from ..kinematic_solver import (
     KinematicSolver,
-    _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _select_links_offset,
+    forward_to_system,
 )
 from .abd.accessor import (
     ConstraintType,
@@ -86,7 +84,6 @@ from .abd.diff import (
     kernel_copy_acc,
     kernel_copy_next_to_curr_no_check,
     kernel_prepare_backward_substep,
-    kernel_save_adjoint_cache,
 )
 from .abd.forward_dynamics import (
     func_forward_dynamics,
@@ -96,10 +93,7 @@ from .abd.forward_dynamics import (
     func_vel_at_point,
     kernel_forward_dynamics,
     kernel_forward_dynamics_without_qacc,
-    kernel_refresh_invweight_and_meaninertia,
     kernel_update_acc,
-    update_qacc_from_qvel_delta,
-    update_qvel,
 )
 from .abd.forward_kinematics import (
     func_forward_kinematics_root,
@@ -128,19 +122,10 @@ from .abd.misc import (
     kernel_apply_links_external_wrench_at_pos,
     kernel_bit_reduction,
     kernel_clear_external_force,
-    kernel_init_entity_fields,
-    kernel_init_equality_fields,
-    kernel_init_geom_fields,
-    kernel_init_link_dynamics,
-    kernel_init_vert_fields,
     kernel_reset_hibernation,
     kernel_set_zero,
-    kernel_update_heterogeneous_link_info,
-    kernel_wakeup_coupled_links,
 )
-from .collider import Collider
-from .collider.collider import func_detection
-from .constraint import ConstraintSolver
+from .collider.collider import Collider
 from .constraint.backward import (
     kernel_accumulate_constraint_solver_grads,
     kernel_load_dL_dqacc_from_acc_grad,
@@ -148,12 +133,6 @@ from .constraint.backward import (
     kernel_manual_add_equality_constraints_bw,
     kernel_manual_add_frictionloss_constraints_bw,
     kernel_manual_add_joint_limit_constraints_bw,
-)
-from .constraint.solver import (
-    func_add_equality_constraints,
-    func_add_inequality_constraints,
-    func_resolve_post,
-    func_solve_body,
 )
 
 if TYPE_CHECKING:
@@ -220,6 +199,32 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
     _entities: list[RigidEntity] = gs.List()
+
+    # The rigid data beyond the kinematic one, which RigidSolverSystem owns
+    _errno = forward_to_system("_errno")
+    n_awake_dofs = forward_to_system("n_awake_dofs")
+    dyn_state_adjoint_cache = forward_to_system("dyn_state_adjoint_cache")
+    mass_mat = forward_to_system("mass_mat")
+    mass_mat_L = forward_to_system("mass_mat_L")
+    mass_mat_D_inv = forward_to_system("mass_mat_D_inv")
+    meaninertia = forward_to_system("meaninertia")
+    geoms_init_AABB = forward_to_system("geoms_init_AABB")
+    _dofs_mass_block_start = forward_to_system("_dofs_mass_block_start")
+    _dofs_mass_block_end = forward_to_system("_dofs_mass_block_end")
+    # The signed distance fields of the rigid geoms, which RigidSdfSystem owns
+    sdf = forward_to_system("sdf")
+
+    @property
+    def collider(self) -> "Collider | None":
+        """User-facing access to the collision detection of the rigid geoms, once the scene is built (see
+        Collider)."""
+        if self._system is None:
+            return None
+        if self._collider is None:
+            self._collider = Collider(self._system)
+        return self._collider
+
+    _is_backward = forward_to_system("_is_backward", False, settable=True)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -296,14 +301,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 options.impratio = 1.0
 
-        self.collider = None
-        self.constraint_solver = None
-
-        self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
-
-        self._is_backward: bool = False
-
         self._ckpt = dict()
+
+        # The user-facing access to the collision detection, created on first use once the scene is built
+        self._collider: Collider | None = None
 
     def init_ckpt(self):
         pass
@@ -341,100 +342,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         super().build()
 
-        self._init_vert_fields()
-        self._init_geom_fields()
-        self._init_equality_fields()
-        self._init_dof_length()
-
-        # Compute the pose of every link in the neutral configuration and update the pose of all the geometries,
-        # including inactive variants for a given env: the step updates the active variant alone, so this is the only
-        # pose the inactive ones get (see func_update_geoms_link). The collider built next relies on these updated poses
-        # to determine whether some collision pairs must be filtered out.
-        kernel_update_cartesian_space(
-            self.dyn_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-            force_update_all_geoms=True,
-            is_backward=False,
-        )
-
-        self._init_collider()
-        self._init_constraint_solver()
-        self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
-
-        # Fill in the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. It is
-        # written to the armature field from the host once the parsed inverse weights stand, and a second refresh
-        # recomputes the ones it changes: those of every degree of freedom and link of the kinematic trees holding a
-        # defaulted joint. The parsed inverse weights stand everywhere else.
-        dofs_idx, dofs_default, dofs_link = [], [], []
-        for entity in self._entities:
-            rotor_links = [
-                link
-                for link in entity.links
-                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
-            ]
-            if not rotor_links:
-                continue
-            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
-            if entity.desc.variants:
-                variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
-            else:
-                variants_default = np.array([entity.main_morph.default_armature or 0.0])
-            envs_default = variants_default[_balanced_variant_mapping(variants_default.size, self._B)]
-            if (envs_default <= 0.0).all():
-                continue
-            dofs_idx.extend(link.dof_start for link in rotor_links)
-            dofs_default.extend([envs_default] * len(rotor_links))
-            dofs_link.extend(rotor_links)
-        if dofs_idx:
-            # Field layout, batch last, since the arrays are written back as fields.
-            dofs_armature = qd_to_numpy(self.dyn_info.dofs.armature, transpose=False, copy=True)
-            is_default = (np.atleast_2d(dofs_armature[dofs_idx].T) <= 0.0).all(axis=0)
-            if is_default.any():
-                dofs_idx = np.array(dofs_idx)[is_default]
-                default_armature = np.stack(dofs_default, axis=1)[:, is_default]
-                dofs_armature[dofs_idx] = default_armature.T if self._options.batch_dofs_info else default_armature[0]
-                self.dyn_info.dofs.armature.from_numpy(dofs_armature)
-                roots_idx = {link.root_idx for link, is_dof_default in zip(dofs_link, is_default) if is_dof_default}
-                trees_links = [link for link in self.links if link.root_idx in roots_idx]
-                dofs_invweight = qd_to_numpy(self.dyn_info.dofs.invweight, transpose=False, copy=True)
-                dofs_invweight[[i_d for link in trees_links for i_d in range(link.dof_start, link.dof_end)]] = -1.0
-                self.dyn_info.dofs.invweight.from_numpy(dofs_invweight)
-                links_idx = [link.idx for link in trees_links]
-                links_invweight = qd_to_numpy(self.dyn_info.links.invweight, transpose=False, copy=True)
-                links_invweight[links_idx] = -1.0
-                self.dyn_info.links.invweight.from_numpy(links_invweight)
-                self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
-
-        # The constraint solver decides it has converged from quantities summed over the whole scene, and every DOF of
-        # a link contributes a cost of the order of the link's mass. A link whose mass is a tolerance-fraction of the
-        # scene total therefore contributes less than the tolerance, and the solve stops while that link still carries
-        # residual. The floor below follows the tolerance linearly, down to the resolution of the working precision in
-        # kilograms. The scene total is summed before the loop below folds each link into its parent, after which every
-        # entry holds the mass of a whole subtree, which is what the floor is compared against.
-        links_subtree_mass = np.atleast_2d(qd_to_numpy(self.dyn_info.links.inertial_mass, transpose=True, copy=True))
-        movable_links_idx = np.flatnonzero([link.n_dofs > 0 for link in self.links])
-        if movable_links_idx.size:
-            total_mass = links_subtree_mass[:, movable_links_idx].sum(axis=1)
-            for i_l in reversed(range(self._n_links)):
-                if self.links[i_l].parent_idx >= 0:
-                    links_subtree_mass[:, self.links[i_l].parent_idx] += links_subtree_mass[:, i_l]
-            movable_links_mass = links_subtree_mass[:, movable_links_idx]
-            mass_floor = np.maximum(self._options.tolerance * total_mass, 0.2 * self._options.tolerance)[:, None]
-            i_b_min, i_l_min = np.unravel_index((movable_links_mass / mass_floor).argmin(), movable_links_mass.shape)
-            mass_min = movable_links_mass[i_b_min, i_l_min]
-            if mass_min < mass_floor[i_b_min, 0]:
-                link = self.links[movable_links_idx[i_l_min]]
-                if gs.qd_float == qd.f32:
-                    remedy = "Use 64-bit simulation precision or tighten the solver tolerance."
-                else:
-                    remedy = "Tighten the solver tolerance."
-                gs.logger.warning(
-                    f"Link '{link.name}' has mass {mass_min:.1e}, too small for the constraint solver to be "
-                    f"numerically stable. {remedy} Note that increasing the solver iterations would not help."
-                )
-
         # Morph pose offset of each collision geom, conjugated into the geom's own frame so the relative getters
         # revert it for geoms rotated relative to the link. Each root link carries its own offset; child-link geoms
         # inherit it through the kinematic chain and keep an identity offset. Forward offset device tensors, None when
@@ -456,793 +363,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._func_vel_at_point = func_vel_at_point
         self._func_apply_coupling_force = func_apply_coupling_force
 
-    def _resolve_broadphase_traversal(self):
-        if self._options.broadphase_traversal is not None:
-            return self._options.broadphase_traversal
-        # The valid pairs are shared by every environment, while a heterogeneous environment carries one variant of each
-        # entity. ALL_VS_ALL tests the pairs of every variant in every environment, those of the variants it does not
-        # carry failing on their empty axis-aligned bounding box (see func_update_geom_aabbs), whereas sweep-and-prune
-        # (SAP) only sweeps the geoms each environment carries.
-        if gs.backend == gs.cpu or self._enable_heterogeneous:
-            return gs.broadphase_traversal.SAP
-        return gs.broadphase_traversal.ALL_VS_ALL
-
-    def _build_static_config(self):
-        # The scene has multi-island block structure when it holds several independent DOF-carrying bodies or free
-        # joints (the Hessian then splits into per-island blocks instead of one dense tree), where the sparse Jacobian
-        # of the CPU solve pays off; a single dense-coupled tree (e.g. one big robot) gains nothing from it.
-        n_dof_entities = sum(entity.n_dofs > 0 for entity in self.entities)
-        n_free_joints = sum(joint.type == gs.JOINT_TYPE.FREE for joint in self.joints)
-        has_multi_island_structure = n_dof_entities >= 2 or n_free_joints >= 2
-
-        # sparse_solve=None resolves automatically: the sparse Jacobian makes the per-iteration Jacobian-vector
-        # products, the constraint-to-island lookup and the per-island Hessian assembly cost O(nonzeros) instead of
-        # O(n_constraints * n_dofs), which pays off on CPU when the scene has block structure, whereas a single
-        # dense-coupled tree gains nothing. An explicit value overrides this on CPU. On GPU the dense tiled path is
-        # faster, so the sparse representation is dropped there whatever the option says.
-        if self._options.sparse_solve is None:
-            sparse_solve = gs.backend == gs.cpu and not self._enable_mujoco_compatibility and has_multi_island_structure
-        else:
-            sparse_solve = self._options.sparse_solve
-            if sparse_solve and gs.backend != gs.cpu:
-                gs.logger.warning(
-                    "'sparse_solve' is ignored on the GPU backend, where the dense tiled factorization is faster."
-                )
-        sparse_solve = sparse_solve and gs.backend == gs.cpu
-
-        # Under the elliptic cone any middle-zone contact invalidates the Cholesky factor every Newton iteration, so
-        # a contact-dense solve rebuilds it nearly every iteration; persisting the cone-free assembled Hessian turns
-        # each rebuild into an envelope copy (see the nt_H declaration in array_class.py for the packed storage).
-        # Confined to the CPU per-island skyline path that owns per-iteration rebuilds, the GPU arms rebuilding through
-        # the tiled assembly.
-        enable_cone_free_hessian_reuse = (
-            self._options.friction_cone == gs.friction_cone.elliptic
-            and gs.backend == gs.cpu
-            and sparse_solve
-            and self._options.constraint_solver == gs.constraint_solver.Newton
-        )
-
-        # The tiled per-island seed (see enable_tiled_island_seed in array_class.py) replaces a per-env thread walking
-        # O(n^3) dependent loads, slower than the whole Newton iteration above the core count. The cooperative body
-        # kernels run one warp per env, which pays off once an env carries enough dofs to keep its lanes busy, and stops
-        # paying once the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray kernels
-        # serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
-        is_generic = gs.use_ndarray
-        enable_tiled_island_seed = (
-            gs.backend != gs.cpu
-            and not self.sim.options.requires_grad
-            and not sparse_solve
-            and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
-        )
-        enable_cooperative_constraint_kernels = enable_tiled_island_seed and (
-            is_generic or self._sim._B <= get_gpu_core_count()
-        )
-        # The noslip sweep of an island is the last one-thread process of the cooperative regime, so its block-per-island
-        # variant takes the same bound (see func_noslip in noslip.py).
-        enable_cooperative_noslip = enable_cooperative_constraint_kernels and self._options.noslip_iterations > 0
-        # Dofs per kinematic tree, counted from the links here since _init_tree_fields runs once the fields this config
-        # sizes are allocated. A scene holding one tree forms at most one island per env, and the per-island passes
-        # read the env's plain ranges.
-        tree_links = np.flatnonzero(self._links_tree_root_idx >= 0)
-        trees_n_dofs = np.bincount(
-            self._links_tree_root_idx[tree_links], np.array([link.n_dofs for link in self.links])[tree_links]
-        )
-        is_single_island = self._n_trees == 1 and not is_generic
-        # Above the cooperative bound one thread per env saturates the GPU, where the scalar dense Cholesky of an env's
-        # one block beats the tiled factor, so the seed kernel assembles the block and the monolith factors it.
-        has_scalar_seed_factor = (
-            enable_tiled_island_seed and is_single_island and not enable_cooperative_constraint_kernels
-        )
-        constraint_layout_batch_first = (
-            enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
-        )
-
-        # The level sweep (see func_sweep_links_by_level) syncs the lanes of a block, which neither the CPU nor the
-        # differentiable runs offer. The serial walks run one thread per tree or root and env through all the links of
-        # its group, so they take as long as the longest group. The lanes of an env step through a level in chunks of
-        # their count, so the sweep stays within that time while its lane steps over all the levels and envs fit in the
-        # cores times the longest group. Past that bound it only adds instructions to a busy GPU, whether the links are
-        # grouped by tree or by root.
-        enable_level_sweep = gs.backend != gs.cpu and not self.sim.options.requires_grad
-        if enable_level_sweep and not is_generic:
-            n_lanes_per_env = array_class.RigidSimStaticConfig.level_sweep_n_lanes_per_env
-            for links_group_idx, links_level in (
-                (self._links_tree_root_idx, self._links_tree_level),
-                (self._links_root_idx, self._links_root_level),
-            ):
-                group_links = np.flatnonzero(links_level >= 0)
-                if group_links.size:
-                    _, groups_n_links = np.unique(links_group_idx[group_links], return_counts=True)
-                    _, levels_n_links = np.unique(
-                        links_group_idx[group_links] * self.n_links + links_level[group_links], return_counts=True
-                    )
-                    n_lane_steps = n_lanes_per_env * (-(-levels_n_links // n_lanes_per_env)).sum() * self._sim._B
-                    enable_level_sweep &= bool(n_lane_steps <= groups_n_links.max() * get_gpu_core_count())
-
-        rigid_config = dict(
-            backend=gs.backend,
-            para_level=self.sim._para_level,
-            requires_grad=self.sim.options.requires_grad,
-            use_hibernation=self._use_hibernation,
-            batch_links_info=self._options.batch_links_info,
-            batch_dofs_info=self._options.batch_dofs_info,
-            batch_joints_info=self._options.batch_joints_info,
-            enable_mujoco_compatibility=self._enable_mujoco_compatibility,
-            enable_elliptic_friction=self._options.friction_cone == gs.friction_cone.elliptic,
-            enable_signorini_contact=self._contact_resolution == gs.contact_resolution.signorini,
-            enable_torsional_friction=self._options.enable_torsional_friction,
-            enable_rolling_friction=self._options.enable_rolling_friction,
-            enable_multi_contact=self._enable_multi_contact,
-            enable_collision=self._enable_collision,
-            enable_joint_limit=self._enable_joint_limit,
-            box_box_detection=self._box_box_detection,
-            sparse_solve=sparse_solve,
-            enable_cone_free_hessian_reuse=enable_cone_free_hessian_reuse,
-            integrator=self._integrator,
-            solver_type=self._options.constraint_solver,
-            broadphase_traversal=self._resolve_broadphase_traversal(),
-            # Parallelize init over (constraints, envs) when envs alone don't saturate the GPU.
-            parallel_init=(
-                gs.backend != gs.cpu
-                and not self.sim.options.requires_grad
-                and (is_generic or self.n_envs <= get_gpu_core_count())
-            ),
-            enable_level_sweep=enable_level_sweep,
-            enable_tiled_island_seed=enable_tiled_island_seed,
-            enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
-            enable_cooperative_noslip=enable_cooperative_noslip,
-            is_single_island=is_single_island,
-            has_scalar_seed_factor=has_scalar_seed_factor,
-            constraint_layout_batch_first=constraint_layout_batch_first,
-        )
-
-        # Prefer the monolith solver on CPU (always faster there, perf dispatch is a waste of effort)
-        if gs.backend == gs.cpu or self.sim.options.requires_grad:
-            rigid_config["prefer_decomposed_solver"] = 0
-
-        # Per-DOF mass-block bounds (see dofs_mass_block_start in array_class.py), computed here because the tiled
-        # factor arms below are sized for the largest block; _init_tree_fields uploads them.
-        links_by_idx = {link.idx: link for link in self.links}
-        dofs_mass_block_start = np.arange(self.n_dofs_, dtype=gs.np_int)
-        for link in self.links:
-            if link.n_dofs == 0:
-                continue
-            root_link = link
-            node = link
-            while node.parent_idx != -1:
-                node = links_by_idx[node.parent_idx]
-                if node.n_dofs > 0:
-                    root_link = node
-            dofs_mass_block_start[link.dof_start : link.dof_end] = root_link.dof_start
-        dofs_mass_block_end = np.empty(self.n_dofs_, dtype=gs.np_int)
-        for i_d in range(self.n_dofs_):
-            dofs_mass_block_end[dofs_mass_block_start[i_d]] = i_d + 1
-        dofs_mass_block_end = dofs_mass_block_end[dofs_mass_block_start]
-
-        # Blocks form clean intervals: attach() is the only source of cross-entity blocks and rejects any layout that
-        # would interleave foreign DOFs inside a merged one (see RigidEntity.attach).
-        self._dofs_mass_block_start = dofs_mass_block_start
-        self._dofs_mass_block_end = dofs_mass_block_end
-
-        if self.is_active:
-            # The tiled and cooperative Cholesky kernels trade per-env serial work for cross-lane parallelism, so they
-            # only help while envs alone do not already saturate the GPU. Above that env count one-thread-per-env keeps
-            # every core busy and the scalar path wins; below it the parallel kernels hide latency by swapping warps.
-            # The crossover is also hardware- and kernel-dependent, so the env threshold (GPU core count) is a heuristic
-            # and a dynamic timer-based selection would be more accurate still.
-            # Largest mass block in DOFs, the unit the per-block factor is sized for: merged entities can make a block
-            # exceed any single entity (see attach).
-            max_block_dofs = int((dofs_mass_block_end - dofs_mass_block_start).max()) if self.n_dofs else 0
-            if gs.backend != gs.cpu:
-                max_tiled_envs = get_gpu_core_count()
-                envs_undersaturate = self.n_envs <= max_tiled_envs
-
-                # Register tile of the mass-matrix Cholesky kernels and unit of the island tile caps, see
-                # cholesky_tile_size_for in array_class.py.
-                cholesky_tile_size = 32 if is_generic else array_class.cholesky_tile_size_for(self.n_dofs)
-
-                # A shared tile holds the dofs it factors rounded up to the next size of get_gpu_shared_tile_sizes,
-                # which bounds the sizes compiled while keeping the occupancy of the tightest fit. A mass block above
-                # the largest size factors outside the shared tile, which leaves the tile size unused.
-                shared_tile_sizes = get_gpu_shared_tile_sizes(2 if is_generic else 8)
-                mass_matrix_fits_shared = max_block_dofs <= shared_tile_sizes[-1]
-                tiled_n_dofs_per_block = min(
-                    (size for size in shared_tile_sizes if size >= max_block_dofs), default=shared_tile_sizes[-1]
-                )
-
-                # The cooperative per-island solve stages one island's tile in shared memory, in size classes (see
-                # island_tile_cap_first in array_class.py): the last cap is the shared tile of the dof count, or the
-                # largest one where the dofs exceed it. An island holds at least one tree, so a class below the
-                # smallest tree never holds an island: the first cap starts at that tree.
-                island_tile_cap_last = min(
-                    (size for size in shared_tile_sizes if size >= self.n_dofs), default=shared_tile_sizes[-1]
-                )
-                min_tree_dofs = trees_n_dofs[trees_n_dofs > 0].min() if self.n_dofs else 0
-                island_tile_cap_first = cholesky_tile_size
-                while island_tile_cap_first < min(min_tree_dofs, island_tile_cap_last):
-                    island_tile_cap_first *= 2
-                island_tile_cap_first = min(island_tile_cap_first, island_tile_cap_last)
-
-                # The cooperative in-place LDL^T has no cap; the shared-memory tile is faster but capped. Same env logic
-                # as the Hessian: tile from the largest block >= 8 DOFs, drop the env guard above the cap where the
-                # scalar O(n_block_dofs^3) per-(block, env) factor is always worse. Outside performance mode every scene
-                # holding dofs takes the tiled factor, whatever its block size and env count.
-                enable_tiled_cholesky_mass_matrix = (
-                    max_block_dofs > 0
-                    if is_generic
-                    else max_block_dofs >= 8 and (not mass_matrix_fits_shared or envs_undersaturate)
-                )
-
-                # Register-streaming tiled mass factor for the >shared-cap forward GPU path: factors each mass
-                # block in registers via the same primitive as the Hessian, faster than and numerically matching the
-                # cooperative LDL^T. Reuses cholesky_tile_size (always 32 here).
-                enable_register_tiled_mass = (
-                    enable_tiled_cholesky_mass_matrix and not mass_matrix_fits_shared and not self._requires_grad
-                )
-
-                # The shared-memory mass factor solves the smooth acceleration while it still holds the factor. A
-                # differentiable scene keeps the separate solve, which kernel_manual_compute_qacc_bw reverses.
-                enable_fused_smooth_acc_solve = (
-                    enable_tiled_cholesky_mass_matrix and mass_matrix_fits_shared and not self._requires_grad
-                )
-
-                rigid_config.update(
-                    enable_tiled_cholesky_mass_matrix=enable_tiled_cholesky_mass_matrix,
-                    mass_matrix_fits_shared=mass_matrix_fits_shared,
-                    enable_register_tiled_mass=enable_register_tiled_mass,
-                    enable_fused_smooth_acc_solve=enable_fused_smooth_acc_solve,
-                    cholesky_tile_size=cholesky_tile_size,
-                    tiled_n_dofs_per_block=tiled_n_dofs_per_block,
-                    island_tile_cap_first=island_tile_cap_first,
-                    island_tile_cap_last=island_tile_cap_last,
-                    # An island holds at most every dof of the scene, so below this bound the factor paths above the
-                    # last cap (see func_island_assemble_factor_solve_tiled) are dead code and stay uncompiled.
-                    has_island_above_tile_cap=self.n_dofs > island_tile_cap_last,
-                )
-
-                # One thread block assembles and factors an island above the last cap for the Newton solver (see
-                # func_island_assemble_factor_solve_tiled), at a cost growing with the cube of its dof count whatever
-                # the environment count, where the skyline factor of the CPU backend exploits the sparsity of the
-                # contact graph.
-                if (
-                    self._options.constraint_solver == gs.constraint_solver.Newton
-                    and self.n_dofs > 4 * island_tile_cap_last
-                ):
-                    gs.logger.warning(
-                        f"The scene holds {self.n_dofs} dofs. A contact island wider than {4 * island_tile_cap_last} "
-                        "dofs takes seconds per step with the Newton constraint solver on the GPU backend. If the "
-                        "bodies can pile up into one island, use the CPU backend or the CG constraint solver."
-                    )
-
-                # Manually pin the solve arm only where the winner is determinable in advance AND confirmed across
-                # CUDA + Metal; genuinely backend-dependent cases fall through to the per-step autotuner.
-                if not enable_cooperative_constraint_kernels:
-                    # No cooperative layout (n_envs > 8192 already saturates the GPU, or n_dofs < 16): the decomposed
-                    # arm has nothing to exploit, so the scalar one-thread-per-env monolith is the clear winner.
-                    rigid_config["prefer_decomposed_solver"] = 0
-
-                # The autotuner picks between two numerically distinct arms by timing them as the simulation runs, so
-                # which one runs at a given step follows the machine rather than the scene. Pinning the arm is what
-                # makes a trajectory reproducible; the decomposed one takes whatever the static scene description
-                # leaves open, every case that description settles in the monolith's favor being pinned above already.
-                if gs.use_deterministic_algorithms and rigid_config.get("prefer_decomposed_solver", -1) == -1:
-                    rigid_config["prefer_decomposed_solver"] = 1
-
-        # Jacobi equilibration of the Newton system (see nt_jacobi in array_class.py): every factor, incremental
-        # update and solve of every arm rides the scaled coordinates; the reference behaviour keeps the raw factor.
-        # Enabled when the model's mass-diagonal spread bound (_jacobi_mass_spread_bound) exceeds what the working
-        # precision's Cholesky factor conditions accurately; the double-precision threshold carries the mantissa
-        # headroom over single, past any scene built from physical units.
-        mass_spread_threshold = 1e4 if gs.qd_float == qd.f32 else 5e12
-        rigid_config["enable_jacobi_equilibration"] = (
-            not self._enable_mujoco_compatibility
-            and rigid_config["solver_type"] == gs.constraint_solver.Newton
-            and self._jacobi_mass_spread_bound() > mass_spread_threshold
-        )
-        self.rigid_config = array_class.RigidSimStaticConfig(**rigid_config)
-
-        if self.rigid_config.requires_grad:
-            if self.rigid_config.use_hibernation:
-                gs.raise_exception("Hibernation is not supported yet when requires_grad is True")
-            if self.rigid_config.integrator != gs.integrator.approximate_implicitfast:
-                gs.raise_exception(
-                    "Only approximate_implicitfast integrator is supported yet when requires_grad is True."
-                )
-            from genesis.engine.couplers import SAPCoupler, IPCCoupler
-
-            if isinstance(self.sim.coupler, (SAPCoupler, IPCCoupler)):
-                gs.raise_exception(
-                    f"{type(self.sim.coupler).__name__} is not supported yet when requires_grad is True."
-                )
-
-            if self._options.noslip_iterations > 0:
-                gs.raise_exception("Noslip is not supported yet when requires_grad is True.")
-            if self._options.enable_torsional_friction or self._options.enable_rolling_friction:
-                gs.raise_exception("Torsional and rolling friction are not supported yet when requires_grad is True.")
-
-    def _create_data_manager(self):
-        # We initialize data even if the solver is not active because the coupler needs arguments like
-        # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
-        self.data_manager = array_class.DataManager(self, kinematic_only=False)
-        self._errno = self.data_manager.errno
-
-        self.rigid_info = self.data_manager.rigid_info
-        self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
-        self.kinematics_scratch = self.data_manager.kinematics_scratch
-        if self._use_hibernation:
-            self.n_awake_dofs = self.rigid_info.n_awake_dofs
-        if self._requires_grad:
-            self.dyn_state_adjoint_cache = self.data_manager.dyn_state_adjoint_cache
-
-        # Gravity lives with the rigid arrays, which the kernels read, so that array is the one handed over to hold it.
-        self._build_gravity(self.rigid_info.gravity)
-
-    def _sanitize_joint_sol_params(self, sol_params):
-        return _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
-
-    def _jacobi_mass_spread_bound(self):
-        """Upper-bound the spread of the mass matrix diagonal over every configuration, from the model alone.
-
-        Each entry gets a lower and an upper bound that hold in every configuration. A translational entry is armature
-        plus subtree mass exactly. A rotational entry is at least armature plus the link inertia about its axis (the
-        smallest principal inertia for free and spherical DOFs), and at most the same with the largest principal inertia
-        plus, per descendant, its largest principal inertia and its mass times the squared anchor-to-COM distance no
-        configuration exceeds (frame offsets along the chain, each anchor twice, prismatic spans, infinite when
-        unlimited). The variants of a heterogeneous entity each bring their own inertial, link frames, joints and
-        build-time default armature, which adds its value to the entries it fills in, and any variant may be dispatched
-        to any environment, so the bounds are kept per variant of each entity and the spread is the largest over every
-        combination of variants across entities. That spread is at least the true one, so the gate never leaves a scene
-        that needs equilibration without it, its only error being to enable it at a small cost for one that does not.
-        """
-        children = {}
-        for entity in self._entities:
-            for link in entity.links:
-                children.setdefault(link.parent_idx, []).append(link)
-
-        # Per entity, the smallest lower bound and the largest upper bound over its entries, per variant.
-        entities_lower, entities_upper = [], []
-        for entity in self._entities:
-            rotor_links = [
-                link
-                for link in entity.links
-                if link.n_dofs == 1 and link.joints[0].type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
-            ]
-            # Only a scene or robot description file yields a rotor link, and those morphs state a default armature.
-            if entity.desc.variants:
-                variants_default = np.array([variant.default_armature or 0.0 for variant in entity.desc.variants])
-            elif rotor_links:
-                variants_default = np.array([entity.main_morph.default_armature or 0.0])
-            else:
-                variants_default = np.zeros(1)
-            variants_links = [entity.desc.links, *(variant.links for variant in entity.desc.variants[1:])]
-            variants_lower, variants_upper = [], []
-            for variant_default, variant_links in zip(variants_default, variants_links):
-                # The subtree of a link reaches the entities attached to it, which have no variants of their own
-                links_desc = {link.idx: l_desc for link, l_desc in zip(entity.links, variant_links)}
-                lower, upper = [], []
-                for link in entity.links:
-                    if link.is_fixed:
-                        continue
-                    l_desc = links_desc[link.idx]
-                    is_rotor = link in rotor_links
-                    for joint, j_desc in zip(link.joints, l_desc.joints):
-                        if joint.type == gs.JOINT_TYPE.FIXED:
-                            continue
-                        anchor = j_desc.pos
-                        # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own
-                        # term is exact only when this joint is its sole joint, since later chained joints re-rotate the
-                        # link about their own anchors.
-                        is_sole_joint = len(link.joints) == 1
-                        if is_sole_joint:
-                            dist_com = {link.idx: np.linalg.norm(l_desc.inertial_pos - anchor)}
-                        else:
-                            dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(l_desc.inertial_pos)}
-                        dist_origin = {link.idx: np.linalg.norm(anchor)}
-                        sub, stack = [], [link]
-                        while stack:
-                            cur = stack.pop()
-                            sub.append(cur)
-                            for child in children.get(cur.idx, []):
-                                child_desc = links_desc.get(child.idx, child.desc)
-                                hop = np.linalg.norm(child_desc.pos) + 2.0 * sum(
-                                    np.linalg.norm(j.pos) for j in child_desc.joints
-                                )
-                                # A prismatic descendant carries the subtree outward by up to its full travel span
-                                # (which covers the offset from any zero configuration within limits); an unlimited
-                                # slide makes the upper bound infinite and the gate enables.
-                                hop += sum(
-                                    np.ptp(j.dofs_limit) for j in child_desc.joints if j.type == gs.JOINT_TYPE.PRISMATIC
-                                )
-                                dist_origin[child.idx] = dist_origin[cur.idx] + hop
-                                dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child_desc.inertial_pos)
-                                stack.append(child)
-                        sub_desc = [links_desc.get(sub_link.idx, sub_link.desc) for sub_link in sub]
-                        sub_mass = sum(sub_link_desc.mass for sub_link_desc in sub_desc)
-                        eigvals = np.linalg.eigvalsh(l_desc.inertia)
-                        rot_desc_upper = sum(
-                            np.linalg.eigvalsh(sub_link_desc.inertia)[-1]
-                            + sub_link_desc.mass * dist_com[sub_link.idx] ** 2
-                            for sub_link, sub_link_desc in zip(sub, sub_desc)
-                            if sub_link is not link
-                        )
-                        # Carrying link's inertia about the anchor: exact along a fixed axis, otherwise between its
-                        # smallest and largest principal inertia.
-                        if is_sole_joint:
-                            R_inertial = gu.quat_to_R(l_desc.inertial_quat)
-                            inertia_com = R_inertial @ l_desc.inertia @ R_inertial.T
-                            offset_com = l_desc.inertial_pos - anchor
-                            rot_self_lower = eigvals[0]
-                            rot_self_upper = eigvals[-1] + l_desc.mass * np.dot(offset_com, offset_com)
-                        else:
-                            inertia_com = None
-                            offset_com = None
-                            rot_self_lower = eigvals[0]
-                            rot_self_upper = eigvals[-1] + l_desc.mass * dist_com[link.idx] ** 2
-                        for i_d, armature_d in enumerate(j_desc.dofs_armature):
-                            armature = variant_default if is_rotor and armature_d <= 0.0 else armature_d
-                            if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
-                                lower.append(armature + sub_mass)
-                                upper.append(armature + sub_mass)
-                            elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
-                                axis = j_desc.dofs_motion_ang[i_d]
-                                lever = np.cross(axis, offset_com)
-                                rot_self = axis @ inertia_com @ axis + l_desc.mass * np.dot(lever, lever)
-                                lower.append(armature + rot_self)
-                                upper.append(armature + rot_self + rot_desc_upper)
-                            else:
-                                lower.append(armature + max(rot_self_lower, 0.0))
-                                upper.append(armature + rot_self_upper + rot_desc_upper)
-                variants_lower.append(lower)
-                variants_upper.append(upper)
-            if variants_lower[0]:
-                lower, upper = np.array(variants_lower).T, np.array(variants_upper).T
-                entities_lower.append(np.where(lower > 0.0, lower, np.inf).min(axis=0))
-                entities_upper.append(upper.max(axis=0))
-        if not entities_lower:
-            return 0.0
-
-        # The largest upper bound of a variant pairs with the smallest lower bound reachable alongside it: its own, or
-        # the one of any variant of another entity. A variant without a positive lower bound has no spread to speak of.
-        lower_min = np.array([entity_lower.min() for entity_lower in entities_lower])
-        mass_spread = 0.0
-        for i_e, (entity_lower, entity_upper) in enumerate(zip(entities_lower, entities_upper)):
-            lower_paired = np.minimum(entity_lower, np.delete(lower_min, i_e).min(initial=np.inf))
-            is_bounded = np.isfinite(lower_paired)
-            mass_spread_entity = np.zeros_like(entity_upper)
-            np.divide(entity_upper, lower_paired, out=mass_spread_entity, where=is_bounded)
-            mass_spread = max(mass_spread, mass_spread_entity.max())
-        return mass_spread
-
-    def _refresh_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True, in_place=False):
-        # Every kinematic tree of the solver is recomputed. A change limited to some links is handled by the setter
-        # writing them, which recomputes their own tree only.
-        # Early return if no DoFs. This is essential to avoid segfault on CUDA.
-        if self._n_dofs == 0:
-            return
-
-        # Handling default arguments
-        batched = self._options.batch_dofs_info or self._options.batch_links_info
-        if not batched and envs_idx is not None:
-            gs.raise_exception(
-                "Links and dofs must be batched to selectively update invweight and meaninertia for some environment."
-            )
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-
-        # The computation needs one vector of size n_dofs and one mass-matrix solve against it. Build time borrows
-        # both from the constraint solver, so that a scene never writing an inertial property allocates no scratch of
-        # its own.
-        if in_place:
-            constraint_state = self.constraint_solver.constraint_state
-            jac_row, solve_out = constraint_state.grad, constraint_state.Mgrad
-        else:
-            jac_row, solve_out = self.data_manager.weight_scratch.jac_row, self.data_manager.weight_scratch.solve_out
-        kernel_refresh_invweight_and_meaninertia(
-            envs_idx,
-            jac_row,
-            solve_out,
-            self.dyn_state,
-            self.constraint_solver.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-            force_update,
-            self._is_forward_pos_updated,
-            self._is_forward_vel_updated,
-        )
-
-    def _init_tree_fields(self):
-        """Initialize the fields describing the kinematic trees, the structure of the joint-space mass matrix
-        included."""
-        super()._init_tree_fields()
-
-        self.mass_mat = self.rigid_info.mass_mat
-        self.mass_mat_L = self.rigid_info.mass_mat_L
-        self.mass_mat_D_inv = self.rigid_info.mass_mat_D_inv
-        self.meaninertia = self.rigid_info.meaninertia
-
-        # tree structure information
-        mass_parent_mask = np.zeros((self.n_dofs_, self.n_dofs_), dtype=gs.np_float)
-        for i_l in range(self.n_links):
-            j_l = i_l
-            while j_l != -1:
-                for i_d, j_d in qd.ndrange(
-                    (self.links[i_l].dof_start, self.links[i_l].dof_end),
-                    (self.links[j_l].dof_start, self.links[j_l].dof_end),
-                ):
-                    mass_parent_mask[i_d, j_d] = 1.0
-                j_l = self.links[j_l].parent_idx
-
-        # Per-DOF mass-block bounds, computed by _build_static_config (which sizes the tiled factor arms from them).
-        dofs_mass_block_start = self._dofs_mass_block_start
-        dofs_mass_block_end = self._dofs_mass_block_end
-
-        # An aligned free body whose only DOFs are its own free joint has a diagonal joint-space mass block, so zero its
-        # within-link off-diagonal mask to make the assembled mass exactly diagonal (else ~1e-6 round-off once it
-        # rotates) and the skyline envelope tighter. A DOF-bearing (articulated) descendant adds off-diagonal base
-        # coupling, so the block must be exactly the root's own DOFs for the diagonalization to be valid.
-        # Writing a center of mass or an inertia on such a link is rejected, so the block stays valid for good (see
-        # _set_links_info).
-        for link in self.links:
-            # 'aligned' already implies a free joint; the block bounds must additionally be exactly the link's own DOFs
-            # (no DOF-bearing ancestor or descendant), otherwise the coupled block is not diagonal.
-            if (
-                not link.aligned
-                or dofs_mass_block_start[link.dof_start] != link.dof_start
-                or dofs_mass_block_end[link.dof_start] != link.dof_end
-            ):
-                continue
-            for i_d in range(link.dof_start, link.dof_end):
-                for j_d in range(link.dof_start, link.dof_end):
-                    if i_d != j_d:
-                        mass_parent_mask[i_d, j_d] = 0.0
-                dofs_mass_block_start[i_d] = i_d
-                dofs_mass_block_end[i_d] = i_d + 1
-
-        # Smallest dof structurally coupled to each dof by the mass matrix (itself when none lies below it), read by the
-        # skyline envelope of the per-island solver (see dof_env_start_local in array_class.py).
-        dofs_mass_envelope_start = ((mass_parent_mask + mass_parent_mask.T) > 0.5).argmax(axis=1).astype(gs.np_int)
-        self.rigid_info.mass_parent_mask.from_numpy(mass_parent_mask)
-        self.rigid_info.dofs_mass_envelope_start.from_numpy(dofs_mass_envelope_start)
-        self.rigid_info.dofs_mass_block_start.from_numpy(dofs_mass_block_start)
-        self.rigid_info.dofs_mass_block_end.from_numpy(dofs_mass_block_end)
-
-    def _dispatch_heterogeneous_vgeoms(self):
-        """
-        Dispatch per-environment geom/vgeom ranges and inertial properties for heterogeneous links.
-
-        Extends the base class (which handles vgeom-only dispatch) to also dispatch collision geom
-        ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
-        link._build() from actual geom objects, using analytic formulas for primitives.
-        """
-        for link in self.links:
-            if link._variant_vgeom_ranges is None:
-                continue
-
-            n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
-
-            # Build per-env arrays from link's variant data
-            geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-            vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-
-            # Build per-env inertial arrays from pre-computed per-variant inertial
-            links_inertial_mass = np.array([link._variant_inertial[v][0] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_pos = np.array([link._variant_inertial[v][1] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_quat = np.array([link._variant_inertial[v][2] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_i = np.array([link._variant_inertial[v][3] for v in variant_idx], dtype=gs.np_float)
-
-            # Update links_info with per-environment values
-            # Note: when batch_links_info is True, the shape is (n_links, B)
-            kernel_update_heterogeneous_link_info(
-                link.idx,
-                geom_starts,
-                geom_ends,
-                vgeom_starts,
-                vgeom_ends,
-                links_inertial_mass,
-                links_inertial_pos,
-                links_inertial_quat,
-                links_inertial_i,
-                self.dyn_info,
-            )
-
-            # Set active_envs on geoms — indicates which environments each geom is active in
-            for geom in link.geoms:
-                active_envs_mask = (geom_starts <= geom.idx) & (geom.idx < geom_ends)
-                geom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (geom.active_envs_idx,) = np.where(active_envs_mask)
-
-            # Set active_envs on vgeoms
-            for vgeom in link.vgeoms:
-                active_envs_mask = (vgeom_starts <= vgeom.idx) & (vgeom.idx < vgeom_ends)
-                vgeom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (vgeom.active_envs_idx,) = np.where(active_envs_mask)
-
-    def _init_link_fields(self):
-        # The base initialization ends by dispatching each heterogeneous variant's inertial per environment, which
-        # must write last, so this runs first.
-        if self.links:
-            links = self.links
-            kernel_init_link_dynamics(
-                np.array([link.desc.invweight for link in links], dtype=gs.np_float),
-                np.array([link.desc.inertial_pos for link in links], dtype=gs.np_float),
-                np.array([link.desc.inertial_quat for link in links], dtype=gs.np_float),
-                np.array([link.desc.inertia for link in links], dtype=gs.np_float),
-                np.array([link.desc.mass for link in links], dtype=gs.np_float),
-                self.dyn_info,
-            )
-
-        super()._init_link_fields()
-
-    def _init_vert_fields(self):
-        if self.n_verts > 0:
-            geoms = self.geoms
-            kernel_init_vert_fields(
-                np.concatenate([np.full(geom.n_verts, geom.idx) for geom in geoms], dtype=gs.np_int),
-                np.concatenate(
-                    [np.arange(geom.verts_state_start, geom.verts_state_start + geom.n_verts) for geom in geoms],
-                    dtype=gs.np_int,
-                ),
-                np.concatenate([geom.init_verts for geom in geoms], dtype=gs.np_float),
-                np.concatenate([geom.init_faces + geom.vert_start for geom in geoms], dtype=gs.np_int),
-                np.concatenate([geom.init_edges + geom.vert_start for geom in geoms], dtype=gs.np_int),
-                np.concatenate([geom.init_normals for geom in geoms], dtype=gs.np_float),
-                np.concatenate([geom.init_center_pos for geom in geoms], dtype=gs.np_float),
-                np.concatenate(
-                    [np.full(geom.n_verts, geom.is_fixed and not geom.entity._batch_fixed_verts) for geom in geoms],
-                    dtype=gs.np_bool,
-                ),
-                self.dyn_info,
-                self.rigid_config,
-            )
-
-    def _init_dof_length(self):
-        # Characteristic length of each dof (1 for translation, the body radius for rotation), used to weight dof
-        # velocities in the hibernation rest test. Computed here, after geom dispatch, because a heterogeneous entity's
-        # per-variant geoms (and hence body radius) are only assigned to environments at that point. Only needed when
-        # hibernation is on.
-        if not self._use_hibernation:
-            return
-
-        joints = self.joints
-        if sum(joint.n_dofs for joint in joints) == 0:
-            return
-
-        # dofs_length is per-env only for a heterogeneous entity; broadcast the shared row across envs when dofs_info
-        # is batched (always so for a heterogeneous entity, optionally for a homogeneous one).
-        dof_length = np.concatenate([joint.dofs_length for joint in joints], axis=0)
-        if self._options.batch_dofs_info and dof_length.ndim == 1:
-            dof_length = np.broadcast_to(dof_length[:, None], (len(dof_length), self._B))
-        self.dyn_info.dofs.dof_length.from_numpy(dof_length)
-
-    def _init_geom_fields(self):
-        self.geoms_init_AABB = self.rigid_info.geoms_init_AABB
-
-        if self.n_geoms > 0:
-            geoms = self.geoms
-            geoms_sol_params = np.array([geom.desc.sol_params for geom in geoms], dtype=gs.np_float)
-            # A geom keeps the time constant the model states; the floor lands on the value a contact mixes out of its
-            # two geoms (see func_set_contact_data), the value the solver actually consumes. Flooring per geom would
-            # raise the mix of a pair that is already above the floor, distorting the stated stiffness with no
-            # stability benefit.
-            _sanitize_sol_params(
-                geoms_sol_params, self._sol_min_timeconst, self._sol_default_timeconst, floor_timeconst=False
-            )
-
-            # Accurately compute the center of mass of each geometry if possible.
-            # Note that the mean vertex position is a bad approximation, which is impeding the ability of MPR to
-            # estimate the exact contact information.
-            geoms_center = []
-            for geom in geoms:
-                tmesh = geom.mesh.trimesh
-                if tmesh.is_watertight:
-                    geoms_center.append(tmesh.center_mass)
-                else:
-                    # Still fallback to mean vertex position if no better option...
-                    geoms_center.append(np.mean(tmesh.vertices, axis=0))
-
-            # A geom is hollow when its own center lies in a cavity rather than inside its material (bowl, mug,
-            # nut), i.e. its own SDF is positive at its center. This is a static property of the collision
-            # geometry, precomputed here so the narrowphase never has to probe it at runtime. SPHERE/PLANE/TERRAIN
-            # SDFs are analytic and convex geoms enclose their own center, so neither is ever hollow and probing
-            # them would only force their SDF grid to be built.
-            geoms_is_hollow = []
-            for geom, center in zip(geoms, geoms_center):
-                is_hollow = False
-                if (
-                    geom.type not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
-                    and not geom.is_convex
-                ):
-                    grid_pos = geom.T_mesh_to_sdf[:3, :3] @ center + geom.T_mesh_to_sdf[:3, 3]
-                    cell = np.minimum(np.maximum(np.floor(grid_pos).astype(gs.np_int), 0), geom.sdf_res - 2)
-                    frac = grid_pos - cell
-                    corners = geom.sdf_val[cell[0] : cell[0] + 2, cell[1] : cell[1] + 2, cell[2] : cell[2] + 2]
-                    weights_x, weights_y, weights_z = ([1.0 - frac[i], frac[i]] for i in range(3))
-                    sd_center = np.einsum("i,j,k,ijk->", weights_x, weights_y, weights_z, corners)
-                    is_hollow = sd_center > gs.EPS
-                geoms_is_hollow.append(is_hollow)
-
-            kernel_init_geom_fields(
-                np.array([geom.link.idx for geom in geoms], dtype=gs.np_int),
-                np.array([geom.vert_start for geom in geoms], dtype=gs.np_int),
-                np.array([geom.face_start for geom in geoms], dtype=gs.np_int),
-                np.array([geom.edge_start for geom in geoms], dtype=gs.np_int),
-                np.array([geom.verts_state_start for geom in geoms], dtype=gs.np_int),
-                np.array([geom.vert_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.face_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.edge_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.verts_state_end for geom in geoms], dtype=gs.np_int),
-                np.array([geom.init_pos for geom in geoms], dtype=gs.np_float),
-                np.array(geoms_center, dtype=gs.np_float),
-                np.array([geom.init_quat for geom in geoms], dtype=gs.np_float),
-                np.array([geom.type for geom in geoms], dtype=gs.np_int),
-                np.array([geom.desc.friction for geom in geoms], dtype=gs.np_float),
-                np.array([geom.desc.friction_torsional for geom in geoms], dtype=gs.np_float),
-                np.array([geom.desc.friction_rolling for geom in geoms], dtype=gs.np_float),
-                geoms_sol_params,
-                np.array([geom.data for geom in geoms], dtype=gs.np_float),
-                np.array([geom.is_convex for geom in geoms], dtype=gs.np_bool),
-                np.array([geom.needs_coup for geom in geoms], dtype=gs.np_int),
-                np.array([geom.contype for geom in geoms], dtype=np.int32),
-                np.array([geom.conaffinity for geom in geoms], dtype=np.int32),
-                np.array([geom.coup_softness for geom in geoms], dtype=gs.np_float),
-                np.array([geom.coup_friction for geom in geoms], dtype=gs.np_float),
-                np.array([geom.coup_restitution for geom in geoms], dtype=gs.np_float),
-                np.array([geom.is_fixed for geom in geoms], dtype=gs.np_bool),
-                np.array([geom.metadata.get("decomposed", False) for geom in geoms], dtype=gs.np_bool),
-                np.array(geoms_is_hollow, dtype=gs.np_bool),
-                self.geoms_init_AABB,
-                self.dyn_state,
-                self.dyn_info,
-                self.rigid_config,
-            )
-
-    def _init_entity_fields(self):
-        if self._entities:
-            entities = self._entities
-            kernel_init_entity_fields(
-                np.array([entity.dof_start for entity in entities], dtype=gs.np_int),
-                np.array([entity.dof_end for entity in entities], dtype=gs.np_int),
-                np.array([entity.link_start for entity in entities], dtype=gs.np_int),
-                np.array([entity.link_end for entity in entities], dtype=gs.np_int),
-                np.array([entity.geom_start for entity in entities], dtype=gs.np_int),
-                np.array([entity.geom_end for entity in entities], dtype=gs.np_int),
-                np.array([entity.gravity_compensation for entity in entities], dtype=gs.np_float),
-                np.array([entity.is_local_collision_mask for entity in entities], dtype=gs.np_bool),
-                self.dyn_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-
-    def _init_equality_fields(self):
-        if self.n_equalities > 0:
-            equalities = self.equalities
-
-            equalities_sol_params = np.array([equality.desc.sol_params for equality in equalities], dtype=gs.np_float)
-            _sanitize_sol_params(equalities_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
-
-            kernel_init_equality_fields(
-                np.array([equality.type for equality in equalities], dtype=gs.np_int),
-                np.array([equality.eq_obj1id for equality in equalities], dtype=gs.np_int),
-                np.array([equality.eq_obj2id for equality in equalities], dtype=gs.np_int),
-                np.array([equality.eq_data for equality in equalities], dtype=gs.np_float),
-                np.array([equality.type for equality in equalities], dtype=gs.np_int),
-                equalities_sol_params,
-                self.dyn_info,
-                self.rigid_config,
-            )
-
-    def _init_collider(self):
-        self.collider = Collider(self)
-
-    def _init_constraint_solver(self):
-        self.constraint_solver = ConstraintSolver(self)
-
     def update_forward_pos(self):
         """Run forward kinematics over links and geoms if they are not already up to date for the current pose.
 
@@ -1258,123 +378,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_pos_updated = True
 
     def substep(self, f):
-        # from genesis.utils.tools import create_timer
-        from genesis.engine.couplers import SAPCoupler
-
-        if self._requires_grad and f == 0:
-            kernel_save_adjoint_cache(f, self.dyn_state, self._rigid_adjoint_cache, self.rigid_info, self.rigid_config)
-
-        # Coupling forces from the previous coupling phase may target hibernated links (see
-        # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
-        if self._use_hibernation and len(self.sim.active_solvers) > 1:
-            kernel_wakeup_coupled_links(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-            )
-
-        if isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
-            # A SAP-coupled substep replaces the constraint solve by the coupler's own, so it keeps its own launches.
-            # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
-            # launches the substep kernels one by one.
-            kernel_step_1(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
-                self._is_backward,
-            )
-            if isinstance(self.sim.coupler, SAPCoupler):
-                update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
-            else:
-                self._func_constraint_force()
-                kernel_step_2(
-                    self.dyn_state,
-                    self.constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    self._is_backward,
-                    self._errno,
-                )
-        else:
-            # The work before the constraint solve is captured as two graphs cut ahead of the collision detection, since
-            # the compile time of a kernel grows faster than its size while one more graph replay costs next to nothing.
-            # The work after the solve is captured as one graph.
-            collider = self.collider
-            constraint_solver = self.constraint_solver
-            collider._contact_data_cache.clear()
-            constraint_solver._eq_const_info_cache.clear()
-            kernel_substep_dynamics(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._is_forward_pos_updated,
-                self._is_forward_vel_updated,
-                self._is_backward,
-                not self._disable_constraint,
-            )
-            kernel_substep_collision(
-                self.geoms_init_AABB,
-                self.dyn_state,
-                collider.collider_state,
-                collider.mpr.mpr_state,
-                collider.gjk.gjk_state,
-                collider.gjk.gjk_state.diff_contact_input,
-                collider.mpr.contact0_mpr_state,
-                collider.gjk.contact0_gjk_state,
-                collider.mpr.multicontact_mpr_state,
-                collider.gjk.multicontact_gjk_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                collider.collider_info,
-                self.rigid_config,
-                collider.collider_config,
-                collider.gjk.gjk_config,
-                not self._disable_constraint,
-                collider._n_possible_pairs > 0,
-                collider._use_split_narrowphase,
-                collider._use_coop_dedup,
-                self._errno,
-            )
-            if not self._disable_constraint:
-                func_solve_body(
-                    self.dyn_state,
-                    constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    constraint_solver._n_iterations,
-                )
-            kernel_substep_post(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._is_backward,
-                not self._disable_constraint,
-                self._options.noslip_iterations > 0,
-                self._errno,
-            )
-
-        if not isinstance(self.sim.coupler, SAPCoupler):
-            self._is_forward_pos_updated = not self._enable_mujoco_compatibility
-            self._is_forward_vel_updated = not self._enable_mujoco_compatibility
-            if self._requires_grad:
-                kernel_save_adjoint_cache(
-                    f + 1, self.dyn_state, self._rigid_adjoint_cache, self.rigid_info, self.rigid_config
-                )
+        """Advance the rigid solver by substep f (see RigidSolverSystem.substep)."""
+        self._system.substep(f)
 
     def get_error_envs_mask(self):
         return qd_to_torch(self._errno) > 0
@@ -1429,15 +434,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return collision_pairs
 
     def _func_constraint_force(self):
-        if not self._disable_constraint:
-            self.constraint_solver.add_equality_constraints()
-
-        if self._enable_collision:
-            self.collider.detection()
-
-        if not self._disable_constraint:
-            self.constraint_solver.add_inequality_constraints()
-            self.constraint_solver.resolve()
+        """Assemble and solve the constraints of the current substep (see RigidSolverSystem.constraint_force)."""
+        self._system.constraint_force()
 
     def _constraint_force_grad(self):
         """Backward pass for the constraint solver: seed dL_dqacc from acc.grad, run the adjoint solve, fold its
@@ -1616,7 +614,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     return
 
             # Run Genesis rigid simulation step for non-IPC couplers
-            self.substep(f)
+            self._system.substep(f)
 
     def reset_grad(self):
         # Rigid additionally owns `geoms_state`, `entities_state`, and the `*_adjoint_cache` structs written by the
@@ -1742,21 +740,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         if isinstance(self.sim.coupler, SAPCoupler):
-            update_qacc_from_qvel_delta(self.dyn_state, self.rigid_info, self.rigid_config)
-            kernel_step_2(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._is_backward,
-                self._errno,
-            )
+            self._system.substep_post_coupling(f)
         elif isinstance(self.sim.coupler, IPCCoupler):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
             if self.sim.coupler.has_any_rigid_coupling:
-                self.substep(f)
+                self._system.substep(f)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -1798,10 +787,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         if partial:
-            self.collider.reset(envs_idx)
+            self._system.reset(envs_idx)
             self.constraint_solver.reset(envs_idx)
         else:
-            self.collider.clear(envs_idx)
+            self._system.clear(envs_idx)
             self.constraint_solver.clear(envs_idx)
 
         if (
@@ -2309,8 +1298,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             skip_allocation=True,
         )
         if links_idx_ is not None:
-            # TODO: the anchor of an aligned root keeps its mass block diagonal (see _init_tree_fields). A center of
-            # mass or an inertia written on any link of the body moves the anchor. A mass write keeps it only as one
+            # TODO: the anchor of an aligned root keeps its mass block diagonal (see rigid_init_tree_fields). A center
+            # of mass or an inertia written on any link of the body moves the anchor. A mass write keeps it only as one
             # rescale of every link of the body, inertia included. A frame move shifts the local pose of every geom
             # ('GeomsInfo.pos' / 'quat', one entry per geom for all environments). It also shifts 'qpos', quoted in the
             # anchored frame, and the origin a fixed child reports. A per-environment value has no frame to go to, so
@@ -2454,8 +1443,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
-        if self.collider is not None:
-            self.collider.reset(envs_idx)
+        if self._system is not None:
+            self._system.reset(envs_idx)
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
@@ -2660,7 +1649,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_set_dofs_stiffness(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         elif name == "armature":
             kernel_set_dofs_armature(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
-            self._refresh_invweight_and_meaninertia(envs_idx=envs_idx, force_update=True)
+            self._system.refresh_invweight_and_meaninertia(envs_idx=envs_idx, force_update=True)
         elif name == "damping":
             kernel_set_dofs_damping(dofs_idx, envs_idx_, *tensor_list, self.dyn_info, self.rigid_config)
         elif name == "frictionloss":
@@ -2706,7 +1695,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
-        self.collider.reset(envs_idx)
+        self._system.reset(envs_idx)
         self.constraint_solver.reset(envs_idx)
 
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
@@ -3577,120 +2566,4 @@ def kernel_step_2(
     errno: qd.Tensor,
 ):
     """Run the second half of a substep on its own (see func_step_2)."""
-    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward, errno)
-
-
-@qd.kernel(graph=True, fastcache=True)
-def kernel_substep_dynamics(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    is_forward_pos_updated: qd.template(),
-    is_forward_vel_updated: qd.template(),
-    is_backward: qd.template(),
-    enable_constraint: qd.template(),
-):
-    """Run the forward dynamics of a substep, then assemble its equality constraints, captured as one graph.
-
-    enable_constraint selects the assembly of the equality constraints.
-    """
-    func_step_1(
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        is_forward_pos_updated,
-        is_forward_vel_updated,
-        is_backward,
-    )
-    if qd.static(enable_constraint):
-        func_add_equality_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
-
-
-@qd.kernel(graph=True, fastcache=True)
-def kernel_substep_collision(
-    geoms_init_AABB: array_class.GeomsInitAABB,
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    mpr_state: array_class.MPRState,
-    gjk_state: array_class.GJKState,
-    diff_contact_input: array_class.DiffContactInput,
-    contact0_mpr_state: array_class.MPRState,
-    contact0_gjk_state: array_class.GJKState,
-    multicontact_mpr_state: array_class.MPRState,
-    multicontact_gjk_state: array_class.GJKState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    collider_info: array_class.ColliderInfo,
-    rigid_config: qd.template(),
-    collider_static_config: qd.template(),
-    gjk_static_config: qd.template(),
-    enable_constraint: qd.template(),
-    has_possible_pairs: qd.template(),
-    split_narrowphase: qd.template(),
-    coop_dedup: qd.template(),
-    errno: qd.Tensor,
-):
-    """Detect the collisions of a substep, then assemble its inequality constraints, captured as one graph.
-
-    enable_constraint selects the assembly of the inequality constraints. has_possible_pairs, split_narrowphase and
-    coop_dedup configure the detection (see func_detection).
-    """
-    if qd.static(rigid_config.enable_collision):
-        func_detection(
-            geoms_init_AABB=geoms_init_AABB,
-            dyn_state=dyn_state,
-            collider_state=collider_state,
-            mpr_state=mpr_state,
-            gjk_state=gjk_state,
-            diff_contact_input=diff_contact_input,
-            contact0_mpr_state=contact0_mpr_state,
-            contact0_gjk_state=contact0_gjk_state,
-            multicontact_mpr_state=multicontact_mpr_state,
-            multicontact_gjk_state=multicontact_gjk_state,
-            constraint_state=constraint_state,
-            dyn_info=dyn_info,
-            rigid_info=rigid_info,
-            collider_info=collider_info,
-            rigid_config=rigid_config,
-            collider_static_config=collider_static_config,
-            gjk_static_config=gjk_static_config,
-            has_possible_pairs=has_possible_pairs,
-            split_narrowphase=split_narrowphase,
-            coop_dedup=coop_dedup,
-            errno=errno,
-        )
-    if qd.static(enable_constraint):
-        func_add_inequality_constraints(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, collider_static_config
-        )
-
-
-@qd.kernel(graph=True, fastcache=True)
-def kernel_substep_post(
-    dyn_state: array_class.DynState,
-    collider_state: array_class.ColliderState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    is_backward: qd.template(),
-    enable_constraint: qd.template(),
-    noslip: qd.template(),
-    errno: qd.Tensor,
-):
-    """Run the part of a substep that follows the constraint solve, captured as one graph.
-
-    It updates the accelerations and the contact forces from the solved constraint forces when enable_constraint is set
-    (see func_resolve_post for noslip), then integrates.
-    """
-    if qd.static(enable_constraint):
-        func_resolve_post(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
-        )
     func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward, errno)

@@ -557,7 +557,7 @@ class ContactDepthQuerySensorMixin:
         if self._shared_metadata.contact_depth_query == "raycast":
             self._shared_context.activate()  # builds the BVH lazily, only on raycast opt-in
         else:
-            self._shared_metadata.solver.collider.activate_sdf()
+            self._shared_metadata.solver.sdf.activate()
 
 
 # ============================ ViscoelasticHysteresis ============================

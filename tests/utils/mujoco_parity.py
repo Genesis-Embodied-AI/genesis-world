@@ -868,7 +868,7 @@ def simulate_and_check_mujoco_consistency(
 
     with pytest.MonkeyPatch.context() as mp:
         if gs.np_float == np.float32 and not ignore_constraints:
-            mp.setattr("genesis.engine.solvers.rigid.rigid_solver.func_solve_body", solve_on_mujoco_aref)
+            mp.setattr("genesis.engine.systems.constraint_solver_system.func_solve_body", solve_on_mujoco_aref)
 
         for i in range(num_steps):
             # Make sure that all "dynamic" quantities are matching before stepping
