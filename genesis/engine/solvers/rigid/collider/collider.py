@@ -6,6 +6,7 @@ including broad-phase (sweep-and-prune), narrow-phase (convex-convex, SDF-based,
 terrain), and contact management.
 """
 
+import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -226,6 +227,23 @@ class Collider:
             links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
             has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
+        # The parallel non-convex vertex scan (narrowphase.func_narrow_phase_nonconvex_parallel_scan) only pays where the
+        # narrowphase loops run in parallel, i.e. a batched scene on GPU: elsewhere they are serialized, and splitting
+        # the scan only adds the per-slot and per-column overhead (-88% on the CPU `nonconvex_spacecraft` benchmark).
+        # PROTOTYPE: GS_SDF_PARALLEL=1 / 0 forces it on / off, e.g. to run the CPU test suite through it.
+        nonconvex_parallel_scan = has_nonconvex_nonterrain and self._solver.sim._para_level >= gs.PARA_LEVEL.ALL
+        if os.environ.get("GS_SDF_PARALLEL") in ("0", "1"):
+            nonconvex_parallel_scan = has_nonconvex_nonterrain and os.environ["GS_SDF_PARALLEL"] == "1"
+        # An env holds at most as many non-convex pairs as the scene can form, which bounds the scan's pair slots (and
+        # its scratch, slots x chunks x keep entries per env); pairs past the last slot keep the serial scan.
+        n_nonconvex_pairs = 0
+        if nonconvex_parallel_scan:
+            geoms = self._solver.geoms
+            pairs = np.asarray(self._valid_collision_pairs).reshape(-1, 2)
+            is_convex = np.array([g.is_convex for g in geoms], dtype=bool)
+            n_nonconvex_pairs = int(np.sum(~(is_convex[pairs[:, 0]] & is_convex[pairs[:, 1]])))
+        nonconvex_scan_slots = max(1, min(16, n_nonconvex_pairs))
+
         # Initialize the static config, which stores every data that are compile-time constants.
         # Note that updating any of them will trigger recompilation.
         self.collider_config = array_class.ColliderStaticConfig(
@@ -242,6 +260,10 @@ class Collider:
             has_prunable_contacts=has_prunable_contacts,
             n_contacts_per_convex_pair=n_contacts_per_convex_pair,
             n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
+            nonconvex_parallel_scan=nonconvex_parallel_scan,
+            nonconvex_scan_slots=nonconvex_scan_slots,
+            nonconvex_scan_chunks=64,
+            nonconvex_scan_keep=8,
             ccd_algorithm=ccd_algorithm,
         )
 

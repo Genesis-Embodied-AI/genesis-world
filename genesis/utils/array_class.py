@@ -1428,6 +1428,8 @@ class ColliderState:
     # (func_clamp_prune_contacts_coop) for the phase-3 (u, v) lex sort. Sized to max_candidate_contacts because
     # each env writes its own permutation.
     contact_lex_idx: qd.Tensor
+    nc_scan_iv: qd.Tensor
+    nc_scan_pen: qd.Tensor
 
 
 def get_collider_state(
@@ -1454,6 +1456,16 @@ def get_collider_state(
     box_ppts2_shape = maybe_shape((4, 2, _B), rigid_config.box_box_detection)
     box_pu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
     prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_static_config.has_prunable_contacts)
+    # Indexed [candidate, env] by the merge branch of func_add_polytope_vertex_contacts_sdf, which is compiled in either
+    # way, so the disabled scan keeps a one-row placeholder rather than a 0-d field.
+    nc_scan_n = (
+        collider_static_config.nonconvex_scan_slots
+        * collider_static_config.nonconvex_scan_chunks
+        * collider_static_config.nonconvex_scan_keep
+        if collider_static_config.nonconvex_parallel_scan
+        else 1
+    )
+    nc_scan_shape = (nc_scan_n, _B)
 
     return ColliderState(
         sort_buffer=get_sort_buffer(solver),
@@ -1495,6 +1507,8 @@ def get_collider_state(
         contact_keep=V(dtype=gs.qd_int, shape=prune_shape),
         contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape),
         contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape),
+        nc_scan_iv=V(dtype=gs.qd_int, shape=nc_scan_shape),
+        nc_scan_pen=V(dtype=gs.qd_float, shape=nc_scan_shape),
     )
 
 
@@ -1539,6 +1553,14 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     n_contacts_per_convex_pair: int
     # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair
     n_contacts_per_nonconvex_pair: int
+    # PROTOTYPE parallel non-convex vertex scan (narrowphase.func_narrow_phase_nonconvex_parallel_scan): the first
+    # nonconvex_scan_slots non-convex pairs of an env have their vertex scan split over nonconvex_scan_chunks columns of
+    # A's 8 x 8 x 8 vertex grid, each column keeping its nonconvex_scan_keep deepest spatially-diverse vertices for the
+    # pair's serial pass to merge.
+    nonconvex_parallel_scan: bool
+    nonconvex_scan_slots: int
+    nonconvex_scan_chunks: int
+    nonconvex_scan_keep: int
     # ccd algorithm
     ccd_algorithm: int
     # GPU core count and cores per compute unit, sizing the split narrow phase launches and scratch states

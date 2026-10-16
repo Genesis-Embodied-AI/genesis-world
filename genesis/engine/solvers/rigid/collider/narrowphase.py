@@ -72,6 +72,7 @@ def func_add_polytope_vertex_contacts_sdf(
     i_gb: int,
     i_b: int,
     i_pair: int,
+    i_slot: int,
     ga_pos: qd.types.vector(3),
     ga_quat: qd.types.vector(4),
     gb_pos: qd.types.vector(3),
@@ -171,72 +172,116 @@ def func_add_polytope_vertex_contacts_sdf(
             top_pen[k] = -gs.qd_float(1e30)
             top_iv[k] = -1
         if qd.static(not seeded):
-            # Pull B's world AABB back into A's local frame (its exact enclosing box, padded to absorb the
-            # rounding of the two transform paths) and walk only the spatial cells of A overlapping it: a vert
-            # outside B's AABB contributes nothing, so far cells are skipped wholesale, without per-vertex work.
-            # The exact world-AABB gate below is unchanged, and the cell binning shares the kernel's monotone
-            # single-precision cell mapping, so every vert that can pass the gate lies in a visited cell.
-            aabb_center = 0.5 * (dyn_state.geoms.aabb_min[i_gb, i_b] + dyn_state.geoms.aabb_max[i_gb, i_b])
-            aabb_half_size = 0.5 * (dyn_state.geoms.aabb_max[i_gb, i_b] - dyn_state.geoms.aabb_min[i_gb, i_b])
-            box_center = gu.qd_inv_transform_by_trans_quat(aabb_center, ga_pos, ga_quat)
-            box_half_size = qd.abs(gu.qd_quat_to_R(ga_quat, EPS)).transpose() @ aabb_half_size
-            box_min = box_center - box_half_size
-            box_max = box_center + box_half_size
-            box_pad = 1e-6 * (1.0 + box_min.norm() + box_max.norm())
-            n_cells_per_axis = 8
-            spatial_origin = collider_info.verts_spatial_grid.geoms_origin[i_ga]
-            spatial_inv_cell_size = collider_info.verts_spatial_grid.geoms_inv_cell_size[i_ga]
-            cell_min = qd.floor((box_min - box_pad - spatial_origin) * spatial_inv_cell_size, gs.qd_int)
-            cell_max = qd.floor((box_max + box_pad - spatial_origin) * spatial_inv_cell_size, gs.qd_int)
-            # The box overlaps the grid only where its cell interval meets [0, n_cells_per_axis - 1] on every
-            # axis; a broadphase pair whose pulled-back box clears the grid on some axis (common for rotated
-            # meshes) scans nothing. Clamping is applied only inside this guard, so indexing stays within the
-            # geom's own cell-range block.
-            if (cell_max >= 0).all() and (cell_min <= n_cells_per_axis - 1).all():
-                cell_min = qd.max(cell_min, 0)
-                cell_max = qd.min(cell_max, n_cells_per_axis - 1)
-                for i_cx in range(cell_min[0], cell_max[0] + 1):
-                    for i_cy in range(cell_min[1], cell_max[1] + 1):
-                        # Cells along z are contiguous in the cell-range layout, so the whole z-run is one vert range.
-                        i_cell = (
-                            i_ga * (n_cells_per_axis**3 + 1)
-                            + (i_cx * n_cells_per_axis + i_cy) * n_cells_per_axis
-                            + cell_min[2]
-                        )
-                        for i_sv in range(
-                            collider_info.verts_spatial_grid.cells_vert_start[i_cell],
-                            collider_info.verts_spatial_grid.cells_vert_start[i_cell + cell_max[2] - cell_min[2] + 1],
-                        ):
-                            vertex_pos = gu.qd_transform_by_trans_quat(
-                                collider_info.verts_spatial_grid.verts_pos[i_sv], ga_pos, ga_quat
+            use_scan_candidates = False
+            if qd.static(collider_static_config.nonconvex_parallel_scan):
+                use_scan_candidates = i_slot < collider_static_config.nonconvex_scan_slots
+            if use_scan_candidates:
+                # The vertex scan already ran in parallel (func_narrow_phase_nonconvex_parallel_scan): merge the
+                # per-column candidates through the same diversity-preserving insertion.
+                # Columns fill their slots from the front (an empty slot is never followed by a kept one), so each
+                # column is read up to its first empty slot. The kept vertices' world positions are cached so that the
+                # diversity test costs a subtraction per kept vertex rather than a transform.
+                n_keep = qd.static(collider_static_config.nonconvex_scan_keep)
+                top_pos = qd.Matrix.zero(gs.qd_float, n_max, 3)
+                for i_col in range(collider_static_config.nonconvex_scan_chunks):
+                    i_s0 = (i_slot * collider_static_config.nonconvex_scan_chunks + i_col) * n_keep
+                    for i_k in range(n_keep):
+                        i_v = collider_state.nc_scan_iv[i_s0 + i_k, i_b]
+                        if i_v < 0:
+                            break
+                        pen_v = collider_state.nc_scan_pen[i_s0 + i_k, i_b]
+                        vertex_pos = gu.qd_transform_by_trans_quat(dyn_info.verts.init_pos[i_v], ga_pos, ga_quat)
+                        close_idx = -1
+                        for k in range(n_max):
+                            if close_idx < 0 and top_iv[k] >= 0:
+                                other_pos = qd.Vector([top_pos[k, 0], top_pos[k, 1], top_pos[k, 2]])
+                                if (vertex_pos - other_pos).norm() < diversity_radius:
+                                    close_idx = k
+                        i_put = -1
+                        if close_idx >= 0:
+                            if pen_v > top_pen[close_idx]:
+                                i_put = close_idx
+                        else:
+                            weakest_idx = 0
+                            for k in range(1, n_max):
+                                if top_pen[k] < top_pen[weakest_idx]:
+                                    weakest_idx = k
+                            if pen_v > top_pen[weakest_idx]:
+                                i_put = weakest_idx
+                        if i_put >= 0:
+                            top_pen[i_put] = pen_v
+                            top_iv[i_put] = i_v
+                            for j in qd.static(range(3)):
+                                top_pos[i_put, j] = vertex_pos[j]
+            else:
+                # Pull B's world AABB back into A's local frame (its exact enclosing box, padded to absorb the
+                # rounding of the two transform paths) and walk only the spatial cells of A overlapping it: a vert
+                # outside B's AABB contributes nothing, so far cells are skipped wholesale, without per-vertex work.
+                # The exact world-AABB gate below is unchanged, and the cell binning shares the kernel's monotone
+                # single-precision cell mapping, so every vert that can pass the gate lies in a visited cell.
+                aabb_center = 0.5 * (dyn_state.geoms.aabb_min[i_gb, i_b] + dyn_state.geoms.aabb_max[i_gb, i_b])
+                aabb_half_size = 0.5 * (dyn_state.geoms.aabb_max[i_gb, i_b] - dyn_state.geoms.aabb_min[i_gb, i_b])
+                box_center = gu.qd_inv_transform_by_trans_quat(aabb_center, ga_pos, ga_quat)
+                box_half_size = qd.abs(gu.qd_quat_to_R(ga_quat, EPS)).transpose() @ aabb_half_size
+                box_min = box_center - box_half_size
+                box_max = box_center + box_half_size
+                box_pad = 1e-6 * (1.0 + box_min.norm() + box_max.norm())
+                n_cells_per_axis = 8
+                spatial_origin = collider_info.verts_spatial_grid.geoms_origin[i_ga]
+                spatial_inv_cell_size = collider_info.verts_spatial_grid.geoms_inv_cell_size[i_ga]
+                cell_min = qd.floor((box_min - box_pad - spatial_origin) * spatial_inv_cell_size, gs.qd_int)
+                cell_max = qd.floor((box_max + box_pad - spatial_origin) * spatial_inv_cell_size, gs.qd_int)
+                # The box overlaps the grid only where its cell interval meets [0, n_cells_per_axis - 1] on every
+                # axis; a broadphase pair whose pulled-back box clears the grid on some axis (common for rotated
+                # meshes) scans nothing. Clamping is applied only inside this guard, so indexing stays within the
+                # geom's own cell-range block.
+                if (cell_max >= 0).all() and (cell_min <= n_cells_per_axis - 1).all():
+                    cell_min = qd.max(cell_min, 0)
+                    cell_max = qd.min(cell_max, n_cells_per_axis - 1)
+                    for i_cx in range(cell_min[0], cell_max[0] + 1):
+                        for i_cy in range(cell_min[1], cell_max[1] + 1):
+                            # Cells along z are contiguous in the cell-range layout, so the whole z-run is one vert range.
+                            i_cell = (
+                                i_ga * (n_cells_per_axis**3 + 1)
+                                + (i_cx * n_cells_per_axis + i_cy) * n_cells_per_axis
+                                + cell_min[2]
                             )
-                            if func_point_in_geom_aabb(i_gb, i_b, vertex_pos, 0.0, dyn_state):
-                                is_in_band, sd_v = sdf.sdf_func_world_local_banded(
-                                    i_gb, vertex_pos, gb_pos, gb_quat, margin, dyn_info, collider_info
+                            for i_sv in range(
+                                collider_info.verts_spatial_grid.cells_vert_start[i_cell],
+                                collider_info.verts_spatial_grid.cells_vert_start[
+                                    i_cell + cell_max[2] - cell_min[2] + 1
+                                ],
+                            ):
+                                vertex_pos = gu.qd_transform_by_trans_quat(
+                                    collider_info.verts_spatial_grid.verts_pos[i_sv], ga_pos, ga_quat
                                 )
-                                pen_v = -sd_v
-                                if is_in_band:
-                                    i_v = collider_info.verts_spatial_grid.verts_idx[i_sv]
-                                    close_idx = -1
-                                    for k in range(n_max):
-                                        if close_idx < 0 and top_iv[k] >= 0:
-                                            other_pos = gu.qd_transform_by_trans_quat(
-                                                dyn_info.verts.init_pos[top_iv[k]], ga_pos, ga_quat
-                                            )
-                                            if (vertex_pos - other_pos).norm() < diversity_radius:
-                                                close_idx = k
-                                    if close_idx >= 0:
-                                        if pen_v > top_pen[close_idx]:
-                                            top_pen[close_idx] = pen_v
-                                            top_iv[close_idx] = i_v
-                                    else:
-                                        weakest_idx = 0
-                                        for k in range(1, n_max):
-                                            if top_pen[k] < top_pen[weakest_idx]:
-                                                weakest_idx = k
-                                        if pen_v > top_pen[weakest_idx]:
-                                            top_pen[weakest_idx] = pen_v
-                                            top_iv[weakest_idx] = i_v
+                                if func_point_in_geom_aabb(i_gb, i_b, vertex_pos, 0.0, dyn_state):
+                                    is_in_band, sd_v = sdf.sdf_func_world_local_banded(
+                                        i_gb, vertex_pos, gb_pos, gb_quat, margin, dyn_info, collider_info
+                                    )
+                                    pen_v = -sd_v
+                                    if is_in_band:
+                                        i_v = collider_info.verts_spatial_grid.verts_idx[i_sv]
+                                        close_idx = -1
+                                        for k in range(n_max):
+                                            if close_idx < 0 and top_iv[k] >= 0:
+                                                other_pos = gu.qd_transform_by_trans_quat(
+                                                    dyn_info.verts.init_pos[top_iv[k]], ga_pos, ga_quat
+                                                )
+                                                if (vertex_pos - other_pos).norm() < diversity_radius:
+                                                    close_idx = k
+                                        if close_idx >= 0:
+                                            if pen_v > top_pen[close_idx]:
+                                                top_pen[close_idx] = pen_v
+                                                top_iv[close_idx] = i_v
+                                        else:
+                                            weakest_idx = 0
+                                            for k in range(1, n_max):
+                                                if top_pen[k] < top_pen[weakest_idx]:
+                                                    weakest_idx = k
+                                            if pen_v > top_pen[weakest_idx]:
+                                                top_pen[weakest_idx] = pen_v
+                                                top_iv[weakest_idx] = i_v
         else:
             # Seeded verification: what the pair's first scan cannot see is a feature of A (rim, edge) crossing one
             # of B's faces BETWEEN B's verts; any such feature lies in B's near-surface band, connected on A's vertex
@@ -4418,6 +4463,146 @@ def func_narrow_phase_any_vs_terrain(
 
 
 @qd.func
+def func_narrow_phase_nonconvex_parallel_scan(
+    geoms_init_AABB: array_class.GeomsInitAABB,
+    dyn_state: array_class.DynState,
+    collider_state: array_class.ColliderState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+    collider_static_config: qd.template(),
+):
+    # PROTOTYPE. One thread per (env, non-convex pair slot, column of A's 8 x 8 x 8 vertex grid): the unseeded vertex
+    # scan of func_add_polytope_vertex_contacts_sdf, split so that a pair's thousands of SDF queries no longer run on
+    # one thread. Each column keeps its NC_KEEP deepest spatially-diverse in-band vertices; the pair's serial pass
+    # merges them. Pair roles (A scanned against B's SDF) follow func_narrow_phase_nonconvex_vs_nonterrain.
+    EPS = rigid_info.EPS[None]
+    n_max = qd.static(collider_static_config.n_contacts_per_nonconvex_pair if rigid_config.enable_multi_contact else 1)
+    NC_SLOTS = qd.static(collider_static_config.nonconvex_scan_slots)
+    NC_CHUNKS = qd.static(collider_static_config.nonconvex_scan_chunks)
+    NC_KEEP = qd.static(collider_static_config.nonconvex_scan_keep)
+    n_cells_per_axis = 8
+    _B = collider_state.active_buffer.shape[1]
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_flat in range(_B * NC_SLOTS * NC_CHUNKS):
+        i_b = i_flat // (NC_SLOTS * NC_CHUNKS)
+        i_slot = (i_flat // NC_CHUNKS) % NC_SLOTS
+        i_chunk = i_flat % NC_CHUNKS
+        i_out = (i_slot * NC_CHUNKS + i_chunk) * NC_KEEP
+        for k in qd.static(range(NC_KEEP)):
+            collider_state.nc_scan_iv[i_out + k, i_b] = -1
+
+        i_ga = -1
+        i_gb = -1
+        n_found = 0
+        for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
+            i_g0 = collider_state.broad_collision_pairs[i_pair, i_b][0]
+            i_g1 = collider_state.broad_collision_pairs[i_pair, i_b][1]
+            if (
+                not (dyn_info.geoms.is_convex[i_g0] and dyn_info.geoms.is_convex[i_g1])
+                and dyn_info.geoms.type[i_g1] != gs.GEOM_TYPE.TERRAIN
+            ):
+                if n_found == i_slot:
+                    i_ga = i_g0
+                    i_gb = i_g1
+                n_found = n_found + 1
+
+        if i_ga >= 0:
+            if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
+                i_ga, i_gb = i_gb, i_ga
+            if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+                i_ga, i_gb = i_gb, i_ga
+            elif dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.PLANE:
+                diag_a_sq = (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]).norm_sqr()
+                diag_b_sq = (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]).norm_sqr()
+                if diag_a_sq > diag_b_sq:
+                    i_ga, i_gb = i_gb, i_ga
+            tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(
+                i_ga, i_gb, geoms_init_AABB, dyn_info
+            )
+            ga_pos = dyn_state.geoms.pos[i_ga, i_b]
+            ga_quat = dyn_state.geoms.quat[i_ga, i_b]
+            gb_pos = dyn_state.geoms.pos[i_gb, i_b]
+            gb_quat = dyn_state.geoms.quat[i_gb, i_b]
+            gb_cell = collider_info.sdf.geoms_info.sdf_cell_size[i_gb]
+            margin = qd.min(qd.min(gb_cell[0], gb_cell[1]), gb_cell[2])
+            ext = geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]
+            ext_max = qd.max(qd.max(ext[0], ext[1]), ext[2])
+            ext_sum_other = ext[0] + ext[1] + ext[2] - ext_max
+            needle_extent = ext_max - gs.qd_float(2.0) * ext_sum_other
+            diversity_radius = qd.max(tolerance, needle_extent * gs.qd_float(0.5 / n_max))
+
+            aabb_center = 0.5 * (dyn_state.geoms.aabb_min[i_gb, i_b] + dyn_state.geoms.aabb_max[i_gb, i_b])
+            aabb_half_size = 0.5 * (dyn_state.geoms.aabb_max[i_gb, i_b] - dyn_state.geoms.aabb_min[i_gb, i_b])
+            box_center = gu.qd_inv_transform_by_trans_quat(aabb_center, ga_pos, ga_quat)
+            box_half_size = qd.abs(gu.qd_quat_to_R(ga_quat, EPS)).transpose() @ aabb_half_size
+            box_min = box_center - box_half_size
+            box_max = box_center + box_half_size
+            box_pad = 1e-6 * (1.0 + box_min.norm() + box_max.norm())
+            spatial_origin = collider_info.verts_spatial_grid.geoms_origin[i_ga]
+            spatial_inv_cell_size = collider_info.verts_spatial_grid.geoms_inv_cell_size[i_ga]
+            cell_min = qd.floor((box_min - box_pad - spatial_origin) * spatial_inv_cell_size, gs.qd_int)
+            cell_max = qd.floor((box_max + box_pad - spatial_origin) * spatial_inv_cell_size, gs.qd_int)
+            i_cx = i_chunk // n_cells_per_axis
+            i_cy = i_chunk % n_cells_per_axis
+            if (cell_max >= 0).all() and (cell_min <= n_cells_per_axis - 1).all():
+                cell_min = qd.max(cell_min, 0)
+                cell_max = qd.min(cell_max, n_cells_per_axis - 1)
+                if cell_min[0] <= i_cx and i_cx <= cell_max[0] and cell_min[1] <= i_cy and i_cy <= cell_max[1]:
+                    top_iv = qd.Vector.zero(gs.qd_int, NC_KEEP)
+                    top_pen = qd.Vector.zero(gs.qd_float, NC_KEEP)
+                    top_pos = qd.Matrix.zero(gs.qd_float, NC_KEEP, 3)
+                    for k in qd.static(range(NC_KEEP)):
+                        top_pen[k] = -gs.qd_float(1e30)
+                        top_iv[k] = -1
+                    i_cell = (
+                        i_ga * (n_cells_per_axis**3 + 1)
+                        + (i_cx * n_cells_per_axis + i_cy) * n_cells_per_axis
+                        + cell_min[2]
+                    )
+                    for i_sv in range(
+                        collider_info.verts_spatial_grid.cells_vert_start[i_cell],
+                        collider_info.verts_spatial_grid.cells_vert_start[i_cell + cell_max[2] - cell_min[2] + 1],
+                    ):
+                        vertex_pos = gu.qd_transform_by_trans_quat(
+                            collider_info.verts_spatial_grid.verts_pos[i_sv], ga_pos, ga_quat
+                        )
+                        if func_point_in_geom_aabb(i_gb, i_b, vertex_pos, 0.0, dyn_state):
+                            is_in_band, sd_v = sdf.sdf_func_world_local_banded(
+                                i_gb, vertex_pos, gb_pos, gb_quat, margin, dyn_info, collider_info
+                            )
+                            pen_v = -sd_v
+                            if is_in_band:
+                                i_v = collider_info.verts_spatial_grid.verts_idx[i_sv]
+                                close_idx = -1
+                                for k in qd.static(range(NC_KEEP)):
+                                    if close_idx < 0 and top_iv[k] >= 0:
+                                        other_pos = qd.Vector([top_pos[k, 0], top_pos[k, 1], top_pos[k, 2]])
+                                        if (vertex_pos - other_pos).norm() < diversity_radius:
+                                            close_idx = k
+                                i_put = -1
+                                if close_idx >= 0:
+                                    if pen_v > top_pen[close_idx]:
+                                        i_put = close_idx
+                                else:
+                                    weakest_idx = 0
+                                    for k in qd.static(range(1, NC_KEEP)):
+                                        if top_pen[k] < top_pen[weakest_idx]:
+                                            weakest_idx = k
+                                    if pen_v > top_pen[weakest_idx]:
+                                        i_put = weakest_idx
+                                if i_put >= 0:
+                                    top_pen[i_put] = pen_v
+                                    top_iv[i_put] = i_v
+                                    for j in qd.static(range(3)):
+                                        top_pos[i_put, j] = vertex_pos[j]
+                    for k in qd.static(range(NC_KEEP)):
+                        collider_state.nc_scan_iv[i_out + k, i_b] = top_iv[k]
+                        collider_state.nc_scan_pen[i_out + k, i_b] = top_pen[k]
+
+
+@qd.func
 def func_narrow_phase_nonconvex_vs_nonterrain(
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
@@ -4432,8 +4617,20 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
     EPS = rigid_info.EPS[None]
 
     _B = collider_state.active_buffer.shape[1]
+    if qd.static(collider_static_config.nonconvex_parallel_scan):
+        func_narrow_phase_nonconvex_parallel_scan(
+            geoms_init_AABB,
+            dyn_state,
+            collider_state,
+            dyn_info,
+            rigid_info,
+            collider_info,
+            rigid_config,
+            collider_static_config,
+        )
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_b in range(_B):
+        i_slot = 0
         for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
@@ -4443,6 +4640,8 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                     not (dyn_info.geoms.is_convex[i_ga] and dyn_info.geoms.is_convex[i_gb])
                     and dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.TERRAIN
                 ):
+                    i_slot_pair = i_slot
+                    i_slot = i_slot + 1
                     # Place the bounded side at i_ga: the polytope helper iterates A's verts and queries B's SDF.
                     # PLANE has infinite extent so it must be i_gb. For non-PLANE pairs the smaller-AABB side goes to
                     # i_ga (its verts are dense relative to the contact patch, while the larger side's scan wastes
@@ -4539,6 +4738,7 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                             i_gb,
                             i_b,
                             i_pair,
+                            i_slot_pair,
                             ga_pos,
                             ga_quat,
                             gb_pos,
@@ -4565,6 +4765,7 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                                 i_ga,
                                 i_b,
                                 i_pair,
+                                collider_static_config.nonconvex_scan_slots,
                                 gb_pos,
                                 gb_quat,
                                 ga_pos,
