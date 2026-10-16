@@ -1956,12 +1956,9 @@ def func_contact_overlap_axes(
     convex hulls of these samples where the depth between their fitted planes is non-negative, in the plane coordinates
     around contact 0 'contact_pos'.
 
-    A perturbed detection returns the point of the overlap that its tilt deepens the most, which is the corner whose
-    normal cone (the in-plane directions along which it lies farthest out) contains the deepening direction. Each
-    detection deepens its corner along the direction of the normal cone that leaves the depth gradient farthest inside
-    the cone, so that it can neither tie with nor return a neighbouring corner. An overlap of more than four corners
-    targets the four that carry the most area together with the corner of contact 0, which needs no detection, so that
-    the contacts of the pair are as many corners of the patch.
+    Targets are selected by the area they span with contact 0. Their aim directions maximize the depth-gradient
+    margin inside each corner's normal cone. Truncated coplanar outlines receive additional support queries until
+    their overlap approximation meets the area and face-distance tolerances or reaches the query or sample limit.
 
     Returns the unit rotation axes and the merge distance. Targets within that distance of contact 0 or an earlier
     target receive a zero axis. Degenerate overlaps retain the default axes and the geom-scale merge distance.
@@ -1972,13 +1969,11 @@ def func_contact_overlap_axes(
     # apart, far beyond the square root of the machine precision.
     coincidence_tolerance = qd.sqrt(EPS) * geom_pair_scale + 2.0 * EPS * contact_pos.norm()
 
-    # Two opposite supports seed a convex outline. Each query adds its support to the hull, retaining at most eight
+    # Two opposite supports seed a convex outline. Each query adds its support to the hull, retaining at most thirty-two
     # vertices in contact-plane coordinates plus height along the normal. Geom A lies on the positive side of the
     # normal, so its face looks backwards. Sorted geom types put a plane at A and a terrain at B.
-    # TODO: Ten vertices per face and 40 support queries raise the area spanned by the contacts on a 32-sided face from
-    # at worst 67% to at least 75% of the largest five-corner patch, for 0.1-0.4% more step time on average. The worst
-    # case grows faster, the search of the target corners being quadratic in the 2n+1 overlap corners of n vertices.
-    polygons = qd.Matrix.zero(gs.qd_float, 16, 3)
+    # Sample and query caps bound local storage and support-query count independently of mesh resolution.
+    polygons = qd.Matrix.zero(gs.qd_float, 64, 3)
     polygons_size = qd.Vector.zero(gs.qd_int, 2)
     # A sphere, an ellipsoid or a capsule has no planar face of positive area, so their overlap with any face is empty.
     # Against a plane, the overlap is the whole face of the other geom, a corner of which every tilt of the default
@@ -1988,23 +1983,40 @@ def func_contact_overlap_axes(
         geom_type = dyn_info.geoms.type[i_ga if i_g == 0 else i_gb]
         if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.ELLIPSOID or geom_type == gs.GEOM_TYPE.CAPSULE:
             is_outlined = False
+    is_adaptive = False
     if is_outlined:
         # Prioritize edges nearest contact 0 so the vertex budget resolves the portion around the contact first.
         # Surviving edges retain their settled bits when an insertion removes the visible chain.
         edges_settled = qd.Vector.zero(gs.qd_int, 2)
+        # Spend additional queries only where truncation leaves overlap uncertainty
+        polygons_capacity = qd.Vector([8, 8])
         i_g_refine = 0
         i_e_refine = 0
-        for i_query in range(4 + 2 * (6 + 8)):
+        n_adaptive = 0
+        planes = qd.Matrix.zero(gs.qd_float, 2, 3)
+        # Four initial bounds plus the remaining support half-planes and the depth half-plane allow 65 vertices
+        region_outer = qd.Matrix.zero(gs.qd_float, 65, 2)
+        n_outer = 0
+        bounds = qd.Vector.zero(gs.qd_float, 4)
+        plane_tolerance = 8.0 * EPS * (geom_pair_scale + contact_pos.norm())
+        sampling_tangent = 2.0 * collider_info.mc_perturbation[None]
+        clip_normal_pending = qd.Vector.zero(gs.qd_float, 2)
+        clip_offset_pending = gs.qd_float(0.0)
+        for i_query in range(128):
             i_g = i_query // 2
             i_e = 0
             direction_x = 1.0 if i_query % 2 == 0 else -1.0
             direction_y = gs.qd_float(0.0)
             is_query = i_query < 4
-            if not is_query:
+            if not is_query and not is_adaptive:
                 for _ in range(2):
                     if i_g_refine < 2:
                         n_points = polygons_size[i_g_refine]
-                        if n_points < 2 or n_points >= 8 or edges_settled[i_g_refine] == (1 << n_points) - 1:
+                        if (
+                            n_points < 2
+                            or n_points >= polygons_capacity[i_g_refine]
+                            or edges_settled[i_g_refine] == (1 << n_points) - 1
+                        ):
                             i_g_refine += 1
                             i_e_refine = 0
                 if i_g_refine < 2:
@@ -2012,8 +2024,8 @@ def func_contact_overlap_axes(
                     distance_min = gs.qd_float(-1.0)
                     for j_e in range(polygons_size[i_g_refine]):
                         if edges_settled[i_g_refine] & (1 << j_e) == 0:
-                            j_k0 = 8 * i_g_refine + j_e
-                            j_k1 = 8 * i_g_refine + (j_e + 1) % polygons_size[i_g_refine]
+                            j_k0 = 32 * i_g_refine + j_e
+                            j_k1 = 32 * i_g_refine + (j_e + 1) % polygons_size[i_g_refine]
                             edge_x = polygons[j_k1, 0] - polygons[j_k0, 0]
                             edge_y = polygons[j_k1, 1] - polygons[j_k0, 1]
                             edge_length_sqr = edge_x**2 + edge_y**2
@@ -2026,26 +2038,143 @@ def func_contact_overlap_axes(
                                 i_e_refine = j_e
                     # Both directed seed edges span the same segment. Contact 0 selects the side to refine first
                     if polygons_size[i_g_refine] == 2 and edges_settled[i_g_refine] == 0:
-                        i_k0 = 8 * i_g_refine
+                        i_k0 = 32 * i_g_refine
                         edge_x = polygons[i_k0 + 1, 0] - polygons[i_k0, 0]
                         edge_y = polygons[i_k0 + 1, 1] - polygons[i_k0, 1]
                         side = edge_y * polygons[i_k0, 0] - edge_x * polygons[i_k0, 1]
                         i_e_refine = 0 if side <= 0.0 else 1
                     i_g, i_e = i_g_refine, i_e_refine
                     n_points = polygons_size[i_g]
-                    i_k0 = 8 * i_g + i_e
-                    i_k1 = 8 * i_g + (i_e + 1) % n_points
+                    i_k0 = 32 * i_g + i_e
+                    i_k1 = 32 * i_g + (i_e + 1) % n_points
                     edge_x = polygons[i_k1, 0] - polygons[i_k0, 0]
                     edge_y = polygons[i_k1, 1] - polygons[i_k0, 1]
                     edge_norm = qd.sqrt(edge_x**2 + edge_y**2)
                     direction_x, direction_y = edge_y / edge_norm, -edge_x / edge_norm
                     is_query = True
+            if not is_query and not is_adaptive:
+                # Refine truncated planar outlines until the uncertainty is small in the overlap itself
+                is_adaptive = polygons_size[0] >= 8 or polygons_size[1] >= 8
+                for j_g in range(2 if is_adaptive else 0):
+                    n_points = polygons_size[j_g]
+                    plane_normal = qd.Vector.zero(gs.qd_float, 3)
+                    centroid = qd.Vector.zero(gs.qd_float, 3)
+                    for j_v in range(n_points):
+                        j_k0 = 32 * j_g + j_v
+                        j_k1 = 32 * j_g + (j_v + 1) % n_points
+                        point = qd.Vector([polygons[j_k0, 0], polygons[j_k0, 1], polygons[j_k0, 2]])
+                        point_next = qd.Vector([polygons[j_k1, 0], polygons[j_k1, 1], polygons[j_k1, 2]])
+                        plane_normal += point.cross(point_next)
+                        centroid += point / n_points
+                    if qd.abs(plane_normal[2]) <= EPS * geom_pair_scale**2:
+                        is_adaptive = False
+                    else:
+                        planes[j_g, 0] = -plane_normal[0] / plane_normal[2]
+                        planes[j_g, 1] = -plane_normal[1] / plane_normal[2]
+                        planes[j_g, 2] = centroid[2] - planes[j_g, 0] * centroid[0] - planes[j_g, 1] * centroid[1]
+                    for j_v in range(n_points):
+                        j_k = 32 * j_g + j_v
+                        height = planes[j_g, 0] * polygons[j_k, 0] + planes[j_g, 1] * polygons[j_k, 1]
+                        if qd.abs(polygons[j_k, 2] - height - planes[j_g, 2]) > plane_tolerance:
+                            is_adaptive = False
+            if is_adaptive:
+                i_g = 0
+                is_query = n_adaptive < 64
+                n_clip_outer = 0
+                if n_adaptive > 4:
+                    n_clip_outer = 2 if n_adaptive == 8 else 1
+                for j_clip in range(n_clip_outer):
+                    clip_normal = qd.Vector([planes[0, 0] - planes[1, 0], planes[0, 1] - planes[1, 1]])
+                    clip_offset = planes[1, 2] - planes[0, 2]
+                    if j_clip == 0:
+                        clip_normal = clip_normal_pending
+                        clip_offset = clip_offset_pending
+                    region_clipped = qd.Matrix.zero(gs.qd_float, 65, 2)
+                    n_clipped = 0
+                    for j_v in range(n_outer):
+                        j_v_next = (j_v + 1) % n_outer
+                        point = qd.Vector([region_outer[j_v, 0], region_outer[j_v, 1]])
+                        point_next = qd.Vector([region_outer[j_v_next, 0], region_outer[j_v_next, 1]])
+                        side = clip_offset - clip_normal.dot(point)
+                        side_next = clip_offset - clip_normal.dot(point_next)
+                        if side >= 0.0:
+                            region_clipped[n_clipped, 0], region_clipped[n_clipped, 1] = point[0], point[1]
+                            n_clipped += 1
+                        if (side >= 0.0) != (side_next >= 0.0):
+                            fraction = side / (side - side_next)
+                            point += fraction * (point_next - point)
+                            region_clipped[n_clipped, 0], region_clipped[n_clipped, 1] = point[0], point[1]
+                            n_clipped += 1
+                    region_outer, n_outer = region_clipped, n_clipped
+                if n_adaptive < 8:
+                    i_g = n_adaptive // 4
+                    i_d = n_adaptive % 4
+                    direction_x = 1.0 if i_d == 0 else (-1.0 if i_d == 2 else 0.0)
+                    direction_y = 1.0 if i_d == 1 else (-1.0 if i_d == 3 else 0.0)
+                else:
+                    area_outer = gs.qd_float(0.0)
+                    perimeter_outer = gs.qd_float(0.0)
+                    bounds_min = qd.Vector([region_outer[0, 0], region_outer[0, 1]])
+                    bounds_max = bounds_min
+                    distance_max = gs.qd_float(-1.0)
+                    for j_v in range(n_outer):
+                        point = qd.Vector([region_outer[j_v, 0], region_outer[j_v, 1]])
+                        j_v1 = (j_v + 1) % n_outer
+                        area_outer += point[0] * region_outer[j_v1, 1] - point[1] * region_outer[j_v1, 0]
+                        edge_outer = qd.Vector([region_outer[j_v1, 0], region_outer[j_v1, 1]]) - point
+                        perimeter_outer += edge_outer.norm()
+                        bounds_min = qd.min(bounds_min, point)
+                        bounds_max = qd.max(bounds_max, point)
+                        for j_g in range(2):
+                            n_points = polygons_size[j_g]
+                            distance_min = gs.qd_float(1e30)
+                            delta_nearest = qd.Vector.zero(gs.qd_float, 2)
+                            is_inside = n_points >= 3
+                            for j_e in range(n_points):
+                                j_e1 = (j_e + 1) % n_points
+                                j_k0, j_k1 = 32 * j_g + j_e, 32 * j_g + j_e1
+                                point_start = qd.Vector([polygons[j_k0, 0], polygons[j_k0, 1]])
+                                point_end = qd.Vector([polygons[j_k1, 0], polygons[j_k1, 1]])
+                                edge = point_end - point_start
+                                delta = point - point_start
+                                if edge[0] * delta[1] - edge[1] * delta[0] < 0.0:
+                                    is_inside = False
+                                fraction = qd.min(qd.max(delta.dot(edge) / qd.max(edge.dot(edge), EPS**2), 0.0), 1.0)
+                                delta -= fraction * edge
+                                if delta.dot(delta) < distance_min:
+                                    distance_min = delta.dot(delta)
+                                    delta_nearest = delta
+                            if is_inside:
+                                distance_min = 0.0
+                            if distance_min > distance_max:
+                                distance_max = distance_min
+                                i_g = j_g
+                                direction_x, direction_y = delta_nearest[0], delta_nearest[1]
+                    diameter_sqr = (bounds_max - bounds_min).norm_sqr()
+                    # Eroding the outer overlap by its maximum distance to either sampled face lies inside both
+                    # faces. The removed area is at most that distance times the outer perimeter.
+                    if n_outer < 3 or (
+                        2.0 * qd.sqrt(qd.max(distance_max, 0.0)) * perimeter_outer <= 0.02 * area_outer
+                        and distance_max <= 0.005**2 * diameter_sqr
+                    ):
+                        is_query = False
+                    if distance_max <= coincidence_tolerance**2 or polygons_size[i_g] >= 32:
+                        is_query = False
+                    direction_norm = qd.sqrt(direction_x**2 + direction_y**2)
+                    direction_x /= qd.max(direction_norm, EPS)
+                    direction_y /= qd.max(direction_norm, EPS)
+            if not is_query:
+                break
             if is_query:
                 is_b = i_g == 1
                 # The relative perturbation sets the sampling angle so curved surfaces are sampled near the contact.
-                direction = 2.0 * collider_info.mc_perturbation[None] * (
-                    direction_x * axis_0 + direction_y * axis_1
-                ) + (normal if is_b else -normal)
+                direction = sampling_tangent * (direction_x * axis_0 + direction_y * axis_1) + (
+                    normal if is_b else -normal
+                )
+                sign = 1.0 if is_b else -1.0
+                if is_adaptive:
+                    # Removing the fitted height gradient makes the support direction tangential within the face
+                    direction -= sign * (planes[i_g, 0] * axis_0 + planes[i_g, 1] * axis_1)
                 support_offset = (
                     mpr.support_driver(
                         i_gb if is_b else i_ga,
@@ -2062,32 +2191,62 @@ def func_contact_overlap_axes(
                     - contact_pos
                 )
                 corner = qd.Vector([support_offset.dot(axis_0), support_offset.dot(axis_1), support_offset.dot(normal)])
+                if is_adaptive:
+                    height = planes[i_g, 0] * corner[0] + planes[i_g, 1] * corner[1] + planes[i_g, 2]
+                    if qd.abs(corner[2] - height) > plane_tolerance:
+                        is_adaptive = False
+                        break
+                    offset = direction_x * corner[0] + direction_y * corner[1]
+                    offset += sign * (corner[2] - height) / sampling_tangent
+                    if n_adaptive < 4:
+                        bounds[n_adaptive] = offset
+                        if n_adaptive == 3:
+                            region_outer[0, 0], region_outer[0, 1] = -bounds[2], -bounds[3]
+                            region_outer[1, 0], region_outer[1, 1] = bounds[0], -bounds[3]
+                            region_outer[2, 0], region_outer[2, 1] = bounds[0], bounds[1]
+                            region_outer[3, 0], region_outer[3, 1] = -bounds[2], bounds[1]
+                            n_outer = 4
+                    else:
+                        clip_normal_pending = qd.Vector([direction_x, direction_y])
+                        clip_offset_pending = offset
+                    n_adaptive += 1
+                    side_min = gs.qd_float(0.0)
+                    i_e = 0
+                    for j_e in range(polygons_size[i_g]):
+                        j_k0 = 32 * i_g + j_e
+                        j_k1 = 32 * i_g + (j_e + 1) % polygons_size[i_g]
+                        edge_x = polygons[j_k1, 0] - polygons[j_k0, 0]
+                        edge_y = polygons[j_k1, 1] - polygons[j_k0, 1]
+                        side = edge_x * (corner[1] - polygons[j_k0, 1]) - edge_y * (corner[0] - polygons[j_k0, 0])
+                        if side < side_min:
+                            side_min = side
+                            i_e = j_e
                 n_points = polygons_size[i_g]
                 if i_query < 4:
                     # Coincident opposite supports leave a single projected point.
                     is_distinct = n_points == 0
                     if n_points > 0:
-                        i_k_last = 8 * i_g + n_points - 1
+                        i_k_last = 32 * i_g + n_points - 1
                         gap_x, gap_y = corner[0] - polygons[i_k_last, 0], corner[1] - polygons[i_k_last, 1]
                         is_distinct = gap_x**2 + gap_y**2 > coincidence_tolerance**2
                         if i_query % 2 == 1 and n_points > 1:
-                            gap_x, gap_y = corner[0] - polygons[8 * i_g, 0], corner[1] - polygons[8 * i_g, 1]
+                            gap_x, gap_y = corner[0] - polygons[32 * i_g, 0], corner[1] - polygons[32 * i_g, 1]
                             is_distinct = is_distinct and gap_x**2 + gap_y**2 > coincidence_tolerance**2
                     if is_distinct:
                         for i_3 in qd.static(range(3)):
-                            polygons[8 * i_g + n_points, i_3] = corner[i_3]
+                            polygons[32 * i_g + n_points, i_3] = corner[i_3]
                         polygons_size[i_g] = n_points + 1
                 else:
-                    i_k0 = 8 * i_g + i_e
-                    i_k1 = 8 * i_g + (i_e + 1) % n_points
+                    i_k0 = 32 * i_g + i_e
+                    i_k1 = 32 * i_g + (i_e + 1) % n_points
                     edge_x, edge_y = polygons[i_k1, 0] - polygons[i_k0, 0], polygons[i_k1, 1] - polygons[i_k0, 1]
                     side = edge_x * (corner[1] - polygons[i_k0, 1]) - edge_y * (corner[0] - polygons[i_k0, 0])
                     if side < -coincidence_tolerance * qd.sqrt(edge_x**2 + edge_y**2):
                         is_local = True
                         for j_e_ in range(2):
                             j_e = (i_e + n_points - 1 + 2 * j_e_) % n_points
-                            j_k0 = 8 * i_g + j_e
-                            j_k1 = 8 * i_g + (j_e + 1) % n_points
+                            j_k0 = 32 * i_g + j_e
+                            j_k1 = 32 * i_g + (j_e + 1) % n_points
                             neighbor_x = polygons[j_k1, 0] - polygons[j_k0, 0]
                             neighbor_y = polygons[j_k1, 1] - polygons[j_k0, 1]
                             neighbor_side = neighbor_x * (corner[1] - polygons[j_k0, 1])
@@ -2098,9 +2257,9 @@ def func_contact_overlap_axes(
                             for i_v_ in range(n_points - i_e - 1):
                                 i_v = n_points - i_v_
                                 for i_3 in qd.static(range(3)):
-                                    polygons[8 * i_g + i_v, i_3] = polygons[8 * i_g + i_v - 1, i_3]
+                                    polygons[32 * i_g + i_v, i_3] = polygons[32 * i_g + i_v - 1, i_3]
                             for i_3 in qd.static(range(3)):
-                                polygons[8 * i_g + i_e + 1, i_3] = corner[i_3]
+                                polygons[32 * i_g + i_e + 1, i_3] = corner[i_3]
                             polygons_size[i_g] = n_points + 1
                             edges_lower = edges_settled[i_g] & ((1 << i_e) - 1)
                             edges_upper = (edges_settled[i_g] >> (i_e + 1)) << (i_e + 2)
@@ -2108,8 +2267,8 @@ def func_contact_overlap_axes(
                         else:
                             edges_visible = gs.qd_int(0)
                             for j_e in range(n_points):
-                                j_k0 = 8 * i_g + j_e
-                                j_k1 = 8 * i_g + (j_e + 1) % n_points
+                                j_k0 = 32 * i_g + j_e
+                                j_k1 = 32 * i_g + (j_e + 1) % n_points
                                 edge_x = polygons[j_k1, 0] - polygons[j_k0, 0]
                                 edge_y = polygons[j_k1, 1] - polygons[j_k0, 1]
                                 side = edge_x * (corner[1] - polygons[j_k0, 1])
@@ -2136,39 +2295,39 @@ def func_contact_overlap_axes(
                                 if i_v_start > 0:
                                     # The kept chain starts at vertex 0 after a rotation by i_v_start, made of as many
                                     # cycles as the greatest common divisor of both counts. Euclid's algorithm takes at
-                                    # most 5 steps for counts up to 8.
+                                    # most 7 steps for counts up to 32.
                                     n_cycles = n_points
                                     n_remainder = i_v_start
-                                    for _ in range(5):
+                                    for _ in range(7):
                                         if n_remainder > 0:
                                             n_next = n_cycles % n_remainder
                                             n_cycles = n_remainder
                                             n_remainder = n_next
                                     for j_v in range(n_cycles):
-                                        i_k = 8 * i_g + j_v
+                                        i_k = 32 * i_g + j_v
                                         corner_cycle = qd.Vector([polygons[i_k, 0], polygons[i_k, 1], polygons[i_k, 2]])
                                         i_v = j_v
                                         for _ in range(n_points // n_cycles - 1):
                                             i_v_next = (i_v + i_v_start) % n_points
                                             for i_3 in qd.static(range(3)):
-                                                polygons[8 * i_g + i_v, i_3] = polygons[8 * i_g + i_v_next, i_3]
+                                                polygons[32 * i_g + i_v, i_3] = polygons[32 * i_g + i_v_next, i_3]
                                             i_v = i_v_next
                                         for i_3 in qd.static(range(3)):
-                                            polygons[8 * i_g + i_v, i_3] = corner_cycle[i_3]
+                                            polygons[32 * i_g + i_v, i_3] = corner_cycle[i_3]
                                 for i_3 in qd.static(range(3)):
-                                    polygons[8 * i_g + n_kept, i_3] = corner[i_3]
+                                    polygons[32 * i_g + n_kept, i_3] = corner[i_3]
                                 polygons_size[i_g] = n_kept + 1
                                 edges_settled[i_g] = edges_settled_next
                             else:
                                 # Roundoff can split nearly collinear visible edges into several chains. Rebuild the
                                 # hull to restore convex vertex order before clipping.
                                 for i_3 in qd.static(range(3)):
-                                    polygons[8 * i_g + n_points, i_3] = corner[i_3]
+                                    polygons[32 * i_g + n_points, i_3] = corner[i_3]
                                 n_points += 1
                                 i_k_start = 0
                                 for j_k_ in range(1, n_points):
-                                    i_k = 8 * i_g + i_k_start
-                                    j_k = 8 * i_g + j_k_
+                                    i_k = 32 * i_g + i_k_start
+                                    j_k = 32 * i_g + j_k_
                                     is_before = polygons[j_k, 0] < polygons[i_k, 0]
                                     is_before = is_before or (
                                         polygons[j_k, 0] <= polygons[i_k, 0] and polygons[j_k, 1] < polygons[i_k, 1]
@@ -2176,19 +2335,19 @@ def func_contact_overlap_axes(
                                     if is_before:
                                         i_k_start = j_k_
                                 for i_3 in qd.static(range(3)):
-                                    coordinate = polygons[8 * i_g, i_3]
-                                    polygons[8 * i_g, i_3] = polygons[8 * i_g + i_k_start, i_3]
-                                    polygons[8 * i_g + i_k_start, i_3] = coordinate
+                                    coordinate = polygons[32 * i_g, i_3]
+                                    polygons[32 * i_g, i_3] = polygons[32 * i_g + i_k_start, i_3]
+                                    polygons[32 * i_g + i_k_start, i_3] = coordinate
                                 n_hull = 0
                                 is_closed = False
                                 for i_v in range(n_points):
                                     if not is_closed:
                                         n_hull = i_v + 1
-                                        i_k0 = 8 * i_g + i_v
+                                        i_k0 = 32 * i_g + i_v
                                         i_k_next = 1 if i_v == 0 and n_points > 1 else 0
                                         for j_k_ in range(i_v + 1, n_points):
-                                            i_k1 = 8 * i_g + i_k_next
-                                            j_k = 8 * i_g + j_k_
+                                            i_k1 = 32 * i_g + i_k_next
+                                            j_k = 32 * i_g + j_k_
                                             edge_x = polygons[i_k1, 0] - polygons[i_k0, 0]
                                             edge_y = polygons[i_k1, 1] - polygons[i_k0, 1]
                                             delta_x = polygons[j_k, 0] - polygons[i_k0, 0]
@@ -2203,16 +2362,16 @@ def func_contact_overlap_axes(
                                         is_closed = i_k_next == 0
                                         if not is_closed:
                                             for i_3 in qd.static(range(3)):
-                                                coordinate = polygons[8 * i_g + n_hull, i_3]
-                                                polygons[8 * i_g + n_hull, i_3] = polygons[8 * i_g + i_k_next, i_3]
-                                                polygons[8 * i_g + i_k_next, i_3] = coordinate
+                                                coordinate = polygons[32 * i_g + n_hull, i_3]
+                                                polygons[32 * i_g + n_hull, i_3] = polygons[32 * i_g + i_k_next, i_3]
+                                                polygons[32 * i_g + i_k_next, i_3] = coordinate
                                 polygons_size[i_g] = n_hull
                                 edges_settled[i_g] = 0
                     else:
                         edges_settled[i_g] |= 1 << i_e
 
-    # Two eight-vertex hulls and the depth half-plane bound at most seventeen overlap vertices
-    overlap = qd.Matrix.zero(gs.qd_float, 17, 2)
+    # Two thirty-two-vertex hulls and the depth half-plane bound at most sixty-five overlap vertices
+    overlap = qd.Matrix.zero(gs.qd_float, 65, 2)
     n_overlap = 0
     slope = qd.Vector.zero(gs.qd_float, 2)
     if is_outlined:
@@ -2226,8 +2385,8 @@ def func_contact_overlap_axes(
             centroid = qd.Vector.zero(gs.qd_float, 3)
             n_points = polygons_size[i_g]
             for i_k in range(n_points):
-                i_k0 = 8 * i_g + i_k
-                i_k1 = 8 * i_g + (i_k + 1) % n_points
+                i_k0 = 32 * i_g + i_k
+                i_k1 = 32 * i_g + (i_k + 1) % n_points
                 plane_normal[0] += (polygons[i_k0, 1] - polygons[i_k1, 1]) * (polygons[i_k0, 2] + polygons[i_k1, 2])
                 plane_normal[1] += (polygons[i_k0, 2] - polygons[i_k1, 2]) * (polygons[i_k0, 0] + polygons[i_k1, 0])
                 plane_normal[2] += (polygons[i_k0, 0] - polygons[i_k1, 0]) * (polygons[i_k0, 1] + polygons[i_k1, 1])
@@ -2264,7 +2423,7 @@ def func_contact_overlap_axes(
                 is_pressed_subject = True
         is_pressed_clip = False
         for i_e in range(n_clip):
-            if depth_origin + slope[0] * polygons[8 + i_e, 0] + slope[1] * polygons[8 + i_e, 1] >= 0.0:
+            if depth_origin + slope[0] * polygons[32 + i_e, 0] + slope[1] * polygons[32 + i_e, 1] >= 0.0:
                 is_pressed_clip = True
         if not (is_pressed_subject and is_pressed_clip):
             n_overlap = 0
@@ -2273,7 +2432,7 @@ def func_contact_overlap_axes(
         for i_e in range(n_clip):
             i_e_next = (i_e + 1) % n_clip
             clip_area += (
-                polygons[8 + i_e, 0] * polygons[8 + i_e_next, 1] - polygons[8 + i_e, 1] * polygons[8 + i_e_next, 0]
+                polygons[32 + i_e, 0] * polygons[32 + i_e_next, 1] - polygons[32 + i_e, 1] * polygons[32 + i_e_next, 0]
             )
         orientation = 1.0 if clip_area >= 0.0 else -1.0
         for i_e in range(n_clip + 1):
@@ -2281,22 +2440,22 @@ def func_contact_overlap_axes(
             inward_normal = slope
             offset = depth_origin
             if i_e < n_clip:
-                corner_x, corner_y = polygons[8 + i_e, 0], polygons[8 + i_e, 1]
-                edge_x = polygons[8 + (i_e + 1) % n_clip, 0] - corner_x
-                edge_y = polygons[8 + (i_e + 1) % n_clip, 1] - corner_y
+                corner_x, corner_y = polygons[32 + i_e, 0], polygons[32 + i_e, 1]
+                edge_x = polygons[32 + (i_e + 1) % n_clip, 0] - corner_x
+                edge_y = polygons[32 + (i_e + 1) % n_clip, 1] - corner_y
                 inward_normal = orientation * qd.Vector([-edge_y, edge_x])
                 offset = -(inward_normal[0] * corner_x + inward_normal[1] * corner_y)
-            overlap_out = qd.Matrix.zero(gs.qd_float, 17, 2)
+            overlap_out = qd.Matrix.zero(gs.qd_float, 65, 2)
             n_out = 0
             for i_k in range(n_overlap):
                 p_x, p_y = overlap[i_k, 0], overlap[i_k, 1]
                 q_x, q_y = overlap[(i_k + 1) % n_overlap, 0], overlap[(i_k + 1) % n_overlap, 1]
                 side_p = offset + inward_normal[0] * p_x + inward_normal[1] * p_y
                 side_q = offset + inward_normal[0] * q_x + inward_normal[1] * q_y
-                if side_p >= 0.0 and n_out < 17:
+                if side_p >= 0.0 and n_out < 65:
                     overlap_out[n_out, 0], overlap_out[n_out, 1] = p_x, p_y
                     n_out += 1
-                if side_p * side_q < 0.0 and n_out < 17:
+                if side_p * side_q < 0.0 and n_out < 65:
                     crossing_fraction = side_p / (side_p - side_q)
                     overlap_out[n_out, 0] = p_x + crossing_fraction * (q_x - p_x)
                     overlap_out[n_out, 1] = p_y + crossing_fraction * (q_y - p_y)
@@ -2306,7 +2465,7 @@ def func_contact_overlap_axes(
 
         # Where an edge of one polygon crosses a corner of the other, clipping places a point of each polygon at that
         # corner, and both points are merged into one corner
-        overlap_distinct = qd.Matrix.zero(gs.qd_float, 17, 2)
+        overlap_distinct = qd.Matrix.zero(gs.qd_float, 65, 2)
         n_distinct = 0
         for i_k in range(n_overlap):
             is_distinct = n_distinct == 0
@@ -2336,19 +2495,17 @@ def func_contact_overlap_axes(
     # An overlap spanning no area beyond the rounding of its corners, as that of an edge lying on a face, has no corner
     # to aim at, and its clipping keeps a number of corners that rounding decides
     overlap_area = gs.qd_float(0.0)
+    overlap_perimeter = gs.qd_float(0.0)
     for i_k in range(n_overlap):
         i_k_next = (i_k + 1) % n_overlap
         overlap_area += 0.5 * (overlap[i_k, 0] * overlap[i_k_next, 1] - overlap[i_k, 1] * overlap[i_k_next, 0])
-    overlap_perimeter = gs.qd_float(0.0)
-    for i_k in range(n_overlap):
-        i_next = (i_k + 1) % n_overlap
-        edge = qd.Vector([overlap[i_next, 0] - overlap[i_k, 0], overlap[i_next, 1] - overlap[i_k, 1]])
+        edge = qd.Vector([overlap[i_k_next, 0] - overlap[i_k, 0], overlap[i_k_next, 1] - overlap[i_k, 1]])
         overlap_perimeter += edge.norm()
     is_overlap_degenerate = qd.abs(overlap_area) <= EPS * geom_pair_scale * overlap_perimeter
 
     # The normal of each edge of the overlap, pointing outwards
     orientation = 1.0 if overlap_area >= 0.0 else -1.0
-    edges_normal = qd.Matrix.zero(gs.qd_float, 17, 2)
+    edges_normal = qd.Matrix.zero(gs.qd_float, 65, 2)
     for i_k in range(n_overlap):
         i_k_next = (i_k + 1) % n_overlap
         edges_normal[i_k, 0] = orientation * (overlap[i_k_next, 1] - overlap[i_k, 1])
