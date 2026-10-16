@@ -6,9 +6,9 @@ from typing import NamedTuple, Sequence
 import numpy as np
 
 import genesis as gs
-from genesis.engine.mesh import InertialProperties
 from genesis.typing import Matrix3x3Type, UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
+from genesis.utils.mesh import InertialProperties
 
 RHO_OBJECT = 600.0
 RHO_ROBOT = 1500.0
@@ -24,14 +24,18 @@ INERTIA_EIGVAL_ATOL = 1e-9
 
 
 def get_local_inertial_from_geom(
-    geom_type: gs.GEOM_TYPE, data: np.ndarray | None, mesh: "gs.Mesh | None", rho: float = 1.0
+    geom_type: gs.GEOM_TYPE,
+    data: np.ndarray | None,
+    mesh: "gs.Mesh | None",
+    rho: float = 1.0,
+    use_enclosed_volume: bool = False,
 ) -> InertialProperties:
     """Local inertial properties (mass, center of mass, inertia tensor) of one described geometry.
 
     Primitive types use the analytic formula on `data`; MESH defers to the mesh's cached unit-density mass properties
-    (`Mesh.inertial`) scaled by `rho`. This is the load-time computation available to kinematic and rigid
-    entities alike (it operates on the parsed info, not on a geom object), so the anchor it feeds matches the finalized
-    geom-derived inertia exactly.
+    (`Mesh.inertial`, or `Mesh.enclosed_inertial` if `use_enclosed_volume`) scaled by `rho`. This is the load-time
+    computation available to kinematic and rigid entities alike (it operates on the parsed info, not on a geom object),
+    so the anchor it feeds matches the finalized geom-derived inertia exactly.
     """
     geom_com_local = np.zeros(3)
     if geom_type == gs.GEOM_TYPE.PLANE:
@@ -68,9 +72,10 @@ def get_local_inertial_from_geom(
         geom_inertia_local = (geom_mass / 12.0) * np.diag([hy**2 + hz**2, hx**2 + hz**2, hx**2 + hy**2])
     else:
         # MESH type: reuse the mesh's cached unit-density mass properties; mass and inertia scale linearly with density.
-        geom_mass = mesh.inertial.mass * rho
-        geom_com_local = mesh.inertial.com
-        geom_inertia_local = mesh.inertial.i * rho
+        mesh_inertial = mesh.enclosed_inertial if use_enclosed_volume else mesh.inertial
+        geom_mass = mesh_inertial.mass * rho
+        geom_com_local = mesh_inertial.com
+        geom_inertia_local = mesh_inertial.i * rho
 
     return InertialProperties(geom_mass, geom_com_local, geom_inertia_local)
 
@@ -122,11 +127,13 @@ def compose_inertial_properties(geoms_inertial_info: Sequence[GeomInertialInfo])
     return InertialProperties(global_mass, global_com, global_inertia)
 
 
-def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> InertialProperties:
+def compose_inertial_from_g_infos(
+    g_infos: Sequence[dict], rho: float, use_enclosed_volume: bool = False
+) -> InertialProperties:
     """Compose the inertial of the geoms one link holds, at 'rho' where a geom states no density of its own.
 
-    Every primitive collision type is handled analytically, and a mesh defers to its cached unit-density mass
-    properties. A geom the link is only drawn with is taken as its visual mesh, so one call covers either kind.
+    Primitives use analytic inertia, except a visual primitive, which is taken as its mesh unless 'use_enclosed_volume'.
+    Meshes use cached unit-density mass properties.
 
     Parameters
     ----------
@@ -134,6 +141,9 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
         Parsed geom infos to compose the inertial from.
     rho : float
         Material density (kg/m^3), used for every geom info without its own authored density.
+    use_enclosed_volume : bool
+        Whether a geom counts for the volume its shape encloses: a visual primitive analytically, and an open mesh by
+        its surface rather than its convex hull.
 
     Returns
     -------
@@ -144,10 +154,13 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
         tuple(
             GeomInertialInfo(
                 get_local_inertial_from_geom(
-                    gs.GEOM_TYPE.MESH if "vmesh" in g_info else g_info["type"],
-                    None if "vmesh" in g_info else g_info.get("data"),
+                    gs.GEOM_TYPE.MESH
+                    if not use_enclosed_volume and "vmesh" in g_info
+                    else g_info.get("type", gs.GEOM_TYPE.MESH),
+                    None if not use_enclosed_volume and "vmesh" in g_info else g_info.get("data"),
                     g_info["vmesh"] if "vmesh" in g_info else g_info["mesh"],
                     rho if g_info.get("density") is None else g_info["density"],
+                    use_enclosed_volume,
                 ),
                 np.asarray(g_info.get("pos", gu.zero_pos()), dtype=gs.np_float),
                 np.asarray(g_info.get("quat", gu.identity_quat()), dtype=gs.np_float),
@@ -181,11 +194,13 @@ class LinkInertialInfo(NamedTuple):
     every geom), False for a pure geometry estimate (the true mass is a uniform material-density rescale of it), and
     None when the link mixes geoms with and without an authored density (neither explicit nor uniformly rescalable).
     'hint' is the material-density-resolved geometry estimate that resolving a link description consumes (None for
-    kinematic entities, which have no dynamics)."""
+    kinematic entities, which have no dynamics). 'is_hint_void' is True when that estimate comes from the visual
+    geometry 'inertia_from_visual' asks for and that geometry encloses no volume."""
 
     props: LinkInertial
     is_mass_explicit: bool | None
     hint: InertialProperties | None
+    is_hint_void: bool
 
 
 def finalize_inertial(
