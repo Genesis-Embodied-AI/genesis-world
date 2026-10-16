@@ -182,13 +182,12 @@ def init(
         tc_bool = torch.bool
 
     # Let's use GLSL convention: https://learnwebgl.brown37.net/12_shader_language/glsl_data_types.html
-    global qd_vec2, qd_vec3, qd_vec4, qd_vec6, qd_vec7, qd_vec11, qd_mat3, qd_mat4, qd_ivec2, qd_ivec3, qd_ivec4
+    global qd_vec2, qd_vec3, qd_vec4, qd_vec6, qd_vec7, qd_mat3, qd_mat4, qd_ivec2, qd_ivec3, qd_ivec4
     qd_vec2 = qd.types.vector(2, qd_float)
     qd_vec3 = qd.types.vector(3, qd_float)
     qd_vec4 = qd.types.vector(4, qd_float)
     qd_vec6 = qd.types.vector(6, qd_float)
     qd_vec7 = qd.types.vector(7, qd_float)
-    qd_vec11 = qd.types.vector(11, qd_float)
     qd_mat3 = qd.types.matrix(3, 3, qd_float)
     qd_mat4 = qd.types.matrix(4, 4, qd_float)
     qd_ivec2 = qd.types.vector(2, qd_int)

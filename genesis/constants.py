@@ -48,6 +48,7 @@ class EQUALITY_TYPE(IntEnum):
     CONNECT = 0
     WELD = 1
     JOINT = 2
+    SCREW = 3
 
 
 class CTRL_MODE(IntEnum):

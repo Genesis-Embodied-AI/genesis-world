@@ -32,13 +32,12 @@ def func_check_collision_valid(
         i_la = dyn_info.geoms.link_idx[i_ga]
         i_lb = dyn_info.geoms.link_idx[i_gb]
 
-        # Filter out collision pairs that are involved in dynamically registered weld equality constraints
+        # Filter out collision pairs coupled by a dynamic constraint
         for i_eq in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
-            if dyn_info.equalities.eq_type[i_eq, i_b] == gs.EQUALITY_TYPE.WELD:
-                i_leqa = dyn_info.equalities.eq_obj1id[i_eq, i_b]
-                i_leqb = dyn_info.equalities.eq_obj2id[i_eq, i_b]
-                if (i_leqa == i_la and i_leqb == i_lb) or (i_leqa == i_lb and i_leqb == i_la):
-                    is_valid = False
+            i_leqa = dyn_info.equalities.eq_obj1id[i_eq, i_b]
+            i_leqb = dyn_info.equalities.eq_obj2id[i_eq, i_b]
+            if (i_leqa == i_la and i_leqb == i_lb) or (i_leqa == i_lb and i_leqb == i_la):
+                is_valid = False
 
         # A sleeping link against a fixed or sleeping one: the pair stands still, so a contact between them is either
         # kept from the last awake solve (see func_collider_clear_env) or settled, and an awake link striking either

@@ -571,7 +571,12 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         translation and rotation. If None, it is set to 1e-4 when MuJoCo compatibility is enabled (matching MuJoCo's
         default) and 2e-3 otherwise. Defaults to None.
     max_dynamic_constraints : int, optional
-        Maximum number of dynamic constraints (like suction cup). Defaults to 8.
+        Maximum number of dynamic constraints (like suction cup) per environment. Adding one past it raises. Defaults
+        to 8.
+    enable_screw_constraints : bool, optional
+        Whether screw constraints can be added at runtime (see `RigidSolver.add_screw_constraint`). Enabling it
+        lengthens the compilation of the scene noticeably, whether or not any screw is added, so leave it off unless
+        the scene uses them. Not supported with `requires_grad`. Defaults to False.
     use_gjk_collision: bool, optional
         Whether to use GJK for collision detection instead of MPR. More stable but much slower. Defaults to
         `sim_options.requires_grad`.
@@ -633,6 +638,7 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
 
     # for dynamic properties
     max_dynamic_constraints: NonNegativeInt = 8
+    enable_screw_constraints: StrictBool = False
 
     # Experimental options mainly intended for debug purpose and unit tests
     enable_multi_contact: StrictBool = True
@@ -670,6 +676,8 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
             gs.raise_exception("The elliptic friction cone is not supported with the noslip solver.")
         if self.enable_rolling_friction and not self.enable_torsional_friction:
             gs.raise_exception("'enable_rolling_friction' requires 'enable_torsional_friction'.")
+        if self.enable_screw_constraints and self.max_dynamic_constraints == 0:
+            gs.raise_exception("'enable_screw_constraints' requires 'max_dynamic_constraints' to be positive.")
 
 
 class MPMOptions(GravityMixin, TimeBasedMixin):

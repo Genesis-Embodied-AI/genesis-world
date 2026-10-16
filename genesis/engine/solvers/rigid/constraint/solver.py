@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
+from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point
 from genesis.engine.solvers.rigid.abd.misc import (
     func_hibernate_island_if_settled,
     func_list_item,
@@ -34,6 +34,24 @@ from .island import (
 from . import backward as backward_constraint_solver
 from . import linesearch
 from . import noslip as constraint_noslip
+
+
+@qd.func
+def _func_clear_jac_row(
+    i_con: qd.int32, i_b: qd.int32, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
+):
+    """Zero one row of the constraint Jacobian.
+
+    Under sparse solve, only the dofs of the support last recorded for row i_con are cleared, the row being zero
+    elsewhere.
+    """
+    if qd.static(rigid_config.sparse_solve):
+        for i_d_ in range(constraint_state.jac_n_dofs[i_con, i_b]):
+            i_d = constraint_state.jac_dofs_idx[i_con, i_d_, i_b]
+            constraint_state.jac[i_con, i_d, i_b] = gs.qd_float(0.0)
+    else:
+        for i_d in range(constraint_state.jac.shape[1]):
+            constraint_state.jac[i_con, i_d, i_b] = gs.qd_float(0.0)
 
 
 @qd.func
@@ -119,6 +137,8 @@ class ConstraintSolver:
         # * 1 constraint per 1DoF joint limit (upper and lower, if not inf)
         # * 1 constraint per dof frictionloss
         # * up to 6 constraints per equality (weld)
+        # * 1 more constraint per dynamic constraint with screw constraints enabled (a screw adds a friction row and a
+        #   limit row to its 5 equality rows)
         # When 'max_contacts' is set, it overrides the post-pruning contact budget enforced by the collider.
         # Resolve the max_contacts option in place: from the collider's post-pruning budget when unset, else clamped
         # to the candidate budget and written back so the collider honors the user's cap. Downstream reads the option.
@@ -136,6 +156,7 @@ class ConstraintSolver:
             + sum(joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC) for joint in self._solver.joints)
             + self._solver.n_dofs
             + self._solver.n_candidate_equalities_ * 6
+            + (self._solver._options.max_dynamic_constraints if self._solver._options.enable_screw_constraints else 0)
         )
         self.len_constraints_ = max(1, self.len_constraints)
         # Max cone rows (rows_per_contact per contact); sizes the elliptic-only previous-residual buffer to exactly
@@ -408,43 +429,63 @@ class ConstraintSolver:
 
         return weld_const_info
 
-    def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+    def add_dynamic_constraint(
+        self, eq_type, link1_idx, link2_idx, anchor_link_idx, anchor_pos, eq_data_tail, envs_idx=None
+    ):
+        """Register a dynamic constraint between two links in the selected envs (see kernel_add_dynamic_constraint)."""
+        # An env selected twice would pass the checks below twice against the same count, then be written twice.
+        envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
         link1_idx, link2_idx = int(link1_idx), int(link2_idx)
+        if link1_idx < 0 or link2_idx < 0:
+            gs.raise_exception("Dynamic constraints require two links, the world is not a valid link.")
 
-        assert link1_idx >= 0 and link2_idx >= 0
-        weld_const_info = self.get_weld_constraints(as_tensor=True, to_torch=True)
-        link_a = weld_const_info["link_a"]
-        link_b = weld_const_info["link_b"]
-        assert not (
-            ((link_a == link1_idx) | (link_b == link1_idx)) & ((link_a == link2_idx) | (link_b == link2_idx))
-        ).any()
+        eq_const_info = self.get_equality_constraints(as_tensor=True, to_torch=True)
+        link_a, link_b = eq_const_info["obj_a"], eq_const_info["obj_b"]
+        is_pair = ((link_a == link1_idx) & (link_b == link2_idx)) | ((link_a == link2_idx) & (link_b == link1_idx))
+        if (is_pair & (eq_const_info["type"] == eq_type))[envs_idx].any():
+            gs.raise_exception(
+                f"Links {link1_idx} and {link2_idx} are already coupled by a {eq_type.name.lower()} constraint."
+            )
+        # Checked before any env is written, so a constraint is either added to every selected env or to none.
+        n_equalities = (eq_const_info["type"] >= 0).sum(dim=-1)
+        if (n_equalities[envs_idx] >= self._solver.n_equalities + self._solver._options.max_dynamic_constraints).any():
+            gs.raise_exception(
+                f"No room left for another dynamic constraint. Please increase the value of RigidSolver's option "
+                f"'max_dynamic_constraints' ({self._solver._options.max_dynamic_constraints})."
+            )
+
+        if self._solver._options.enable_screw_constraints:
+            n_eq_data_tail = array_class.EQ_DATA_N_TAIL_SCREW
+        else:
+            n_eq_data_tail = array_class.EQ_DATA_N_TAIL
+        eq_data_tail_padded = np.zeros(n_eq_data_tail, dtype=gs.np_float)
+        eq_data_tail_padded[: len(eq_data_tail)] = eq_data_tail
 
         self._eq_const_info_cache.clear()
-        overflow = kernel_add_weld_constraint(
+        kernel_add_dynamic_constraint(
             link1_idx,
             link2_idx,
+            int(anchor_link_idx),
             envs_idx,
+            int(eq_type),
+            anchor_pos,
+            eq_data_tail_padded,
             self._solver.dyn_state,
             self.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,
             self._solver.rigid_config,
+            n_eq_data_tail,
         )
-        if overflow:
-            gs.logger.warning(
-                "Ignoring dynamically registered weld constraint to avoid exceeding max number of equality constraints"
-                f"({self.rigid_info.n_candidate_equalities.to_numpy()}). Please increase the value of "
-                "RigidSolver's option 'max_dynamic_constraints'."
-            )
 
-    def delete_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+    def delete_dynamic_constraint(self, eq_type, link1_idx, link2_idx, envs_idx=None):
+        envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
         self._eq_const_info_cache.clear()
-        kernel_delete_weld_constraint(
+        kernel_delete_dynamic_constraint(
             int(link1_idx),
             int(link2_idx),
             envs_idx,
+            int(eq_type),
             self.constraint_state,
             self._solver.dyn_info,
             self._solver.rigid_info,
@@ -523,6 +564,11 @@ def kernel_get_equality_constraints(
             elif dyn_info.equalities.eq_type[i_e_, i_b] == gs.EQUALITY_TYPE.JOINT:
                 fout[i_e, 0] = constraint_state.efc_force[i_c_start, i_b]
                 i_c_start = i_c_start + 1
+            elif dyn_info.equalities.eq_type[i_e_, i_b] == gs.EQUALITY_TYPE.SCREW:
+                for i_c_ in qd.static(range(5)):
+                    i_c = i_c_start + i_c_
+                    fout[i_e, i_c_] = constraint_state.efc_force[i_c, i_b]
+                i_c_start = i_c_start + 5
 
 
 # =====================================================================================================================
@@ -681,7 +727,6 @@ def _add_friction_constraint(
     to either basis.
     """
     EPS = rigid_info.EPS[None]
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
 
     collision_con_start = constraint_state.n_constraints[i_b]
 
@@ -732,13 +777,7 @@ def _add_friction_constraint(
 
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
     n_con = collision_con_start + i_col_ * rows_per_contact + i_friction
-    if qd.static(rigid_config.sparse_solve):
-        for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
-            i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
-            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-    else:
-        for i_d in range(n_dofs):
-            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+    _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
 
     same_root = (
         link_b > -1 and dyn_info.links.root_idx[link_a_maybe_batch] == dyn_info.links.root_idx[link_b_maybe_batch]
@@ -897,7 +936,6 @@ def _add_collision_constraints_per_contact(
     """Build all collision-contact constraints with one GPU thread per contact."""
     EPS = rigid_info.EPS[None]
     _B = dyn_state.dofs.ctrl_mode.shape[1]
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     max_candidate_contacts = collider_state.contact_data.link_a.shape[0]
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
 
@@ -952,13 +990,7 @@ def _add_collision_constraints_per_contact(
             n_con_head = collision_con_start + i_col_ * rows_per_contact
             for i_friction in range(rows_per_contact):
                 n_con = n_con_head + i_friction
-                if qd.static(rigid_config.sparse_solve):
-                    for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
-                        i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
-                        constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-                else:
-                    for i_d in range(n_dofs):
-                        constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+                _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
             # The rows of a contact share the point whose velocity each dof moves, so both kinematic chains are walked
             # once: every dof's contribution to the point velocity is projected on each row's direction in turn, and
             # the support built on the head row is copied to the others.
@@ -1152,8 +1184,6 @@ def func_equality_connect(
 ):
     EPS = rigid_info.EPS[None]
 
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
-
     link1_idx = dyn_info.equalities.eq_obj1id[i_e, i_b]
     link2_idx = dyn_info.equalities.eq_obj2id[i_e, i_b]
     link_a_maybe_batch = [link1_idx, i_b] if qd.static(rigid_config.batch_links_info) else link1_idx
@@ -1200,13 +1230,7 @@ def func_equality_connect(
         qd.atomic_add(constraint_state.n_constraints_equality[i_b], 1)
         con_n_dofs = 0
 
-        if qd.static(rigid_config.sparse_solve):
-            for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
-                i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
-                constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-        else:
-            for i_d in range(n_dofs):
-                constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+        _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
 
         same_root = (
             link2_idx > -1
@@ -1275,8 +1299,6 @@ def func_equality_joint(
 ):
     EPS = rigid_info.EPS[None]
 
-    n_dofs = constraint_state.jac.shape[1]
-
     sol_params = dyn_info.equalities.sol_params[i_e, i_b]
 
     I_joint1 = (
@@ -1300,13 +1322,7 @@ def func_equality_joint(
     n_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
     qd.atomic_add(constraint_state.n_constraints_equality[i_b], 1)
 
-    if qd.static(rigid_config.sparse_solve):
-        for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
-            i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
-            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-    else:
-        for i_d in range(n_dofs):
-            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+    _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
 
     pos1 = rigid_info.qpos[i_qpos1, i_b]
     ref1 = rigid_info.qpos0[i_qpos1, i_b]
@@ -1382,6 +1398,9 @@ def func_add_equality_constraints(
                 func_equality_weld(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
             elif dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.JOINT:
                 func_equality_joint(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+            if qd.static(rigid_config.enable_screw_constraints):
+                if dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.SCREW:
+                    func_equality_screw(i_b, i_e, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)
@@ -1549,6 +1568,8 @@ def func_add_inequality_constraints(
         add_collision_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
     if qd.static(rigid_config.enable_joint_limit):
         add_joint_limit_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
+    if qd.static(rigid_config.enable_screw_constraints):
+        add_screw_limit_constraints(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.kernel(fastcache=True)
@@ -1661,13 +1682,7 @@ def func_equality_weld(
         qd.atomic_add(constraint_state.n_constraints_equality[i_b], 1)
         con_n_dofs = 0
 
-        if qd.static(rigid_config.sparse_solve):
-            for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
-                i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
-                constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
-        else:
-            for i_d in range(n_dofs):
-                constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+        _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
 
         jac_qvel = gs.qd_float(0.0)
         for i_ab in range(2):
@@ -1713,8 +1728,7 @@ def func_equality_weld(
     qd.atomic_add(constraint_state.n_constraints_equality[i_b], 3)
     con_n_dofs = 0
     for i_con in range(n_con, n_con + 3):
-        for i_d in range(n_dofs):
-            constraint_state.jac[i_con, i_d, i_b] = gs.qd_float(0.0)
+        _func_clear_jac_row(i_con, i_b, constraint_state, rigid_config)
 
     for i_ab in range(2):
         sign = gs.qd_float(1.0) if i_ab == 0 else gs.qd_float(-1.0)
@@ -1826,7 +1840,6 @@ def _func_add_joint_limit_row(
 ):
     """Write row i_con of the constraint system for the joint i_j past one of its limits."""
     EPS = rigid_info.EPS[None]
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
     I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
     I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
 
@@ -1840,17 +1853,287 @@ def _func_add_joint_limit_row(
     constraint_state.aref[i_con, i_b] = aref
     constraint_state.efc_D[i_con, i_b] = 1 / diag
 
-    if qd.static(rigid_config.sparse_solve):
-        for i_d2_ in range(constraint_state.jac_n_dofs[i_con, i_b]):
-            i_d2 = constraint_state.jac_dofs_idx[i_con, i_d2_, i_b]
-            constraint_state.jac[i_con, i_d2, i_b] = gs.qd_float(0.0)
-    else:
-        for i_d2 in range(n_dofs):
-            constraint_state.jac[i_con, i_d2, i_b] = gs.qd_float(0.0)
+    _func_clear_jac_row(i_con, i_b, constraint_state, rigid_config)
     constraint_state.jac[i_con, i_d, i_b] = jac
 
     constraint_state.jac_n_dofs[i_con, i_b] = 1
     constraint_state.jac_dofs_idx[i_con, 0, i_b] = i_d
+
+
+@qd.func
+def func_screw_frame(
+    i_b: int,
+    i_e: int,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+):
+    """Locate a screw constraint in the world frame and measure its travel.
+
+    The screw constraint is the equality i_e of env i_b. Its data follows the layout of kernel_add_dynamic_constraint,
+    with the type-specific entries:
+    [10:13] the unit screw axis, in the frame of link1
+    [13:15] (cos, sin) of the direction of (1, p), p being the travel per radian of turn, so that the coupling row
+            holds sin * turn - cos * travel at zero
+    [15:17] the lower and upper travel limits
+    [17]    the dry friction
+    """
+    i_l1 = dyn_info.equalities.eq_obj1id[i_e, i_b]
+    i_l2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+    eq_data = dyn_info.equalities.eq_data[i_e, i_b]
+    anchor2_pos = gs.qd_vec3([eq_data[0], eq_data[1], eq_data[2]])
+    anchor1_pos = gs.qd_vec3([eq_data[3], eq_data[4], eq_data[5]])
+    axis_local = gs.qd_vec3([eq_data[10], eq_data[11], eq_data[12]])
+
+    quat1 = dyn_state.links.quat[i_l1, i_b]
+    anchor1 = gu.qd_transform_by_trans_quat(anchor1_pos, dyn_state.links.pos[i_l1, i_b], quat1)
+    anchor2 = gu.qd_transform_by_trans_quat(
+        anchor2_pos, dyn_state.links.pos[i_l2, i_b], dyn_state.links.quat[i_l2, i_b]
+    )
+    axis = gu.qd_transform_by_quat(axis_local, quat1)
+    travel = axis.dot(anchor2 - anchor1)  # Displacement of link2 along the axis relative to link1
+    return anchor1 + travel * axis, anchor2, axis, travel
+
+
+@qd.func
+def func_equality_screw(
+    i_b: int,
+    i_e: int,
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """Add the 5 rows of a screw constraint, which leave link2 a single dof relative to link1.
+
+    The screw constraint is the equality i_e of env i_b. Two rows keep link2 on the axis, two keep it from swinging off
+    it, and the last one couples its travel and turn. One walk of the kinematic chains of both links also fills the
+    Jacobian of the free motion of the screw, for its friction and limit rows.
+    """
+    EPS = rigid_info.EPS[None]
+    i_s = i_e - rigid_info.n_equalities[None]
+
+    i_l1 = dyn_info.equalities.eq_obj1id[i_e, i_b]
+    i_l2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+    I_l1 = [i_l1, i_b] if qd.static(rigid_config.batch_links_info) else i_l1
+    I_l2 = [i_l2, i_b] if qd.static(rigid_config.batch_links_info) else i_l2
+    is_same_root = dyn_info.links.root_idx[I_l1] == dyn_info.links.root_idx[I_l2]
+    eq_data = dyn_info.equalities.eq_data[i_e, i_b]
+    relpose = gs.qd_vec4([eq_data[6], eq_data[7], eq_data[8], eq_data[9]])
+    axis_local = gs.qd_vec3([eq_data[10], eq_data[11], eq_data[12]])
+    pitch_cos = eq_data[13]
+    pitch_sin = eq_data[14]
+
+    # point1 faces the anchor of link2 across the axis, so the two differ by the radial error alone.
+    point1, anchor2, axis, travel = func_screw_frame(i_b, i_e, dyn_state, dyn_info, rigid_info)
+    # Orientation link1 would have if rigidly attached to link2 at the reference pose.
+    quat2_ref = gu.qd_quat_mul(dyn_state.links.quat[i_l2, i_b], gu.qd_inv_quat(relpose))
+    swing = axis.cross(gu.qd_transform_by_quat(axis_local, quat2_ref))
+
+    # Rotation of link2 since the reference pose in link1's frame, real part non-negative for a turn in [-pi, pi].
+    quat_delta = gu.qd_quat_mul(gu.qd_inv_quat(dyn_state.links.quat[i_l1, i_b]), quat2_ref)
+    if quat_delta[0] < 0.0:
+        quat_delta = -quat_delta
+    turn_wrapped = 2.0 * qd.atan2(
+        axis_local.dot(gs.qd_vec3([quat_delta[1], quat_delta[2], quat_delta[3]])), quat_delta[0]
+    )
+    turn = turn_wrapped
+    if qd.abs(pitch_sin) > EPS:
+        turn_travel = travel * pitch_cos / pitch_sin
+        turn = turn_wrapped + 2.0 * qd.math.pi * qd.floor((turn_travel - turn_wrapped) / (2.0 * qd.math.pi) + 0.5)
+    dir_u, dir_v = gu.qd_orthogonals(axis)
+    errors = qd.Vector(
+        [
+            dir_u.dot(point1 - anchor2),
+            dir_v.dot(point1 - anchor2),
+            -dir_u.dot(swing),
+            -dir_v.dot(swing),
+            pitch_sin * turn - pitch_cos * travel,
+        ]
+    )
+    error_norm = errors.norm()
+
+    # The 5 rows of the constraint, then the free motion of the screw.
+    dir_zero = qd.Vector.zero(gs.qd_float, 3)
+    lin_dirs = qd.Matrix.rows([dir_u, dir_v, dir_zero, dir_zero, pitch_cos * axis, pitch_sin * axis])
+    ang_dirs = qd.Matrix.rows([dir_zero, dir_zero, dir_u, dir_v, -pitch_sin * axis, pitch_cos * axis])
+
+    # Centripetal/Coriolis bias Jdot @ qvel of each row (see func_equality_connect). The row directions are attached to
+    # link1, so their rotation adds a term (omega1 x dir) . x = dir . (x x omega1) for each relative velocity x.
+    jdotv1, cddb1_ang = func_equality_jdotv(i_b, i_l1, point1, dyn_state, dyn_info, rigid_config)
+    jdotv2, cddb2_ang = func_equality_jdotv(i_b, i_l2, anchor2, dyn_state, dyn_info, rigid_config)
+    omega1 = dyn_state.links.cd_ang[i_l1, i_b]
+    omega2 = dyn_state.links.cd_ang[i_l2, i_b]
+    vel1 = func_vel_at_point(i_l1, i_b, point1, dyn_state.links)
+    vel2 = func_vel_at_point(i_l2, i_b, anchor2, dyn_state.links)
+    arefs_bias = lin_dirs @ (jdotv1 - jdotv2 + (vel1 - vel2).cross(omega1)) + ang_dirs @ (
+        cddb1_ang - cddb2_ang + (omega1 - omega2).cross(omega1)
+    )
+
+    dyn_state.links.is_constrained[i_l1, i_b] = True
+    dyn_state.links.is_constrained[i_l2, i_b] = True
+
+    i_con = qd.atomic_add(constraint_state.n_constraints[i_b], 5)
+    qd.atomic_add(constraint_state.n_constraints_equality[i_b], 5)
+    constraint_state.screws_i_con[i_s, i_b] = i_con + 4
+
+    for i_r in range(5):
+        _func_clear_jac_row(i_con + i_r, i_b, constraint_state, rigid_config)
+
+    con_n_dofs = 0
+    jac_qvel = qd.Vector.zero(gs.qd_float, 6)
+    for i_ab in range(2):
+        sign = gs.qd_float(1.0)
+        i_l = i_l1
+        point = point1
+        if i_ab == 1:
+            sign = gs.qd_float(-1.0)
+            i_l = i_l2
+            point = anchor2
+
+        while i_l > -1:
+            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+            for i_d_ in range(dyn_info.links.n_dofs[I_l]):
+                i_d = dyn_info.links.dof_end[I_l] - 1 - i_d_
+                cdof_ang = dyn_state.dofs.cdof_ang[i_d, i_b]
+                arm = point - dyn_state.links.root_COM[i_l, i_b]
+                point_vel = dyn_state.dofs.cdof_vel[i_d, i_b] - arm.cross(cdof_ang)
+                jac = sign * (lin_dirs @ point_vel + ang_dirs @ cdof_ang)
+                jac_qvel = jac_qvel + jac * dyn_state.dofs.vel[i_d, i_b]
+                for i_r in qd.static(range(5)):
+                    constraint_state.jac[i_con + i_r, i_d, i_b] = constraint_state.jac[i_con + i_r, i_d, i_b] + jac[i_r]
+                # A dof met for the first time overwrites the value a previous step left, which is read nowhere else.
+                n_dofs_prev = con_n_dofs
+                con_n_dofs = _append_relevant_dof(
+                    i_con, i_d, i_b, con_n_dofs, i_ab == 1 and is_same_root, constraint_state
+                )
+                if con_n_dofs > n_dofs_prev:
+                    constraint_state.screws_jac_free[i_s, i_d, i_b] = jac[5]
+                else:
+                    constraint_state.screws_jac_free[i_s, i_d, i_b] = (
+                        constraint_state.screws_jac_free[i_s, i_d, i_b] + jac[5]
+                    )
+            i_l = dyn_info.links.parent_idx[I_l]
+
+    # DOFs from two entities are only descending within each entity, while incremental Cholesky requires globally
+    # descending order. All the rows share the support of the first one.
+    _sort_relevant_dofs_descending(i_con, i_b, con_n_dofs, constraint_state, rigid_config)
+
+    invweight = dyn_info.links.invweight[I_l1] + dyn_info.links.invweight[I_l2]
+    ones = gs.qd_vec3([1.0, 1.0, 1.0])
+    rows_invweight = (lin_dirs * lin_dirs) @ ones * invweight[0] + (ang_dirs * ang_dirs) @ ones * invweight[1]
+    sol_params = dyn_info.equalities.sol_params[i_e, i_b]
+    for i_r in range(5):
+        constraint_state.jac_n_dofs[i_con + i_r, i_b] = con_n_dofs
+        if i_r > 0:
+            for i_d_ in range(con_n_dofs):
+                constraint_state.jac_dofs_idx[i_con + i_r, i_d_, i_b] = constraint_state.jac_dofs_idx[i_con, i_d_, i_b]
+        imp, aref = gu.imp_aref(sol_params, -error_norm, jac_qvel[i_r], errors[i_r])
+        diag = qd.max(rows_invweight[i_r] * (1.0 - imp) / imp, EPS)
+
+        constraint_state.diag[i_con + i_r, i_b] = diag
+        constraint_state.aref[i_con + i_r, i_b] = aref - arefs_bias[i_r]
+        constraint_state.efc_D[i_con + i_r, i_b] = 1.0 / diag
+
+
+@qd.func
+def func_add_screw_axis_constraints(
+    i_b: int,
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    is_limit: qd.template(),
+):
+    """Add a row along the free motion of every screw constraint of an env: its dry friction, or its violated limit.
+
+    The rows belong to env i_b, and this is called once for the frictionloss block and once for the inequality one. The
+    friction resists the turn, or the travel for an infinite pitch. Each row combines the free motion and the coupling
+    row of the screw: cos * free - sin * coupling is minus the turn rate of link2 and sin * free + cos * coupling minus
+    its travel rate.
+    """
+    EPS = rigid_info.EPS[None]
+
+    for i_e in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
+        if dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.SCREW:
+            i_s = i_e - rigid_info.n_equalities[None]
+            pitch_cos = dyn_info.equalities.eq_data[i_e, i_b][13]
+            pitch_sin = dyn_info.equalities.eq_data[i_e, i_b][14]
+            frictionloss = dyn_info.equalities.eq_data[i_e, i_b][17]
+            weight_free = pitch_sin
+            weight_coupling = pitch_cos
+            is_turn = False
+            pos_delta = gs.qd_float(0.0)
+            is_active = False
+            if qd.static(is_limit):
+                _point1, _anchor2, _axis, travel = func_screw_frame(i_b, i_e, dyn_state, dyn_info, rigid_info)
+                pos_delta_min = travel - dyn_info.equalities.eq_data[i_e, i_b][15]
+                pos_delta_max = dyn_info.equalities.eq_data[i_e, i_b][16] - travel
+                pos_delta = qd.min(pos_delta_min, pos_delta_max)
+                # The row rate is the travel rate toward the inside of the limits.
+                side = gs.qd_float((pos_delta_min < pos_delta_max) * 2 - 1)
+                weight_free = -side * pitch_sin
+                weight_coupling = -side * pitch_cos
+                is_active = pos_delta < 0.0
+            else:
+                if pitch_cos > EPS:
+                    weight_free = pitch_cos
+                    weight_coupling = -pitch_sin
+                    is_turn = True
+                is_active = frictionloss > EPS
+
+            if is_active:
+                i_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
+                i_coupling = constraint_state.screws_i_con[i_s, i_b]
+                _func_clear_jac_row(i_con, i_b, constraint_state, rigid_config)
+
+                con_n_dofs = constraint_state.jac_n_dofs[i_coupling, i_b]
+                jac_qvel = gs.qd_float(0.0)
+                for i_d_ in range(con_n_dofs):
+                    i_d = constraint_state.jac_dofs_idx[i_coupling, i_d_, i_b]
+                    jac = (
+                        weight_free * constraint_state.screws_jac_free[i_s, i_d, i_b]
+                        + weight_coupling * constraint_state.jac[i_coupling, i_d, i_b]
+                    )
+                    constraint_state.jac[i_con, i_d, i_b] = jac
+                    constraint_state.jac_dofs_idx[i_con, i_d_, i_b] = i_d
+                    jac_qvel = jac_qvel + jac * dyn_state.dofs.vel[i_d, i_b]
+                constraint_state.jac_n_dofs[i_con, i_b] = con_n_dofs
+
+                i_l1 = dyn_info.equalities.eq_obj1id[i_e, i_b]
+                i_l2 = dyn_info.equalities.eq_obj2id[i_e, i_b]
+                I_l1 = [i_l1, i_b] if qd.static(rigid_config.batch_links_info) else i_l1
+                I_l2 = [i_l2, i_b] if qd.static(rigid_config.batch_links_info) else i_l2
+                invweight = dyn_info.links.invweight[I_l1] + dyn_info.links.invweight[I_l2]
+                row_invweight = invweight[1] if is_turn else invweight[0]
+                imp, aref = gu.imp_aref(dyn_info.equalities.sol_params[i_e, i_b], pos_delta, jac_qvel, pos_delta)
+                diag = qd.max(row_invweight * (1.0 - imp) / imp, EPS)
+
+                constraint_state.diag[i_con, i_b] = diag
+                constraint_state.aref[i_con, i_b] = aref
+                constraint_state.efc_D[i_con, i_b] = 1.0 / diag
+                if qd.static(not is_limit):
+                    qd.atomic_add(constraint_state.n_constraints_frictionloss[i_b], 1)
+                    constraint_state.efc_frictionloss[i_con, i_b] = frictionloss
+
+
+@qd.func
+def add_screw_limit_constraints(
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    _B = constraint_state.jac.shape[2]
+
+    qd.loop_config(name="add_screw_limit_constraints", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_b in range(_B):
+        func_add_screw_axis_constraints(
+            i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_limit=True
+        )
 
 
 @qd.func
@@ -1943,7 +2226,6 @@ def add_frictionloss_constraints(
 
     _B = constraint_state.jac.shape[2]
     n_links = dyn_info.links.root_idx.shape[0]
-    n_dofs = dyn_state.dofs.ctrl_mode.shape[0]
 
     # TODO: sparse mode
     # FIXME: The condition `if dofs_info.frictionloss[I_d] > EPS:` is not correctly evaluated on Apple Metal
@@ -1977,75 +2259,89 @@ def add_frictionloss_constraints(
                         constraint_state.aref[i_con, i_b] = aref
                         constraint_state.efc_D[i_con, i_b] = 1.0 / diag
                         constraint_state.efc_frictionloss[i_con, i_b] = dyn_info.dofs.frictionloss[I_d]
-                        for i_d2 in range(n_dofs):
-                            constraint_state.jac[i_con, i_d2, i_b] = gs.qd_float(0.0)
+                        _func_clear_jac_row(i_con, i_b, constraint_state, rigid_config)
                         constraint_state.jac[i_con, i_d, i_b] = jac
 
                         constraint_state.jac_dofs_idx[i_con, 0, i_b] = i_d
                         constraint_state.jac_n_dofs[i_con, i_b] = 1
 
+        if qd.static(rigid_config.enable_screw_constraints):
+            func_add_screw_axis_constraints(
+                i_b, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_limit=False
+            )
 
-# ====================================== Runtime User-Specified Weld Constraints ======================================
+
+# ==================================== Runtime User-Specified Dynamic Constraints =====================================
 
 
 @qd.kernel(fastcache=True)
-def kernel_add_weld_constraint(
-    link1_idx: qd.i32,
-    link2_idx: qd.i32,
+def kernel_add_dynamic_constraint(
+    link1_idx: int,
+    link2_idx: int,
+    anchor_link_idx: int,
     envs_idx: qd.types.ndarray(),
+    eq_type: int,
+    anchor_pos: qd.types.ndarray(),
+    eq_data_tail: qd.types.ndarray(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-) -> qd.i32:
-    overflow = gs.qd_bool(False)
+    n_eq_data_tail: qd.template(),
+):
+    """Register a constraint between two links, taking their current relative pose as its reference.
 
+    The anchor is the point anchor_pos given in the frame of link anchor_link_idx. The constraint data holds:
+    [0:3]   the anchor, in the frame of link2
+    [3:6]   the anchor, in the frame of link1
+    [6:10]  the orientation of link2 relative to link1
+    [10:]   the n_eq_data_tail type-specific entries of eq_data_tail (see EQ_DATA_N_TAIL in array_class.py)
+    Every selected env has an equality slot left (see ConstraintSolver.add_dynamic_constraint).
+    """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         i_e = constraint_state.qd_n_equalities[i_b]
-        if i_e == rigid_info.n_candidate_equalities[None]:
-            overflow = True
-        else:
-            shared_pos = dyn_state.links.pos[link1_idx, i_b]
-            pos1 = gu.qd_inv_transform_by_trans_quat(
-                shared_pos, dyn_state.links.pos[link1_idx, i_b], dyn_state.links.quat[link1_idx, i_b]
-            )
-            pos2 = gu.qd_inv_transform_by_trans_quat(
-                shared_pos, dyn_state.links.pos[link2_idx, i_b], dyn_state.links.quat[link2_idx, i_b]
-            )
+        anchor = gu.qd_transform_by_trans_quat(
+            gs.qd_vec3([anchor_pos[0], anchor_pos[1], anchor_pos[2]]),
+            dyn_state.links.pos[anchor_link_idx, i_b],
+            dyn_state.links.quat[anchor_link_idx, i_b],
+        )
+        pos1 = gu.qd_inv_transform_by_trans_quat(
+            anchor, dyn_state.links.pos[link1_idx, i_b], dyn_state.links.quat[link1_idx, i_b]
+        )
+        pos2 = gu.qd_inv_transform_by_trans_quat(
+            anchor, dyn_state.links.pos[link2_idx, i_b], dyn_state.links.quat[link2_idx, i_b]
+        )
+        relpose = gu.qd_quat_mul(
+            gu.qd_inv_quat(dyn_state.links.quat[link1_idx, i_b]), dyn_state.links.quat[link2_idx, i_b]
+        )
 
-            dyn_info.equalities.eq_type[i_e, i_b] = gs.qd_int(gs.EQUALITY_TYPE.WELD)
-            dyn_info.equalities.eq_obj1id[i_e, i_b] = link1_idx
-            dyn_info.equalities.eq_obj2id[i_e, i_b] = link2_idx
+        dyn_info.equalities.eq_type[i_e, i_b] = eq_type
+        dyn_info.equalities.eq_obj1id[i_e, i_b] = link1_idx
+        dyn_info.equalities.eq_obj2id[i_e, i_b] = link2_idx
+        for i_3 in qd.static(range(3)):
+            dyn_info.equalities.eq_data[i_e, i_b][i_3] = pos2[i_3]
+            dyn_info.equalities.eq_data[i_e, i_b][i_3 + 3] = pos1[i_3]
+        for i_4 in qd.static(range(4)):
+            dyn_info.equalities.eq_data[i_e, i_b][i_4 + 6] = relpose[i_4]
+        for i_t in qd.static(range(n_eq_data_tail)):
+            dyn_info.equalities.eq_data[i_e, i_b][i_t + 10] = eq_data_tail[i_t]
 
-            for i_3 in qd.static(range(3)):
-                dyn_info.equalities.eq_data[i_e, i_b][i_3 + 3] = pos1[i_3]
-                dyn_info.equalities.eq_data[i_e, i_b][i_3] = pos2[i_3]
+        dyn_info.equalities.sol_params[i_e, i_b] = qd.Vector(
+            [2 * rigid_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
+        )
 
-            relpose = gu.qd_quat_mul(
-                gu.qd_inv_quat(dyn_state.links.quat[link1_idx, i_b]), dyn_state.links.quat[link2_idx, i_b]
-            )
-
-            for i_4 in qd.static(range(4)):
-                dyn_info.equalities.eq_data[i_e, i_b][i_4 + 6] = relpose[i_4]
-
-            dyn_info.equalities.eq_data[i_e, i_b][10] = 1.0
-
-            dyn_info.equalities.sol_params[i_e, i_b] = qd.Vector(
-                [2 * rigid_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
-            )
-
-            constraint_state.qd_n_equalities[i_b] = constraint_state.qd_n_equalities[i_b] + 1
-    return overflow
+        constraint_state.qd_n_equalities[i_b] = constraint_state.qd_n_equalities[i_b] + 1
 
 
 @qd.kernel(fastcache=True)
-def kernel_delete_weld_constraint(
-    link1_idx: qd.i32,
-    link2_idx: qd.i32,
+def kernel_delete_dynamic_constraint(
+    link1_idx: int,
+    link2_idx: int,
     envs_idx: qd.types.ndarray(),
+    eq_type: int,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -2055,10 +2351,10 @@ def kernel_delete_weld_constraint(
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
         for i_e in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
-            if (
-                dyn_info.equalities.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.WELD
-                and dyn_info.equalities.eq_obj1id[i_e, i_b] == link1_idx
-                and dyn_info.equalities.eq_obj2id[i_e, i_b] == link2_idx
+            link_a = dyn_info.equalities.eq_obj1id[i_e, i_b]
+            link_b = dyn_info.equalities.eq_obj2id[i_e, i_b]
+            if dyn_info.equalities.eq_type[i_e, i_b] == eq_type and (
+                (link_a == link1_idx and link_b == link2_idx) or (link_a == link2_idx and link_b == link1_idx)
             ):
                 if i_e < constraint_state.qd_n_equalities[i_b] - 1:
                     # Swap-remove must move the whole constraint record, not just its type,
