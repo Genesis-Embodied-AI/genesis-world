@@ -127,7 +127,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         Convexify the mesh.
         """
         if self._mesh.vertices.shape[0] > 3:
-            self._mesh = trimesh.convex.convex_hull(self._mesh)
+            self._mesh = mu.convex_hull(self._mesh)
             self._metadata["convexified"] = True
         self._invalidate_geometry_cache()
         self.clear_visuals()
@@ -291,33 +291,29 @@ class Mesh(RBC, serialization.SerializationMixin):
         if self._inertial_source is not None:
             return self._inertial_source.inertial
         if self._inertial is None:
-            # A degenerate geometry (zero / ill-defined volume) makes trimesh's mass-property integral divide by zero,
-            # yielding a non-finite center of mass; a more degenerate one (fewer than 4 non-coplanar vertices) makes the
-            # convex-hull closure of a non-watertight mesh raise instead. Either way the geom carries no inertia:
-            # report no mass, rather than crashing or letting NaNs propagate into the composed inertia.
-            with np.errstate(invalid="ignore", divide="ignore"):
-                try:
-                    tmesh = self._mesh
-                    if not self._mesh.is_watertight:
-                        gs.logger.warning(
-                            "Mesh is not watertight. Falling back to convex hull for estimating inertial properties."
-                        )
-                        tmesh = self._mesh.convex_hull
-                    volume = float(tmesh.volume)
-                    if volume < 0.0:
-                        # Inward-facing winding gives a negative volume and inverted mass properties (e.g. a closed
-                        # terrain block, which bypasses watertighten since it is already watertight). Flip the mesh so
-                        # the inertia integral reflects the actual solid rather than estimating from an inverted one.
-                        tmesh = tmesh.copy()
-                        tmesh.invert()
-                        volume = -volume
-                    center_mass = tmesh.center_mass
-                except QhullError:
-                    volume, center_mass = 0.0, None
-                if volume > 0.0 and np.all(np.isfinite(center_mass)):
-                    self._inertial = InertialProperties(tmesh.mass, center_mass, tmesh.moment_inertia)
-                else:
-                    self._inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+            # A degenerate geometry carries no inertia: one enclosing no volume has no center of mass, and the convex
+            # hull closing a non-watertight one raises when it has fewer than 4 non-coplanar vertices.
+            try:
+                tmesh = self._mesh
+                if not self._mesh.is_watertight:
+                    gs.logger.warning(
+                        "Mesh is not watertight. Falling back to convex hull for estimating inertial properties."
+                    )
+                    tmesh = mu.convex_hull(self._mesh)
+                volume = mu.get_signed_volume(tmesh.vertices, tmesh.faces)
+            except QhullError:
+                volume = 0.0
+            if volume < 0.0:
+                # Inward-facing winding gives a negative volume and inverted mass properties (e.g. a closed terrain
+                # block, which bypasses watertighten since it is already watertight). Flip the mesh so the inertia
+                # integral reflects the actual solid rather than estimating from an inverted one.
+                tmesh = tmesh.copy()
+                tmesh.invert()
+                volume = -volume
+            if volume > 0.0:
+                self._inertial = InertialProperties(tmesh.mass, tmesh.center_mass, tmesh.moment_inertia)
+            else:
+                self._inertial = InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
         return self._inertial
 
     def get_vert_adjacency(self):
@@ -659,7 +655,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Volume of the mesh.
         """
-        return self._mesh.volume
+        return mu.get_signed_volume(self._mesh.vertices, self._mesh.faces)
 
     def export(self, exporting: serialization.Exporting) -> dict:
         """Export the geometry, uvs, surface and metadata a mesh holds.

@@ -427,6 +427,40 @@ def test_compose_inertial_properties():
 
 
 @pytest.mark.required
+def test_mesh_inertial_properties(tol):
+    EXTENTS = (1.0, 2.0, 3.0)
+    VOLUME = math.prod(EXTENTS)
+    INERTIA = VOLUME / 12.0 * np.diag(np.sum(np.square(EXTENTS)) - np.square(EXTENTS))
+
+    # A box wound inward has a negative volume, and a box missing a side is closed by its convex hull
+    box = trimesh.creation.box(extents=EXTENTS)
+    box_inverted = box.copy()
+    box_inverted.invert()
+    box_open = trimesh.Trimesh(vertices=box.vertices, faces=box.faces[box.face_normals[:, 0] > -0.5], process=False)
+    for tmesh, volume in ((box, VOLUME), (box_inverted, -VOLUME), (box_open, None)):
+        mesh = gs.Mesh.from_trimesh(tmesh)
+        if volume is not None:
+            assert_allclose(mesh.volume, volume, tol=tol)
+        mass, com, inertia = mesh.inertial
+        assert_allclose(mass, VOLUME, tol=tol)
+        assert_allclose(com, 0.0, tol=tol)
+        assert_allclose(inertia, INERTIA, tol=tol)
+
+    # A flat mesh encloses no volume, so it carries no inertia
+    quad = trimesh.Trimesh(
+        vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)),
+        faces=((0, 1, 2), (0, 2, 3)),
+        process=False,
+    )
+    mesh = gs.Mesh.from_trimesh(quad)
+    assert_allclose(mesh.volume, 0.0, tol=tol)
+    mass, com, inertia = mesh.inertial
+    assert_equal(mass, 0.0)
+    assert_equal(com, 0.0)
+    assert_equal(inertia, 0.0)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("side", ["right", "left"])
 def test_polar_decomposition(side, tol):
     # Generate random matrices (not necessarily square)
