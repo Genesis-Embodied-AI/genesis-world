@@ -558,6 +558,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         parser.addoption("--vis", action="store_true", default=False, help="Enable interactive viewer.")
     parser.addoption("--dev", action="store_true", default=False, help="Enable genesis debug mode.")
     parser.addoption(
+        "--snapshots-dir",
+        type=str,
+        default=None,
+        help="Read the snapshots from this local clone of the snapshots dataset instead of downloading them.",
+    )
+    parser.addoption(
         "--failure-trajectories-dir",
         type=str,
         default=None,
@@ -1087,6 +1093,27 @@ class PixelMatchSnapshotExtension(PNGImageSnapshotExtension):
         return True
 
 
+def _fetch_snapshots(config, pattern):
+    """Put the snapshot files matching a glob pattern, relative to the tests root, in the tests tree.
+
+    The files come from the snapshots dataset at its pinned revision, or from the local clone of the dataset that
+    '--snapshots-dir' gives, which validates new snapshots before they are published. The dataset mirrors the tests
+    tree ('rendering/__snapshots__/test_offscreen/...'), so the path of a snapshot relative to the tests root is also its
+    path in the dataset.
+    """
+    from .utils.assets import get_hf_dataset
+
+    tests_dir = Path(__file__).parent
+    snapshots_dir = config.getoption("--snapshots-dir")
+    if snapshots_dir is None:
+        get_hf_dataset(pattern=pattern, repo_name="snapshots", local_dir=tests_dir)
+        return
+    for path in Path(snapshots_dir).glob(pattern):
+        target = tests_dir / path.relative_to(snapshots_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+
+
 @pytest.fixture
 def png_snapshot(request, snapshot):
     snapshot_obj = snapshot.use_extension(PixelMatchSnapshotExtension)
@@ -1103,16 +1130,8 @@ def png_snapshot(request, snapshot):
             assert path.is_file()
             path.unlink()
     else:
-        from .utils.assets import get_hf_dataset
-
-        # The snapshots repository mirrors the tests tree ('rendering/__snapshots__/test_offscreen/...'), so the
-        # snapshot directory path relative to the tests root is also its path in the repository.
         tests_dir = Path(__file__).parent
-        get_hf_dataset(
-            pattern=f"{snapshot_dir.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
-            repo_name="snapshots",
-            local_dir=tests_dir,
-        )
+        _fetch_snapshots(request.config, f"{snapshot_dir.relative_to(tests_dir).as_posix()}/{snapshot_pattern}")
 
     return snapshot_obj
 
@@ -1121,17 +1140,11 @@ def png_snapshot(request, snapshot):
 def trajectory_snapshot(request) -> Path:
     from genesis.recorders.trajectory import TRAJECTORY_FORMAT
 
-    from .utils.assets import get_hf_dataset
-
     # The path is the one syrupy gives a single-file snapshot of the test. The test reads the file itself, so syrupy
     # leaves it out of its count of unused snapshots.
     path = request.path.parent / "__snapshots__" / request.path.stem / f"{request.node.name}{TRAJECTORY_FORMAT}"
     # The brackets of a parametrized test name are escaped for the same reason as in 'png_snapshot'
     snapshot_pattern = "".join(f"[{char}]" if char in ("[", "]") else char for char in path.name)
     tests_dir = Path(__file__).parent
-    get_hf_dataset(
-        pattern=f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
-        repo_name="snapshots",
-        local_dir=tests_dir,
-    )
+    _fetch_snapshots(request.config, f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}")
     return path
