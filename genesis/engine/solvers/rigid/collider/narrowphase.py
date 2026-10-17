@@ -1716,61 +1716,77 @@ def func_recompute_perturbed_contact(
                     contact_pos = 0.5 * (witness_a + witness_b)
                     has_depth_estimate = True
         else:
-            # Along an edge lying on the face of the other geom, the depth varies linearly, so that the point the
-            # detection lands on along it is arbitrary up to rounding when the tilt hardly deepens one end more than
-            # the other. The perturbation looks for the end of the patch that its tilt deepens, which is one end of the
-            # edge, an exact material point. Each geom turns about contact 0, geom A by 'qrot' towards the negative
-            # side of the normal and geom B by its inverse towards the positive one.
-            ends_deepened = qd.Matrix.zero(gs.qd_float, 2, 3)
-            has_end_deepened = qd.Vector.zero(gs.qd_int, 2)
-            for i_g in qd.static(range(2)):
-                if is_supports_edge[i_g] == 1:
-                    end_0, end_1 = ends[2 * i_g, :], ends[2 * i_g + 1, :]
-                    R_g = R if qd.static(i_g == 0) else R_inv
-                    lift_0 = normal_0.dot(R_g @ (end_0 - contact_pos_0) - (end_0 - contact_pos_0))
-                    lift_1 = normal_0.dot(R_g @ (end_1 - contact_pos_0) - (end_1 - contact_pos_0))
-                    if qd.static(i_g == 0):
-                        lift_0, lift_1 = -lift_0, -lift_1
-                    if qd.abs(lift_1 - lift_0) > EPS * (qd.abs(lift_0) + qd.abs(lift_1)):
-                        end = end_1 if lift_1 > lift_0 else end_0
-                        has_end_deepened[i_g] = 1
-                        ends_deepened[i_g, :] = end
-
-            # The support triangle of each geom, where it covers the witness of the other geom along the normal of
-            # contact 0, bounds its surface there, which gives a lower bound of the depth. The deepened end of an edge
-            # replaces the witness of its geom only where covered, since the edge may run past the other geom.
-            for i_g in qd.static(range(2)):
-                supports_other = supports_b if qd.static(i_g == 0) else supports_a
+            # A projected edge can cross the other support triangle while both its deepest endpoint and the detection
+            # witness lie outside. Clip the whole edge to retain a covered material point in that case.
+            for i_g in range(2):
+                supports_other = supports_b if i_g == 0 else supports_a
                 v_1, v_2, v_3 = supports_other[0, :], supports_other[1, :], supports_other[2, :]
                 edge_1, edge_2 = v_2 - v_1, v_3 - v_1
                 area = edge_1.cross(edge_2).dot(normal_0)
-                is_covered = False
-                for i_w in qd.static(range(2)):
-                    # The deepened end first, then the witness of the detection
-                    witness = witness_a if qd.static(i_g == 0) else witness_b
-                    is_candidate = not is_covered
-                    if qd.static(i_w == 0):
-                        witness = ends_deepened[i_g, :]
-                        is_candidate = has_end_deepened[i_g] == 1
-                    if is_candidate:
-                        if is_supports_degenerate[1 - i_g] == 0:
-                            offset = witness - v_1
-                            lambda_2 = offset.cross(edge_2).dot(normal_0) / area
-                            lambda_3 = edge_1.cross(offset).dot(normal_0) / area
-                            if lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0:
-                                is_covered = True
-                                if qd.static(i_g == 0):
-                                    witness_a = witness
+                if is_supports_degenerate[1 - i_g] == 0:
+                    barycentric_gradient_2 = edge_2.cross(normal_0) / area
+                    barycentric_gradient_3 = normal_0.cross(edge_1) / area
+                    witness = witness_a if i_g == 0 else witness_b
+                    offset = witness - v_1
+                    lambda_2 = offset.dot(barycentric_gradient_2)
+                    lambda_3 = offset.dot(barycentric_gradient_3)
+                    is_covered = lambda_2 >= 0.0 and lambda_3 >= 0.0 and lambda_2 + lambda_3 <= 1.0
+                    if is_supports_edge[i_g] == 1:
+                        end_0, end_1 = ends[2 * i_g, :], ends[2 * i_g + 1, :]
+                        offset_0, offset_1 = end_0 - v_1, end_1 - v_1
+                        barycentric_0 = qd.Vector(
+                            [0.0, offset_0.dot(barycentric_gradient_2), offset_0.dot(barycentric_gradient_3)]
+                        )
+                        barycentric_1 = qd.Vector(
+                            [0.0, offset_1.dot(barycentric_gradient_2), offset_1.dot(barycentric_gradient_3)]
+                        )
+                        barycentric_0[0] = 1.0 - barycentric_0[1] - barycentric_0[2]
+                        barycentric_1[0] = 1.0 - barycentric_1[1] - barycentric_1[2]
+                        fraction_min, fraction_max = 0.0, 1.0
+                        for i_corner in range(3):
+                            value_0, value_1 = barycentric_0[i_corner], barycentric_1[i_corner]
+                            if value_0 < 0.0 and value_1 < 0.0:
+                                fraction_min = 1.0
+                                fraction_max = 0.0
+                            elif (value_0 < 0.0) != (value_1 < 0.0):
+                                fraction = value_0 / (value_0 - value_1)
+                                if value_0 < 0.0:
+                                    fraction_min = qd.max(fraction_min, fraction)
                                 else:
-                                    witness_b = witness
-                                height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
-                                bound = height - normal_0.dot(witness_a)
-                                if qd.static(i_g == 1):
-                                    bound = normal_0.dot(witness_b) - height
-                                if not has_depth_estimate or bound > depth:
-                                    depth = bound
-                                    contact_pos = witness + (0.5 if qd.static(i_g == 0) else -0.5) * bound * normal_0
-                                    has_depth_estimate = True
+                                    fraction_max = qd.min(fraction_max, fraction)
+                        if fraction_min <= fraction_max:
+                            R_g = R if i_g == 0 else R_inv
+                            lift_0 = normal_0.dot(R_g @ (end_0 - contact_pos_0) - (end_0 - contact_pos_0))
+                            lift_1 = normal_0.dot(R_g @ (end_1 - contact_pos_0) - (end_1 - contact_pos_0))
+                            if i_g == 0:
+                                lift_0, lift_1 = -lift_0, -lift_1
+                            edge = end_1 - end_0
+                            fraction = (witness - end_0).dot(edge) / edge.norm_sqr()
+                            fraction = qd.min(qd.max(fraction, fraction_min), fraction_max)
+                            has_end_deepened = qd.abs(lift_1 - lift_0) > EPS * (qd.abs(lift_0) + qd.abs(lift_1))
+                            fraction_end = 1.0 if lift_1 > lift_0 else 0.0
+                            is_end_covered = has_end_deepened and fraction_min <= fraction_end <= fraction_max
+                            # A covered detection witness remains valid when the deepened endpoint crosses the
+                            # support triangle boundary. Clipping supplies a witness only when both miss it.
+                            if is_end_covered or not is_covered:
+                                if has_end_deepened:
+                                    fraction = qd.min(qd.max(fraction_end, fraction_min), fraction_max)
+                                witness = end_0 + fraction * edge
+                                barycentric = barycentric_0 + fraction * (barycentric_1 - barycentric_0)
+                                lambda_2, lambda_3 = barycentric[1], barycentric[2]
+                                is_covered = True
+                    if is_covered:
+                        height = normal_0.dot(v_1 + lambda_2 * edge_1 + lambda_3 * edge_2)
+                        bound = height - normal_0.dot(witness)
+                        if i_g == 0:
+                            witness_a = witness
+                        else:
+                            witness_b = witness
+                            bound = -bound
+                        if not has_depth_estimate or bound > depth:
+                            depth = bound
+                            contact_pos = witness + (0.5 if i_g == 0 else -0.5) * bound * normal_0
+                            has_depth_estimate = True
 
     # Available support triangles define the unperturbed normal below. Un-rotating the detection normal instead mixes
     # lateral witness separation into depth when the detection combines different support features.
@@ -1941,6 +1957,7 @@ def func_contact_overlap_axes(
     gb_pos: qd.types.vector(3),
     gb_quat: qd.types.vector(4),
     axes: qd.types.matrix(4, 3),
+    geoms_init_AABB: array_class.GeomsInitAABB,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -1984,7 +2001,14 @@ def func_contact_overlap_axes(
         if geom_type == gs.GEOM_TYPE.SPHERE or geom_type == gs.GEOM_TYPE.ELLIPSOID or geom_type == gs.GEOM_TYPE.CAPSULE:
             is_outlined = False
     is_adaptive = False
+    planes = qd.Matrix.zero(gs.qd_float, 2, 3)
     if is_outlined:
+        geoms_diameter = qd.Vector(
+            [
+                (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]).norm(),
+                (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]).norm(),
+            ]
+        )
         # Prioritize edges nearest contact 0 so the vertex budget resolves the portion around the contact first.
         # Surviving edges retain their settled bits when an insertion removes the visible chain.
         edges_settled = qd.Vector.zero(gs.qd_int, 2)
@@ -1993,7 +2017,8 @@ def func_contact_overlap_axes(
         i_g_refine = 0
         i_e_refine = 0
         n_adaptive = 0
-        planes = qd.Matrix.zero(gs.qd_float, 2, 3)
+        is_plane_valid = qd.Vector.zero(gs.qd_int, 2)
+        i_g_fit = -1
         # Four initial bounds plus the remaining support half-planes and the depth half-plane allow 65 vertices
         region_outer = qd.Matrix.zero(gs.qd_float, 65, 2)
         n_outer = 0
@@ -2002,11 +2027,47 @@ def func_contact_overlap_axes(
         sampling_tangent = 2.0 * collider_info.mc_perturbation[None]
         clip_normal_pending = qd.Vector.zero(gs.qd_float, 2)
         clip_offset_pending = gs.qd_float(0.0)
-        for i_query in range(128):
+        for i_query in range(129):
+            if i_g_fit >= 0:
+                n_points = polygons_size[i_g_fit]
+                plane_normal = qd.Vector.zero(gs.qd_float, 3)
+                centroid = qd.Vector.zero(gs.qd_float, 3)
+                for j_v in range(n_points):
+                    j_k0 = 32 * i_g_fit + j_v
+                    j_k1 = 32 * i_g_fit + (j_v + 1) % n_points
+                    plane_normal[0] += (polygons[j_k0, 1] - polygons[j_k1, 1]) * (polygons[j_k0, 2] + polygons[j_k1, 2])
+                    plane_normal[1] += (polygons[j_k0, 2] - polygons[j_k1, 2]) * (polygons[j_k0, 0] + polygons[j_k1, 0])
+                    plane_normal[2] += (polygons[j_k0, 0] - polygons[j_k1, 0]) * (polygons[j_k0, 1] + polygons[j_k1, 1])
+                    for i_3 in qd.static(range(3)):
+                        centroid[i_3] += polygons[j_k0, i_3] / n_points
+                gradient = qd.Vector.zero(gs.qd_float, 2)
+                if qd.abs(plane_normal[2]) > EPS * plane_normal.norm():
+                    gradient = -qd.Vector([plane_normal[0], plane_normal[1]]) / plane_normal[2]
+                height_origin = centroid[2] - gradient[0] * centroid[0] - gradient[1] * centroid[1]
+                planes[i_g_fit, 0], planes[i_g_fit, 1], planes[i_g_fit, 2] = gradient[0], gradient[1], height_origin
+                is_plane_valid[i_g_fit] = n_points >= 3 and qd.abs(plane_normal[2]) > EPS * geom_pair_scale**2
+                for j_v in range(n_points):
+                    j_k = 32 * i_g_fit + j_v
+                    height = height_origin + gradient[0] * polygons[j_k, 0] + gradient[1] * polygons[j_k, 1]
+                    if qd.abs(polygons[j_k, 2] - height) > plane_tolerance:
+                        is_plane_valid[i_g_fit] = False
+                i_g_fit = -1
+            # Finish the last plane update without spending another support query.
+            if i_query == 128:
+                break
             i_g = i_query // 2
             i_e = 0
             direction_x = 1.0 if i_query % 2 == 0 else -1.0
             direction_y = gs.qd_float(0.0)
+            if i_query < 4:
+                # Geom-relative seeds reduce outline changes caused by motion of the contact frame.
+                seed_quat = ga_quat if i_g == 0 else gb_quat
+                normal_local = gu.qd_inv_transform_by_quat(normal, seed_quat)
+                seed_local, _ = gu.qd_orthogonals(normal_local)
+                seed_world = gu.qd_transform_by_quat(seed_local, seed_quat)
+                seed_sign = direction_x
+                direction_x = seed_sign * seed_world.dot(axis_0)
+                direction_y = seed_sign * seed_world.dot(axis_1)
             is_query = i_query < 4
             if not is_query and not is_adaptive:
                 for _ in range(2):
@@ -2055,28 +2116,7 @@ def func_contact_overlap_axes(
             if not is_query and not is_adaptive:
                 # Refine truncated planar outlines until the uncertainty is small in the overlap itself
                 is_adaptive = polygons_size[0] >= 8 or polygons_size[1] >= 8
-                for j_g in range(2 if is_adaptive else 0):
-                    n_points = polygons_size[j_g]
-                    plane_normal = qd.Vector.zero(gs.qd_float, 3)
-                    centroid = qd.Vector.zero(gs.qd_float, 3)
-                    for j_v in range(n_points):
-                        j_k0 = 32 * j_g + j_v
-                        j_k1 = 32 * j_g + (j_v + 1) % n_points
-                        point = qd.Vector([polygons[j_k0, 0], polygons[j_k0, 1], polygons[j_k0, 2]])
-                        point_next = qd.Vector([polygons[j_k1, 0], polygons[j_k1, 1], polygons[j_k1, 2]])
-                        plane_normal += point.cross(point_next)
-                        centroid += point / n_points
-                    if qd.abs(plane_normal[2]) <= EPS * geom_pair_scale**2:
-                        is_adaptive = False
-                    else:
-                        planes[j_g, 0] = -plane_normal[0] / plane_normal[2]
-                        planes[j_g, 1] = -plane_normal[1] / plane_normal[2]
-                        planes[j_g, 2] = centroid[2] - planes[j_g, 0] * centroid[0] - planes[j_g, 1] * centroid[1]
-                    for j_v in range(n_points):
-                        j_k = 32 * j_g + j_v
-                        height = planes[j_g, 0] * polygons[j_k, 0] + planes[j_g, 1] * polygons[j_k, 1]
-                        if qd.abs(polygons[j_k, 2] - height - planes[j_g, 2]) > plane_tolerance:
-                            is_adaptive = False
+                is_adaptive = is_adaptive and is_plane_valid[0] != 0 and is_plane_valid[1] != 0
             if is_adaptive:
                 i_g = 0
                 is_query = n_adaptive < 64
@@ -2128,7 +2168,8 @@ def func_contact_overlap_axes(
                         for j_g in range(2):
                             n_points = polygons_size[j_g]
                             distance_min = gs.qd_float(1e30)
-                            delta_nearest = qd.Vector.zero(gs.qd_float, 2)
+                            direction_nearest = qd.Vector.zero(gs.qd_float, 2)
+                            violation_max = gs.qd_float(-1.0)
                             is_inside = n_points >= 3
                             for j_e in range(n_points):
                                 j_e1 = (j_e + 1) % n_points
@@ -2137,19 +2178,25 @@ def func_contact_overlap_axes(
                                 point_end = qd.Vector([polygons[j_k1, 0], polygons[j_k1, 1]])
                                 edge = point_end - point_start
                                 delta = point - point_start
-                                if edge[0] * delta[1] - edge[1] * delta[0] < 0.0:
+                                side = edge[0] * delta[1] - edge[1] * delta[0]
+                                edge_length_sqr = qd.max(edge.dot(edge), EPS**2)
+                                if side < 0.0:
                                     is_inside = False
-                                fraction = qd.min(qd.max(delta.dot(edge) / qd.max(edge.dot(edge), EPS**2), 0.0), 1.0)
+                                    violation = side**2 / edge_length_sqr
+                                    if violation > violation_max:
+                                        violation_max = violation
+                                        direction_nearest = qd.Vector([edge[1], -edge[0]])
+                                fraction = qd.min(qd.max(delta.dot(edge) / edge_length_sqr, 0.0), 1.0)
                                 delta -= fraction * edge
                                 if delta.dot(delta) < distance_min:
                                     distance_min = delta.dot(delta)
-                                    delta_nearest = delta
                             if is_inside:
                                 distance_min = 0.0
                             if distance_min > distance_max:
                                 distance_max = distance_min
                                 i_g = j_g
-                                direction_x, direction_y = delta_nearest[0], delta_nearest[1]
+                                # Edge normals keep a query fixed while the overlap moves past the same sampled edge
+                                direction_x, direction_y = direction_nearest[0], direction_nearest[1]
                     diameter_sqr = (bounds_max - bounds_min).norm_sqr()
                     # Eroding the outer overlap by its maximum distance to either sampled face lies inside both
                     # faces. The removed area is at most that distance times the outer perimeter.
@@ -2167,13 +2214,26 @@ def func_contact_overlap_axes(
                 break
             if is_query:
                 is_b = i_g == 1
+                edge_tolerance = coincidence_tolerance
+                if is_plane_valid[i_g] and (not is_adaptive or n_adaptive >= 8):
+                    # A one-sided query tilt resolves tied supports. Its support error is bounded by the tilt times
+                    # the geom diameter, sharing the existing edge tolerance with the insertion test.
+                    direction_bias = 0.5 * coincidence_tolerance / qd.max(geoms_diameter[i_g], EPS)
+                    direction_biased = qd.Vector(
+                        [
+                            direction_x - direction_bias * direction_y,
+                            direction_y + direction_bias * direction_x,
+                        ]
+                    ).normalized(EPS)
+                    direction_x, direction_y = direction_biased[0], direction_biased[1]
+                    edge_tolerance *= 0.5
                 # The relative perturbation sets the sampling angle so curved surfaces are sampled near the contact.
                 direction = sampling_tangent * (direction_x * axis_0 + direction_y * axis_1) + (
                     normal if is_b else -normal
                 )
                 sign = 1.0 if is_b else -1.0
-                if is_adaptive:
-                    # Removing the fitted height gradient makes the support direction tangential within the face
+                if is_plane_valid[i_g]:
+                    # Removing the face slope makes the support certify an edge in the projected outline.
                     direction -= sign * (planes[i_g, 0] * axis_0 + planes[i_g, 1] * axis_1)
                 support_offset = (
                     mpr.support_driver(
@@ -2236,12 +2296,14 @@ def func_contact_overlap_axes(
                         for i_3 in qd.static(range(3)):
                             polygons[32 * i_g + n_points, i_3] = corner[i_3]
                         polygons_size[i_g] = n_points + 1
-                else:
+                elif not is_adaptive or n_adaptive > 8:
+                    # Outer bounds certify the overlap. Edge-normal queries alone refine its sampled outline.
                     i_k0 = 32 * i_g + i_e
                     i_k1 = 32 * i_g + (i_e + 1) % n_points
                     edge_x, edge_y = polygons[i_k1, 0] - polygons[i_k0, 0], polygons[i_k1, 1] - polygons[i_k0, 1]
                     side = edge_x * (corner[1] - polygons[i_k0, 1]) - edge_y * (corner[0] - polygons[i_k0, 0])
-                    if side < -coincidence_tolerance * qd.sqrt(edge_x**2 + edge_y**2):
+                    if side < -edge_tolerance * qd.sqrt(edge_x**2 + edge_y**2):
+                        i_g_fit = i_g
                         is_local = True
                         for j_e_ in range(2):
                             j_e = (i_e + n_points - 1 + 2 * j_e_) % n_points
@@ -2369,39 +2431,20 @@ def func_contact_overlap_axes(
                                 edges_settled[i_g] = 0
                     else:
                         edges_settled[i_g] |= 1 << i_e
+                if i_g_fit >= 0 and is_plane_valid[i_g] != 0:
+                    # Retained vertices already satisfy the plane, so only the inserted support needs checking.
+                    height = planes[i_g, 2] + planes[i_g, 0] * corner[0] + planes[i_g, 1] * corner[1]
+                    if qd.abs(corner[2] - height) <= plane_tolerance:
+                        i_g_fit = -1
 
     # Two thirty-two-vertex hulls and the depth half-plane bound at most sixty-five overlap vertices
     overlap = qd.Matrix.zero(gs.qd_float, 65, 2)
     n_overlap = 0
     slope = qd.Vector.zero(gs.qd_float, 2)
     if is_outlined:
-        # Depth in the contact plane, the height of the face of geom B minus that of geom A, from the plane of each
-        # polygon: the normal of its points (Newell's method) through their centroid. Contact 0 lies on both planes of
-        # flat faces, while the outline of a rounded geom samples it far above the contact, where its depth leaves no
-        # part of the overlap pressed.
-        depth_origin = gs.qd_float(0.0)
-        for i_g in qd.static(range(2)):
-            plane_normal = qd.Vector.zero(gs.qd_float, 3)
-            centroid = qd.Vector.zero(gs.qd_float, 3)
-            n_points = polygons_size[i_g]
-            for i_k in range(n_points):
-                i_k0 = 32 * i_g + i_k
-                i_k1 = 32 * i_g + (i_k + 1) % n_points
-                plane_normal[0] += (polygons[i_k0, 1] - polygons[i_k1, 1]) * (polygons[i_k0, 2] + polygons[i_k1, 2])
-                plane_normal[1] += (polygons[i_k0, 2] - polygons[i_k1, 2]) * (polygons[i_k0, 0] + polygons[i_k1, 0])
-                plane_normal[2] += (polygons[i_k0, 0] - polygons[i_k1, 0]) * (polygons[i_k0, 1] + polygons[i_k1, 1])
-                for i_3 in qd.static(range(3)):
-                    centroid[i_3] += polygons[i_k0, i_3] / n_points
-            gradient = qd.Vector.zero(gs.qd_float, 2)
-            if qd.abs(plane_normal[2]) > EPS * plane_normal.norm():
-                gradient = -qd.Vector([plane_normal[0], plane_normal[1]]) / plane_normal[2]
-            height_origin = centroid[2] - gradient[0] * centroid[0] - gradient[1] * centroid[1]
-            if qd.static(i_g == 1):
-                slope += gradient
-                depth_origin += height_origin
-            else:
-                slope -= gradient
-                depth_origin -= height_origin
+        # The fitted face heights bound the portion of the overlap that interpenetrates.
+        slope = qd.Vector([planes[1, 0] - planes[0, 0], planes[1, 1] - planes[0, 1]])
+        depth_origin = planes[1, 2] - planes[0, 2]
 
         # Clip the polygon of geom A by that of geom B (Sutherland-Hodgman), which keeps the orientation of the former,
         # then by the half-plane where the faces interpenetrate, the patch being the part of their overlap that the
@@ -2521,57 +2564,106 @@ def func_contact_overlap_axes(
         # rotate the corner order past it and split the pentagon into three triangles, two independently maximal.
         n_search = n_overlap - (1 if i_k_origin >= 0 else 0)
         i_k_start = i_k_origin + 1 if i_k_origin >= 0 else 0
+        has_anchor = i_k_origin >= 0
+        if not has_anchor:
+            # Contact 0 can lie outside the sampled overlap. Its hull replaces the visible edge chain, so the
+            # remaining chain and contact 0 define the same anchored area search as a coincident overlap corner.
+            n_visible = 0
+            i_k_visible = 0
+            is_visible_previous = False
+            for i_k_ in range(n_overlap + 1):
+                i_k = (i_k_ + n_overlap - 1) % n_overlap
+                i_k_next = (i_k + 1) % n_overlap
+                corner = qd.Vector([overlap[i_k, 0], overlap[i_k, 1]])
+                edge = qd.Vector([overlap[i_k_next, 0], overlap[i_k_next, 1]]) - corner
+                side = orientation * (edge[1] * corner[0] - edge[0] * corner[1])
+                is_visible = side < -coincidence_tolerance * edge.norm()
+                if i_k_ > 0:
+                    if is_visible:
+                        n_visible += 1
+                        if not is_visible_previous:
+                            i_k_visible = i_k
+                is_visible_previous = is_visible
+            if n_visible > 0:
+                has_anchor = True
+                n_search = n_overlap - n_visible + 1
+                i_k_start = (i_k_visible + n_visible) % n_overlap
         area_best = gs.qd_float(-1.0)
-        for i_k0_ in range(n_search - 3):
-            i_k0 = (i_k_start + i_k0_) % n_overlap
-            corner_0 = qd.Vector([overlap[i_k0, 0], overlap[i_k0, 1]])
-            corner_anchor = corner_0
-            if i_k_origin >= 0:
-                corner_anchor = qd.Vector([overlap[i_k_origin, 0], overlap[i_k_origin, 1]])
-            # Convexity makes each maximizing endpoint advance as the diagonal rotates. Each endpoint traverses
-            # its corner interval once for a fixed first corner, bounding the total search quadratically.
-            i_k1_best_ = i_k0_ + 1
-            i_k3_best_ = i_k0_ + 3
-            for i_k2_ in range(i_k0_ + 2, n_search - 1):
-                i_k2 = (i_k_start + i_k2_) % n_overlap
-                corner_2 = qd.Vector([overlap[i_k2, 0], overlap[i_k2, 1]])
-                area_origin = gs.qd_float(0.0)
+        if has_anchor and n_search < 4:
+            for i_t in range(4):
+                targets[i_t] = (i_k_start + i_t % n_search) % n_overlap
+        for i_search in range(1 if has_anchor else 2):
+            n_first = n_search - 3 if i_search == 0 else n_overlap
+            for i_k0_ in range(n_first):
+                i_k0 = (i_k_start + i_k0_) % n_overlap
+                corner_0 = qd.Vector([overlap[i_k0, 0], overlap[i_k0, 1]])
+                corner_anchor = corner_0
+                if has_anchor or i_search == 1:
+                    corner_anchor = qd.Vector.zero(gs.qd_float, 2)
                 if i_k_origin >= 0:
-                    edge_0, edge_2 = corner_0 - corner_anchor, corner_2 - corner_anchor
-                    area_origin = orientation * (edge_0[0] * edge_2[1] - edge_0[1] * edge_2[0])
-                i_k3_best_ = qd.max(i_k3_best_, i_k2_ + 1)
-                area_mid_best = gs.qd_float(0.0)
-                area_last_best = gs.qd_float(0.0)
-                for i_side in range(2):
-                    i_k_best_ = i_k1_best_
-                    i_k_end_ = i_k2_
-                    if i_side == 1:
-                        i_k_best_ = i_k3_best_
-                        i_k_end_ = n_search
-                    area_triangle_best = gs.qd_float(-1.0)
-                    for i_k_ in range(i_k_best_, i_k_end_):
-                        i_k = (i_k_start + i_k_) % n_overlap
-                        corner = qd.Vector([overlap[i_k, 0], overlap[i_k, 1]])
-                        edge_1, edge_2 = corner - corner_0, corner_2 - corner_0
-                        if i_side == 1:
-                            edge_1, edge_2 = corner_2 - corner_anchor, corner - corner_anchor
-                        area = orientation * (edge_1[0] * edge_2[1] - edge_1[1] * edge_2[0])
-                        if area <= area_triangle_best:
+                    corner_anchor = qd.Vector([overlap[i_k_origin, 0], overlap[i_k_origin, 1]])
+                # Convexity makes each maximizing endpoint advance as the diagonal rotates. Each endpoint traverses
+                # its corner interval once for a fixed first corner, bounding the total search quadratically.
+                i_k1_best_ = i_k0_ + 1
+                i_k3_best_ = i_k0_ + 3
+                i_k_end = n_search
+                if i_search == 1:
+                    # An interior contact contributes to the hull when the four targets lie in a half-plane through it
+                    i_k_end = i_k0_ + n_overlap
+                    area_bound = gs.qd_float(0.0)
+                    corner_previous = corner_0
+                    for j_k_ in range(i_k0_ + 1, i_k0_ + n_overlap):
+                        j_k = j_k_ % n_overlap
+                        side = orientation * (corner_0[0] * overlap[j_k, 1] - corner_0[1] * overlap[j_k, 0])
+                        if side < 0.0:
+                            i_k_end = j_k_
                             break
-                        area_triangle_best = area
-                        i_k_best_ = i_k_
-                    if i_side == 0:
-                        i_k1_best_ = i_k_best_
-                        area_mid_best = area_triangle_best
-                    else:
-                        i_k3_best_ = i_k_best_
-                        area_last_best = area_triangle_best
-                area = area_origin + area_mid_best + area_last_best
-                if area > area_best:
-                    area_best = area
-                    i_k1_best = (i_k_start + i_k1_best_) % n_overlap
-                    i_k3_best = (i_k_start + i_k3_best_) % n_overlap
-                    targets = qd.Vector([i_k0, i_k1_best, i_k2, i_k3_best], dt=gs.qd_int)
+                        corner = qd.Vector([overlap[j_k, 0], overlap[j_k, 1]])
+                        area_bound += qd.abs(corner_previous[0] * corner[1] - corner_previous[1] * corner[0])
+                        corner_previous = corner
+                    # Every candidate lies inside this corner chain and the origin, whose area bounds its support area.
+                    if area_bound + EPS * geom_pair_scale**2 <= area_best:
+                        i_k_end = i_k0_ + 3
+                for i_k2_ in range(i_k0_ + 2, i_k_end - 1):
+                    i_k2 = (i_k_start + i_k2_) % n_overlap
+                    corner_2 = qd.Vector([overlap[i_k2, 0], overlap[i_k2, 1]])
+                    area_origin = gs.qd_float(0.0)
+                    if has_anchor or i_search == 1:
+                        edge_0, edge_2 = corner_0 - corner_anchor, corner_2 - corner_anchor
+                        area_origin = orientation * (edge_0[0] * edge_2[1] - edge_0[1] * edge_2[0])
+                    i_k3_best_ = qd.max(i_k3_best_, i_k2_ + 1)
+                    area_mid_best = gs.qd_float(0.0)
+                    area_last_best = gs.qd_float(0.0)
+                    for i_side in range(2):
+                        i_k_best_ = i_k1_best_
+                        i_k_end_ = i_k2_
+                        if i_side == 1:
+                            i_k_best_ = i_k3_best_
+                            i_k_end_ = i_k_end
+                        area_triangle_best = gs.qd_float(-1.0)
+                        for i_k_ in range(i_k_best_, i_k_end_):
+                            i_k = (i_k_start + i_k_) % n_overlap
+                            corner = qd.Vector([overlap[i_k, 0], overlap[i_k, 1]])
+                            edge_1, edge_2 = corner - corner_0, corner_2 - corner_0
+                            if i_side == 1:
+                                edge_1, edge_2 = corner_2 - corner_anchor, corner - corner_anchor
+                            area = orientation * (edge_1[0] * edge_2[1] - edge_1[1] * edge_2[0])
+                            if area <= area_triangle_best:
+                                break
+                            area_triangle_best = area
+                            i_k_best_ = i_k_
+                        if i_side == 0:
+                            i_k1_best_ = i_k_best_
+                            area_mid_best = area_triangle_best
+                        else:
+                            i_k3_best_ = i_k_best_
+                            area_last_best = area_triangle_best
+                    area = area_origin + area_mid_best + area_last_best
+                    if area > area_best:
+                        area_best = area
+                        i_k1_best = (i_k_start + i_k1_best_) % n_overlap
+                        i_k3_best = (i_k_start + i_k3_best_) % n_overlap
+                        targets = qd.Vector([i_k0, i_k1_best, i_k2, i_k3_best], dt=gs.qd_int)
 
     # Area divided by perimeter scales with the narrow width of a patch, protecting thin overlaps from merging
     overlap_merge_tolerance = collider_info.mc_tolerance[None] * geom_pair_scale
@@ -3062,6 +3154,7 @@ def func_convex_convex_contact(
                                     gb_pos_original,
                                     gb_quat_original,
                                     overlap_axes,
+                                    geoms_init_AABB,
                                     collider_state,
                                     dyn_info,
                                     rigid_info,
@@ -3987,6 +4080,7 @@ def func_narrowphase_multicontact(
                                     dyn_state.geoms.pos[i_gb, i_b],
                                     dyn_state.geoms.quat[i_gb, i_b],
                                     overlap_axes,
+                                    geoms_init_AABB,
                                     collider_state,
                                     dyn_info,
                                     rigid_info,
