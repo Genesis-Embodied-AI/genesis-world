@@ -49,9 +49,11 @@ class Emitter(RBC):
 
     def reset(self):
         """
-        Reset the emitter's internal particle index to start emitting from the beginning.
+        Reset the emitter's internal particle index to start emitting from the beginning, and clear any partial
+        droplet length accumulated by the current episode.
         """
         self._next_particle = 0
+        self._acc_droplet_len = 0.0
 
     def emit(
         self,
