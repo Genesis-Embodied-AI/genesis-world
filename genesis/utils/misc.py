@@ -772,24 +772,39 @@ def indices_to_mask(
                     arg = slice(arg, arg + 1 if arg != -1 else None)
             else:  # np.ndarray, torch.tensor, list, tuple, np.int32...
                 try:
-                    is_torch_, is_numpy_ = False, False
+                    is_torch_, is_numpy_, is_bool_mask = False, False, False
                     if isinstance(arg, torch.Tensor):
                         if not boolean_mask and arg.dtype == torch.bool:
                             arg = arg.nonzero()[:, 0]
                         is_scalar_ = arg.dtype != torch.bool and arg.numel() == 1
                         is_torch_ = True
                     elif isinstance(arg, np.ndarray):
-                        is_scalar_ = arg.size == 1
+                        is_bool_mask = arg.dtype == np.bool_
+                        is_scalar_ = arg.size == 1 and not is_bool_mask
                         is_numpy_ = True
                     else:
-                        is_scalar_ = len(arg) == 1
+                        is_bool_mask = (
+                            isinstance(arg, (list, tuple))
+                            and len(arg) > 0
+                            and all(type(entry) in (bool, np.bool_) for entry in arg)
+                        )
+                        is_scalar_ = len(arg) == 1 and not is_bool_mask
                     if is_scalar_:
                         idx = arg.item() if is_torch_ or is_numpy_ else arg[0]
                         arg = slice(idx, idx + 1 if idx != -1 else None)
                     else:
                         if raise_if_fancy:
                             gs.raise_exception("This mask requires advanced indexing but 'raise_if_fancy=True'.")
-                        if not is_torch_ and to_torch:
+                        if is_bool_mask and not boolean_mask:
+                            # A kernel taking indices has no masked variant, so the mask becomes plain indices first.
+                            arg = np.nonzero(arg)[0]
+                            is_bool_mask = False
+                        elif is_bool_mask and not is_torch_ and to_torch:
+                            # Host masks keep the same meaning as a torch tensor given directly: they stay boolean
+                            # instead of taking integer values 0/1, which would select the environments they exclude.
+                            arg = torch.as_tensor(arg, dtype=torch.bool, device=gs.device)
+                            is_torch_, is_numpy_ = True, False
+                        if not is_bool_mask and not is_torch_ and to_torch:
                             # Must convert masks to torch if not slice or int since torch will do it anyway.
                             # Note that being contiguous is not required and does not affect performance.
                             # int64 is what torch indexes with: a narrower index is widened on every use, and the
@@ -817,6 +832,8 @@ def indices_to_mask(
                 # the only place where combining axes makes that necessary.
                 if isinstance(mask[i], torch.Tensor) and mask[i].dtype == torch.bool:
                     mask[i] = mask[i].nonzero()[:, 0]
+                elif isinstance(mask[i], np.ndarray) and mask[i].dtype == np.bool_:
+                    mask[i] = np.nonzero(mask[i])[0]
                 shape = [1] * num_tensors
                 shape[tensor_idx] = -1
                 mask[i] = mask[i].reshape(shape)
@@ -1050,9 +1067,16 @@ def sanitize_index(
             elif index[0] < 0 or index[-1] < 0:
                 index = tuple(index)
                 is_negative_wrap_required = True
-    elif isinstance(index, (list, tuple, torch.Tensor)):
-        is_bool_mask = isinstance(index, torch.Tensor) and index.dtype == torch.bool
+    elif isinstance(index, torch.Tensor):
+        is_bool_mask = index.dtype == torch.bool
         is_negative_wrap_required = not is_bool_mask
+    elif isinstance(index, (list, tuple)):
+        is_bool_mask = len(index) > 0 and all(type(entry) in (bool, np.bool_) for entry in index)
+        is_negative_wrap_required = not is_bool_mask
+        if is_bool_mask:
+            # Hosting the tensor conversion on a NumPy array keeps masks holding NumPy booleans from falling back to
+            # an object tensor.
+            index = np.asarray(index, dtype=bool)
     elif isinstance(index, np.ndarray):
         is_bool_mask = np.issubdtype(index.dtype, np.bool_)
         is_negative_wrap_required = not is_bool_mask

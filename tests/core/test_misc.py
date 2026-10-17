@@ -637,7 +637,7 @@ def test_per_env_time(show_viewer, n_envs, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
+    sphere = scene.add_entity(
         morph=gs.morphs.Sphere(
             pos=(0.0, 0.0, 1.0),
         ),
@@ -673,6 +673,34 @@ def test_per_env_time(show_viewer, n_envs, tol):
         scene.step()
     scene.reset(envs_idx=torch.tensor((False, True, False), device=gs.device))
     assert_allclose(scene.get_time(), [N_MORE_STEPS * DT, 0.0, N_MORE_STEPS * DT], tol=tol)
+
+    # Host-side boolean masks select the same environments as the equivalent torch tensor, whether they come as a
+    # NumPy array or a plain collection of booleans, and the reset restores the state of the named environments alone.
+    for _ in range(N_MORE_STEPS):
+        scene.step()
+    positions_before_reset = sphere.get_pos()
+    scene.reset(envs_idx=np.array((False, True, False)))
+    assert_allclose(scene.get_time(), [2 * N_MORE_STEPS * DT, 0.0, 2 * N_MORE_STEPS * DT], tol=tol)
+    positions_after_reset = sphere.get_pos()
+    assert_allclose(positions_after_reset[1], (0.0, 0.0, 1.0), tol=tol)
+    assert_allclose(positions_after_reset[0], positions_before_reset[0], tol=tol)
+    assert_allclose(positions_after_reset[2], positions_before_reset[2], tol=tol)
+
+    # The getters take the same masks as the setters.
+    assert_allclose(scene.get_time(envs_idx=np.array((False, True, False))), [0.0], tol=tol)
+
+    for _ in range(N_MORE_STEPS):
+        scene.step()
+    scene.reset(envs_idx=[False, True, False])
+    assert_allclose(scene.get_time(), [3 * N_MORE_STEPS * DT, 0.0, 3 * N_MORE_STEPS * DT], tol=tol)
+
+    # Entity-local indexing accepts the same boolean masks, naming the same dofs as the equivalent integer selection.
+    sphere.set_dofs_position(np.linspace(-0.3, 0.3, 6), np.arange(6))
+    assert_allclose(
+        sphere.get_dofs_position(dofs_idx_local=np.array((True, False, True, False, True, True)))[1],
+        sphere.get_dofs_position(dofs_idx_local=(0, 2, 4, 5))[1],
+        tol=tol,
+    )
 
 
 @pytest.mark.required
