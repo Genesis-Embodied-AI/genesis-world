@@ -1,7 +1,10 @@
 import os
-import sys
 import subprocess
+import sys
+import time
 from pathlib import Path
+
+import psutil
 import pytest
 
 
@@ -47,6 +50,8 @@ EXAMPLE_DEPENDENCIES = {
 }
 
 TIMEOUT = 600
+# Period of the memory polling of a running example, short enough to catch a growth before it exhausts the machine
+MEMORY_POLL_PERIOD = 0.5
 
 
 pytestmark = [
@@ -85,21 +90,47 @@ def test_example(file: Path):
     env = os.environ.copy()
     env["PYNPUT_BACKEND"] = "dummy"
 
-    path_rel = file.relative_to(EXAMPLES_DIR).as_posix()
-    try:
-        result = subprocess.run(
-            [sys.executable, str(file)], env=env, capture_output=True, text=True, check=False, timeout=TIMEOUT
-        )
-    except subprocess.TimeoutExpired as e:
-        err_msg = f"Timeout running example {path_rel}."
-        if e.stdout is not None:
-            err_msg += f"\n\n--- STDOUT ---\n{e.stdout.decode()}"
-        if e.stderr is not None:
-            err_msg += f"\n\n--- STDERR ---\n{e.stderr.decode()}"
-        pytest.fail(err_msg)
+    # Every example running in parallel gets an even share of the memory of the machine. An example going beyond it is
+    # killed and reported, rather than exhausting the memory of the machine and taking down every process running on it.
+    memory_limit = psutil.virtual_memory().total / int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
 
-    if result.returncode != 0:
+    path_rel = file.relative_to(EXAMPLES_DIR).as_posix()
+    process = subprocess.Popen(
+        [sys.executable, str(file)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    process_tree = psutil.Process(process.pid)
+    deadline = time.monotonic() + TIMEOUT
+    memory_peak, err_msg = 0, None
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=MEMORY_POLL_PERIOD)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        memory = 0
+        for proc in (process_tree, *process_tree.children(recursive=True)):
+            try:
+                memory += proc.memory_info().rss
+            except psutil.NoSuchProcess:
+                pass
+        memory_peak = max(memory_peak, memory)
+        if memory > memory_limit:
+            err_msg = f"Example {path_rel} exceeded its share of memory ({memory_limit / 1024**3:.1f} GiB)."
+        elif time.monotonic() > deadline:
+            err_msg = f"Timeout running example {path_rel}."
+        if err_msg is not None:
+            for proc in (*process_tree.children(recursive=True), process_tree):
+                try:
+                    proc.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            stdout, stderr = process.communicate()
+            break
+
+    if err_msg is None and process.returncode != 0:
+        err_msg = f"Failed to run example {path_rel} (Exit Code {process.returncode})."
+    if err_msg is not None:
         pytest.fail(
-            f"Failed to run example {path_rel} (Exit Code {result.returncode}).\n\n"
-            f"--- STDOUT ---\n{result.stdout}\n\n--- STDERR ---\n{result.stderr}"
+            f"{err_msg} Peak memory: {memory_peak / 1024**3:.1f} GiB.\n\n"
+            f"--- STDOUT ---\n{stdout}\n\n--- STDERR ---\n{stderr}"
         )
