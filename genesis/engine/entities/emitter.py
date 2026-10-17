@@ -166,6 +166,10 @@ class Emitter(RBC):
                     f"number of particles ({self._entity.n_particles})."
                 )
 
+            # recycle particles as the batch does not fit in the remaining ones
+            if self._next_particle + n_particles > self._entity.n_particles:
+                self._next_particle = 0
+
             particles_idx = torch.arange(
                 self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
             )
@@ -175,10 +179,6 @@ class Emitter(RBC):
             self._entity.set_particles_active(gs.ACTIVE, particles_idx)
 
             self._next_particle += n_particles
-
-            # recycle particles
-            if self._next_particle + n_particles > self._entity.n_particles:
-                self._next_particle = 0
 
             gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
@@ -233,6 +233,10 @@ class Emitter(RBC):
                 f"of particles ({self._entity.n_particles})."
             )
 
+        # recycle particles as the batch does not fit in the remaining ones
+        if self._next_particle + n_particles > self._entity.n_particles:
+            self._next_particle = 0
+
         particles_idx = torch.arange(
             self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
         )
@@ -242,10 +246,6 @@ class Emitter(RBC):
         self._entity.set_particles_active(gs.ACTIVE, particles_idx)
 
         self._next_particle += n_particles
-
-        # recycle particles
-        if self._next_particle + n_particles > self._entity.n_particles:
-            self._next_particle = 0
 
         gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
