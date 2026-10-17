@@ -62,6 +62,60 @@ def test_disable_defaults():
 
 @pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
+def test_setter_does_not_pace_realtime_loop(monkeypatch):
+    DT = 0.005
+    N_SETTER_CALLS = 10
+    BOX_SIZE = (0.2, 0.2, 0.2)
+    BOX_POS = (0.0, 0.0, BOX_SIZE[0] / 2)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            res=CAM_RES,
+            run_in_thread=(sys.platform == "linux"),
+            realtime_factor=1.0,
+        ),
+        profiling_options=gs.options.ProfilingOptions(
+            show_FPS=False,
+        ),
+        show_viewer=True,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=BOX_POS,
+            size=BOX_SIZE,
+        ),
+    )
+    scene.build()
+
+    realtime_pacer = scene.visualizer.viewer._realtime_pacer
+    n_pacer_sleeps = 0
+    pacer_sleep = realtime_pacer.sleep
+
+    def counting_pacer_sleep():
+        nonlocal n_pacer_sleeps
+        n_pacer_sleeps += 1
+        pacer_sleep()
+
+    monkeypatch.setattr(realtime_pacer, "sleep", counting_pacer_sleep)
+
+    for _ in range(N_SETTER_CALLS):
+        box.set_pos(BOX_POS)
+    assert n_pacer_sleeps == 0
+
+    scene.step()
+    assert n_pacer_sleeps == 1
+    scene.step()
+    assert n_pacer_sleeps == 2
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_default_plugin(n_envs):
     scene = gs.Scene(

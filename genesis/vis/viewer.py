@@ -234,8 +234,13 @@ class Viewer(RBC):
                 if auto_refresh and not self._pyrender_viewer.run_in_thread:
                     self._pyrender_viewer.refresh()
 
-        # Pace the stepping loop to real time when a factor is set (no effect once the sim falls behind). Read the
-        # pacer once: the realtime_factor setter may swap it from the viewer thread between the check and the call.
+    def pace(self):
+        """Pace the stepping loop to real time when a factor is set (no effect once the sim falls behind).
+
+        Only stepping paces, so 'Visualizer.update' alone calls this: a state setter redraws through
+        'Visualizer.reset' and returns without sleeping. Read the pacer once: the realtime_factor setter may swap
+        it from the viewer thread between the check and the call.
+        """
         realtime_pacer = self._realtime_pacer
         if realtime_pacer is not None:
             realtime_pacer.sleep()

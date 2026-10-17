@@ -190,10 +190,11 @@ class Visualizer(RBC):
         self._context.build(self._scene)
 
         if self._viewer is not None:
-            # The interactive viewer shows the changes of state made outside of stepping, such as a setter, right away
+            # The interactive viewer shows the changes of state made outside of stepping, such as a setter, right
+            # away. 'reset' redraws without pacing: a setter does not advance the simulation, so it must not sleep.
             viewer_subscriber = Subscriber(
                 to=frozenset((StateChange.GEOMETRY,)),
-                callback=lambda change, envs_idx: self.update(force=True),
+                callback=lambda change, envs_idx: self.reset(),
             )
             for solver in self._scene.active_solvers:
                 solver.subscribe(viewer_subscriber)
@@ -223,6 +224,11 @@ class Visualizer(RBC):
             self.reset()
         elif self._viewer is not None:
             self._viewer.update(auto_refresh=auto, force=force)
+
+        # Only stepping paces the loop to real time: 'scene.step' is the sole caller that advances the simulation.
+        # A state setter redraws through 'reset' instead, which never paces.
+        if self._viewer is not None:
+            self._viewer.pace()
 
     def update_visual_states(self, force_render: bool = False):
         """
