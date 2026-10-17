@@ -889,11 +889,10 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
 @pytest.mark.parametrize("gjk_collision", [True, False])
 @pytest.mark.parametrize("n_base_sides", [4, 32])
 def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer, tol):
-    # A box rests on a wider base, a box or a 32-sided prism, at a random yaw and offset in each environment, so that
-    # the overlap of their faces takes every shape from slivers and short edges to near-collinear corners and many-sided
-    # polygons. The contacts of a pair lie within this overlap at its exact depth, on each of its corners when it has at
-    # most 4, and span its area.
-    N_ENVS = 128
+    # Random yaw and offset exercise slivers, short edges and nearly collinear corners of the overlap
+    N_POSES = 128
+    BASES_N_SIDES = (32, 8, 16, 64, 128, 256) if n_base_sides > 4 else (4,)
+    N_ENVS = N_POSES * len(BASES_N_SIDES)
     PENETRATION = 1e-4
     PRUNING_TOLERANCE = 0.02
     BASE_SIZE = (1.0, 0.6, 0.1)
@@ -901,20 +900,28 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
 
     corners_sign = np.array(((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)))
     base_corners = 0.5 * corners_sign * BASE_SIZE[:2]
+    bases_corners = [base_corners]
     base_morph = gs.morphs.Box(
-        size=BASE_SIZE,
         pos=(0.0, 0.0, 0.5 * BASE_SIZE[2]),
         fixed=True,
+        size=BASE_SIZE,
     )
     if n_base_sides > 4:
-        angles = 2.0 * np.pi * np.arange(n_base_sides) / n_base_sides
-        base_corners = 0.5 * np.stack((np.cos(angles), np.sin(angles)), axis=-1) * BASE_SIZE[:2]
-        heights = np.repeat((0.0, BASE_SIZE[2]), n_base_sides)[:, None]
-        base_mesh = trimesh.Trimesh(np.concatenate((np.tile(base_corners, (2, 1)), heights), axis=-1)).convex_hull
-        base_morph = gs.morphs.MeshSet(
-            files=(base_mesh,),
-            fixed=True,
-        )
+        base_morph = []
+        bases_corners.clear()
+        for n_sides in BASES_N_SIDES:
+            angles = 2.0 * np.pi * np.arange(n_sides) / n_sides
+            corners = 0.5 * np.stack((np.cos(angles), np.sin(angles)), axis=-1) * BASE_SIZE[:2]
+            bases_corners.append(corners)
+            heights = np.repeat((0.0, BASE_SIZE[2]), n_sides)[:, None]
+            mesh = trimesh.Trimesh(np.concatenate((np.tile(corners, (2, 1)), heights), axis=-1)).convex_hull
+            base_morph.append(
+                gs.morphs.MeshSet(
+                    decimate=False,
+                    fixed=True,
+                    files=(mesh,),
+                )
+            )
 
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -927,11 +934,15 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(base_morph)
+    scene.add_entity(
+        morph=base_morph,
+        vis_mode="collision",
+    )
     box = scene.add_entity(
-        gs.morphs.Box(
+        morph=gs.morphs.Box(
             size=BOX_SIZE,
         ),
+        vis_mode="collision",
     )
     scene.build(n_envs=N_ENVS)
 
@@ -940,6 +951,9 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
     yaw_aligned = 0.5 * np.pi * np.random.randint(4, size=is_aligned.sum())
     yaw[is_aligned] = yaw_aligned + np.random.uniform(-1e-3, 1e-3, is_aligned.sum())
     offset = np.random.uniform(-0.6, 0.6, (N_ENVS, 2))
+    # A thin rim overlap still needs contacts spanning its separated corners
+    yaw[0] = 3.101833136188562
+    offset[0] = (0.00690993398559525, 0.49528428141735137)
     box_z = BASE_SIZE[2] + 0.5 * BOX_SIZE[2] - PENETRATION
     corners_tol = scene.rigid_solver.collider._mc_tolerance * 0.5 * np.linalg.norm(BOX_SIZE)
     box.set_pos(np.concatenate((offset, np.full((N_ENVS, 1), box_z)), axis=-1))
@@ -954,7 +968,7 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
         clip_edges = np.roll(clip, -1, axis=0) - clip
         half_normals = np.stack((-clip_edges[:, 1], clip_edges[:, 0]), axis=-1)
         half_normals *= np.sign(((clip.mean(axis=0) - clip) * half_normals).sum(axis=-1))[:, None]
-        overlap = base_corners.copy()
+        overlap = bases_corners[i_b // N_POSES].copy()
         for half_normal, half_offset in zip(half_normals, -(half_normals * clip).sum(axis=-1)):
             overlap_side = half_offset + overlap @ half_normal
             overlap_clipped = []
@@ -980,7 +994,21 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
         overlap_normals *= np.sign(((overlap.mean(axis=0) - overlap) * overlap_normals).sum(axis=-1))[:, None]
         overlap_normals /= np.linalg.norm(overlap_normals, axis=-1, keepdims=True)
         assert ((contacts_pos[:, None] - overlap[None]) * overlap_normals[None]).sum(axis=-1).min(initial=0.0) > -tol
-        assert_allclose(contacts["penetration"][i_b], PENETRATION, tol=tol)
+        if gjk_collision or BASES_N_SIDES[i_b // N_POSES] in (4, 32):
+            assert_allclose(contacts["penetration"][i_b], PENETRATION, tol=tol)
+        else:
+            # Minkowski Portal Refinement (MPR) may select a side axis on a narrow rim overlap
+            normals = np.where(
+                (contacts["link_a"][i_b] == box.links[0].idx)[:, None],
+                -contacts["normal"][i_b],
+                contacts["normal"][i_b],
+            )
+            depth = (-bases_corners[i_b // N_POSES] @ normals[:, :2].T).max(axis=0)
+            depth += np.maximum(-normals[:, 2] * BASE_SIZE[2], 0.0)
+            depth += normals[:, :2] @ offset[i_b] + normals[:, 2] * box_z
+            depth += np.abs(normals[:, :2] @ rot) @ (0.5 * np.array(BOX_SIZE[:2]))
+            depth += 0.5 * BOX_SIZE[2] * np.abs(normals[:, 2])
+            assert_allclose(contacts["penetration"][i_b], depth, tol=tol)
 
         # An overlap of at most 4 corners has a contact within the merge distance of each corner, unless the pruning
         # drops it: the triangle a corner forms with its two neighbors then covers less than its pruning tolerance.
@@ -1002,12 +1030,15 @@ def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer,
                     assert ConvexHull(contacts_pos).volume > 0.75 * overlap_area
         else:
             # Five contacts can span an inscribed pentagon of a larger overlap.
-            pentagons = overlap[np.array(list(combinations(range(len(overlap)), 5)))]
-            pentagons_next = np.roll(pentagons, -1, axis=1)
-            pentagons_area = 0.5 * np.abs(
-                (pentagons[..., 0] * pentagons_next[..., 1] - pentagons[..., 1] * pentagons_next[..., 0]).sum(axis=1)
-            )
-            assert ConvexHull(contacts_pos).volume > 0.65 * pentagons_area.max()
+            indices = np.arange(len(overlap))
+            edges = overlap[None] - overlap[:, None]
+            triangles_area = edges[:, :, 0, None] * edges[:, None, :, 1]
+            triangles_area -= edges[:, :, 1, None] * edges[:, None, :, 0]
+            triangles_area[:, indices[:, None] >= indices[None]] = -np.inf
+            chains_area = np.where(indices[:, None] < indices[None], 0.0, -np.inf)
+            for _ in range(3):
+                chains_area = (chains_area[:, :, None] + triangles_area).max(axis=1)
+            assert ConvexHull(contacts_pos).volume > 0.65 * 0.5 * chains_area.max()
 
 
 @pytest.mark.required
