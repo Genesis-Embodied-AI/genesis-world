@@ -503,6 +503,46 @@ class Plane(Primitive):
 ############################ Mesh ############################
 
 
+class LinkCollisionOptions(Options):
+    """
+    Collision mesh post-processing options of one link, overriding the morph options link-wise.
+
+    Every field left unset (``None``) inherits the morph option it mirrors, so an entry only needs to state what
+    differs for the link at hand. Entries are keyed by authored link name through ``FileMorph.links_collision_options``.
+    """
+
+    convexify: StrictBool | None = None
+    decimate: StrictBool | None = None
+    decimate_face_num: PositiveInt | None = None
+    decimate_aggressiveness: StrictInt | None = Field(default=None, ge=0, le=8)
+    watertighten: StrictInt | None = Field(default=None, ge=0, le=8)
+    decompose_error_threshold: float | None = Field(default=None, ge=0, allow_inf_nan=True)
+    coacd_options: CoacdOptions | None = None
+
+    def resolve(self, morph: "FileMorph", decompose_error_threshold: float) -> "LinkCollisionOptions":
+        """The effective collision post-processing of one link: this entry's stated values, the morph's otherwise.
+
+        'decompose_error_threshold' is the robot/object split the caller resolves, kept wherever this entry is unset.
+        """
+        return LinkCollisionOptions(
+            convexify=self.convexify if self.convexify is not None else morph.convexify,
+            decimate=self.decimate if self.decimate is not None else morph.decimate,
+            decimate_face_num=self.decimate_face_num if self.decimate_face_num is not None else morph.decimate_face_num,
+            decimate_aggressiveness=(
+                self.decimate_aggressiveness
+                if self.decimate_aggressiveness is not None
+                else morph.decimate_aggressiveness
+            ),
+            watertighten=self.watertighten if self.watertighten is not None else morph.watertighten,
+            decompose_error_threshold=(
+                self.decompose_error_threshold
+                if self.decompose_error_threshold is not None
+                else decompose_error_threshold
+            ),
+            coacd_options=self.coacd_options if self.coacd_options is not None else morph.coacd_options,
+        )
+
+
 class FileMorph(Morph):
     """
     Morph loaded from a file.
@@ -560,6 +600,14 @@ class FileMorph(Morph):
         0.0 to enforce decomposition, float("inf") to disable it completely. Defaults to float("inf").
     coacd_options : CoacdOptions, optional
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
+    links_collision_options : dict[str, LinkCollisionOptions], optional
+        Collision mesh post-processing overrides keyed by authored link name, for articulated assets whose links
+        have different needs (e.g. accurate non-convex fingertips on a cheaply convexified body). Each
+        `gs.morphs.LinkCollisionOptions` states the values that differ for its link (`convexify`, `decimate`,
+        `decimate_face_num`, `decimate_aggressiveness`, `watertighten`, `decompose_error_threshold`,
+        `coacd_options`); whatever it leaves unset inherits the morph options above, and an entry naming no link
+        of the asset raises. Needs to be a `gs.morphs.LinkCollisionOptions` object per entry. Defaults to no
+        override. **This is only used for RigidEntity.**
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
@@ -600,6 +648,7 @@ class FileMorph(Morph):
     decompose_object_error_threshold: float = Field(default=0.15, ge=0, allow_inf_nan=True)
     decompose_robot_error_threshold: float = Field(default=float("inf"), ge=0, allow_inf_nan=True)
     coacd_options: CoacdOptions | None = None
+    links_collision_options: dict[str, LinkCollisionOptions] = {}
     recompute_inertia: StrictBool = False
     align: StrictBool | None = None
     file_meshes_are_zup: StrictBool | None = True
@@ -762,6 +811,14 @@ class Mesh(FileMorph, TetGenMixin):
         0.0 to enforce decomposition, float("inf") to disable it completely. Defaults to float("inf").
     coacd_options : CoacdOptions, optional
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
+    links_collision_options : dict[str, LinkCollisionOptions], optional
+        Collision mesh post-processing overrides keyed by authored link name, for articulated assets whose links
+        have different needs (e.g. accurate non-convex fingertips on a cheaply convexified body). Each
+        `gs.morphs.LinkCollisionOptions` states the values that differ for its link (`convexify`, `decimate`,
+        `decimate_face_num`, `decimate_aggressiveness`, `watertighten`, `decompose_error_threshold`,
+        `coacd_options`); whatever it leaves unset inherits the morph options above, and an entry naming no link
+        of the asset raises. Needs to be a `gs.morphs.LinkCollisionOptions` object per entry. Defaults to no
+        override. **This is only used for RigidEntity.**
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
@@ -953,6 +1010,14 @@ class MJCF(FileMorph):
         0.0 to enforce decomposition, float("inf") to disable it completely. Defaults to float("inf").
     coacd_options : CoacdOptions, optional
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
+    links_collision_options : dict[str, LinkCollisionOptions], optional
+        Collision mesh post-processing overrides keyed by authored link name, for articulated assets whose links
+        have different needs (e.g. accurate non-convex fingertips on a cheaply convexified body). Each
+        `gs.morphs.LinkCollisionOptions` states the values that differ for its link (`convexify`, `decimate`,
+        `decimate_face_num`, `decimate_aggressiveness`, `watertighten`, `decompose_error_threshold`,
+        `coacd_options`); whatever it leaves unset inherits the morph options above, and an entry naming no link
+        of the asset raises. Needs to be a `gs.morphs.LinkCollisionOptions` object per entry. Defaults to no
+        override. **This is only used for RigidEntity.**
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
@@ -1090,6 +1155,14 @@ class URDF(FileMorph):
         0.0 to enforce decomposition, float("inf") to disable it completely. Defaults to float("inf").
     coacd_options : CoacdOptions, optional
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
+    links_collision_options : dict[str, LinkCollisionOptions], optional
+        Collision mesh post-processing overrides keyed by authored link name, for articulated assets whose links
+        have different needs (e.g. accurate non-convex fingertips on a cheaply convexified body). Each
+        `gs.morphs.LinkCollisionOptions` states the values that differ for its link (`convexify`, `decimate`,
+        `decimate_face_num`, `decimate_aggressiveness`, `watertighten`, `decompose_error_threshold`,
+        `coacd_options`); whatever it leaves unset inherits the morph options above, and an entry naming no link
+        of the asset raises. Needs to be a `gs.morphs.LinkCollisionOptions` object per entry. Defaults to no
+        override. **This is only used for RigidEntity.**
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
@@ -1229,6 +1302,14 @@ class Drone(FileMorph):
         0.0 to enforce decomposition, float("inf") to disable it completely. Defaults to float("inf").
     coacd_options : CoacdOptions, optional
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
+    links_collision_options : dict[str, LinkCollisionOptions], optional
+        Collision mesh post-processing overrides keyed by authored link name, for articulated assets whose links
+        have different needs (e.g. accurate non-convex fingertips on a cheaply convexified body). Each
+        `gs.morphs.LinkCollisionOptions` states the values that differ for its link (`convexify`, `decimate`,
+        `decimate_face_num`, `decimate_aggressiveness`, `watertighten`, `decompose_error_threshold`,
+        `coacd_options`); whatever it leaves unset inherits the morph options above, and an entry naming no link
+        of the asset raises. Needs to be a `gs.morphs.LinkCollisionOptions` object per entry. Defaults to no
+        override. **This is only used for RigidEntity.**
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.
@@ -1577,6 +1658,14 @@ class USD(FileMorph):
         0.0 to enforce decomposition, float("inf") to disable it completely. Defaults to float("inf").
     coacd_options : CoacdOptions, optional
         Options for configuring coacd convex decomposition. Needs to be a `gs.options.CoacdOptions` object.
+    links_collision_options : dict[str, LinkCollisionOptions], optional
+        Collision mesh post-processing overrides keyed by authored link name, for articulated assets whose links
+        have different needs (e.g. accurate non-convex fingertips on a cheaply convexified body). Each
+        `gs.morphs.LinkCollisionOptions` states the values that differ for its link (`convexify`, `decimate`,
+        `decimate_face_num`, `decimate_aggressiveness`, `watertighten`, `decompose_error_threshold`,
+        `coacd_options`); whatever it leaves unset inherits the morph options above, and an entry naming no link
+        of the asset raises. Needs to be a `gs.morphs.LinkCollisionOptions` object per entry. Defaults to no
+        override. **This is only used for RigidEntity.**
     recompute_inertia : bool, optional
         Force recomputing spatial inertia of links from their geometry. This option is useful to import partially
         broken assets from external providers that cannot be re-exported from source. Default to False.

@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pytest
 import torch
+import trimesh
 from PIL import Image
 
 import genesis as gs
@@ -2149,3 +2150,188 @@ def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypat
     # link frame, as for a rigid pair.
     assert_allclose(ghost_tool.get_pos(), np.add(GHOST_MOUNT_POS, GHOST_MOUNT_OFFSET), tol=gs.EPS)
     assert ghost_tool.desc.attachment.entity_name == ghost_mount.name
+
+
+@pytest.fixture
+def dimpled_sphere_mesh_path(tmp_path):
+    """Write a dimpled icosphere to 'tmp_path' and return the path of the file holding it.
+
+    The dimple makes the mesh non-convex, so convexification is observable, while keeping it watertight so
+    decimation applies to it. The subdivision count puts it well above the default decimation target, so
+    'decimate_face_num' bites.
+    """
+    tmesh = trimesh.creation.icosphere(subdivisions=3, radius=0.05)
+    tmesh.vertices[int(np.argmax(tmesh.vertices[:, 2]))] *= 0.7
+    mesh_path = str(tmp_path / "dimpled.obj")
+    tmesh.export(mesh_path)
+    return mesh_path
+
+
+@pytest.fixture
+def three_link_mesh_mjcf_path(tmp_path, dimpled_sphere_mesh_path):
+    """Write a base-finger-wrist MJCF whose every link collides as the dimpled sphere."""
+    mjcf = ET.Element("mujoco", model="per_link_collision_options")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    body_base = ET.SubElement(worldbody, "body", name="base")
+    ET.SubElement(body_base, "geom", type="mesh", mesh="dimpled")
+    body_finger = ET.SubElement(body_base, "body", name="finger")
+    ET.SubElement(body_finger, "joint", type="hinge", axis="0 1 0", range="-1 1")
+    ET.SubElement(body_finger, "geom", type="mesh", mesh="dimpled")
+    body_wrist = ET.SubElement(body_finger, "body", name="wrist")
+    ET.SubElement(body_wrist, "joint", type="hinge", axis="0 1 0", range="-1 1")
+    ET.SubElement(body_wrist, "geom", type="mesh", mesh="dimpled")
+    asset = ET.SubElement(mjcf, "asset")
+    ET.SubElement(asset, "mesh", file=dimpled_sphere_mesh_path)
+    mjcf_path = str(tmp_path / "per_link_collision_options.xml")
+    ET.ElementTree(mjcf).write(mjcf_path, encoding="utf-8", xml_declaration=True)
+    return mjcf_path
+
+
+@pytest.mark.required
+def test_per_link_collision_options(three_link_mesh_mjcf_path, show_viewer):
+    scene = gs.Scene(show_viewer=show_viewer)
+    entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=three_link_mesh_mjcf_path,
+            decimate=False,
+            watertighten=None,
+            convexify=False,
+            links_collision_options={
+                "finger": gs.morphs.LinkCollisionOptions(
+                    convexify=True,
+                ),
+                "wrist": gs.morphs.LinkCollisionOptions(
+                    decimate=True,
+                    decimate_face_num=150,
+                ),
+            },
+        )
+    )
+    scene.build()
+
+    links_by_name = {link.name: link for link in entity.links}
+    base_tmesh = links_by_name["base"].geoms[0].mesh.trimesh
+    finger_tmesh = links_by_name["finger"].geoms[0].mesh.trimesh
+    wrist_tmesh = links_by_name["wrist"].geoms[0].mesh.trimesh
+
+    # The base inherits the morph options, so the authored mesh is kept as-is.
+    n_source_faces = 1280
+    assert_equal(len(base_tmesh.faces), n_source_faces)
+    assert not base_tmesh.is_convex
+
+    # The finger states 'convexify=True' only, so its hull escapes the morph 'decimate=False': it is convex, and
+    # slightly smaller than the authored mesh since the dimple vertex it buries is not on the hull.
+    assert finger_tmesh.is_convex
+    assert len(finger_tmesh.faces) < n_source_faces
+
+    # The wrist states 'decimate=True' with its own target and inherits 'convexify=False', so the authored mesh is
+    # decimated without being convexified.
+    assert not wrist_tmesh.is_convex
+    assert len(wrist_tmesh.faces) < len(base_tmesh.faces)
+    assert len(wrist_tmesh.faces) <= 400
+
+
+@pytest.mark.required
+def test_per_link_collision_options_unknown_link(three_link_mesh_mjcf_path, show_viewer):
+    # An entry keyed with no loaded link is a typo that would otherwise silently do nothing, so it raises.
+    scene = gs.Scene(show_viewer=show_viewer)
+    with pytest.raises(gs.GenesisException, match="names unknown links"):
+        scene.add_entity(
+            morph=gs.morphs.MJCF(
+                file=three_link_mesh_mjcf_path,
+                links_collision_options={
+                    "fingr": gs.morphs.LinkCollisionOptions(
+                        convexify=True,
+                    ),
+                },
+            )
+        )
+
+
+@pytest.fixture
+def heterogeneous_sphere_mesh_paths(tmp_path):
+    """Write the dimpled icosphere twice, under two different file names.
+
+    A heterogeneous Mesh variant resolves its geom under the baselink name its own file gives it, so the two
+    morphs resolve under different names exactly because the file names differ.
+    """
+    tmesh = trimesh.creation.icosphere(subdivisions=3, radius=0.05)
+    tmesh.vertices[int(np.argmax(tmesh.vertices[:, 2]))] *= 0.7
+    paths = []
+    for file_name in ("dimpled.obj", "coarse.obj"):
+        mesh_path = str(tmp_path / file_name)
+        tmesh.export(mesh_path)
+        paths.append(mesh_path)
+    return paths
+
+
+@pytest.mark.required
+def test_per_link_collision_options_heterogeneous_variant(heterogeneous_sphere_mesh_paths, show_viewer):
+    # A variant morph resolves its geom under its own baselink name, so its entry keys by that name and must be
+    # validated against the links the variant resolves with, not the primary's.
+    dimpled_path, coarse_path = heterogeneous_sphere_mesh_paths
+    scene = gs.Scene(show_viewer=show_viewer)
+    entity = scene.add_entity(
+        [
+            gs.morphs.Mesh(
+                file=dimpled_path,
+                decimate=False,
+                convexify=False,
+                watertighten=None,
+            ),
+            gs.morphs.Mesh(
+                file=coarse_path,
+                decimate=False,
+                convexify=False,
+                watertighten=None,
+                links_collision_options={
+                    "coarse_obj_baselink": gs.morphs.LinkCollisionOptions(
+                        convexify=True,
+                    ),
+                },
+            ),
+        ]
+    )
+    scene.build(n_envs=2)
+
+    # The primary keeps the authored mesh under its morph options; the variant convexifies through the entry keyed
+    # with the baselink name it resolves with.
+    tmeshes = [geom.mesh.trimesh for geom in entity.links[0].geoms]
+    non_convex = [tm for tm in tmeshes if not tm.is_convex]
+    convex = [tm for tm in tmeshes if tm.is_convex]
+    n_source_faces = 1280
+    assert len(non_convex) == 1
+    assert len(non_convex[0].faces) == n_source_faces
+    assert len(convex) == 1
+    assert len(convex[0].faces) < n_source_faces
+
+
+@pytest.mark.required
+def test_per_link_collision_options_unknown_variant_link(heterogeneous_sphere_mesh_paths, show_viewer):
+    # A variant morph never resolves the primary's links, so an entry keyed with one is a typo that would silently
+    # do nothing, and it raises against the links the variant resolves with.
+    dimpled_path, coarse_path = heterogeneous_sphere_mesh_paths
+    scene = gs.Scene(show_viewer=show_viewer)
+    with pytest.raises(gs.GenesisException, match="names unknown links.*coarse_obj_baselink"):
+        scene.add_entity(
+            [
+                gs.morphs.Mesh(
+                    file=dimpled_path,
+                    decimate=False,
+                    convexify=False,
+                    watertighten=None,
+                ),
+                gs.morphs.Mesh(
+                    file=coarse_path,
+                    decimate=False,
+                    convexify=False,
+                    watertighten=None,
+                    links_collision_options={
+                        # The primary's baselink name, which the variant's entry must not silently key by.
+                        "dimpled_obj_baselink": gs.morphs.LinkCollisionOptions(
+                            convexify=True,
+                        ),
+                    },
+                ),
+            ]
+        )
