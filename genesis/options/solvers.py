@@ -231,7 +231,7 @@ class IPCCouplerOptions(BaseCouplerOptions):
     Linear System Options
     ---------------------
     linear_system_solver : str, optional
-        Linear system solver type. Options: 'linear_pcg', 'direct', etc. Defaults to None (use libuipc default: 'linear_pcg').
+        Linear system solver type. Options: 'linear_pcg', 'fused_pcg', 'direct', etc. Defaults to None (use libuipc default: 'fused_pcg').
     linear_system_tolerance : float, optional
         Tolerance for linear system solver. Defaults to None (use libuipc default: 1e-3).
 
@@ -256,7 +256,7 @@ class IPCCouplerOptions(BaseCouplerOptions):
     Collision Detection Options
     ---------------------------
     collision_detection_method : str, optional
-        Collision detection method. Options: 'linear_bvh', 'spatial_hash', etc. Defaults to None (use libuipc default: 'linear_bvh').
+        Collision detection method. Options: 'linear_bvh', 'info_stackless_bvh', 'spatial_hash', etc. Defaults to None (use libuipc default: 'info_stackless_bvh').
 
     CFL Options
     -----------
@@ -316,7 +316,7 @@ class IPCCouplerOptions(BaseCouplerOptions):
     linesearch_report_energy: StrictBool | None = None
 
     # Linear system options (None = use libuipc default)
-    linear_system_solver: Literal["linear_pcg", "direct"] | None = None
+    linear_system_solver: Literal["linear_pcg", "fused_pcg", "direct"] | None = None
     linear_system_tolerance: PositiveFloat | None = None
 
     # Contact options
@@ -328,7 +328,7 @@ class IPCCouplerOptions(BaseCouplerOptions):
     contact_constitution: Literal["ipc", "isometric"] | None = None
 
     # Collision detection options
-    collision_detection_method: Literal["linear_bvh", "spatial_hash"] | None = None
+    collision_detection_method: Literal["linear_bvh", "info_stackless_bvh", "spatial_hash"] | None = None
 
     # CFL options
     cfl_enable: StrictBool | None = None
