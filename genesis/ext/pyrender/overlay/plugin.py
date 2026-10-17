@@ -894,7 +894,9 @@ class ImGuiOverlayPlugin(ViewerPlugin):
                 imgui.end_disabled()
                 self._maybe_show_disabled_tooltip(scale_disabled)
                 if changed and not scale_disabled:
-                    morph.scale = new_scale
+                    # A new morph rather than an edit in place, since the rebuild re-creates an entity handed its own
+                    # morph from the description resolved at the old scale (see 'InteractiveScene._apply_rebuild').
+                    kwargs["morph"] = morph.model_copy(update={"scale": new_scale})
                     self._pending_dirty = True
 
                 imgui.same_line()

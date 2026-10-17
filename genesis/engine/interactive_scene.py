@@ -45,6 +45,7 @@ class InteractiveScene:
         self._pending_steps: int = 0
         self._rebuild_pending: bool = False
         self._reset_pending: bool = False
+        self._has_new_scene_kwargs: bool = False
         self._entities_kwargs: dict[str, dict[str, Any]] = {}
         self._sensors_kwargs: list["SensorOptions"] = []
         scene.register_pre_step_callback(self._pre_step)
@@ -240,6 +241,10 @@ class InteractiveScene:
         Any argument left as ``None`` reuses what was supplied previously. Pass an empty ``dict`` / iterable to
         explicitly clear stored state.
 
+        An entity whose kwargs hold the same morph, material and surface objects as at the previous build is
+        re-created from the description resolved then, without reading its asset again, unless ``scene_kwargs`` is
+        given. To edit an entity, pass new objects (e.g. ``morph.model_copy(update=...)``) rather than mutating them.
+
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
             entities_kwargs: Mapping from entity name to a kwargs dict forwarded to ``scene.add_entity``
@@ -253,6 +258,7 @@ class InteractiveScene:
             )
         if scene_kwargs is not None:
             self._scene_kwargs = dict(scene_kwargs)
+            self._has_new_scene_kwargs = True
         if entities_kwargs is not None:
             self._entities_kwargs = dict(entities_kwargs)
         if sensors_kwargs is not None:
@@ -278,6 +284,10 @@ class InteractiveScene:
             # Preserve the live window/GL context so the rebuild does not close and reopen it.
             pyrender_window = viewer._pyrender_viewer
 
+        # The scene options take part in resolving a description, so new ones leave none of the previous ones valid
+        entities_desc = {} if self._has_new_scene_kwargs else {entity.name: entity.desc for entity in scene.entities}
+        self._has_new_scene_kwargs = False
+
         # Serialize against a threaded render loop (run_in_thread=True): holding the preserved window's render_lock
         # blocks on_draw so it never draws the scene while it is being torn down, rebuilt and re-pointed. No-op when
         # there is no window (headless) or the viewer runs on the main thread.
@@ -291,10 +301,25 @@ class InteractiveScene:
             # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
             scene.register_pre_step_callback(self._pre_step)
             for name, kwargs in self._entities_kwargs.items():
+                morph = kwargs["morph"]
+                morphs = (morph,) if isinstance(morph, gs.morphs.Morph) else tuple(morph)  # heterogeneous entity
+                desc = entities_desc.get(name)
                 # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
                 # takes no name. Every other morph is a single entity added by name.
-                if isinstance(kwargs["morph"], gs.morphs.USD):
+                if isinstance(morph, gs.morphs.USD):
                     scene.add_stage(**kwargs)
+                # An entity handed the very objects its description was resolved from is unchanged by the edit, so it is
+                # created from that description without reading its asset again. An edit hands in new objects.
+                elif (
+                    desc is not None
+                    and len(morphs) == len(desc.morphs)
+                    and all(kwargs_morph is desc_morph for kwargs_morph, desc_morph in zip(morphs, desc.morphs))
+                    and kwargs.get("material") is desc.material
+                    and kwargs.get("surface") is desc.surface
+                    and kwargs.get("visualize_contact", False) == desc.visualize_contact
+                    and kwargs.get("vis_mode") in (None, desc.surface.vis_mode)
+                ):
+                    scene._sim._add_entity(desc=desc)
                 else:
                     scene.add_entity(name=name, **kwargs)
             for sensor_opts in self._sensors_kwargs:
