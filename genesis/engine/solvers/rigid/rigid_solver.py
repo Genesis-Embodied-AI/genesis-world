@@ -245,6 +245,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # use_hibernation option).
         self._use_hibernation = options.use_hibernation and not self._requires_grad
 
+        # Position control does not reach a non-PD-reducible actuator as a setpoint, e.g. an MJCF tendon approximated
+        # by a joint actuator, so the command can silently have little or no effect. The offenders are static, so they
+        # are scanned once and reported once.
+        self._non_pd_reducible_dofs_mask = None
+        self._is_non_pd_reducible_warned = False
+
         # Resolve the hibernation velocity tolerance. MuJoCo compatibility uses MuJoCo's own default (1e-4); otherwise
         # use a coarser floor that a body reliably settles below across float precisions and dense contact piles, where
         # the contact solve leaves a larger residual resting-velocity jitter.
@@ -2788,7 +2794,55 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         kernel_control_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
+    def _warn_position_control_non_pd_reducible_dofs(self, dofs_idx, envs_idx):
+        """Warn once when position control targets dofs whose actuator is not PD-reducible.
+
+        In position control mode, a non-PD-reducible actuator (act_gain != -act_bias[1] or act_bias[0] != 0), for
+        instance an MJCF tendon approximated by a joint actuator, is not driven towards the commanded position: the
+        target only feeds the actuator gain term, which such an approximation can leave negligible against the residual
+        position terms, so the command silently has little or no effect. Velocity control is unaffected, as it only
+        relies on act_bias[2]. The actuator parameters are static, so the offenders are scanned once and the warning is
+        emitted once, for the first position control call that targets one of them.
+        """
+        if self._is_non_pd_reducible_warned:
+            return
+        if self._non_pd_reducible_dofs_mask is None:
+            gain = qd_to_torch(self.dyn_info.dofs.act_gain, None, None, transpose=True, copy=True)
+            bias = qd_to_torch(self.dyn_info.dofs.act_bias, None, None, transpose=True, copy=True)
+            if not self._options.batch_dofs_info:
+                gain, bias = gain[None], bias[None]
+            is_pd_reducible = (torch.abs(gain + bias[..., 1]) < gs.EPS * torch.clamp(torch.abs(gain), min=1.0)) & (
+                torch.abs(bias[..., 0]) < gs.EPS
+            )
+            self._non_pd_reducible_dofs_mask = ~is_pd_reducible
+            if not bool(self._non_pd_reducible_dofs_mask.any()):
+                # No dof of this model can ignore a position target, so later calls skip the scan entirely.
+                self._is_non_pd_reducible_warned = True
+                return
+        selected_dofs = torch.zeros(self.n_dofs, dtype=torch.bool, device=gs.device)
+        # An unset selection targets everything, while `indices_to_mask(None)` is empty.
+        if dofs_idx is None:
+            selected_dofs[:] = True
+        else:
+            selected_dofs[indices_to_mask(dofs_idx)[0]] = True
+        if self._options.batch_dofs_info:
+            envs_mask = slice(None) if envs_idx is None else indices_to_mask(envs_idx)[0]
+            non_pd_reducible_dofs = self._non_pd_reducible_dofs_mask[envs_mask].any(dim=0)
+        else:
+            non_pd_reducible_dofs = self._non_pd_reducible_dofs_mask.any(dim=0)
+        offending_dofs = torch.nonzero(non_pd_reducible_dofs & selected_dofs)[:, 0].tolist()
+        if not offending_dofs:
+            return
+        self._is_non_pd_reducible_warned = True
+        gs.logger.warning(
+            f"Position control targets dofs {offending_dofs} whose actuator is not PD-reducible "
+            "(act_gain != -act_bias[1] or act_bias[0] != 0), e.g. an MJCF tendon approximated by a joint actuator, "
+            "so the commanded position is not applied as a setpoint and may have little or no effect. Use "
+            "`control_dofs_force` to drive them, or inspect them with `get_dofs_act_gain()` / `get_dofs_act_bias()`."
+        )
+
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None):
+        self._warn_position_control_non_pd_reducible_dofs(dofs_idx, envs_idx)
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
@@ -2810,6 +2864,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_control_dofs_position(dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
 
     def control_dofs_position_velocity(self, position, velocity, dofs_idx=None, envs_idx=None):
+        self._warn_position_control_non_pd_reducible_dofs(dofs_idx, envs_idx)
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)

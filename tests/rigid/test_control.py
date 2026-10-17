@@ -305,3 +305,75 @@ def test_drone_advanced(show_viewer):
     assert abs(quat_1[1] + quat_2[1]) < tol
     assert abs(quat_1[2] - quat_2[2]) < tol
     assert abs(quat_1[2] - quat_2[2]) < tol
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu])
+@pytest.mark.parametrize("batch_dofs_info", [False, True])
+@pytest.mark.parametrize("selection", ["explicit_dofs", "combined_api", "default_dofs"])
+def test_position_control_non_pd_reducible_warning(show_viewer, caplog, batch_dofs_info, selection):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+            batch_dofs_info=batch_dofs_info,
+        ),
+        show_viewer=show_viewer,
+        show_FPS=False,
+    )
+    robot = scene.add_entity(
+        gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+        ),
+    )
+    scene.build()
+
+    # The finger dofs carry the MJCF tendon approximation, whose actuator is not PD-reducible, while the arm dofs use
+    # plain position actuators. Guard against a silent asset change making this test vacuous.
+    finger_dofs_idx = [7, 8]
+    arm_dofs_idx = [0, 1, 2, 3, 4, 5, 6]
+    act_gain = robot.get_dofs_act_gain(finger_dofs_idx)
+    bias0, bias1, _ = robot.get_dofs_act_bias(finger_dofs_idx)
+    assert not (
+        (torch.abs(act_gain + bias1) < gs.EPS * torch.clamp(torch.abs(act_gain), min=1.0)) & (torch.abs(bias0) < gs.EPS)
+    ).all()
+
+    finger_pos_target = torch.tensor([0.0, 0.04], dtype=gs.tc_float, device=gs.device)
+    finger_vel_target = torch.zeros_like(finger_pos_target)
+    arm_pos_target = torch.zeros(len(arm_dofs_idx), dtype=gs.tc_float, device=gs.device)
+    all_pos_target = torch.zeros(robot.n_dofs, dtype=gs.tc_float, device=gs.device)
+
+    # Position control on PD-reducible dofs does not warn.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        robot.control_dofs_position(arm_pos_target, arm_dofs_idx)
+    assert len(caplog.records) == 0
+
+    # Position control reaching the tendon-approximated finger dofs warns, with actionable guidance. The selection is
+    # spelled explicitly, through the combined API, or left to its default (no dofs_idx, i.e. every dof of the model,
+    # which only the solver-level entry point takes unconverted).
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        if selection == "explicit_dofs":
+            robot.control_dofs_position(finger_pos_target, finger_dofs_idx)
+        elif selection == "combined_api":
+            robot.control_dofs_position_velocity(finger_pos_target, finger_vel_target, finger_dofs_idx)
+        else:
+            scene.rigid_solver.control_dofs_position(all_pos_target)
+    assert len(caplog.records) == 1
+    assert "[7, 8]" in caplog.text
+    assert "control_dofs_force" in caplog.text
+
+    # The warning only fires once per solver.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        robot.control_dofs_position(finger_pos_target, finger_dofs_idx)
+    assert len(caplog.records) == 0
+
+    # Velocity control only relies on act_bias[2], so it is not affected.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        robot.control_dofs_velocity(finger_vel_target, finger_dofs_idx)
+    assert len(caplog.records) == 0
