@@ -50,8 +50,7 @@ def test_maxvolume(pbd_material, show_viewer, box_obj_path):
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_get_mass(n_envs, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

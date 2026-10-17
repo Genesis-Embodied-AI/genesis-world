@@ -15,12 +15,11 @@ if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.rigid_entity import RigidEntity
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["two_aligned_hinges"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 # Swept over compatibility, which decides whether every step recomputes the whole derived state or only what is owed.
-@pytest.mark.parametrize("mujoco_compatibility", [True, False])
+@pytest.mark.parametrize("mujoco_compatibility", [True, pytest.param(False, marks=pytest.mark.required)])
 def test_link_velocity(gs_sim, tol):
     # Check the velocity for a few "easy" special cases
     (gs_robot,) = gs_sim.entities
@@ -291,8 +290,7 @@ def test_jacobian(gs_sim, tol):
     assert_allclose(J_p[:3, 0], lin_expected, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_joint_get_anchor_pos_and_axis(n_envs):
     scene = gs.Scene(
         show_viewer=False,
@@ -375,8 +373,7 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
     # local_point positions an offset point of the link at the target. The floating-base go2 also exercises the
     # FREE root joint (base translation and orientation degrees of freedom) at a non-zero entity offset.
@@ -520,8 +517,7 @@ def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
         scene.visualizer.update()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_inverse_kinematics_multilink_local_points(show_viewer, tol):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -622,11 +618,11 @@ def test_multi_robot_inverse_kinematics(show_viewer, tol):
     "backend, n_envs, batch_dofs_info",
     [
         pytest.param(gs.cpu, 0, True, marks=pytest.mark.required),
-        pytest.param(gs.cpu, 2, False, marks=pytest.mark.required),
+        (gs.cpu, 2, False),
         (gs.cpu, 2, True),
-        pytest.param(gs.gpu, 0, True, marks=pytest.mark.required),
-        pytest.param(gs.gpu, 2, False, marks=pytest.mark.required),
-        pytest.param(gs.gpu, 2, True, marks=pytest.mark.required),
+        (gs.gpu, 0, True),
+        (gs.gpu, 2, False),
+        (gs.gpu, 2, True),
     ],
 )
 def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, tol):
@@ -942,8 +938,7 @@ def test_track_rigid(show_viewer, tol):
         assert_allclose(robot.get_vAABB(), frozen_robot_vaabb, atol=0.1)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_kinematics_queries(n_envs, show_viewer, tol):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(

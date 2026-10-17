@@ -452,8 +452,7 @@ class AnalyticalVsGJKSceneCreator:
             assert (errno_val & ERRNO_CALLED_GJK_K2) != 0, "GJK scene should use GJK for contact generation."
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_capsule_analytical_accuracy(tmp_path: Path, show_viewer: bool, tol: float):
     # Simple test case: two vertical capsules offset horizontally
     # Capsule 1: center at origin, radius=0.1, half_length=0.25
@@ -751,10 +750,9 @@ def test_analytical_vs_gjk(backend, monkeypatch, tmp_path: Path, show_viewer: bo
             ) from e
 
 
-@pytest.mark.required
 # Both arms carry mode-specific narrowphase blocks: MuJoCo compatibility gates its own acceptance tolerance,
 # perturbation pattern and penetration override, which must stay mirrored between the split and monolithic consumers.
-@pytest.mark.parametrize("enable_mujoco_compatibility", [False, True])
+@pytest.mark.parametrize("enable_mujoco_compatibility", [pytest.param(False, marks=pytest.mark.required), True])
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_split_vs_monolithic_narrowphase(
     enable_mujoco_compatibility, monkeypatch, tmp_path: Path, show_viewer: bool, tol: float
@@ -835,8 +833,7 @@ def test_split_vs_monolithic_narrowphase(
                 assert_allclose(contacts_split[field], contacts_mono[field], atol=field_atol, err_msg=field)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -885,8 +882,7 @@ def test_contact_patch_full_box_box_manifold(show_viewer: bool) -> None:
         assert_allclose(penetrations, 1e-3, atol=1e-5)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize("gjk_collision", [True, pytest.param(False, marks=pytest.mark.required)])
 @pytest.mark.parametrize("n_base_sides", [4, 32])
 def test_multi_contact_overlap_corners(gjk_collision, n_base_sides, show_viewer, tol):
     # A box rests on a wider base, a box or a 32-sided prism, at a random yaw and offset in each environment, so that

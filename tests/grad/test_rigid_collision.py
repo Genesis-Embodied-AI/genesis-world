@@ -15,11 +15,11 @@ from ..utils.assertions import assert_allclose
 @pytest.mark.parametrize(
     "shape, backend",
     [
-        pytest.param("ground_box", gs.cpu, marks=pytest.mark.required),
+        ("ground_box", gs.cpu),
         pytest.param("ground_box", gs.gpu, marks=pytest.mark.required),
-        pytest.param("box", gs.cpu, marks=pytest.mark.required),
+        ("box", gs.cpu),
         pytest.param("box", gs.gpu, marks=pytest.mark.required),
-        pytest.param("sphere", gs.cpu, marks=pytest.mark.required),
+        ("sphere", gs.cpu),
         pytest.param("sphere", gs.gpu, marks=pytest.mark.required),
         ("capsule", gs.cpu),
         pytest.param("capsule", gs.gpu, marks=pytest.mark.required),

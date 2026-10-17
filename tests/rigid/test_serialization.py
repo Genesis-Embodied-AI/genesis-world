@@ -699,10 +699,9 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
         scene.__setstate__(dataclasses.replace(checkpoint, layout=dataclasses.replace(checkpoint.layout, n_envs=3)))
 
 
-@pytest.mark.required
 # Eight environments make the exact frames large enough for a CUDA device to encode them, while the minimal frames still
 # share their slots
-@pytest.mark.parametrize("n_envs", [0, 8])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(8, marks=pytest.mark.required)])
 def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol):
     scene = checkpoint_scene
     box, arm, ghost = scene.entities[1], scene.entities[2], scene.entities[4]

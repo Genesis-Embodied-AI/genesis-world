@@ -136,8 +136,7 @@ def test_discrete_obstacles():
     assert (platform < gs.EPS).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_get_terrain_height(n_envs, tol):
     height_field = np.array(
         [

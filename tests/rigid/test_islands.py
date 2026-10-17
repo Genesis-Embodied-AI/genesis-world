@@ -64,8 +64,7 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
     assert constraint_solver.constraint_state.island.constraint_id.shape[0] >= constraint_solver.len_constraints
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     # The welded pair never touches, so only the equality edge couples them: without it the partition would split them
     # and the weld would be solved across two islands. A fixed body carries no dofs and joins no island. The
@@ -250,8 +249,7 @@ def test_partition_maximal_and_invariance(show_viewer, fixed_base_dual_arm):
     assert_allclose(dual_arm_welded.get_dofs_position()[..., 6:], dual_arm.get_dofs_position(), tol=5e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_partition_track_changes(show_viewer, n_envs):
     # The partition is rebuilt every step, so it must track contacts forming (merge) and breaking (split).
     scene = gs.Scene(
@@ -292,9 +290,8 @@ def test_partition_track_changes(show_viewer, n_envs):
     assert_equal(qd_to_numpy(island_state.n_islands), 2)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("noslip_iterations", [0, 5])
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
     # Islands of different make-up (a two-box stack, a welded pair, a lone box) are solved side by side, each on its own
     # block of the Hessian, and the noslip pass refines the island-solved accelerations. The ground truth is the rest
@@ -353,8 +350,7 @@ def test_solve_correctness(show_viewer, noslip_iterations, n_envs):
     assert (scene.rigid_solver.get_dofs_velocity().abs() < 1e-4).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_islands_converge_independently(show_viewer, n_envs):
     # Each island converges on its own criterion: a 1 g die resting beside a Franka settles to the residual its own
     # inertia allows, whatever the arm beside it tolerates. CG converges gradually, so its exit is where this shows.
@@ -450,8 +446,7 @@ def test_monolith_seed_oversaturated(show_viewer, monkeypatch):
     assert np.abs(vel).max() < 0.1
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_pruning(show_viewer, n_envs):
     # A convex-decomposed box is a compound body (27 sub-box geoms on one link), so its ground contacts pile up per
     # link-pair and pruning collapses them. The island construction reads contacts through contact_sort_idx, so pruning
@@ -487,8 +482,7 @@ def test_pruning(show_viewer, n_envs):
         assert_allclose(box.get_pos()[..., 2], half, atol=5e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_hibernation_with_pruning(show_viewer, n_envs):
     # A convexified duck is a compound body whose many ground contacts pile into one (duck, plane) link-pair bucket,
     # so link-pair pruning collapses them into a logical permutation in contact_sort_idx. Islands read contacts through
@@ -549,8 +543,7 @@ def test_hibernation_with_pruning(show_viewer, n_envs):
     assert (qd_to_numpy(solver.dyn_state.links.awake_steps) == 0).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("mujoco_compatibility", [False, True])
+@pytest.mark.parametrize("mujoco_compatibility", [False, pytest.param(True, marks=pytest.mark.required)])
 def test_dof_length_scales_with_body_size(offset_hinge_box, mujoco_compatibility):
     # dof_length puts each rotational dof velocity on a linear (m/s) scale by the body radius (1 for translation), so
     # the same angular velocity reads as a larger surface speed on a larger body. A free sphere gets a rotational
@@ -588,8 +581,7 @@ def test_dof_length_scales_with_body_size(offset_hinge_box, mujoco_compatibility
     assert_allclose(dof_length[het_hinge.dof_start], np.repeat(hinge_scales, 2) * hinge_radius, tol=gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_weld_coupling(show_viewer, n_envs):
     # box2 hangs from a weld onto the anchored box1 at a horizontal offset, never touching it. Without the equality
     # edge in the partition the two land in different islands and the weld is dropped, letting box2 free-fall.
@@ -624,8 +616,7 @@ def test_weld_coupling(show_viewer, n_envs):
     assert_allclose(box2.get_pos()[..., 2], z_start, tol=0.15)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_sparsity(show_viewer, n_envs):
     # On CPU the sparse Jacobian and the per-island solve exploit the same block-diagonal structure and must compose
     # (islands own the per-block factorization, the sparse jac makes products and the constraint-to-island lookup
@@ -1058,8 +1049,7 @@ def test_hibernation_wakes_on_daisy_chain(show_viewer, n_envs):
     assert asleep(box_far)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_hibernation_repartitioning(show_viewer, n_envs):
     # Full lifecycle of hibernation and the partition together: two boxes sleep apart (2 islands); moving one onto the
     # other wakes it, it collides, and the stack sleeps as one merged island; moving a box off the hibernated stack

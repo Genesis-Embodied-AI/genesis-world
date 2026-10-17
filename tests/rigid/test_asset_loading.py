@@ -17,8 +17,9 @@ from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("model_name", ["depth_first_tree_mjcf", "depth_first_tree_urdf"])
+@pytest.mark.parametrize(
+    "model_name", ["depth_first_tree_mjcf", pytest.param("depth_first_tree_urdf", marks=pytest.mark.required)]
+)
 def test_depth_first_link_ordering(xml_path, model_name, show_viewer):
     # Links must be parsed depth-first so every subtree - hence every free body's DOFs - occupies a contiguous index
     # range. The per-tree mass-matrix factorization relies on this so a multi-body file costs the same as the
@@ -558,8 +559,14 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity.get_pos(), (0.0, 0.0, -0.03), atol=5e-4)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("urdf_path", ["chain.urdf", "dual_arms_glb/dual_arms_glb.urdf", "dual_arms_primitives.urdf"])
+@pytest.mark.parametrize(
+    "urdf_path",
+    [
+        "chain.urdf",
+        "dual_arms_glb/dual_arms_glb.urdf",
+        pytest.param("dual_arms_primitives.urdf", marks=pytest.mark.required),
+    ],
+)
 @pytest.mark.parametrize("fixed", [False, True])
 def test_urdf_parsing_merge_fixed_links(urdf_path, fixed, show_viewer, tol):
     POS = (0.0, -0.2, 0.5)
@@ -718,9 +725,10 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
     assert np.linalg.norm(vgeom_verts - (0.0, 0.0, 0.13), axis=-1, ord=np.inf).min() < 1e-3
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["pendulum_with_joint_dynamics", "joint_with_partial_dynamics"])
-@pytest.mark.parametrize("joint_damping, joint_friction", [(1.0, 2.0), (1.0, None), (None, 2.0)])
+@pytest.mark.parametrize(
+    "joint_damping, joint_friction", [(1.0, 2.0), pytest.param(1.0, None, marks=pytest.mark.required), (None, 2.0)]
+)
 def test_urdf_joint_dynamics(joint_damping, joint_friction, xml_path):
     # A <dynamics> tag authoring only one of damping/friction leaves the other one unset. It must fall back to zero
     # like an absent tag rather than reaching the solver as a null value.
@@ -1008,12 +1016,11 @@ def test_color_overwrite(overwrite, urdf_with_external_assets, show_viewer):
                 assert_equal(color, (255, 0, 0, 255))
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize(
     "xml_path",
     [
-        "xml/franka_emika_panda/panda.xml",
+        pytest.param("xml/franka_emika_panda/panda.xml", marks=pytest.mark.required),
         "urdf/go2/urdf/go2.urdf",
         "urdf/panda_bullet/panda.urdf",
     ],
@@ -2002,8 +2009,7 @@ def test_multi_root_offset(show_viewer, tol):
     assert_allclose(link_a.get_pos()[..., 2], link_b.get_pos()[..., 2], tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("is_fixed", [False, True])
+@pytest.mark.parametrize("is_fixed", [pytest.param(False, marks=pytest.mark.required), True])
 @pytest.mark.parametrize("merge_fixed_links", [False, True])
 def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypatch):
     # Force parallelism on CPU to trigger any cross-entity race condition

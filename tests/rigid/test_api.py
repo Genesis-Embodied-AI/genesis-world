@@ -395,8 +395,7 @@ def test_data_accessor(n_envs, batched, tol):
     gs_robot.get_contacts()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("enable_mujoco_compatibility", [True, False])
+@pytest.mark.parametrize("enable_mujoco_compatibility", [True, pytest.param(False, marks=pytest.mark.required)])
 def test_getter_vs_state_post_step_consistency(enable_mujoco_compatibility):
     DT = 0.01
     GRAVITY = 10.0
@@ -460,8 +459,7 @@ def test_extended_broadcasting():
     assert_allclose(entity.get_dofs_velocity(), np.array([(1.0,) * 6, (2.0,) * 6]), tol=gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("batch_links_info", [False, True])
+@pytest.mark.parametrize("batch_links_info", [pytest.param(False, marks=pytest.mark.required), True])
 @pytest.mark.parametrize("batch_joints_info", [False, True])
 @pytest.mark.parametrize("batch_dofs_info", [False, True])
 def test_batched_info(batch_links_info, batch_joints_info, batch_dofs_info, tol):
@@ -587,8 +585,7 @@ def test_info_batching(tol):
     assert_allclose(qposs[0], qposs[1], tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_geom_pos_quat(n_envs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1117,8 +1114,7 @@ def test_inertial_property_setters(
         assert_allclose(qd_to_numpy(buffer)[untouched], SENTINEL, tol=gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 3])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(3, marks=pytest.mark.required)])
 def test_axis_aligned_bounding_boxes(n_envs):
     scene = gs.Scene()
     scene.add_entity(

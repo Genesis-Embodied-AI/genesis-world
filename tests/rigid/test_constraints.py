@@ -9,8 +9,7 @@ from genesis.utils.misc import tensor_to_array
 from ..utils.assertions import assert_allclose, assert_equal
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs, batched", [(0, False), (2, True)])
+@pytest.mark.parametrize("n_envs, batched", [pytest.param(0, False, marks=pytest.mark.required), (2, True)])
 def test_equality_joint_scaling(show_viewer, scaled_mjcf_joint_equalities, n_envs, batched, tol):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -309,8 +308,7 @@ def test_get_constraints_api(show_viewer, tol):
         assert_allclose((link_a_[1], link_b_[1]), ((link_a,), (link_b,)), tol=0)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs, batched", [(0, False), (3, True)])
+@pytest.mark.parametrize("n_envs, batched", [pytest.param(0, False, marks=pytest.mark.required), (3, True)])
 def test_set_sol_params(n_envs, batched, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

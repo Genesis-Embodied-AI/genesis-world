@@ -47,8 +47,7 @@ def joint_torque_contact_pendulum():
     return ET.tostring(mjcf, encoding="unicode")
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
     # One MJCF packs four single-DOF pendulums, each with a different gearbox loss (none, armature, frictionloss,
     # damping); a single JointTorqueSensor reads all four output efforts. The loss parameters are read back from the
@@ -132,8 +131,7 @@ def test_joint_torque(joint_torque_pendulums, show_viewer, tol, n_envs):
         vel_prev = vel_after
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_joint_torque_with_contact(joint_torque_contact_pendulum, show_viewer, tol, n_envs):
     # A lossless pendulum pressed against a fixed wall: contact forces flow through the equations of motion and never
     # appear in the sensor formula, so the reading stays equal to the commanded effort throughout the impact.

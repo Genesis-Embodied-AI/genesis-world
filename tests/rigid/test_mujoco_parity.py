@@ -46,9 +46,10 @@ def test_equality_joint_mimic(gs_sim, mj_sim, tol):
 
 
 # Must disable self-collision caused by closing the kinematic chain (adjacent link filtering is not enough)
-@pytest.mark.required
 @pytest.mark.enable_collision(False)
-@pytest.mark.parametrize("xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", "connect.xml"])
+@pytest.mark.parametrize(
+    "xml_path", ["xml/four_bar_linkage_weld.xml", "weld.xml", pytest.param("connect.xml", marks=pytest.mark.required)]
+)
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 @pytest.mark.parametrize("backend", [gs.cpu])
@@ -76,7 +77,6 @@ def test_equality_link(gs_sim, mj_sim):
     )
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["box_plan"])
 @pytest.mark.parametrize(
     "gs_solver, gs_integrator",
@@ -84,7 +84,7 @@ def test_equality_link(gs_sim, mj_sim):
         (gs.constraint_solver.CG, gs.integrator.implicitfast),
         (gs.constraint_solver.CG, gs.integrator.Euler),
         (gs.constraint_solver.Newton, gs.integrator.implicitfast),
-        (gs.constraint_solver.Newton, gs.integrator.Euler),
+        pytest.param(gs.constraint_solver.Newton, gs.integrator.Euler, marks=pytest.mark.required),
         # Elliptic (second-order) friction cone must match MuJoCo's elliptic cone. The box lands and slides with an
         # initial tangential + angular velocity so the tangential cone rows are exercised in both the sliding (cone
         # boundary) and sticking (bottom) regimes.
@@ -134,10 +134,11 @@ def test_scene_aggregates_hold_across_entities(gs_sim, mj_sim, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=10, tol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["hinge_slide"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize(
+    "gs_integrator", [gs.integrator.implicitfast, pytest.param(gs.integrator.Euler, marks=pytest.mark.required)]
+)
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_frictionloss(gs_sim, mj_sim, tol):
     qvel = np.array([0.7, -0.9])
@@ -147,12 +148,11 @@ def test_frictionloss(gs_sim, mj_sim, tol):
     assert_allclose(entity.get_dofs_velocity(), 0.0, tol=1e-2)
 
 
-@pytest.mark.required
 @pytest.mark.friction_torsional(True)
 @pytest.mark.parametrize(
     "model_name",
     [
-        "sphere_plane_spin",
+        pytest.param("sphere_plane_spin", marks=pytest.mark.required),
         pytest.param("sphere_plane_roll", marks=pytest.mark.friction_rolling(True)),
     ],
 )
@@ -177,18 +177,18 @@ def test_torsional_and_rolling_friction(gs_sim, mj_sim, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos=qpos, qvel=qvel, num_steps=60, tol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.adjacent_collision(True)
 @pytest.mark.parametrize("model_name", ["chain_capsule_hinge_mesh"])  # FIXME: , "chain_capsule_hinge_capsule"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize(
+    "gs_integrator", [gs.integrator.implicitfast, pytest.param(gs.integrator.Euler, marks=pytest.mark.required)]
+)
 @pytest.mark.parametrize("gjk_collision", [True, False])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_simple_kinematic_chain(gs_sim, mj_sim, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=200, tol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("xml_path", ["xml/walker.xml"])
 @pytest.mark.parametrize(
     "gs_solver",
@@ -197,7 +197,9 @@ def test_simple_kinematic_chain(gs_sim, mj_sim, tol):
         # gs.constraint_solver.Newton,  # FIXME: This test is not passing because collision detection is too sensitive
     ],
 )
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize(
+    "gs_integrator", [gs.integrator.implicitfast, pytest.param(gs.integrator.Euler, marks=pytest.mark.required)]
+)
 @pytest.mark.parametrize("gjk_collision", [True, False])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_walker(gs_sim, mj_sim, gjk_collision, tol):
@@ -220,10 +222,11 @@ def test_walker(gs_sim, mj_sim, gjk_collision, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=90, tol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("xml_path", ["xml/one_ball_joint.xml"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
-@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize(
+    "gs_integrator", [gs.integrator.implicitfast, pytest.param(gs.integrator.Euler, marks=pytest.mark.required)]
+)
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_one_ball_joint(gs_sim, mj_sim, tol):
     # FIXME: Mujoco is detecting collision for some reason...
@@ -251,11 +254,10 @@ def test_rope_ball(gs_sim, mj_sim, gs_solver, tol):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=300, tol=5e-9)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("xml_path", ["linear_deformable.urdf"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast])
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize("gjk_collision", [True, pytest.param(False, marks=pytest.mark.required)])
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_urdf_rope(gs_sim, mj_sim, gs_solver, xml_path):
     # Must increase sol params to improve numerical stability
@@ -271,7 +273,6 @@ def test_urdf_rope(gs_sim, mj_sim, gs_solver, xml_path):
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=300, tol=5e-5)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name, gjk_collision",
     [
@@ -283,7 +284,7 @@ def test_urdf_rope(gs_sim, mj_sim, gs_solver, xml_path):
         ("tet_meshball", True),
         # The same patches through the MPR pipeline, whose manifold comes from exhaustive mesh supports and perturbed
         # re-detections.
-        ("tet_meshball", False),
+        pytest.param("tet_meshball", False, marks=pytest.mark.required),
     ],
 )
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
@@ -298,12 +299,11 @@ def test_tet_primitive_shapes(gs_sim, mj_sim, gs_integrator, gs_solver, multi_co
     simulate_and_check_mujoco_consistency(gs_sim, mj_sim, num_steps=700, tol=5e-6)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["humanoid_ball_floor"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 @pytest.mark.parametrize("gjk_collision", [True])
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_stickman(gs_sim, mj_sim, tol):
     # Make sure that the simulation is deterministic
     (gs_robot,) = gs_sim.entities
@@ -402,13 +402,12 @@ def test_general_actuator(gs_sim, mj_sim, tol):
     assert_allclose(b1[1], -50.0, tol=1e-6)
 
 
-@pytest.mark.required
 @pytest.mark.enable_collision(False)
 @pytest.mark.disable_constraint(True)
 @pytest.mark.parametrize("xml_path", ["xml/franka_emika_panda/panda.xml"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_robot_kinematics(gs_sim, mj_sim, tol):
     # Disable all constraints and actuation
     mj_sim.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONSTRAINT

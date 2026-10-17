@@ -9,9 +9,8 @@ from ..utils.assertions import assert_allclose
 from .utils import make_diff_scene_pair
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-@pytest.mark.parametrize("control_target", ["init_vel", "control_force"])
+@pytest.mark.parametrize("control_target", [pytest.param("init_vel", marks=pytest.mark.required), "control_force"])
 @pytest.mark.debug(False)
 def test_reference_trajectory_recovery_converges(control_target, grad_cartpole, show_viewer):
     # Reproduce a reference cartpole trajectory by optimizing either the initial velocity or the per-step control

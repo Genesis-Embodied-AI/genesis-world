@@ -114,11 +114,10 @@ def test_all_fixed(show_viewer):
     assert_allclose(scene.rigid_solver.get_links_acc(), 0, tol=gs.EPS)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["box_box"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_box_box_dynamics(gs_sim):
     (gs_robot,) = gs_sim.entities
     for _ in range(20):
@@ -375,8 +374,10 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     assert_allclose(duck.get_dofs_velocity()[3:] - duck_ang, duck_spin, tol=1e-4)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.approximate_implicitfast])
+@pytest.mark.parametrize(
+    "integrator",
+    [pytest.param(gs.integrator.Euler, marks=pytest.mark.required), gs.integrator.approximate_implicitfast],
+)
 def test_energy_analytical_and_conservation(
     spring_double_pendulum, implicit_inertial_origin_chain, show_viewer, tol, integrator
 ):
@@ -572,8 +573,9 @@ def test_energy_analytical_and_conservation(
         assert_allclose(ke_rot, ke_rot[0], tol=10.0 * tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("integrator", [gs.integrator.Euler, gs.integrator.implicitfast])
+@pytest.mark.parametrize(
+    "integrator", [pytest.param(gs.integrator.Euler, marks=pytest.mark.required), gs.integrator.implicitfast]
+)
 def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
@@ -609,8 +611,10 @@ def test_contact_energy_dissipation(damped_flap, integrator, show_viewer):
     assert_allclose(entity.get_total_energy(), 0.0, atol=2e-2 * energy_init)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+@pytest.mark.parametrize(
+    "contact_resolution",
+    [gs.contact_resolution.convex, pytest.param(gs.contact_resolution.signorini, marks=pytest.mark.required)],
+)
 def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer):
     G = 9.81
     DT = 0.002
@@ -673,8 +677,10 @@ def test_dofs_force_balance(resting_light_stick, contact_resolution, show_viewer
         vel = vel_next
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+@pytest.mark.parametrize(
+    "contact_resolution",
+    [gs.contact_resolution.convex, pytest.param(gs.contact_resolution.signorini, marks=pytest.mark.required)],
+)
 def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
     DT = 0.01
     FORCE_TOL = 2e-4
@@ -753,9 +759,11 @@ def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
         assert_allclose(entity.get_mass_mat() @ acc, entity.get_dofs_force(), tol=FORCE_TOL)
 
 
-@pytest.mark.required
 @pytest.mark.precision("32")
-@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
+@pytest.mark.parametrize(
+    "contact_resolution",
+    [gs.contact_resolution.convex, pytest.param(gs.contact_resolution.signorini, marks=pytest.mark.required)],
+)
 def test_static_equilibrium(damped_pendulum_and_tilted_light_capsule, contact_resolution, show_viewer):
     N_STEPS = 100
 
@@ -908,15 +916,14 @@ def test_mass_block_partition(xml_path, show_viewer, tol):
     assert_allclose(mass_mat_L.T @ torch.diag(1.0 / mass_mat_D_inv) @ mass_mat_L, mass_mat, tol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "box_position, n_envs",
     [
         ("after", 0),
         ("after", 2),
-        ("between", 2),
-        ("inside", 2),
-        ("inside_target", 2),
+        pytest.param("between", 2, marks=pytest.mark.required),
+        pytest.param("inside", 2, marks=pytest.mark.required),
+        pytest.param("inside_target", 2, marks=pytest.mark.required),
     ],
 )
 def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_position, n_envs, show_viewer, tol):

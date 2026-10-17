@@ -620,8 +620,7 @@ def test_per_solver_gravity():
         os.environ.pop("GS_ENABLE_NDARRAY", None)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 3])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(3, marks=pytest.mark.required)])
 def test_per_env_time(show_viewer, n_envs, tol):
     DT = 0.01
     N_STEPS = 10
@@ -840,12 +839,11 @@ def test_derived_substeps(show_viewer, tol):
         scene.build()
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "boxes_size",
     [
         # A light body under a heavy scene aggregate, below the floor quoted on the solver tolerance.
-        [1.0, 0.001],
+        pytest.param([1.0, 0.001], marks=pytest.mark.required),
         # A uniformly tiny scene, below the absolute floor the working precision resolves at all.
         pytest.param([0.0002], marks=pytest.mark.precision("32")),
     ],
