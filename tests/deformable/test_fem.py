@@ -182,14 +182,13 @@ def test_offset_pos(box_obj_path, show_viewer):
     assert_allclose(offset, OFFSET_POS, tol=gs.EPS)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
 @pytest.mark.parametrize(
     "coupler_type, material_model",
     [
         (gs.options.SAPCouplerOptions, "linear"),
         (gs.options.SAPCouplerOptions, "linear_corotated"),
-        (gs.options.LegacyCouplerOptions, "linear"),
+        pytest.param(gs.options.LegacyCouplerOptions, "linear", marks=pytest.mark.required),
     ],
 )
 def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
@@ -280,8 +279,7 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         assert_allclose(-state.pos[..., 2].min(), penetration_depth_ref, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("use_implicit_solver", [False, True])
+@pytest.mark.parametrize("use_implicit_solver", [pytest.param(False, marks=pytest.mark.required), True])
 @pytest.mark.parametrize("precision", ["64"])
 def test_hard_constraint(use_implicit_solver, show_viewer):
     DT = 0.01

@@ -26,9 +26,10 @@ from .conftest import (
 # ==================== Scale Tests ====================
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("scale", [(0.5, 2.0, 8.0), (2.0, 2.0, 2.0)])
-@pytest.mark.parametrize("mesh_file", ["meshes/camera/camera.glb", "meshes/axis.obj"])
+@pytest.mark.parametrize("scale", [pytest.param((0.5, 2.0, 8.0), marks=pytest.mark.required), (2.0, 2.0, 2.0)])
+@pytest.mark.parametrize(
+    "mesh_file", [pytest.param("meshes/camera/camera.glb", marks=pytest.mark.required), "meshes/axis.obj"]
+)
 def test_morph_scale(scale, mesh_file, mesh_urdf):
     scene = gs.Scene(show_viewer=False)
     obj_orig = scene.add_entity(
@@ -111,7 +112,10 @@ def test_morph_scale(scale, mesh_file, mesh_urdf):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("mesh_file", ["glb/combined_transform.glb", "yup_zup_coverage/cannon_y_-z.stl"])
+@pytest.mark.parametrize(
+    "mesh_file",
+    ["glb/combined_transform.glb", "yup_zup_coverage/cannon_y_-z.stl"],
+)
 def test_urdf_scale(mesh_urdf, show_viewer):
     SCALE_FACTOR = 2.0
 
@@ -144,7 +148,6 @@ def test_urdf_scale(mesh_urdf, show_viewer):
 
 
 @pytest.mark.slow  # ~200s
-@pytest.mark.required
 def test_mesh_yup(show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
 
@@ -227,7 +230,10 @@ def test_mesh_yup(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize(
     "mesh_file, file_meshes_are_zup",
-    [("yup_zup_coverage/cannon_z.glb", True), ("yup_zup_coverage/cannon_y_-z.stl", False)],
+    [
+        ("yup_zup_coverage/cannon_z.glb", True),
+        ("yup_zup_coverage/cannon_y_-z.stl", False),
+    ],
 )
 def test_urdf_yup(file_meshes_are_zup, mesh_urdf, show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
@@ -343,7 +349,10 @@ def test_glb_parse_geometry(request, glb_file, tol):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("glb_file", ["glb/tycoon_draco_no_normal.glb", "glb/tycoon_with_normal_draco.glb"])
+@pytest.mark.parametrize(
+    "glb_file",
+    ["glb/tycoon_draco_no_normal.glb", "glb/tycoon_with_normal_draco.glb"],
+)
 def test_glb_draco_missing_normals_texcoord(glb_file):
     # Normals and tex_coord are not always present in GLB files, typically for Draco-compressed ones.
     asset_path = get_hf_dataset(pattern=glb_file)
@@ -547,7 +556,6 @@ def test_glb_uv_set_and_unlit_albedo_resolution(material_variants_glb):
     # A single UV set is baked per mesh, following whichever texture actually samples it, and unlit imagery must not be
     # hidden by the white base that a missing color installs. parse_glb_material returns the chosen texCoord and surface.
     glb = pygltflib.GLTF2().load(material_variants_glb)
-    glb.convert_images(pygltflib.ImageFormat.DATAURI)
 
     # A base-color atlas owns the UV set; an emissive on a different texCoord does not replace it.
     _, base_atlas_uvs, _ = gltf_utils.parse_glb_material(glb, 0, gs.surfaces.Default())

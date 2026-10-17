@@ -8,13 +8,12 @@ import genesis as gs
 from .utils import assert_grad_matches_fd, make_diff_scene_pair
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 @pytest.mark.parametrize(
     "model_name",
     [
         "grad_free",
-        "grad_revolute",
+        pytest.param("grad_revolute", marks=pytest.mark.required),
         "grad_prismatic",
         "grad_spherical",
         "grad_free_with_revolute",
@@ -118,7 +117,6 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
         )
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name",
     [
@@ -128,7 +126,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
         "grad_free_with_revolute",
         "grad_chain3",
         "grad_spherical",
-        "grad_cartpole",
+        pytest.param("grad_cartpole", marks=pytest.mark.required),
         "grad_hopper",
     ],
 )
@@ -193,8 +191,7 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("control_mode", ["position", "velocity"])
+@pytest.mark.parametrize("control_mode", ["position", pytest.param("velocity", marks=pytest.mark.required)])
 def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precision, show_viewer):
     # Per-step-varying PD targets are scenario commands, replayed by the backward unroll; the gradient of a tracked
     # initial velocity through the controlled rollout must match finite differences.

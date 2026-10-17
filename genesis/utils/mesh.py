@@ -68,6 +68,33 @@ def glossiness_to_roughness(glossiness: float) -> float:
     return (2 / (glossiness + 2)) ** (1.0 / 4.0)
 
 
+def get_signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
+    """Compute the volume a closed triangle mesh encloses, positive when its faces wind outward.
+
+    The volume is the sum of the signed volumes of the tetrahedra each face spans with the origin (divergence theorem).
+    It is computed alone, which spares the division by the volume that the center of mass of a mesh enclosing no volume
+    would require.
+    """
+    tris = verts[faces]
+    return np.einsum("ij,ij->", tris[:, 0], np.cross(tris[:, 1], tris[:, 2])) / 6.0
+
+
+def convex_hull(tmesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    """Compute the convex hull of a mesh, with its faces wound outward unless the vertices are coplanar.
+
+    The winding of a hull is repaired from the sign of the volume it encloses, which a flat hull does not have, so a
+    hull of coplanar vertices keeps the winding of each face as qhull computed it. The vertices are coplanar when the
+    thickness of their cloud relative to its extent is below the tolerance trimesh merges vertices with, since the
+    rounding of the coordinates alone already spreads the vertices of a flat mesh above machine precision.
+    """
+    # Fewer than 4 vertices enclose no volume
+    is_flat = len(tmesh.vertices) < 4
+    if not is_flat:
+        singular_values = np.linalg.svd(tmesh.vertices - tmesh.vertices.mean(axis=0), compute_uv=False)
+        is_flat = singular_values[-1] <= trimesh.tol.merge * singular_values[0]
+    return trimesh.convex.convex_hull(tmesh, repair=not is_flat)
+
+
 def get_wall_thickness(verts: np.ndarray, faces: np.ndarray, quantile: float = 0.25) -> float:
     """Estimate a watertight mesh's characteristic wall thickness by probing its local diameter with inward rays.
 
@@ -634,13 +661,11 @@ def _postprocess_collision_geoms_impl(
             if g_info["type"] != gs.GEOM_TYPE.MESH:
                 continue
             if tmesh.is_winding_consistent and not tmesh.is_watertight:
-                tmesh_repaired = tmesh.copy()
-                tmesh_repaired.update_faces(tmesh_repaired.unique_faces())
-                if tmesh_repaired.volume < 0.0:
-                    tmesh_repaired.invert()
-                if abs(tmesh_repaired.volume) < gs.EPS:
+                volume_repaired = get_signed_volume(tmesh.vertices, tmesh.faces[tmesh.unique_faces()])
+                if abs(volume_repaired) < gs.EPS:
                     continue
-                if abs(abs(tmesh.volume / tmesh_repaired.volume) - 1.0) > MESH_REPAIR_ERROR_THRESHOLD:
+                volume = get_signed_volume(tmesh.vertices, tmesh.faces)
+                if abs(abs(volume / volume_repaired) - 1.0) > MESH_REPAIR_ERROR_THRESHOLD:
                     gs.logger.info(
                         "Collision mesh is not watertight and has ill-defined volume. It will be repaired by removing "
                         "duplicate faces."
@@ -660,8 +685,9 @@ def _postprocess_collision_geoms_impl(
             # Skip geometries that do not corresponds to mesh or have no enclosed volume
             if g_info["type"] != gs.GEOM_TYPE.MESH:
                 continue
-            cmesh = trimesh.convex.convex_hull(tmesh)
-            if abs(cmesh.volume) < gs.EPS:
+            cmesh = convex_hull(tmesh)
+            cmesh_volume = get_signed_volume(cmesh.vertices, cmesh.faces)
+            if abs(cmesh_volume) < gs.EPS:
                 continue
 
             # Fix mesh temporarily to make volume computation more reliable
@@ -669,18 +695,14 @@ def _postprocess_collision_geoms_impl(
                 tmesh = tmesh.copy()
                 tmesh.process(validate=True)
 
-            # Fix negative volume by inverting faces
-            if tmesh.volume < 0.0:
-                tmesh = tmesh.copy()
-                tmesh.invert()
-
-            # Compute volume approximation error between true geometry and its convex hull conservatively
+            # Compute volume approximation error between true geometry and its convex hull conservatively. The volume
+            # of a mesh wound inward is negative.
             if not tmesh.is_winding_consistent:
                 if not math.isinf(decompose_error_threshold):
                     geoms_must_decompose[i_g] = True
                     volume_err_max = float("inf")
-            elif abs(tmesh.volume) > gs.EPS:
-                volume_err = abs(cmesh.volume / abs(tmesh.volume) - 1.0)
+            elif abs(volume := get_signed_volume(tmesh.vertices, tmesh.faces)) > gs.EPS:
+                volume_err = abs(cmesh_volume / abs(volume) - 1.0)
                 if volume_err > decompose_error_threshold:
                     geoms_must_decompose[i_g] = True
                     volume_err_max = max(volume_err_max, volume_err)
@@ -810,11 +832,11 @@ def _postprocess_collision_geoms_impl(
                 volume_err = 0.0
             elif not tmesh.is_winding_consistent:
                 volume_err = float("inf")
-            elif abs(tmesh.volume) < gs.EPS:
+            elif abs(volume := get_signed_volume(tmesh.vertices, tmesh.faces)) < gs.EPS:
                 volume_err = 0.0
             else:
-                cmesh = trimesh.convex.convex_hull(tmesh)
-                volume_err = abs(cmesh.volume / abs(tmesh.volume) - 1.0)
+                cmesh = convex_hull(tmesh)
+                volume_err = abs(get_signed_volume(cmesh.vertices, cmesh.faces) / abs(volume) - 1.0)
             if volume_err > decompose_error_threshold:  # Note that 'inf' is not larger than 'inf'
                 tmeshes = convex_decompose(tmesh, coacd_options)
                 meshes = [

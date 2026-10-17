@@ -41,9 +41,8 @@ from .conftest import (
 # ==================== Primitive Tests ====================
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["all_primitives_mjcf"])
-@pytest.mark.parametrize("scale", [1.0, 2.0])
+@pytest.mark.parametrize("scale", [pytest.param(1.0, marks=pytest.mark.required), 2.0])
 def test_primitives_mjcf_vs_usd(xml_path, all_primitives_usd, scale, tol):
     mjcf_scene = build_mjcf_scene(xml_path, scale=scale)
     usd_scene = build_usd_scene(all_primitives_usd, scale=scale)
@@ -53,11 +52,13 @@ def test_primitives_mjcf_vs_usd(xml_path, all_primitives_usd, scale, tol):
 # ==================== Joint Tests ====================
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["all_joints_mjcf"])
 @pytest.mark.parametrize("scale", [1.0, 2.0])
 @pytest.mark.parametrize(
-    "all_joints_usd", [True, False], indirect=True, ids=["with_articulation_root", "without_articulation_root"]
+    "all_joints_usd",
+    [True, pytest.param(False, marks=pytest.mark.required)],
+    indirect=True,
+    ids=["with_articulation_root", "without_articulation_root"],
 )
 def test_joints_mjcf_vs_usd(xml_path, all_joints_usd, scale, tol):
     mjcf_scene = build_mjcf_scene(xml_path, scale=scale)
@@ -67,8 +68,9 @@ def test_joints_mjcf_vs_usd(xml_path, all_joints_usd, scale, tol):
     compare_scene(mjcf_scene, usd_scene, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("model_name", ["usd/sneaker_airforce", "usd/RoughnessTest"])
+@pytest.mark.parametrize(
+    "model_name", [pytest.param("usd/sneaker_airforce", marks=pytest.mark.required), "usd/RoughnessTest"]
+)
 def test_visual_parse(model_name):
     glb_asset_path = get_hf_dataset(pattern=f"{model_name}.glb")
     glb_file = os.path.join(glb_asset_path, f"{model_name}.glb")

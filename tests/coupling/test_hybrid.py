@@ -89,8 +89,7 @@ def test_rigid_mpm_muscle(show_viewer):
     assert_allclose(ball_pos_delta[..., 2], 0.0, tol=1e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("substeps", [1, 10])
+@pytest.mark.parametrize("substeps", [1, pytest.param(10, marks=pytest.mark.required)])
 def test_rigid_mpm_legacy_coupling(substeps, show_viewer):
     # This test is aimining at two things:
     # 1) When substep = 1, the rigid object should be affected by the MPM particles
@@ -304,7 +303,6 @@ def test_deformable_parallel(show_viewer):
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "n_envs, material_type",
     [
@@ -312,7 +310,7 @@ def test_deformable_parallel(show_viewer):
         (1, gs.materials.SPH.Liquid),
         (2, gs.materials.SPH.Liquid),
         (2, gs.materials.PBD.Liquid),
-        (2, gs.materials.MPM.Liquid),
+        pytest.param(2, gs.materials.MPM.Liquid, marks=pytest.mark.required),
         (2, gs.materials.MPM.Sand),
         (2, gs.materials.MPM.Snow),
         (2, gs.materials.MPM.Elastic),  # This makes little sense but nothing prevents doing this

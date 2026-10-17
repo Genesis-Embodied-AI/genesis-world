@@ -1,7 +1,9 @@
 import ctypes
 import gc
+import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,10 +13,10 @@ from enum import Enum
 from io import BytesIO
 from pathlib import Path
 
-import setproctitle
 import psutil
 import pyglet
 import pytest
+import setproctitle
 from _pytest.mark import Expression, MarkMatcher
 from PIL import Image
 from syrupy.extensions.image import PNGImageSnapshotExtension
@@ -77,6 +79,10 @@ TOL_DOUBLE = 1e-9
 # normalized to point to the definition line below instead of scattered test function locations.
 # This makes the short test summary group identical skip reasons into a single line.
 _CANONICAL_SKIP_LINES = {}
+
+# Whether any phase of a test has failed so far, and where the trajectories of the test go (see 'failure_trajectories')
+IS_TEST_FAILED_KEY = pytest.StashKey[bool]()
+TRAJECTORIES_DIR_KEY = pytest.StashKey[Path]()
 
 
 def _skip_reason(reason):
@@ -500,6 +506,11 @@ def pytest_runtest_makereport(item, call):
     """
     outcome = yield
     report = outcome.get_result()
+    item.stash[IS_TEST_FAILED_KEY] = item.stash.get(IS_TEST_FAILED_KEY, False) or report.failed
+    # The teardown report follows every finalizer, the destruction of the scenes that flushes the trajectories included,
+    # so a failure raised by any of them is known here
+    if report.when == "teardown" and TRAJECTORIES_DIR_KEY in item.stash and not item.stash[IS_TEST_FAILED_KEY]:
+        shutil.rmtree(item.stash[TRAJECTORIES_DIR_KEY], ignore_errors=True)
     if report.skipped and isinstance(report.longrepr, tuple):
         _, _, reason = report.longrepr
         # pytest may prefix the reason with "Skipped: " - strip it for matching
@@ -546,6 +557,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     if IS_INTERACTIVE_VIEWER_AVAILABLE:
         parser.addoption("--vis", action="store_true", default=False, help="Enable interactive viewer.")
     parser.addoption("--dev", action="store_true", default=False, help="Enable genesis debug mode.")
+    parser.addoption(
+        "--snapshots-dir",
+        type=str,
+        default=None,
+        help="Read the snapshots from this local clone of the snapshots dataset instead of downloading them.",
+    )
+    parser.addoption(
+        "--failure-trajectories-dir",
+        type=str,
+        default=None,
+        help="Record every scene a test builds to a trajectory file in this directory, kept only if the test fails.",
+    )
     supported, _reason = is_mem_monitoring_supported()
     help_text = (
         "Run memory monitoring, and store results to mem_monitoring_filepath. CUDA on linux ONLY."
@@ -807,6 +830,53 @@ def use_deterministic_algorithms(request):
     return use_deterministic_algorithms
 
 
+@pytest.fixture(autouse=True)
+def failure_trajectories(request, monkeypatch):
+    """Record every exportable scene the test builds to a trajectory file, deleted after teardown unless the test failed.
+
+    The files go to a directory named after the test inside the one given by '--failure-trajectories-dir', and nothing
+    is recorded without that option. A failure is studied by opening a file with 'gs.Scene.load_trajectory', which
+    replays the run up to the failing step on any machine. The files are deleted by 'pytest_runtest_makereport' once the
+    teardown is reported.
+    """
+    trajectories_root = request.config.getoption("--failure-trajectories-dir")
+    if trajectories_root is None:
+        yield
+        return
+
+    import genesis as gs
+    from genesis.engine.couplers import IPCCoupler
+    from genesis.engine.solvers.kinematic_solver import KinematicSolver
+    from genesis.recorders.trajectory import TRAJECTORY_FORMAT
+
+    # The name is shortened to keep the path within the length limit of Windows, and the digest of the full test id keeps
+    # the tests sharing that prefix apart
+    nodeid_name = re.sub(r"[^\w.\[\]-]+", "_", request.node.nodeid)[:150]
+    nodeid_digest = hashlib.sha1(request.node.nodeid.encode()).hexdigest()[:12]
+    trajectories_dir = Path(trajectories_root) / f"{nodeid_name}-{nodeid_digest}"
+    request.node.stash[TRAJECTORIES_DIR_KEY] = trajectories_dir
+    scene_build = gs.Scene.build
+
+    def build_recorded(scene, *args, **kwargs):
+        # A file describes rigid and kinematic entities alone, and a scene holding anything else that alters the
+        # simulation cannot be exported (see 'Scene.export'). The kinematic and rigid solvers alone are checkpointed,
+        # and the IPC world holds state of its own (see 'Simulator.data').
+        if (
+            all(entity.desc is not None for entity in scene.entities)
+            and not scene.emitters
+            and not scene.sim.solvers[0].force_fields
+            and all(isinstance(solver, KinematicSolver) for solver in scene.sim.solvers if solver.is_active)
+            and not isinstance(scene.sim.coupler, IPCCoupler)
+        ):
+            trajectories_dir.mkdir(parents=True, exist_ok=True)
+            path = trajectories_dir / f"scene_{len(list(trajectories_dir.iterdir()))}{TRAJECTORY_FORMAT}"
+            scene.start_recording(gs.recorders.TrajectoryFile(filename=str(path)))
+        return scene_build(scene, *args, **kwargs)
+
+    monkeypatch.setattr(gs.Scene, "build", build_recorded)
+    yield
+
+
 @pytest.fixture(scope="function", autouse=True)
 def initialize_genesis(
     request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, cache, use_deterministic_algorithms
@@ -1023,6 +1093,27 @@ class PixelMatchSnapshotExtension(PNGImageSnapshotExtension):
         return True
 
 
+def _fetch_snapshots(config, pattern):
+    """Put the snapshot files matching a glob pattern, relative to the tests root, in the tests tree.
+
+    The files come from the snapshots dataset at its pinned revision, or from the local clone of the dataset that
+    '--snapshots-dir' gives, which validates new snapshots before they are published. The dataset mirrors the tests
+    tree ('rendering/__snapshots__/test_offscreen/...'), so the path of a snapshot relative to the tests root is also its
+    path in the dataset.
+    """
+    from .utils.assets import get_hf_dataset
+
+    tests_dir = Path(__file__).parent
+    snapshots_dir = config.getoption("--snapshots-dir")
+    if snapshots_dir is None:
+        get_hf_dataset(pattern=pattern, repo_name="snapshots", local_dir=tests_dir)
+        return
+    for path in Path(snapshots_dir).glob(pattern):
+        target = tests_dir / path.relative_to(snapshots_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+
+
 @pytest.fixture
 def png_snapshot(request, snapshot):
     snapshot_obj = snapshot.use_extension(PixelMatchSnapshotExtension)
@@ -1039,16 +1130,8 @@ def png_snapshot(request, snapshot):
             assert path.is_file()
             path.unlink()
     else:
-        from .utils.assets import get_hf_dataset
-
-        # The snapshots repository mirrors the tests tree ('rendering/__snapshots__/test_offscreen/...'), so the
-        # snapshot directory path relative to the tests root is also its path in the repository.
         tests_dir = Path(__file__).parent
-        get_hf_dataset(
-            pattern=f"{snapshot_dir.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
-            repo_name="snapshots",
-            local_dir=tests_dir,
-        )
+        _fetch_snapshots(request.config, f"{snapshot_dir.relative_to(tests_dir).as_posix()}/{snapshot_pattern}")
 
     return snapshot_obj
 
@@ -1057,17 +1140,11 @@ def png_snapshot(request, snapshot):
 def trajectory_snapshot(request) -> Path:
     from genesis.recorders.trajectory import TRAJECTORY_FORMAT
 
-    from .utils.assets import get_hf_dataset
-
     # The path is the one syrupy gives a single-file snapshot of the test. The test reads the file itself, so syrupy
     # leaves it out of its count of unused snapshots.
     path = request.path.parent / "__snapshots__" / request.path.stem / f"{request.node.name}{TRAJECTORY_FORMAT}"
     # The brackets of a parametrized test name are escaped for the same reason as in 'png_snapshot'
     snapshot_pattern = "".join(f"[{char}]" if char in ("[", "]") else char for char in path.name)
     tests_dir = Path(__file__).parent
-    get_hf_dataset(
-        pattern=f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}",
-        repo_name="snapshots",
-        local_dir=tests_dir,
-    )
+    _fetch_snapshots(request.config, f"{path.parent.relative_to(tests_dir).as_posix()}/{snapshot_pattern}")
     return path

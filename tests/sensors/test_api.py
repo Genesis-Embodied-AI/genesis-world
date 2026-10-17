@@ -503,8 +503,7 @@ def test_add_and_read_all_registered_sensors():
         sensor.read()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_sensor_history_length_contact_and_imu(show_viewer, tol, n_envs):
     # history_length stacks recent frames from the ring snapshot buffers.
     GRAVITY = -10.0
@@ -634,8 +633,7 @@ def test_shared_context(show_viewer):
     assert torch.isfinite(depth_camera.read_image()).all()
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 3])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 3])
 def test_read_sensors_bulk_api(show_viewer, n_envs):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

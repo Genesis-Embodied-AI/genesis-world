@@ -128,14 +128,14 @@ def gs_static_child(args: list[str]):
 @pytest.mark.parametrize(
     "enable_multicontact, expected_num_contacts, use_ndarray, test_backend",
     [
-        pytest.param(False, 1, False, "cpu", marks=pytest.mark.required),
-        pytest.param(True, 4, False, "cpu", marks=pytest.mark.required),
+        (False, 1, False, "cpu"),
+        (True, 4, False, "cpu"),
         (False, 1, True, "cpu"),
-        pytest.param(True, 4, True, "cpu", marks=pytest.mark.required),
+        (True, 4, True, "cpu"),
         pytest.param(False, 1, False, "gpu", marks=pytest.mark.required),
-        pytest.param(True, 4, False, "gpu", marks=pytest.mark.required),
-        pytest.param(False, 1, True, "gpu", marks=pytest.mark.required),
-        pytest.param(True, 4, True, "gpu", marks=pytest.mark.required),
+        (True, 4, False, "gpu"),
+        (False, 1, True, "gpu"),
+        (True, 4, True, "gpu"),
     ],
 )
 def test_static(
@@ -219,9 +219,8 @@ def gs_num_envs_child(args: list[str]):
     sys.exit(RET_SUCCESS)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("backend", [None])  # Disable genesis initialization at worker level
-@pytest.mark.parametrize("test_backend", ["cpu", "gpu"])
+@pytest.mark.parametrize("test_backend", ["cpu", pytest.param("gpu", marks=pytest.mark.required)])
 @pytest.mark.parametrize("use_ndarray", [False, True])
 def test_num_envs(use_ndarray: bool, test_backend: str, tmp_path: pathlib.Path) -> None:
     # Change n_envs each time, and check effect on reading from cache

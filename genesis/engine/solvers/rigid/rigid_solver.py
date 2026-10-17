@@ -1138,8 +1138,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             geoms_center = []
             for geom in geoms:
                 tmesh = geom.mesh.trimesh
-                if tmesh.is_watertight:
-                    geoms_center.append(tmesh.center_mass)
+                # A geom enclosing no volume has no center of mass, and its inertial reports no mass
+                if tmesh.is_watertight and geom.mesh.inertial.mass > 0.0:
+                    geoms_center.append(geom.mesh.inertial.com)
                 else:
                     # Still fallback to mean vertex position if no better option...
                     geoms_center.append(np.mean(tmesh.vertices, axis=0))

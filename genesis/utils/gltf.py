@@ -1,16 +1,19 @@
+import os
 from io import BytesIO
 from urllib import request
+from urllib.parse import unquote
+
+import numpy as np
 
 import DracoPy
-import numpy as np
 import pygltflib
 import trimesh
 from PIL import Image
 
 import genesis as gs
 
-from . import mesh as mu
 from . import geom as gu
+from . import mesh as mu
 
 
 ctype_to_numpy = {
@@ -38,12 +41,6 @@ alpha_modes = {
     "MASK": 1,
     "BLEND": 2,
 }
-
-
-def uri_to_PIL(data_uri):
-    with request.urlopen(data_uri) as response:
-        data = response.read()
-    return BytesIO(data)
 
 
 def get_glb_bufferview_data(glb, buffer_view):
@@ -88,7 +85,19 @@ def get_glb_data_from_accessor(glb, accessor_index):
 
 def get_glb_image(glb, image_index, image_type=None):
     if image_index is not None:
-        image = Image.open(uri_to_PIL(glb.images[image_index].uri))
+        # An image is stored in a buffer view of the binary chunk, as a data URI, or in a file next to the asset
+        glb_image = glb.images[image_index]
+        if glb_image.bufferView is not None:
+            buffer_view = glb.bufferViews[glb_image.bufferView]
+            byte_offset = buffer_view.byteOffset or 0
+            buffer_data = get_glb_bufferview_data(glb, buffer_view)
+            image_file = BytesIO(buffer_data[byte_offset : byte_offset + buffer_view.byteLength])
+        elif glb_image.uri.startswith("data:"):
+            with request.urlopen(glb_image.uri) as response:
+                image_file = BytesIO(response.read())
+        else:
+            image_file = os.path.join(os.path.dirname(glb.path), unquote(glb_image.uri))
+        image = Image.open(image_file)
         if image_type is not None:
             image = image.convert(image_type)
         return mu.PIL_to_array(image)
@@ -305,7 +314,6 @@ def parse_glb_tree(glb, node_index):
 def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
     glb = pygltflib.GLTF2().load(path)
     assert glb is not None
-    glb.convert_images(pygltflib.ImageFormat.DATAURI)
     glb.path = path
 
     glb_scene = glb.scene or 0

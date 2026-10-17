@@ -7,8 +7,7 @@ import genesis.utils.geom as gu
 from ..utils.assertions import assert_allclose
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_gravity_force(free_box, n_envs, show_viewer, tol):
     GRAVITY = -10.0
     BIAS = (0.1, 0.2, 0.3)

@@ -28,8 +28,7 @@ except ImportError:
     ENABLE_MADRONA = False
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 1])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 1])
 def test_rasterizer_non_batched(n_envs, show_viewer):
     scene = gs.Scene(
         profiling_options=gs.options.ProfilingOptions(

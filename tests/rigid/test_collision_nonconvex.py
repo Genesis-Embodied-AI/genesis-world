@@ -622,9 +622,8 @@ def test_concave_slanted_wall(timestep, decimate, show_viewer):
         assert (bowls_dist_rel < BOWL_THICKNESS + 1e-3).all()
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("convexify", [True, False])
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize("gjk_collision", [True, pytest.param(False, marks=pytest.mark.required)])
 def test_mesh_repair(convexify, show_viewer, gjk_collision):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -803,8 +802,9 @@ def test_convexify(euler, show_viewer, gjk_collision):
             assert_allclose(obj_pos[:2], (OBJ_OFFSET_X * (1.5 - i), OBJ_OFFSET_Y * (i - 1.5)), atol=6e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("convexify, watertighten", [(True, 5), (False, 5), (False, None)])
+@pytest.mark.parametrize(
+    "convexify, watertighten", [pytest.param(True, 5, marks=pytest.mark.required), (False, 5), (False, None)]
+)
 @pytest.mark.parametrize("model_name", ["decompose_fusion_groups"])
 def test_convexify_fusion_groups(convexify, watertighten, xml_path):
     scene = gs.Scene()

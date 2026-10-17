@@ -113,8 +113,7 @@ def polar(A, pure_rotation: bool, side, tol):
     return gu.polar(A, pure_rotation=pure_rotation, side=side)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
+@pytest.mark.parametrize("batch_shape", [(10, 40, 25), pytest.param((), marks=pytest.mark.required)])
 def test_geom_quadrants_vs_tensor_consistency(batch_shape):
     import quadrants as qd
 
@@ -169,8 +168,7 @@ def test_geom_quadrants_vs_tensor_consistency(batch_shape):
             np.testing.assert_allclose(np_out, tc_out, atol=1e2 * gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
+@pytest.mark.parametrize("batch_shape", [(10, 40, 25), pytest.param((), marks=pytest.mark.required)])
 def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
     for py_func, shapes_in, shapes_out in (
         (gu.quat_to_R, [[4]], [[3, 3]]),
@@ -227,8 +225,7 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
             assert_allclose(np_out, tc_out, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
+@pytest.mark.parametrize("batch_shape", [(10, 40, 25), pytest.param((), marks=pytest.mark.required)])
 def test_geom_quadrants_inverse(batch_shape):
     import quadrants as qd
 
@@ -329,8 +326,7 @@ def test_geom_tensor_identity(batch_shape):
         np.testing.assert_allclose(tensor_to_array(tc_args[0]), tensor_to_array(tc_args[-1]), atol=1e2 * gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
+@pytest.mark.parametrize("batch_shape", [(10, 40, 25), pytest.param((), marks=pytest.mark.required)])
 def test_slerp(batch_shape, tol):
     INTERP_RATIO = 0.7
 
@@ -427,6 +423,40 @@ def test_compose_inertial_properties():
 
 
 @pytest.mark.required
+def test_mesh_inertial_properties(tol):
+    EXTENTS = (1.0, 2.0, 3.0)
+    VOLUME = math.prod(EXTENTS)
+    INERTIA = VOLUME / 12.0 * np.diag(np.sum(np.square(EXTENTS)) - np.square(EXTENTS))
+
+    # A box wound inward has a negative volume, and a box missing a side is closed by its convex hull
+    box = trimesh.creation.box(extents=EXTENTS)
+    box_inverted = box.copy()
+    box_inverted.invert()
+    box_open = trimesh.Trimesh(vertices=box.vertices, faces=box.faces[box.face_normals[:, 0] > -0.5], process=False)
+    for tmesh, volume in ((box, VOLUME), (box_inverted, -VOLUME), (box_open, None)):
+        mesh = gs.Mesh.from_trimesh(tmesh)
+        if volume is not None:
+            assert_allclose(mesh.volume, volume, tol=tol)
+        mass, com, inertia = mesh.inertial
+        assert_allclose(mass, VOLUME, tol=tol)
+        assert_allclose(com, 0.0, tol=tol)
+        assert_allclose(inertia, INERTIA, tol=tol)
+
+    # A flat mesh encloses no volume, so it carries no inertia
+    quad = trimesh.Trimesh(
+        vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)),
+        faces=((0, 1, 2), (0, 2, 3)),
+        process=False,
+    )
+    mesh = gs.Mesh.from_trimesh(quad)
+    assert_allclose(mesh.volume, 0.0, tol=tol)
+    mass, com, inertia = mesh.inertial
+    assert_equal(mass, 0.0)
+    assert_equal(com, 0.0)
+    assert_equal(inertia, 0.0)
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("side", ["right", "left"])
 def test_polar_decomposition(side, tol):
     # Generate random matrices (not necessarily square)
@@ -483,9 +513,8 @@ def test_polar_pure_rotation(is_pure, tol):
     assert_allclose(np_A, np_recon, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("side", ["right", "left"])
-@pytest.mark.parametrize("batch_shape", [(5,), (3, 4), (2, 3, 4)])
+@pytest.mark.parametrize("side", [pytest.param("right", marks=pytest.mark.required), "left"])
+@pytest.mark.parametrize("batch_shape", [(5,), (3, 4), pytest.param((2, 3, 4), marks=pytest.mark.required)])
 def test_polar_decomposition_batched_numpy(side, batch_shape, tol):
     M, N = 3, 3
     np_A = np.random.randn(*batch_shape, M, N).astype(gs.np_float)
@@ -531,7 +560,6 @@ def test_polar_decomposition_batched_pure_rotation(side, tol):
     assert_allclose(np_A, np_reconstructed, tol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.slow  # ~300s
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_genuine_interpenetration(show_viewer):

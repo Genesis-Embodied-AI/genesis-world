@@ -103,8 +103,7 @@ def test_particle_constraints(show_viewer, tol):
     assert mpm_diff > pos_diff[0] * 0.3, f"MPM should follow rigid link. Got {mpm_diff:.3f}"
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("variant", ["svd", "no_svd"])
+@pytest.mark.parametrize("variant", [pytest.param("svd", marks=pytest.mark.required), "no_svd"])
 def test_perf_dispatch(variant, show_viewer):
     if variant == "svd":
         elastic_model = "corotation"

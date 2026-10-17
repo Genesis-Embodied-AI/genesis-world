@@ -211,9 +211,8 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
     assert rgb_array_to_png_bytes(rgb_arr) == png_snapshot
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_draw_debug_frustum_and_trajectory(n_envs, renderer_type, renderer, png_snapshot):
     scene = gs.Scene(

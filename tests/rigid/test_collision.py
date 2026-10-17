@@ -35,14 +35,13 @@ def _ellipsoid_mjcf_path(tmp_path, semi_axes):
     return str(path)
 
 
-@pytest.mark.required
 @pytest.mark.mujoco_compatibility(False)
 @pytest.mark.parametrize("mode", range(9))
 @pytest.mark.parametrize("model_name", ["collision_edge_cases"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
 @pytest.mark.parametrize("gjk_collision", [True, False])
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 def test_edge_cases(gs_sim, mode):
     qpos_0 = gs_sim.rigid_solver.get_dofs_position()
     for _ in range(200):
@@ -148,14 +147,14 @@ def test_ellipsoid(xml_path, show_viewer):
 @pytest.mark.parametrize(
     "entity_kind, entity_type, ground_type",
     [
-        pytest.param("sphere", "prim", "prim", marks=pytest.mark.required),
-        pytest.param("sphere", "prim", "mesh", marks=pytest.mark.required),
-        pytest.param("capsule", "prim", "prim", marks=pytest.mark.required),
-        pytest.param("capsule", "prim", "mesh", marks=pytest.mark.required),
-        pytest.param("cylinder", "prim", "prim", marks=pytest.mark.required),
-        pytest.param("cylinder", "prim", "mesh", marks=pytest.mark.required),
+        ("sphere", "prim", "prim"),
+        ("sphere", "prim", "mesh"),
+        ("capsule", "prim", "prim"),
+        ("capsule", "prim", "mesh"),
+        ("cylinder", "prim", "prim"),
+        ("cylinder", "prim", "mesh"),
         pytest.param("ellipsoid", "prim", "prim", marks=pytest.mark.required),
-        pytest.param("ellipsoid", "prim", "mesh", marks=pytest.mark.required),
+        ("ellipsoid", "prim", "mesh"),
         ("sphere", "prim", "terrain"),
         ("sphere", "prim", "nonconvex"),
         ("sphere", "mesh", "mesh"),
@@ -1253,8 +1252,7 @@ def test_contact_forces(show_viewer):
     assert torch.quantile(torch.cat(all_errors), 0.95) < 2e-4
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize("gjk_collision", [pytest.param(True, marks=pytest.mark.required), False])
 def test_contact_pruning(gjk_collision, show_viewer):
     GEOM_HALF_SIZE = 0.1
     MARGIN = 1e-4
@@ -1386,9 +1384,8 @@ def test_contact_pruning(gjk_collision, show_viewer):
     assert_allclose(box.get_pos(), ((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)), atol=2e-3)
 
 
-@pytest.mark.required
 @pytest.mark.precision("32")
-@pytest.mark.parametrize("gjk_collision", [False, True])
+@pytest.mark.parametrize("gjk_collision", [False, pytest.param(True, marks=pytest.mark.required)])
 def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
     # A central pole carries six concentric rings, capped by a ball seated in the top ring's hole. Each ring collision
     # mesh is pre-decomposed into N_WEDGES convex slices, so stacked pieces touch face-to-face along the vertical axis.
@@ -1524,11 +1521,10 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         assert is_vertical and is_pruned
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name",
     [
-        "side_by_side_capsules",
+        pytest.param("side_by_side_capsules", marks=pytest.mark.required),
         "collinear_capsules",
         "side_by_side_cylinders",
         "collinear_cylinders",
@@ -1866,14 +1862,13 @@ def test_contype_conaffinity(show_viewer, tol):
     assert_allclose(scene.rigid_solver.get_links_acc(slice(box4.link_start, box4.link_end)), GRAVITY, atol=tol)
 
 
-@pytest.mark.required
 @pytest.mark.precision("32")
 @pytest.mark.parametrize("backend", [gs.gpu])
 @pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None], ids=["prune", "noprune"])
 @pytest.mark.parametrize(
     "prefer_decomposed_solver",
     [
-        pytest.param(False, marks=pytest.mark.use_deterministic_algorithms(False)),
+        pytest.param(False, marks=(pytest.mark.use_deterministic_algorithms(False), pytest.mark.required)),
         pytest.param(True, marks=pytest.mark.use_deterministic_algorithms(False)),
         None,
     ],

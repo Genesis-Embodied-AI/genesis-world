@@ -110,8 +110,7 @@ def test_position_control(show_viewer):
         assert_allclose(pos_target, robot.get_dofs_position(envs_idx=1), tol=1e-2)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize("backend", [gs.cpu, pytest.param(gs.gpu, marks=pytest.mark.required)])
 @pytest.mark.parametrize("robot_path", ["xml/franka_emika_panda/panda.xml"])
 def test_reset_control(robot_path, tol):
     scene = gs.Scene(
@@ -140,8 +139,7 @@ def test_reset_control(robot_path, tol):
     assert_allclose(new_control_force, 0, tol=gs.EPS)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs, substeps", [(0, 5), (2, 1)])
+@pytest.mark.parametrize("n_envs, substeps", [pytest.param(0, 5, marks=pytest.mark.required), (2, 1)])
 def test_drone_propellers_force_application(n_envs, substeps, show_viewer, tol):
     BASE_RPM = 15000
     RPM_DELTA = 0.01

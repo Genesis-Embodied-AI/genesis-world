@@ -60,9 +60,8 @@ def test_disable_defaults():
     assert len(pyrender_viewer._keybindings) == 0
 
 
-@pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [pytest.param(0, marks=pytest.mark.required), 2])
 def test_default_plugin(n_envs):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
@@ -280,7 +279,6 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
         assert f.read() == png_snapshot
 
 
-@pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 @pytest.mark.parametrize(
     "n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset, use_visual_geom",
@@ -288,7 +286,7 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
         (0, (0.0, 0.0), None, None, (0.0, 0.0, 0.0), False),
         # Two envs spaced along x so envs_offset is non-zero. Camera is positioned over env 1, so a viewport-center
         # click must pick env 1 (exercising kernel_cast_ray's per-env offset transform) and leave env 0 untouched.
-        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), False),
+        pytest.param(2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), False, marks=pytest.mark.required),
         (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), True),
     ],
 )

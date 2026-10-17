@@ -20,14 +20,13 @@ from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match
 from .conftest import RENDERER_TYPE
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "renderer_type",
     [
         RENDERER_TYPE.RASTERIZER,
-        RENDERER_TYPE.RAYTRACER,
-        RENDERER_TYPE.BATCHRENDER_RASTERIZER,
-        RENDERER_TYPE.BATCHRENDER_RAYTRACER,
+        pytest.param(RENDERER_TYPE.RAYTRACER, marks=pytest.mark.required),
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RASTERIZER, marks=pytest.mark.required),
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RAYTRACER, marks=pytest.mark.required),
     ],
 )
 def test_render_api(show_viewer, renderer_type, renderer):
@@ -200,10 +199,13 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
     assert abs(means[emissive_green][1] - means[base_green][1]) < 30.0
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "renderer_type",
-    [RENDERER_TYPE.RASTERIZER, RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER],
+    [
+        RENDERER_TYPE.RASTERIZER,
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RASTERIZER, marks=pytest.mark.required),
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RAYTRACER, marks=pytest.mark.required),
+    ],
 )
 # Debug mode is forced for the batched scene, whose rendered snapshots are sensitive to fast-math
 @pytest.mark.parametrize("n_envs", [0, pytest.param(4, marks=pytest.mark.debug(True))])
@@ -663,10 +665,13 @@ def test_deterministic(tmp_path, renderer_type, renderer, show_viewer, tol):
     cam.stop_recording()
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "renderer_type",
-    [RENDERER_TYPE.RASTERIZER, RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER],
+    [
+        RENDERER_TYPE.RASTERIZER,
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RASTERIZER, marks=pytest.mark.required),
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RAYTRACER, marks=pytest.mark.required),
+    ],
 )
 @pytest.mark.parametrize("n_envs", [0, 4])
 def test_renders_heterogeneous_entities(n_envs, show_viewer, png_snapshot, renderer_type, renderer):
@@ -969,10 +974,13 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
         assert rgb_array_to_png_bytes(seg) == png_snapshot
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "renderer_type",
-    [RENDERER_TYPE.RASTERIZER, RENDERER_TYPE.BATCHRENDER_RASTERIZER, RENDERER_TYPE.BATCHRENDER_RAYTRACER],
+    [
+        RENDERER_TYPE.RASTERIZER,
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RASTERIZER, marks=pytest.mark.required),
+        pytest.param(RENDERER_TYPE.BATCHRENDER_RAYTRACER, marks=pytest.mark.required),
+    ],
 )
 def test_point_cloud(renderer_type, renderer, show_viewer):
     N_ENVS = 2
@@ -1243,8 +1251,7 @@ def test_context_isolation(renderer_type):
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 def test_camera_follow_entity(n_envs, renderer, show_viewer):
     CAM_RES = (100, 100)
@@ -1545,9 +1552,10 @@ def test_rasterizer_env_separate(renderer, png_snapshot, show_viewer, force_show
     assert_equal(rgb_debug_reset, rgb_debug)
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
-@pytest.mark.parametrize("context_mode", ["sensor_only", "with_scene_camera", "with_viewer"])
+@pytest.mark.parametrize(
+    "context_mode", ["sensor_only", "with_scene_camera", pytest.param("with_viewer", marks=pytest.mark.required)]
+)
 def test_rasterizer_sensor_env_spacing_invariance(renderer, context_mode):
     if context_mode == "with_viewer" and not IS_INTERACTIVE_VIEWER_AVAILABLE:
         pytest.skip(SKIP_NO_VIEWER)

@@ -102,8 +102,7 @@ def get_sph_density_pressure(scene, n_particles):
     return densities, pressures
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
+@pytest.mark.parametrize("pressure_solver", [pytest.param("WCSPH", marks=pytest.mark.required), "DFSPH"])
 def test_initial_density_regular_sampler(show_viewer, pressure_solver, tol):
     # A regular sampler places particles at uniform spacing: interior particles see a consistent near-rest
     # density while boundary particles sit lower (fewer neighbors inside the kernel support), so the mean lands
@@ -141,8 +140,7 @@ def test_initial_density_regular_sampler(show_viewer, pressure_solver, tol):
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
+@pytest.mark.parametrize("pressure_solver", [pytest.param("WCSPH", marks=pytest.mark.required), "DFSPH"])
 def test_initial_pressure_regular_sampler(show_viewer, pressure_solver, tol):
     # Regular sampling yields densities at or below the rest density, and the equation of state clamps density
     # to the rest density, so the initial pressure must be exactly zero. A nonzero initial pressure would inject
@@ -174,8 +172,7 @@ def test_initial_pressure_regular_sampler(show_viewer, pressure_solver, tol):
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
+@pytest.mark.parametrize("pressure_solver", [pytest.param("WCSPH", marks=pytest.mark.required), "DFSPH"])
 def test_simulation_stability_regular_sampler(show_viewer, pressure_solver, tol):
     scene, liquid = create_sph_scene(show_viewer, pressure_solver=pressure_solver)
     sph_solver = scene.sph_solver
@@ -217,8 +214,7 @@ def test_simulation_stability_regular_sampler(show_viewer, pressure_solver, tol)
     )
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
+@pytest.mark.parametrize("pressure_solver", [pytest.param("WCSPH", marks=pytest.mark.required), "DFSPH"])
 @pytest.mark.parametrize("particle_size", [0.01, 0.02])
 def test_density_consistency_different_particle_sizes(show_viewer, pressure_solver, particle_size, tol):
     # The SPH kernel support scales with the particle size, so the density distribution normalized by the rest
@@ -278,8 +274,7 @@ def test_dfsph_simulation_builds_and_runs(show_viewer):
     assert pos.shape[0] == scene.sph_solver.n_particles
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
+@pytest.mark.parametrize("pressure_solver", [pytest.param("WCSPH", marks=pytest.mark.required), "DFSPH"])
 def test_pressure_carries_column_weight(show_viewer, pressure_solver):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
