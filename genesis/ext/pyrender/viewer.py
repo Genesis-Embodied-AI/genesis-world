@@ -206,6 +206,11 @@ class Viewer(pyglet.window.Window):
         # Step counter of the last frame written to the video, so a paused (non-advancing) simulation does not fill
         # the recording with duplicate frozen frames.
         self._last_recorded_t = -1
+        # Completion time of the last on_draw and the event it sets, read by the stepping thread to detect that this
+        # thread is starved (a slow simulation step holds the GIL for its whole duration) and to wait for one frame.
+        # Initialized to the creation time so a viewer that never managed to draw at all also counts as starved.
+        self._last_draw_time = time.perf_counter()
+        self._draw_event = Event()
 
         self._default_render_flags = {
             "flip_wireframe": False,
@@ -872,6 +877,9 @@ class Viewer(pyglet.window.Window):
         if self._initialized_event.is_set():
             for plugin in self.plugins:
                 plugin.on_draw()
+
+        self._last_draw_time = time.perf_counter()
+        self._draw_event.set()
 
     def on_resize(self, width: int, height: int) -> EVENT_HANDLE_STATE:
         """Resize the camera and trackball when the window is resized."""

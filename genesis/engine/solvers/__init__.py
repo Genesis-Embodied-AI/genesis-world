@@ -1,5 +1,6 @@
 from .fem_solver import FEMSolver
 from .kinematic_solver import KinematicSolver
+from .mochi import MochiSolver
 from .mpm_solver import MPMSolver
 from .pbd_solver import PBDSolver
 from .rigid.rigid_solver import RigidSolver

@@ -16,6 +16,7 @@ ALLOW_PATTERNS = {
     "fluid/**/*.py",
     "ipc/**/*.py",
     "kinematic/**/*.py",
+    "mochi/**/*.py",
     "rendering/**/*.py",
     "rigid/**/*.py",
     "sap_coupling/**/*.py",

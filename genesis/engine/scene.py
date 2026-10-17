@@ -31,6 +31,7 @@ from genesis.options import (
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
+    MochiOptions,
     MPMOptions,
     PBDOptions,
     ProfilingOptions,
@@ -190,6 +191,7 @@ class Scene(RBC):
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | None = None,
+        mochi_options: MochiOptions | None = None,
         coupler_options: BaseCouplerOptions | None = None,
         vis_options: VisOptions | None = None,
         viewer_options: ViewerOptions | None = None,
@@ -212,6 +214,7 @@ class Scene(RBC):
             fem_options,
             sf_options,
             pbd_options,
+            mochi_options,
             coupler_options,
             vis_options,
             viewer_options,
@@ -233,6 +236,7 @@ class Scene(RBC):
                 fem=fem_options,
                 sf=sf_options,
                 pbd=pbd_options,
+                mochi=mochi_options,
                 coupler=coupler_options,
                 vis=vis_options,
                 viewer=viewer_options,
@@ -393,7 +397,9 @@ class Scene(RBC):
             surface.smooth = False
 
         if surface.double_sided is None:
-            surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
+            surface.double_sided = isinstance(
+                material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth, gs.materials.Mochi.Shell)
+            )
 
         if vis_mode is not None:
             surface.vis_mode = vis_mode
@@ -445,7 +451,10 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual', 'particle', 'recon']."
                 )
 
-        elif isinstance(material, gs.materials.FEM.Base):
+        elif isinstance(
+            material,
+            (gs.materials.FEM.Base, gs.materials.Mochi.Elastic, gs.materials.Mochi.Shell, gs.materials.Mochi.Rod),
+        ):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
@@ -892,12 +901,12 @@ class Scene(RBC):
 
         with gs.logger.timer("Compiling simulation kernels..."):
             self._sim.step()
-            if self._sim.rigid_solver.is_active:
-                try:
-                    self._sim.rigid_solver.check_errno()
-                except gs.GenesisException:
-                    self.destroy()
-                    raise
+            try:
+                for solver in self._sim.active_solvers:
+                    solver.check_errno()
+            except gs.GenesisException:
+                self.destroy()
+                raise
             self._reset()
 
         # visualizer
@@ -2073,6 +2082,11 @@ class Scene(RBC):
     def pbd_solver(self):
         """The scene's `pbd_solver`, managing all the `PBDEntity` in the scene."""
         return self._sim.pbd_solver
+
+    @property
+    def mochi_solver(self):
+        """The scene's `mochi_solver`, managing all the `MochiEntity` in the scene."""
+        return self._sim.mochi_solver
 
     @property
     def segmentation_idx_dict(self):

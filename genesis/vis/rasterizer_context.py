@@ -512,6 +512,8 @@ class RasterizerContext:
             yield self.sim.rigid_solver
         if self.sim.kinematic_solver.is_active:
             yield self.sim.kinematic_solver
+        if self.sim.mochi_solver.is_active:
+            yield self.sim.mochi_solver
 
     def on_rigid(self):
         # Reuse a single pyrender material per genesis surface so that geoms sharing one surface (e.g. the many
@@ -924,18 +926,24 @@ class RasterizerContext:
                         if normal_data is not None:
                             self.jit.update_buffer(node, "normal", normal_data)
 
-    def on_fem(self):
+    def _deformable_vverts(self):
+        """Yield the entities of every active deformable solver with the render vertices of the rendered envs."""
         if self.sim.fem_solver.is_active:
             vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
-            vverts_all = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+            yield self.sim.fem_solver.entities, qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+        if self.sim.mochi_solver.has_soft:
+            vverts_pos, _, _ = self.sim.mochi_solver.get_soft_state_render(self.sim.cur_substep_local)
+            yield self.sim.mochi_solver.soft_entities, qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
 
-            for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode != "visual":
+    def on_fem(self):
+        for entities, vverts_all in self._deformable_vverts():
+            for entity in entities:
+                if entity.surface.vis_mode != "visual":
                     continue
 
-                for i_g, vgeom in enumerate(fem_entity.vgeoms):
+                for i_g, vgeom in enumerate(entity.vgeoms):
                     visual = mu.surface_uvs_to_trimesh_visual(vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts)
-                    seg_key = (fem_entity.idx, i_g) if self.segmentation_level == "geom" else fem_entity.idx
+                    seg_key = (entity.idx, i_g) if self.segmentation_level == "geom" else entity.idx
                     vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
                     for env_i, i_b in enumerate(self.rendered_envs_idx):
                         mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
@@ -948,15 +956,12 @@ class RasterizerContext:
                         self.create_node_seg(seg_key, static_node)
 
     def update_fem(self):
-        if self.sim.fem_solver.is_active:
-            vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
-            vverts_all = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
-
-            for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode != "visual":
+        for entities, vverts_all in self._deformable_vverts():
+            for entity in entities:
+                if entity.surface.vis_mode != "visual":
                     continue
 
-                for vgeom in fem_entity.vgeoms:
+                for vgeom in entity.vgeoms:
                     vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
                     for env_i, i_b in enumerate(self.rendered_envs_idx):
                         node = self.static_nodes[(i_b, vgeom.uid)]

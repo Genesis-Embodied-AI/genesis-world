@@ -160,3 +160,6 @@ outputs/
 
 # Local benchmark archive (not versioned)
 /benchmarks/
+
+# MochiSolver benchmark outputs
+tests/mochi/benchmark/results/

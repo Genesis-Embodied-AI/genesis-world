@@ -74,6 +74,7 @@ class Viewer(RBC):
         # background-thread viewer paces its own redraws). Real-time pacing waits until the scene is built so the
         # physics dt is known.
         self._last_refresh_time = None
+        self._last_update_time = None
         self._realtime_pacer = None
 
     def build(self, scene):
@@ -233,6 +234,24 @@ class Viewer(RBC):
 
                 if auto_refresh and not self._pyrender_viewer.run_in_thread:
                     self._pyrender_viewer.refresh()
+
+        # A kernel launch holds the GIL for its whole duration and this thread holds the viewer lock while pushing
+        # the render buffers, so when a simulation step is slower than the refresh period the viewer thread may never
+        # hold the GIL and the lock at the same time long enough to complete a redraw. When both the step interval
+        # and the time since the last drawn frame exceed two refresh periods, yield the GIL (with the lock released)
+        # until the viewer thread completes one frame, waiting at most one refresh period. Fast simulations never
+        # trigger this, and a viewer that is merely slow (not starved) is filtered out by the step-interval test.
+        if self._pyrender_viewer.run_in_thread:
+            now = time.perf_counter()
+            period = 1.0 / self._refresh_rate
+            last_update_time, self._last_update_time = self._last_update_time, now
+            if (
+                last_update_time is not None
+                and now - last_update_time > 2.0 * period
+                and now - self._pyrender_viewer._last_draw_time > 2.0 * period
+            ):
+                self._pyrender_viewer._draw_event.clear()
+                self._pyrender_viewer._draw_event.wait(timeout=period)
 
         # Pace the stepping loop to real time when a factor is set (no effect once the sim falls behind). Read the
         # pacer once: the realtime_factor setter may swap it from the viewer thread between the check and the call.

@@ -123,12 +123,12 @@ def main():
         )
         for orbit_init_degree in np.linspace(0, 360, 3, endpoint=False)
     ]
-    scene.sim.solvers[-1].set_jets(jets)
+    scene.sim.sf_solver.set_jets(jets)
 
     scene.build()
 
     for i in range(args.steps):
-        scalars = qd_to_numpy(scene.sim.solvers[-1].grid.q).astype(np.float32)
+        scalars = qd_to_numpy(scene.sim.sf_solver.grid.q).astype(np.float32)
         scalars[scalars < 1e-4] = 0
         layer = scalars[:, res // 2, :]
 
