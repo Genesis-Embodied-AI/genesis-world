@@ -171,3 +171,22 @@ def test_perf_dispatch(variant, show_viewer):
     # is normal for the MPM coupling, so allow up to 2mm.
     assert final_elastic_pos[..., 2].min() > -1e-3
     assert final_liquid_pos[..., 2].min() > -2e-3
+
+
+@pytest.mark.required
+def test_free_particles():
+    scene = gs.Scene()
+    cube = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.MPM.Elastic(),
+    )
+    scene.build()
+
+    # All the particles are free by default, and fixing some of them reads back particle by particle
+    assert cube.get_free().all()
+    free = torch.as_tensor(cube.init_particles[:, 2] > 0.5, device=gs.device)
+    cube.set_free(free)
+    assert (cube.get_free() == free).all()
