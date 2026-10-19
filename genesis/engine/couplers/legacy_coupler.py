@@ -553,44 +553,52 @@ class LegacyCoupler(RBC):
                         mpm_fx = pos * self.mpm_solver.inv_dx - mpm_base.cast(gs.qd_float)
                         mpm_w = [0.5 * (1.5 - mpm_fx) ** 2, 0.75 - (mpm_fx - 1.0) ** 2, 0.5 * (mpm_fx - 0.5) ** 2]
                         new_vel_fem_sv = vel_fem_sv
-                        for mpm_offset in qd.static(qd.grouped(self.mpm_solver.stencil_range())):
-                            mpm_grid_I = mpm_base - self.mpm_solver.grid_offset + mpm_offset
-                            mpm_grid_mass = (
-                                self.mpm_solver.grid[f, mpm_grid_I, i_b].mass / self.mpm_solver.particle_volume_scale
-                            )
+                        # A vertex whose 3x3x3 stencil leaves the grid skips the exchange: no MPM mass lives
+                        # outside the grid, and on CPU reading a cell outside it can fault the process.
+                        mpm_cell0 = mpm_base - self.mpm_solver.grid_offset
+                        in_grid = True
+                        for d in qd.static(range(3)):
+                            if mpm_cell0[d] < 0 or mpm_cell0[d] + 2 >= qd.static(self.mpm_solver.grid_res[d]):
+                                in_grid = False
+                        if in_grid:
+                            for mpm_offset in qd.static(qd.grouped(self.mpm_solver.stencil_range())):
+                                mpm_grid_I = mpm_base - self.mpm_solver.grid_offset + mpm_offset
+                                mpm_grid_mass = (
+                                    self.mpm_solver.grid[f, mpm_grid_I, i_b].mass / self.mpm_solver.particle_volume_scale
+                                )
 
-                            mpm_weight = gs.qd_float(1.0)
-                            for d in qd.static(range(3)):
-                                mpm_weight *= mpm_w[mpm_offset[d]][d]
+                                mpm_weight = gs.qd_float(1.0)
+                                for d in qd.static(range(3)):
+                                    mpm_weight *= mpm_w[mpm_offset[d]][d]
 
-                            # FEM -> MPM
-                            mpm_grid_pos = (mpm_grid_I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
-                            signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
-                            if signed_dist <= self.mpm_solver.dx:  # NOTE: use dx as minimal unit for collision
-                                vel_mpm_at_cell = mpm_weight * self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
-                                mass_mpm_at_cell = mpm_weight * mpm_grid_mass
+                                # FEM -> MPM
+                                mpm_grid_pos = (mpm_grid_I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
+                                signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
+                                if signed_dist <= self.mpm_solver.dx:  # NOTE: use dx as minimal unit for collision
+                                    vel_mpm_at_cell = mpm_weight * self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
+                                    mass_mpm_at_cell = mpm_weight * mpm_grid_mass
 
-                                vel_mpm += vel_mpm_at_cell
-                                mass_mpm += mass_mpm_at_cell
+                                    vel_mpm += vel_mpm_at_cell
+                                    mass_mpm += mass_mpm_at_cell
 
-                                if mass_mpm_at_cell > gs.EPS:
-                                    delta_mpm_vel_at_cell_unmul = (
-                                        vel_fem_sv * mpm_weight - self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
-                                    )
-                                    mass_mul_at_cell = (
-                                        mpm_grid_mass / mass_fem_sv
-                                    )  # NOTE: use un-reweighted mass instead of mass_mpm_at_cell
-                                    delta_mpm_vel_at_cell = delta_mpm_vel_at_cell_unmul * mass_mul_at_cell
-                                    self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out += delta_mpm_vel_at_cell
+                                    if mass_mpm_at_cell > gs.EPS:
+                                        delta_mpm_vel_at_cell_unmul = (
+                                            vel_fem_sv * mpm_weight - self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
+                                        )
+                                        mass_mul_at_cell = (
+                                            mpm_grid_mass / mass_fem_sv
+                                        )  # NOTE: use un-reweighted mass instead of mass_mpm_at_cell
+                                        delta_mpm_vel_at_cell = delta_mpm_vel_at_cell_unmul * mass_mul_at_cell
+                                        self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out += delta_mpm_vel_at_cell
 
-                                    new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
+                                        new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
 
-                        # MPM -> FEM
-                        if mass_mpm > gs.EPS:
-                            # delta_mv = (vel_mpm - vel_fem_sv) * mass_mpm
-                            # delta_vel_fem_sv = delta_mv / mass_fem_sv
-                            # self.fem_solver.elements_v[f + 1, iv].vel += delta_vel_fem_sv
-                            self.fem_solver.elements_v[f + 1, iv, i_b].vel = new_vel_fem_sv
+                            # MPM -> FEM
+                            if mass_mpm > gs.EPS:
+                                # delta_mv = (vel_mpm - vel_fem_sv) * mass_mpm
+                                # delta_vel_fem_sv = delta_mv / mass_fem_sv
+                                # self.fem_solver.elements_v[f + 1, iv].vel += delta_vel_fem_sv
+                                self.fem_solver.elements_v[f + 1, iv, i_b].vel = new_vel_fem_sv
 
                 # FEM <-> SPH TODO: this doesn't work well
                 if qd.static(self._fem_sph):
