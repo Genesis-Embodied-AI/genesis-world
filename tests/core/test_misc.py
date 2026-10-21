@@ -21,6 +21,91 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
+def test_entity_options(tmp_path):
+    scene = gs.Scene(
+        show_viewer=False,
+    )
+    options = gs.options.RigidEntityOptions(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+        ),
+    )
+    entity = scene.add_entity(
+        options=options,
+    )
+    second = scene.add_entity(
+        options=options,
+    )
+    kinematic = scene.add_entity(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(1.0, 0.0, 0.0),
+                size=(0.2, 0.2, 0.2),
+            ),
+        ),
+    )
+    heterogeneous = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=[
+                gs.morphs.Box(
+                    pos=(2.0, 0.0, 0.0),
+                    size=(0.2, 0.2, 0.2),
+                ),
+                gs.morphs.Sphere(
+                    pos=(2.0, 0.0, 0.0),
+                    radius=0.1,
+                ),
+            ],
+        ),
+    )
+    assert type(entity) is gs.engine.entities.RigidEntity
+    assert entity.solver is scene.sim.rigid_solver
+    assert type(kinematic) is gs.engine.entities.KinematicEntity
+    assert kinematic.solver is scene.sim.kinematic_solver
+    assert_equal(entity.material.rho, 500.0)
+    assert entity.name != second.name
+    assert len(heterogeneous.options.morph) == 2
+
+    # Each entity owns options as authored, while its description holds what the scene resolved from them
+    assert entity.options == options
+    assert entity.options is not second.options
+    assert entity.options.surface is None
+    assert entity.desc.surface is not None
+    assert options.surface is None
+    with pytest.raises(gs.GenesisException, match="frozen"):
+        entity.options.name = "renamed"
+
+    with pytest.raises(gs.GenesisException, match="material"):
+        gs.options.RigidEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
+    with pytest.raises(gs.GenesisException, match="kinematic material"):
+        gs.options.KinematicEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid())
+    with pytest.raises(gs.GenesisException, match="visualize_contact"):
+        gs.options.KinematicEntityOptions(morph=gs.morphs.Sphere(), visualize_contact=True)
+    with pytest.raises(gs.GenesisException, match="material"):
+        scene.add_entity(options=options.model_copy(update={"material": gs.materials.Kinematic()}))
+    with pytest.raises(gs.GenesisException, match="either entity options"):
+        scene.add_entity(morph=gs.morphs.Sphere(), options=options)
+    with pytest.raises(gs.GenesisException, match="either entity options"):
+        scene.add_entity(visualize_contact=False, options=options)
+    with pytest.raises(gs.GenesisException, match="entity family"):
+        scene.add_entity(options=gs.options.EntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid()))
+    with pytest.raises(gs.GenesisException, match="requires a morph"):
+        scene.add_entity()
+    assert len(scene.entities) == 4
+
+    exported = tmp_path / "entity_options.gscene"
+    scene.export(exported)
+    restored = gs.Scene.load(exported)
+    for restored_entity, original_entity in zip(restored.entities, scene.entities):
+        assert type(restored_entity) is type(original_entity)
+        assert restored_entity.options == original_entity.options
+        assert restored_entity.options.model_fields_set == original_entity.options.model_fields_set
+
+
+@pytest.mark.required
 def test_scene_destroy_cleans_up_simulator():
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(
