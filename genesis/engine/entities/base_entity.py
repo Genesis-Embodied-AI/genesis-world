@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -6,6 +6,7 @@ import torch
 import genesis as gs
 from genesis.engine.materials.base import Material
 from genesis.grad.bridge import QueriedStates
+from genesis.options.entities import EntityOptions
 from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
 
@@ -19,10 +20,13 @@ class EntityDescription:
     """Base class of what one entity of a scene is created from, whatever the solver simulating it.
 
     A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
-    material is what every description holds, since the simulator picks the solver from it.
+    material is what every description holds, since the simulator picks the solver from it unless the entity was
+    constructed from options. Those options stand here as authored, before any default was resolved, and decide the
+    solver instead (see 'EntityOptions.scene_solver_options_cls').
     """
 
     material: Material
+    options: EntityOptions | None = field(default=None, kw_only=True)
 
 
 class Entity(RBC):
@@ -114,6 +118,16 @@ class Entity(RBC):
         kind of entity gains export support by returning its description here.
         """
         return None
+
+    @property
+    def options(self) -> EntityOptions | None:
+        """The options this entity was constructed from, as authored, or None for an entity given individual arguments.
+
+        The entity owns this copy, so the options passed to 'Scene.add_entity' may change or construct other entities
+        afterwards. It stays as authored: what the scene resolved from it lives in 'desc'.
+        """
+        desc = self.desc
+        return None if desc is None else desc.options
 
     @property
     def material(self):

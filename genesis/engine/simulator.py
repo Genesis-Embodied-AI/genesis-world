@@ -31,6 +31,7 @@ from .states.solvers import SimState, SimulatorCheckpoint
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
+    from genesis.options.entities import EntityOptions
     from genesis.options.scene import SceneOptions
 
     from .solvers.base_solver import Solver
@@ -130,13 +131,25 @@ class Simulator(RBC):
         surface=None,
         visualize_contact=False,
         name: str | None = None,
+        options: "EntityOptions | None" = None,
         desc: "EntityDescription | None" = None,
     ):
         if desc is not None:
             material = desc.material
+            options = desc.options
         if visualize_contact and not isinstance(material, gs.materials.Rigid):
             gs.raise_exception("'visualize_contact' only applies to rigid entities.")
-        if isinstance(material, gs.materials.Hybrid):
+        if options is not None:
+            # The options decide the solver, by naming the class of the options configuring it
+            for solver in self._solvers:
+                if type(solver._options) is options.scene_solver_options_cls:
+                    break
+            else:
+                gs.raise_exception(f"No solver simulates entities of options {type(options).__name__}.")
+            entity = solver.add_entity(
+                self.n_entities, material, morph, surface, visualize_contact, name=name, options=options, desc=desc
+            )
+        elif isinstance(material, gs.materials.Hybrid):
             # Note that adding to solver is handled in the hybrid entity
             entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
         else:

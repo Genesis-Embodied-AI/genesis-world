@@ -24,6 +24,7 @@ import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.materials.base import Material
 from genesis.engine.mesh import InertialProperties
+from genesis.options.entities import EntityOptions
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
@@ -401,16 +402,20 @@ class KinematicEntityDescription(EntityDescription):
         morphs: Sequence[Morph],
         material: Material,
         surface: Surface,
-        options: Options,
+        solver_options: Options,
         enable_mujoco_compatibility: bool,
         visualize_contact: bool = False,
         name: str | None = None,
+        options: EntityOptions | None = None,
     ) -> Self:
         """Resolve what an entity is created with into the description it is built from.
 
         This is where every asset a morph names is read and post-processed, so an entity created from the returned
         description opens no file. 'morphs' lists the primary morph first, then one morph per heterogeneous variant.
-        'options' are those of the solver simulating the entity, which the parsers check the assets against.
+        'solver_options' are those of the solver simulating the entity, which the parsers check the assets against.
+        'options' are the entity options the other arguments were taken from, if any, kept as authored in the
+        description. The resolution modifies the morphs, the material and the surface it is given, so 'options' must
+        hold objects of its own.
         """
         morphs = list(morphs)
         if len(morphs) > 1:
@@ -452,8 +457,15 @@ class KinematicEntityDescription(EntityDescription):
                 ):
                     morph.default_armature = None
 
-        desc = cls(morphs=morphs, material=material, surface=surface, visualize_contact=visualize_contact, name=name)
-        desc._load_morph(morphs[0], Resolution(options, enable_mujoco_compatibility))
+        desc = cls(
+            morphs=morphs,
+            material=material,
+            surface=surface,
+            visualize_contact=visualize_contact,
+            name=name,
+            options=options,
+        )
+        desc._load_morph(morphs[0], Resolution(solver_options, enable_mujoco_compatibility))
         return desc
 
     def _load_morph(self, morph: Morph, resolution: Resolution):
