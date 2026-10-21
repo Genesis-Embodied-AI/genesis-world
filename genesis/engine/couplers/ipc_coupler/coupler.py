@@ -89,6 +89,10 @@ def _animate_rigid_link(coupler_ref, link, env_idx, info):
     assert is_constrained_attr and aim_transform_attr
     uipc.view(is_constrained_attr)[0] = 1
     uipc.view(aim_transform_attr)[:] = coupler._abd_transforms_by_link[link][env_idx]
+    strength = coupler._link_coupling_strength.get(link)
+    if strength is not None:
+        strength_view = uipc.view(geom.instances().find("strength_ratio"))
+        strength_view[0] = np.reshape(strength[0], strength_view[0].shape)
 
 
 class IPCCoupler(RBC):
@@ -148,6 +152,11 @@ class IPCCoupler(RBC):
         self._ipc_nks: StrainLimitingBaraffWitkinShell | None = None
         self._ipc_dsb: DiscreteShellBending | None = None
         self._ipc_pdsb: StrainPlasticDiscreteShellBending | None = None
+
+        # Per-link soft-constraint overrides (set_link_coupling_stiffness): link -> ((s_t, s_r) for IPC, (c_t, c_r)
+        # for the Genesis reaction), and the affine-body mass / mean inertia libuipc derives from the link meshes.
+        self._link_coupling_strength: dict = {}
+        self._abd_mass_props: dict = {}
         self._ipc_eac: ExternalArticulationConstraint | None = None
 
         # ==== IPC Contact Elements ====
@@ -411,6 +420,34 @@ class IPCCoupler(RBC):
                 # ---- Create IPC object and geometry slot ----
                 fem_obj.geometries().create(mesh)
 
+    def set_link_coupling_stiffness(self, links, translation, rotation):
+        """
+        Set the stiffness of the soft constraint pulling the IPC body of each link toward its Genesis pose.
+
+        Overrides 'constraint_strength_translation/rotation' for these links. Can be called between steps, e.g. to
+        mimic an impedance controller that softens on contact. Only for 'two_way_soft_constraint' links.
+
+        Parameters
+        ----------
+        links : RigidLink or list of RigidLink
+        translation : float
+            Translational stiffness (N/m) between the IPC body and the Genesis link.
+        rotation : float
+            Rotational stiffness (N*m/rad) about the body's center of mass.
+        """
+        dt2 = self.sim.substep_dt**2
+        links = links if isinstance(links, (list, tuple)) else [links]
+        # links joined by fixed joints share one IPC body, held by the first non-fixed ancestor
+        for link in dict.fromkeys(find_target_link_for_fixed_merge(l) for l in links):
+            if link not in self._abd_mass_props:
+                gs.raise_exception(f"Link '{link.name}' has no IPC body.")
+            m_abd, i_abd = self._abd_mass_props[link]
+            i_gs = np.linalg.eigvalsh(np.asarray(link.desc.inertia, dtype=np.float64)).mean()
+            self._link_coupling_strength[link] = (
+                (translation * dt2 / m_abd, rotation * dt2 / i_abd),
+                (translation / link.desc.mass, rotation / i_gs),
+            )
+
     @staticmethod
     def _apply_cloth_edge_bending(entity: "FEMEntity", mesh: "SimplicialComplex") -> None:
         """Write the per-edge bending overrides of 'FEMEntity.set_cloth_edge_bending' into the uipc edge attributes."""
@@ -472,6 +509,7 @@ class IPCCoupler(RBC):
 
                 # ---- Collect geom meshes ----
                 meshes = []
+                link_tms = []
                 for source_link in source_links:
                     for geom in source_link.geoms:
                         if geom.type == gs.GEOM_TYPE.PLANE:
@@ -526,6 +564,7 @@ class IPCCoupler(RBC):
                                 gs.raise_exception_from(f"Failed to process geom {geom.idx} for IPC.", e)
 
                             meshes.append(mesh)
+                            link_tms.append(trimesh.Trimesh(geom_verts, geom_faces, process=False))
 
                 if not meshes:
                     continue
@@ -577,6 +616,10 @@ class IPCCoupler(RBC):
                     else:
                         rho = RHO_ROBOT if target_link.desc.is_robot else RHO_OBJECT
                 self._ipc_abd.apply_to(rigid_link_geom, kappa=ABD_KAPPA * uipc.unit.MPa, mass_density=rho)
+                if env_idx == 0:
+                    merged = trimesh.util.concatenate(link_tms)
+                    inertia = rho * np.linalg.eigvalsh(merged.moment_inertia).mean()
+                    self._abd_mass_props[target_link] = (rho * abs(merged.volume), inertia)
 
                 # Apply SoftTransformConstraint and animator for coupled links
                 if is_soft_constraint_target:
@@ -1190,13 +1233,19 @@ class IPCCoupler(RBC):
             return
 
         assert self._coupling_data is not None
+        links = self._coupling_data.links
+        strength_t = np.full(len(links), self._constraint_strength_translation_scaled, dtype=gs.np_float)
+        strength_r = np.full(len(links), self._constraint_strength_rotation_scaled, dtype=gs.np_float)
+        for i, link in enumerate(links):
+            if link in self._link_coupling_strength:
+                strength_t[i], strength_r[i] = self._link_coupling_strength[link][1]
         update_coupling_forces(
             self._coupling_data.ipc_transforms,
             self._coupling_data.aim_transforms,
             self._coupling_data.links_mass,
             self._coupling_data.links_inertia_i,
-            self._constraint_strength_translation_scaled,
-            self._constraint_strength_rotation_scaled,
+            strength_t,
+            strength_r,
             self._coupling_data.out_forces,
             self._coupling_data.out_torques,
         )

@@ -215,7 +215,7 @@ def update_coupling_forces(
     out_forces,
     out_torques,
 ):
-    """Compute coupling forces and torques for all links."""
+    """Compute coupling forces and torques for all links (strengths given per link, already scaled by 1/dt^2)."""
 
     batch_shape = out_forces.shape[:-1]
 
@@ -223,7 +223,7 @@ def update_coupling_forces(
     pos_aim, R_aim = aim_transforms[..., :3, 3], aim_transforms[..., :3, :3]
 
     # Linear force
-    out_forces[:] = (translation_strength * links_mass[..., None]) * (pos_current - pos_aim)
+    out_forces[:] = (translation_strength * links_mass)[..., None] * (pos_current - pos_aim)
 
     # Relative rotation matrix
     R_rel = np.empty((*batch_shape, 3, 3), dtype=ipc_transforms.dtype)
@@ -240,4 +240,4 @@ def update_coupling_forces(
 
     # Torque
     for idx in np.ndindex(batch_shape):
-        out_torques[idx] = rotation_strength * (I_world[idx] @ rotvec[idx])
+        out_torques[idx] = rotation_strength[idx[-1]] * (I_world[idx] @ rotvec[idx])
