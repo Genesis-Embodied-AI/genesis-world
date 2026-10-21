@@ -7,6 +7,7 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -505,10 +506,21 @@ class IPCCoupler(RBC):
                             if source_link is not target_link:
                                 geom_verts = gu.transform_by_trans_quat(geom_verts, *merge_transforms[source_link])
 
+                            geom_faces = geom.init_faces
+                            # Affine bodies take their mass from the enclosed volume, which an open mesh lacks
+                            # (e.g. a thin flange whose convexified collision mesh came out with holes).
+                            tm = trimesh.Trimesh(geom_verts, geom_faces, process=False)
+                            if not tm.is_watertight:
+                                gs.logger.warning(
+                                    f"Collision mesh of geom {geom.idx} (link '{source_link.name}') is not closed; "
+                                    "using its convex hull in IPC."
+                                )
+                                hull = tm.convex_hull
+                                geom_verts, geom_faces = np.asarray(hull.vertices), np.asarray(hull.faces)
                             try:
                                 mesh = uipc.geometry.trimesh(
                                     geom_verts.astype(np.float64, copy=False),
-                                    geom.init_faces.astype(np.int32, copy=False),
+                                    geom_faces.astype(np.int32, copy=False),
                                 )
                             except RuntimeError as e:
                                 gs.raise_exception_from(f"Failed to process geom {geom.idx} for IPC.", e)
