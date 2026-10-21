@@ -128,7 +128,11 @@ class Morph(Options):
 
     @model_validator(mode="before")
     @classmethod
-    def _resolve_orientation(cls, data: dict) -> dict:
+    def _resolve_orientation(cls, data: Any) -> Any:
+        # An input other than field values, such as the sequence of morphs a field typed 'Morph | tuple[Morph, ...]'
+        # also tries against 'Morph', is left to the type check that rejects it.
+        if not isinstance(data, dict):
+            return data
         is_free = data.pop("is_free", None)
         if is_free is not None:
             gs.logger.warning("'is_free' is deprecated and will be removed in the future.")
