@@ -139,6 +139,7 @@ The build phases are:
 | SPH | `SPHDescription` | `SPHData`: particle state and info, in entity order and in spatial hash order | `ParticleEntityData` per entity, in entity order | Spatial hash, render buffers |
 | PBD | `PBDDescription` | `PBDData`: particle state and info, in entity order and in spatial hash order, rest topology | `PBDEntityData` per entity: particle range and topology ranges | Spatial hash, visual vertex supports, render buffers |
 | Tool | `ToolDescription` | `ToolData`: the `ToolEntityData` of each entity | `ToolEntityData` per entity: pose history, signed distance field | Boundary |
+| SF | `SFDescription` | `SFData`: grid of cell velocity, pressure and jet concentrations, shared by every environment | None | Swap fields of the pressure projection |
 
 A range record holds the aggregate record it indexes and its ranges into it. A tool entity holds fields of its own, so its `ToolEntityData` holds them in place of ranges. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
 
