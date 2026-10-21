@@ -44,6 +44,7 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         SoftTransformConstraint,
         StableNeoHookean,
         StrainLimitingBaraffWitkinShell,
+        StrainPlasticDiscreteShellBending,
     )
     from uipc.core import Engine, World, Scene, AffineBodyStateAccessorFeature, ContactElement, SubsceneElement
     from uipc.geometry import GeometrySlot, SimplicialComplex, SimplicialComplexSlot
@@ -145,6 +146,7 @@ class IPCCoupler(RBC):
         self._ipc_stc: SoftTransformConstraint | None = None
         self._ipc_nks: StrainLimitingBaraffWitkinShell | None = None
         self._ipc_dsb: DiscreteShellBending | None = None
+        self._ipc_pdsb: StrainPlasticDiscreteShellBending | None = None
         self._ipc_eac: ExternalArticulationConstraint | None = None
 
         # ==== IPC Contact Elements ====
@@ -370,11 +372,26 @@ class IPCCoupler(RBC):
 
                     # Apply bending stiffness if specified
                     if entity.material.bending_stiffness is not None:
-                        if self._ipc_dsb is None:
-                            self._ipc_dsb = DiscreteShellBending()
-                            self._ipc_constitution_tabular.insert(self._ipc_dsb)
+                        if entity.material.bending_model == "strain_plastic":
+                            if self._ipc_pdsb is None:
+                                self._ipc_pdsb = StrainPlasticDiscreteShellBending()
+                                self._ipc_constitution_tabular.insert(self._ipc_pdsb)
 
-                        self._ipc_dsb.apply_to(mesh, bending_stiffness=entity.material.bending_stiffness)
+                            self._ipc_pdsb.apply_to(
+                                mesh,
+                                bending_stiffness=entity.material.bending_stiffness,
+                                yield_threshold=entity.material.bending_yield_threshold,
+                                hardening_modulus=entity.material.bending_hardening_modulus,
+                            )
+                        else:
+                            if self._ipc_dsb is None:
+                                self._ipc_dsb = DiscreteShellBending()
+                                self._ipc_constitution_tabular.insert(self._ipc_dsb)
+
+                            self._ipc_dsb.apply_to(mesh, bending_stiffness=entity.material.bending_stiffness)
+                        self._apply_cloth_edge_bending(entity, mesh)
+                    elif entity._cloth_edge_bending:
+                        gs.raise_exception("Edge bending parameters require 'bending_stiffness' on the material.")
                 else:
                     if self._ipc_stk is None:
                         self._ipc_stk = StableNeoHookean()
@@ -392,6 +409,22 @@ class IPCCoupler(RBC):
 
                 # ---- Create IPC object and geometry slot ----
                 fem_obj.geometries().create(mesh)
+
+    @staticmethod
+    def _apply_cloth_edge_bending(entity: "FEMEntity", mesh: "SimplicialComplex") -> None:
+        """Write the per-edge bending overrides of 'FEMEntity.set_cloth_edge_bending' into the uipc edge attributes."""
+        if not entity._cloth_edge_bending:
+            return
+        mesh_edges = np.sort(np.asarray(mesh.edges().topo().view()).reshape((-1, 2)), axis=1)
+        edge_index = {(int(a), int(b)): i for i, (a, b) in enumerate(mesh_edges)}
+        for name, overrides in entity._cloth_edge_bending.items():
+            values = uipc.view(mesh.edges().find(name))
+            for edges, edge_values in overrides:
+                try:
+                    rows = np.array([edge_index[(int(a), int(b))] for a, b in edges], dtype=np.int64)
+                except KeyError as e:
+                    gs.raise_exception(f"Edge {e.args[0]} is not an edge of the cloth mesh of entity {entity.uid}.")
+                values[rows] = edge_values.reshape(values[rows].shape)
 
     def _add_rigid_geoms_to_ipc(self) -> None:
         """Add rigid geoms to the IPC scene as ABD objects, merging geoms by link."""

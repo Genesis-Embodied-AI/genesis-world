@@ -35,6 +35,14 @@ class Cloth(Base):
     bending_stiffness : float, optional
         Bending resistance coefficient. If None, no bending resistance.
         Default is None.
+    bending_model : str, optional
+        Bending constitution: "elastic" (DiscreteShellBending) or "strain_plastic" (StrainPlasticDiscreteShellBending,
+        the rest dihedral angle of an edge moves once its deviation exceeds the yield threshold; the plastic state is
+        committed after each accepted step and is part of IPC dump/recover). Default is "elastic".
+    bending_yield_threshold : float, optional
+        Yield threshold on the dihedral angle deviation (rad), "strain_plastic" only. Default is pi (no yield).
+    bending_hardening_modulus : float, optional
+        Linear hardening of the yield threshold per rad of plastic flow, "strain_plastic" only. Default is 0.
     model : str, optional
         FEM material model (not used for cloth, kept for compatibility).
         Default is "stable_neohookean".
@@ -66,4 +74,7 @@ class Cloth(Base):
     rho: PositiveFloat = 200.0
     thickness: PositiveFloat = 0.001
     bending_stiffness: NonNegativeFloat | None = None
+    bending_model: Literal["elastic", "strain_plastic"] = "elastic"
+    bending_yield_threshold: NonNegativeFloat = 3.141592653589793
+    bending_hardening_modulus: NonNegativeFloat = 0.0
     model: Literal["linear", "stable_neohookean", "linear_corotated"] = "stable_neohookean"

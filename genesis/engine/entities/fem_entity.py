@@ -175,6 +175,7 @@ class FEMEntity(Entity):
         self._vvert_start = vvert_start  # offset for render vertices
         self._vface_start = vface_start  # offset for render faces
         self._step_global_added = None
+        self._cloth_edge_bending = {}  # attribute name -> (edges (m, 2) local vertex indices, values (m,))
         self.sample()
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
@@ -951,6 +952,42 @@ class FEMEntity(Entity):
             n_elements=self.n_elements,
             muscle_direction=muscle_direction,
         )
+
+    def set_cloth_edge_bending(
+        self, edges, bending_stiffness=None, bending_yield_threshold=None, bending_hardening_modulus=None
+    ):
+        """
+        Override the bending parameters of individual cloth edges (IPC coupler only, before the scene is built).
+
+        Edges not listed keep the per-entity values of the material. Typical use: a pre-creased fold line that is
+        softer and yields earlier than the surrounding shell.
+
+        Parameters
+        ----------
+        edges : array_like, shape (m, 2)
+            Edges given by their two local vertex indices (order does not matter). Each must be an edge of the mesh.
+        bending_stiffness, bending_yield_threshold, bending_hardening_modulus : float or array_like of shape (m,)
+            New values; None leaves the attribute untouched. Yield and hardening require bending_model "strain_plastic".
+        """
+        if not isinstance(self.material, gs.materials.FEM.Cloth):
+            gs.raise_exception("Edge bending parameters only apply to entities with 'FEM.Cloth' material.")
+        if self._scene.is_built:
+            gs.raise_exception("Edge bending parameters must be set before the scene is built.")
+        edges = np.sort(np.asarray(edges, dtype=gs.np_int).reshape((-1, 2)), axis=1)
+        values = {
+            "bending_stiffness": bending_stiffness,
+            "bending_yield_threshold": bending_yield_threshold,
+            "bending_hardening_modulus": bending_hardening_modulus,
+        }
+        for name, value in values.items():
+            if value is None:
+                continue
+            if name != "bending_stiffness" and self.material.bending_model != "strain_plastic":
+                gs.raise_exception(f"'{name}' requires bending_model='strain_plastic'.")
+            value = np.broadcast_to(np.asarray(value, dtype=np.float64), (len(edges),))
+            if not np.all(np.isfinite(value)) or np.any(value < 0.0):
+                gs.raise_exception(f"'{name}' must be finite and non-negative.")
+            self._cloth_edge_bending.setdefault(name, []).append((edges, value.copy()))
 
     def set_vertex_constraints(
         self, verts_idx_local, target_poss=None, link=None, is_soft_constraint=False, stiffness=0.0, envs_idx=None
