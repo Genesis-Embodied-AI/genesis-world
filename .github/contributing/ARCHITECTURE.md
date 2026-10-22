@@ -133,7 +133,7 @@ The build phases are:
 
 | Family | Solver description | Record | Range records | Kept by the solver |
 |--------|--------------------|--------|---------------|--------------------|
-| Kinematic, rigid | `ArticulatedDescription` | `ArticulatedData`: dynamic info and state | `LinksData`, `JointsData` per entity, `VisualGeomData` per visual geometry | `RigidInfo`, scratch and adjoint workspaces |
+| Kinematic, rigid | `ArticulatedDescription` | `ArticulatedData`: dynamic info and state | `LinksData`, `JointsData` per entity, `VisualGeomData` per visual geometry, `RigidGeomData` per collision geometry of the rigid solver | `RigidInfo`, scratch and adjoint workspaces |
 
 A range record holds the aggregate record it indexes and its ranges into it. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
 

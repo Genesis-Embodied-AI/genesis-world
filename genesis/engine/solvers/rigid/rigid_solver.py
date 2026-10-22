@@ -13,7 +13,7 @@ import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.states import RigidSolverState, SolverCheckpoint
-from genesis.engine.system_data.articulated import ArticulatedDescription
+from genesis.engine.system_data.articulated import ArticulatedDescription, RigidGeomData
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
@@ -350,6 +350,30 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             is_dynamic=True,
         )
         return self._data_description
+
+    def register_data(self):
+        super().register_data()
+        for entity in self.entities:
+            for link in entity.links:
+                for geom in link.geoms:
+                    is_batched = not geom.is_fixed or entity._batch_fixed_verts
+                    self.sim._system_data.add(
+                        RigidGeomData(
+                            owner=self,
+                            idx=geom.idx,
+                            data=self._data_record,
+                            link_idx=link.idx,
+                            vert_start=geom.vert_start,
+                            vert_end=geom.vert_end,
+                            face_start=geom.face_start,
+                            face_end=geom.face_end,
+                            verts_state=self.dyn_state.free_verts if is_batched else self.dyn_state.fixed_verts,
+                            verts_state_start=geom.verts_state_start,
+                            verts_state_end=geom.verts_state_end,
+                            edge_start=geom.edge_start,
+                            edge_end=geom.edge_end,
+                        )
+                    )
 
     def build(self):
         super().build()

@@ -48,6 +48,17 @@ class VisualGeomData(GeomData):
     """The ranges index the visual vertices and faces."""
 
 
+@dataclass(frozen=True, kw_only=True, eq=False)
+class RigidGeomData(GeomData):
+    """The ranges index the collision vertices and faces, and the vertex state is the free or the fixed one."""
+
+    verts_state: array_class.VertsState
+    verts_state_start: int
+    verts_state_end: int
+    edge_start: int
+    edge_end: int
+
+
 @dataclass(frozen=True, kw_only=True)
 class ArticulatedDescription(SystemDataDescription[ArticulatedData]):
     """Collision geometry and equality counts default to single-entry placeholders for kinematic-only solvers."""
