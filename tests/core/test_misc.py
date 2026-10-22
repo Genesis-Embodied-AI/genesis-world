@@ -51,6 +51,10 @@ def test_entity_options():
     second = scene.add_entity(
         options=options,
     )
+    flattened = scene.add_entity(
+        morph=options.morph,
+        material=options.material,
+    )
     kinematic = scene.add_entity(
         options=gs.options.KinematicEntityOptions(
             morph=gs.morphs.Box(
@@ -172,6 +176,8 @@ def test_entity_options():
     assert kinematic.solver is scene.sim.kinematic_solver
     assert_equal(entity.material.rho, 500.0)
     assert entity.name != second.name
+    assert type(flattened) is gs.engine.entities.RigidEntity
+    assert flattened.options == options
     assert len(heterogeneous.options.morph) == 2
     assert type(fem) is gs.engine.entities.FEMEntity
     assert type(mpm) is gs.engine.entities.MPMEntity
@@ -217,8 +223,12 @@ def test_entity_options():
         scene.add_entity(options=gs.options.EntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid()))
     with pytest.raises(gs.GenesisException, match="requires a morph"):
         scene.add_entity()
+    with pytest.raises(gs.GenesisException, match="gs.options.KinematicEntityOptions"):
+        scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
+    with pytest.raises(gs.GenesisException, match="gs.options.FEMEntityOptions"):
+        scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
     # The two parts of the hybrid entity are entities of their own
-    assert len(scene.entities) == 15
+    assert len(scene.entities) == 16
 
 
 @pytest.mark.required
@@ -818,11 +828,13 @@ def test_per_solver_gravity():
             )
         )
         scene.add_entity(
-            gs.morphs.Sphere(
-                pos=(0.0, 0.0, 0.5),
-                radius=0.1,
+            options=gs.options.MPMEntityOptions(
+                morph=gs.morphs.Sphere(
+                    pos=(0.0, 0.0, 0.5),
+                    radius=0.1,
+                ),
+                material=gs.materials.MPM.Liquid(),
             ),
-            material=gs.materials.MPM.Liquid(),
         )
         scene.build(n_envs=2)
 

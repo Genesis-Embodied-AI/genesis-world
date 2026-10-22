@@ -1,16 +1,14 @@
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from genesis.typing import PositiveFloat, ValidFloat
 
 from .base import Base
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.pbd_entity import PBDParticleEntity
 
 SamplerType = Literal["pbs", "random", "regular"]
 
 
-class Liquid(Base["PBDParticleEntity"]):
+class Liquid(Base):
     """
     The liquid material class for PBD.
 

@@ -38,22 +38,24 @@ scene.add_entity(
 )
 
 worm = scene.add_entity(
-    morph=gs.morphs.Mesh(
-        file="meshes/worm/worm.obj",
-        pos=(0.3, 0.3, 0.001),
-        scale=0.1,
-        euler=(90, 0, 0),
-    ),
-    material=gs.materials.MPM.Muscle(
-        E=5e5,
-        nu=0.45,
-        rho=10000.0,
-        model="neohooken",
-        n_groups=4,
-    ),
-    surface=gs.surfaces.Default(
-        diffuse_texture=gs.textures.ImageTexture(
-            image_path="meshes/worm/bdy_Base_Color.png",
+    options=gs.options.MPMEntityOptions(
+        morph=gs.morphs.Mesh(
+            file="meshes/worm/worm.obj",
+            pos=(0.3, 0.3, 0.001),
+            scale=0.1,
+            euler=(90, 0, 0),
+        ),
+        material=gs.materials.MPM.Muscle(
+            E=5e5,
+            nu=0.45,
+            rho=10000.0,
+            model="neohooken",
+            n_groups=4,
+        ),
+        surface=gs.surfaces.Default(
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path="meshes/worm/bdy_Base_Color.png",
+            ),
         ),
     ),
 )

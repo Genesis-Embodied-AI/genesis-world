@@ -49,21 +49,23 @@ def main():
         max_workers=1,
     )
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 1.0),
-            euler=(120, -30, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,  # Young's modulus (Pa) - soft cloth (100 kPa)
-            nu=0.499,  # Poisson's ratio - nearly incompressible
-            rho=200,  # Density (kg/m^3)
-            thickness=0.001,  # Shell thickness (m) - 1mm
-            bending_stiffness=50.0,  # Bending resistance
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 1.0),
+                euler=(120, -30, 0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=1e5,  # Young's modulus (Pa) - soft cloth (100 kPa)
+                nu=0.499,  # Poisson's ratio - nearly incompressible
+                rho=200,  # Density (kg/m^3)
+                thickness=0.001,  # Shell thickness (m) - 1mm
+                bending_stiffness=50.0,  # Bending resistance
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
         ),
     )
 
@@ -85,18 +87,20 @@ def main():
 
     # Optional: Add another FEM volume object
     soft_ball = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.25, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e3,
-            nu=0.3,
-            rho=1000.0,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.25, 0.0, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e3,
+                nu=0.3,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
         ),
     )
 

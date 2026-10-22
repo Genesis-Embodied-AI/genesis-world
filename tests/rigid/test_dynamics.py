@@ -21,10 +21,11 @@ def test_gravity(show_viewer, tol):
 
     sphere = scene.add_entity(gs.morphs.Sphere())
     ghost = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(1.0, 0.0, 0.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(1.0, 0.0, 0.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     scene.build(n_envs=3)
 

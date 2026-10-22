@@ -21,13 +21,12 @@ class EntityDescription:
     """Base class of what one entity of a scene is created from, whatever the solver simulating it.
 
     A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
-    material is what every description holds, since the simulator picks the solver from it unless the entity was
-    constructed from options. Those options stand here as authored, before any default was resolved, and decide the
-    solver instead (see 'EntityOptions.scene_solver_options_cls').
+    options the entity was constructed from stand here as authored, before any default was resolved, and decide the
+    solver simulating it (see 'EntityOptions.scene_solver_options_cls').
     """
 
     material: Material
-    options: EntityOptions | None = field(default=None, kw_only=True)
+    options: EntityOptions = field(kw_only=True)
 
 
 class Entity(RBC):
@@ -120,8 +119,8 @@ class Entity(RBC):
         return None
 
     @property
-    def options(self) -> EntityOptions | None:
-        """The options this entity was constructed from, as authored, or None for an entity given individual arguments.
+    def options(self) -> EntityOptions:
+        """The options this entity was constructed from, as authored.
 
         Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it
         is. The options passed to 'Scene.add_entity' may change or construct other entities afterwards. What the scene
@@ -129,8 +128,6 @@ class Entity(RBC):
         """
         desc = self.desc
         options = self._options if desc is None else desc.options
-        if options is None:
-            return None
         return options.model_copy(deep=True)
 
     @property

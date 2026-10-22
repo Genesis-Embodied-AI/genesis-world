@@ -10,6 +10,7 @@ from genesis.vis.viewer_plugins.plugins import DefaultControlsPlugin
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import KinematicEntity
     from genesis.engine.scene import Scene
+    from genesis.options.entities import EntityOptions
     from genesis.options.sensors.options import SensorOptions
 
 
@@ -47,7 +48,7 @@ class InteractiveScene:
         self._rebuild_pending: bool = False
         self._reset_pending: bool = False
         self._has_new_scene_kwargs: bool = False
-        self._entities_kwargs: dict[str, dict[str, Any]] = {}
+        self._entities_options: dict[str, "EntityOptions"] = {}
         self._sensors_kwargs: list["SensorOptions"] = []
         scene.register_pre_step_callback(self._pre_step)
         # Capture the wrapped scene's construction so rebuild() can reconstruct it identically. The stored options
@@ -195,7 +196,7 @@ class InteractiveScene:
         self,
         *,
         scene_kwargs: dict[str, Any] | None = None,
-        entities_kwargs: dict[str, dict[str, Any]] | None = None,
+        entities_options: dict[str, "EntityOptions"] | None = None,
         sensors_kwargs: Iterable["SensorOptions"] | None = None,
     ):
         """
@@ -207,14 +208,14 @@ class InteractiveScene:
         Any argument left as ``None`` reuses what was supplied previously. Pass an empty ``dict`` / iterable to
         explicitly clear stored state.
 
-        An entity whose kwargs hold the same morph, material and surface objects as at the previous build is
-        re-created from the description resolved then, without reading its asset again, unless ``scene_kwargs`` is
-        given. To edit an entity, pass new objects (e.g. ``morph.model_copy(update=...)``) rather than mutating them.
+        An entity given the very options object its description holds (``entity.desc.options``) is re-created from
+        the description resolved at the previous build, without reading its asset again, unless ``scene_kwargs`` is
+        given. To edit an entity, pass new options (e.g. ``options.model_copy(update=...)``).
 
         Args:
             scene_kwargs: Keyword arguments forwarded to ``gs.Scene(...)`` (sim_options, viewer_options, etc.).
-            entities_kwargs: Mapping from entity name to a kwargs dict forwarded to ``scene.add_entity``
-                (morph, material, surface, visualize_contact, vis_mode). The dict key becomes the entity's name.
+            entities_options: Mapping from entity name to the ``EntityOptions`` forwarded to ``scene.add_entity``.
+                The dict key becomes the entity's name, overriding the name the options hold.
             sensors_kwargs: Iterable of ``SensorOptions`` instances forwarded to ``scene.add_sensor``.
         """
         if InteractiveFeature.REBUILD not in self.supported_features:
@@ -225,8 +226,8 @@ class InteractiveScene:
         if scene_kwargs is not None:
             self._scene_kwargs = dict(scene_kwargs)
             self._has_new_scene_kwargs = True
-        if entities_kwargs is not None:
-            self._entities_kwargs = dict(entities_kwargs)
+        if entities_options is not None:
+            self._entities_options = dict(entities_options)
         if sensors_kwargs is not None:
             self._sensors_kwargs = list(sensors_kwargs)
         self._rebuild_pending = True
@@ -272,28 +273,24 @@ class InteractiveScene:
                 scene.__dict__.pop("_desc_digest", None)
                 # Re-register the pre-step callback: the in-place re-init cleared Scene's callback list.
                 scene.register_pre_step_callback(self._pre_step)
-                for name, kwargs in self._entities_kwargs.items():
-                    morph = kwargs["morph"]
-                    morphs = (morph,) if isinstance(morph, gs.morphs.Morph) else tuple(morph)  # heterogeneous entity
+                for name, options in self._entities_options.items():
                     desc = entities_desc.get(name)
-                    # A USD morph describes a whole stage (potentially many bodies); add_stage parses and adds them and
-                    # takes no name. Every other morph is a single entity added by name.
-                    if isinstance(morph, gs.morphs.USD):
-                        scene.add_stage(**kwargs)
-                    # An entity handed the very objects its description was resolved from is unchanged by the edit, so
-                    # it is created from that description without reading its asset again. An edit hands in new objects.
-                    elif (
-                        desc is not None
-                        and len(morphs) == len(desc.morphs)
-                        and all(kwargs_morph is desc_morph for kwargs_morph, desc_morph in zip(morphs, desc.morphs))
-                        and kwargs.get("material") is desc.material
-                        and kwargs.get("surface") is desc.surface
-                        and kwargs.get("visualize_contact", False) == desc.visualize_contact
-                        and kwargs.get("vis_mode") in (None, desc.surface.vis_mode)
-                    ):
+                    # An entity handed the very options its description holds is unchanged by the edit, so it is
+                    # created from that description without reading its asset again. An edit hands in new options.
+                    if desc is not None and options is desc.options:
                         scene._sim._add_entity(desc=desc)
+                    # A USD morph describes a whole stage (potentially many bodies), which add_stage parses and adds
+                    # without a name. Every other morph is a single entity added by name.
+                    elif isinstance(options.morph, gs.morphs.USD):
+                        scene.add_stage(
+                            morph=options.morph,
+                            material=options.material,
+                            surface=options.surface,
+                            visualize_contact=options.visualize_contact,
+                            vis_mode=options.vis_mode,
+                        )
                     else:
-                        scene.add_entity(name=name, **kwargs)
+                        scene.add_entity(options=options.model_copy(update={"name": name}))
                 for sensor_opts in self._sensors_kwargs:
                     scene.add_sensor(sensor_opts)
                 # Hand the preserved window to the new viewer so build() reuses it instead of opening a new one.

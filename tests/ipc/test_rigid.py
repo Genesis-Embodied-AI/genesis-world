@@ -67,21 +67,23 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 1.5),
-            euler=(0, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,
-            nu=0.499,
-            rho=200,
-            thickness=0.001,
-            bending_stiffness=50.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 1.5),
+                euler=(0, 0, 0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=1e5,
+                nu=0.499,
+                rho=200,
+                thickness=0.001,
+                bending_stiffness=50.0,
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
         ),
     )
 
@@ -100,18 +102,20 @@ def test_objects_freefall(n_envs, n_substeps, show_viewer):
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.5, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.3,
-            rho=1000.0,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.5, 0.0, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e5,
+                nu=0.3,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
         ),
     )
 
@@ -383,16 +387,18 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
         ),
     )
     fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.0, 0.12),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=5e4,
-            nu=0.35,
-            rho=1000.0,
-            friction_mu=0.49,
-            contact_resistance=25.0,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.0, 0.12),
+                size=(0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=5e4,
+                nu=0.35,
+                rho=1000.0,
+                friction_mu=0.49,
+                contact_resistance=25.0,
+            ),
         ),
     )
 
@@ -463,21 +469,23 @@ def test_objects_colliding(n_envs, show_viewer):
 
     asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/IPC/grid20x20.obj",
-            scale=1.5,
-            pos=(0.0, 0.0, 0.2),
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.FEM.Cloth(
-            E=1e5,
-            nu=0.499,
-            rho=200,
-            thickness=0.001,
-            bending_stiffness=50.0,
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.3, 0.5, 0.8, 1.0),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/IPC/grid20x20.obj",
+                scale=1.5,
+                pos=(0.0, 0.0, 0.2),
+                euler=(90, 0, 0),
+            ),
+            material=gs.materials.FEM.Cloth(
+                E=1e5,
+                nu=0.499,
+                rho=200,
+                thickness=0.001,
+                bending_stiffness=50.0,
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.3, 0.5, 0.8, 1.0),
+            ),
         ),
     )
 
@@ -497,19 +505,21 @@ def test_objects_colliding(n_envs, show_viewer):
     )
 
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            radius=0.08,
-            pos=(0.25, 0.0, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e3,
-            nu=0.3,
-            rho=1000.0,
-            friction_mu=0.3,
-            model="stable_neohookean",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.3, 0.8),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                radius=0.08,
+                pos=(0.25, 0.0, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e3,
+                nu=0.3,
+                rho=1000.0,
+                friction_mu=0.3,
+                model="stable_neohookean",
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.2, 0.8, 0.3, 0.8),
+            ),
         ),
     )
 
@@ -583,16 +593,18 @@ def test_momentum_conservation(n_envs, show_viewer):
     )
 
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.3, 0.0, 0.4),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e5,
-            nu=0.45,
-            rho=1000.0,
-            friction_mu=0.0,
-            model="stable_neohookean",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.3, 0.0, 0.4),
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e5,
+                nu=0.45,
+                rho=1000.0,
+                friction_mu=0.0,
+                model="stable_neohookean",
+            ),
         ),
     )
 

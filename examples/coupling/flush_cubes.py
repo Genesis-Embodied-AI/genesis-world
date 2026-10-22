@@ -37,45 +37,51 @@ def main():
         morph=gs.morphs.Plane(),
     )
     cube0 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=400,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.25, 0.4),
-            size=(0.12, 0.12, 0.12),
-        ),
-        surface=gs.surfaces.Rough(
-            color=(1.0, 0.5, 0.5, 1.0),
-            vis_mode="particle",
-        ),
-    )
-
-    cube0 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=400,
-        ),
-        morph=gs.morphs.Sphere(
-            pos=(0.15, 0.45, 0.5),
-            radius=0.06,
-        ),
-        surface=gs.surfaces.Rough(
-            color=(1.0, 1.0, 0.5, 1.0),
-            vis_mode="particle",
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.25, 0.4),
+                size=(0.12, 0.12, 0.12),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=400,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 0.5, 0.5, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
 
     cube0 = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            rho=400,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.15, 0.45, 0.5),
+                radius=0.06,
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=400,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 1.0, 0.5, 1.0),
+                vis_mode="particle",
+            ),
         ),
-        morph=gs.morphs.Cylinder(
-            pos=(-0.15, 0.45, 0.6),
-            radius=0.05,
-            height=0.14,
-        ),
-        surface=gs.surfaces.Rough(
-            color=(0.5, 1.0, 1.0, 1.0),
-            vis_mode="particle",
+    )
+
+    cube0 = scene.add_entity(
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Cylinder(
+                pos=(-0.15, 0.45, 0.6),
+                radius=0.05,
+                height=0.14,
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=400,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.5, 1.0, 1.0, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
     emitter1 = scene.add_emitter(

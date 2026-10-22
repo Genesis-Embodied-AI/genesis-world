@@ -44,25 +44,27 @@ scene.add_entity(
 )
 
 robot = scene.add_entity(
-    morph=gs.morphs.URDF(
-        file="urdf/simple/two_link_arm.urdf",
-        pos=(0.5, 0.5, 0.3),
-        euler=(0.0, 0.0, 0.0),
-        scale=0.2,
-        fixed=True,
-    ),
-    material=gs.materials.Hybrid(
-        material_rigid=gs.materials.Rigid(
-            gravity_compensation=1.0,
+    options=gs.options.HybridEntityOptions(
+        morph=gs.morphs.URDF(
+            file="urdf/simple/two_link_arm.urdf",
+            pos=(0.5, 0.5, 0.3),
+            euler=(0.0, 0.0, 0.0),
+            scale=0.2,
+            fixed=True,
         ),
-        material_soft=gs.materials.MPM.Muscle(  # to allow setting group
-            E=1e4,
-            nu=0.45,
-            rho=1000.0,
-            model="neohooken",
+        material=gs.materials.Hybrid(
+            material_rigid=gs.materials.Rigid(
+                gravity_compensation=1.0,
+            ),
+            material_soft=gs.materials.MPM.Muscle(  # to allow setting group
+                E=1e4,
+                nu=0.45,
+                rho=1000.0,
+                model="neohooken",
+            ),
+            damping=1000.0,
+            thickness=0.05,
         ),
-        damping=1000.0,
-        thickness=0.05,
     ),
 )
 

@@ -199,8 +199,9 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
             visualize_contact=True,
         )
         scene.add_entity(
-            kinematic_morph,
-            material=gs.materials.Kinematic(),
+            options=gs.options.KinematicEntityOptions(
+                morph=kinematic_morph,
+            ),
         )
 
     boxes = scene.rigid_solver.entities

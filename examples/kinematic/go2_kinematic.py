@@ -40,14 +40,15 @@ def main():
 
     # The ghost is a kinematic entity: it visualizes the commanded pose without taking part in the dynamics.
     ghost = scene.add_entity(
-        gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0.0, 0.0, 0.42),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.7, 1.0),
-            opacity=0.5,
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0.0, 0.0, 0.42),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.7, 1.0),
+                opacity=0.5,
+            ),
         ),
     )
 

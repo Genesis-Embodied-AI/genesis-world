@@ -779,22 +779,24 @@ def test_setters(show_viewer, tol):
     )
 
     ghost_box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.4, 0.2, 0.1),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(1.0, 0.0, 0.0, 0.7),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.4, 0.2, 0.1),
+            ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0, 0.7),
+            ),
         ),
     )
     ghost_robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_cube_prismatic.urdf",
-            fixed=False,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(0.0, 1.0, 0.0, 0.7),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_prismatic.urdf",
+                fixed=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.0, 1.0, 0.0, 0.7),
+            ),
         ),
     )
 
@@ -901,13 +903,14 @@ def test_track_rigid(show_viewer, tol):
         ),
     )
     ghost = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/go2/urdf/go2.urdf",
-            pos=(0, 0.5, 0.42),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.0, 1.0, 0.7),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/go2/urdf/go2.urdf",
+                pos=(0, 0.5, 0.42),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.0, 1.0, 0.7),
+            ),
         ),
     )
     scene.build(n_envs=2, env_spacing=(0.5, 0.5))
@@ -960,10 +963,11 @@ def test_kinematics_queries(n_envs, show_viewer, tol):
         ),
     )
     ghost = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     scene.build(n_envs=n_envs)
 

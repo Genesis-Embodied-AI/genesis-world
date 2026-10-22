@@ -37,16 +37,18 @@ def main():
         morph=gs.morphs.Plane(),
     )
     water = scene.add_entity(
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-            mu=0.01,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.0, 0.6),
-            size=(0.9, 1.6, 1.2),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.5, 0.7, 0.9, 1.0),
+        options=gs.options.SPHEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 0.6),
+                size=(0.9, 1.6, 1.2),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="regular",
+                mu=0.01,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.5, 0.7, 0.9, 1.0),
+            ),
         ),
     )
 

@@ -1,14 +1,12 @@
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from ..base import Material
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.sph_entity import SPHEntity
 
 SamplerType = Literal["pbs", "random", "regular"]
 
 
-class Base(Material["SPHEntity"]):
+class Base(Material):
     """
     The base class of SPH materials.
 

@@ -44,14 +44,16 @@ def main():
     )
 
     mpm_cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            E=5e4,
-            nu=0.3,
-            rho=1000,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.35),
-            size=(0.15, 0.15, 0.15),
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.35),
+                size=(0.15, 0.15, 0.15),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                rho=1000,
+            ),
         ),
     )
 

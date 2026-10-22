@@ -23,23 +23,25 @@ def main():
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.06,
-            pos=(3.5, -1.5, 0.7),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.06,
+                pos=(3.5, -1.5, 0.7),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
 
     target_entity = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/axis.obj",
-            scale=0.15,
-            collision=False,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(1, 0.5, 0.5, 1),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/axis.obj",
+                scale=0.15,
+                collision=False,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0.5, 0.5, 1),
+            ),
         ),
     )
 

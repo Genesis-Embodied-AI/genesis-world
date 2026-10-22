@@ -76,16 +76,16 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
     # makes the panel taller than the basename (one line). The substitution must happen before the panel first
     # renders, otherwise build() lays out the long path and the auto-resized window stays one frame behind when
     # captured, giving a taller, non-reproducible frame. Hook the plugin's entity capture to apply it up front.
-    orig_capture = ImGuiOverlayPlugin._capture_pending_entities_kwargs
+    orig_capture = ImGuiOverlayPlugin._capture_pending_entities_options
 
     def _capture_pending_entities_basename(self):
         orig_capture(self)
-        for entity_kwargs in self._pending_entities_kwargs.values():
-            morph = entity_kwargs["morph"]
+        for entity_options in self._pending_entities_options.values():
+            morph = entity_options.morph
             if isinstance(morph, gs.morphs.FileMorph):
                 morph.file = os.path.basename(morph.file)
 
-    monkeypatch.setattr(ImGuiOverlayPlugin, "_capture_pending_entities_kwargs", _capture_pending_entities_basename)
+    monkeypatch.setattr(ImGuiOverlayPlugin, "_capture_pending_entities_options", _capture_pending_entities_basename)
 
 
 def _build_default_scene(*, enable_gui, run_in_thread=False):
@@ -348,7 +348,7 @@ def test_scene_rebuild():
         window_before._camera_node, window_before._renderer, rgb=True, depth=False, seg=False, normal=False
     )
 
-    interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
+    interactive.rebuild(entities_options=plugin._pending_entities_options)
     scene.step()
 
     assert id(scene) == scene_id
@@ -371,12 +371,14 @@ def test_scene_rebuild():
     scene.step()
     assert_allclose(scene.rigid_solver.get_qpos(), qpos_before, tol=gs.EPS)
 
-    # A scale edit hands the rebuild a new morph, so the entity is resolved again at the new scale
+    # A scale edit hands the rebuild new options, so the entity is resolved again at the new scale
     duck_aabb = scene.get_entity("duck").get_AABB()
     digest_before = scene._desc_digest
-    duck_kwargs = plugin._pending_entities_kwargs["duck"]
-    duck_kwargs["morph"] = duck_kwargs["morph"].model_copy(update={"scale": 0.002})
-    interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
+    duck_options = plugin._pending_entities_options["duck"]
+    plugin._pending_entities_options["duck"] = duck_options.model_copy(
+        update={"morph": duck_options.morph.model_copy(update={"scale": 0.002})}
+    )
+    interactive.rebuild(entities_options=plugin._pending_entities_options)
     scene.step()
     duck_aabb_scaled = scene.get_entity("duck").get_AABB()
     assert_allclose(duck_aabb_scaled[1] - duck_aabb_scaled[0], 2.0 * (duck_aabb[1] - duck_aabb[0]), tol=1e-3)
@@ -420,18 +422,14 @@ def test_capture_pending_entities_preserves_heterogeneous_morphs():
     plugin = ImGuiOverlayPlugin.__new__(ImGuiOverlayPlugin)
     plugin.scene = scene
 
-    plugin._capture_pending_entities_kwargs()
+    plugin._capture_pending_entities_options()
 
-    single_kwargs = plugin._pending_entities_kwargs[single_entity.name]
-    assert single_kwargs["morph"] is single_morph
-    assert single_kwargs["material"] is single_entity.material
-    assert single_kwargs["surface"] is single_entity.surface
-    assert single_kwargs["visualize_contact"] is True
+    single_options = plugin._pending_entities_options[single_entity.name]
+    assert isinstance(single_options, gs.options.RigidEntityOptions)
+    assert single_options.morph == single_morph
+    assert single_options.visualize_contact is True
 
-    heterogeneous_kwargs = plugin._pending_entities_kwargs[heterogeneous_entity.name]
-    assert heterogeneous_kwargs["morph"] == heterogeneous_morphs
-    assert heterogeneous_kwargs["morph"][0] is heterogeneous_morphs[0]
-    assert heterogeneous_kwargs["morph"][1] is heterogeneous_morphs[1]
-    assert heterogeneous_kwargs["material"] is heterogeneous_entity.material
-    assert heterogeneous_kwargs["surface"] is heterogeneous_entity.surface
-    assert heterogeneous_kwargs["visualize_contact"] is True
+    heterogeneous_options = plugin._pending_entities_options[heterogeneous_entity.name]
+    assert isinstance(heterogeneous_options, gs.options.RigidEntityOptions)
+    assert heterogeneous_options.morph == heterogeneous_morphs
+    assert heterogeneous_options.visualize_contact is True

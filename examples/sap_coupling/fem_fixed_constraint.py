@@ -53,12 +53,14 @@ def main():
         max_workers=1,
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/cube8.obj",
-            pos=(0.0, 0.0, 0.7),
-            scale=0.1,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/cube8.obj",
+                pos=(0.0, 0.0, 0.7),
+                scale=0.1,
+            ),
+            material=fem_material_linear_corotated,
         ),
-        material=fem_material_linear_corotated,
     )
     scene.build()
 

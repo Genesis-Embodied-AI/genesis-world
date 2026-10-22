@@ -51,18 +51,20 @@ def main():
         surface=gs.surfaces.Iron(),
     )
     dragon = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/dragon/dragon.obj",
-            scale=0.007,
-            euler=(0, 0, 90),
-            pos=(0.3, -0.0, 1.3),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="pbs-64",
-        ),
-        surface=gs.surfaces.Rough(
-            color=(0.6, 1.0, 0.8, 1.0),
-            vis_mode="particle",
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/dragon/dragon.obj",
+                scale=0.007,
+                euler=(0, 0, 90),
+                pos=(0.3, -0.0, 1.3),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="pbs-64",
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.6, 1.0, 0.8, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
     scene.build(n_envs=0)
