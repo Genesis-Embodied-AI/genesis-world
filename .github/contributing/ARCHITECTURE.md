@@ -138,8 +138,9 @@ The build phases are:
 | MPM | `MPMDescription` | `MPMData`: particle history, particle info, coupling grid | `ParticleEntityData` per entity | Grid reset bookkeeping, render buffers |
 | SPH | `SPHDescription` | `SPHData`: particle state and info, in entity order and in spatial hash order | `ParticleEntityData` per entity, in entity order | Spatial hash, render buffers |
 | PBD | `PBDDescription` | `PBDData`: particle state and info, in entity order and in spatial hash order, rest topology | `PBDEntityData` per entity: particle range and topology ranges | Spatial hash, visual vertex supports, render buffers |
+| Tool | `ToolDescription` | `ToolData`: the `ToolEntityData` of each entity | `ToolEntityData` per entity: pose history, signed distance field | Boundary |
 
-A range record holds the aggregate record it indexes and its ranges into it. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
+A range record holds the aggregate record it indexes and its ranges into it. A tool entity holds fields of its own, so its `ToolEntityData` holds them in place of ranges. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
 
 An entity of a kind that has an `EntityDescription` is created from it: the solver resolves the description in `add_entity` when the caller passes none, and `Scene.export` writes it. A description declares its material as the base material of its solver, such as `FEM.Base`, so a material name read from a scene file resolves among the materials of that solver.
 

@@ -553,7 +553,7 @@ class RasterizerContext:
                     for env_i, idx in enumerate(self.rendered_envs_idx):
                         mesh = trimesh.Trimesh(
                             tool_entity.mesh.raw_vertices,
-                            tool_entity.mesh.faces_np.reshape([-1, 3]),
+                            tool_entity.mesh.faces_np,
                             tool_entity.mesh.raw_vertex_normals,
                             process=False,
                         )

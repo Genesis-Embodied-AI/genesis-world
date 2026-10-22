@@ -3,6 +3,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 
 from ..utils.assertions import assert_allclose
 
@@ -10,7 +11,7 @@ from ..utils.assertions import assert_allclose
 @pytest.mark.slow  # ~350s
 @pytest.mark.required
 @pytest.mark.debug(False)
-def test_mpm_tool_push_grad(show_viewer):
+def test_mpm_tool_push_grad(tmp_path, show_viewer):
     HORIZON = 10
 
     scene = gs.Scene(
@@ -59,6 +60,10 @@ def test_mpm_tool_push_grad(show_viewer):
             ),
         ),
     )
+    exported = tmp_path / f"tool_push{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    stick, obj = scene.entities[1:]
     scene.build(n_envs=2)
 
     stick.set_position(
