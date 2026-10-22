@@ -7,6 +7,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.sdf as sdf
 from genesis.engine.system_data.fem import FEMData
+from genesis.engine.system_data.mpm import MPMData
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils import array_class
@@ -36,6 +37,7 @@ class LegacyCoupler(RBC):
         self.tool_solver = self.sim.tool_solver
         self.rigid_solver = self.sim.rigid_solver
         self.mpm_solver = self.sim.mpm_solver
+        self._mpm_data: MPMData | None = None
         self.sph_solver = self.sim.sph_solver
         self.pbd_solver = self.sim.pbd_solver
         self.fem_solver = self.sim.fem_solver
@@ -43,6 +45,8 @@ class LegacyCoupler(RBC):
         self.sf_solver = self.sim.sf_solver
 
     def build(self) -> None:
+        if self.mpm_solver.is_active:
+            self._mpm_data = self.sim._system_data.get(MPMData, self.mpm_solver)
         if self.fem_solver.is_active:
             self._fem_data = self.sim._system_data.get(FEMData, self.fem_solver)
         self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
@@ -329,16 +333,16 @@ class LegacyCoupler(RBC):
     ):
         for ii, jj, kk, i_b in qd.ndrange(*self.mpm_solver.grid_res, self.mpm_solver._B):
             I = (ii, jj, kk)
-            if self.mpm_solver.grid[f, I, i_b].mass > gs.EPS:
+            if self._mpm_data.grid[f, I, i_b].mass > gs.EPS:
                 #################### MPM grid op ####################
                 # Momentum to velocity
-                vel_mpm = (1 / self.mpm_solver.grid[f, I, i_b].mass) * self.mpm_solver.grid[f, I, i_b].vel_in
+                vel_mpm = (1 / self._mpm_data.grid[f, I, i_b].mass) * self._mpm_data.grid[f, I, i_b].vel_in
 
                 # gravity
                 vel_mpm += self.mpm_solver.substep_dt * self.mpm_solver._gravity[i_b]
 
                 pos = (I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
-                mass_mpm = self.mpm_solver.grid[f, I, i_b].mass / self.mpm_solver._particle_volume_scale
+                mass_mpm = self._mpm_data.grid[f, I, i_b].mass / self._mpm_data.particle_volume_scale
 
                 # external force fields
                 for i_ff in qd.static(range(len(self.mpm_solver._ffs))):
@@ -460,7 +464,7 @@ class LegacyCoupler(RBC):
                                         )
 
                 #################### MPM boundary ####################
-                _, self.mpm_solver.grid[f, I, i_b].vel_out = self.mpm_solver.boundary.impose_pos_vel(pos, vel_mpm)
+                _, self._mpm_data.grid[f, I, i_b].vel_out = self.mpm_solver.boundary.impose_pos_vel(pos, vel_mpm)
 
     @qd.kernel
     def mpm_surface_to_particle(
@@ -473,13 +477,13 @@ class LegacyCoupler(RBC):
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.mpm_solver.n_particles, self.mpm_solver._B):
-            if self.mpm_solver.particles_ng[f, i_p, i_b].active:
+            if self._mpm_data.particles_ng[f, i_p, i_b].active:
                 for i_g in range(self.rigid_solver.n_geoms):
                     if geoms_info.needs_coup[i_g]:
                         sdf_normal = sdf.sdf_func_normal_world(
                             i_g,
                             i_b,
-                            self.mpm_solver.particles[f, i_p, i_b].pos,
+                            self._mpm_data.particles[f, i_p, i_b].pos,
                             geoms_state,
                             geoms_info,
                             rigid_info,
@@ -560,7 +564,7 @@ class LegacyCoupler(RBC):
                         for mpm_offset in qd.static(qd.grouped(self.mpm_solver.stencil_range())):
                             mpm_grid_I = mpm_base - self.mpm_solver.grid_offset + mpm_offset
                             mpm_grid_mass = (
-                                self.mpm_solver.grid[f, mpm_grid_I, i_b].mass / self.mpm_solver.particle_volume_scale
+                                self._mpm_data.grid[f, mpm_grid_I, i_b].mass / self._mpm_data.particle_volume_scale
                             )
 
                             mpm_weight = gs.qd_float(1.0)
@@ -571,7 +575,7 @@ class LegacyCoupler(RBC):
                             mpm_grid_pos = (mpm_grid_I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
                             signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
                             if signed_dist <= self.mpm_solver.dx:  # NOTE: use dx as minimal unit for collision
-                                vel_mpm_at_cell = mpm_weight * self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
+                                vel_mpm_at_cell = mpm_weight * self._mpm_data.grid[f, mpm_grid_I, i_b].vel_out
                                 mass_mpm_at_cell = mpm_weight * mpm_grid_mass
 
                                 vel_mpm += vel_mpm_at_cell
@@ -579,13 +583,13 @@ class LegacyCoupler(RBC):
 
                                 if mass_mpm_at_cell > gs.EPS:
                                     delta_mpm_vel_at_cell_unmul = (
-                                        vel_fem_sv * mpm_weight - self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
+                                        vel_fem_sv * mpm_weight - self._mpm_data.grid[f, mpm_grid_I, i_b].vel_out
                                     )
                                     mass_mul_at_cell = (
                                         mpm_grid_mass / mass_fem_sv
                                     )  # NOTE: use un-reweighted mass instead of mass_mpm_at_cell
                                     delta_mpm_vel_at_cell = delta_mpm_vel_at_cell_unmul * mass_mul_at_cell
-                                    self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out += delta_mpm_vel_at_cell
+                                    self._mpm_data.grid[f, mpm_grid_I, i_b].vel_out += delta_mpm_vel_at_cell
 
                                     new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
 

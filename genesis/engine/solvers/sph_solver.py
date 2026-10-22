@@ -1,18 +1,15 @@
-from typing import TYPE_CHECKING
-
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import SPHEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.states.solvers import SPHSolverState
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import SPHEntity
 
 
 @qd.data_oriented
@@ -171,19 +168,13 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
-    ) -> "SPHEntity":
-        entity = SPHEntity(
-            scene=self.scene,
-            solver=self,
-            material=material,
-            morph=morph,
-            surface=surface,
-            particle_size=self._particle_size,
-            idx=idx,
-            particle_start=self.n_particles,
-            name=name,
-            options=options,
-        )
+    ) -> SPHEntity:
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                material, morph, surface, self._particle_size, name, self.boundary, has_skinning=False, options=options
+            )
+        assert isinstance(desc, ParticleEntityDescription)
+        entity = SPHEntity(scene=self.scene, solver=self, desc=desc, idx=idx, particle_start=self.n_particles)
 
         self.entities.append(entity)
         return entity

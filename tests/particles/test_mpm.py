@@ -4,12 +4,13 @@ import torch
 import trimesh
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 
 from ..utils.assertions import assert_allclose
 
 
 @pytest.mark.required
-def test_particle_constraints(show_viewer, tol):
+def test_particle_constraints(tmp_path, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=2e-3,
@@ -65,6 +66,12 @@ def test_particle_constraints(show_viewer, tol):
             ),
         ),
     )
+    # The sampled particles and the member poses are resolved into the descriptions that the scene file holds
+    exported = tmp_path / f"particle_constraints{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    rigid_box, mpm_cube, mpm_mesh_set = scene.entities[1:]
+    assert isinstance(mpm_cube.material, gs.materials.MPM.Elastic)
     scene.build(n_envs=2)
 
     # Each member is rotated about its own position: the box offset lands at -x for the member rotated about z and at

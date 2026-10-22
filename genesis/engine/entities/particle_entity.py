@@ -1,4 +1,5 @@
 import functools
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -12,13 +13,138 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
 from genesis.utils.misc import broadcast_tensor, to_gs_tensor
 
-from .base_entity import Entity
+from .base_entity import Entity, EntityDescription, VerticesDescription
 
 # Number of vvert-particle distances computed at once when searching the supports of the vverts. Their difference
 # vectors take 24 MiB in double precision, while chunks of this size still amortize the per-chunk overhead of numpy.
 VVERTS_DIST2_MAX_SIZE = 2**20
+
+
+@dataclass(kw_only=True)
+class ParticleEntityDescription(VerticesDescription, EntityDescription):
+    morph: Morph
+    surface: Surface
+    name: str | None
+    particle_size: float
+    has_skinning: bool
+    sampler: str
+    origin: np.ndarray
+    vmesh: gs.Mesh | None
+    vverts: np.ndarray
+    vfaces: np.ndarray
+    mesh_set_group_ids: np.ndarray | None
+
+    @staticmethod
+    def resolve_mesh(morph, surface):
+        """Load the visual mesh of a morph, one per member for a mesh set, or None for a morph holding no mesh."""
+        if isinstance(morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+            meshes = gs.Mesh.from_morph_surface(morph, surface)
+            if isinstance(morph, gs.options.morphs.MeshSet):
+                return meshes
+            if len(meshes) > 1:
+                gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
+            return meshes[0]
+        surface.update_texture()
+        return None
+
+    @classmethod
+    def resolve(cls, material, morph, surface, particle_size, name, boundary, *, has_skinning, options, vmesh=None):
+        """Sample the particles of an entity from its morph, and place them and its visual mesh at the morph pose.
+
+        The visual mesh is loaded from the morph unless 'vmesh' gives it already. The particles must lie inside
+        'boundary', and the visual vertices and faces are kept for skinning when 'has_skinning' is set. 'options' are
+        the entity options the other arguments were taken from, kept as authored in the description.
+        """
+        sampler = material.sampler
+        match sampler.split("-"):
+            case ["regular"] | ["random"]:
+                pass
+            case ["pbs"]:
+                sampler = "pbs-32"
+            case ["pbs", num] if num.isnumeric():
+                pass
+            case _:
+                gs.raise_exception(
+                    "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
+                    f"Got: {sampler}."
+                )
+
+        if vmesh is None:
+            vmesh = cls.resolve_mesh(morph, surface)
+        mesh_set_group_ids = None
+        if isinstance(morph, gs.options.morphs.MeshSet):
+            surface = vmesh[0].surface
+            particles_per_mesh = []
+            for mesh, pos, euler in zip(vmesh, morph.poss, morph.eulers, strict=True):
+                pos = np.array(pos, dtype=gs.np_float)
+                quat = gu.xyz_to_quat(np.array(euler, dtype=gs.np_float), rpy=True, degrees=True)
+                # Sample before posing the mesh, so the lattice and the sampling cache depend on the member shape alone
+                particles = mesh.particlize(particle_size, sampler)
+                particles_per_mesh.append(gu.transform_by_trans_quat(particles, pos, quat))
+                mesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+            mesh_set_group_ids = np.concatenate(
+                [np.full(len(particles), i, dtype=gs.np_int) for i, particles in enumerate(particles_per_mesh)]
+            )
+            particles = np.concatenate(particles_per_mesh)
+            verts, faces = trimesh.util.append_faces([mesh.verts for mesh in vmesh], [mesh.faces for mesh in vmesh])
+            normals = np.concatenate([mesh.trimesh.vertex_normals for mesh in vmesh])
+            vmesh = mu.trimesh_to_mesh(
+                trimesh.Trimesh(vertices=verts, faces=faces, vertex_normals=normals), scale=1, surface=surface
+            )
+            origin = np.mean(morph.poss, axis=0, dtype=gs.np_float)
+        elif isinstance(morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+            surface = vmesh.surface
+            particles = vmesh.particlize(particle_size, sampler)
+            # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose
+            pos, quat = gu.transform_pos_quat_by_trans_quat(
+                np.array(morph.offset_pos, dtype=gs.np_float),
+                np.array(morph.offset_quat, dtype=gs.np_float),
+                np.array(morph.pos, dtype=gs.np_float),
+                np.array(morph.quat, dtype=gs.np_float),
+            )
+            vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+            particles = gu.transform_by_trans_quat(particles, pos, quat)
+            origin = pos
+        elif isinstance(morph, gs.options.morphs.Nowhere):
+            particles = pu.nowhere_particles(morph.n_particles)
+            origin = gu.nowhere()
+        else:
+            gs.raise_exception(f"Unsupported morph: {morph}.")
+
+        if len(particles) == 0:
+            gs.raise_exception("Entity has zero particles.")
+        if not isinstance(morph, gs.options.morphs.Nowhere) and not boundary.is_inside(particles):
+            gs.raise_exception(
+                "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly tighter "
+                f"than the specified domain due to safety padding.\n\nCurrent boundary:\n{boundary}\n\nEntity to be "
+                f"added:\nmin: {particles.min(0)}\nmax: {particles.max(0)}\n"
+            )
+        if has_skinning and vmesh is not None:
+            vverts = vmesh.verts.astype(gs.np_float, copy=False)
+            vfaces = vmesh.faces.astype(gs.np_int, copy=False)
+        else:
+            vverts = np.zeros((0, 3), dtype=gs.np_float)
+            vfaces = np.zeros((0, 3), dtype=gs.np_int)
+        return cls(
+            material=material,
+            morph=morph,
+            surface=surface,
+            name=name,
+            particle_size=particle_size,
+            has_skinning=has_skinning,
+            sampler=sampler,
+            init_positions=particles.astype(gs.np_float, order="C", copy=False),
+            origin=origin,
+            vmesh=vmesh,
+            vverts=vverts,
+            vfaces=vfaces,
+            mesh_set_group_ids=mesh_set_group_ids,
+            options=options,
+        )
 
 
 def assert_active(method):
@@ -60,6 +186,8 @@ class ParticleEntity(Entity):
         Global index offset for visual faces, used for skinning.
     need_skinning : bool, default=True
         Whether to enable skinning for rendering this entity's mesh.
+    desc : ParticleEntityDescription, optional
+        The resolved particles and visual mesh. An entity created without one samples them from its morph.
     """
 
     def __init__(
@@ -77,8 +205,10 @@ class ParticleEntity(Entity):
         need_skinning=True,
         name: str | None = None,
         options=None,
+        desc: ParticleEntityDescription | None = None,
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
+        self._desc: ParticleEntityDescription | None = None
 
         self._particle_size = particle_size
         self._particle_start = particle_start
@@ -91,23 +221,15 @@ class ParticleEntity(Entity):
             self._vvert_start = -1
             self._vface_start = -1
 
-        # visual mesh
-        if isinstance(self._morph, gs.options.morphs.MeshSet):
-            self._vmesh = gs.Mesh.from_morph_surface(self.morph, self.surface)
-            self._surface = self._vmesh[0].surface
-
-        elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
-            meshes = gs.Mesh.from_morph_surface(self.morph, self.surface)
-            if len(meshes) > 1:
-                gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
-            self._vmesh = meshes[0]
-            self._surface = self._vmesh.surface
-
+        if desc is None:
+            self._vmesh = ParticleEntityDescription.resolve_mesh(morph, surface)
+            if isinstance(morph, gs.options.morphs.MeshSet):
+                self._surface = self._vmesh[0].surface
+            elif self._vmesh is not None:
+                self._surface = self._vmesh.surface
+            self.sample()
         else:
-            surface.update_texture()
-            self._vmesh = None
-
-        self.sample()
+            self._apply_description(desc)
 
         self.init_tgt_vars()
         self.init_ckpt()
@@ -146,33 +268,6 @@ class ParticleEntity(Entity):
         tensor_shape = (*batch_shape, *element_shape)
 
         return broadcast_tensor(tensor, dtype, tensor_shape, dim_names).contiguous()
-
-    def init_sampler(self):
-        """
-        Initialize the particle sampling strategy based on the material's sampler field.
-
-        Raises
-        ------
-        GenesisException
-            If the specified sampler is not supported or incorrectly formatted.
-        """
-        self.sampler = self._material.sampler
-
-        match self.sampler.split("-"):
-            case ["regular"]:
-                pass
-            case ["random"]:
-                pass
-            case ["pbs"]:
-                # using default sdf_res=32
-                self.sampler += "-32"
-            case ["pbs", num] if num.isnumeric():
-                pass
-            case _:
-                gs.raise_exception(
-                    "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
-                    f"Got: {self.sampler}."
-                )
 
     def init_tgt_keys(self):
         """
@@ -244,101 +339,31 @@ class ParticleEntity(Entity):
                 self.solver.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + self._particle_start
 
     def sample(self):
-        """
-        Sample particles from the morph based on its type and the specified sampler.
+        """Sample the particles of an entity created without a description from its morph."""
+        desc = ParticleEntityDescription.resolve(
+            self._material,
+            self._morph,
+            self._surface,
+            self._particle_size,
+            self._name,
+            self._solver.boundary,
+            has_skinning=self._need_skinning,
+            options=self._options,
+            vmesh=self._vmesh,
+        )
+        self._apply_description(desc)
 
-        Raises
-        ------
-        GenesisException
-            If no particles are sampled, or sampled particles lie outside the solver's domain.
-        """
-        self.init_sampler()
-
-        if isinstance(self._morph, gs.options.morphs.MeshSet):
-            particles = []
-            for vmesh_i, pos_i, euler_i in zip(self._vmesh, self._morph.poss, self._morph.eulers, strict=True):
-                trans_i = np.array(pos_i, dtype=gs.np_float)
-                quat_i = gu.xyz_to_quat(np.array(euler_i, dtype=gs.np_float), rpy=True, degrees=True)
-                # Sample before posing the mesh, so the lattice and the sampling cache depend on the member shape alone
-                particles_i = vmesh_i.particlize(self._particle_size, self.sampler)
-                particles.append(gu.transform_by_trans_quat(particles_i, trans_i, quat_i))
-                vmesh_i.apply_transform(gu.trans_quat_to_T(trans_i, quat_i))
-        elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
-            particles = self._vmesh.particlize(self._particle_size, self.sampler)
-            particles = particles.astype(gs.np_float, order="C", copy=False)
-        elif isinstance(self._morph, gs.options.morphs.Nowhere):
-            particles = pu.nowhere_particles(self._morph.n_particles)
-        else:
-            gs.raise_exception(f"Unsupported morph: {self._morph}.")
-
-        if not isinstance(self._morph, gs.options.morphs.MeshSet) and particles.size == 0:
-            gs.raise_exception("Entity has zero particles.")
-
-        if isinstance(self._morph, gs.options.morphs.Nowhere):
-            self._vverts = np.zeros((0, 3), dtype=gs.np_float)
-            self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
-            origin = gu.nowhere()
-        elif isinstance(self._morph, gs.options.morphs.MeshSet):
-            self.mesh_set_group_ids = np.concatenate(
-                [np.full((len(v),), fill_value=i, dtype=gs.np_int) for i, v in enumerate(particles)]
-            )
-            particles = np.concatenate(particles, dtype=gs.np_float)
-            if not self._solver.boundary.is_inside(particles):
-                gs.raise_exception(
-                    "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
-                    "tighter than the specified domain due to safety padding.\n\nCurrent boundary:\n"
-                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\nmax: {particles.max(0)}\n"
-                )
-
-            combined_verts, combined_faces = trimesh.util.append_faces(
-                [v.verts for v in self._vmesh],
-                [v.faces for v in self._vmesh],
-            )
-            combined_vert_normals = np.concatenate([v.trimesh.vertex_normals for v in self._vmesh])
-            combined_tmesh = trimesh.Trimesh(
-                vertices=combined_verts,
-                faces=combined_faces,
-                vertex_normals=combined_vert_normals,
-            )
-            self._vmesh = mu.trimesh_to_mesh(combined_tmesh, 1, self._surface)
-
-            if self._need_skinning:
-                self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
-                self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
-            else:
-                self._vverts = np.zeros((0, 3), dtype=gs.np_float)
-                self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
-            origin = np.mean(self._morph.poss, axis=0, dtype=gs.np_float)
-        else:
-            # transform vmesh (the morph pose offset, e.g. an up-axis conversion, is composed onto the morph pose)
-            pos, quat = gu.transform_pos_quat_by_trans_quat(
-                np.array(self._morph.offset_pos, dtype=gs.np_float),
-                np.array(self._morph.offset_quat, dtype=gs.np_float),
-                np.array(self._morph.pos, dtype=gs.np_float),
-                np.array(self._morph.quat, dtype=gs.np_float),
-            )
-            self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
-            # transform particles
-            particles = gu.transform_by_trans_quat(particles, pos, quat)
-
-            if not self._solver.boundary.is_inside(particles):
-                gs.raise_exception(
-                    "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
-                    "tighter than the specified domain due to safety padding.\n\n"
-                    f"Current boundary:\n{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\n"
-                    f"max: {particles.max(0)}\n"
-                )
-
-            if self._need_skinning:
-                self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
-                self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
-            else:
-                self._vverts = np.zeros((0, 3), dtype=gs.np_float)
-                self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
-            origin = pos
-
-        self._particles = np.asarray(particles, dtype=gs.np_float, order="C")
-        self._init_particles_offset = torch.tensor(self._particles - origin, dtype=gs.tc_float, device=gs.device)
+    def _apply_description(self, desc: ParticleEntityDescription):
+        self._desc = desc
+        desc.name = self._name
+        self.sampler = desc.sampler
+        self._surface = desc.surface
+        self._vmesh = desc.vmesh
+        self._vverts = desc.vverts
+        self._vfaces = desc.vfaces
+        self._particles = desc.init_positions
+        self.mesh_set_group_ids = desc.mesh_set_group_ids
+        self._init_particles_offset = torch.tensor(self._particles - desc.origin, dtype=gs.tc_float, device=gs.device)
         self._n_particles = len(self._particles)
 
         gs.logger.info(f"Sampled ~<{self._n_particles:,}>~ particles.")

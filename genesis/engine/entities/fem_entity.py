@@ -22,7 +22,7 @@ from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor, unique_rows
 
-from .base_entity import Entity, EntityDescription
+from .base_entity import Entity, EntityDescription, VerticesDescription
 
 
 @dataclass(kw_only=True)
@@ -32,12 +32,11 @@ class FEMVisGeomDescription:
 
 
 @dataclass(kw_only=True)
-class FEMEntityDescription(EntityDescription):
+class FEMEntityDescription(VerticesDescription, EntityDescription):
     material: FEM.Base
     morph: Morph
     surface: Surface
     name: str | None
-    init_positions: np.ndarray
     init_positions_COM: np.ndarray
     elems: np.ndarray
     surface_triangles: np.ndarray

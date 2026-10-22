@@ -610,14 +610,9 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
 @pytest.mark.required
 def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
     # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
-    # other physics. No description carries a particle entity either.
-    checkpoint_scene.add_entity(
-        options=gs.options.MPMEntityOptions(
-            morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
-        )
-    )
+    # other physics.
     checkpoint_scene.add_force_field(gs.force_fields.Wind(direction=(1.0, 0.0, 0.0)))
-    with pytest.raises(gs.GenesisException, match="1 MPMEntity, 1 Wind cannot be exported"):
+    with pytest.raises(gs.GenesisException, match="1 Wind cannot be exported"):
         checkpoint_scene.export(tmp_path / f"wind{SCENE_FORMAT}")
 
 
