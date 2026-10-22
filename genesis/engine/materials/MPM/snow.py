@@ -41,7 +41,10 @@ class Snow(ElastoPlastic):
 
     @model_validator(mode="before")
     @classmethod
-    def _enforce_no_von_mises(cls, data: dict) -> dict:
+    def _enforce_no_von_mises(cls, data: Any) -> Any:
+        # See 'Morph._resolve_orientation' for an input other than field values
+        if not isinstance(data, dict):
+            return data
         if data.get("use_von_mises", False):
             gs.raise_exception("Snow does not support use_von_mises=True.")
         data["use_von_mises"] = False

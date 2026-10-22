@@ -167,8 +167,9 @@ class FEMEntity(Entity):
         vvert_start=0,
         vface_start=0,
         name: str | None = None,
+        options=None,
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 
         self._v_start = v_start  # offset for vertex index of elements
         self._el_start = el_start  # offset for element index
