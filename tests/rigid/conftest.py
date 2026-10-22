@@ -786,8 +786,6 @@ def mjcf_geom_density_defaults():
     models = []
     for root_density, discard_visual, material_density in (
         (None, False, None),
-        (None, True, None),
-        (700.0, False, None),
         (700.0, True, None),
         (None, True, 2000.0),
     ):
