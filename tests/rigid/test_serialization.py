@@ -152,6 +152,9 @@ def test_export_and_load_rigid(
             files=pieces,
             pos=(0.0, 0.5, 0.5),
         ),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.2, 0.2),
+        ),
     )
     # A link whose frame is anchored on the geometry it holds, given a pose offset as well
     anchored = scene.add_entity(
@@ -344,6 +347,8 @@ def test_export_and_load_rigid(
     assert restored.entities[1].surface.diffuse_texture.image_path == "checker.png"
     # A batch holds textures of its own, and each keeps the name of the image it was read from
     assert restored.entities[2].surface.diffuse_texture.textures[0].image_path == "indoor_bright.png"
+    # A color shortcut stays out of the file, and the texture it resolved to stands in its place
+    assert_allclose(restored.entities[5].surface.diffuse_texture.color, (0.8, 0.2, 0.2), tol=gs.EPS)
     # A texture holding a path rather than pixels stands for nothing, in the surface and in the meshes drawn with it
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None

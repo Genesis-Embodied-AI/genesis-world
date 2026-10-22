@@ -1,7 +1,5 @@
 # pylint: disable=no-value-for-parameter
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 import torch
 
@@ -12,15 +10,14 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
-from genesis.engine.entities.fem_entity import FEMEntity
+from genesis.engine.couplers import SAPCoupler
+from genesis.engine.entities.fem_entity import FEMEntity, FEMEntityDescription
 from genesis.engine.states.solvers import FEMSolverState
+from genesis.engine.system_data.fem import FEMData, FEMDescription, FEMEntityData
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import FEMEntity
 
 
 @qd.data_oriented
@@ -91,38 +88,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.linesearch_state = linesearch_state.field(shape=(self._B,), needs_grad=False, layout=qd.Layout.SOA)
 
     def init_element_fields(self):
-        # element state in vertices
-        element_state_v = qd.types.struct(
-            pos=gs.qd_vec3,  # position
-            vel=gs.qd_vec3,  # velocity
-        )
-
-        # element state in elements
-        element_state_el = qd.types.struct(
-            actu=gs.qd_float,  # actuation
-        )
-
-        # element state without gradient
-        element_state_el_ng = qd.types.struct(
-            active=gs.qd_bool,
-        )
-
-        # element info (properties that remain static through time)
-        element_info = qd.types.struct(
-            el2v=gs.qd_ivec4,  # vertex index of an element
-            mu=gs.qd_float,  # lame parameters (1)
-            lam=gs.qd_float,  # lame parameters (2)
-            mass_scaled=gs.qd_float,  # scaled element mass. The real mass is mass_scaled / self._vol_scale
-            mat_idx=gs.qd_int,  # material model index
-            B=gs.qd_mat3,  # inverse of the deformation gradient at rest state
-            V=gs.qd_float,  # rest volume of the element
-            V_scaled=gs.qd_float,  # scaled rest volume of the element
-            friction_mu=gs.qd_float,  # friction coefficient for contact
-            # for muscle
-            muscle_group=gs.qd_int,
-            muscle_direction=gs.qd_vec3,
-        )
-
         # element state for energy
         element_state_el_energy = qd.types.struct(
             energy=gs.qd_float,  # energy density for the element
@@ -132,13 +97,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         element_state_v_energy = qd.types.struct(
             inertia=gs.qd_vec3,  # inertia for the vertex
             force=gs.qd_vec3,
-        )
-
-        element_v_info = qd.types.struct(
-            mass=gs.qd_float,  # mass of the vertex
-            mass_inv=gs.qd_float,  # inverse mass of the vertex
-            mass_over_dt2=gs.qd_float,  # scaled mass of the vertex over dt^2
-            friction_mu=gs.qd_float,  # friction coefficient for contact
         )
 
         pcg_state_v = qd.types.struct(
@@ -156,27 +114,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
 
         # construct field
-        self.elements_v = element_state_v.field(
-            shape=(self.sim.substeps_local + 1, self.n_vertices, self._B),
-            needs_grad=True,
-            layout=qd.Layout.SOA,
-        )
-        self.elements_el = element_state_el.field(
-            shape=(self.sim.substeps_local + 1, self.n_elements, self._B),
-            needs_grad=True,
-            layout=qd.Layout.SOA,
-        )
-        self.elements_el_ng = element_state_el_ng.field(
-            shape=(self.sim.substeps_local + 1, self.n_elements, self._B),
-            needs_grad=False,
-            layout=qd.Layout.SOA,
-        )
-        self.elements_i = element_info.field(
-            shape=(self.n_elements),
-            needs_grad=False,
-            layout=qd.Layout.SOA,
-        )
-
         self.elements_el_energy = element_state_el_energy.field(
             shape=(self._B, self.n_elements),
             needs_grad=False,
@@ -191,12 +128,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             layout=qd.Layout.SOA,
         )
 
-        self.elements_v_info = element_v_info.field(
-            shape=(self.n_vertices),
-            needs_grad=False,
-            layout=qd.Layout.SOA,
-        )
-
         self.pcg_state_v = pcg_state_v.field(
             shape=(self._B, self.n_vertices),
             needs_grad=False,
@@ -205,22 +136,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         self.linesearch_state_v = linesearch_state_v.field(
             shape=(self._B, self.n_vertices),
-            needs_grad=False,
-            layout=qd.Layout.SOA,
-        )
-
-    def init_surface_fields(self):
-        n_surfaces_max = self.n_surfaces
-
-        # surface info (for coupling)
-        surface_state = qd.types.struct(
-            tri2v=gs.qd_ivec3,  # vertex index of a triangle
-            tri2el=gs.qd_int,  # element index of a triangle
-            active=gs.qd_bool,
-        )
-
-        self.surface = surface_state.field(
-            shape=(n_surfaces_max),
             needs_grad=False,
             layout=qd.Layout.SOA,
         )
@@ -250,62 +165,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         # static, in the solver's global vvert space
         self.vfaces_indices = qd.field(dtype=gs.qd_ivec3, shape=(max(self._n_vfaces, 1),))
-
-    def _init_surface_info(self):
-        self.vertices_on_surface = qd.field(dtype=gs.qd_bool, shape=(self.n_vertices,))
-        self.elements_on_surface = qd.field(dtype=gs.qd_bool, shape=(self.n_elements,))
-        self.compute_surface_vertices()
-        self.compute_surface_elements()
-        vertices_on_surface_np = self.vertices_on_surface.to_numpy()
-        elements_on_surface_np = self.elements_on_surface.to_numpy()
-        (surface_vertices_np,) = vertices_on_surface_np.nonzero()
-        self.surface_vertices = qd.field(
-            dtype=qd.i32,
-            shape=(len(surface_vertices_np),),
-            needs_grad=False,
-        )
-        self.surface_vertices.from_numpy(surface_vertices_np.astype(np.int32, copy=False))
-        (surface_elements_np,) = elements_on_surface_np.nonzero()
-        self.surface_elements = qd.field(
-            dtype=qd.i32,
-            shape=(len(surface_elements_np),),
-            needs_grad=False,
-        )
-        self.surface_elements.from_numpy(surface_elements_np.astype(np.int32, copy=False))
-
-        surface_triangles_np = self.surface.tri2v.to_numpy()
-        pos_np = self.elements_v.pos.to_numpy()[0, :, 0, :][surface_vertices_np]
-        surface_vertices_mapping = np.full(self.n_vertices, -1, dtype=np.int32)
-        surface_vertices_mapping[surface_vertices_np] = np.arange(len(surface_vertices_np))
-        mass = igl.massmatrix(pos_np, surface_vertices_mapping[surface_triangles_np])
-        surface_vert_mass_np = mass.diagonal().astype(gs.np_float, copy=False)
-        self.surface_vert_mass = qd.field(
-            dtype=gs.qd_float,
-            shape=(len(surface_vertices_np),),
-            needs_grad=False,
-        )
-        self.surface_vert_mass.from_numpy(surface_vert_mass_np)
-
-    @qd.kernel
-    def compute_surface_vertices(self):
-        for i_v in range(self.n_vertices):
-            self.vertices_on_surface[i_v] = False
-
-        for i_s in range(self.n_surfaces):
-            tri2v = self.surface[i_s].tri2v
-            for i in qd.static(range(3)):
-                self.vertices_on_surface[tri2v[i]] = True
-
-    @qd.kernel
-    def compute_surface_elements(self):
-        for i_e in range(self.n_elements):
-            i_v = self.elements_i[i_e].el2v
-            self.elements_on_surface[i_e] = (
-                self.vertices_on_surface[i_v[0]]
-                or self.vertices_on_surface[i_v[1]]
-                or self.vertices_on_surface[i_v[2]]
-                or self.vertices_on_surface[i_v[3]]
-            )
 
     def init_ckpt(self):
         self._ckpt = dict()
@@ -339,11 +198,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         for entity in self._entities:
             entity.reset_grad()
 
-    def build(self):
-        super().build()
+    def describe(self) -> FEMDescription | None:
+        super().describe()
 
         self.n_envs = self.sim.n_envs
-        self._B = self.sim._B
 
         # elements and bodies
         self._n_elements_max = self.n_elements
@@ -351,6 +209,62 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
 
+        if not self.is_active:
+            return None
+        positions = np.concatenate([entity.desc.init_positions for entity in self.entities])
+        triangles = np.concatenate([entity.desc.surface_triangles + entity.v_start for entity in self.entities])
+        surface_vertices = np.unique(triangles)
+        surface_mask = np.zeros(self.n_vertices, dtype=gs.np_bool)
+        surface_mask[surface_vertices] = True
+        # 'np.flatnonzero' yields int64 indices, whatever the integer precision
+        surface_elements = np.concatenate(
+            [
+                np.flatnonzero(surface_mask[entity.elems + entity.v_start].any(axis=1)) + entity.el_start
+                for entity in self.entities
+            ]
+        )
+        vertices_mapping = np.full(self.n_vertices, -1, dtype=gs.np_int)
+        vertices_mapping[surface_vertices] = np.arange(len(surface_vertices))
+        surface_vert_mass = igl.massmatrix(positions[surface_vertices], vertices_mapping[triangles]).diagonal()
+        return FEMDescription(
+            _B=self._B,
+            vol_scale=self.vol_scale,
+            substeps_local=self.sim.substeps_local,
+            n_vertices=self.n_vertices,
+            n_elements=self.n_elements,
+            n_surfaces=self.n_surfaces,
+            surface_vertices=surface_vertices,
+            surface_elements=surface_elements.astype(gs.np_int, copy=False),
+            surface_vert_mass=surface_vert_mass.astype(gs.np_float, copy=False),
+        )
+
+    def register_data(self):
+        assert isinstance(self._data_record, FEMData)
+        self.elements_v = self._data_record.elements_v
+        self.elements_el = self._data_record.elements_el
+        self.elements_el_ng = self._data_record.elements_el_ng
+        self.elements_i = self._data_record.elements_i
+        self.elements_v_info = self._data_record.elements_v_info
+        self.surface = self._data_record.surface
+        self.surface_vertices = self._data_record.surface_vertices
+        self.surface_elements = self._data_record.surface_elements
+        self.surface_vert_mass = self._data_record.surface_vert_mass
+        for entity in self.entities:
+            self.sim._system_data.add(
+                FEMEntityData(
+                    owner=self,
+                    idx=entity.idx,
+                    data=self._data_record,
+                    vert_start=entity.v_start,
+                    vert_end=entity.v_start + entity.n_vertices,
+                    elem_start=entity.el_start,
+                    elem_end=entity.el_start + entity.n_elements,
+                    surface_start=entity.s_start,
+                    surface_end=entity.s_start + entity.n_surfaces,
+                )
+            )
+
+    def build(self):
         if self.n_elements_max > 0:
             self.tet_wrong_order = qd.field(dtype=gs.qd_bool, shape=(), needs_grad=False)
 
@@ -358,7 +272,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_batch_fields()
 
             self.init_element_fields()
-            self.init_surface_fields()
             self.init_vvert_fields()
             self.init_ckpt()
 
@@ -369,7 +282,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             mat.build(self)
 
         if self.n_elements_max > 0:
-            self._init_surface_info()
             if self.tet_wrong_order[None]:
                 raise RuntimeError(
                     "The order of vertices in the tetrahedral elements is not correct. "
@@ -391,6 +303,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "FEMEntity":
+        if desc is None:
+            desc = FEMEntityDescription.resolve(
+                material, morph, surface, name, has_pressure=isinstance(self.sim.coupler, SAPCoupler), options=options
+            )
+        assert isinstance(desc, FEMEntityDescription)
+
         # add material's update methods if not matching any existing material
         exist = False
         for mat in self._mats:
@@ -410,17 +328,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         entity = FEMEntity(
             scene=self._scene,
             solver=self,
-            material=material,
-            morph=morph,
-            surface=surface,
+            desc=desc,
             idx=idx,
             v_start=self.n_vertices,
             el_start=self.n_elements,
             s_start=self.n_surfaces,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
-            name=name,
-            options=options,
         )
 
         self._entities.append(entity)

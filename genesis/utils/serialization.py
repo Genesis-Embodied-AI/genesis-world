@@ -2,8 +2,8 @@
 
 A file holds JavaScript Object Notation (JSON) and arrays, and what each value in it is comes from the type the
 loader expects: the caller says what it exported and what it is loading, and the declared types of the descriptions
-and options take it from there. So a file holds no module path, no import, and no code, and a class name appears only
-where a declared type has subclasses and the file must say which one.
+and options take it from there. So a file holds no import and no code. A class name appears only where a declared
+type has subclasses and the file must say which one, and a module path only where several options share a name.
 """
 
 import dataclasses
@@ -256,15 +256,33 @@ def _layout(cls: type) -> list[str] | dict[str, int]:
     return sorted(_declared_fields(cls))
 
 
+def _schema_key(cls: type) -> str:
+    """Returns the name the layout of a class is recorded under, its own name unless several options share it.
+
+    Materials of different solvers share names such as 'Elastic', so a name shared by several options is qualified by
+    the module defining each. The options Genesis declares decide which names are shared, so the key of a class
+    follows from the class hierarchy alone, whichever classes a file holds.
+    """
+    # An option may extend several options, so the walk meets it once per path to it.
+    option_classes = set()
+    classes = [Options]
+    while classes:
+        option_cls = classes.pop()
+        option_classes.add(option_cls)
+        classes.extend(option_cls.__subclasses__())
+    shared_count = sum(option_cls.__name__ == cls.__name__ for option_cls in option_classes)
+    return cls.__name__ if shared_count < 2 else f"{cls.__module__}.{cls.__qualname__}"
+
+
 def schema(classes: set[type]) -> dict:
-    """Records what each of these classes is made of, under the name each is written as.
+    """Records what each of these classes is made of, under its own name, or its module path where options share it.
 
     A field renamed or an enumeration member renumbered leaves every value in a file intact while changing what it
     means. A file therefore carries this of the classes it holds, and a load compares it class by class. A class
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {cls.__name__: _layout(cls) for cls in sorted(classes, key=lambda cls: cls.__name__)}
+    return {_schema_key(cls): _layout(cls) for cls in sorted(classes, key=_schema_key)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -285,13 +303,13 @@ def declared_schema(expect: dict) -> dict:
                 continue
             seen.add(declared)
             if issubclass(declared, IntEnum):
-                layout[declared.__name__] = _layout(declared)
+                layout[_schema_key(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[cls.__name__] = _layout(cls)
+                    layout[_schema_key(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -390,14 +408,17 @@ def _export_value(value, expect, exported: "Exported"):
     if _has_declared_fields(expect):
         exported.classes.add(type(value))
         given = vars(value)
-        values = {
-            name: _export_value(given[name], annotation, exported)
-            for name, annotation in _declared_fields(type(value)).items()
-        }
+        declared = _declared_fields(type(value))
+        if issubclass(type(value), Options):
+            # A field an option excludes from its own serialization holds what it derives from the others, such as the
+            # methods a material binds. It stays out of the file, and a load leaves it at its default.
+            fields = type(value).model_fields
+            declared = {name: annotation for name, annotation in declared.items() if fields[name].exclude is not True}
+        values = {name: _export_value(given[name], annotation, exported) for name, annotation in declared.items()}
         if issubclass(type(value), Options):
             # An option object carries the names of the fields the user gave, since rebuilding one needs them. They
             # are sorted, so exporting the same scene twice gives the same file.
-            values = {"values": values, "given": sorted(value.model_fields_set)}
+            values = {"values": values, "given": sorted(value.model_fields_set & values.keys())}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
     # A union mixing an option with a sequence of them, such as one morph or several, exports as the argument it holds
     deduced = _deduce_union(expect, value)

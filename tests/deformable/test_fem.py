@@ -1,11 +1,13 @@
 import math
 
-import igl
 import numpy as np
 import pytest
 import torch
 
+import igl
+
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -164,12 +166,12 @@ def test_maxvolume(box_obj_path, show_viewer):
 
 
 @pytest.mark.required
-def test_offset_pos(box_obj_path, show_viewer):
+def test_offset_pos(box_obj_path, tmp_path, show_viewer):
     POS = (0.2, -0.1, 0.3)
     OFFSET_POS = (0.05, 0.0, 0.1)
 
     scene = gs.Scene(show_viewer=show_viewer)
-    box = scene.add_entity(
+    scene.add_entity(
         options=gs.options.FEMEntityOptions(
             morph=gs.morphs.Mesh(
                 file=box_obj_path,
@@ -179,7 +181,7 @@ def test_offset_pos(box_obj_path, show_viewer):
             material=gs.materials.FEM.Elastic(),
         ),
     )
-    box_no_offset = scene.add_entity(
+    scene.add_entity(
         options=gs.options.FEMEntityOptions(
             morph=gs.morphs.Mesh(
                 file=box_obj_path,
@@ -188,6 +190,12 @@ def test_offset_pos(box_obj_path, show_viewer):
             material=gs.materials.FEM.Elastic(),
         ),
     )
+    # The offset is resolved into the simulation mesh that the scene file holds
+    exported = tmp_path / f"offset_pos{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    box, box_no_offset = scene.entities
+    assert isinstance(box.material, gs.materials.FEM.Elastic)
     scene.build()
 
     offset = box.get_state().pos - box_no_offset.get_state().pos

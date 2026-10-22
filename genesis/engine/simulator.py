@@ -15,7 +15,6 @@ from genesis.utils.tools import StepTimer
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
 from .sensors import SensorManager
-from .system_data import SystemDataArray
 from .solvers import (
     FEMSolver,
     KinematicSolver,
@@ -28,6 +27,7 @@ from .solvers import (
 )
 from .solvers.base_solver import GravityMixin, TimeBasedMixin
 from .states.solvers import SimState, SimulatorCheckpoint
+from .system_data import SystemDataArray
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
