@@ -391,7 +391,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_elements > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, options=None, desc=None
     ) -> "FEMEntity":
         # add material's update methods if not matching any existing material
         exist = False
@@ -422,6 +422,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
+            options=options,
         )
 
         self._entities.append(entity)

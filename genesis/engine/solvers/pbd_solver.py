@@ -243,7 +243,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, options=None, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
@@ -260,6 +260,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
                 name=name,
+                options=options,
             )
 
         elif isinstance(material, gs.materials.PBD.Elastic):
@@ -277,6 +278,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
                 name=name,
+                options=options,
             )
 
         elif isinstance(material, gs.materials.PBD.Liquid):
@@ -290,6 +292,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 idx=idx,
                 particle_start=self.n_particles,
                 name=name,
+                options=options,
             )
 
         elif isinstance(material, gs.materials.PBD.Particle):
@@ -303,6 +306,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 idx=idx,
                 particle_start=self.n_particles,
                 name=name,
+                options=options,
             )
 
         else:

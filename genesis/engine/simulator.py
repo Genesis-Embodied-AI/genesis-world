@@ -139,7 +139,12 @@ class Simulator(RBC):
             options = desc.options
         if visualize_contact and not isinstance(material, gs.materials.Rigid):
             gs.raise_exception("'visualize_contact' only applies to rigid entities.")
-        if options is not None:
+        if isinstance(material, gs.materials.Hybrid):
+            # A hybrid entity has no solver of its own, since its parts are entities of their own. Its material, which
+            # only 'HybridEntityOptions' admits, routes it with or without options. The hybrid entity adds its parts to
+            # the scene itself.
+            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name, options=options)
+        elif options is not None:
             # The options decide the solver, by naming the class of the options configuring it
             for solver in self._solvers:
                 if type(solver._options) is options.scene_solver_options_cls:
@@ -149,9 +154,6 @@ class Simulator(RBC):
             entity = solver.add_entity(
                 self.n_entities, material, morph, surface, visualize_contact, name=name, options=options, desc=desc
             )
-        elif isinstance(material, gs.materials.Hybrid):
-            # Note that adding to solver is handled in the hybrid entity
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
         else:
             # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
             # one declaring the most derived class simulates it (see 'Solver.material_cls').

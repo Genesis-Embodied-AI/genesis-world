@@ -30,8 +30,9 @@ class ToolEntity(Entity):
         morph,
         surface,
         name: str | None = None,
+        options=None,
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 
         # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
         self._init_pos, self._init_quat = transform_pos_quat_by_trans_quat(

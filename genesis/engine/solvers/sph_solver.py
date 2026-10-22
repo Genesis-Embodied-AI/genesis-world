@@ -172,7 +172,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, options=None, desc=None
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,
@@ -184,6 +184,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             idx=idx,
             particle_start=self.n_particles,
             name=name,
+            options=options,
         )
 
         self.entities.append(entity)

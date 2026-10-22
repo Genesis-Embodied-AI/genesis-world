@@ -297,7 +297,10 @@ class Box(Primitive, TetGenMixin):
 
     @model_validator(mode="before")
     @classmethod
-    def _resolve_geometry(cls, data: dict) -> dict:
+    def _resolve_geometry(cls, data: Any) -> Any:
+        # See 'Morph._resolve_orientation' for an input other than field values
+        if not isinstance(data, dict):
+            return data
         lower, upper, size = data.get("lower"), data.get("upper"), data.get("size")
 
         if lower is not None and upper is not None:
@@ -611,7 +614,10 @@ class FileMorph(Morph):
 
     @model_validator(mode="before")
     @classmethod
-    def _resolve_file_and_defaults(cls, data: dict) -> dict:
+    def _resolve_file_and_defaults(cls, data: Any) -> Any:
+        # See 'Morph._resolve_orientation' for an input other than field values
+        if not isinstance(data, dict):
+            return data
         # Clamp thresholds to avoid decomposition of convex and primitive shapes
         obj_thresh = data.get("decompose_object_error_threshold", 0.15)
         robot_thresh = data.get("decompose_robot_error_threshold", float("inf"))
@@ -996,7 +1002,10 @@ class MJCF(FileMorph):
 
     @model_validator(mode="before")
     @classmethod
-    def _enforce_isotropic_scale(cls, data: dict) -> dict:
+    def _enforce_isotropic_scale(cls, data: Any) -> Any:
+        # See 'Morph._resolve_orientation' for an input other than field values
+        if not isinstance(data, dict):
+            return data
         # Anisotropic scaling is ill-defined for poly-articulated robots because link positions depend on configuration,
         # making the effect of per-axis scaling configuration-dependent. Limiting to scalar factor avoids this.
         scale = np.atleast_1d(np.array(data.get("scale", 1.0)))
@@ -1146,7 +1155,10 @@ class URDF(FileMorph):
 
     @model_validator(mode="before")
     @classmethod
-    def _enforce_isotropic_scale(cls, data: dict) -> dict:
+    def _enforce_isotropic_scale(cls, data: Any) -> Any:
+        # See 'Morph._resolve_orientation' for an input other than field values
+        if not isinstance(data, dict):
+            return data
         # Anisotropic scaling is ill-defined for poly-articulated robots. See MJCF for details.
         scale = np.atleast_1d(np.array(data.get("scale", 1.0)))
         if scale.std() > gs.EPS:

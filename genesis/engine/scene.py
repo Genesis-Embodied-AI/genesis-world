@@ -29,18 +29,27 @@ from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     BaseCouplerOptions,
     EntityOptions,
+    FEMEntityOptions,
     FEMOptions,
+    HybridEntityOptions,
     KinematicEntityOptions,
     KinematicOptions,
+    MPMEntityOptions,
     MPMOptions,
+    PBDClothEntityOptions,
+    PBDElasticEntityOptions,
+    PBDLiquidEntityOptions,
     PBDOptions,
+    PBDParticleEntityOptions,
     ProfilingOptions,
     RigidEntityOptions,
     RigidOptions,
     SceneOptions,
     SFOptions,
     SimOptions,
+    SPHEntityOptions,
     SPHOptions,
+    ToolEntityOptions,
     ToolOptions,
     ViewerOptions,
     VisOptions,
@@ -61,6 +70,17 @@ from genesis.utils.warnings import warn_once
 from genesis.vis import Visualizer
 
 if TYPE_CHECKING:
+    from genesis.engine.entities import (
+        FEMEntity,
+        HybridEntity,
+        MPMEntity,
+        PBD2DEntity,
+        PBD3DEntity,
+        PBDFreeParticleEntity,
+        PBDParticleEntity,
+        SPHEntity,
+        ToolEntity,
+    )
     from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
@@ -318,6 +338,33 @@ class Scene(RBC):
     def add_entity(self, *, options: KinematicEntityOptions) -> KinematicEntity: ...
 
     @overload
+    def add_entity(self, *, options: FEMEntityOptions) -> "FEMEntity": ...
+
+    @overload
+    def add_entity(self, *, options: MPMEntityOptions) -> "MPMEntity": ...
+
+    @overload
+    def add_entity(self, *, options: SPHEntityOptions) -> "SPHEntity": ...
+
+    @overload
+    def add_entity(self, *, options: PBDClothEntityOptions) -> "PBD2DEntity": ...
+
+    @overload
+    def add_entity(self, *, options: PBDElasticEntityOptions) -> "PBD3DEntity": ...
+
+    @overload
+    def add_entity(self, *, options: PBDLiquidEntityOptions) -> "PBDParticleEntity": ...
+
+    @overload
+    def add_entity(self, *, options: PBDParticleEntityOptions) -> "PBDFreeParticleEntity": ...
+
+    @overload
+    def add_entity(self, *, options: ToolEntityOptions) -> "ToolEntity": ...
+
+    @overload
+    def add_entity(self, *, options: HybridEntityOptions) -> "HybridEntity": ...
+
+    @overload
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
@@ -379,9 +426,9 @@ class Scene(RBC):
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
         options : EntityOptions | None, optional
             The options to construct the entity from, whose class decides the kind of entity and the solver simulating
-            it: ``RigidEntityOptions`` or ``KinematicEntityOptions``. They replace every other argument, so passing
-            both raises. The entity keeps a copy of them as ``entity.options``, so one instance can construct several
-            entities.
+            it, such as ``RigidEntityOptions`` or ``FEMEntityOptions`` (see ``gs.options``). They replace every other
+            argument, so passing both raises. The entity keeps a copy of them as ``entity.options``, so one instance
+            can construct several entities.
 
         Returns
         -------
@@ -391,10 +438,9 @@ class Scene(RBC):
         if options is not None:
             if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
                 gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
-            if options.scene_solver_options_cls is None:
+            if type(options) is EntityOptions:
                 gs.raise_exception(
-                    f"{type(options).__name__} selects no entity family. Use RigidEntityOptions or "
-                    "KinematicEntityOptions."
+                    "EntityOptions selects no entity family. Use one of its subclasses, such as RigidEntityOptions."
                 )
             # Revalidated, since 'model_copy(update=...)' bypasses validation. The entity owns the authored copy, while
             # the resolution below modifies the morph, the material and the surface it is given.
