@@ -1506,9 +1506,9 @@ class KinematicEntityDescription(EntityDescription):
             and not (explicit_mass is not None and explicit_mass > 0.0 and explicit_inertia is not None)
         ):
             cg_infos = vg_infos
-        hint = compose_inertial_from_g_infos(cg_infos, rho=1.0)
+        anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
-            explicit_mass, explicit_com, explicit_quat, explicit_inertia, *hint, clamp_min_mass=False
+            explicit_mass, explicit_com, explicit_quat, explicit_inertia, *anchor_inertial, clamp_min_mass=False
         )
         if explicit_mass is not None and explicit_mass > 0.0:
             is_mass_explicit = True
