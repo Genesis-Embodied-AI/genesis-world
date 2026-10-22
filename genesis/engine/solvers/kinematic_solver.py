@@ -9,7 +9,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
-from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -167,7 +166,6 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
-    material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
@@ -194,13 +192,13 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name=None, options=None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name=None, *, options, desc=None
     ) -> "KinematicEntity":
         """Create an entity from its description.
 
         Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
         deciding the kind of entity among those the solver builds ('_entity_classes'). The entity options the other
-        arguments were taken from, if any, are kept in the description as authored. The class of a given description
+        arguments were taken from are kept in the description as authored. The class of a given description
         says which kind it holds. Creation from a description reads no asset.
         """
         if desc is None:

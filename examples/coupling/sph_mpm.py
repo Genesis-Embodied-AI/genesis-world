@@ -38,29 +38,32 @@ def main():
     )
 
     water = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.4, 0.5, 0.25),
-            size=(0.7, 0.9, 0.5),
-        ),
-        material=gs.materials.SPH.Liquid(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
-            vis_mode="particle",
+        options=gs.options.SPHEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.4, 0.5, 0.25),
+                size=(0.7, 0.9, 0.5),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
     duck = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            pos=(0.5, 0.5, 0.7),
-            scale=0.07,
-            euler=(90.0, 0.0, 90.0),
-        ),
-        material=gs.materials.MPM.Elastic(
-            rho=200,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
-            vis_mode="particle",
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                pos=(0.5, 0.5, 0.7),
+                scale=0.07,
+                euler=(90.0, 0.0, 90.0),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=200,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
 

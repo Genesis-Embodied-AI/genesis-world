@@ -12,7 +12,6 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
-from genesis.engine.materials.base import Material
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import QueriedStates
 from genesis.repr_base import RBC
@@ -315,9 +314,6 @@ class GravityMixin:
 
 
 class Solver(RBC):
-    # The material of the entities this solver simulates, None for a solver holding no entity of its own
-    material_cls: type[Material] | None = None
-
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
         self._sim = sim

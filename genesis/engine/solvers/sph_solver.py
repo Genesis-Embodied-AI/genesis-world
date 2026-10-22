@@ -7,7 +7,6 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import SPHEntity
-from genesis.engine.materials import SPH
 from genesis.engine.states.solvers import SPHSolverState
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
@@ -18,7 +17,6 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
-    material_cls = SPH.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -172,7 +170,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, options=None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "SPHEntity":
         entity = SPHEntity(
             scene=self.scene,

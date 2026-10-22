@@ -37,14 +37,16 @@ def test_particle_constraints(show_viewer, tol):
         ),
     )
     mpm_cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            E=5e4,
-            nu=0.3,
-            rho=1000,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0, 0, 0.35),
-            size=(0.15, 0.15, 0.15),
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 0.35),
+                size=(0.15, 0.15, 0.15),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                rho=1000,
+            ),
         ),
     )
     # Two copies of one box offset along its local y axis, each placed with its own member pose
@@ -52,13 +54,15 @@ def test_particle_constraints(show_viewer, tol):
         extents=(0.04, 0.12, 0.04), transform=trimesh.transformations.translation_matrix((0.0, 0.1, 0.0))
     )
     mpm_mesh_set = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(box, box),
-            poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
-            eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="regular",
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.MeshSet(
+                files=(box, box),
+                poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
+                eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="regular",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -129,24 +133,28 @@ def test_perf_dispatch(variant, show_viewer):
         morph=gs.morphs.Plane(),
     )
     elastic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.1, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=3e5,
-            nu=0.2,
-            rho=200.0,
-            model=elastic_model,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-0.1, 0.0, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=3e5,
+                nu=0.2,
+                rho=200.0,
+                model=elastic_model,
+            ),
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.MPM.Liquid(
-            viscous=liquid_viscous,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.0, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Liquid(
+                viscous=liquid_viscous,
+            ),
         ),
     )
     scene.build(n_envs=2)

@@ -54,9 +54,11 @@ class Cloth(Base):
     Examples
     --------
     >>> cloth = scene.add_entity(
-    ...     morph=gs.morphs.Mesh(file="cloth.obj"),
-    ...     material=gs.materials.FEM.Cloth(
-    ...         E=10e3, nu=0.49, rho=200, thickness=0.001, bending_stiffness=10.0
+    ...     options=gs.options.FEMEntityOptions(
+    ...         morph=gs.morphs.Mesh(file="cloth.obj"),
+    ...         material=gs.materials.FEM.Cloth(
+    ...             E=10e3, nu=0.49, rho=200, thickness=0.001, bending_stiffness=10.0
+    ...         ),
     ...     ),
     ... )
     """

@@ -36,23 +36,27 @@ def test_mpm_tool_push_grad(show_viewer):
         )
     )
     stick = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/stirrer.obj",
-            scale=0.6,
-            pos=(0.5, 0.5, 0.05),
-            euler=(90.0, 0.0, 0.0),
-        ),
-        material=gs.materials.Tool(
-            friction=8.0,
+        options=gs.options.ToolEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/stirrer.obj",
+                scale=0.6,
+                pos=(0.5, 0.5, 0.05),
+                euler=(90.0, 0.0, 0.0),
+            ),
+            material=gs.materials.Tool(
+                friction=8.0,
+            ),
         ),
     )
     obj = scene.add_entity(
-        morph=gs.morphs.Box(
-            lower=(0.2, 0.1, 0.05),
-            upper=(0.4, 0.3, 0.15),
-        ),
-        material=gs.materials.MPM.Elastic(
-            rho=500,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                lower=(0.2, 0.1, 0.05),
+                upper=(0.4, 0.3, 0.15),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=500,
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -110,16 +114,18 @@ def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
             show_viewer=show_viewer and requires_grad,
         )
         box = scene.add_entity(
-            morph=gs.morphs.Box(
-                lower=(-0.1, -0.1, 0.1),
-                upper=(0.1, 0.1, 0.2),
-            ),
-            material=gs.materials.MPM.Muscle(
-                E=5e4,
-                nu=0.3,
-                rho=1000.0,
-                sampler="regular",
-                n_groups=2,
+            options=gs.options.MPMEntityOptions(
+                morph=gs.morphs.Box(
+                    lower=(-0.1, -0.1, 0.1),
+                    upper=(0.1, 0.1, 0.2),
+                ),
+                material=gs.materials.MPM.Muscle(
+                    E=5e4,
+                    nu=0.3,
+                    rho=1000.0,
+                    sampler="regular",
+                    n_groups=2,
+                ),
             ),
         )
         scene.build(n_envs=2)
@@ -185,12 +191,14 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         show_viewer=show_viewer,
     )
     block = scene.add_entity(
-        morph=gs.morphs.Box(
-            lower=(-0.2, -0.05, -0.05),
-            upper=(-0.05, 0.05, 0.05),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=5e4,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                lower=(-0.2, -0.05, -0.05),
+                upper=(-0.05, 0.05, 0.05),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+            ),
         ),
     )
     box = scene.add_entity(

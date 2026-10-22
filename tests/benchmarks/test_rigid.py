@@ -292,11 +292,12 @@ def make_anymal(n_envs, solver=None, gjk=None, control=None, with_kinematic=Fals
     ghost = None
     if with_kinematic:
         ghost = scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/anymal_c/urdf/anymal_c.urdf",
-                pos=(0, -0.5, 0.8),
+            options=gs.options.KinematicEntityOptions(
+                morph=gs.morphs.URDF(
+                    file="urdf/anymal_c/urdf/anymal_c.urdf",
+                    pos=(0, -0.5, 0.8),
+                ),
             ),
-            material=gs.materials.Kinematic(),
         )
     time_start = time.time()
     scene.build(n_envs=n_envs)

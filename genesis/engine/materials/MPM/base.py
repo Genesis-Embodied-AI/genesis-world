@@ -1,7 +1,7 @@
 import platform
 import re
 import sys
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar
 
 import quadrants as qd
 from pydantic import BeforeValidator, Field, PrivateAttr
@@ -12,8 +12,6 @@ from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
 from ..base import Material
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.mpm_entity import MPMEntity
 
 _SAMPLER_PATTERN = re.compile(r"^pbs(-\d+)?$|^random$|^regular$")
 
@@ -33,7 +31,7 @@ DEFAULT_SAMPLER = "pbs" if (sys.platform == "linux" and platform.machine() == "x
 
 
 @qd.data_oriented
-class Base(Material["MPMEntity"]):
+class Base(Material):
     """
     The base class of MPM materials.
 

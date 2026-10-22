@@ -57,25 +57,32 @@ def main():
         material=franka_material,
     )
 
+    cube_morph = gs.morphs.Box(
+        pos=(0.65, 0.0, 0.03),
+        size=(0.05, 0.05, 0.05),
+    )
+    cube_surface = gs.surfaces.Plastic(
+        color=(0.2, 0.8, 0.2, 0.5),
+    )
     if not args.no_ipc:
-        cube_material = gs.materials.FEM.Elastic(
-            E=5.0e4,
-            nu=0.45,
-            rho=1000.0,
-            friction_mu=0.5,
-            model="stable_neohookean",
+        cube_options = gs.options.FEMEntityOptions(
+            morph=cube_morph,
+            material=gs.materials.FEM.Elastic(
+                E=5.0e4,
+                nu=0.45,
+                rho=1000.0,
+                friction_mu=0.5,
+                model="stable_neohookean",
+            ),
+            surface=cube_surface,
         )
     else:
-        cube_material = gs.materials.Rigid()
+        cube_options = gs.options.RigidEntityOptions(
+            morph=cube_morph,
+            surface=cube_surface,
+        )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.65, 0.0, 0.03),
-            size=(0.05, 0.05, 0.05),
-        ),
-        material=cube_material,
-        surface=gs.surfaces.Plastic(
-            color=(0.2, 0.8, 0.2, 0.5),
-        ),
+        options=cube_options,
     )
 
     scene.build()

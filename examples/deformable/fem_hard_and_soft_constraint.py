@@ -42,28 +42,32 @@ def main():
     scene.add_entity(gs.morphs.Plane())
 
     blob = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=SCENE_POS + np.array([-0.3, -0.3, 0]),
-            radius=0.1,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e4,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=SCENE_POS + np.array([-0.3, -0.3, 0]),
+                radius=0.1,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e4,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated",
+            ),
         ),
     )
 
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=SCENE_POS + np.array([0.3, 0.3, 0]),
-            size=(0.2, 0.2, 0.2),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e6,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=SCENE_POS + np.array([0.3, 0.3, 0]),
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e6,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated",
+            ),
         ),
     )
 

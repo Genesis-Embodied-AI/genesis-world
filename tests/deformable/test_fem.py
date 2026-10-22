@@ -21,14 +21,16 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
 
     scene = gs.Scene(show_viewer=show_viewer)
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            minratio=1.5,
-            verbose=1,
-            maxvolume=0.01,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                minratio=1.5,
+                verbose=1,
+                maxvolume=0.01,
+            ),
+            material=gs.materials.FEM.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
     scene.build()
 
@@ -99,11 +101,13 @@ def test_multi_submesh_render_decoupling(n_envs, show_viewer):
     # simulation elements. The GLB asset holds 2 sub-meshes (bag and channel) with distinct materials.
     scene = gs.Scene(show_viewer=show_viewer)
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/trashbag_rope.glb",
-            group_by_material=True,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/trashbag_rope.glb",
+                group_by_material=True,
+            ),
+            material=gs.materials.FEM.Cloth(),
         ),
-        material=gs.materials.FEM.Cloth(),
     )
     scene.build(n_envs=n_envs)
 
@@ -130,23 +134,27 @@ def test_maxvolume(box_obj_path, show_viewer):
 
     # Mesh without any maximum-element-volume constraint
     fem1 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            verbose=1,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                verbose=1,
+            ),
+            material=gs.materials.FEM.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
 
     # Mesh with maximum element volume limited to 0.01
     fem2 = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            nobisect=False,
-            maxvolume=0.01,
-            verbose=1,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                nobisect=False,
+                maxvolume=0.01,
+                verbose=1,
+            ),
+            material=gs.materials.FEM.Muscle(),
         ),
-        material=gs.materials.FEM.Muscle(),
     )
 
     assert len(fem1.elems) < len(fem2.elems), (
@@ -162,19 +170,23 @@ def test_offset_pos(box_obj_path, show_viewer):
 
     scene = gs.Scene(show_viewer=show_viewer)
     box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            pos=POS,
-            offset_pos=OFFSET_POS,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                pos=POS,
+                offset_pos=OFFSET_POS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     box_no_offset = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=box_obj_path,
-            pos=POS,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=box_obj_path,
+                pos=POS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
     scene.build()
 
@@ -216,22 +228,26 @@ def test_implicit_falling_sphere_box(coupler_type, material_model, show_viewer):
         show_FPS=False,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.4, -0.1, 0.10),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            rho=SPHERE_RHO,
-            model=material_model,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.4, -0.1, 0.10),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                rho=SPHERE_RHO,
+                model=material_model,
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE * 2, BOX_SIZE * 2, BOX_SIZE * 2),
-            pos=BOX_POS,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE * 2, BOX_SIZE * 2, BOX_SIZE * 2),
+                pos=BOX_POS,
+            ),
+            material=gs.materials.FEM.Elastic(),
         ),
-        material=gs.materials.FEM.Elastic(),
     )
 
     # Build the scene
@@ -310,27 +326,31 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     )
     # Place the tested entity after another FEM entity so its local and solver indices differ.
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.5, 0.0, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-0.5, 0.0, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+            ),
         ),
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated" if use_implicit_solver else "stable_neohookean",
+            ),
         ),
     )
     anchor = scene.add_entity(
@@ -462,15 +482,17 @@ def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):
         show_FPS=False,
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-            pos=(0.0, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(
-            rho=1.0 / BOX_SIZE**3,  # Unit mass
-        ),
-        surface=gs.surfaces.Default(
-            color=(1, 1, 1, 0.5),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+                pos=(0.0, 0.0, 0.0),
+            ),
+            material=gs.materials.FEM.Elastic(
+                rho=1.0 / BOX_SIZE**3,  # Unit mass
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 1, 1, 0.5),
+            ),
         ),
     )
     scene.build()
@@ -517,27 +539,31 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         show_FPS=False,
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                friction_mu=1.0,
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="meshes/cube8.obj")
     box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/meshes/cube8.obj",
-            pos=(0.0, 0.0, 2 * SPHERE_RADIUS + BOX_SIZE),
-            scale=BOX_SIZE,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e4,
-            rho=50.0,
-            friction_mu=1.0,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/meshes/cube8.obj",
+                pos=(0.0, 0.0, 2 * SPHERE_RADIUS + BOX_SIZE),
+                scale=BOX_SIZE,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e4,
+                rho=50.0,
+                friction_mu=1.0,
+                model="linear_corotated",
+            ),
         ),
     )
     scene.build()
@@ -590,24 +616,28 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
         show_FPS=False,
     )
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
-            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.45,
-            rho=1000.0,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-BOX_SIZE / 2, BOX_SIZE / 2 + MOTION_RADIUS, HEIGHT + BOX_SIZE / 2),
+                size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.45,
+                rho=1000.0,
+                model="linear_corotated",
+            ),
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(MOTION_RADIUS + BOX_SIZE, -SPHERE_RADIUS, HEIGHT - BOX_SIZE / 2),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(MOTION_RADIUS + BOX_SIZE, -SPHERE_RADIUS, HEIGHT - BOX_SIZE / 2),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                model="linear_corotated",
+            ),
         ),
     )
     scene.build()

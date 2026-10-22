@@ -11,7 +11,6 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
-from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
 from genesis.utils.misc import DeprecationError, qd_to_torch
@@ -27,7 +26,6 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
-    material_cls = MPM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -255,7 +253,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, options=None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "MPMEntity":
         self.add_material(material)
 

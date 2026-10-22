@@ -437,12 +437,13 @@ def test_align_anchor_with_geom_densities(density_align_usd):
         ),
     )
     ghost = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/uniform_body",
-            align=True,
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.USD(
+                file=density_align_usd,
+                prim_path="/root/uniform_body",
+                align=True,
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     scene.build()
     # Two unit cubes at x = -0.5 / +0.5 with densities 100 / 300: mass 400, center of mass at

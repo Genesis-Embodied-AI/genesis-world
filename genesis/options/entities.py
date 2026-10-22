@@ -208,3 +208,15 @@ class HybridEntityOptions(EntityOptions):
     """
 
     material: Hybrid
+
+
+def get_entity_options_cls(material: Material) -> type[EntityOptions] | None:
+    """Return the class of the entity options admitting a material, or None if no class admits it.
+
+    Each class admits the materials of its declared 'material' field. A rigid material resolves to
+    'RigidEntityOptions', since that class is declared before 'KinematicEntityOptions'.
+    """
+    for options_cls in EntityOptions.__subclasses__():
+        if isinstance(material, options_cls.model_fields["material"].annotation):
+            return options_cls
+    return None
