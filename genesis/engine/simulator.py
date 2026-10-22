@@ -140,6 +140,10 @@ class Simulator(RBC):
         if desc is not None:
             material = desc.material
             options = desc.options
+        # Only a kinematic or rigid entity takes several morphs, one per variant. The other solvers resolve their
+        # description from the morph before the entity exists, so the check runs here.
+        elif not isinstance(morph, Morph) and not isinstance(material, gs.materials.Kinematic):
+            gs.raise_exception(f"An entity is created from one morph, got {type(morph).__name__}.")
         if isinstance(material, gs.materials.Hybrid):
             # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
             # adds its parts to the scene itself.

@@ -137,6 +137,7 @@ The build phases are:
 | FEM | `FEMDescription` | `FEMData`: time-indexed state, element and vertex info, surface fields | `FEMEntityData` per entity | Iterative solve, rendering and constraint workspaces |
 | MPM | `MPMDescription` | `MPMData`: particle history, particle info, coupling grid | `ParticleEntityData` per entity | Grid reset bookkeeping, render buffers |
 | SPH | `SPHDescription` | `SPHData`: particle state and info, in entity order and in spatial hash order | `ParticleEntityData` per entity, in entity order | Spatial hash, render buffers |
+| PBD | `PBDDescription` | `PBDData`: particle state and info, in entity order and in spatial hash order, rest topology | `PBDEntityData` per entity: particle range and topology ranges | Spatial hash, visual vertex supports, render buffers |
 
 A range record holds the aggregate record it indexes and its ranges into it. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
 

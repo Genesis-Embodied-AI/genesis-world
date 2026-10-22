@@ -1,10 +1,11 @@
-import pytest
 import numpy as np
+import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 
-from ..utils.assertions import assert_allclose
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 # Note that "session" scope must NOT be used because the material while be altered without copy when building the scene
@@ -15,7 +16,7 @@ def pbd_material():
 
 
 @pytest.mark.required
-def test_maxvolume(pbd_material, show_viewer, box_obj_path):
+def test_maxvolume(pbd_material, tmp_path, show_viewer, box_obj_path):
     scene = gs.Scene(
         pbd_options=gs.options.PBDOptions(
             particle_size=0.1,
@@ -53,10 +54,19 @@ def test_maxvolume(pbd_material, show_viewer, box_obj_path):
         f"expected more than {pbd1.n_elems} elements without a volume limit."
     )
 
+    # The rest topology is resolved into the descriptions that the scene file holds
+    exported = tmp_path / f"maxvolume{SCENE_FORMAT}"
+    scene.export(exported)
+    restored = gs.Scene.load(exported, show_viewer=show_viewer)
+    for entity, restored_entity in zip((pbd1, pbd2), restored.entities):
+        assert isinstance(restored_entity.material, gs.materials.PBD.Elastic)
+        assert_equal(restored_entity.n_elems, entity.n_elems)
+        assert_equal(restored_entity.edges, entity.edges)
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_get_mass(n_envs, show_viewer, tol):
+def test_get_mass(n_envs, tmp_path, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
@@ -74,12 +84,17 @@ def test_get_mass(n_envs, show_viewer, tol):
             ),
         ),
     )
+    expected_mass = cloth.vmesh.area * cloth.material.rho
+    exported = tmp_path / f"cloth{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    cloth = scene.entities[1]
     scene.build(n_envs=n_envs)
 
     mass = cloth.get_mass()
     expected_n = max(n_envs, 1)
     assert mass.shape == (expected_n,), f"Expected shape ({expected_n},), got {mass.shape}"
-    assert (mass > 0).all(), f"Expected positive mass, got {mass}"
+    assert_allclose(mass, expected_mass, rtol=tol)
 
 
 @pytest.mark.required

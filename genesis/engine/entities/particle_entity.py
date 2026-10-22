@@ -31,7 +31,7 @@ class ParticleEntityDescription(VerticesDescription, EntityDescription):
     name: str | None
     particle_size: float
     has_skinning: bool
-    sampler: str
+    sampler: str | None
     origin: np.ndarray
     vmesh: gs.Mesh | None
     vverts: np.ndarray
@@ -52,12 +52,12 @@ class ParticleEntityDescription(VerticesDescription, EntityDescription):
         return None
 
     @classmethod
-    def resolve(cls, material, morph, surface, particle_size, name, boundary, *, has_skinning, options, vmesh=None):
+    def resolve(cls, material, morph, surface, particle_size, name, boundary, *, has_skinning, options):
         """Sample the particles of an entity from its morph, and place them and its visual mesh at the morph pose.
 
-        The visual mesh is loaded from the morph unless 'vmesh' gives it already. The particles must lie inside
-        'boundary', and the visual vertices and faces are kept for skinning when 'has_skinning' is set. 'options' are
-        the entity options the other arguments were taken from, kept as authored in the description.
+        The particles must lie inside 'boundary', and the visual vertices and faces are kept for skinning when
+        'has_skinning' is set. 'options' are the entity options the other arguments were taken from, kept as
+        authored in the description.
         """
         sampler = material.sampler
         match sampler.split("-"):
@@ -73,8 +73,7 @@ class ParticleEntityDescription(VerticesDescription, EntityDescription):
                     f"Got: {sampler}."
                 )
 
-        if vmesh is None:
-            vmesh = cls.resolve_mesh(morph, surface)
+        vmesh = cls.resolve_mesh(morph, surface)
         mesh_set_group_ids = None
         if isinstance(morph, gs.options.morphs.MeshSet):
             surface = vmesh[0].surface
@@ -168,14 +167,8 @@ class ParticleEntity(Entity):
         The scene object that this entity belongs to.
     solver : Solver
         The physics solver responsible for simulating the entity's particles.
-    material : Material
-        The material definition, including sampling strategy and physical properties.
-    morph : Morph
-        Geometry or volumetric shape used for sampling particles (e.g., mesh, primitive).
-    surface : Surface
-        Surface material or texture information associated with the entity.
-    particle_size : float
-        Size of each particle, determining resolution and sampling density.
+    desc : ParticleEntityDescription
+        The resolved particles and visual mesh, with the material, morph and surface they are resolved from.
     idx : int
         Index of this entity in the simulation.
     particle_start : int
@@ -184,52 +177,35 @@ class ParticleEntity(Entity):
         Global index offset for vertex-based rendering, used for skinning.
     vface_start : int, optional
         Global index offset for visual faces, used for skinning.
-    need_skinning : bool, default=True
-        Whether to enable skinning for rendering this entity's mesh.
-    desc : ParticleEntityDescription, optional
-        The resolved particles and visual mesh. An entity created without one samples them from its morph.
     """
 
     def __init__(
-        self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        vvert_start=None,
-        vface_start=None,
-        need_skinning=True,
-        name: str | None = None,
-        options=None,
-        desc: ParticleEntityDescription | None = None,
+        self, scene, solver, desc: ParticleEntityDescription, idx, particle_start, vvert_start=None, vface_start=None
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
-        self._desc: ParticleEntityDescription | None = None
+        super().__init__(idx, scene, desc.morph, solver, desc.material, desc.surface, name=desc.name)
+        # The scene names an entity as it is added, so the description takes the name the entity received
+        desc.name = self._name
+        self._desc = desc
 
-        self._particle_size = particle_size
+        self._particle_size = desc.particle_size
         self._particle_start = particle_start
 
-        self._need_skinning = need_skinning
-        if need_skinning:
+        if desc.has_skinning:
             self._vvert_start = vvert_start
             self._vface_start = vface_start
         else:
             self._vvert_start = -1
             self._vface_start = -1
 
-        if desc is None:
-            self._vmesh = ParticleEntityDescription.resolve_mesh(morph, surface)
-            if isinstance(morph, gs.options.morphs.MeshSet):
-                self._surface = self._vmesh[0].surface
-            elif self._vmesh is not None:
-                self._surface = self._vmesh.surface
-            self.sample()
-        else:
-            self._apply_description(desc)
+        self.sampler = desc.sampler
+        self._vmesh = desc.vmesh
+        self._vverts = desc.vverts
+        self._vfaces = desc.vfaces
+        self._particles = desc.init_positions
+        self.mesh_set_group_ids = desc.mesh_set_group_ids
+        self._init_particles_offset = torch.tensor(self._particles - desc.origin, dtype=gs.tc_float, device=gs.device)
+        self._n_particles = len(self._particles)
+        gs.logger.info(f"Sampled ~<{self._n_particles:,}>~ particles.")
 
         self.init_tgt_vars()
         self.init_ckpt()
@@ -282,7 +258,7 @@ class ParticleEntity(Entity):
         self.active = not isinstance(self._morph, gs.options.morphs.Nowhere)
 
         self._add_particles_to_solver()
-        if self._need_skinning:
+        if self._desc.has_skinning:
             self._add_vverts_to_solver()
 
     def _add_particles_to_solver(self):
@@ -337,36 +313,6 @@ class ParticleEntity(Entity):
             self.solver.vverts_info.support_weights[i_vv][self.solver.n_vvert_supports - 1] = 1.0 - b.sum()
             for j in range(self.solver.n_vvert_supports):
                 self.solver.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + self._particle_start
-
-    def sample(self):
-        """Sample the particles of an entity created without a description from its morph."""
-        desc = ParticleEntityDescription.resolve(
-            self._material,
-            self._morph,
-            self._surface,
-            self._particle_size,
-            self._name,
-            self._solver.boundary,
-            has_skinning=self._need_skinning,
-            options=self._options,
-            vmesh=self._vmesh,
-        )
-        self._apply_description(desc)
-
-    def _apply_description(self, desc: ParticleEntityDescription):
-        self._desc = desc
-        desc.name = self._name
-        self.sampler = desc.sampler
-        self._surface = desc.surface
-        self._vmesh = desc.vmesh
-        self._vverts = desc.vverts
-        self._vfaces = desc.vfaces
-        self._particles = desc.init_positions
-        self.mesh_set_group_ids = desc.mesh_set_group_ids
-        self._init_particles_offset = torch.tensor(self._particles - desc.origin, dtype=gs.tc_float, device=gs.device)
-        self._n_particles = len(self._particles)
-
-        gs.logger.info(f"Sampled ~<{self._n_particles:,}>~ particles.")
 
     def init_tgt_vars(self):
         """

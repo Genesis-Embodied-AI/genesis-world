@@ -34,19 +34,7 @@ class SPHEntity(ParticleEntity):
     """
 
     def __init__(self, scene, solver, desc: SPHEntityDescription, idx, particle_start):
-        super().__init__(
-            scene,
-            solver,
-            desc.material,
-            desc.morph,
-            desc.surface,
-            desc.particle_size,
-            idx,
-            particle_start,
-            need_skinning=desc.has_skinning,
-            name=desc.name,
-            desc=desc,
-        )
+        super().__init__(scene, solver, desc, idx, particle_start)
 
     @property
     def desc(self) -> SPHEntityDescription:

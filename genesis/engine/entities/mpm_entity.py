@@ -61,21 +61,7 @@ class MPMEntity(ParticleEntity):
         vvert_start,
         vface_start,
     ):
-        super().__init__(
-            scene,
-            solver,
-            desc.material,
-            desc.morph,
-            desc.surface,
-            desc.particle_size,
-            idx,
-            particle_start,
-            vvert_start,
-            vface_start,
-            need_skinning=desc.has_skinning,
-            name=desc.name,
-            desc=desc,
-        )
+        super().__init__(scene, solver, desc, idx, particle_start, vvert_start, vface_start)
 
     @property
     def desc(self) -> MPMEntityDescription:
