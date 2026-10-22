@@ -260,7 +260,7 @@ class MPMSolver(ParticleSolver):
         return self.n_particles > 0
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, options=None, desc=None
     ) -> "MPMEntity":
         self.add_material(material)
 
@@ -277,6 +277,7 @@ class MPMSolver(ParticleSolver):
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
+            options=options,
         )
         self._entities.append(entity)
 

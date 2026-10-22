@@ -137,6 +137,7 @@ class PBDTetEntity(PBDBaseEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
+        options=None,
     ):
         super().__init__(
             scene,
@@ -150,6 +151,7 @@ class PBDTetEntity(PBDBaseEntity):
             vvert_start,
             vface_start,
             name=name,
+            options=options,
         )
         self._edge_start = edge_start
 
@@ -269,6 +271,7 @@ class PBD2DEntity(PBDTetEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
+        options=None,
     ):
         super().__init__(
             scene,
@@ -283,6 +286,7 @@ class PBD2DEntity(PBDTetEntity):
             vvert_start,
             vface_start,
             name=name,
+            options=options,
         )
 
         self._inner_edge_start = inner_edge_start
@@ -384,6 +388,7 @@ class PBD3DEntity(PBDTetEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
+        options=None,
     ):
         super().__init__(
             scene,
@@ -398,6 +403,7 @@ class PBD3DEntity(PBDTetEntity):
             vvert_start,
             vface_start,
             name=name,
+            options=options,
         )
 
         self._elem_start = elem_start
@@ -493,10 +499,30 @@ class PBDParticleEntity(PBDBaseEntity):
     """
 
     def __init__(
-        self, scene, solver, material, morph, surface, particle_size, idx, particle_start, name: str | None = None
+        self,
+        scene,
+        solver,
+        material,
+        morph,
+        surface,
+        particle_size,
+        idx,
+        particle_start,
+        name: str | None = None,
+        options=None,
     ):
         super().__init__(
-            scene, solver, material, morph, surface, particle_size, idx, particle_start, need_skinning=False, name=name
+            scene,
+            solver,
+            material,
+            morph,
+            surface,
+            particle_size,
+            idx,
+            particle_start,
+            need_skinning=False,
+            name=name,
+            options=options,
         )
 
     def _add_particles_to_solver(self):
@@ -547,10 +573,30 @@ class PBDFreeParticleEntity(PBDBaseEntity):
     """
 
     def __init__(
-        self, scene, solver, material, morph, surface, particle_size, idx, particle_start, name: str | None = None
+        self,
+        scene,
+        solver,
+        material,
+        morph,
+        surface,
+        particle_size,
+        idx,
+        particle_start,
+        name: str | None = None,
+        options=None,
     ):
         super().__init__(
-            scene, solver, material, morph, surface, particle_size, idx, particle_start, need_skinning=False, name=name
+            scene,
+            solver,
+            material,
+            morph,
+            surface,
+            particle_size,
+            idx,
+            particle_start,
+            need_skinning=False,
+            name=name,
+            options=options,
         )
 
     def _add_particles_to_solver(self):

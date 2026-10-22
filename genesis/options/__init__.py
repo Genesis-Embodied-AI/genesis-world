@@ -1,4 +1,17 @@
-from .entities import EntityOptions, KinematicEntityOptions, RigidEntityOptions
+from .entities import (
+    EntityOptions,
+    FEMEntityOptions,
+    HybridEntityOptions,
+    KinematicEntityOptions,
+    MPMEntityOptions,
+    PBDClothEntityOptions,
+    PBDElasticEntityOptions,
+    PBDLiquidEntityOptions,
+    PBDParticleEntityOptions,
+    RigidEntityOptions,
+    SPHEntityOptions,
+    ToolEntityOptions,
+)
 from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .scene import SceneOptions
@@ -22,14 +35,21 @@ __all__ = [
     "BaseCouplerOptions",
     "CoacdOptions",
     "EntityOptions",
+    "FEMEntityOptions",
     "FEMOptions",
     "FoamOptions",
+    "HybridEntityOptions",
     "IPCCouplerOptions",
     "KinematicEntityOptions",
     "KinematicOptions",
     "LegacyCouplerOptions",
+    "MPMEntityOptions",
     "MPMOptions",
+    "PBDClothEntityOptions",
+    "PBDElasticEntityOptions",
+    "PBDLiquidEntityOptions",
     "PBDOptions",
+    "PBDParticleEntityOptions",
     "ProfilingOptions",
     "RigidEntityOptions",
     "RigidOptions",
@@ -37,7 +57,10 @@ __all__ = [
     "SceneOptions",
     "SFOptions",
     "SimOptions",
+    "SPHEntityOptions",
     "SPHOptions",
+    "ToolEntityOptions",
+    "ToolOptions",
     "ViewerOptions",
     "VisOptions",
 ]

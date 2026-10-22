@@ -44,6 +44,7 @@ class Entity(RBC):
         material,
         surface,
         name: str | None = None,
+        options: EntityOptions | None = None,
     ):
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
@@ -58,6 +59,7 @@ class Entity(RBC):
         self._material = material
         self._morph = morph
         self._surface = surface
+        self._options = options
         self._sim = scene.sim
 
         # Set entity name (auto-generate if not provided)
@@ -121,11 +123,15 @@ class Entity(RBC):
     def options(self) -> EntityOptions | None:
         """The options this entity was constructed from, as authored, or None for an entity given individual arguments.
 
-        The entity owns this copy, so the options passed to 'Scene.add_entity' may change or construct other entities
-        afterwards. It stays as authored: what the scene resolved from it lives in 'desc'.
+        Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it
+        is. The options passed to 'Scene.add_entity' may change or construct other entities afterwards. What the scene
+        resolved from them lives in 'desc'.
         """
         desc = self.desc
-        return None if desc is None else desc.options
+        options = self._options if desc is None else desc.options
+        if options is None:
+            return None
+        return options.model_copy(deep=True)
 
     @property
     def material(self):
