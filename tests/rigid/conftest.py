@@ -752,22 +752,24 @@ def authored_geom_density_mjcf():
     ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
 
     worldbody = ET.SubElement(mjcf, "worldbody")
-    for name, attrib in (
-        ("on_geom", dict(density="250")),
-        ("on_class", {"class": "water"}),
-        ("on_default", dict(density="1000")),
-        ("unstated", {}),
+    for i_b, (name, attrib) in enumerate(
+        (
+            ("on_geom", dict(density="250")),
+            ("on_class", {"class": "water"}),
+            ("on_default", dict(density="1000")),
+            ("unstated", {}),
+        )
     ):
-        body = ET.SubElement(worldbody, "body", name=name, pos="0.0 0.0 1.0")
+        body = ET.SubElement(worldbody, "body", name=name, pos=f"{i_b} 0.0 1.0")
         ET.SubElement(body, "freejoint")
         ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
 
-    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
+    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="4.0 0.0 1.0")
     ET.SubElement(mixed, "freejoint")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
 
-    fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
+    fused = ET.SubElement(worldbody, "body", name="fused", pos="5.0 0.0 1.0")
     ET.SubElement(fused, "freejoint")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
