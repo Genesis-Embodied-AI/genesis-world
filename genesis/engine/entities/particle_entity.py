@@ -182,10 +182,7 @@ class ParticleEntity(Entity):
     def __init__(
         self, scene, solver, desc: ParticleEntityDescription, idx, particle_start, vvert_start=None, vface_start=None
     ):
-        super().__init__(idx, scene, desc.morph, solver, desc.material, desc.surface, name=desc.name)
-        # The scene names an entity as it is added, so the description takes the name the entity received
-        desc.name = self._name
-        self._desc = desc
+        super().__init__(idx, scene, solver, desc, desc.morph)
 
         self._particle_size = desc.particle_size
         self._particle_start = particle_start

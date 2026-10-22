@@ -14,6 +14,7 @@ from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
+from .entities.hybrid_entity import HybridEntityDescription
 from .sensors import SensorManager
 from .solvers import (
     FEMSolver,
@@ -145,9 +146,11 @@ class Simulator(RBC):
         elif not isinstance(morph, Morph) and not isinstance(material, gs.materials.Kinematic):
             gs.raise_exception(f"An entity is created from one morph, got {type(morph).__name__}.")
         if isinstance(material, gs.materials.Hybrid):
-            # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
-            # adds its parts to the scene itself.
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name, options=options)
+            # A hybrid entity has no solver of its own, since its parts are entities of their own. Resolution adds both
+            # parts to the scene first, so the hybrid entity comes after them, authored or loaded.
+            if desc is None:
+                desc = HybridEntityDescription.resolve(self.scene, material, morph, surface, name, options)
+            entity = HybridEntity(self.n_entities, self.scene, desc)
         else:
             # The options decide the solver, by naming the class of the options configuring it
             for solver in self._solvers:
@@ -159,8 +162,7 @@ class Simulator(RBC):
                 self.n_entities, material, morph, surface, visualize_contact, name=name, options=options, desc=desc
             )
         self._entities.append(entity)
-        if entity.desc is not None:
-            self.scene._desc.entities.append(entity.desc)
+        self.scene._desc.entities.append(entity.desc)
         return entity
 
     def _add_force_field(self, force_field):

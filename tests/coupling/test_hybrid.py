@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
@@ -14,7 +15,7 @@ from ..utils.assets import get_hf_dataset
 
 @pytest.mark.slow  # ~300s
 @pytest.mark.required
-def test_rigid_mpm_muscle(show_viewer):
+def test_rigid_mpm_muscle(tmp_path, show_viewer):
     BALL_POS_INIT = (0.8, 0.6, 0.12)
 
     scene = gs.Scene(
@@ -78,6 +79,11 @@ def test_rigid_mpm_muscle(show_viewer):
             friction=0.5,
         ),
     )
+    exported = tmp_path / f"hybrid_robot{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    robot = scene.get_entity(robot.name)
+    ball = scene.get_entity(ball.name)
     scene.build()
 
     scene.reset()
@@ -173,30 +179,59 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     sys.platform == "linux" and platform.machine() == "aarch64",
     reason="pygel3d is not supported on Linux ARM (aarch64)",
 )
-def test_mesh_mpm_build(show_viewer):
+def test_mesh_association(tmp_path, show_viewer, tol):
     # FIXME: This test is crashing on Linux (x86 & aarch64) Github-hosted runners
 
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
             upper_bound=(0.5, 0.5, 0.5),
         ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.6),
+            camera_lookat=(0.1, 0.0, 0.0),
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
+    # Offsets the soft particles so that they do not start at index 0
     scene.add_entity(
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Nowhere(
+                n_particles=1,
+            ),
+            material=gs.materials.MPM.Liquid(),
+        ),
+    )
+    hybrid = scene.add_entity(
         options=gs.options.HybridEntityOptions(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 scale=0.15,
             ),
             material=gs.materials.Hybrid(
-                material_rigid=gs.materials.Rigid(),
+                material_rigid=gs.materials.Rigid(
+                    needs_coup=False,
+                ),
                 material_soft=gs.materials.MPM.Muscle(),
             ),
         ),
     )
-    scene.build()
+    exported = tmp_path / f"hybrid_mesh{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    hybrid = scene.get_entity(hybrid.name)
+    scene.build(n_envs=2)
+
+    pos = hybrid.part_rigid.get_pos()
+    pos[..., 0] += 0.2
+    hybrid.part_rigid.set_pos(pos)
+    scene.step()
+    expected_vel = 0.2 * hybrid.material.soft_dv_coef / hybrid.solver_soft.substep_dt
+    assert_allclose(hybrid.part_soft.get_particles_vel()[..., 0, 0], expected_vel, rtol=tol)
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup

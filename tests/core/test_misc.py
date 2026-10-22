@@ -21,7 +21,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
-def test_entity_options():
+def test_entity_options(tmp_path):
     scene = gs.Scene(
         mpm_options=gs.options.MPMOptions(
             grid_density=16,
@@ -229,6 +229,15 @@ def test_entity_options():
         scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
     # The two parts of the hybrid entity are entities of their own
     assert len(scene.entities) == 16
+
+    exported = tmp_path / "entity_options.gscene"
+    scene.export(exported)
+    restored = gs.Scene.load(exported)
+    assert [type(entity) for entity in restored.entities] == [type(entity) for entity in scene.entities]
+    for restored_entity, original_entity in zip(restored.entities, scene.entities):
+        # FEM and MPM materials hold functions bound to themselves, which no other instance compares equal to
+        assert restored_entity.options.model_dump() == original_entity.options.model_dump()
+        assert restored_entity.options.model_fields_set == original_entity.options.model_fields_set
 
 
 @pytest.mark.required

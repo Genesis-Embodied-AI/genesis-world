@@ -1,9 +1,10 @@
 from typing import Callable
 
-from pydantic import StrictBool
+from pydantic import Field, StrictBool
 
 from genesis.typing import NonNegativeFloat, ValidFloat
 
+from . import MPM
 from .base import Material
 
 
@@ -15,7 +16,7 @@ class Hybrid(Material):
     ----------
     material_rigid : Material
         The material of the rigid body.
-    material_soft : Material
+    material_soft : MPM.Base
         The material of the soft body.
     use_default_coupling : bool, optional
         Whether to use default solver coupling. Default is False.
@@ -34,11 +35,11 @@ class Hybrid(Material):
     """
 
     material_rigid: Material = ...
-    material_soft: Material = ...
+    material_soft: MPM.Base = ...
     use_default_coupling: StrictBool = False
     damping: NonNegativeFloat = 0.0
     thickness: ValidFloat = 0.05
     soft_dv_coef: ValidFloat = 0.01
-    func_instantiate_rigid_from_soft: Callable | None = None
-    func_instantiate_soft_from_rigid: Callable | None = None
-    func_instantiate_rigid_soft_association: Callable | None = None
+    func_instantiate_rigid_from_soft: Callable | None = Field(default=None, exclude=True)
+    func_instantiate_soft_from_rigid: Callable | None = Field(default=None, exclude=True)
+    func_instantiate_rigid_soft_association: Callable | None = Field(default=None, exclude=True)

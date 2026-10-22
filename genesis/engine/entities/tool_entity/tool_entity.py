@@ -103,10 +103,7 @@ class ToolEntity(Entity):
     """
 
     def __init__(self, scene, idx, solver, desc: ToolEntityDescription):
-        super().__init__(idx, scene, desc.morph, solver, desc.material, desc.surface, name=desc.name)
-        # The scene names an entity as it is added, so the description takes the name the entity received
-        desc.name = self._name
-        self._desc = desc
+        super().__init__(idx, scene, solver, desc, desc.morph)
         self._entity_data: ToolEntityData | None = None
 
         self.mesh = Mesh(entity=self, desc=desc)

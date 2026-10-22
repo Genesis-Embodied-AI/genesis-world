@@ -1660,8 +1660,7 @@ class Scene(RBC):
         # A scene holding what alters the simulation is rejected, since a file leaving it out would restore other
         # physics. Everything else is left out with a warning: what observes or draws the simulation, and every
         # callback. Every solver holds the same force fields, so one solver names them all.
-        rejected_kinds = Counter(type(entity).__name__ for entity in self.entities if entity.desc is None)
-        rejected_kinds.update(type(emitter).__name__ for emitter in self._emitters)
+        rejected_kinds = Counter(type(emitter).__name__ for emitter in self._emitters)
         rejected_kinds.update(type(force_field).__name__ for force_field in self._sim.solvers[0].force_fields)
         omitted_kinds = Counter(type(sensor).__name__ for sensor in self._sim._sensor_manager.sensors)
         if self._visualizer is not None:
@@ -1701,12 +1700,11 @@ class Scene(RBC):
         simulation had run to, so the simulated state has to be reproduced by stepping it again. Adding an entity
         resolves its description, so a scene is exported before it is built as readily as after.
 
-        Every entity that holds a description is written as that description. A scene holding anything that alters the
-        simulation and that no description covers raises, naming it: an entity of a kind without a description, an
-        emitter and a force field. Everything else a description leaves out is written without, with a warning naming
-        it: a camera, a sensor, a callback Genesis calls at every step, a texture read from an HDR or EXR file, and the
-        visual vertices an entity was given at runtime. A recorder neither simulates nor draws, so it is left out
-        without a word.
+        Every entity is written as its description. A scene holding anything that alters the simulation and that no
+        description covers raises, naming it: an emitter and a force field. Everything else a description leaves out
+        is written without, with a warning naming it: a camera, a sensor, a callback Genesis calls at every step, a
+        texture read from an HDR or EXR file, and the visual vertices an entity was given at runtime. A recorder
+        neither simulates nor draws, so it is left out without a word.
 
         Parameters
         ----------
