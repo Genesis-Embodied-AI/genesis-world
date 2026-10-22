@@ -1,9 +1,17 @@
+from dataclasses import dataclass
+
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.materials import SPH
 from genesis.engine.states.entities import SPHEntityState
 
 from .particle_entity import ParticleEntity, ParticleEntityDescription
+
+
+@dataclass(kw_only=True)
+class SPHEntityDescription(ParticleEntityDescription):
+    material: SPH.Base
 
 
 @qd.data_oriented
@@ -17,7 +25,7 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    desc : ParticleEntityDescription
+    desc : SPHEntityDescription
         The resolved particles, with the material, morph and surface they are resolved from.
     idx : int
         Index of this entity in the scene.
@@ -25,7 +33,7 @@ class SPHEntity(ParticleEntity):
         Start index for the particles belonging to this entity.
     """
 
-    def __init__(self, scene, solver, desc: ParticleEntityDescription, idx, particle_start):
+    def __init__(self, scene, solver, desc: SPHEntityDescription, idx, particle_start):
         super().__init__(
             scene,
             solver,
@@ -39,6 +47,10 @@ class SPHEntity(ParticleEntity):
             name=desc.name,
             desc=desc,
         )
+
+    @property
+    def desc(self) -> SPHEntityDescription:
+        return self._desc
 
     def _add_particles_to_solver(self):
         self._solver._kernel_add_particles(

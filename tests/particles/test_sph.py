@@ -6,10 +6,11 @@
 # Irregular samplers (e.g. pbs, random) introduce local density fluctuations at initialization, which lead to large
 # spurious pressure forces and can cause the simulation to become unstable or diverge.
 
-import pytest
 import numpy as np
+import pytest
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 from genesis.utils.misc import qd_to_numpy
 
 
@@ -282,7 +283,7 @@ def test_dfsph_simulation_builds_and_runs(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("pressure_solver", ["WCSPH", "DFSPH"])
-def test_pressure_carries_column_weight(show_viewer, pressure_solver):
+def test_pressure_carries_column_weight(tmp_path, show_viewer, pressure_solver):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -316,6 +317,11 @@ def test_pressure_carries_column_weight(show_viewer, pressure_solver):
             ),
         ),
     )
+    # The sampled particles are resolved into the description that the scene file holds
+    exported = tmp_path / f"column{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    assert isinstance(scene.entities[1].material, gs.materials.SPH.Liquid)
     scene.build()
 
     for _ in range(100):

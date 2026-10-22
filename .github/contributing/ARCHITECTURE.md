@@ -136,6 +136,7 @@ The build phases are:
 | Kinematic, rigid | `ArticulatedDescription` | `ArticulatedData`: dynamic info and state | `LinksData`, `JointsData` per entity, `VisualGeomData` per visual geometry, `RigidGeomData` per collision geometry of the rigid solver | `RigidInfo`, scratch and adjoint workspaces |
 | FEM | `FEMDescription` | `FEMData`: time-indexed state, element and vertex info, surface fields | `FEMEntityData` per entity | Iterative solve, rendering and constraint workspaces |
 | MPM | `MPMDescription` | `MPMData`: particle history, particle info, coupling grid | `ParticleEntityData` per entity | Grid reset bookkeeping, render buffers |
+| SPH | `SPHDescription` | `SPHData`: particle state and info, in entity order and in spatial hash order | `ParticleEntityData` per entity, in entity order | Spatial hash, render buffers |
 
 A range record holds the aggregate record it indexes and its ranges into it. Checkpoint iteration includes each shared allocation once. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly.
 
