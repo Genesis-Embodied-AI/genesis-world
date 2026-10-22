@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, StrictBool, model_validator
 
@@ -7,13 +7,11 @@ from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, StrArrayT
 
 from .kinematic import Kinematic
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.rigid_entity import RigidEntity
 
 CoupType = Literal["two_way_soft_constraint", "external_articulation", "ipc_only"]
 
 
-class Rigid(Kinematic["RigidEntity"]):
+class Rigid(Kinematic):
     """
     The Rigid class represents a material used in rigid body simulation.
 

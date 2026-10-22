@@ -13,6 +13,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
 from genesis.ext.urdfpy.urdf import URDF
+from genesis.options.entities import MPMEntityOptions, RigidEntityOptions
 from genesis.utils.hybrid import (
     check_graph,
     compute_graph_attribute,
@@ -72,7 +73,9 @@ class HybridEntity(Entity):
                 gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to False")
                 material_rigid.needs_coup = False
 
-            part_rigid = scene.add_entity(material=material_rigid, morph=morph, surface=surface_rigid)
+            part_rigid = scene.add_entity(
+                options=RigidEntityOptions(morph=morph, material=material_rigid, surface=surface_rigid)
+            )
 
             # get rigid part in world coords
             augment_link_world_coords(part_rigid)
@@ -91,7 +94,7 @@ class HybridEntity(Entity):
 
         elif isinstance(morph, gs.morphs.Mesh):
             # instantiate soft part
-            part_soft = scene.add_entity(material=material_soft, morph=morph, surface=surface)
+            part_soft = scene.add_entity(options=MPMEntityOptions(morph=morph, material=material_soft, surface=surface))
 
             # load mesh in the same way as the soft entity
             mesh = load_mesh(morph.file)
@@ -576,14 +579,16 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
             meshes[i] = trimesh.boolean.difference([mesh] + meshes[i + 1 :])
 
     part_soft = scene.add_entity(
-        material=material_soft,
-        morph=gs.morphs.MeshSet(
-            files=meshes,
-            poss=trans_local_to_global,
-            eulers=euler_local_to_global,
-            scale=1,  # scale is already handled in geom.init_verts
-        ),
-        surface=surface,
+        options=MPMEntityOptions(
+            morph=gs.morphs.MeshSet(
+                files=meshes,
+                poss=trans_local_to_global,
+                eulers=euler_local_to_global,
+                scale=1,  # scale is already handled in geom.init_verts
+            ),
+            material=material_soft,
+            surface=surface,
+        )
     )
 
     return part_soft
@@ -618,7 +623,9 @@ def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid,
     quat_rigid = morph.quat
     scale_rigid = morph.scale
     morph_rigid = gs.morphs.URDF(file=urdf, pos=pos_rigid, quat=quat_rigid, scale=scale_rigid, fixed=morph.fixed)
-    part_rigid = scene.add_entity(material=material_rigid, morph=morph_rigid, surface=surface)
+    part_rigid = scene.add_entity(
+        options=RigidEntityOptions(morph=morph_rigid, material=material_rigid, surface=surface)
+    )
 
     return part_rigid
 

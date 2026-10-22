@@ -918,25 +918,27 @@ def test_splashsurf_surface_reconstruction(show_viewer):
         show_viewer=show_viewer,
     )
     sph_liquid = scene.add_entity(
-        material=gs.materials.SPH.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.3, 0.2),
-            size=(0.25, 0.25, 0.4),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
-            vis_mode="recon",
+        options=gs.options.SPHEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.3, 0.2),
+                size=(0.25, 0.25, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+                vis_mode="recon",
+            ),
         ),
     )
     pbd_liquid = scene.add_entity(
-        material=gs.materials.PBD.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.3, 0.2),
-            size=(0.25, 0.25, 0.4),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
-            vis_mode="recon",
+        options=gs.options.PBDLiquidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.3, 0.2),
+                size=(0.25, 0.25, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+                vis_mode="recon",
+            ),
         ),
     )
     cam = scene.add_camera(

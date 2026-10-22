@@ -29,13 +29,15 @@ def main():
     mat_elastic = gs.materials.PBD.Elastic()
 
     bunny = scene.add_entity(
-        material=mat_elastic,
-        morph=gs.morphs.Mesh(
-            file="meshes/dragon/dragon.obj",
-            scale=0.003,
-            pos=(0, 0, 0.8),
+        options=gs.options.PBDElasticEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/dragon/dragon.obj",
+                scale=0.003,
+                pos=(0, 0, 0.8),
+            ),
+            material=mat_elastic,
+            surface=gs.surfaces.Default(),
         ),
-        surface=gs.surfaces.Default(),
     )
     scene.build()
 

@@ -406,14 +406,15 @@ class KinematicEntityDescription(EntityDescription):
         enable_mujoco_compatibility: bool,
         visualize_contact: bool = False,
         name: str | None = None,
-        options: EntityOptions | None = None,
+        *,
+        options: EntityOptions,
     ) -> Self:
         """Resolve what an entity is created with into the description it is built from.
 
         This is where every asset a morph names is read and post-processed, so an entity created from the returned
         description opens no file. 'morphs' lists the primary morph first, then one morph per heterogeneous variant.
         'solver_options' are those of the solver simulating the entity, which the parsers check the assets against.
-        'options' are the entity options the other arguments were taken from, if any, kept as authored in the
+        'options' are the entity options the other arguments were taken from, kept as authored in the
         description. The resolution modifies the morphs, the material and the surface it is given, so 'options' must
         hold objects of its own.
         """

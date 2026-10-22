@@ -73,15 +73,16 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
     # Kinematic mesh in addition to the rigid entities above, so the camera-mount path is exercised against both
     # entity kinds via raster_cam_attached_kin below.
     kin_box = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.3,
-            pos=(-1.0, 1.0, 1.0),
-            fixed=True,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Rough(
-            color=(0.5, 0.5, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.3,
+                pos=(-1.0, 1.0, 1.0),
+                fixed=True,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.5, 0.5, 1.0),
+            ),
         ),
     )
 

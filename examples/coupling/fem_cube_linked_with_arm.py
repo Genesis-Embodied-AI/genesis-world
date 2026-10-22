@@ -41,15 +41,17 @@ def main():
     scene.add_entity(gs.morphs.Plane())
 
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.0, 0.05),
-            size=(0.2, 0.2, 0.2),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1.0e4,  # stiffness
-            nu=0.45,  # compressibility (0 to 0.5)
-            rho=1000.0,  # density
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.0, 0.05),
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1.0e4,  # stiffness
+                nu=0.45,  # compressibility (0 to 0.5)
+                rho=1000.0,  # density
+                model="linear_corotated",
+            ),
         ),
     )
     arm = scene.add_entity(

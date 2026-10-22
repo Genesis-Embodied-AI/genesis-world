@@ -158,14 +158,11 @@ class Simulator(RBC):
         if desc is not None:
             material = desc.material
             options = desc.options
-        if visualize_contact and not isinstance(material, gs.materials.Rigid):
-            gs.raise_exception("'visualize_contact' only applies to rigid entities.")
         if isinstance(material, gs.materials.Hybrid):
-            # A hybrid entity has no solver of its own, since its parts are entities of their own. Its material, which
-            # only 'HybridEntityOptions' admits, routes it with or without options. The hybrid entity adds its parts to
-            # the scene itself.
+            # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
+            # adds its parts to the scene itself.
             entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name, options=options)
-        elif options is not None:
+        else:
             # The options decide the solver, by naming the class of the options configuring it
             for solver in self._solvers:
                 if type(solver._options) is options.scene_solver_options_cls:
@@ -174,20 +171,6 @@ class Simulator(RBC):
                 gs.raise_exception(f"No solver simulates entities of options {type(options).__name__}.")
             entity = solver.add_entity(
                 self.n_entities, material, morph, surface, visualize_contact, name=name, options=options, desc=desc
-            )
-        else:
-            # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
-            # one declaring the most derived class simulates it (see 'Solver.material_cls').
-            solver = None
-            for candidate in self._solvers:
-                if candidate.material_cls is None or not isinstance(material, candidate.material_cls):
-                    continue
-                if solver is None or issubclass(candidate.material_cls, solver.material_cls):
-                    solver = candidate
-            if solver is None:
-                gs.raise_exception(f"No solver simulates entities of material {type(material).__name__}.")
-            entity = solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact, name=name, desc=desc
             )
         self._entities.append(entity)
         if entity.desc is not None:
