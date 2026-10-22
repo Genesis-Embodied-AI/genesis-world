@@ -62,7 +62,7 @@ def get_model_name(file_path):
     return None
 
 
-def prepare_xml(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep):
+def build_spec(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep):
     robot = None
     if isinstance(xml, urdfpy.URDF):
         is_urdf_file = True
@@ -183,7 +183,7 @@ def prepare_xml(xml, discard_visual, merge_fixed_links, exclude_ground_plane, li
             # Mujoco MJCF parser to determine how to load mesh files.
             elem.set("filename", str(Path(asset_path) / mesh_path))
 
-    return root, robot
+    return mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8")), robot
 
 
 def compile_model(spec: mujoco.MjSpec, robot: urdfpy.URDF | None) -> mujoco.MjModel:
@@ -224,8 +224,7 @@ def build_model(
         return xml
     if not isinstance(xml, (str, Path, urdfpy.URDF)):
         gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
-    root, robot = prepare_xml(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep)
-    spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
+    spec, robot = build_spec(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep)
     return compile_model(spec, robot)
 
 
@@ -242,26 +241,22 @@ def parse_xml(morph, surface, rigid_options=None):
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
     if isinstance(file, mujoco.MjModel):
-        mj = file
-        geoms_density = [None] * mj.ngeom
+        mj, spec_geoms = file, ()
     else:
-        root, robot = prepare_xml(file, not morph.visualization, merge_fixed_links, exclude_ground_plane, links_to_keep)
-        spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
-        geoms_density_map: dict[mujoco.MjsGeom, float | None] = {}
-        if robot is None:
-            # An omitted density takes the MJCF default of 1000, resolved by MuJoCo through the default classes
-            for geom in spec.geoms:
-                if geom.type == mujoco.mjtGeom.mjGEOM_MESH:
-                    is_shell = spec.mesh(geom.meshname).inertia == mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
-                else:
-                    is_shell = geom.typeinertia == mujoco.mjtGeomInertia.mjINERTIA_SHELL
-                geoms_density_map[geom] = geom.density if np.isnan(geom.mass) and not is_shell else None
+        spec, robot = build_spec(file, not morph.visualization, merge_fixed_links, exclude_ground_plane, links_to_keep)
         mj = compile_model(spec, robot)
-        geoms_density = [None] * mj.ngeom
-        if robot is None:
-            # Compilation can discard visual geoms. Only retained geoms have valid final model IDs.
-            for geom in spec.geoms:
-                geoms_density[geom.id] = geoms_density_map[geom]
+        # A URDF states no geom density
+        spec_geoms = spec.geoms if robot is None else ()
+    # Compilation removes the discarded visual geoms from the spec, so the remaining ones carry their model ids.
+    # An omitted density takes the MJCF default of 1000, resolved by MuJoCo through the default classes.
+    geoms_density = [None] * mj.ngeom
+    for geom in spec_geoms:
+        if geom.type == mujoco.mjtGeom.mjGEOM_MESH:
+            is_shell = spec.mesh(geom.meshname).inertia == mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
+        else:
+            is_shell = geom.typeinertia == mujoco.mjtGeomInertia.mjINERTIA_SHELL
+        if np.isnan(geom.mass) and not is_shell:
+            geoms_density[geom.id] = geom.density
 
     # We have another more informative warning later so we suppress this one
     # gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
