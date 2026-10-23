@@ -757,7 +757,6 @@ def authored_geom_density_mjcf():
             ("on_geom", dict(density="250")),
             ("on_class", {"class": "water"}),
             ("on_default", dict(density="1000")),
-            ("unstated", {}),
         )
     ):
         body = ET.SubElement(worldbody, "body", name=name, pos=f"{i_b} 0.0 1.0")
@@ -768,16 +767,21 @@ def authored_geom_density_mjcf():
     ET.SubElement(mixed, "freejoint")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+    # A visual geom stays out of the recomputed inertia
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
 
     fused = ET.SubElement(worldbody, "body", name="fused", pos="5.0 0.0 1.0")
     ET.SubElement(fused, "freejoint")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
 
-    # A zero-density geom is a massless marker carried by a link with nonzero inertia
-    weightless = ET.SubElement(fused, "body", name="weightless")
+    unstated = ET.SubElement(worldbody, "body", name="unstated", pos="6.0 0.0 1.0")
+    ET.SubElement(unstated, "freejoint")
+    ET.SubElement(unstated, "geom", type="box", size="0.1 0.1 0.1")
+    # A zero-density geom is a massless marker carried by a link with nonzero inertia. The two share one frame, so the
+    # center of mass of the marker lies inside its own geometry.
+    weightless = ET.SubElement(unstated, "body", name="weightless")
     ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
-    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
     return ET.tostring(mjcf, encoding="unicode")
 
 
@@ -913,20 +917,6 @@ def degenerate_inertials():
         ET.SubElement(joint, "parent", link=parent)
         ET.SubElement(joint, "child", link=name)
     return ET.tostring(urdf, encoding="unicode")
-
-
-@pytest.fixture(scope="session")
-def zero_density_marker_mjcf():
-    """Generate an MJCF with a free body holding a jointless child body whose geom has a zero density. The two bodies
-    share one frame, so the center of mass of the child lies inside its own geometry."""
-    mjcf = ET.Element("mujoco", model="zero_density_marker")
-    worldbody = ET.SubElement(mjcf, "worldbody")
-    hull = ET.SubElement(worldbody, "body", name="hull", pos="0.0 -2.0 0.5")
-    ET.SubElement(hull, "freejoint")
-    ET.SubElement(hull, "geom", type="box", size="0.1 0.1 0.1")
-    marker = ET.SubElement(hull, "body", name="marker")
-    ET.SubElement(marker, "geom", type="sphere", size="0.05", density="0")
-    return ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
