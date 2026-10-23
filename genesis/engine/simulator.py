@@ -508,9 +508,10 @@ class Simulator(RBC):
     def substep_post_coupling(self, f):
         for solver in self._active_solvers:
             solver.substep_post_coupling(f)
-        # Hybrid entities drive their soft particles from the rigid links after the grid to particle transfer
-        for entity in self._associated_hybrid_entities:
-            entity.update_soft_part(f)
+            # Hybrid entities drive their soft particles from the rigid links after the grid to particle transfer
+            if solver is self.mpm_solver:
+                for entity in self._associated_hybrid_entities:
+                    entity.update_soft_part(f)
 
     def substep_post_coupling_grad(self, f):
         for solver in reversed(self._active_solvers):
