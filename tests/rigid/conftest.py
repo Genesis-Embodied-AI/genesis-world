@@ -748,6 +748,10 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 def authored_geom_density_mjcf():
     """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
     mjcf = ET.Element("mujoco", model="authored_geom_density")
+    asset = ET.SubElement(mjcf, "asset")
+    ET.SubElement(
+        asset, "mesh", name="duck", file=os.path.join(get_assets_dir(), "meshes", "duck.obj"), scale="0.1 0.1 0.1"
+    )
     default = ET.SubElement(mjcf, "default")
     ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
 
@@ -779,6 +783,11 @@ def authored_geom_density_mjcf():
     ET.SubElement(weighed, "freejoint")
     ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="5")
     ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
+    # A stated mass survives the processing of an open mesh into its collision geometry
+    weighed_mesh = ET.SubElement(worldbody, "body", name="weighed_mesh", pos="-1.0 0.0 1.0")
+    ET.SubElement(weighed_mesh, "freejoint")
+    ET.SubElement(weighed_mesh, "geom", type="mesh", mesh="duck", mass="5")
 
     unstated = ET.SubElement(worldbody, "body", name="unstated", pos="6.0 0.0 1.0")
     ET.SubElement(unstated, "freejoint")
