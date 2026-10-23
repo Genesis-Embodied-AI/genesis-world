@@ -179,6 +179,8 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     sys.platform == "linux" and platform.machine() == "aarch64",
     reason="pygel3d is not supported on Linux ARM (aarch64)",
 )
+# The closed-form soft velocity holds up to the rounding of the elastic stress, which single precision leaves above tol
+@pytest.mark.precision("64")
 def test_mesh_association(tmp_path, show_viewer, tol):
     # FIXME: This test is crashing on Linux (x86 & aarch64) Github-hosted runners
 
