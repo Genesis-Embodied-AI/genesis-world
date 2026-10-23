@@ -116,12 +116,11 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             # Compute stable timestep for the given particle properties (mu) and support radius and print warning
             # if the current timestep is larger than the stable timestep. This formula is derived from
             # [_task_compute_non_pressure_forces] function, which computes the acceleration due to non-pressure forces.
-            stable_dt = (
-                self._stable_dt_coef
-                * (0.01 * self._support_radius**2)
-                / qd_to_numpy(self.particles_info.mu, transpose=True).max()
-            )
-            if self.substep_dt > stable_dt:
+            # The stable timestep is inversely proportional to the viscosity, so an inviscid liquid has none to exceed.
+            mu_max = qd_to_numpy(self.particles_info.mu, transpose=True).max()
+            stable_dt_times_mu = self._stable_dt_coef * (0.01 * self._support_radius**2)
+            if self.substep_dt * mu_max > stable_dt_times_mu:
+                stable_dt = stable_dt_times_mu / mu_max
                 gs.logger.warning(
                     f"Current timestep ({self.substep_dt:.4g}) is larger than the stable timestep "
                     f"({stable_dt:.4g}) for SPH solver. "
