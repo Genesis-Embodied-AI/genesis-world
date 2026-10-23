@@ -1401,15 +1401,6 @@ class KinematicEntityDescription(EntityDescription):
                 g_info.pop("density", None)
                 g_info.pop("mass", None)
 
-        # A geom stating its mass takes the density giving that mass, so that its link holds densities alone. A geom
-        # spanning no volume keeps none.
-        for g_info in g_infos:
-            mass = g_info.pop("mass", None)
-            if mass is not None:
-                unit_mass = get_local_inertial_from_geom(g_info["type"], g_info["data"], g_info["mesh"]).mass
-                if unit_mass > 0.0:
-                    g_info["density"] = mass / unit_mass
-
         cg_infos, vg_infos = [], []
         for g_info in g_infos:
             is_col = g_info["contype"] or g_info["conaffinity"]
@@ -1471,6 +1462,16 @@ class KinematicEntityDescription(EntityDescription):
                     morph.coacd_options,
                     morph.watertighten,
                 )
+
+        # A geom stating its mass takes the density giving that mass on its final geometry, so that its link holds
+        # densities alone. Post-processing carries the mass over to that geometry, and a geom spanning no volume keeps
+        # no density.
+        for g_info in cg_infos:
+            mass = g_info.pop("mass", None)
+            if mass is not None:
+                unit_mass = get_local_inertial_from_geom(g_info["type"], g_info["data"], g_info["mesh"]).mass
+                if unit_mass > 0.0:
+                    g_info["density"] = mass / unit_mass
 
         # Randomize collision mesh colors. This is especially useful to check convex decomposition.
         for g_info in cg_infos:

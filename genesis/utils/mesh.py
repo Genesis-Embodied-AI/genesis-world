@@ -427,6 +427,7 @@ def postprocess_collision_geoms(
         geom_type = g_info.get("type")
         friction = g_info.get("friction")
         density = g_info.get("density")
+        mass = g_info.get("mass")
         sol_params = g_info.get("sol_params")
         key_parts += [
             np.ascontiguousarray(mesh.verts),
@@ -436,6 +437,7 @@ def postprocess_collision_geoms(
             int(g_info.get("conaffinity", 0)),
             float("nan") if friction is None else float(friction),
             float("nan") if density is None else float(density),
+            float("nan") if mass is None else float(mass),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
             np.ascontiguousarray(g_info.get("pos", gu.zero_pos()), dtype=np.float64),
             np.ascontiguousarray(g_info.get("quat", gu.identity_quat()), dtype=np.float64),
@@ -603,6 +605,8 @@ def _postprocess_collision_geoms_impl(
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
+                        # A geom stating its mass fuses with others stating theirs alone, so their masses add up
+                        and ("mass" in first_g_info) == ("mass" in g_info)
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
                             # A fused mesh carries a single density, so geoms with different authored densities must
@@ -646,7 +650,10 @@ def _postprocess_collision_geoms_impl(
             mesh = gs.Mesh.from_trimesh(
                 mesh=tmesh, surface=gs.surfaces.Collision(), metadata=dict(metadata) | {"merged": True}
             )
-            fused_infos.append({**first_g_info, **dict(type=gs.GEOM_TYPE.MESH, data=None, mesh=mesh)})
+            fused_info = {**first_g_info, **dict(type=gs.GEOM_TYPE.MESH, data=None, mesh=mesh)}
+            if "mass" in first_g_info:
+                fused_info["mass"] = sum(g_infos[i]["mass"] for i in fusion_group)
+            fused_infos.append(fused_info)
             geoms_is_fused.append(True)
         g_infos = fused_infos
 
@@ -722,7 +729,13 @@ def _postprocess_collision_geoms_impl(
                     )
                     for tmesh in tmeshes
                 ]
-                _g_infos += [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
+                parts_g_info = [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
+                # The parts share a stated mass in proportion to their volume
+                if "mass" in g_info:
+                    parts_volume = np.array([tmesh.volume for tmesh in tmeshes])
+                    for part_g_info, part_volume in zip(parts_g_info, parts_volume):
+                        part_g_info["mass"] = g_info["mass"] * part_volume / parts_volume.sum()
+                _g_infos += parts_g_info
             else:
                 _g_infos.append(g_info)
         g_infos = _g_infos

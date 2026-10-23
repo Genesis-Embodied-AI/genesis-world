@@ -456,6 +456,9 @@ def test_parsing_inertia_defaults(
     assert_allclose(masses["mixed"], (250.0 + 1000.0) * VOLUME, tol=gs.EPS)
     assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
     assert_allclose(masses["weighed"], 5.0 + 1000.0 * VOLUME, tol=gs.EPS)
+    # The unscaled copy watertightens the open mesh and the scaled one decomposes it, which keeps the mass alone
+    assert_allclose(masses["weighed_mesh"], 5.0, tol=gs.EPS)
+    assert_allclose(entity_density_scaled.get_link("weighed_mesh").get_mass(), 5.0 * 2.0**3, tol=gs.EPS)
     assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
     assert_equal(entity_density.get_link("weightless").desc.inertia, 0.0)
 
