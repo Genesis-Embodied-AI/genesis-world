@@ -784,6 +784,12 @@ def authored_geom_density_mjcf():
     ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="5")
     ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
 
+    # Geoms stating different masses keep them apart, which places the center of mass off center
+    weighed_pair = ET.SubElement(worldbody, "body", name="weighed_pair", pos="-2.0 0.0 1.0")
+    ET.SubElement(weighed_pair, "freejoint")
+    ET.SubElement(weighed_pair, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="1")
+    ET.SubElement(weighed_pair, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", mass="9")
+
     # A stated mass survives the processing of an open mesh into its collision geometry
     weighed_mesh = ET.SubElement(worldbody, "body", name="weighed_mesh", pos="-1.0 0.0 1.0")
     ET.SubElement(weighed_mesh, "freejoint")

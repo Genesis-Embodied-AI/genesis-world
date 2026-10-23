@@ -605,12 +605,13 @@ def _postprocess_collision_geoms_impl(
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
-                        # A geom stating its mass fuses with others stating theirs alone, so their masses add up
-                        and ("mass" in first_g_info) == ("mass" in g_info)
+                        # A fused mesh carries a single density, so geoms with different authored densities, and any
+                        # geom stating its mass, must stay separate for the density-weighted link inertial to survive
+                        # fusion.
+                        and "mass" not in first_g_info
+                        and "mass" not in g_info
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
-                            # A fused mesh carries a single density, so geoms with different authored densities must
-                            # stay separate for the density-weighted link inertial to survive fusion.
                             for name in ("friction", "sol_params", "density")
                         )
                     ):
@@ -650,10 +651,7 @@ def _postprocess_collision_geoms_impl(
             mesh = gs.Mesh.from_trimesh(
                 mesh=tmesh, surface=gs.surfaces.Collision(), metadata=dict(metadata) | {"merged": True}
             )
-            fused_info = {**first_g_info, **dict(type=gs.GEOM_TYPE.MESH, data=None, mesh=mesh)}
-            if "mass" in first_g_info:
-                fused_info["mass"] = sum(g_infos[i]["mass"] for i in fusion_group)
-            fused_infos.append(fused_info)
+            fused_infos.append({**first_g_info, **dict(type=gs.GEOM_TYPE.MESH, data=None, mesh=mesh)})
             geoms_is_fused.append(True)
         g_infos = fused_infos
 
