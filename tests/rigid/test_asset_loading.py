@@ -522,6 +522,26 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity_variants.desc.variants[1].links[0].inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
     assert_allclose(np.linalg.eigvalsh(entity_variants.desc.variants[1].links[0].inertia), (0.8, 1.6, 2.08), rtol=1e-6)
 
+    # Attaching makes the welded base movable, which estimates its inertia from the same geometry selection
+    carrier_inertia = inertia_scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+        ),
+    )
+    entity_inertia_mounted = inertia_scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=visual_collision_inertia[0],
+            fixed=True,
+            batch_fixed_verts=True,
+            inertia_from_visual=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
+    entity_inertia_mounted.attach(carrier_inertia, parent_link_name=carrier_inertia.base_link.name)
+    assert_allclose(entity_inertia_mounted.base_link.desc.mass, 48.0, rtol=1e-6)
+
     # Every link of an aligned free body keeps its own mass, so each link reads its authored mass. The two totals are
     # accumulated by independent code paths, so their agreement is bounded by that cross-path floor.
     assert_allclose(entity_chain_unmerged.get_links_mass(), (2.5, 1.5), tol=gs.EPS)

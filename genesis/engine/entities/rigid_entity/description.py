@@ -52,6 +52,7 @@ from .inertial import (
     compose_inertial_from_g_infos,
     compose_inertial_properties,
     finalize_inertial,
+    select_inertial_g_infos,
 )
 
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
@@ -1489,23 +1490,17 @@ class KinematicEntityDescription(EntityDescription):
         vg_infos,
         is_robot,
         resolution,
-        from_visual=False,
+        from_visual,
     ):
         """Compute a link's load-time inertial data (see 'LinkInertialInfo').
 
         The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density,
         so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
-        geoms for a link without collision geometry. With 'from_visual', visual geometry supplies both estimates when
-        inertia needs estimating and collision geometry has no authored density.
+        geoms for a link without collision geometry. 'from_visual' selects the geometry of both estimates (see
+        'select_inertial_g_infos').
         """
-        if (
-            from_visual
-            and vg_infos
-            and all(g_info.get("density") is None for g_info in cg_infos)
-            and not (explicit_mass is not None and explicit_mass > 0.0 and explicit_inertia is not None)
-        ):
-            cg_infos = vg_infos
+        cg_infos = select_inertial_g_infos(cg_infos, vg_infos, from_visual)
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *anchor_inertial, clamp_min_mass=False

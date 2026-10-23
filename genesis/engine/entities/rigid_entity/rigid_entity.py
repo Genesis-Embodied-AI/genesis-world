@@ -19,7 +19,14 @@ from .description import (
     RigidEqualityDescription,
     RigidLinkDescription,
 )
-from .inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT, compose_inertial_from_g_infos, finalize_inertial
+from .inertial import (
+    RHO_MUJOCO,
+    RHO_OBJECT,
+    RHO_ROBOT,
+    compose_inertial_from_g_infos,
+    finalize_inertial,
+    select_inertial_g_infos,
+)
 from .rigid_equality import RigidEquality
 from .rigid_geom import RigidGeom
 from .rigid_joint import RigidJoint
@@ -373,7 +380,12 @@ class KinematicEntity(Entity):
                         else:
                             rho = RHO_ROBOT if desc.is_robot else RHO_OBJECT
                     # A geom description holds the fields a parse states it with, so one composition serves either.
-                    hint = compose_inertial_from_g_infos([vars(g_desc) for g_desc in (desc.geoms or desc.vgeoms)], rho)
+                    cg_infos = [vars(g_desc) for g_desc in desc.geoms]
+                    vg_infos = [vars(g_desc) for g_desc in desc.vgeoms]
+                    morph = link.entity.morph
+                    from_visual = isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual
+                    g_infos = select_inertial_g_infos(cg_infos, vg_infos, from_visual) or vg_infos
+                    hint = compose_inertial_from_g_infos(g_infos, rho)
                     # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so
                     # this resolves it exactly as '_describe_link' resolves a moving link.
                     desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
