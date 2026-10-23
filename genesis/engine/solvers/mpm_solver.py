@@ -10,7 +10,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.entities import MPMEntity
+from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.entities.mpm_entity import MPMEntityDescription
 from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
@@ -34,6 +34,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def __init__(self, scene: "Scene", sim: "Simulator", options: "MPMOptions"):
         super().__init__(scene, sim, options)
+
+        self._hybrid_entities: list[HybridEntity] = []
 
         # options
         self._grid_density = options.grid_density
@@ -205,6 +207,14 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 gs.raise_exception(
                     "CPIC is not supported in differentiable mode yet. Submit a feature request if you need it."
                 )
+
+            self._hybrid_entities.extend(
+                entity
+                for entity in self._sim.entities
+                if isinstance(entity, HybridEntity)
+                and entity.part_soft.solver is self
+                and entity.desc.association is not None
+            )
 
             self.init_particle_render_fields()
             self.init_grid_scratch()
@@ -606,6 +616,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 gs.raise_exception(
                     "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
                 )
+
+        # Hybrid entities drive their soft particles from the rigid links after the grid to particle transfer
+        for entity in self._hybrid_entities:
+            entity.update_soft_part(f)
 
     def substep_post_coupling_grad(self, f):
         self.g2p.grad(
