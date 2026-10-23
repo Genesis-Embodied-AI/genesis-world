@@ -3149,7 +3149,7 @@ class FEMFloorVertContactHandler(FEMContactHandler):
             if i_p < self.max_contact_pairs:
                 self.contact_pairs[i_p].batch_idx = i_b
                 self.contact_pairs[i_p].geom_idx = i_v
-                sap_info[i_p].k = self.coupler._point_contact_stiffness * self._fem_data.surface_vert_mass[i_v]
+                sap_info[i_p].k = self.coupler._point_contact_stiffness * self._fem_data.surface_vert_mass[i_sv]
                 sap_info[i_p].phi0 = distance
                 sap_info[i_p].mu = self._fem_data.elements_v_info[i_v].friction_mu
             else:
