@@ -1033,7 +1033,7 @@ class Scene(RBC):
         """
         # Snapshot the current state before the gradient-tape unroll rewinds physics to step 0. The clocks go with
         # it: the unroll winds them down step by step, and the restore below puts the physics back where they were.
-        snapshot = self.get_state()
+        snapshot = self._get_state()
         steps = self._sim._steps.clone()
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
         torch.autograd.backward(loss, *args, **kwargs)
@@ -1044,7 +1044,9 @@ class Scene(RBC):
         return snapshot
 
     def _get_state(self):
-        return self._sim.get_state()
+        # A state the scene keeps for itself is no query of a differentiable rollout
+        with torch.no_grad():
+            return self._sim.get_state()
 
     @gs.assert_built
     def get_state(self):

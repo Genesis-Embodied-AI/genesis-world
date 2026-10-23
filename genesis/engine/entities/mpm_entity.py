@@ -6,6 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
+from genesis.grad.bridge import KernelLaunch
 from genesis.utils.misc import to_gs_tensor
 
 from .particle_entity import ParticleEntity, assert_active
@@ -82,18 +83,6 @@ class MPMEntity(ParticleEntity):
             name=name,
         )
 
-    def init_tgt_keys(self):
-        """
-        Initialize target keys used for buffer-based state tracking.
-
-        Sets up the list of keys for target states, including velocity, position, activeness, and finally actuation (for
-        muscle only).
-        """
-        if isinstance(self.material, gs.materials.MPM.Muscle):
-            self._tgt_keys = ("pos", "vel", "act", "actu")
-        else:
-            self._tgt_keys = ("pos", "vel", "act")
-
     def _add_to_solver(self):
         super()._add_to_solver()
         if isinstance(self.material, gs.materials.MPM.Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
@@ -111,66 +100,8 @@ class MPMEntity(ParticleEntity):
             self._particles,
         )
 
-    def _reset_grad(self):
-        """
-        Clear all gradients for particle properties.
-        """
-        self._reset_frame_grad(self._sim.cur_substep_local)
-
     @qd.kernel
-    def _reset_frame_grad(self, f: qd.i32):
-        """
-        Clear all gradients for particle properties at the given substep.
-
-        Parameters
-        ----------
-        f : int
-            The current substep index.
-        """
-        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
-            i_global = i_p + self._particle_start
-            self._solver.particles.grad[f, i_global, i_b].pos = 0
-            self._solver.particles.grad[f, i_global, i_b].vel = 0
-            self._solver.particles.grad[f, i_global, i_b].C = 0
-            self._solver.particles.grad[f, i_global, i_b].F = 0
-            self._solver.particles.grad[f, i_global, i_b].F_tmp = 0
-            self._solver.particles.grad[f, i_global, i_b].Jp = 0
-            self._solver.particles.grad[f, i_global, i_b].U = 0
-            self._solver.particles.grad[f, i_global, i_b].V = 0
-            self._solver.particles.grad[f, i_global, i_b].S = 0
-            self._solver.particles.grad[f, i_global, i_b].actu = 0
-
-    def add_grad_from_state(self, state):
-        """
-        Accumulate gradients from a recorded state back into the solver.
-
-        Parameters
-        ----------
-        state : MPMEntityState
-            The state object containing gradients for physical quantities.
-        """
-        if state.pos.grad is not None:
-            assert state.pos.grad.is_contiguous()
-            self._kernel_add_frame_particles_pos_grad(self._sim.cur_substep_local, state.pos.grad)
-
-        if state.vel.grad is not None:
-            assert state.vel.grad.is_contiguous()
-            self._kernel_add_frame_particles_vel_grad(self._sim.cur_substep_local, state.vel.grad)
-
-        if state.C.grad is not None:
-            assert state.C.grad.is_contiguous()
-            self._kernel_add_frame_particles_C_grad(self._sim.cur_substep_local, state.C.grad)
-
-        if state.F.grad is not None:
-            assert state.F.grad.is_contiguous()
-            self._kernel_add_frame_particles_F_grad(self._sim.cur_substep_local, state.F.grad)
-
-        if state.Jp.grad is not None:
-            assert state.Jp.grad.is_contiguous()
-            self._kernel_add_frame_particles_Jp_grad(self._sim.cur_substep_local, state.Jp.grad)
-
-    @qd.kernel
-    def _kernel_add_frame_particles_pos_grad(self, f: qd.i32, poss_grad: qd.types.ndarray()):
+    def add_grad_from_pos(self, f: qd.i32, poss_grad: qd.types.ndarray()):
         """
         Accumulate gradients to particle positions at the given substep.
 
@@ -187,7 +118,7 @@ class MPMEntity(ParticleEntity):
                 self._solver.particles.grad[f, i_global, i_b].pos[j] += poss_grad[i_b, i_p, j]
 
     @qd.kernel
-    def _kernel_add_frame_particles_vel_grad(self, f: qd.i32, vels_grad: qd.types.ndarray()):
+    def add_grad_from_vel(self, f: qd.i32, vels_grad: qd.types.ndarray()):
         """
         Accumulate gradients to particle velocities at the given substep.
 
@@ -204,7 +135,7 @@ class MPMEntity(ParticleEntity):
                 self._solver.particles.grad[f, i_global, i_b].vel[j] += vels_grad[i_b, i_p, j]
 
     @qd.kernel
-    def _kernel_add_frame_particles_C_grad(self, f: qd.i32, C_grad: qd.types.ndarray()):
+    def add_grad_from_C(self, f: qd.i32, C_grad: qd.types.ndarray()):
         """
         Accumulate gradients to affine matrices C at the given substep.
 
@@ -222,7 +153,7 @@ class MPMEntity(ParticleEntity):
                     self._solver.particles.grad[f, i_global, i_b].C[j, k] += C_grad[i_b, i_p, j, k]
 
     @qd.kernel
-    def _kernel_add_frame_particles_F_grad(self, f: qd.i32, F_grad: qd.types.ndarray()):
+    def add_grad_from_F(self, f: qd.i32, F_grad: qd.types.ndarray()):
         """
         Accumulate gradients to deformation gradients F at the given substep.
 
@@ -240,7 +171,7 @@ class MPMEntity(ParticleEntity):
                     self._solver.particles.grad[f, i_global, i_b].F[j, k] += F_grad[i_b, i_p, j, k]
 
     @qd.kernel
-    def _kernel_add_frame_particles_Jp_grad(self, f: qd.i32, Jp_grad: qd.types.ndarray()):
+    def add_grad_from_Jp(self, f: qd.i32, Jp_grad: qd.types.ndarray()):
         """
         Accumulate gradients to plastic volume ratios Jp at the given substep.
 
@@ -254,22 +185,6 @@ class MPMEntity(ParticleEntity):
         for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
             i_global = i_p + self._particle_start
             self._solver.particles.grad[f, i_global, i_b].Jp += Jp_grad[i_b, i_p]
-
-    def process_input_grad(self):
-        """
-        Process gradients for buffered inputs and backpropagate using custom kernels.
-
-        Returns the pairs (input, gradient) of the inputs applied at this step that track gradients.
-        """
-        inputs_grad = []
-        if isinstance(self.material, gs.materials.MPM.Muscle):
-            _tgt_actu = self._tgt_buffer["actu"].pop()
-            if _tgt_actu is not None and _tgt_actu.requires_grad:
-                actu_grad = torch.zeros_like(_tgt_actu)
-                self._set_particles_actu_grad(actu_grad)
-                inputs_grad.append((_tgt_actu, actu_grad))
-
-        return inputs_grad + super().process_input_grad()
 
     @gs.assert_built
     def get_state(self):
@@ -293,8 +208,8 @@ class MPMEntity(ParticleEntity):
             active=state.active,
         )
 
-        # Store all queried states to track gradient flow
-        self._queried_states.append(state)
+        # The gradient of the state goes to the particles of this entity (see 'MPMSolver.add_grad_from_state')
+        self._solver.record_read(state.grad_tensors, self)
 
         return state
 
@@ -353,12 +268,9 @@ class MPMEntity(ParticleEntity):
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         poss = self._sanitize_particles_tensor(poss, gs.tc_float, particles_idx, envs_idx, (3,))
-        self.solver._kernel_set_particles_pos(self._sim.cur_substep_local, particles_idx, envs_idx, poss)
-
-    @gs.assert_built
-    def _set_particles_pos_grad(self, poss_grad):
-        self.solver._kernel_set_particles_pos_grad(
-            self._sim.cur_substep_local, self._particle_start, self._n_particles, poss_grad
+        # Between two steps, the state sits in frame 0 (see 'MPMSolver.roll_frame_window')
+        self._solver.record_input(
+            (KernelLaunch(self.solver._kernel_set_particles_pos, (0, particles_idx, envs_idx, poss)),)
         )
 
     def get_particles_pos(self, envs_idx=None):
@@ -377,12 +289,9 @@ class MPMEntity(ParticleEntity):
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         vels = self._sanitize_particles_tensor(vels, gs.tc_float, particles_idx, envs_idx, (3,))
-        self.solver._kernel_set_particles_vel(self._sim.cur_substep_local, particles_idx, envs_idx, vels)
-
-    @gs.assert_built
-    def _set_particles_vel_grad(self, vels_grad):
-        self.solver._kernel_set_particles_vel_grad(
-            self._sim.cur_substep_local, self._particle_start, self._n_particles, vels_grad
+        # See 'set_particles_pos'
+        self._solver.record_input(
+            (KernelLaunch(self.solver._kernel_set_particles_vel, (0, particles_idx, envs_idx, vels)),)
         )
 
     def get_particles_vel(self, envs_idx=None):
@@ -406,7 +315,11 @@ class MPMEntity(ParticleEntity):
         # if not torch.isin(actives, torch.Tensor([False, True], dtype=gs.tc_bool, device=gs.device)).all():
         #     gs.raise_exception("Elements of `actives' must be either True or False.")
 
-        self.solver._kernel_set_particles_active(self._sim.cur_substep_local, particles_idx, envs_idx, actives)
+        # See 'set_particles_pos'
+        self._solver.record_input(
+            (KernelLaunch(self.solver._kernel_set_particles_active, (0, particles_idx, envs_idx, actives)),),
+            is_differentiable=False,
+        )
 
     def get_particles_active(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -433,7 +346,7 @@ class MPMEntity(ParticleEntity):
         actus = to_gs_tensor(actus)
         if actus.ndim == 0:
             actus = actus.reshape((1,)).expand((self.material.n_groups,))
-        self._set_particles_target_state("actu", "actuation", (self.material.n_groups,), gs.tc_float, actus, envs_idx)
+        self._set_particles_state(self.set_particles_actu, (self.material.n_groups,), gs.tc_float, actus, envs_idx)
 
     @assert_muscle
     @gs.assert_built
@@ -454,22 +367,13 @@ class MPMEntity(ParticleEntity):
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         actus = self._sanitize_particles_tensor(actus, gs.tc_float, particles_idx, envs_idx, (self.material.n_groups,))
-        self.solver._kernel_set_particles_actu(
-            self._sim.cur_substep_local, self.material.n_groups, particles_idx, envs_idx, actus
-        )
-
-    @gs.assert_built
-    def _set_particles_actu_grad(self, actu_grad):
-        """
-        Set gradients for particle actuation values.
-
-        Parameters
-        ----------
-        actu_grad : torch.Tensor
-            A tensor containing gradients for actuation inputs.
-        """
-        self.solver._kernel_set_particles_actu_grad(
-            self._sim.cur_substep_local, self._particle_start, self._n_particles, actu_grad
+        # See 'set_particles_pos'
+        self._solver.record_input(
+            (
+                KernelLaunch(
+                    self.solver._kernel_set_particles_actu, (0, self.material.n_groups, particles_idx, envs_idx, actus)
+                ),
+            )
         )
 
     def get_particles_actu(self, envs_idx=None):

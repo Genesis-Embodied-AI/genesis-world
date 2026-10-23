@@ -17,11 +17,16 @@ class SolverCheckpoint:
     back recomputes what it leaves out. Each array stands under the name 'Solver.data' gives it, copied where it lives:
     on the device as a torch tensor when zero-copy views exist, as a numpy array otherwise. The static configs come
     along as provenance and are never written back.
+
+    A boundary checkpoint holds the state at the boundary of two steps alone, which the backward pass of a step of a
+    differentiable rollout replays it from: no gradient, frame 0 of the arrays holding frames, on the device whatever
+    the backend (see 'Solver.get_checkpoint').
     """
 
     arrays: dict[str, np.ndarray | torch.Tensor]
     configs: dict[str, object]
     kinds: frozenset[DataKind]
+    is_boundary_only: bool = False
 
 
 @dataclasses.dataclass
@@ -119,7 +124,7 @@ class RigidSolverState:
     @property
     def grad_tensors(self):
         """The tensors of the state that carry gradients."""
-        return (self.qpos, self.dofs_vel, self.dofs_acc, self.links_pos, self.links_quat, self.friction_ratio)
+        return (self.qpos, self.dofs_vel, self.links_pos, self.links_quat)
 
     @property
     def s_global(self):

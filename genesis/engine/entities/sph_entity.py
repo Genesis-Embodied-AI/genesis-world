@@ -79,20 +79,6 @@ class SPHEntity(ParticleEntity):
             self._particles,
         )
 
-    def _reset_grad(self):
-        pass
-
-    def add_grad_from_state(self, state):
-        """
-        Apply gradients from a given state.
-
-        Parameters
-        ----------
-        state : SPHEntityState
-            The state from which to compute gradients.
-        """
-        pass
-
     @qd.kernel
     def get_frame(
         self,

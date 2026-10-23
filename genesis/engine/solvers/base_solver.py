@@ -14,7 +14,7 @@ import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
 from genesis.engine.states import SolverCheckpoint
-from genesis.grad.bridge import QueriedStates
+from genesis.grad.bridge import InputOperation, KernelLaunch, ReadOperation, RolloutGraph
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -325,8 +325,10 @@ class Solver(RBC):
         self._options = options
         self._entities: list[Entity] = gs.List()
 
-        # The solver states queried during the current rollout, registered by 'get_state' (see QueriedStates)
-        self._queried_states = QueriedStates(sim)
+        # Whether the state of the solver tracks gradients, and the autograd graph recording its operations, which the
+        # simulator hands it at build (see 'set_rollout_graph')
+        self._requires_grad: bool = sim.options.requires_grad
+        self._rollout_graph: RolloutGraph | None = None
 
         # force fields
         self._ffs = list()
@@ -359,28 +361,92 @@ class Solver(RBC):
     def build(self):
         self._B = self._sim._B
 
-    def process_input(self, in_backward=False):
-        """
-        Apply the inputs the entities taped for the coming step.
+    # ------------------------------------------------------------------------------------
+    # ------------------------------ differentiable simulation ---------------------------
+    # ------------------------------------------------------------------------------------
 
-        Returns the inputs applied, of any type, for the simulator to tape on the step.
-        """
-        return [value for entity in self._entities for value in entity.process_input(in_backward=in_backward)]
+    # The protocol a solver implements to take part in a differentiable scene. The simulator calls it on every active
+    # solver alone, so a solver of any origin becomes differentiable by implementing it, and the defaults below fit a
+    # solver holding no differentiable state.
 
-    def process_input_grad(self):
-        """
-        Run the reverse pass of the inputs the entities applied at the current step.
+    @property
+    def is_differentiable(self) -> bool:
+        """Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must."""
+        return False
 
-        Returns the pairs (input, gradient) of those that track gradients.
-        """
-        return [pair for entity in reversed(self._entities) for pair in entity.process_input_grad()]
+    def set_rollout_graph(self, rollout_graph: RolloutGraph) -> None:
+        """Give the solver the autograd graph recording its operations, before it builds."""
+        self._rollout_graph = rollout_graph
 
-    def collect_output_grads(self):
-        """Hand the gradients of the states queried at the current step to the solver, then to its entities."""
-        for state in self._queried_states.get(self._sim.cur_step_global):
-            self.add_grad_from_state(state)
-        for entity in self._entities:
-            entity.collect_output_grads()
+    @property
+    def is_recording(self) -> bool:
+        """Whether the operations on the state of the solver are recorded in the autograd graph of the rollout."""
+        return self._requires_grad and self._rollout_graph is not None and self._rollout_graph.is_recording
+
+    def record_input(
+        self, launches: tuple[KernelLaunch, ...], saved_state=None, *, is_differentiable: bool = True
+    ) -> None:
+        """
+        Run the launches of a setter, recorded as one operation of the rollout while it is recorded (see
+        InputOperation).
+
+        `saved_state` is the state the solver saved for launches whose kernels read quantities derived from it, None
+        otherwise (see 'restore_saved_state'). The values of an input that is not differentiable track no gradient,
+        and its operation only clears the adjoint of the state it overwrote. Every change of the state of a
+        differentiable solver goes through here, so a differentiable scene takes no shortcut around it.
+        """
+        if self.is_recording:
+            op = InputOperation(self, launches, saved_state)
+            if op.inputs and not is_differentiable:
+                gs.raise_exception("Gradients with respect to this input are not supported.")
+            self._rollout_graph.record(op, *op.inputs)
+            return
+        for launch in launches:
+            launch.kernel(*launch.args)
+        # A change of the state of a differentiable solver the graph does not record overwrites the output of the last
+        # operation recorded
+        if self._requires_grad:
+            self._rollout_graph.mark_state_changed()
+
+    def record_read(self, tensors: tuple[torch.Tensor, ...], selection, saved_state=None) -> None:
+        """
+        Record the query of the given tensors of a state as one operation of the rollout, while it is recorded (see
+        ReadOperation).
+
+        `selection` names the state the tensors cover, which 'add_grad_from_state' interprets, and `saved_state` is the
+        state the solver saved for tensors of quantities derived from it, None otherwise.
+        """
+        if self.is_recording:
+            self._rollout_graph.record(ReadOperation(self, tensors, selection, saved_state))
+
+    def add_grad_from_state(self, grads, selection, saved_state) -> None:
+        """Add the gradients of the tensors of a queried state to the adjoint of the state of the solver."""
+        gs.raise_exception(f"{type(self).__name__} records no differentiable query.")
+
+    def restore_saved_state(self, saved_state) -> None:
+        """Put back the state the solver saved for an operation reading quantities derived from it."""
+        gs.raise_exception(f"{type(self).__name__} saves no state.")
+
+    def fold_derived_grad(self, saved_state) -> None:
+        """Fold the adjoint an operation left on quantities derived from the state into the adjoint of the state."""
+
+    def roll_frame_window(self) -> None:
+        """Copy the last frame of the substeps the solver holds into frame 0, which the next substeps start from."""
+
+    def roll_frame_window_grad(self) -> None:
+        """Reverse 'roll_frame_window': move the adjoint of frame 0 to the last frame, before a step is replayed."""
+
+    def end_step(self) -> None:
+        """Run what ends a step once its substeps are over."""
+
+    def end_step_grad(self) -> None:
+        """Reverse 'end_step', first thing of the backward pass of a step."""
+
+    def reset_grad(self) -> None:
+        """Zero the adjoint of the state of the solver, from which a backward pass starts."""
+
+    def check_errors(self) -> None:
+        """Raise on the errors the solver flagged during a backward pass, once it is over."""
 
     @property
     def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
@@ -389,33 +455,53 @@ class Solver(RBC):
         """
         gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
-    def __getstate__(self) -> SolverCheckpoint:
-        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore.
+    def get_checkpoint(
+        self, kinds: frozenset[array_class.DataKind], *, is_boundary_only: bool = False
+    ) -> SolverCheckpoint:
+        """Return a SolverCheckpoint of the arrays of the given kinds this solver holds, for 'set_checkpoint' to restore.
 
-        The state is what 'data' yields of the kinds a checkpoint carries (see 'CHECKPOINT_KINDS'), copied where it
-        lives: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
-        process off the host, and as numpy arrays otherwise.
+        The arrays are what 'data' yields of those kinds. A full checkpoint copies them with their gradients where they
+        live: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
+        process off the host, and as numpy arrays otherwise. A boundary checkpoint holds the state at the boundary of
+        two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame 0 of the arrays
+        holding frames, on the device whatever the backend.
         """
+        configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
         arrays = {}
-        configs = {}
+        for item in self._checkpoint_items(kinds, is_boundary_only):
+            if isinstance(item, array_class.ScalarItem):
+                arrays[item.name] = np.array(getattr(item.owner, item.attr))
+            elif is_boundary_only and item.is_framed:
+                arrays[item.name] = qd_to_torch(item.array, 0, keepdim=False, copy=True)
+            else:
+                arrays[item.name] = data_to_array(item.array, to_torch=is_boundary_only or gs.use_zerocopy, copy=True)
+        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds, is_boundary_only=is_boundary_only)
+
+    def set_checkpoint(self, checkpoint: SolverCheckpoint) -> None:
+        """Write back the arrays of a checkpoint 'get_checkpoint' read, rejecting a record read from another build.
+
+        Nothing is notified to the subscribers (see 'mutates'). A solver whose step reads a DERIVED array before
+        recomputing it overrides this to recompute or invalidate that array when the record lacks DERIVED (see
+        'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
+        """
+        items = self._checkpoint_items(checkpoint.kinds, checkpoint.is_boundary_only)
+        array_class.fill_data(items, checkpoint.arrays, is_boundary_only=checkpoint.is_boundary_only)
+
+    def _checkpoint_items(self, kinds, is_boundary_only) -> Iterator[array_class.DataItem]:
+        """Yield the items a checkpoint of the given kinds holds, without the gradients for a boundary checkpoint."""
         for item in self.data:
-            if isinstance(item, array_class.ConfigItem):
-                configs[item.name] = item.config
-            elif item.kind in array_class.CHECKPOINT_KINDS:
-                if isinstance(item, array_class.ScalarItem):
-                    arrays[item.name] = np.array(getattr(item.owner, item.attr))
-                else:
-                    arrays[item.name] = data_to_array(item.array, to_torch=gs.use_zerocopy, copy=True)
-        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=array_class.CHECKPOINT_KINDS)
+            if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
+                continue
+            if not (is_boundary_only and isinstance(item, array_class.ArrayItem) and item.is_grad):
+                yield item
+
+    def __getstate__(self) -> SolverCheckpoint:
+        """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
+        return self.get_checkpoint(array_class.CHECKPOINT_KINDS)
 
     def __setstate__(self, state: SolverCheckpoint) -> None:
-        """Write back the arrays of the kinds a record holds, rejecting a record read from another build.
-
-        A solver whose step reads a DERIVED array before recomputing it overrides this to recompute or invalidate that
-        array when the record lacks DERIVED (see 'DataKind').
-        """
-        items = (item for item in self.data if isinstance(item, array_class.DataItem) and item.kind in state.kinds)
-        array_class.fill_data(items, state.arrays)
+        """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""
+        self.set_checkpoint(state)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

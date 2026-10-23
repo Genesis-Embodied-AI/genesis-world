@@ -1,10 +1,11 @@
+import weakref
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import torch
 
 import genesis as gs
-from genesis.grad.bridge import ReadNode, StepNode
+from genesis.grad.bridge import Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
@@ -25,7 +26,7 @@ from .solvers import (
     SPHSolver,
     ToolSolver,
 )
-from .solvers.base_solver import GravityMixin, TimeBasedMixin
+from .solvers.base_solver import GravityMixin, StateChange, Subscriber, TimeBasedMixin
 from .states.solvers import SimState, SimulatorCheckpoint
 
 if TYPE_CHECKING:
@@ -63,21 +64,16 @@ class Simulator(RBC):
         self._dt: float = self.options.dt
         self._substep_dt: float = self.options.dt / self.options.substeps
         self._substeps: int = self.options.substeps
-        self._substeps_local: int | None = self.options.substeps_local
         self._requires_grad: bool = self.options.requires_grad
-        self._steps_local: int | None = self.options._steps_local
 
         self._cur_substep_global = 0
 
-        # Gradient tape (see genesis.grad.bridge): the token returned by the autograd node of the last step, and the
-        # rollout the token chain belongs to, which a reset starts anew. A backward pass that rewinds the rollout to its
-        # start consumes it, which forbids stepping forward and differentiating again until the next reset.
-        self._grad_token = (
-            torch.zeros((), dtype=gs.tc_float, device=gs.device, requires_grad=True) if self._requires_grad else None
+        # Autograd graph of the rollout (see genesis.grad.bridge), which a reset starts anew. A backward pass rewinds the
+        # simulation, which forbids stepping forward again until the next reset.
+        self._rollout_graph = RolloutGraph(
+            self._requires_grad, on_pass_start=self._begin_backward_pass, on_pass_end=self._end_backward_pass
         )
-        self._grad_epoch = 0
         self._is_forward_ready = True
-        self._is_backward_ready = True
 
         # solvers
         self.tool_solver = ToolSolver(self.scene, self, options.tool)
@@ -199,13 +195,6 @@ class Simulator(RBC):
                 + "."
             )
         substeps = next(iter(rates), self._substeps)
-        # The differentiable window was sized from the authored substeps before the solvers allocated their buffers,
-        # so a rate derived afterwards would leave the tape describing a step of a different length than the one run.
-        if self._requires_grad and substeps != self._substeps:
-            gs.raise_exception(
-                f"A solver dt deriving {substeps} substep(s) per step is not supported in differentiable mode, which "
-                f"is recording {self._substeps}. Ask for the rate through `SimOptions.substeps={substeps}` instead."
-            )
         self._substeps = substeps
         self._substep_dt = self._dt / self._substeps
         # The substep loop advances every active solver once per iteration, so the rate one of them asks for is the
@@ -217,10 +206,23 @@ class Simulator(RBC):
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
+        # Every active solver and the coupler of a differentiable scene support gradients, which they declare
+        if self._requires_grad:
+            unsupported = [
+                type(solver).__name__ for solver in self._solvers if solver.is_active and not solver.is_differentiable
+            ]
+            if not self._coupler.is_differentiable:
+                unsupported.append(type(self._coupler).__name__)
+            if unsupported:
+                gs.raise_exception(
+                    f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported}."
+                )
+
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
         for solver in self._solvers:
+            solver.set_rollout_graph(self._rollout_graph)
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
@@ -237,6 +239,13 @@ class Simulator(RBC):
         for entity in self._entities:
             if isinstance(entity, HybridEntity):
                 entity.build()
+
+        # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while the
+        # changes of the state go through the solvers (see 'Solver.record_input'). The state of a solver tracking no
+        # gradient is outside the graph.
+        for solver in self._active_solvers:
+            if solver._requires_grad:
+                solver.subscribe(Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate))
 
         self._step_timer.add_phases("physics", "sensors")
         self._sensor_manager.build()
@@ -256,12 +265,11 @@ class Simulator(RBC):
         self._restart(envs_idx)
 
     def _restart(self, envs_idx=None):
-        """Restart the coupler, the gradient tape and the sensors."""
+        """Restart the coupler, the autograd graph of the rollout and the sensors."""
         self._coupler.reset(envs_idx=envs_idx)
 
-        # TODO: keeping as is for now
         self.reset_grad()
-        # The tape cursor is a position in the recorded window, not a clock, so it rewinds whole.
+        # The cursor is a position in the frames the solvers hold, not a clock, so it rewinds whole.
         self._cur_substep_global = 0
 
         # reset sensors state
@@ -315,90 +323,36 @@ class Simulator(RBC):
             torch.mps.synchronize()
 
     def reset_grad(self):
+        """Zero the adjoint of the state of every solver, and begin a new rollout of the autograd graph."""
+        for solver in self._active_solvers:
+            solver.reset_grad()
+        self._rollout_graph.restart()
+        self._is_forward_ready = True
+
+    def _begin_backward_pass(self):
+        """
+        Start a backward pass through the rollout from zero adjoints.
+
+        The pass rewinds the state of the simulation, which forbids stepping forward again until the next reset, a pass
+        that raises included.
+        """
+        self._is_forward_ready = False
         for solver in self._active_solvers:
             solver.reset_grad()
 
-        if self._requires_grad:
-            self._grad_token = torch.zeros((), dtype=gs.tc_float, device=gs.device, requires_grad=True)
-        self._grad_epoch += 1
-        self._is_forward_ready = True
-        self._is_backward_ready = True
-
-    def track_state(self, *tensors: torch.Tensor):
-        """
-        Make the gradient-carrying tensors of a state queried at the current step differentiable.
-
-        In a differentiable scene, the tensors become the outputs of one read node of the current step (see
-        `genesis.grad.bridge`) and retain their gradient, which `collect_output_grads` hands to the solvers. They stay
-        the same tensor objects, so the solver may fill them afterwards. Called by 'QueriedStates' on registration.
-        """
-        if self._requires_grad:
-            ReadNode.apply(self._grad_token, tensors)
-            for tensor in tensors:
-                tensor.retain_grad()
-
-    def reverse_step(self, step: int, epoch: int) -> dict[int, torch.Tensor]:
-        """
-        Run the reverse pass of one step and return the gradients of the inputs taped for it, keyed by tensor id.
-
-        `step` is the global index of the step, and `epoch` the rollout it belongs to (see `genesis.grad.bridge`). The
-        autograd node of the step calls this once the gradients of the states read at that step and of every later step
-        are in. The reverse pass of the later steps whose node the loss does not reach only rewinds the rollout. The
-        gradient of an input given to several setters is summed over all of them.
-        """
-        if epoch != self._grad_epoch:
-            gs.raise_exception(
-                "Calling backward on a scene that has been reset since the rollout. Call it before 'scene.reset()'."
-            )
-        if not self._is_backward_ready or self.cur_step_global < step:
-            gs.raise_exception("Multiple backward calls not allowed.")
-
-        while self.cur_step_global >= step:
-            self.collect_output_grads()
-            inputs_grad_pairs = self._step_grad()
-
-        if self.cur_step_global == 0:
-            self._is_forward_ready = False
-            self._is_backward_ready = False
-
-        inputs_grad: dict[int, torch.Tensor] = {}
-        for tensor, grad in inputs_grad_pairs:
-            input_grad = inputs_grad.get(id(tensor))
-            if input_grad is None:
-                inputs_grad[id(tensor)] = grad
-            else:
-                input_grad += grad
-        return inputs_grad
+    def _end_backward_pass(self):
+        """Raise on the errors the solvers flagged during a backward pass, once it is over."""
+        for solver in self._active_solvers:
+            solver.check_errors()
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- step computation ----------------------------------
     # ------------------------------------------------------------------------------------
-    """
-    We use f to represent substep, and s to represent step.
-    """
-
-    def f_global_to_f_local(self, f_global):
-        f_local = f_global % self._substeps_local
-        return f_local
-
-    def f_local_to_s_local(self, f_local):
-        f_local = f_local // self._substeps
-        return f_local
-
-    def f_global_to_s_local(self, f_global):
-        f_local = self.f_global_to_f_local(f_global)
-        s_local = self.f_local_to_s_local(f_local)
-        return s_local
-
-    def f_global_to_s_global(self, f_global):
-        s_global = f_global // self._substeps
-        return s_global
-
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def step(self, in_backward=False):
+    def step(self):
         # Check errno at the very beginning of the step.
         # This will trigger GPU sync, but it is not a big deal at the point, since we are going to enqueue very large
         # kernel right away. Moreover, if computations are still not done at this point, then the queue will just
@@ -406,63 +360,60 @@ class Simulator(RBC):
         if self.rigid_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.rigid_solver.check_errno()
 
-        # Reconstructing a checkpoint window replays steps the environments already simulated, so only a forward step
-        # advances their clock. The backward pass winds it down again through `_step_grad`.
-        if not in_backward:
-            self._steps += 1
-
         with self._step_timer.phase("physics"):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
+                self._steps += 1
                 for _ in range(self._substeps):
                     self.rigid_solver.substep(self.cur_substep_local)
                     self._cur_substep_global += 1
+                self.rigid_solver.end_step()
+            elif self._rollout_graph.is_recording:
+                self._rollout_graph.record(StepOperation(self))
             else:
-                inputs = self.process_input(in_backward=in_backward)
-                for _ in range(self._substeps):
-                    self.substep(self.cur_substep_local)
-
-                    self._cur_substep_global += 1
-                    if self.cur_substep_local == 0 and not in_backward:
-                        self.save_ckpt()
-
-                if self._requires_grad and not in_backward:
-                    # Each tensor is one input of the node however many setters it was given to: the node returns its
-                    # gradient summed over all of them (see reverse_step).
-                    step_inputs = {
-                        id(value): value for value in inputs if isinstance(value, torch.Tensor) and value.requires_grad
-                    }
-                    self._grad_token = StepNode.apply(
-                        self, self.cur_step_global, self._grad_epoch, self._grad_token, *step_inputs.values()
-                    )
-
-            if self.rigid_solver.is_active:
-                self.rigid_solver.clear_external_force()
+                # A step the graph does not record overwrites the state the last recorded operation returned
+                self._rollout_graph.mark_state_changed()
+                self._advance()
 
         with self._step_timer.phase("sensors"):
             self._sensor_manager.step()
 
-    def _step_grad(self):
-        self._steps -= 1
-        for _ in range(self._substeps - 1, -1, -1):
+    def _advance(self):
+        """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
+        self._steps += 1
+        for _ in range(self._substeps):
+            self.substep(self.cur_substep_local)
+            self._cur_substep_global += 1
             if self.cur_substep_local == 0:
-                self.load_ckpt()
+                for solver in self._active_solvers:
+                    solver.roll_frame_window()
+        for solver in self._active_solvers:
+            solver.end_step()
+
+    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list) -> None:
+        """
+        Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
+        differentiable solvers.
+
+        The step is replayed from the checkpoints to rebuild the frames of its substeps, which are then reversed. The
+        clocks of the environments go back to `steps_start`, the steps they counted before it.
+        """
+        for solver in reversed(self._active_solvers):
+            solver.end_step_grad()
+        self._cur_substep_global = substep_start
+        for solver, checkpoint in zip(self._differentiable_solvers, checkpoints):
+            solver.set_checkpoint(checkpoint)
+        # Flush the zero-copy writes of the restore on Metal.
+        if gs.use_zerocopy and gs.backend == gs.metal:
+            torch.mps.synchronize()
+        for solver in self._active_solvers:
+            solver.roll_frame_window_grad()
+        for _ in range(self._substeps):
+            self.substep(self.cur_substep_local)
+            self._cur_substep_global += 1
+        for _ in range(self._substeps):
             self._cur_substep_global -= 1
-
             self.sub_step_grad(self.cur_substep_local)
-
-        return self.process_input_grad()
-
-    def process_input(self, in_backward=False):
-        """
-        Apply the inputs the entities taped for the coming step, given at step level rather than substep level.
-
-        Returns the inputs applied, of any type.
-        """
-        return [value for solver in self._active_solvers for value in solver.process_input(in_backward=in_backward)]
-
-    def process_input_grad(self):
-        """Run the reverse pass of the inputs applied at the current step, and return their (input, gradient) pairs."""
-        return [pair for solver in reversed(self._active_solvers) for pair in solver.process_input_grad()]
+        self._steps.copy_(steps_start)
 
     def substep(self, f):
         self._coupler.preprocess(f)
@@ -492,49 +443,6 @@ class Simulator(RBC):
     def substep_post_coupling_grad(self, f):
         for solver in reversed(self._active_solvers):
             solver.substep_post_coupling_grad(f)
-
-    # ------------------------------------------------------------------------------------
-    # ------------------------------------ gradient --------------------------------------
-    # ------------------------------------------------------------------------------------
-
-    def collect_output_grads(self):
-        """Hand the gradients of the states queried at the current step to the solvers that registered them."""
-        for solver in self._active_solvers:
-            solver.collect_output_grads()
-
-    def save_ckpt(self):
-        """
-        This function refreshes the gpu memory (copy the last frame to the first frame in the local memory), and then saves the checkpoint.
-        This function is called every `substeps_local` steps, which means it's called only once per step when `requires_grad` is True.
-        """
-        ckpt_start_substep = self._cur_substep_global - self._substeps_local
-        ckpt_end_step = self._cur_substep_global - 1
-        ckpt_name = f"{ckpt_start_substep}"
-
-        for solver in self._active_solvers:
-            solver.save_ckpt(ckpt_name)
-
-        if self._requires_grad:
-            gs.logger.debug(
-                f"Forward: Saved checkpoint for global substep {ckpt_start_substep} to {ckpt_end_step}. Now starts from substep {self._cur_substep_global}."
-            )
-
-    def load_ckpt(self):
-        ckpt_start_substep = self._cur_substep_global - self._substeps_local
-        ckpt_end_step = self._cur_substep_global - 1
-        ckpt_name = f"{ckpt_start_substep}"
-
-        for solver in self._active_solvers:
-            solver.load_ckpt(ckpt_name)
-
-        # now that we loaded the first frame, we do a forward pass to fill up the rest
-        self._cur_substep_global = ckpt_start_substep
-        for _ in range(self._steps_local):
-            self.step(in_backward=True)
-
-        gs.logger.debug(
-            f"Backward: Loaded checkpoint for global substep {ckpt_start_substep} to {ckpt_end_step}. Now starts from substep {ckpt_start_substep}."
-        )
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -590,6 +498,11 @@ class Simulator(RBC):
         return self._requires_grad
 
     @property
+    def _differentiable_solvers(self) -> list["Solver"]:
+        """The active solvers whose state tracks gradients, which a recorded step checkpoints."""
+        return [solver for solver in self._active_solvers if solver._requires_grad]
+
+    @property
     def is_forward_ready(self) -> bool:
         """Whether the simulation may step forward, which a backward pass rewinding it to its start forbids until reset."""
         return self._is_forward_ready
@@ -605,24 +518,19 @@ class Simulator(RBC):
         return self._entities
 
     @property
-    def substeps_local(self):
-        """The number of substeps stored in local memory."""
-        return self._substeps_local
-
-    @property
     def cur_substep_global(self):
         """The current substep of the simulation."""
         return self._cur_substep_global
 
     @property
     def cur_substep_local(self):
-        """The current substep of the simulation in local memory."""
-        return self.f_global_to_f_local(self._cur_substep_global)
+        """
+        The frame the current substep starts from, among those the solvers hold.
 
-    @property
-    def cur_step_local(self):
-        """The current step of the simulation in local memory."""
-        return self.f_global_to_s_local(self._cur_substep_global)
+        The solvers of a differentiable scene hold the frames of the substeps of one step, those of any other scene the
+        frames of one substep (see 'Solver.roll_frame_window').
+        """
+        return self._cur_substep_global % (self._substeps if self._requires_grad else 1)
 
     @property
     def step_timer(self) -> StepTimer:
@@ -636,7 +544,7 @@ class Simulator(RBC):
         Use it to tell that the simulation moved on, for instance to invalidate a cache. For the simulated time of an
         environment, use `get_time`.
         """
-        return self.f_global_to_s_global(self._cur_substep_global)
+        return self._cur_substep_global // self._substeps
 
     def get_time(self, envs_idx=None):
         """The simulated time of each environment, in seconds.
@@ -670,3 +578,29 @@ class Simulator(RBC):
     def active_solvers(self):
         """The list of active solvers in the simulator."""
         return self._active_solvers
+
+
+class StepOperation(Operation):
+    """A step of a differentiable scene, as one operation of its autograd graph (see genesis.grad.bridge)."""
+
+    def __init__(self, sim: Simulator):
+        # See OperationNode in genesis.grad.bridge for the weak reference
+        self._sim = weakref.ref(sim)
+        self._substep_start = sim.cur_substep_global
+        self._steps_start = sim.steps.clone()
+        # The state each differentiable solver holds at the start of the step, which its backward pass replays it from
+        self._checkpoints = None
+        self.inputs = ()
+
+    def forward(self) -> tuple[torch.Tensor, ...]:
+        sim = self._sim()
+        self._checkpoints = [
+            solver.get_checkpoint(frozenset((DataKind.STATE,)), is_boundary_only=True)
+            for solver in sim._differentiable_solvers
+        ]
+        sim._advance()
+        return ()
+
+    def backward(self) -> tuple[torch.Tensor | None, ...]:
+        self._sim()._reverse(self._substep_start, self._steps_start, self._checkpoints)
+        return ()

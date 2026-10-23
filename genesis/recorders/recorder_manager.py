@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, Any, Callable
 
+import torch
+
 import genesis as gs
 
 if TYPE_CHECKING:
@@ -101,6 +103,8 @@ class RecorderManager:
                 recorder.reset(envs_idx)
 
     @gs.assert_built
+    # The recorders read the state of the scene for themselves, which is no query of a differentiable rollout
+    @torch.no_grad()
     def step(self, global_step: int):
         """
         Increment the step count and process data from each recording configuration.
@@ -114,6 +118,7 @@ class RecorderManager:
             recorder.step(global_step)
 
     @gs.assert_built
+    @torch.no_grad()
     def record(self, global_step: int):
         """Record the current state through every recorder, whatever its sampling rate."""
         if not self._is_recording:

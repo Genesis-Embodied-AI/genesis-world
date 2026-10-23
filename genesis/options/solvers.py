@@ -27,9 +27,6 @@ class SimOptions(Options):
     all the solvers, while a solver given its own `dt` integrates over that interval instead, and the number of
     substeps of every solver follows from it.
 
-    2. In differentiable mode, `substeps_local` must be divisible by `substeps`, as external command is input per
-    `step`, but `substep`. If `requires_grad` is False, we can use arbitrary `substeps_local`.
-
     Parameters
     ----------
     dt : float, optional
@@ -39,8 +36,6 @@ class SimOptions(Options):
         substeps buy accuracy and stability, at a runtime cost that grows linearly with the count in the worst case
         though sub-linearly in practice. Setting both this and a solver `dt` that implies a different count raises an
         exception. Defaults to 1.
-    substeps_local : int, optional
-        Number of substeps stored in GPU memory. Defaults to None. This is used for differentiable mode.
     gravity : tuple, optional
         Gravity force in N/kg. Defaults to (0.0, 0.0, -9.81).
     floor_height : float, optional
@@ -53,29 +48,9 @@ class SimOptions(Options):
 
     dt: PositiveFloat = 1e-2
     substeps: PositiveInt = 1
-    substeps_local: PositiveInt | None = None  # number of substeps stored in GPU memory
     gravity: Vec3FType = (0.0, 0.0, -9.81)
     floor_height: float = 0.0
     requires_grad: StrictBool = False
-
-    _steps_local: int | None = PrivateAttr(default=None)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _resolve_substeps(cls, data: dict) -> dict:
-        if data.get("substeps_local") is None:
-            # use 1 to save gpu memory when not in differentiable mode
-            data["substeps_local"] = data.get("substeps", 1) if data.get("requires_grad", False) else 1
-        return data
-
-    def model_post_init(self, context: Any) -> None:
-        if self.requires_grad:
-            if self.substeps_local % self.substeps != 0:
-                gs.raise_exception("`substeps_local` must be divisible by `substeps` when `requires_grad` is True.")
-            else:
-                self._steps_local = int(self.substeps_local / self.substeps)
-        else:
-            self._steps_local = None
 
 
 class BaseCouplerOptions(Options):

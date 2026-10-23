@@ -115,10 +115,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         # construct fields
         self.particles = struct_particle_state.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
+            shape=(self._n_frames, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
         )
         self.particles_ng = struct_particle_state_ng.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
+            shape=(self._n_frames, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
         self.particles_info = struct_particle_info.field(
             shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
@@ -133,10 +133,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             vel_in=gs.qd_vec3,  # input momentum/velocity
             vel_out=gs.qd_vec3,  # output momentum/velocity
         )
-        # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so substeps_local frames are enough.
-        # Particles still need substeps_local + 1 because g2p writes the next-frame state at [f+1].
+        # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so one frame per substep is enough.
+        # Particles still need one more, because g2p writes the next-frame state at [f+1].
         self.grid = grid_cell_state.field(
-            shape=(self._sim.substeps_local, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
+            shape=(self._n_frames - 1, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
         )
 
         # Sparse-reset bookkeeping for forward-only mode. A single global dirty list captures unique cells touched by
@@ -165,9 +165,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.vverts_render = struct_vvert_state_render.field(
             shape=(max(1, self._n_vverts), self._B), layout=qd.Layout.SOA
         )
-
-    def init_ckpt(self):
-        self._ckpt = dict()
 
     def init_constraints(self):
         """Lazy initialization of particle constraint fields."""
@@ -199,10 +196,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def reset_grad(self):
         self.particles.grad.fill(0.0)
         self.grid.grad.fill(0.0)
-        self._queried_states.clear()
-
-        for entity in self._entities:
-            entity.reset_grad()
 
     def build(self):
         super().build()
@@ -214,6 +207,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vfaces = self.n_vfaces
 
         self._coupler = self.sim._coupler
+        # The frames of the substeps the solver holds: those of one step with gradients, whose backward pass replays it
+        # whole, otherwise those of one substep (see 'roll_frame_window')
+        self._n_frames = self.substeps + 1 if self._requires_grad else 2
 
         # Aggregate SVD requirement across registered materials. If no material reads U/V/S, the solver can skip the SVD
         # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
@@ -230,7 +226,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_particle_fields()
             self.init_grid_fields()
             self.init_vvert_fields()
-            self.init_ckpt()
 
             for entity in self._entities:
                 entity._add_to_solver()
@@ -607,6 +602,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             if gs.use_zerocopy:
                 grid_dirty_count = qd_to_torch(self.grid_dirty_count, copy=False)
                 grid_dirty_count.zero_()
+                # The next kernel reads the count (see qd_zero_grad in misc.py)
+                if gs.backend == gs.metal:
+                    torch.mps.synchronize()
             else:
                 self.grid_dirty_count[0] = 0
 
@@ -700,27 +698,47 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ gradient --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def add_grad_from_state(self, state):
-        if self.is_active:
-            if state.pos.grad is not None:
-                assert state.pos.grad.is_contiguous()
-                self.add_grad_from_pos(self._sim.cur_substep_local, state.pos.grad)
+    @property
+    def is_differentiable(self) -> bool:
+        return not self._enable_CPIC
 
-            if state.vel.grad is not None:
-                assert state.vel.grad.is_contiguous()
-                self.add_grad_from_vel(self._sim.cur_substep_local, state.vel.grad)
+    def add_grad_from_state(self, grads, selection, saved_state):
+        """Add the gradients of a queried state, of the given entity or of the whole solver, to the frame 0 adjoint."""
+        owner = self if selection is None else selection
+        kernels = (
+            owner.add_grad_from_pos,
+            owner.add_grad_from_vel,
+            owner.add_grad_from_C,
+            owner.add_grad_from_F,
+            owner.add_grad_from_Jp,
+        )
+        for kernel, grad in zip(kernels, grads):
+            if grad is not None:
+                kernel(0, grad)
 
-            if state.C.grad is not None:
-                assert state.C.grad.is_contiguous()
-                self.add_grad_from_C(self._sim.cur_substep_local, state.C.grad)
+    def roll_frame_window(self):
+        self.copy_frame(self._n_frames - 1, 0)
 
-            if state.F.grad is not None:
-                assert state.F.grad.is_contiguous()
-                self.add_grad_from_F(self._sim.cur_substep_local, state.F.grad)
+    def roll_frame_window_grad(self):
+        self.copy_grad(0, self._n_frames - 1)
+        self.reset_grad_till_frame(self._n_frames - 1)
 
-            if state.Jp.grad is not None:
-                assert state.Jp.grad.is_contiguous()
-                self.add_grad_from_Jp(self._sim.cur_substep_local, state.Jp.grad)
+    @property
+    def data(self):
+        """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
+        particles = self.particles
+        for name, field in (
+            ("pos", particles.pos),
+            ("vel", particles.vel),
+            ("C", particles.C),
+            ("F", particles.F),
+            ("Jp", particles.Jp),
+            ("actu", particles.actu),
+        ):
+            yield array_class.ArrayItem(f"particles.{name}", array_class.DataKind.STATE, field, is_framed=True)
+        yield array_class.ArrayItem(
+            "particles_ng.active", array_class.DataKind.STATE, self.particles_ng.active, is_framed=True
+        )
 
     @qd.kernel
     def add_grad_from_pos(self, f: qd.i32, pos_grad: qd.types.ndarray()):
@@ -762,58 +780,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def save_ckpt(self, ckpt_name):
-        if self._sim.requires_grad:
-            if ckpt_name not in self._ckpt:
-                self._ckpt[ckpt_name] = {
-                    "pos": torch.zeros((self._B, self._n_particles, 3), dtype=gs.tc_float, device=gs.device),
-                    "vel": torch.zeros((self._B, self._n_particles, 3), dtype=gs.tc_float, device=gs.device),
-                    "C": torch.zeros((self._B, self._n_particles, 3, 3), dtype=gs.tc_float, device=gs.device),
-                    "F": torch.zeros((self._B, self._n_particles, 3, 3), dtype=gs.tc_float, device=gs.device),
-                    "Jp": torch.zeros((self._B, self._n_particles), dtype=gs.tc_float, device=gs.device),
-                    "actu": torch.zeros((self._B, self._n_particles), dtype=gs.tc_float, device=gs.device),
-                    "active": torch.zeros((self._B, self._n_particles), dtype=gs.tc_bool, device=gs.device),
-                }
-
-            self._kernel_get_state(
-                0,
-                self._ckpt[ckpt_name]["pos"],
-                self._ckpt[ckpt_name]["vel"],
-                self._ckpt[ckpt_name]["C"],
-                self._ckpt[ckpt_name]["F"],
-                self._ckpt[ckpt_name]["Jp"],
-                self._ckpt[ckpt_name]["actu"],
-                self._ckpt[ckpt_name]["active"],
-            )
-
-            for entity in self._entities:
-                entity.save_ckpt(ckpt_name)
-
-        # restart from frame 0 in memory
-        self.copy_frame(self._sim.substeps_local, 0)
-
-    def load_ckpt(self, ckpt_name):
-        self.copy_frame(0, self._sim.substeps_local)
-        self.copy_grad(0, self._sim.substeps_local)
-
-        if self._sim.requires_grad:
-            self.reset_grad_till_frame(self._sim.substeps_local)
-
-            self._kernel_set_state(
-                0,
-                self._ckpt[ckpt_name]["pos"],
-                self._ckpt[ckpt_name]["vel"],
-                self._ckpt[ckpt_name]["C"],
-                self._ckpt[ckpt_name]["F"],
-                self._ckpt[ckpt_name]["Jp"],
-                self._ckpt[ckpt_name]["actu"],
-                self._ckpt[ckpt_name]["active"],
-            )
-
-            for entity in self._entities:
-                entity.load_ckpt(ckpt_name=ckpt_name)
-
     def set_state(self, f, state, envs_idx=None):
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        if self._requires_grad:
+            self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active)
 
@@ -849,7 +819,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         state = MPMSolverState(self._scene)
         self._kernel_get_state(f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active)
-        self._queried_states.append(state)
+        self.record_read(state.grad_tensors, None)
         return state
 
     @qd.kernel
@@ -953,19 +923,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.particles[f, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
 
     @qd.kernel
-    def _kernel_set_particles_pos_grad(
-        self,
-        f: qd.i32,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        poss_grad: qd.types.ndarray(),  # shape [B, n_particles, 3]
-    ):
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
-            i_p = i_p_ + particle_start
-            for i in qd.static(range(3)):
-                poss_grad[i_b, i_p_, i] = self.particles.grad[f, i_p, i_b].pos[i]
-
-    @qd.kernel
     def _kernel_get_particles_pos(
         self,
         f: qd.i32,
@@ -993,19 +950,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
                 self.particles[f, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
-
-    @qd.kernel
-    def _kernel_set_particles_vel_grad(
-        self,
-        f: qd.i32,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        vels_grad: qd.types.ndarray(),  # shape [B, n_particles, 3]
-    ):
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
-            i_p = i_p_ + particle_start
-            for i in qd.static(range(3)):
-                vels_grad[i_b, i_p_, i] = self.particles.grad[f, i_p, i_b].vel[i]
 
     @qd.kernel
     def _kernel_get_particles_vel(
@@ -1063,22 +1007,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_b = envs_idx[i_b_]
             if self.particles_info[i_p].muscle_group == i_g:
                 self.particles[f, i_p, i_b].actu = actus[i_b_, i_p_, i_g]
-
-    @qd.kernel
-    def _kernel_set_particles_actu_grad(
-        self,
-        f: qd.i32,
-        particle_start: qd.i32,
-        n_particles: qd.i32,
-        actus_grad: qd.types.ndarray(),  # shape [B, n_particles, n_groups]
-    ):
-        for i_p_, i_b in qd.ndrange(n_particles, self._B):
-            i_p = i_p_ + particle_start
-            # Each particle reads the column of its muscle group (see _kernel_set_particles_actu)
-            i_g = self.particles_info[i_p].muscle_group
-            actus_grad[i_b, i_p_, i_g] = self.particles.grad[f, i_p, i_b].actu
-            # The input overwrites the actuation, so the value it replaces has no effect past this substep
-            self.particles.grad[f, i_p, i_b].actu = 0.0
 
     @qd.kernel
     def _kernel_get_particles_actu(

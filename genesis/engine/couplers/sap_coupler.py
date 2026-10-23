@@ -708,6 +708,11 @@ class SAPCoupler(RBC):
             self.sap_solve(i_step)
             self.update_vel(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
 
+    @property
+    def is_differentiable(self) -> bool:
+        """Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')."""
+        return False
+
     def couple_grad(self, i_step):
         gs.raise_exception("couple_grad is not available for SAPCoupler. Please use LegacyCoupler instead.")
 

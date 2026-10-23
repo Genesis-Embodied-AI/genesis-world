@@ -179,11 +179,17 @@ class ArrayItem(NamedTuple):
     It lives on the device of the backend, and a restore fills it in place (see 'iter_data'). It is a quadrants array,
     or a torch tensor such as the step counts of the simulator. An unused quadrants array is the 0-d placeholder of a
     feature switched off (see 'maybe_shape'), which a restore leaves as built (see 'check_data').
+
+    `is_grad` marks the gradient of another item. `is_framed` marks an array whose first axis indexes the frames of
+    the substeps a solver holds, the state at the boundary of two steps sitting in frame 0 (see
+    'Solver.roll_frame_window').
     """
 
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
+    is_grad: bool = False
+    is_framed: bool = False
 
 
 class ScalarItem(NamedTuple):
@@ -212,7 +218,9 @@ class ConfigItem(NamedTuple):
     config: object
 
 
-def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterator[DataItem | ConfigItem]:
+def iter_data(
+    owner: object, attr: str, kind: DataKind | None = None, *, is_framed: bool = False
+) -> Iterator[DataItem | ConfigItem]:
     """Yield the data of an attribute, one item per array if it is a struct, named by the fields reaching it.
 
     The attribute is 'attr' of 'owner', and an item of a struct is named by 'attr' plus field names joined with dots.
@@ -221,7 +229,8 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     field applies to every array of that struct. An array is a quadrants array or a torch tensor, and a quadrants array
     carrying gradients yields them as one more item of its kind, named 'grad'. A Python native scalar of an object that
     is no struct, such as a flag, yields an item of the given kind, which a restore sets back as the attribute. A static
-    config yields a ConfigItem. Anything else raises and names the offending attribute.
+    config yields a ConfigItem. Anything else raises and names the offending attribute. `is_framed` marks every array
+    yielded (see 'ArrayItem').
     """
     value = getattr(owner, attr)
     if isinstance(type(value), AutoInitMeta):
@@ -229,9 +238,9 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
     elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
         if kind is None:
             gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-        yield ArrayItem(attr, kind, value)
+        yield ArrayItem(attr, kind, value, is_framed=is_framed)
         if not isinstance(value, torch.Tensor) and value.has_grad():
-            yield ArrayItem(f"{attr}.grad", kind, value.grad)
+            yield ArrayItem(f"{attr}.grad", kind, value.grad, is_grad=True, is_framed=is_framed)
     elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
         if dataclasses.is_dataclass(value):
             members = [(field.name, field.metadata.get(KIND)) for field in dataclasses.fields(value)]
@@ -241,7 +250,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
             is_member_array = isinstance(getattr(value, member), (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
             if stated_kind is None and kind is None and is_member_array:
                 stated_kind = type(value).kind
-            for item in iter_data(value, member, kind if stated_kind is None else stated_kind):
+            for item in iter_data(value, member, kind if stated_kind is None else stated_kind, is_framed=is_framed):
                 yield item._replace(name=f"{attr}.{item.name}")
     elif isinstance(value, (bool, int, float)) and not (dataclasses.is_dataclass(owner) or isinstance(owner, tuple)):
         if kind is None:
@@ -251,13 +260,16 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         gs.raise_exception(f"'{attr}' holds a {type(value).__name__} where an array, a struct or a scalar stands.")
 
 
-def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> list[DataItem]:
+def check_data(
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, is_boundary_only: bool = False
+) -> list[DataItem]:
     """Return the items 'fill_data' writes, rejecting a record made for another scene.
 
     A value read from a record has the shape of its item, and is floating exactly when its item is. Its dtype may
     differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
     and so does a name on one side only, since the record comes from another build or version. 'maybe_shape' shapes an
-    unused array as (), so an array with that shape on either side stays as built, and is left out.
+    unused array as (), so an array with that shape on either side stays as built, and is left out. With
+    `is_boundary_only`, an array holding frames is recorded for its frame 0 alone (see 'ArrayItem').
     """
     items = tuple(items)
     unshared = sorted({item.name for item in items} ^ set(values))
@@ -271,10 +283,17 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
             is_item_real = dtype.is_floating_point
         elif isinstance(item, ArrayItem):
             array = item.array
-            element_shape = array.element_shape if isinstance(array, (qd.VectorTensor, qd.MatrixTensor)) else ()
+            if isinstance(array, (qd.VectorTensor, qd.MatrixTensor)):
+                element_shape = array.element_shape
+            elif isinstance(array, qd.MatrixField):
+                element_shape = (array.n, array.m)[: array.ndim]
+            else:
+                element_shape = ()
             if tuple(array.shape) == () or tuple(value.shape) == element_shape:
                 continue
             shape, dtype = (*array.shape, *element_shape), array.dtype
+            if is_boundary_only and item.is_framed:
+                shape = shape[1:]
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
             scalar = getattr(item.owner, item.attr)
@@ -292,23 +311,34 @@ def check_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torc
     return writes
 
 
-def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor]) -> None:
+def fill_data(
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, is_boundary_only: bool = False
+) -> None:
     """Write back into each item the value recorded under its name, once every value passed 'check_data', so that a
     record made for another scene leaves the scene as it was.
 
     An array is filled in place, through its zero-copy view where one exists, so that a device-resident record stays on
     the device. On Metal these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once
-    before the next kernel. A scalar is set back as the Python native the host code reading it expects.
+    before the next kernel. A scalar is set back as the Python native the host code reading it expects. With
+    `is_boundary_only`, the frame 0 alone of an array holding frames is written (see 'check_data').
     """
-    for item in check_data(items, values):
+    for item in check_data(items, values, is_boundary_only=is_boundary_only):
         value = values[item.name]
+        is_frame_only = is_boundary_only and item.is_framed
         if isinstance(item, ScalarItem):
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
             setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
         elif isinstance(item.array, torch.Tensor) or gs.use_zerocopy:
             view = data_to_array(item.array, to_torch=True, copy=False)
             # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
-            view.copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+            (view[0] if is_frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+        elif is_frame_only:
+            # Without zero-copy views, the array is written whole, its other frames as they are
+            frames = data_to_array(item.array, to_torch=True, copy=True)
+            frames[0] = value
+            item.array.from_torch(frames)
+        elif isinstance(value, torch.Tensor):
+            item.array.from_torch(value)
         else:
             item.array.from_numpy(value)
 
@@ -325,6 +355,7 @@ class ErrorCode(IntEnum):
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
+    INVALID_GRAD_NAN = 0b00000000000000000000000010000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -2394,8 +2425,10 @@ class LinksState:
     crb_mass: qd.Tensor
     cdd_vel: qd.Tensor
     cdd_ang: qd.Tensor
-    pos: qd.Tensor
-    quat: qd.Tensor
+    # The pose of a fixed root link is state, which forward kinematics leaves as set (see
+    # func_forward_kinematics_link_bw), the poses of the other links being recomputed from the positions of the dofs.
+    pos: qd.Tensor = of_kind(DataKind.STATE)
+    quat: qd.Tensor = of_kind(DataKind.STATE)
     pos_bw: qd.Tensor
     quat_bw: qd.Tensor
     i_pos: qd.Tensor
@@ -2424,8 +2457,9 @@ class LinksState:
     cfrc_vel: qd.Tensor
     cfrc_applied_ang: qd.Tensor = of_kind(DataKind.STATE)
     cfrc_applied_vel: qd.Tensor = of_kind(DataKind.STATE)
-    cfrc_coupling_ang: qd.Tensor
-    cfrc_coupling_vel: qd.Tensor
+    # The wrench the couplers accumulate during a substep, which the next substep consumes
+    cfrc_coupling_ang: qd.Tensor = of_kind(DataKind.STATE)
+    cfrc_coupling_vel: qd.Tensor = of_kind(DataKind.STATE)
     contact_force: qd.Tensor
     # Hibernation: is_hibernated flags a sleeping link, awake_steps counts the consecutive substeps an awake link has
     # spent below the hibernation speed tolerance, up to hibernation_min_steps (see func_count_settled_step), zero
@@ -2996,12 +3030,13 @@ class RigidAdjointCache:
 
 
 def get_rigid_adjoint_cache(solver):
-    substeps_local = solver._sim.substeps_local
     requires_grad = solver._requires_grad
+    # One frame per substep of a step and one for the state it ends at (see 'Solver.roll_frame_window')
+    n_frames = solver.substeps + 1 if requires_grad else 1
 
-    qs_shape = maybe_shape((substeps_local + 1, solver.n_qs_, solver._B), requires_grad)
-    dofs_shape = maybe_shape((substeps_local + 1, solver.n_dofs_, solver._B), requires_grad)
-    links_shape = maybe_shape((substeps_local + 1, solver.n_links_, solver._B), requires_grad)
+    qs_shape = maybe_shape((n_frames, solver.n_qs_, solver._B), requires_grad)
+    dofs_shape = maybe_shape((n_frames, solver.n_dofs_, solver._B), requires_grad)
+    links_shape = maybe_shape((n_frames, solver.n_links_, solver._B), requires_grad)
     return RigidAdjointCache(
         qpos=V(dtype=gs.qd_float, shape=qs_shape, needs_grad=requires_grad),
         dofs_vel=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),

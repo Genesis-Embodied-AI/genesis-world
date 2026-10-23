@@ -2,12 +2,11 @@ from typing import TYPE_CHECKING
 
 import quadrants as qd
 
-import genesis as gs
+import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.tool_entity.tool_entity import ToolEntity
 from genesis.engine.materials import Tool
 from genesis.engine.states.solvers import ToolSolverState
-from genesis.utils.misc import *
 
 from .base_solver import Solver, TimeBasedMixin
 
@@ -40,8 +39,11 @@ class ToolSolver(TimeBasedMixin, Solver):
 
     def build(self):
         super().build()
+        # The frames of the substeps the solver holds: those of one step with gradients, whose backward pass replays it
+        # whole, otherwise those of one substep (see 'roll_frame_window')
+        self._n_frames = self.substeps + 1 if self._requires_grad else 2
         for entity in self._entities:
-            entity.build()
+            entity.build(self._n_frames)
 
     @property
     def is_active(self):
@@ -79,6 +81,9 @@ class ToolSolver(TimeBasedMixin, Solver):
         return state
 
     def set_state(self, f, state, envs_idx=None):
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        if self._requires_grad:
+            self._rollout_graph.mark_state_changed()
         if state is not None:
             assert len(state) == len(self._entities)
             for i, entity in enumerate(self._entities):
@@ -100,17 +105,29 @@ class ToolSolver(TimeBasedMixin, Solver):
         for entity in self._entities[::-1]:
             entity.substep_post_coupling_grad(f)
 
-    def add_grad_from_state(self, state):
-        # Nothing needed here, since tool_solver state is composed of tool_entity.get_state(), which has already been cached inside each tool_entity.
-        pass
+    @property
+    def is_differentiable(self) -> bool:
+        return True
 
-    def save_ckpt(self, ckpt_name):
-        for entity in self._entities:
-            entity.save_ckpt(ckpt_name)
+    def add_grad_from_state(self, grads, selection, saved_state):
+        """Add the gradients of a queried state of the tool given as selection to its frame 0 adjoint."""
+        selection.add_grad_from_state(grads)
 
-    def load_ckpt(self, ckpt_name):
+    def roll_frame_window(self):
         for entity in self._entities:
-            entity.load_ckpt(ckpt_name=ckpt_name)
+            entity.copy_frame(self._n_frames - 1, 0)
+
+    def roll_frame_window_grad(self):
+        for entity in self._entities:
+            entity.copy_grad(0, self._n_frames - 1)
+            entity.reset_grad_till_frame(self._n_frames - 1)
+
+    @property
+    def data(self):
+        """Yield the state of every tool, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
+        for i_e, entity in enumerate(self._entities):
+            for name, field in (("pos", entity.pos), ("quat", entity.quat), ("vel", entity.vel), ("ang", entity.ang)):
+                yield array_class.ArrayItem(f"entities.{i_e}.{name}", array_class.DataKind.STATE, field, is_framed=True)
 
     @qd.func
     def pbd_collide(self, f, pos_world, thickness, dt):

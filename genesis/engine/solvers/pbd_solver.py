@@ -200,12 +200,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
 
-    def init_ckpt(self):
-        self._ckpt = dict()
-
-    def reset_grad(self):
-        pass
-
     def build(self):
         super().build()
 
@@ -225,8 +219,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_edge_fields()
             self.init_elem_fields()
             self.init_vvert_fields()
-
-            self.init_ckpt()
 
             for entity in self._entities:
                 entity._add_to_solver()
@@ -750,9 +742,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def process_input_grad(self):
-        return []
-
     def substep_pre_coupling(self, f):
         if self.is_active:
             self._kernel_store_initial_pos(f)
@@ -798,21 +787,9 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ gradient --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def collect_output_grads(self):
-        pass
-
-    def add_grad_from_state(self, state):
-        pass
-
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    def save_ckpt(self, ckpt_name):
-        pass
-
-    def load_ckpt(self, ckpt_name):
-        pass
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:

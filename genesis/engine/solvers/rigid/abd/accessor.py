@@ -178,37 +178,6 @@ def kernel_set_state(
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_state_grad(
-    qpos_grad: qd.types.ndarray(),
-    vel_grad: qd.types.ndarray(),
-    links_pos_grad: qd.types.ndarray(),
-    links_quat_grad: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_qs = qpos_grad.shape[1]
-    n_dofs = vel_grad.shape[1]
-    n_links = links_pos_grad.shape[1]
-    _B = qpos_grad.shape[0]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q, i_b in qd.ndrange(n_qs, _B):
-        qd.atomic_add(rigid_info.qpos.grad[i_q, i_b], qpos_grad[i_b, i_q])
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        qd.atomic_add(dyn_state.dofs.vel.grad[i_d, i_b], vel_grad[i_b, i_d])
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(n_links, _B):
-        for j in qd.static(range(3)):
-            qd.atomic_add(dyn_state.links.pos.grad[i_l, i_b][j], links_pos_grad[i_b, i_l, j])
-        for j in qd.static(range(4)):
-            qd.atomic_add(dyn_state.links.quat.grad[i_l, i_b][j], links_quat_grad[i_b, i_l, j])
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_links_pos(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -370,33 +339,6 @@ def kernel_wake_up_entities_by_qs(
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_links_pos_grad(
-    links_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    pos_grad: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        i_l = links_idx[i_l_]
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
-            for j in qd.static(range(3)):
-                pos_grad[i_b_, i_l_, j] = dyn_state.links.pos.grad[i_l, i_b][j]
-                dyn_state.links.pos.grad[i_l, i_b][j] = 0.0
-        else:
-            q_start = dyn_info.links.q_start[I_l]
-            for j in qd.static(range(3)):
-                pos_grad[i_b_, i_l_, j] = rigid_info.qpos.grad[q_start + j, i_b]
-                rigid_info.qpos.grad[q_start + j, i_b] = 0.0
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_links_quat(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -419,33 +361,6 @@ def kernel_set_links_quat(
             q_start = dyn_info.links.q_start[I_l]
             for j in qd.static(range(4)):
                 rigid_info.qpos[q_start + j + 3, i_b] = quat[i_b_, i_l_, j]
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_links_quat_grad(
-    links_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    quat_grad: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        i_l = links_idx[i_l_]
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-
-        if dyn_info.links.parent_idx[I_l] == -1 and dyn_info.links.is_fixed[I_l]:
-            for j in qd.static(range(4)):
-                quat_grad[i_b_, i_l_, j] = dyn_state.links.quat.grad[i_l, i_b][j]
-                dyn_state.links.quat.grad[i_l, i_b][j] = 0.0
-        else:
-            q_start = dyn_info.links.q_start[I_l]
-            for j in qd.static(range(4)):
-                quat_grad[i_b_, i_l_, j] = rigid_info.qpos.grad[q_start + j + 3, i_b]
-                rigid_info.qpos.grad[q_start + j + 3, i_b] = 0.0
 
 
 @qd.func
@@ -906,34 +821,6 @@ def kernel_set_dofs_velocity(
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_dofs_velocity_grad(
-    dofs_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    velocity_grad: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_config: qd.template(),
-):
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
-        velocity_grad[i_b_, i_d_] = dyn_state.dofs.vel.grad[dofs_idx[i_d_], envs_idx[i_b_]]
-        dyn_state.dofs.vel.grad[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_dofs_force_grad(
-    dofs_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    force_grad: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_config: qd.template(),
-):
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
-        force_grad[i_b_, i_d_] = dyn_state.dofs.ctrl_force.grad[dofs_idx[i_d_], envs_idx[i_b_]]
-        dyn_state.dofs.ctrl_force.grad[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_dofs_zero_velocity(
     dofs_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -943,6 +830,48 @@ def kernel_set_dofs_zero_velocity(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
         dyn_state.dofs.vel[dofs_idx[i_d_], envs_idx[i_b_]] = 0.0
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_dofs_position_qs(
+    envs_idx: qd.types.ndarray(),
+    linear_cols: qd.types.ndarray(),
+    linear_qs_idx: qd.types.ndarray(),
+    linear_qpos0_weights: qd.types.ndarray(),
+    rotation_cols: qd.types.ndarray(),
+    rotation_qs_start: qd.types.ndarray(),
+    position: qd.types.ndarray(),
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Write the positions of the targeted dofs into the positions of their joints, which autodiff reverses.
+
+    A dof of a revolute or prismatic joint, or a translation dof of a free joint, is one entry of qpos, offset by the
+    neutral configuration for the former (`linear_qpos0_weights` is 1 or 0): `linear_cols` are their columns in
+    `position`, `linear_qs_idx` their entries of qpos. The three rotation dofs of a free or spherical joint make one
+    quaternion: `rotation_cols` are their columns in `position`, `rotation_qs_start` the first entry of the quaternion
+    in qpos. The positions of the dofs themselves are derived from qpos by forward kinematics.
+    """
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_c_, i_b_ in qd.ndrange(linear_cols.shape[0], envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        i_c = linear_cols[i_c_]
+        i_q = linear_qs_idx[i_c_]
+        rigid_info.qpos[i_q, i_b] = linear_qpos0_weights[i_c_] * rigid_info.qpos0[i_q, i_b] + position[i_b_, i_c]
+
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_r_, i_b_ in qd.ndrange(rotation_cols.shape[0], envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        i_c_x = rotation_cols[i_r_, 0]
+        i_c_y = rotation_cols[i_r_, 1]
+        i_c_z = rotation_cols[i_r_, 2]
+        quat = gu.qd_xyz_to_quat(
+            qd.Vector([position[i_b_, i_c_x], position[i_b_, i_c_y], position[i_b_, i_c_z]], dt=gs.qd_float)
+        )
+        q_start = rotation_qs_start[i_r_]
+        for j in qd.static(range(4)):
+            rigid_info.qpos[q_start + j, i_b] = quat[j]
 
 
 @qd.kernel(fastcache=True)

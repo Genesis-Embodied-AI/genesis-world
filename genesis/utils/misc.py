@@ -947,6 +947,39 @@ def qd_to_numpy(
     return _apply_masks(array, value, row_mask, col_mask, keepdim, copy, to_torch=False)
 
 
+def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor) -> None:
+    """Write a torch tensor into a Quadrants field / ndarray, in the native layout of the latter (see qd_to_torch).
+
+    On Metal, call `torch.mps.synchronize()` once after a batch of writes, before the next quadrants kernel reads the
+    values (see qd_zero_grad).
+    """
+    if isinstance(value, qd.Tensor):
+        value = value._unwrap()
+    if gs.use_zerocopy:
+        view = qd_to_torch(value, copy=False)
+        view.copy_(tensor)
+    else:
+        value.from_torch(tensor)
+
+
+def qd_add_grad(value: qd.Tensor, grad: torch.Tensor) -> None:
+    """Add a gradient to the adjoint of a Quadrants tensor, given in the layout of its getters (see 'qd_to_torch').
+
+    On Metal, call `torch.mps.synchronize()` once after a batch of additions, before the next quadrants kernel reads the
+    adjoint.
+    """
+    value_grad = value.grad
+    if gs.use_zerocopy:
+        view = qd_to_torch(value_grad, transpose=True, copy=False)
+        view += grad
+    else:
+        # Without zero-copy views, the adjoint is read and written back whole, in its native layout
+        n_dims = len(value_grad.shape)
+        data = qd_to_torch(value_grad, copy=True)
+        data += grad.movedim(0, n_dims - 1) if n_dims > 1 else grad
+        qd_from_torch(value_grad, data)
+
+
 def qd_zero_grad(value) -> None:
     """Zero the `.grad` buffers of a Quadrants field/ndarray, or every grad-bearing slot of a `dataclass` /
     `@qd.data_oriented` struct-of-arrays.

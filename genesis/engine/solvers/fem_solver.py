@@ -3,7 +3,6 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 import igl
 
@@ -159,17 +158,17 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         # construct field
         self.elements_v = element_state_v.field(
-            shape=(self.sim.substeps_local + 1, self.n_vertices, self._B),
+            shape=(self._n_frames, self.n_vertices, self._B),
             needs_grad=True,
             layout=qd.Layout.SOA,
         )
         self.elements_el = element_state_el.field(
-            shape=(self.sim.substeps_local + 1, self.n_elements, self._B),
+            shape=(self._n_frames, self.n_elements, self._B),
             needs_grad=True,
             layout=qd.Layout.SOA,
         )
         self.elements_el_ng = element_state_el_ng.field(
-            shape=(self.sim.substeps_local + 1, self.n_elements, self._B),
+            shape=(self._n_frames, self.n_elements, self._B),
             needs_grad=False,
             layout=qd.Layout.SOA,
         )
@@ -309,9 +308,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 or self.vertices_on_surface[i_v[3]]
             )
 
-    def init_ckpt(self):
-        self._ckpt = dict()
-
     def init_constraints(self):
         self._constraints_initialized = True
 
@@ -336,10 +332,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def reset_grad(self):
         self.elements_v.grad.fill(0)
         self.elements_el.grad.fill(0)
-        self._queried_states.clear()
-
-        for entity in self._entities:
-            entity.reset_grad()
 
     def build(self):
         super().build()
@@ -352,6 +344,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vertices_max = self.n_vertices
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
+        # The frames of the substeps the solver holds: those of one step with gradients, whose backward pass replays it
+        # whole, otherwise those of one substep (see 'roll_frame_window')
+        self._n_frames = self.substeps + 1 if self._requires_grad else 2
 
         if self.n_elements_max > 0:
             self.tet_wrong_order = qd.field(dtype=gs.qd_bool, shape=(), needs_grad=False)
@@ -362,7 +357,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.init_element_fields()
             self.init_surface_fields()
             self.init_vvert_fields()
-            self.init_ckpt()
 
             for entity in self._entities:
                 entity._add_to_solver()
@@ -494,6 +488,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_v[f + 1, i_v, i_b].pos = (
                 self.substep_dt * self.elements_v[f + 1, i_v, i_b].vel + self.elements_v[f, i_v, i_b].pos
             )
+        # The frames of a step of a differentiable scene carry the actuation and the activity its inputs set in frame 0
+        if qd.static(self._requires_grad):
+            for i_e, i_b in qd.ndrange(self.n_elements, self._B):
+                self.elements_el[f + 1, i_e, i_b].actu = self.elements_el[f, i_e, i_b].actu
+                self.elements_el_ng[f + 1, i_e, i_b].active = self.elements_el_ng[f, i_e, i_b].active
 
     @qd.kernel
     def precompute_material_data(self, f: qd.i32):
@@ -1024,9 +1023,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_v.grad[target, i_v, i_b].pos = self.elements_v.grad[source, i_v, i_b].pos
             self.elements_v.grad[target, i_v, i_b].vel = self.elements_v.grad[source, i_v, i_b].vel
 
-        # Copy 'active' for elements
+        # Copy the gradients of the actuation of elements
         for i_e, i_b in qd.ndrange(self.n_elements_max, self._B):
-            self.elements_el_ng[target, i_e, i_b].active = self.elements_el_ng[source, i_e, i_b].active
+            self.elements_el.grad[target, i_e, i_b].actu = self.elements_el.grad[source, i_e, i_b].actu
 
     @qd.kernel
     def reset_grad_till_frame(self, f: qd.i32):
@@ -1043,53 +1042,43 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ----------------------------------- gradient ---------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def add_grad_from_state(self, state):
-        if self.is_active:
-            if state.pos.grad is not None:
-                assert state.pos.grad.is_contiguous()
-                self._kernel_add_grad_from_pos(self._sim.cur_substep_local, state.pos.grad)
+    @property
+    def is_differentiable(self) -> bool:
+        return not self._use_implicit_solver
 
-            if state.vel.grad is not None:
-                assert state.vel.grad.is_contiguous()
-                self._kernel_add_grad_from_vel(self._sim.cur_substep_local, state.vel.grad)
+    def add_grad_from_state(self, grads, selection, saved_state):
+        """Add the gradients of a queried state, of the given entity or of the whole solver, to the frame 0 adjoint."""
+        v_start, n_vertices = (0, self.n_vertices) if selection is None else (selection.v_start, selection.n_vertices)
+        for kernel, grad in zip((self._kernel_add_grad_from_pos, self._kernel_add_grad_from_vel), grads):
+            if grad is not None:
+                kernel(0, v_start, n_vertices, grad)
 
-    def save_ckpt(self, ckpt_name):
-        if self.is_active:
-            if ckpt_name not in self._ckpt:
-                self._ckpt[ckpt_name] = {
-                    "pos": torch.zeros((self._B, self.n_vertices, 3), dtype=gs.tc_float, device=gs.device),
-                    "vel": torch.zeros((self._B, self.n_vertices, 3), dtype=gs.tc_float, device=gs.device),
-                    "active": torch.zeros((self._B, self.n_elements), dtype=gs.tc_int, device=gs.device),
-                }
+    def roll_frame_window(self):
+        self.copy_frame(self._n_frames - 1, 0)
 
-            self._kernel_get_state(
-                0, self._ckpt[ckpt_name]["pos"], self._ckpt[ckpt_name]["vel"], self._ckpt[ckpt_name]["active"]
-            )
+    def roll_frame_window_grad(self):
+        self.copy_grad(0, self._n_frames - 1)
+        self.reset_grad_till_frame(self._n_frames - 1)
 
-            self.copy_frame(self.sim.substeps_local, 0)
-
-    def load_ckpt(self, ckpt_name):
-        self.copy_frame(0, self._sim.substeps_local)
-        self.copy_grad(0, self._sim.substeps_local)
-
-        if self._sim.requires_grad:
-            self.reset_grad_till_frame(self._sim.substeps_local)
-
-            self._kernel_set_state(
-                0,
-                self._ckpt[ckpt_name]["pos"],
-                self._ckpt[ckpt_name]["vel"],
-                self._ckpt[ckpt_name]["active"],
-            )
-
-            for entity in self._entities:
-                entity.load_ckpt(ckpt_name=ckpt_name)
+    @property
+    def data(self):
+        """Yield the state of the elements, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
+        for name, field in (
+            ("elements_v.pos", self.elements_v.pos),
+            ("elements_v.vel", self.elements_v.vel),
+            ("elements_el.actu", self.elements_el.actu),
+            ("elements_el_ng.active", self.elements_el_ng.active),
+        ):
+            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field, is_framed=True)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
     def set_state(self, f, state, envs_idx=None):
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        if self._requires_grad:
+            self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.active)
 
@@ -1097,7 +1086,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.is_active:
             state = FEMSolverState(self._scene)
             self._kernel_get_state(f, state.pos, state.vel, state.active)
-            self._queried_states.append(state)
+            self.record_read(state.grad_tensors, None)
         else:
             state = None
         return state
@@ -1259,19 +1248,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.elements_v[f, i_global, i_b].pos[k] = pos[i_b, i_v, k]
 
     @qd.kernel
-    def _kernel_set_elements_pos_grad(
-        self,
-        f: qd.i32,
-        element_v_start: qd.i32,
-        n_vertices: qd.i32,
-        pos_grad: qd.types.ndarray(),
-    ):
-        for i_v, i_b in qd.ndrange(n_vertices, self._B):
-            i_global = i_v + element_v_start
-            for k in qd.static(range(3)):
-                self.elements_v.grad[f, i_global, i_b].pos[k] = pos_grad[i_b, i_v, k]
-
-    @qd.kernel
     def _kernel_set_elements_vel(
         self,
         f: qd.i32,
@@ -1283,19 +1259,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_global = i_v + element_v_start
             for k in qd.static(range(3)):
                 self.elements_v[f, i_global, i_b].vel[k] = vel[i_b, i_v, k]
-
-    @qd.kernel
-    def _kernel_set_elements_vel_grad(
-        self,
-        f: qd.i32,
-        element_v_start: qd.i32,
-        n_vertices: qd.i32,
-        vel_grad: qd.types.ndarray(),  # shape [B, n_vertices, 3]
-    ):
-        for i_v, i_b in qd.ndrange(n_vertices, self._B):
-            i_global = i_v + element_v_start
-            for k in qd.static(range(3)):
-                self.elements_v.grad[f, i_global, i_b].vel[k] = vel_grad[i_b, i_v, k]
 
     @qd.kernel
     def _kernel_set_elements_actu(
@@ -1310,18 +1273,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_global = i_e + element_el_start
             if self.elements_i[i_global].muscle_group == j_g:
                 self.elements_el[f, i_global, i_b].actu = actu[i_b, j_g]
-
-    @qd.kernel
-    def _kernel_set_elements_actu_grad(
-        self,
-        f: qd.i32,
-        element_el_start: qd.i32,
-        n_elements: qd.i32,
-        actu_grad: qd.types.ndarray(),  # shape [B, n_elements]
-    ):
-        for i_e, i_b in qd.ndrange(n_elements, self._B):
-            i_global = i_e + element_el_start
-            self.elements_el.grad[f, i_global, i_b].actu = actu_grad[i_b, i_e]
 
     @qd.kernel
     def _kernel_set_active(
@@ -1433,16 +1384,16 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_el_ng[f, i_e, i_b].active = active[i_b, i_e]
 
     @qd.kernel
-    def _kernel_add_grad_from_pos(self, f: qd.i32, pos_grad: qd.types.ndarray()):
-        for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
+    def _kernel_add_grad_from_pos(self, f: qd.i32, v_start: qd.i32, n_vertices: qd.i32, pos_grad: qd.types.ndarray()):
+        for i_v, i_b in qd.ndrange(n_vertices, self._B):
             for j in qd.static(range(3)):
-                self.elements_v.grad[f, i_v, i_b].pos[j] += pos_grad[i_b, i_v, j]
+                self.elements_v.grad[f, v_start + i_v, i_b].pos[j] += pos_grad[i_b, i_v, j]
 
     @qd.kernel
-    def _kernel_add_grad_from_vel(self, f: qd.i32, vel_grad: qd.types.ndarray()):
-        for i_v, i_b in qd.ndrange(self.n_vertices, self._B):
+    def _kernel_add_grad_from_vel(self, f: qd.i32, v_start: qd.i32, n_vertices: qd.i32, vel_grad: qd.types.ndarray()):
+        for i_v, i_b in qd.ndrange(n_vertices, self._B):
             for j in qd.static(range(3)):
-                self.elements_v.grad[f, i_v, i_b].vel[j] += vel_grad[i_b, i_v, j]
+                self.elements_v.grad[f, v_start + i_v, i_b].vel[j] += vel_grad[i_b, i_v, j]
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

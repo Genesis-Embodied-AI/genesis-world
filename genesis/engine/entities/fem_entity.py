@@ -16,6 +16,7 @@ import genesis.utils.mesh as mu
 from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.entities import FEMEntityState
+from genesis.grad.bridge import KernelLaunch
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor, unique_rows
 
@@ -217,9 +218,6 @@ class FEMEntity(Entity):
         if isinstance(self.sim.coupler, SAPCoupler):
             self.compute_pressure_field()
 
-        self.init_tgt_vars()
-        self.init_ckpt()
-
         self.active = False  # This attribute is only used in forward pass. It should NOT be used during backward pass.
 
     # ------------------------------------------------------------------------------------
@@ -275,7 +273,6 @@ class FEMEntity(Entity):
             If the tensor shape is not supported.
         """
         self._assert_active()
-        gs.logger.warning("Manually setting element positions. This is not recommended and could break gradient flow.")
 
         pos = to_gs_tensor(pos)
 
@@ -283,27 +280,23 @@ class FEMEntity(Entity):
         if pos.ndim == 1:
             if pos.shape == (3,):
                 pos = self.init_positions_COM_offset + pos
-                self._tgt["pos"] = pos[None].tile((self._sim._B, 1, 1))
+                pos = pos[None].tile((self._sim._B, 1, 1))
                 is_valid = True
         elif pos.ndim == 2:
             if pos.shape == (self.n_vertices, 3):
-                self._tgt["pos"] = pos[None].tile((self._sim._B, 1, 1))
+                pos = pos[None].tile((self._sim._B, 1, 1))
                 is_valid = True
             elif pos.shape == (self._sim._B, 3):
                 pos = self.init_positions_COM_offset[None] + pos[:, None]
-                self._tgt["pos"] = pos
                 is_valid = True
         elif pos.ndim == 3:
             if pos.shape == (self._sim._B, self.n_vertices, 3):
-                self._tgt["pos"] = pos
                 is_valid = True
         if not is_valid:
             gs.raise_exception("Tensor shape not supported.")
 
-        # Immediately flush to the solver's internal elements_v so that the
-        # visualizer can render the updated positions without scene.step().
-        if is_valid and self._tgt["pos"] is not None:
-            self.set_pos(self._sim.cur_substep_local, self._tgt["pos"].detach())
+        # Between two steps, the state sits in frame 0 (see 'FEMSolver.roll_frame_window')
+        self.set_pos(0, pos.contiguous())
 
     def set_velocity(self, vel):
         """
@@ -324,28 +317,29 @@ class FEMEntity(Entity):
             If the tensor shape is not supported.
         """
         self._assert_active()
-        gs.logger.warning("Manually setting element velocities. This is not recommended and could break gradient flow.")
 
         vel = to_gs_tensor(vel)
 
         is_valid = False
         if vel.ndim == 1:
             if vel.shape == (3,):
-                self._tgt["vel"] = vel.tile((self._sim._B, self.n_vertices, 1))
+                vel = vel.tile((self._sim._B, self.n_vertices, 1))
                 is_valid = True
         elif vel.ndim == 2:
             if vel.shape == (self.n_vertices, 3):
-                self._tgt["vel"] = vel[None].tile((self._sim._B, 1, 1))
+                vel = vel[None].tile((self._sim._B, 1, 1))
                 is_valid = True
             elif vel.shape == (self._sim._B, 3):
-                self._tgt["vel"] = vel[:, None].tile((1, self.n_vertices, 1))
+                vel = vel[:, None].tile((1, self.n_vertices, 1))
                 is_valid = True
         elif vel.ndim == 3:
             if vel.shape == (self._sim._B, self.n_vertices, 3):
-                self._tgt["vel"] = vel
                 is_valid = True
         if not is_valid:
             gs.raise_exception("Tensor shape not supported.")
+
+        # See 'set_position'
+        self.set_vel(0, vel.contiguous())
 
     @assert_muscle
     def set_actuation(self, actu):
@@ -372,20 +366,22 @@ class FEMEntity(Entity):
         is_valid = False
         n_groups = self.material.n_groups
         if actu.ndim == 0:
-            self._tgt["actu"] = actu.tile((self._sim._B, n_groups))
+            actu = actu.tile((self._sim._B, n_groups))
             is_valid = True
         elif actu.ndim == 1:
             if actu.shape == (n_groups,):
-                self._tgt["actu"] = actu[None].tile((self._sim._B, 1))
+                actu = actu[None].tile((self._sim._B, 1))
                 is_valid = True
             elif actu.shape == (self.n_elements,):
                 gs.raise_exception("Cannot set per-element actuation.")
         elif actu.ndim == 2:
             if actu.shape == (self._sim._B, n_groups):
-                self._tgt["actu"] = actu
                 is_valid = True
         if not is_valid:
             gs.raise_exception("Tensor shape not supported.")
+
+        # See 'set_position'
+        self.set_actu(0, actu.contiguous())
 
     def set_muscle(self, muscle_group=None, muscle_direction=None):
         """
@@ -426,16 +422,20 @@ class FEMEntity(Entity):
     def get_state(self):
         state = FEMEntityState(self, self._sim.cur_step_global)
         self.get_frame(self._sim.cur_substep_local, state.pos, state.vel, state.active)
+        # The gradient of the state goes to the vertices of this entity (see 'FEMSolver.add_grad_from_state')
+        self._solver.record_read(state.grad_tensors, self)
         return state
 
     def deactivate(self):
         gs.logger.info(f"{self.__class__.__name__} <{self.id}> deactivated.")
-        self._tgt["act"] = gs.INACTIVE
+        # See 'set_position'
+        self.set_active(0, gs.INACTIVE)
         self.active = False
 
     def activate(self):
         gs.logger.info(f"{self.__class__.__name__} <{self.id}> activated.")
-        self._tgt["act"] = gs.ACTIVE
+        # See 'set_position'
+        self.set_active(0, gs.ACTIVE)
         self.active = True
 
     # ------------------------------------------------------------------------------------
@@ -613,168 +613,6 @@ class FEMEntity(Entity):
     # ---------------------------- checkpoint and buffer ---------------------------------
     # ------------------------------------------------------------------------------------
 
-    def init_tgt_keys(self):
-        """
-        Initialize the keys used in target state management.
-
-        This defines which physical properties (e.g., position, velocity) will be tracked for checkpointing and buffering.
-        """
-        self._tgt_keys = ["vel", "pos", "act", "actu"]
-
-    def init_tgt_vars(self):
-        """
-        Initialize the target state variables and their buffers.
-
-        This sets up internal dictionaries to store per-step target values for properties like velocity, position, actuation, and activation.
-        """
-
-        # temp variable to store targets for next step
-        self._tgt = dict()
-        self._tgt_buffer = dict()
-        self.init_tgt_keys()
-
-        for key in self._tgt_keys:
-            self._tgt[key] = None
-            self._tgt_buffer[key] = list()
-
-    def init_ckpt(self):
-        """
-        Initialize the checkpoint storage dictionary.
-
-        Creates an empty container for storing simulation checkpoints.
-        """
-
-        self._ckpt = dict()
-
-    def save_ckpt(self, ckpt_name):
-        """
-        Save the current target state buffers to a named checkpoint.
-
-        Parameters
-        ----------
-        ckpt_name : str
-            The name to identify the checkpoint.
-
-        Notes
-        -----
-        After saving, the internal target buffers are cleared to prepare for new input.
-        """
-
-        if ckpt_name not in self._ckpt:
-            self._ckpt[ckpt_name] = {
-                "_tgt_buffer": dict(),
-            }
-
-        for key in self._tgt_keys:
-            self._ckpt[ckpt_name]["_tgt_buffer"][key] = list(self._tgt_buffer[key])
-            self._tgt_buffer[key].clear()
-
-    def load_ckpt(self, ckpt_name):
-        """
-        Load a previously saved target state buffer from a named checkpoint.
-
-        Parameters
-        ----------
-        ckpt_name : str
-            The name of the checkpoint to load.
-
-        Raises
-        ------
-        KeyError
-            If the checkpoint name is not found.
-        """
-
-        for key in self._tgt_keys:
-            self._tgt_buffer[key] = list(self._ckpt[ckpt_name]["_tgt_buffer"][key])
-
-    def reset_grad(self):
-        """
-        Clear the target buffer.
-        """
-
-        for key in self._tgt_keys:
-            self._tgt_buffer[key].clear()
-
-    def process_input(self, in_backward=False):
-        """
-        Push position, velocity, and activation target states into the simulator.
-
-        Parameters
-        ----------
-        in_backward : bool, default=False
-            Whether the simulation is in the backward (gradient) pass.
-
-        Returns
-        -------
-        inputs : tuple
-            The inputs applied at this step, of any type, for the simulator to tape.
-        """
-        if in_backward:
-            # use negative index because buffer length might not be full
-            index = self._sim.cur_step_local - self._sim.max_steps_local
-            for key in self._tgt_keys:
-                self._tgt[key] = self._tgt_buffer[key][index]
-
-        else:
-            for key in self._tgt_keys:
-                self._tgt_buffer[key].append(self._tgt[key])
-        inputs = tuple(self._tgt.values())
-
-        # set_pos followed by set_vel, because set_pos resets velocity.
-        # Detached, see ParticleEntity.process_input.
-        if self._tgt["pos"] is not None:
-            assert self._tgt["pos"].is_contiguous()
-            self.set_pos(self._sim.cur_substep_local, self._tgt["pos"].detach())
-
-        if self._tgt["vel"] is not None:
-            assert self._tgt["vel"].is_contiguous()
-            self.set_vel(self._sim.cur_substep_local, self._tgt["vel"].detach())
-
-        if self._tgt["act"] is not None:
-            assert self._tgt["act"] in (gs.ACTIVE, gs.INACTIVE)
-            self.set_active(self._sim.cur_substep_local, self._tgt["act"])
-
-        if self._tgt["actu"] is not None:
-            assert self._tgt["actu"].is_contiguous()
-            self.set_actu(self._sim.cur_substep_local, self._tgt["actu"].detach())
-
-        for key in self._tgt_keys:
-            self._tgt[key] = None
-        return inputs
-
-    def process_input_grad(self):
-        """
-        Process gradients of input states and propagate them backward.
-
-        Returns
-        -------
-        inputs_grad : list of tuple
-            The pairs (input, gradient) of the inputs applied at this step that track gradients.
-
-        Notes
-        -----
-        Clears the gradients in the solver to avoid double accumulation.
-        """
-        _tgt_actu = self._tgt_buffer["actu"].pop()
-        _tgt_vel = self._tgt_buffer["vel"].pop()
-        _tgt_pos = self._tgt_buffer["pos"].pop()
-
-        inputs_grad = []
-        for tgt, set_grad in (
-            (_tgt_actu, self.set_actu_grad),
-            (_tgt_vel, self.set_vel_grad),
-            (_tgt_pos, self.set_pos_grad),
-        ):
-            if tgt is not None and tgt.requires_grad:
-                grad = torch.zeros_like(tgt)
-                set_grad(self._sim.cur_substep_local, grad)
-                inputs_grad.append((tgt, grad))
-
-        if _tgt_vel is not None or _tgt_pos is not None or _tgt_actu is not None:
-            # manually zero the grad since manually setting state breaks gradient flow
-            self.clear_grad(self._sim.cur_substep_local)
-        return inputs_grad
-
     def _assert_active(self):
         if not self.active:
             gs.raise_exception(f"{self.__class__.__name__} is inactive. Call `entity.activate()` first.")
@@ -796,31 +634,8 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_vertices, 3) containing new positions.
         """
 
-        self._solver._kernel_set_elements_pos(
-            f=f,
-            element_v_start=self._v_start,
-            n_vertices=self.n_vertices,
-            pos=pos,
-        )
-
-    def set_pos_grad(self, f, pos_grad):
-        """
-        Set gradient of element positions in the solver.
-
-        Parameters
-        ----------
-        f : int
-            Current substep/frame index.
-
-        pos_grad : torch.Tensor
-            Tensor of shape (n_envs, n_vertices, 3) containing gradients of positions.
-        """
-
-        self._solver._kernel_set_elements_pos_grad(
-            f=f,
-            element_v_start=self._v_start,
-            n_vertices=self.n_vertices,
-            pos_grad=pos_grad,
+        self._solver.record_input(
+            (KernelLaunch(self._solver._kernel_set_elements_pos, (f, self._v_start, self.n_vertices, pos)),)
         )
 
     def set_vel(self, f, vel):
@@ -836,31 +651,8 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_vertices, 3) containing velocities.
         """
 
-        self._solver._kernel_set_elements_vel(
-            f=f,
-            element_v_start=self._v_start,
-            n_vertices=self.n_vertices,
-            vel=vel,
-        )
-
-    def set_vel_grad(self, f, vel_grad):
-        """
-        Set gradient of element velocities in the solver.
-
-        Parameters
-        ----------
-        f : int
-            Current substep/frame index.
-
-        vel_grad : torch.Tensor
-            Tensor of shape (n_envs, n_vertices, 3) containing gradients of velocities.
-        """
-
-        self._solver._kernel_set_elements_vel_grad(
-            f=f,
-            element_v_start=self._v_start,
-            n_vertices=self.n_vertices,
-            vel_grad=vel_grad,
+        self._solver.record_input(
+            (KernelLaunch(self._solver._kernel_set_elements_vel, (f, self._v_start, self.n_vertices, vel)),)
         )
 
     def set_actu(self, f, actu):
@@ -876,32 +668,13 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_groups) specifying actuation values.
         """
 
-        self._solver._kernel_set_elements_actu(
-            f=f,
-            element_el_start=self._el_start,
-            n_elements=self.n_elements,
-            n_groups=self.material.n_groups,
-            actu=actu,
-        )
-
-    def set_actu_grad(self, f, actu_grad):
-        """
-        Set gradient of actuation values in the solver.
-
-        Parameters
-        ----------
-        f : int
-            Current substep/frame index.
-
-        actu_grad : torch.Tensor
-            Tensor of shape (n_envs, n_groups) specifying gradients of actuation.
-        """
-
-        self._solver._kernel_set_elements_actu(
-            f=f,
-            element_el_start=self._el_start,
-            n_elements=self.n_elements,
-            actu_grad=actu_grad,
+        self._solver.record_input(
+            (
+                KernelLaunch(
+                    self._solver._kernel_set_elements_actu,
+                    (f, self._el_start, self.n_elements, self.material.n_groups, actu),
+                ),
+            )
         )
 
     def set_active(self, f, active):
@@ -916,12 +689,10 @@ class FEMEntity(Entity):
         active : int
             Activity flag (gs.ACTIVE or gs.INACTIVE).
         """
-
-        self._solver._kernel_set_active(
-            f=f,
-            element_el_start=self._el_start,
-            n_elements=self.n_elements,
-            active=active,
+        actives = torch.full((self._sim._B, self.n_elements), active, dtype=gs.tc_int, device=gs.device)
+        self._solver.record_input(
+            (KernelLaunch(self._solver._kernel_set_active, (f, self._el_start, self.n_elements, actives)),),
+            is_differentiable=False,
         )
 
     @assert_muscle
@@ -1113,31 +884,6 @@ class FEMEntity(Entity):
         for i_v, i_b in qd.ndrange(self.n_elements, self._sim._B):
             i_global = i_v + self.el_start
             active[i_b, i_v] = self._solver.elements_el_ng[f, i_global, i_b].active
-
-    @qd.kernel
-    def clear_grad(self, f: qd.i32):
-        """
-        Zero out the gradients of position, velocity, and actuation for the current substep.
-
-        Parameters
-        ----------
-        f : int
-            The substep/frame index for which to clear gradients.
-
-        Notes
-        -----
-        This method is primarily used during backward passes to manually reset gradients
-        that may be corrupted by explicit state setting.
-        """
-        # TODO: not well-tested
-        for i_v, i_b in qd.ndrange(self.n_vertices, self._sim._B):
-            i_global = i_v + self.v_start
-            self._solver.elements_v.grad[f, i_global, i_b].pos = 0
-            self._solver.elements_v.grad[f, i_global, i_b].vel = 0
-
-        for i_v, i_b in qd.ndrange(self.n_elements, self._sim._B):
-            i_global = i_v + self.el_start
-            self._solver.elements_el.grad[f, i_global, i_b].actu = 0
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------

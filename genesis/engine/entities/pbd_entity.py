@@ -284,12 +284,6 @@ class PBDTetEntity(PBDBaseEntity):
         self._mesh = self._vmesh.copy()
         self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
 
-    def _reset_grad(self):
-        pass
-
-    def add_grad_from_state(self, state):
-        pass
-
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------

@@ -87,15 +87,14 @@ def test_mpm_tool_push_grad(show_viewer):
 
 @pytest.mark.required
 def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
-    # With checkpoint windows of two steps, the backward pass replays the second and third actuations within a window,
-    # and restores the second from a checkpoint at the start of the next window, over which it holds.
+    # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
+    # none.
     scenes, boxes = [], []
     for requires_grad in (True, False):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=4e-3,
                 substeps=2,
-                substeps_local=4,
                 requires_grad=requires_grad,
             ),
             mpm_options=gs.options.MPMOptions(

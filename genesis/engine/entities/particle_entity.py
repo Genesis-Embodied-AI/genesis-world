@@ -108,9 +108,6 @@ class ParticleEntity(Entity):
 
         self.sample()
 
-        self.init_tgt_vars()
-        self.init_ckpt()
-
         # Note that this attribute must only be used in forward pass
         self.active = False
 
@@ -172,12 +169,6 @@ class ParticleEntity(Entity):
                     "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
                     f"Got: {self.sampler}."
                 )
-
-    def init_tgt_keys(self):
-        """
-        Initialize the list of keys used for controlling entity state (position, velocity, activation).
-        """
-        self._tgt_keys = ("pos", "vel", "act")
 
     def _add_to_solver(self):
         # For nowhere entity, it will be activated when particles are later added.
@@ -342,168 +333,17 @@ class ParticleEntity(Entity):
 
         gs.logger.info(f"Sampled ~<{self._n_particles:,}>~ particles.")
 
-    def init_tgt_vars(self):
-        """
-        Initialize target buffers used for controlling and differentiating entity state over time.
-        """
-        # temp variable to store targets for next step
-        self._tgt = dict()
-        self._tgt_buffer = dict()
-        self.init_tgt_keys()
-
-        for key in self._tgt_keys:
-            self._tgt[key] = None
-            self._tgt_buffer[key] = list()
-
-    def init_ckpt(self):
-        """
-        Initialize checkpoint storage for simulation state.
-        """
-        self._ckpt = dict()
-
-    def save_ckpt(self, ckpt_name):
-        """
-        Save the current target state buffers to a checkpoint.
-
-        Parameters
-        ----------
-        ckpt_name : str
-            Name of the checkpoint to save.
-        """
-        if ckpt_name not in self._ckpt:
-            self._ckpt[ckpt_name] = {"_tgt_buffer": dict()}
-
-        for key in self._tgt_keys:
-            self._ckpt[ckpt_name]["_tgt_buffer"][key] = list(self._tgt_buffer[key])
-            self._tgt_buffer[key].clear()
-
-    def load_ckpt(self, ckpt_name):
-        """
-        Restore target state buffers from a previously saved checkpoint.
-
-        Parameters
-        ----------
-        ckpt_name : str
-            Name of the checkpoint to load.
-        """
-        for key in self._tgt_keys:
-            self._tgt_buffer[key] = list(self._ckpt[ckpt_name]["_tgt_buffer"][key])
-
-    def reset_grad(self):
-        """
-        Clear target buffers and any externally queried simulation states.
-
-        Used before backpropagation to reset gradients.
-        """
-        for key in self._tgt_keys:
-            self._tgt_buffer[key].clear()
-        self._queried_states.clear()
-
-    def _reset_grad(self):
-        """
-        Clear gradients.
-        """
-        raise NotImplementedError
-
-    def add_grad_from_state(state):
-        raise NotImplementedError
-
-    def process_input(self, in_backward: bool = False):
-        """
-        Push position, velocity, and activation target states into the simulator.
-
-        Parameters
-        ----------
-        in_backward : bool, default=False
-            Whether the simulation is in the backward gradient pass.
-
-        Returns
-        -------
-        inputs : tuple
-            The inputs applied at this step, of any type, for the simulator to tape.
-        """
-        if in_backward:
-            # use negative index because buffer length might not be full
-            index = self._sim.cur_step_local - self._sim._steps_local
-            for key in self._tgt_keys:
-                self._tgt[key] = self._tgt_buffer[key][index]
-        else:
-            for key in self._tgt_keys:
-                self._tgt_buffer[key].append(self._tgt[key])
-        inputs = tuple(self._tgt.values())
-
-        if any(self._tgt[key] is not None for key in self._tgt_keys):
-            particles_idx_local = self._sanitize_particles_idx_local(envs_idx=self._scene._envs_idx)
-
-        # Note that setting positions resets velocities to zero, so it must be done BEFORE setting velocities.
-        # The setter kernels of every deformable entity take detached inputs: they only read the values, the gradient
-        # reaches each input through `process_input_grad`, and a gradient-tracking kernel argument makes Quadrants
-        # allocate a `.grad` buffer for it.
-        if self._tgt["pos"] is not None:
-            assert self._tgt["pos"].is_contiguous()
-            self.set_particles_pos(self._tgt["pos"].detach(), particles_idx_local)
-
-        if self._tgt["vel"] is not None:
-            assert self._tgt["vel"].is_contiguous()
-            self.set_particles_vel(self._tgt["vel"].detach(), particles_idx_local)
-
-        if self._tgt["act"] is not None:
-            assert self._tgt["act"].is_contiguous()
-            act_values = torch.tensor((gs.ACTIVE, gs.INACTIVE), dtype=gs.tc_int, device=gs.device)
-            assert torch.isin(self._tgt["act"], act_values).all()
-            self.set_particles_active(self._tgt["act"], particles_idx_local)
-
-        # Only the entities of a muscle material tape an actuation (see init_tgt_keys)
-        if "actu" in self._tgt_keys and self._tgt["actu"] is not None:
-            assert self._tgt["actu"].is_contiguous()
-            self.set_particles_actu(self._tgt["actu"].detach(), particles_idx_local)
-
-        for key in self._tgt_keys:
-            self._tgt[key] = None
-        return inputs
-
-    def process_input_grad(self):
-        """
-        Process gradients of input states and propagate them backward.
-
-        Returns
-        -------
-        inputs_grad : list of tuple
-            The pairs (input, gradient) of the inputs applied at this step that track gradients.
-
-        Notes
-        -----
-        Clears the gradients in the solver to avoid double accumulation.
-        """
-        _tgt_pos = self._tgt_buffer["pos"].pop()
-        _tgt_vel = self._tgt_buffer["vel"].pop()
-
-        inputs_grad = []
-        for tgt, set_grad in ((_tgt_pos, self._set_particles_pos_grad), (_tgt_vel, self._set_particles_vel_grad)):
-            if tgt is not None and tgt.requires_grad:
-                grad = torch.zeros_like(tgt)
-                set_grad(grad)
-                inputs_grad.append((tgt, grad))
-
-        # Manually zero the grad since manually setting state breaks gradient flow
-        if _tgt_vel is not None or _tgt_pos is not None:
-            self._reset_grad()
-        return inputs_grad
-
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------
     # ------------------------------------------------------------------------------------
 
     @assert_active
-    def _set_particles_target_state(self, key, name, element_shape, dtype, tensor, envs_idx=None):
-        # Overwriting the position or velocity of the particles cuts the gradient of everything that led to them
-        if key in ("pos", "vel") and self.sim.requires_grad and self.sim.cur_t > 0.0:
-            gs.logger.warning(
-                f"Manually setting particle '{name}'. This is not recommended because it breaks gradient flow."
-            )
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        vel_ = self._sanitize_particles_tensor(tensor, dtype, None, envs_idx, element_shape)
-        self._tgt[key] = to_gs_tensor(vel_)
+    def _set_particles_state(self, setter, element_shape, dtype, tensor, envs_idx=None):
+        """Set a state of all the particles through the given setter of particles, broadcast to every environment."""
+        tensor = self._sanitize_particles_tensor(
+            tensor, dtype, None, self._scene._sanitize_envs_idx(envs_idx), element_shape
+        )
+        setter(tensor, None, envs_idx)
 
     def set_position(self, value, envs_idx=None):
         """
@@ -522,7 +362,7 @@ class ParticleEntity(Entity):
         if poss.ndim == 1 or (poss.ndim == 2 and poss.shape[0] != self._n_particles):
             poss = self._init_particles_offset + poss[..., None, :]
 
-        self._set_particles_target_state("pos", "position", (3,), gs.tc_float, poss, envs_idx)
+        self._set_particles_state(self.set_particles_pos, (3,), gs.tc_float, poss, envs_idx)
 
     @gs.assert_built
     def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
@@ -537,18 +377,6 @@ class ParticleEntity(Entity):
             Index of the particles relative to this entity. If None, all particles will be considered. Defaults to None.
         envs_idx : torch.Tensor, shape (M,)
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
-        """
-        raise NotImplementedError
-
-    @gs.assert_built
-    def _set_particles_pos_grad(self, poss_grad):
-        """
-        Set gradients for particle positions at a given substep.
-
-        Parameters
-        ----------
-        poss_grad : torch.Tensor, shape (M, n_particles, 3)
-            The gradients for particle positions.
         """
         raise NotImplementedError
 
@@ -580,7 +408,7 @@ class ParticleEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        self._set_particles_target_state("vel", "velocity", (3,), gs.tc_float, vels, envs_idx)
+        self._set_particles_state(self.set_particles_vel, (3,), gs.tc_float, to_gs_tensor(vels), envs_idx)
 
     @gs.assert_built
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
@@ -595,18 +423,6 @@ class ParticleEntity(Entity):
             Index of the particles relative to this entity. If None, all particles will be considered. Defaults to None.
         envs_idx : torch.Tensor, shape (M,)
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
-        """
-        raise NotImplementedError
-
-    @gs.assert_built
-    def _set_particles_vel_grad(self, vels_grad):
-        """
-        Set gradients for particle velocities at a specific frame.
-
-        Parameters
-        ----------
-        vels_grad : torch.Tensor, shape (M, n_particles, 3)
-            The gradients for particle velocities.
         """
         raise NotImplementedError
 
@@ -638,8 +454,8 @@ class ParticleEntity(Entity):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        self._set_particles_target_state("act", "activeness", (), gs.tc_bool, actives, envs_idx)
-        self.active = bool((self._tgt["act"] == gs.ACTIVE).any())
+        self._set_particles_state(self.set_particles_active, (), gs.tc_bool, actives, envs_idx)
+        self.active = bool((to_gs_tensor(actives) == gs.ACTIVE).any())
 
     def activate(self):
         """

@@ -149,6 +149,11 @@ class FEMEntityState:
     def active(self):
         return self._active
 
+    @property
+    def grad_tensors(self):
+        """The tensors of the state that carry gradients."""
+        return (self._pos, self._vel)
+
 
 class RigidEntityState(RBC):
     """

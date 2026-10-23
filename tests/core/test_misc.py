@@ -858,17 +858,6 @@ def test_derived_substeps(show_viewer, tol):
         scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
         scene.build()
 
-    # The differentiable window is sized before the solvers allocate against it, so a rate derived from a solver dt
-    # cannot be honoured there and is rejected rather than left describing a step of a different length.
-    with pytest.raises(gs.GenesisException, match="not supported in differentiable mode"):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(dt=0.01, requires_grad=True),
-            rigid_options=gs.options.RigidOptions(dt=0.002),
-            show_viewer=False,
-        )
-        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
-        scene.build()
-
 
 @pytest.mark.required
 @pytest.mark.parametrize(

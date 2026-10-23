@@ -5,7 +5,6 @@ import torch
 
 import genesis as gs
 from genesis.engine.materials.base import Material
-from genesis.grad.bridge import QueriedStates
 from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
 
@@ -54,9 +53,6 @@ class Entity(RBC):
         self._morph = morph
         self._surface = surface
         self._sim = scene.sim
-
-        # The states of this entity queried during the current rollout, registered by 'get_state' (see QueriedStates)
-        self._queried_states = QueriedStates(self._sim)
 
         # Set entity name (auto-generate if not provided)
         existing_names = {entity.name for entity in scene.entities if entity.name is not None}
@@ -147,11 +143,6 @@ class Entity(RBC):
     def sensors(self) -> "gs.List[Sensor]":
         """List of sensors attached to this entity."""
         return self._sim._sensor_manager.get_sensors_by_entity(self._idx)
-
-    def collect_output_grads(self):
-        """Hand the gradients of the states of this entity queried at the current step to 'add_grad_from_state'."""
-        for state in self._queried_states.get(self._sim.cur_step_global):
-            self.add_grad_from_state(state)
 
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":

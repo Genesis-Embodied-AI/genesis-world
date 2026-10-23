@@ -187,33 +187,36 @@ def kernel_begin_backward_substep(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-) -> qd.i32:
-    is_grad_valid = func_is_grad_valid(dyn_state, rigid_info, rigid_config)
-    if is_grad_valid:
-        func_copy_next_to_curr_grad(f, dyn_state, rigid_adjoint_cache, rigid_info, rigid_config)
+    errno: qd.Tensor,
+):
+    func_flag_nan_grad(dyn_state, rigid_info, rigid_config, errno)
+    func_copy_next_to_curr_grad(f, dyn_state, rigid_adjoint_cache, rigid_info, rigid_config)
 
-        if not rigid_config.enable_mujoco_compatibility:
-            # Restore the cartesian space that was overwritten by the post-integrate forward replay in the backward
-            # substep (see _update_cartesian_grad in rigid_solver.py).
-            func_copy_cartesian_space(dyn_state_adjoint_cache, dyn_state, rigid_config)
-
-    return is_grad_valid
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        # Restore the cartesian space that was overwritten by the post-integrate forward replay in the backward
+        # substep (see _update_cartesian_grad in rigid_solver.py).
+        func_copy_cartesian_space(dyn_state_adjoint_cache, dyn_state, rigid_config)
 
 
 @qd.func
-def func_is_grad_valid(dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()):
-    is_valid = True
+def func_flag_nan_grad(
+    dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
+):
+    """
+    Flag INVALID_GRAD_NAN for every environment whose gradient of the positions or velocities of the dofs is 'nan'.
+
+    The flag stays on the device until the backward pass is over (see '_begin_reverse_pass' of Simulator), so the
+    reverse substeps never wait on the host.
+    """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*rigid_info.qpos.shape)):
-        if qd.math.isnan(rigid_info.qpos.grad[I]):
-            is_valid = False
+    for i_q, i_b in qd.ndrange(rigid_info.qpos.shape[0], rigid_info.qpos.shape[1]):
+        if qd.math.isnan(rigid_info.qpos.grad[i_q, i_b]):
+            qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_GRAD_NAN)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for I in qd.grouped(qd.ndrange(*dyn_state.dofs.vel.shape)):
-        if qd.math.isnan(dyn_state.dofs.vel.grad[I]):
-            is_valid = False
-
-    return is_valid
+    for i_d, i_b in qd.ndrange(dyn_state.dofs.vel.shape[0], dyn_state.dofs.vel.shape[1]):
+        if qd.math.isnan(dyn_state.dofs.vel.grad[i_d, i_b]):
+            qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_GRAD_NAN)
 
 
 @qd.func

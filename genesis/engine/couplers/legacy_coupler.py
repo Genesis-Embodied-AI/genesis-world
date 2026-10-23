@@ -933,6 +933,11 @@ class LegacyCoupler(RBC):
             )
             self.fem_rigid_link_constraints()
 
+    @property
+    def is_differentiable(self) -> bool:
+        """Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')."""
+        return True
+
     def couple_grad(self, f):
         if self.fem_solver.is_active:
             self.fem_surface_force.grad(

@@ -120,12 +120,6 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
 
-    def init_ckpt(self):
-        self._ckpt = dict()
-
-    def reset_grad(self):
-        pass
-
     def build(self):
         super().build()
 
@@ -139,7 +133,6 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.is_active:
             self.sh.build(self._B)
             self.init_particle_fields()
-            self.init_ckpt()
 
             for entity in self.entities:
                 entity._add_to_solver()
@@ -745,24 +738,9 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------ gradient --------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def collect_output_grads(self):
-        """
-        Collect gradients from downstream queried states.
-        """
-        pass
-
-    def add_grad_from_state(self, state):
-        pass
-
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
-
-    def save_ckpt(self, ckpt_name):
-        pass
-
-    def load_ckpt(self, ckpt_name):
-        pass
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:

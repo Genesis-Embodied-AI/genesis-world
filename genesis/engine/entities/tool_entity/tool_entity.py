@@ -1,12 +1,12 @@
 from pathlib import Path
 
 import numpy as np
-import torch
 
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import ToolEntityState
+from genesis.grad.bridge import KernelLaunch
 from genesis.utils.geom import (
     qd_rotvec_to_quat,
     qd_transform_quat_by_quat,
@@ -46,8 +46,6 @@ class ToolEntity(Entity):
             material=material,
             morph=morph,
         )
-        self.init_tgt_vars()
-        self.init_ckpt()
 
         # for rendering purpose only
         self.latest_pos = qd.Vector.field(3, dtype=gs.qd_float, shape=(1))
@@ -65,111 +63,11 @@ class ToolEntity(Entity):
     # --------------------------------- initialization -----------------------------------
     # ------------------------------------------------------------------------------------
 
-    def init_tgt_vars(self):
-        # temp variable to store targets for next step
-        self._tgt = {
-            "pos": None,
-            "quat": None,
-            "vel": None,
-            "ang": None,
-        }
-
-        self._tgt_buffer = {
-            "pos": list(),
-            "quat": list(),
-            "vel": list(),
-            "ang": list(),
-        }
-
-    def init_ckpt(self):
-        self._ckpt = dict()
-
     def reset_grad(self):
         self.pos.grad.fill(0)
         self.quat.grad.fill(0)
         self.vel.grad.fill(0)
         self.ang.grad.fill(0)
-
-        self._tgt_buffer["pos"].clear()
-        self._tgt_buffer["quat"].clear()
-        self._tgt_buffer["vel"].clear()
-        self._tgt_buffer["ang"].clear()
-
-        self._queried_states.clear()
-
-    @qd.kernel
-    def save_ckpt_kernel(
-        self, pos: qd.types.ndarray(), quat: qd.types.ndarray(), vel: qd.types.ndarray(), ang: qd.types.ndarray()
-    ):
-        for i_b in range(self._sim._B):
-            for i in qd.static(range(3)):
-                pos[i_b, i] = self.pos[0, i_b][i]
-                vel[i_b, i] = self.vel[0, i_b][i]
-                ang[i_b, i] = self.ang[0, i_b][i]
-
-            for i in qd.static(range(4)):
-                quat[i_b, i] = self.quat[0, i_b][i]
-
-    @qd.kernel
-    def load_ckpt_kernel(
-        self, pos: qd.types.ndarray(), quat: qd.types.ndarray(), vel: qd.types.ndarray(), ang: qd.types.ndarray()
-    ):
-        for i_b in range(self._sim._B):
-            for i in qd.static(range(3)):
-                self.pos[0, i_b][i] = pos[i_b, i]
-                self.vel[0, i_b][i] = vel[i_b, i]
-                self.ang[0, i_b][i] = ang[i_b, i]
-
-            for i in qd.static(range(4)):
-                self.quat[0, i_b][i] = quat[i_b, i]
-
-    def save_ckpt(self, ckpt_name):
-        if self._sim.requires_grad:
-            if ckpt_name not in self._ckpt:
-                self._ckpt[ckpt_name] = {
-                    "pos": torch.zeros((self._sim._B, 3), dtype=gs.tc_float, device=gs.device),
-                    "quat": torch.zeros((self._sim._B, 4), dtype=gs.tc_float, device=gs.device),
-                    "vel": torch.zeros((self._sim._B, 3), dtype=gs.tc_float, device=gs.device),
-                    "ang": torch.zeros((self._sim._B, 3), dtype=gs.tc_float, device=gs.device),
-                    "_tgt_buffer": dict(),
-                }
-
-            self.save_ckpt_kernel(
-                self._ckpt[ckpt_name]["pos"],
-                self._ckpt[ckpt_name]["quat"],
-                self._ckpt[ckpt_name]["vel"],
-                self._ckpt[ckpt_name]["ang"],
-            )
-
-            self._ckpt[ckpt_name]["_tgt_buffer"]["pos"] = list(self._tgt_buffer["pos"])
-            self._ckpt[ckpt_name]["_tgt_buffer"]["quat"] = list(self._tgt_buffer["quat"])
-            self._ckpt[ckpt_name]["_tgt_buffer"]["vel"] = list(self._tgt_buffer["vel"])
-            self._ckpt[ckpt_name]["_tgt_buffer"]["ang"] = list(self._tgt_buffer["ang"])
-
-            self._tgt_buffer["pos"].clear()
-            self._tgt_buffer["quat"].clear()
-            self._tgt_buffer["vel"].clear()
-            self._tgt_buffer["ang"].clear()
-
-        # restart from frame 0 in memory
-        self.copy_frame(self._sim.substeps_local, 0)
-
-    def load_ckpt(self, ckpt_name):
-        self.copy_frame(0, self._sim.substeps_local)
-        self.copy_grad(0, self._sim.substeps_local)
-        self.reset_grad_till_frame(self._sim.substeps_local)
-
-        self.load_ckpt_kernel(
-            self._ckpt[ckpt_name]["pos"],
-            self._ckpt[ckpt_name]["quat"],
-            self._ckpt[ckpt_name]["vel"],
-            self._ckpt[ckpt_name]["ang"],
-        )
-
-        self._tgt_buffer["pos"] = list(self._ckpt[ckpt_name]["_tgt_buffer"]["pos"])
-        self._tgt_buffer["quat"] = list(self._ckpt[ckpt_name]["_tgt_buffer"]["quat"])
-        self._tgt_buffer["vel"] = list(self._ckpt[ckpt_name]["_tgt_buffer"]["vel"])
-        self._tgt_buffer["ang"] = list(self._ckpt[ckpt_name]["_tgt_buffer"]["ang"])
 
     def substep_pre_coupling(self, f):
         self.advect(f)
@@ -303,9 +201,8 @@ class ToolEntity(Entity):
         if f is None:
             f = self._sim.cur_substep_local
         self.get_frame(f, state.pos, state.quat, state.vel, state.ang)
-
-        # we store all queried states to track gradient flow
-        self._queried_states.append(state)
+        # The gradient of the state goes to this entity (see 'ToolSolver.add_grad_from_state')
+        self._solver.record_read(state.grad_tensors, self)
 
         return state
 
@@ -313,15 +210,13 @@ class ToolEntity(Entity):
         f = self._sim.cur_substep_local
         self.set_frame(f, state.pos, state.quat, state.vel, state.ang)
 
-    def build(self):
-        self.pos = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # positon
-        self.quat = qd.Vector.field(4, gs.qd_float, needs_grad=True)  # quaternion wxyz
-        self.vel = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # velocity
-        self.ang = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # angular velocity
-
-        qd.root.dense(qd.ij, (self._sim.substeps_local + 1, self._sim._B)).place(
-            self.pos, self.pos.grad, self.quat, self.quat.grad, self.vel, self.vel.grad, self.ang, self.ang.grad
-        )
+    def build(self, n_frames: int):
+        """Allocate the state of the tool over the given number of frames (see 'ToolSolver.roll_frame_window')."""
+        shape = (n_frames, self._sim._B)
+        self.pos = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)  # positon
+        self.quat = qd.Vector.field(4, gs.qd_float, shape=shape, needs_grad=True)  # quaternion wxyz
+        self.vel = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)  # velocity
+        self.ang = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)  # angular velocity
         self.init_state = ToolEntityState(self, 0)
         self.set_init_state(self._init_pos, self._init_quat)
 
@@ -334,150 +229,57 @@ class ToolEntity(Entity):
                 self.quat[0, i_b][i] = quat[i]
 
     @qd.kernel
-    def set_vel(self, s: qd.i32, vel: qd.types.ndarray()):
-        f = s * self._sim.substeps
+    def set_vel(self, f: qd.i32, vel: qd.types.ndarray()):
         for i_b in range(self._sim._B):
             for k in qd.static(range(3)):
                 self.vel[f, i_b][k] = vel[i_b, k]
 
     @qd.kernel
-    def set_vel_grad(self, s: qd.i32, vel_grad: qd.types.ndarray()):
-        f = s * self._sim.substeps
-        for i_b in range(self._sim._B):
-            for k in qd.static(range(3)):
-                vel_grad[i_b, k] += self.vel.grad[f, i_b][k]
-
-    @qd.kernel
-    def set_ang(self, s: qd.i32, ang: qd.types.ndarray()):
-        f = s * self._sim.substeps
+    def set_ang(self, f: qd.i32, ang: qd.types.ndarray()):
         for i_b in range(self._sim._B):
             for k in qd.static(range(3)):
                 self.ang[f, i_b][k] = ang[i_b, k]
 
     @qd.kernel
-    def set_ang_grad(self, s: qd.i32, ang_grad: qd.types.ndarray()):
-        f = s * self._sim.substeps
-        for i_b in range(self._sim._B):
-            for k in qd.static(range(3)):
-                ang_grad[i_b, k] += self.ang.grad[f, i_b][k]
-
-    @qd.kernel
-    def set_pos(self, s: qd.i32, pos: qd.types.ndarray()):
-        f = s * self._sim.substeps
+    def set_pos(self, f: qd.i32, pos: qd.types.ndarray()):
         for i_b in range(self._sim._B):
             for k in qd.static(range(3)):
                 self.pos[f, i_b][k] = pos[i_b, k]
 
     @qd.kernel
-    def set_pos_grad(self, s: qd.i32, pos_grad: qd.types.ndarray()):
-        f = s * self._sim.substeps
-        for i_b in range(self._sim._B):
-            for k in qd.static(range(3)):
-                pos_grad[i_b, k] += self.pos.grad[f, i_b][k]
-
-    @qd.kernel
-    def set_quat(self, s: qd.i32, quat: qd.types.ndarray()):
-        f = s * self._sim.substeps
+    def set_quat(self, f: qd.i32, quat: qd.types.ndarray()):
         for i_b in range(self._sim._B):
             for k in qd.static(range(4)):
                 self.quat[f, i_b][k] = quat[i_b, k]
 
-    @qd.kernel
-    def set_quat_grad(self, s: qd.i32, quat_grad: qd.types.ndarray()):
-        f = s * self._sim.substeps
-        for i_b in range(self._sim._B):
-            for k in qd.static(range(4)):
-                quat_grad[i_b, k] += self.quat.grad[f, i_b][k]
-
     def set_velocity(self, vel=None, ang=None):
+        # Between two steps, the state sits in frame 0 (see 'ToolSolver.roll_frame_window')
+        launches = []
         if vel is not None:
-            vel = to_gs_tensor(vel)
-            self._tgt["vel"] = vel
-
+            launches.append(KernelLaunch(self.set_vel, (0, to_gs_tensor(vel).contiguous())))
         if ang is not None:
-            ang = to_gs_tensor(ang)
-            self._tgt["ang"] = ang
+            launches.append(KernelLaunch(self.set_ang, (0, to_gs_tensor(ang).contiguous())))
+        self._solver.record_input(tuple(launches))
 
     def set_position(self, pos):
-        pos = to_gs_tensor(pos)
-        self._tgt["pos"] = pos
+        # See 'set_velocity'
+        self._solver.record_input((KernelLaunch(self.set_pos, (0, to_gs_tensor(pos).contiguous())),))
 
     def set_quaternion(self, quat):
-        quat = to_gs_tensor(quat)
-        self._tgt["quat"] = quat
+        # See 'set_velocity'
+        self._solver.record_input((KernelLaunch(self.set_quat, (0, to_gs_tensor(quat).contiguous())),))
 
-    def process_input(self, in_backward=False):
-        if in_backward:
-            self._tgt["pos"] = self._tgt_buffer["pos"][self._sim.cur_step_local]
-            self._tgt["quat"] = self._tgt_buffer["quat"][self._sim.cur_step_local]
-            self._tgt["vel"] = self._tgt_buffer["vel"][self._sim.cur_step_local]
-            self._tgt["ang"] = self._tgt_buffer["ang"][self._sim.cur_step_local]
-        else:
-            self._tgt_buffer["pos"].append(self._tgt["pos"])
-            self._tgt_buffer["quat"].append(self._tgt["quat"])
-            self._tgt_buffer["vel"].append(self._tgt["vel"])
-            self._tgt_buffer["ang"].append(self._tgt["ang"])
-        inputs = tuple(self._tgt.values())
-
-        # Detached, see ParticleEntity.process_input.
-        if self._tgt["pos"] is not None:
-            assert self._tgt["pos"].is_contiguous()
-            self.set_pos(self._sim.cur_step_local, self._tgt["pos"].detach())
-
-        if self._tgt["quat"] is not None:
-            assert self._tgt["quat"].is_contiguous()
-            self.set_quat(self._sim.cur_step_local, self._tgt["quat"].detach())
-
-        if self._tgt["vel"] is not None:
-            assert self._tgt["vel"].is_contiguous()
-            self.set_vel(self._sim.cur_step_local, self._tgt["vel"].detach())
-
-        if self._tgt["ang"] is not None:
-            assert self._tgt["ang"].is_contiguous()
-            self.set_ang(self._sim.cur_step_local, self._tgt["ang"].detach())
-
-        self._tgt["pos"] = None
-        self._tgt["quat"] = None
-        self._tgt["vel"] = None
-        self._tgt["ang"] = None
-        return inputs
-
-    def process_input_grad(self):
-        """Return the pairs (input, gradient) of the inputs applied at this step that track gradients."""
-        _tgt_pos = self._tgt_buffer["pos"].pop()
-        _tgt_quat = self._tgt_buffer["quat"].pop()
-        _tgt_vel = self._tgt_buffer["vel"].pop()
-        _tgt_ang = self._tgt_buffer["ang"].pop()
-
-        inputs_grad = []
-        for tgt, set_grad in (
-            (_tgt_vel, self.set_vel_grad),
-            (_tgt_ang, self.set_ang_grad),
-            (_tgt_pos, self.set_pos_grad),
-            (_tgt_quat, self.set_quat_grad),
-        ):
-            if tgt is not None and tgt.requires_grad:
-                grad = torch.zeros_like(tgt)
-                set_grad(self._sim.cur_step_local, grad)
-                inputs_grad.append((tgt, grad))
-        return inputs_grad
-
-    def add_grad_from_state(self, state):
-        if state.pos.grad is not None:
-            assert state.pos.grad.is_contiguous()
-            self.set_frame_add_grad_pos(self._sim.cur_substep_local, state.pos.grad)
-
-        if state.quat.grad is not None:
-            assert state.quat.grad.is_contiguous()
-            self.set_frame_add_grad_quat(self._sim.cur_substep_local, state.quat.grad)
-
-        if state.vel.grad is not None:
-            assert state.vel.grad.is_contiguous()
-            self.set_frame_add_grad_vel(self._sim.cur_substep_local, state.vel.grad)
-
-        if state.ang.grad is not None:
-            assert state.ang.grad.is_contiguous()
-            self.set_frame_add_grad_ang(self._sim.cur_substep_local, state.ang.grad)
+    def add_grad_from_state(self, grads):
+        """Add the gradients of a queried state of the tool, in the order of its `grad_tensors`, to the frame 0 adjoint."""
+        kernels = (
+            self.set_frame_add_grad_pos,
+            self.set_frame_add_grad_quat,
+            self.set_frame_add_grad_vel,
+            self.set_frame_add_grad_ang,
+        )
+        for kernel, grad in zip(kernels, grads):
+            if grad is not None:
+                kernel(0, grad)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

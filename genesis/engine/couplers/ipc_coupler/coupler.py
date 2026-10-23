@@ -854,6 +854,11 @@ class IPCCoupler(RBC):
             ps.frame_tick()
             self._ipc_gui.update()
 
+    @property
+    def is_differentiable(self) -> bool:
+        """Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')."""
+        return False
+
     def couple_grad(self, f):
         """Gradient computation for coupling"""
         # IPC doesn't support gradients yet
