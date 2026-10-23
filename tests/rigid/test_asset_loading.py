@@ -467,9 +467,9 @@ def test_parsing_inertia_defaults(
     for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused"):
         link = entity_density.get_link(name)
         scaled_link = entity_density_scaled.get_link(name)
-        assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, rtol=1e-6, err_msg=name)
-        assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=1e-6, err_msg=name)
-        assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, rtol=1e-6, err_msg=name)
+        assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, tol=gs.EPS, err_msg=name)
+        assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=gs.EPS, err_msg=name)
+        assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, tol=gs.EPS, err_msg=name)
 
     # An explicit material density overrides every density of the file, as it does for URDF
     for entity_density_mounted, (_, root_density, material_density) in zip(
@@ -484,8 +484,8 @@ def test_parsing_inertia_defaults(
         inertia = np.eye(3) * geoms_mass.sum() * 0.2**2 / 6.0
         inertia[1, 1] += np.dot(geoms_mass, (np.arange(7) - center) ** 2)
         inertia[2, 2] = inertia[1, 1]
-        assert_allclose(entity_density_mounted.base_link.get_mass(), geoms_mass.sum(), tol=1e-6)
-        assert_allclose(entity_density_mounted.base_link.desc.inertia, inertia, rtol=1e-6)
+        assert_allclose(entity_density_mounted.base_link.get_mass(), geoms_mass.sum(), tol=gs.EPS)
+        assert_allclose(entity_density_mounted.base_link.desc.inertia, inertia, tol=gs.EPS)
 
     # The link 'no_inertial' has no inertial element, so its whole inertial is the geometry estimate. Every link carries
     # the same sphere, so this mass is the reference for the recovered masses below.
