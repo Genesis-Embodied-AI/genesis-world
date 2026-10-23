@@ -224,7 +224,6 @@ def test_parsing_inertia_defaults(
     undefined_inertia,
     undefined_inertia_arm,
     degenerate_inertials,
-    zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
     authored_geom_density_mjcf,
     mjcf_geom_density_defaults,
@@ -297,7 +296,8 @@ def test_parsing_inertia_defaults(
     entity_mounted.attach(carrier_welded, parent_link_name=carrier_welded.base_link.name, pos=(0.0, 0.0, 0.2))
     entity_zero_density = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=zero_density_marker_mjcf,
+            file=authored_geom_density_mjcf,
+            pos=(0.0, -2.0, -0.5),
         ),
     )
     entity_chain_unmerged = scene.add_entity(
@@ -511,9 +511,9 @@ def test_parsing_inertia_defaults(
         # The fixed child 'bob' carries the mass, so 'connector' keeps a zero inertia and a zero mass floored at gs.EPS.
         (entity.get_link("connector"), gs.EPS, GEOM_POS, 0.0),
         (entity.get_link("bob"), 1.0, GEOM_POS, BOB_INERTIA_PER_MASS),
-        # The geom of 'marker' has a zero density and 'hull' carries the mass, so the marker keeps a zero mass.
-        (entity_zero_density.get_link("hull"), 8.0, (0.0, 0.0, 0.0), BOX_INERTIA_PER_MASS),
-        (entity_zero_density.get_link("marker"), gs.EPS, (0.0, 0.0, 0.0), 0.0),
+        # The geom of 'weightless' has a zero density and 'unstated' carries the mass, so it keeps a zero mass.
+        (entity_zero_density.get_link("unstated"), 8.0, (0.0, 0.0, 0.0), BOX_INERTIA_PER_MASS),
+        (entity_zero_density.get_link("weightless"), gs.EPS, (0.0, 0.0, 0.0), 0.0),
     ):
         assert_allclose(link.desc.mass, expected_mass, rtol=1e-6, err_msg=link.name)
         assert_allclose(link.desc.inertial_pos, expected_com, tol=tol, err_msg=link.name)
