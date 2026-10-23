@@ -111,7 +111,7 @@ class Entity(RBC):
 
     @property
     def desc(self) -> EntityDescription:
-        """The description this entity was created from, which 'Scene.export' writes."""
+        """The description this entity was created from."""
         return self._desc
 
     @property

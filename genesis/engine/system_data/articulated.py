@@ -1,4 +1,4 @@
-"""Articulated geometry and state backed by the native bulk array layout."""
+"""Articulated geometry and state of the kinematic and rigid solvers."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING

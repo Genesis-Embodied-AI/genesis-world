@@ -31,10 +31,7 @@ class ToolEntityData(SystemData):
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class ToolData(SystemData):
-    """Every tool entity holds fields of its own, so the aggregate record holds the 'ToolEntityData' of each entity.
-
-    The solver registers each of them, and nothing reads the aggregate record after.
-    """
+    """Every tool entity holds fields of its own, so the aggregate record holds the 'ToolEntityData' of each entity."""
 
     entities: tuple[ToolEntityData, ...]
 
