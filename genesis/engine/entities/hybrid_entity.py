@@ -71,7 +71,7 @@ class HybridEntityDescription(EntityDescription):
         are the entity options the other arguments were taken from, kept as authored in the description.
         """
         material_rigid = material.material_rigid
-        # The association sets the muscle groups of the soft material, so each hybrid entity resolves its own copy
+        # The association sets the muscle groups of the soft material, so each hybrid entity takes its own copy
         material_soft = material.material_soft.model_copy()
 
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
