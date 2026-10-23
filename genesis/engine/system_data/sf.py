@@ -1,12 +1,16 @@
 """Grid state for the stable fluid (SF) solver."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import quadrants as qd
 
 import genesis as gs
 
 from . import SystemData, SystemDataDescription
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -21,7 +25,7 @@ class SFDescription(SystemDataDescription[SFData]):
     res: tuple[int, int, int]
     n_jets: int
 
-    def allocate(self, owner) -> SFData:
+    def allocate(self, owner: "Solver") -> SFData:
         cell_state = qd.types.struct(
             v=gs.qd_vec3,
             v_tmp=gs.qd_vec3,

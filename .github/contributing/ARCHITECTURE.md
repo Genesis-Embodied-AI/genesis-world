@@ -121,7 +121,7 @@ Location: `genesis/engine/solvers/`
 
 ### System data lifecycle
 
-`Simulator` owns an internal `SystemDataArray`. Each record has a concrete type, an owning solver and an owner-local index: 0 for the aggregate record of a solver, the entity index for a per-entity record and the geometry index for a per-geometry record. The owning solver decides whether its record exists, describes it and binds it, and the record lives as long as the scene. Solvers, couplers and entities look records up during build and keep references for runtime access, and a coupler writes into the fields of the records it couples.
+`Simulator` owns an internal `SystemDataArray`. Each record has a concrete type, an owning solver and an index: 0 for the aggregate record of a solver, the scene index of the entity for a per-entity record and the solver index of the geometry for a per-geometry record. The owning solver decides whether its record exists, describes it and binds it, and the record lives as long as the scene. Solvers, couplers and entities look records up during build and keep references for runtime access, and a coupler writes into the fields of the records it couples.
 
 The build phases are:
 

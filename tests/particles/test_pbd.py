@@ -58,7 +58,7 @@ def test_maxvolume(pbd_material, tmp_path, show_viewer, box_obj_path):
     exported = tmp_path / f"maxvolume{SCENE_FORMAT}"
     scene.export(exported)
     restored = gs.Scene.load(exported, show_viewer=show_viewer)
-    for entity, restored_entity in zip((pbd1, pbd2), restored.entities):
+    for entity, restored_entity in zip((pbd1, pbd2), restored.entities, strict=True):
         assert isinstance(restored_entity.material, gs.materials.PBD.Elastic)
         assert_equal(restored_entity.n_elems, entity.n_elems)
         assert_equal(restored_entity.edges, entity.edges)

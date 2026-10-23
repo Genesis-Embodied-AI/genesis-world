@@ -1,12 +1,16 @@
 """Particle state and reorder maps for smoothed particle hydrodynamics (SPH)."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import quadrants as qd
 
 import genesis as gs
 
 from . import SystemData, SystemDataDescription
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -26,7 +30,7 @@ class SPHDescription(SystemDataDescription[SPHData]):
     _B: int
     n_particles: int
 
-    def allocate(self, owner) -> SPHData:
+    def allocate(self, owner: "Solver") -> SPHData:
         # dynamic particle state
         particle_state = qd.types.struct(
             pos=gs.qd_vec3,  # position

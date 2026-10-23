@@ -1,10 +1,14 @@
 """Articulated geometry and state backed by the native bulk array layout."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from genesis.utils import array_class
 
 from . import SystemData, SystemDataDescription
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -87,7 +91,7 @@ class ArticulatedDescription(SystemDataDescription[ArticulatedData]):
     is_batch_dofs_info: bool
     is_batch_joints_info: bool
 
-    def allocate(self, owner) -> ArticulatedData:
+    def allocate(self, owner: "Solver") -> ArticulatedData:
         # Leaf structs are allocated one by one before assembling the per-component aggregates, to control the
         # allocation order of the underlying buffers (see the warning in get_constraint_state).
         dofs_info = array_class.get_dofs_info(self)

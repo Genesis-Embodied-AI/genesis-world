@@ -1,6 +1,7 @@
 """Shared finite element geometry, material data and time-indexed state."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -9,6 +10,9 @@ import quadrants as qd
 import genesis as gs
 
 from . import SystemData, SystemDataDescription
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -50,7 +54,7 @@ class FEMDescription(SystemDataDescription[FEMData]):
     surface_elements: np.ndarray
     surface_vert_mass: np.ndarray
 
-    def allocate(self, owner) -> FEMData:
+    def allocate(self, owner: "Solver") -> FEMData:
         # element state in vertices
         element_state_v = qd.types.struct(
             pos=gs.qd_vec3,  # position

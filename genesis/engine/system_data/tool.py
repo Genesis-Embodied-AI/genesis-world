@@ -11,6 +11,7 @@ from . import SystemData, SystemDataDescription
 
 if TYPE_CHECKING:
     from genesis.engine.entities.tool_entity.tool_entity import ToolEntityDescription
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -45,7 +46,7 @@ class ToolDescription(SystemDataDescription[ToolData]):
     entities_idx: tuple[int, ...]
     entities: tuple["ToolEntityDescription", ...]
 
-    def allocate(self, owner) -> ToolData:
+    def allocate(self, owner: "Solver") -> ToolData:
         entities_data = []
         for i_e, entity in zip(self.entities_idx, self.entities, strict=True):
             pos = qd.Vector.field(n=3, dtype=gs.qd_float, needs_grad=True)

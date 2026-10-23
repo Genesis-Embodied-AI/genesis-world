@@ -1,6 +1,7 @@
 """Particle state and rest topology for position-based dynamics (PBD)."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import quadrants as qd
 
@@ -8,6 +9,9 @@ import genesis as gs
 
 from . import SystemData, SystemDataDescription
 from .particles import ParticleEntityData
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -45,7 +49,7 @@ class PBDDescription(SystemDataDescription[PBDData]):
     n_inner_edges: int
     n_elems: int
 
-    def allocate(self, owner) -> PBDData:
+    def allocate(self, owner: "Solver") -> PBDData:
         # particles information (static)
         particle_info = qd.types.struct(
             mass=gs.qd_float,

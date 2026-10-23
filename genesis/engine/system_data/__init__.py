@@ -10,10 +10,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class SystemData:
-    """A domain record identified by its type, owner, and owner-local index.
+    """A domain record identified by its type, owner, and index.
 
-    The index is 0 for a solver's aggregate record, the entity index for per-entity records and the geometry index for
-    per-geometry records.
+    The index is 0 for a solver's aggregate record, the scene index of the entity for per-entity records and the solver
+    index of the geometry for per-geometry records.
     """
 
     owner: "Solver"

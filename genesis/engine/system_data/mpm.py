@@ -1,6 +1,7 @@
 """Particle history and coupling grid for the material point method (MPM)."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -9,6 +10,9 @@ import quadrants as qd
 import genesis as gs
 
 from . import SystemData, SystemDataDescription
+
+if TYPE_CHECKING:
+    from genesis.engine.solvers.base_solver import Solver
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -30,7 +34,7 @@ class MPMDescription(SystemDataDescription[MPMData]):
     n_particles: int
     grid_res: np.ndarray
 
-    def allocate(self, owner) -> MPMData:
+    def allocate(self, owner: "Solver") -> MPMData:
         # dynamic particle state
         particle_state = qd.types.struct(
             pos=gs.qd_vec3,  # position

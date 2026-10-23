@@ -230,7 +230,7 @@ def test_mesh_association(tmp_path, show_viewer, tol):
     pos[..., 0] += 0.2
     hybrid.part_rigid.set_pos(pos)
     scene.step()
-    expected_vel = 0.2 * hybrid.material.soft_dv_coef / hybrid.solver_soft.substep_dt
+    expected_vel = 0.2 * hybrid.material.soft_dv_coef / hybrid.solver_rigid.dt
     assert_allclose(hybrid.part_soft.get_particles_vel()[..., 0, 0], expected_vel, rtol=tol)
 
 
