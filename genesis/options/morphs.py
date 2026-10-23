@@ -567,8 +567,7 @@ class FileMorph(Morph):
         Estimate missing or recomputed inertia from visual geometry instead of collision geometry. Enable it when the
         collision geometry is a coarse stand-in for the part, such as a convex hull, so that the mass follows its real
         shape. Leave it off when the visual meshes are open, overlapping or full of interior detail, since their volume
-        is then unreliable. Authored collision densities take precedence, and a link without visual geometry falls back
-        to collision geometry. Defaults to False.
+        is then unreliable. A link without visual geometry falls back to collision geometry. Defaults to False.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
@@ -776,8 +775,7 @@ class Mesh(FileMorph, TetGenMixin):
         Estimate missing or recomputed inertia from visual geometry instead of collision geometry. Enable it when the
         collision geometry is a coarse stand-in for the part, such as a convex hull, so that the mass follows its real
         shape. Leave it off when the visual meshes are open, overlapping or full of interior detail, since their volume
-        is then unreliable. Authored collision densities take precedence, and a link without visual geometry falls back
-        to collision geometry. Defaults to False.
+        is then unreliable. A link without visual geometry falls back to collision geometry. Defaults to False.
     merge_submeshes_for_collision : bool, optional
         Whether to merge submeshes for collision. Defaults to False. **This is only used for RigidEntity.**
     visualization : bool, optional
@@ -973,8 +971,8 @@ class MJCF(FileMorph):
         Estimate missing or recomputed inertia from visual geometry instead of collision geometry. Enable it when the
         collision geometry is a coarse stand-in for the part, such as a convex hull, so that the mass follows its real
         shape. Leave it off when the visual meshes are open, overlapping or full of interior detail, since their volume
-        is then unreliable. Authored collision densities take precedence, and a link without visual geometry falls back
-        to collision geometry. Requires 'recompute_inertia'. Defaults to False.
+        is then unreliable. A link without visual geometry falls back to collision geometry. Turns on
+        'recompute_inertia'. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1023,11 +1021,12 @@ class MJCF(FileMorph):
     def model_post_init(self, context: Any) -> None:
         if not self.is_format(MJCF_FORMAT):
             gs.raise_exception(f"Expected `{MJCF_FORMAT}` extension for MJCF file: {self.file}")
+        # MuJoCo computes the inertia of every moving body from its geoms, so estimating it from visual geometry
+        # recomputes it
         if self.inertia_from_visual and not self.recompute_inertia:
-            gs.raise_exception(
-                "'inertia_from_visual' requires 'recompute_inertia' for MJCF, since MuJoCo already computes the "
-                "inertia of every moving body from its geoms."
-            )
+            if "recompute_inertia" in self.model_fields_set:
+                gs.raise_exception("'recompute_inertia' must be True when 'inertia_from_visual' is True for MJCF.")
+            self.recompute_inertia = True
 
     def _identifier(self) -> str:
         # A morph outlives the file it came from, because the entity builds only once. An unreadable file falls back
@@ -1121,8 +1120,7 @@ class URDF(FileMorph):
         Estimate missing or recomputed inertia from visual geometry instead of collision geometry. Enable it when the
         collision geometry is a coarse stand-in for the part, such as a convex hull, so that the mass follows its real
         shape. Leave it off when the visual meshes are open, overlapping or full of interior detail, since their volume
-        is then unreliable. Authored collision densities take precedence, and a link without visual geometry falls back
-        to collision geometry. Defaults to False.
+        is then unreliable. A link without visual geometry falls back to collision geometry. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1266,8 +1264,7 @@ class Drone(FileMorph):
         Estimate missing or recomputed inertia from visual geometry instead of collision geometry. Enable it when the
         collision geometry is a coarse stand-in for the part, such as a convex hull, so that the mass follows its real
         shape. Leave it off when the visual meshes are open, overlapping or full of interior detail, since their volume
-        is then unreliable. Authored collision densities take precedence, and a link without visual geometry falls back
-        to collision geometry. Defaults to False.
+        is then unreliable. A link without visual geometry falls back to collision geometry. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1620,8 +1617,7 @@ class USD(FileMorph):
         Estimate missing or recomputed inertia from visual geometry instead of collision geometry. Enable it when the
         collision geometry is a coarse stand-in for the part, such as a convex hull, so that the mass follows its real
         shape. Leave it off when the visual meshes are open, overlapping or full of interior detail, since their volume
-        is then unreliable. Authored collision densities take precedence, and a link without visual geometry falls back
-        to collision geometry. Defaults to False.
+        is then unreliable. A link without visual geometry falls back to collision geometry. Defaults to False.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
