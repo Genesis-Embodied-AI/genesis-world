@@ -52,7 +52,6 @@ from .inertial import (
     compose_inertial_from_g_infos,
     compose_inertial_properties,
     finalize_inertial,
-    select_inertial_g_infos,
 )
 
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
@@ -258,6 +257,9 @@ class RigidLinkDescription(KinematicLinkDescription):
     mass: float | None
     invweight: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
+    inertial_estimate: InertialProperties | None = None
+    """Estimate from the geometry at the density of the entity, kept by a link the world carries for an attach that
+    sets it moving to resolve with."""
 
 
 @dataclass
@@ -702,7 +704,10 @@ class KinematicEntityDescription(EntityDescription):
             pos=link_pos,
             quat=link_quat,
             joints=joints,
-            vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            vgeoms=[
+                description_from_info(RigidVisGeomDescription, vg_info)
+                for vg_info in (vg_infos if morph.visualization else ())
+            ],
         )
 
     def _load_primitive(self, morph, resolution: Resolution, load_geom_only_for_heterogeneous=False):
@@ -824,7 +829,7 @@ class KinematicEntityDescription(EntityDescription):
             init_qpos = np.concatenate([link_pos, link_quat])
 
         g_infos = []
-        if morph.visualization:
+        if morph.visualization or morph.inertia_from_visual:
             for mesh in meshes:
                 g_infos.append(dict(contype=0, conaffinity=0, vmesh=mesh, pos=gu.zero_pos(), quat=gu.identity_quat()))
         if morph.collision:
@@ -1393,7 +1398,10 @@ class KinematicEntityDescription(EntityDescription):
             is_robot=bool(l_info["is_robot"]),
             is_aligned=l_info["is_aligned"],
             joints=[description_from_info(RigidJointDescription, j_info) for j_info in j_infos],
-            vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            vgeoms=[
+                description_from_info(RigidVisGeomDescription, vg_info)
+                for vg_info in (vg_infos if morph.visualization else ())
+            ],
         )
 
     def _resolve_geoms(self, morph, g_infos, is_robot):
@@ -1411,12 +1419,16 @@ class KinematicEntityDescription(EntityDescription):
             for g_info in g_infos:
                 g_info.pop("density", None)
 
+        # Visual geometry estimating the inertia is kept, drawn or not (see '_describe_link')
+        is_visual_kept = morph.visualization or (
+            isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual
+        )
         cg_infos, vg_infos = [], []
         for g_info in g_infos:
             is_col = g_info["contype"] or g_info["conaffinity"]
             if morph.collision and is_col:
                 cg_infos.append(g_info)
-            if morph.visualization and not is_col:
+            if is_visual_kept and not is_col:
                 vg_infos.append(g_info)
 
         # Post-process all collision meshes at once.
@@ -1497,10 +1509,11 @@ class KinematicEntityDescription(EntityDescription):
         The align-anchor inertial weighs each collision geom by its authored density, falling back to unit density,
         so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
-        geoms for a link without collision geometry. 'from_visual' selects the geometry of both estimates (see
-        'select_inertial_g_infos').
+        geoms for a link without collision geometry. With 'from_visual', the visual geoms replace the collision ones in
+        both estimates, unless the link has no visual geometry or one of its collision geoms states its own density.
         """
-        cg_infos = select_inertial_g_infos(cg_infos, vg_infos, from_visual)
+        if from_visual and vg_infos and all(g_info.get("density") is None for g_info in cg_infos):
+            cg_infos = vg_infos
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *anchor_inertial, clamp_min_mass=False
@@ -1640,7 +1653,10 @@ class RigidEntityDescription(KinematicEntityDescription):
             pos=link_pos,
             quat=link_quat,
             joints=joints,
-            vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            vgeoms=[
+                description_from_info(RigidVisGeomDescription, vg_info)
+                for vg_info in (vg_infos if morph.visualization else ())
+            ],
             mass=inertial.mass,
             inertial_pos=inertial.com,
             inertial_quat=inertial.quat,
@@ -1817,13 +1833,17 @@ class RigidEntityDescription(KinematicEntityDescription):
             is_robot=bool(l_info["is_robot"]),
             is_aligned=l_info["is_aligned"],
             joints=[description_from_info(RigidJointDescription, j_info) for j_info in j_infos],
-            vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
+            vgeoms=[
+                description_from_info(RigidVisGeomDescription, vg_info)
+                for vg_info in (vg_infos if morph.visualization else ())
+            ],
             inertial_pos=inertial.com,
             inertial_quat=inertial.quat,
             inertia=inertial.inertia,
             mass=inertial.mass,
             invweight=invweight,
             geoms=self._describe_geoms(cg_infos),
+            inertial_estimate=inertial_info.hint if is_fixed else None,
         )
 
 

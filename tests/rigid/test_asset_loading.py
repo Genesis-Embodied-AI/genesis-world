@@ -482,9 +482,9 @@ def test_parsing_inertia_defaults(
     ):
         entity_inertia = inertia_scene.add_entity(
             morph=gs.morphs.URDF(
-                file=visual_collision_inertia[has_inertial],
                 visualization=has_visual,
                 collision=has_collision,
+                file=visual_collision_inertia[has_inertial],
                 recompute_inertia=is_recomputed,
                 inertia_from_visual=is_from_visual,
                 align=is_aligned,
@@ -495,7 +495,7 @@ def test_parsing_inertia_defaults(
         )
         if has_inertial and not is_recomputed:
             mass, com, inertia = 2.0, (0.0, 0.0, 0.0), (0.01, 0.02, 0.025)
-        elif has_visual and (is_from_visual or not has_collision):
+        elif is_from_visual or (has_visual and not has_collision):
             mass, com, inertia = 48.0, (0.2, 0.0, 0.0), (2.08, 1.6, 0.8)
         else:
             mass, com, inertia = 1.0, (0.0, 0.0, 0.0), (1.0 / 600.0,) * 3
@@ -505,6 +505,8 @@ def test_parsing_inertia_defaults(
         assert_allclose(np.linalg.eigvalsh(link.desc.inertia), sorted(inertia), rtol=1e-6)
         if is_aligned:
             assert_allclose(link.desc.offset_pos, com, atol=1e-7)
+        # Visual geometry estimates the inertia without being drawn
+        assert len(link.desc.vgeoms) == has_visual
 
     with pytest.raises(gs.GenesisException, match="recompute_inertia"):
         gs.morphs.MJCF(file=zero_density_marker_mjcf, inertia_from_visual=True)
@@ -530,10 +532,11 @@ def test_parsing_inertia_defaults(
     )
     entity_inertia_mounted = inertia_scene.add_entity(
         morph=gs.morphs.URDF(
+            visualization=False,
             file=visual_collision_inertia[0],
-            fixed=True,
-            batch_fixed_verts=True,
             inertia_from_visual=True,
+            batch_fixed_verts=True,
+            fixed=True,
         ),
         material=gs.materials.Rigid(
             rho=1000.0,

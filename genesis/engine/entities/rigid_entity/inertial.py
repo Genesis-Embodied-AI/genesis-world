@@ -122,17 +122,6 @@ def compose_inertial_properties(geoms_inertial_info: Sequence[GeomInertialInfo])
     return InertialProperties(global_mass, global_com, global_inertia)
 
 
-def select_inertial_g_infos(cg_infos: Sequence[dict], vg_infos: Sequence[dict], from_visual: bool) -> Sequence[dict]:
-    """Select the geoms a link's inertia is estimated from.
-
-    With 'from_visual', the visual geoms replace the collision ones, unless the link has no visual geometry or one of
-    its collision geoms states a density of its own. Otherwise the collision geoms are returned.
-    """
-    if from_visual and vg_infos and all(g_info.get("density") is None for g_info in cg_infos):
-        return vg_infos
-    return cg_infos
-
-
 def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> InertialProperties:
     """Compose the inertial of the geoms one link holds, at 'rho' where a geom states no density of its own.
 
