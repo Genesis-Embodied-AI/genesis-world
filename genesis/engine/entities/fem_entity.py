@@ -532,12 +532,11 @@ class FEMEntity(Entity):
 
         self.instantiate(verts, elems)
 
-    def _add_to_solver(self, in_backward=False):
-        if not in_backward:
-            self._step_global_added = self._sim.cur_step_global
-            gs.logger.info(
-                f"Entity {self.uid} added. class: {self.__class__.__name__}, morph: {self.morph.__class__.__name__}, size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
-            )
+    def _add_to_solver(self):
+        self._step_global_added = self._sim.cur_step_global
+        gs.logger.info(
+            f"Entity {self.uid} added. class: {self.__class__.__name__}, morph: {self.morph.__class__.__name__}, size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
+        )
 
         # Convert to appropriate numpy array types
         verts_numpy = tensor_to_array(self.init_positions, dtype=gs.np_float)
@@ -610,7 +609,7 @@ class FEMEntity(Entity):
         self.pressure_field_np = unsigned_distance / max_distance * self.material.hydroelastic_modulus  # normalize
 
     # ------------------------------------------------------------------------------------
-    # ---------------------------- checkpoint and buffer ---------------------------------
+    # ------------------------------------- activity -------------------------------------
     # ------------------------------------------------------------------------------------
 
     def _assert_active(self):
@@ -692,7 +691,7 @@ class FEMEntity(Entity):
         actives = torch.full((self._sim._B, self.n_elements), active, dtype=gs.tc_int, device=gs.device)
         self._solver.record_input(
             (KernelLaunch(self._solver._kernel_set_active, (f, self._el_start, self.n_elements, actives)),),
-            is_differentiable=False,
+            differentiable=False,
         )
 
     @assert_muscle

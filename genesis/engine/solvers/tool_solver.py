@@ -1,5 +1,3 @@
-from typing import TYPE_CHECKING
-
 import quadrants as qd
 
 import genesis.utils.array_class as array_class
@@ -9,9 +7,6 @@ from genesis.engine.materials import Tool
 from genesis.engine.states.solvers import ToolSolverState
 
 from .base_solver import Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import ToolEntity
 
 
 @qd.data_oriented
@@ -39,11 +34,8 @@ class ToolSolver(TimeBasedMixin, Solver):
 
     def build(self):
         super().build()
-        # The frames of the substeps the solver holds: those of one step with gradients, whose backward pass replays it
-        # whole, otherwise those of one substep (see 'roll_frame_window')
-        self._n_frames = self.substeps + 1 if self._requires_grad else 2
         for entity in self._entities:
-            entity.build(self._n_frames)
+            entity.build(self.n_frames)
 
     @property
     def is_active(self):
@@ -82,8 +74,7 @@ class ToolSolver(TimeBasedMixin, Solver):
 
     def set_state(self, f, state, envs_idx=None):
         # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
-        if self._requires_grad:
-            self._rollout_graph.mark_state_changed()
+        self._rollout_graph.mark_state_changed()
         if state is not None:
             assert len(state) == len(self._entities)
             for i, entity in enumerate(self._entities):
@@ -115,12 +106,12 @@ class ToolSolver(TimeBasedMixin, Solver):
 
     def roll_frame_window(self):
         for entity in self._entities:
-            entity.copy_frame(self._n_frames - 1, 0)
+            entity.copy_frame(self.n_frames - 1, 0)
 
     def roll_frame_window_grad(self):
         for entity in self._entities:
-            entity.copy_grad(0, self._n_frames - 1)
-            entity.reset_grad_till_frame(self._n_frames - 1)
+            entity.copy_grad(0, self.n_frames - 1)
+            entity.reset_grad_till_frame(self.n_frames - 1)
 
     @property
     def data(self):

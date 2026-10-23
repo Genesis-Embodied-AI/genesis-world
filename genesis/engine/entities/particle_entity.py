@@ -339,7 +339,7 @@ class ParticleEntity(Entity):
 
     @assert_active
     def _set_particles_state(self, setter, element_shape, dtype, tensor, envs_idx=None):
-        """Set a state of all the particles through the given setter of particles, broadcast to every environment."""
+        """Set a state of all the particles through the given setter, broadcast to the selected environments."""
         tensor = self._sanitize_particles_tensor(
             tensor, dtype, None, self._scene._sanitize_envs_idx(envs_idx), element_shape
         )

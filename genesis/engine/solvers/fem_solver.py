@@ -1,7 +1,5 @@
 # pylint: disable=no-value-for-parameter
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 
 import igl
@@ -18,9 +16,6 @@ from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import qd_to_torch
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import FEMEntity
 
 
 @qd.data_oriented
@@ -158,17 +153,17 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         # construct field
         self.elements_v = element_state_v.field(
-            shape=(self._n_frames, self.n_vertices, self._B),
+            shape=(self.n_frames, self.n_vertices, self._B),
             needs_grad=True,
             layout=qd.Layout.SOA,
         )
         self.elements_el = element_state_el.field(
-            shape=(self._n_frames, self.n_elements, self._B),
+            shape=(self.n_frames, self.n_elements, self._B),
             needs_grad=True,
             layout=qd.Layout.SOA,
         )
         self.elements_el_ng = element_state_el_ng.field(
-            shape=(self._n_frames, self.n_elements, self._B),
+            shape=(self.n_frames, self.n_elements, self._B),
             needs_grad=False,
             layout=qd.Layout.SOA,
         )
@@ -344,9 +339,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vertices_max = self.n_vertices
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
-        # The frames of the substeps the solver holds: those of one step with gradients, whose backward pass replays it
-        # whole, otherwise those of one substep (see 'roll_frame_window')
-        self._n_frames = self.substeps + 1 if self._requires_grad else 2
 
         if self.n_elements_max > 0:
             self.tet_wrong_order = qd.field(dtype=gs.qd_bool, shape=(), needs_grad=False)
@@ -1054,11 +1046,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 kernel(0, v_start, n_vertices, grad)
 
     def roll_frame_window(self):
-        self.copy_frame(self._n_frames - 1, 0)
+        self.copy_frame(self.n_frames - 1, 0)
 
     def roll_frame_window_grad(self):
-        self.copy_grad(0, self._n_frames - 1)
-        self.reset_grad_till_frame(self._n_frames - 1)
+        self.copy_grad(0, self.n_frames - 1)
+        self.reset_grad_till_frame(self.n_frames - 1)
 
     @property
     def data(self):
@@ -1077,8 +1069,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def set_state(self, f, state, envs_idx=None):
         # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
-        if self._requires_grad:
-            self._rollout_graph.mark_state_changed()
+        self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.active)
 

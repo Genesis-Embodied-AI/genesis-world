@@ -45,7 +45,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
     time_mid_a = scene_a.get_time().clone()
     scene_a.backward(loss_h1_a)
     # backward restores the physics state it snapshotted, so the clocks describing it come back too, while the substep
-    # counter indexes the input buffer that was consumed and rewinds to 0 for the tape horizon 2 records.
+    # counter rewinds to the first step the backward pass replayed.
     assert_allclose(scene_a.get_time(), time_mid_a, tol=gs.EPS)
     assert scene_a._sim._cur_substep_global == 0
     grad1_a = tensor_to_array(v1_a.grad).copy()
@@ -119,8 +119,8 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
             chassis_pos = robot.get_state().pos.squeeze()
         loss = torch.linalg.norm(chassis_pos)
         loss.backward()
-        # Rebuilding a checkpoint window replays steps the environments already simulated, so the clock has to follow
-        # the physics the backward pass rewinds instead of counting that replay as newly simulated time.
+        # The backward pass of a step replays it from the state it started from, so the clock follows the physics the
+        # backward pass rewinds instead of counting that replay as newly simulated time.
         assert_allclose(scene.get_time(), 0.0, tol=gs.EPS)
         grads.append(ctrl.grad.detach().clone())
         ctrl.grad.zero_()
@@ -196,8 +196,44 @@ def test_closed_loop_policy_grad_matches_fd(grad_revolute, precision, show_viewe
 
     params_ana = torch.tensor(params, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     rollout(scene_ana, arms_ana, params_ana).backward()
-    (grad_functional,) = torch.autograd.grad(rollout(scene_ana, arms_ana, params_ana), params_ana)
+    # The graph of a rollout runs backward again while it is retained, and the state behaves as a tensor the simulator
+    # mutates in place: a mutation torch does not record makes a later backward through the rollout raise.
+    loss = rollout(scene_ana, arms_ana, params_ana)
+    (grad_functional,) = torch.autograd.grad(loss, params_ana, retain_graph=True)
     assert_allclose(grad_functional, params_ana.grad, tol=gs.EPS)
+    (grad_retained,) = torch.autograd.grad(loss, params_ana, retain_graph=True)
+    assert_allclose(grad_retained, grad_functional, tol=gs.EPS)
+    with torch.no_grad():
+        arms_ana[0].control_dofs_force(0.0)
+    with pytest.raises(gs.GenesisException, match="changed since this operation"):
+        torch.autograd.grad(loss, params_ana)
+    # So does a change of the model, which the backward pass of every step would replay with
+    loss = rollout(scene_ana, arms_ana, params_ana)
+    arms_ana[0].set_dofs_kv(arms_ana[0].get_dofs_kv())
+    with pytest.raises(gs.GenesisException, match="changed since this operation"):
+        torch.autograd.grad(loss, params_ana)
+    # A gradient that is not finite raises once the backward pass is over, and so does an error the last steps of the
+    # rollout flagged
+    loss = rollout(scene_ana, arms_ana, params_ana)
+    with pytest.raises(gs.GenesisException, match="'inf' gradient"):
+        torch.autograd.grad(loss * float("nan"), params_ana)
+    loss = rollout(scene_ana, arms_ana, params_ana)
+    arms_ana[0].set_dofs_velocity(float("nan"))
+    scene_ana.step()
+    with pytest.raises(gs.GenesisException, match="Invalid accelerations"):
+        torch.autograd.grad(loss, params_ana)
+    # A 'nan' control force, unbounded by the force range of the dofs, drives the state to infinity
+    loss = rollout(scene_ana, arms_ana, params_ana)
+    arms_ana[0].control_dofs_force(float("nan"))
+    scene_ana.step()
+    with pytest.raises(gs.GenesisException, match="Invalid accelerations"):
+        torch.autograd.grad(loss, params_ana)
+
+    # A recorded write given an index twice raises, as its reverse pass would race on the slot it overwrites
+    with pytest.raises(gs.GenesisException, match="'envs_idx' repeats an index"):
+        arms_ana[0].control_dofs_force([[0.0], [0.0]], envs_idx=[0, 0])
+    with pytest.raises(gs.GenesisException, match="'dofs_idx' repeats an index"):
+        arms_ana[0].control_dofs_force([[0.0, 0.0], [0.0, 0.0]], dofs_idx_local=[0, 0])
 
     # fp32 needs a large step to clear the state-noise floor. fp64 needs a small step to bound truncation error.
     eps = 3e-5 if precision == "64" else 3e-2
@@ -218,3 +254,88 @@ def test_closed_loop_policy_grad_matches_fd(grad_revolute, precision, show_viewe
     del scenes, arms, scene, scene_ana, arms_ana
     gc.collect()
     assert scene_ref() is None
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_viewer):
+    # A PD controller written with the getters feeds the configuration and velocity it reads back into the control
+    # forces, and the loss reads link poses and DOF positions: the gradient of its gains follows both. The DOF positions
+    # are derived from the configuration as forward kinematics does, for every joint type.
+    HORIZON = 30
+    pair = make_diff_scene_pair(
+        grad_free_with_hinge_ball_slide, n_envs=2, gravity=(0.0, 0.0, -1.0), show_viewer=show_viewer
+    )
+    velocity = np.linspace(-0.8, 0.9, 11) * np.array([[1.0], [-0.7]])
+    params = np.array([3.0, 0.4, 0.5])
+    joints_dofs, base_rotation_dofs = slice(6, 11), slice(3, 6)
+
+    # In a differentiable scene, the getters track gradients and give the values the solver holds
+    reads = []
+    for scene, entity in ((pair.scene_ana, pair.entity_ana), (pair.scene_fd, pair.entity_fd)):
+        scene.reset()
+        entity.set_dofs_velocity(velocity)
+        for _ in range(7):
+            scene.step()
+        reads.append(
+            {
+                "qpos": entity.get_qpos(),
+                "dofs_position": entity.get_dofs_position(),
+                "dofs_position_selected": entity.get_dofs_position([8, 3, 8], envs_idx=[1]),
+                "dofs_velocity": entity.get_dofs_velocity(),
+                "links_pos": entity.get_links_pos(),
+                "links_pos_solver": entity.get_links_pos(relative=False),
+                "links_pos_com": entity.get_links_pos(ref=gs.link_ref_frame.link_COM),
+                "links_quat": entity.get_links_quat(),
+                "pos": entity.get_pos(),
+                "quat": entity.get_quat(),
+            }
+        )
+    for name, value in reads[0].items():
+        assert value.requires_grad, name
+        assert not reads[1][name].requires_grad, name
+        assert_allclose(value, reads[1][name], tol=gs.EPS, err_msg=name)
+
+    def rollout(scene, entity, params):
+        kp, kd, amplitude = torch.as_tensor(params, dtype=gs.tc_float, device=gs.device)
+        scene.reset()
+        entity.set_dofs_velocity(velocity)
+        for i_step in range(HORIZON):
+            position = entity.get_dofs_position(joints_dofs)
+            force = kp * (amplitude * np.sin(0.2 * i_step) - position) - kd * entity.get_dofs_velocity(joints_dofs)
+            entity.control_dofs_force(force, joints_dofs)
+            scene.step()
+        return (entity.get_links_pos()[:, 1:] ** 2).sum() + (entity.get_dofs_position(base_rotation_dofs) ** 2).sum()
+
+    params_ana = torch.tensor(params, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    rollout(pair.scene_ana, pair.entity_ana, params_ana).backward()
+
+    eps = 1e-5
+    fd_grad = np.zeros_like(params)
+    for i in range(len(params)):
+        losses = []
+        for sign in (+1, -1):
+            perturbed = params.copy()
+            perturbed[i] += sign * eps
+            losses.append(float(rollout(pair.scene_fd, pair.entity_fd, perturbed)))
+        fd_grad[i] = (losses[0] - losses[1]) / (2.0 * eps)
+    assert (np.abs(fd_grad) > 1e-4).all()
+    assert_allclose(params_ana.grad, fd_grad, tol=2e-10)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+def test_reject_non_differentiable_solvers():
+    box = gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1))
+    for materials, options, component_name in (
+        ((gs.materials.PBD.Liquid(),), {}, "PBDSolver"),
+        ((gs.materials.SPH.Liquid(),), {}, "SPHSolver"),
+        ((gs.materials.FEM.Elastic(),), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
+        ((gs.materials.FEM.Elastic(), gs.materials.Rigid()), {}, "LegacyCoupler"),
+        ((gs.materials.Rigid(),), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),
+    ):
+        scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True), **options, show_viewer=False)
+        for material in materials:
+            scene.add_entity(morph=box, material=material)
+        with pytest.raises(gs.GenesisException, match=component_name):
+            scene.build()

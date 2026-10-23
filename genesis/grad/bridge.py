@@ -45,13 +45,13 @@ class Operation:
 
 class OperationNode(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, graph: "RolloutGraph", op: Operation, state_handle, model_handle, *inputs: torch.Tensor):
+    def forward(ctx, graph: "RolloutGraph", operation: Operation, state_handle, model_handle, *inputs: torch.Tensor):
         # The simulator owns the graph, so a strong reference would make a cycle that crosses the C++ autograd graph,
         # which the garbage collector cannot traverse: the scene would never be freed.
         ctx.graph = weakref.ref(graph)
-        ctx.op = op
+        ctx.operation = operation
         ctx.set_materialize_grads(False)
-        outputs = graph._run(op.forward, *inputs)
+        outputs = graph._run(operation.forward, *inputs)
         next_state_handle = state_handle.detach().clone()
         ctx.save_for_backward(next_state_handle, model_handle)
         return next_state_handle, *outputs
@@ -71,7 +71,7 @@ class OperationNode(torch.autograd.Function):
                 e,
             )
         graph._enter_pass()
-        inputs_grad = graph._run(ctx.op.backward, *outputs_grad)
+        inputs_grad = graph._run(ctx.operation.backward, *outputs_grad)
         # The previous node runs its backward only if it receives a gradient for the state handle it returned
         if state_handle_grad is None:
             state_handle_grad = torch.zeros((), dtype=gs.tc_float, device=gs.device)
@@ -116,24 +116,23 @@ class RolloutGraph:
         """
         return self._requires_grad and torch.is_grad_enabled() and not self._is_running_operation
 
-    def record(self, op: Operation, *inputs: torch.Tensor) -> list[torch.Tensor]:
+    def record(self, operation: Operation, *inputs: torch.Tensor) -> list[torch.Tensor]:
         """Run an operation on the state as one node of the graph, and return its outputs."""
-        state_handle, *outputs = OperationNode.apply(self, op, self._state_handle, self._model_handle, *inputs)
+        state_handle, *outputs = OperationNode.apply(self, operation, self._state_handle, self._model_handle, *inputs)
         self._state_handle = state_handle
         return outputs
 
     def mark_state_changed(self):
-        """Invalidate the last operation recorded, whose output a change of the state that is not recorded overwrote."""
+        """Invalidate the last operation recorded, for a change of the state torch records no gradient of."""
         if self._requires_grad and not self._is_running_operation:
             increment_version(self._state_handle)
 
     def invalidate(self, change: "StateChange | None" = None, envs_idx=None):
         """
-        Invalidate every operation of the rollout, for a change of the scene the backward pass of a step cannot replay.
+        Invalidate every operation of the rollout, for a change of the model, which alters the replay of every step.
 
-        A change of the model alters the replay of every recorded step, and a state set whole replaces the one they
-        lead to. The arguments are those of a solver Subscriber callback, which this method is for the changes of the
-        model (see 'Simulator.build').
+        The simulator subscribes this method to the changes of the model of the differentiable solvers (see
+        'Simulator.build'), whose Subscriber callbacks take these arguments.
         """
         if self._requires_grad and not self._is_running_operation:
             increment_version(self._model_handle)
@@ -149,11 +148,11 @@ class RolloutGraph:
             # torch has it.
             torch.autograd.Variable._execution_engine.queue_callback(self._on_pass_end)
 
-    def _run(self, op_method, *args):
+    def _run(self, operation_method, *args):
         """Run the forward or backward pass of a recorded operation, inside which no operation is recorded."""
         self._is_running_operation = True
         try:
-            return op_method(*args)
+            return operation_method(*args)
         finally:
             self._is_running_operation = False
 
@@ -232,6 +231,8 @@ class ReadOperation(Operation):
         self._saved_state = saved_state
 
     def forward(self) -> tuple[torch.Tensor, ...]:
+        # A tensor a node returns without taking it as input becomes an output of the node itself, through which torch
+        # routes the gradient of the loss. The node keeps no reference to it, which would outlive the rollout.
         tensors, self._tensors = self._tensors, None
         return tensors
 

@@ -213,10 +213,11 @@ class ToolEntity(Entity):
     def build(self, n_frames: int):
         """Allocate the state of the tool over the given number of frames (see 'ToolSolver.roll_frame_window')."""
         shape = (n_frames, self._sim._B)
-        self.pos = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)  # positon
-        self.quat = qd.Vector.field(4, gs.qd_float, shape=shape, needs_grad=True)  # quaternion wxyz
-        self.vel = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)  # velocity
-        self.ang = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)  # angular velocity
+        self.pos = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)
+        # Quaternion (w, x, y, z)
+        self.quat = qd.Vector.field(4, gs.qd_float, shape=shape, needs_grad=True)
+        self.vel = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)
+        self.ang = qd.Vector.field(3, gs.qd_float, shape=shape, needs_grad=True)
         self.init_state = ToolEntityState(self, 0)
         self.set_init_state(self._init_pos, self._init_quat)
 
@@ -270,7 +271,7 @@ class ToolEntity(Entity):
         self._solver.record_input((KernelLaunch(self.set_quat, (0, to_gs_tensor(quat).contiguous())),))
 
     def add_grad_from_state(self, grads):
-        """Add the gradients of a queried state of the tool, in the order of its `grad_tensors`, to the frame 0 adjoint."""
+        """Add the gradients of a queried state of the tool, ordered as its `grad_tensors`, to the frame 0 adjoint."""
         kernels = (
             self.set_frame_add_grad_pos,
             self.set_frame_add_grad_quat,

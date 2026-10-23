@@ -94,11 +94,6 @@ class KinematicSolverState:
         self.links_quat = torch.zeros((_B, scene.sim.kinematic_solver.n_links, 4), dtype=gs.tc_float, device=gs.device)
 
     @property
-    def grad_tensors(self):
-        """The tensors of the state that carry gradients."""
-        return (self.qpos, self.dofs_vel, self.links_pos, self.links_quat)
-
-    @property
     def s_global(self):
         return self._s_global
 

@@ -3,6 +3,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
@@ -88,8 +89,8 @@ def test_mpm_tool_push_grad(show_viewer):
 @pytest.mark.required
 def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
-    # none.
-    scenes, boxes = [], []
+    # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
+    scenes, boxes_by_scene = [], []
     for requires_grad in (True, False):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
@@ -102,16 +103,20 @@ def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
                 upper_bound=(0.5, 0.5, 0.5),
                 grid_density=32,
             ),
+            # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
+            coupler_options=gs.options.LegacyCouplerOptions(
+                fem_mpm=False,
+            ),
             viewer_options=gs.options.ViewerOptions(
-                camera_pos=(0.6, -0.6, 0.4),
+                camera_pos=(0.6, -0.9, 0.5),
                 camera_lookat=(0.0, 0.0, 0.15),
             ),
             show_viewer=show_viewer and requires_grad,
         )
-        box = scene.add_entity(
+        mpm_box = scene.add_entity(
             morph=gs.morphs.Box(
-                lower=(-0.1, -0.1, 0.1),
-                upper=(0.1, 0.1, 0.2),
+                lower=(-0.35, -0.1, 0.1),
+                upper=(-0.15, 0.1, 0.2),
             ),
             material=gs.materials.MPM.Muscle(
                 E=5e4,
@@ -121,46 +126,77 @@ def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
                 n_groups=2,
             ),
         )
+        fem_box = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.3, 0.0, 0.3),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Muscle(
+                E=5e4,
+                nu=0.3,
+                rho=1000.0,
+                n_groups=2,
+            ),
+        )
         scene.build(n_envs=2)
-        # One muscle group on each side of the box
-        muscle_group = (box.init_particles[:, 0] > 0.0).astype(np.int32)
-        box.set_muscle(muscle_group=muscle_group)
+        # One muscle group on each side of each box
+        mpm_muscle_group = (mpm_box.init_particles[:, 0] > -0.25).astype(gs.np_int)
+        mpm_box.set_muscle(muscle_group=mpm_muscle_group)
+        elems_centroid = tensor_to_array(fem_box.init_positions)[fem_box.elems].mean(axis=1)
+        fem_box.set_muscle(muscle_group=(elems_centroid[:, 0] > 0.3).astype(gs.np_int))
         scenes.append(scene)
-        boxes.append(box)
+        boxes_by_scene.append((mpm_box, fem_box))
 
-    def rollout(scene, box, actus):
+    def rollout(scene, boxes, actus, vels):
         scene.reset()
-        box.set_actuation(actus[0])
+        for box, vel, actu in zip(boxes, vels, actus):
+            box.set_velocity(vel)
+            box.set_actuation(actu[0])
         scene.step()
-        box.set_actuation(actus[1])
+        for box, actu in zip(boxes, actus):
+            box.set_actuation(actu[1])
         scene.step()
         scene.step()
-        box.set_actuation(actus[2])
+        for box, actu in zip(boxes, actus):
+            box.set_actuation(actu[2])
         scene.step()
-        return (box.get_state().pos[..., 2] ** 2).sum()
+        # The loss of each box, which alone depends on its inputs since the boxes are uncoupled
+        goals = ((-0.15, -0.05, 0.0), (0.4, -0.05, 0.0))
+        return tuple(
+            ((box.get_state().pos - torch.tensor(goal, dtype=gs.tc_float, device=gs.device)) ** 2).sum()
+            for box, goal in zip(boxes, goals)
+        )
 
-    actus = np.array([[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]])
+    # Actuations of each box (MPM, FEM) at steps 0, 1 and 3, then their initial velocities
+    actus = np.array([[[0.5, 0.2], [0.1, 0.4], [0.3, 0.6]], [[0.4, 0.1], [0.2, 0.5], [0.6, 0.3]]])
+    vels = np.array([[0.1, -0.2, 0.3], [-0.2, 0.1, 0.2]])
     # Every substep of a step reads the actuation set last
-    for scene, box in zip(scenes, boxes):
-        rollout(scene, box, actus)
-        assert_allclose(box.get_particles_actu(), actus[2][muscle_group], tol=gs.EPS)
+    for scene, boxes in zip(scenes, boxes_by_scene):
+        rollout(scene, boxes, actus, vels)
+        assert_allclose(boxes[0].get_particles_actu(), actus[0, 2][mpm_muscle_group], tol=gs.EPS)
 
-    actus_ana = [torch.tensor(actu, dtype=gs.tc_float, device=gs.device, requires_grad=True) for actu in actus]
-    rollout(scenes[0], boxes[0], actus_ana).backward()
+    actus_ana = torch.tensor(actus, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    sum(rollout(scenes[0], boxes_by_scene[0], actus_ana, vels_ana)).backward()
 
-    # fp32 needs a large step to clear the state-noise floor. fp64 needs a small step to bound truncation error.
+    # fp32 needs a large step to clear the state-noise floor. fp64 needs a small step to bound truncation error. The
+    # finite difference of the inputs of a box reads the loss of that box alone, clear of the rounding of the other.
     eps = 1e-5 if precision == "64" else 1e-2
-    fd_grad = np.zeros_like(actus)
-    for i, j in np.ndindex(actus.shape):
-        losses = []
-        for sign in (+1, -1):
-            perturbed = actus.copy()
-            perturbed[i, j] += sign * eps
-            losses.append(float(rollout(scenes[1], boxes[1], perturbed)))
-        fd_grad[i, j] = (losses[0] - losses[1]) / (2.0 * eps)
-    assert (np.abs(fd_grad) > 1e-3).all()
+    inputs = (actus, vels)
+    inputs_fd_grad = (np.zeros_like(actus), np.zeros_like(vels))
+    for value, fd_grad in zip(inputs, inputs_fd_grad):
+        for idx in np.ndindex(value.shape):
+            losses = []
+            for sign in (+1, -1):
+                perturbed = value.copy()
+                perturbed[idx] += sign * eps
+                perturbed_inputs = (perturbed, vels) if value is actus else (actus, perturbed)
+                losses.append(float(rollout(scenes[1], boxes_by_scene[1], *perturbed_inputs)[idx[0]]))
+            fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
+        assert (np.abs(fd_grad) > 1e-3).all()
     tol = 2e-9 if precision == "64" else 2e-4
-    assert_allclose(torch.stack([actu.grad for actu in actus_ana]), fd_grad, rtol=tol, atol=tol)
+    assert_allclose(actus_ana.grad, inputs_fd_grad[0], rtol=tol, atol=tol)
+    assert_allclose(vels_ana.grad, inputs_fd_grad[1], rtol=tol, atol=tol)
 
 
 @pytest.mark.required

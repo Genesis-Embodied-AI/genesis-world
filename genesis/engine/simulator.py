@@ -68,8 +68,8 @@ class Simulator(RBC):
 
         self._cur_substep_global = 0
 
-        # Autograd graph of the rollout (see genesis.grad.bridge), which a reset starts anew. A backward pass rewinds the
-        # simulation, which forbids stepping forward again until the next reset.
+        # Autograd graph of the rollout (see genesis.grad.bridge), which a reset starts anew (see 'is_forward_ready' for
+        # the steps a backward pass forbids)
         self._rollout_graph = RolloutGraph(
             self._requires_grad, on_pass_start=self._begin_backward_pass, on_pass_end=self._end_backward_pass
         )
@@ -99,6 +99,8 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
+        # The active solvers whose state tracks gradients, which a recorded step checkpoints
+        self._differentiable_solvers: list["Solver"] = gs.List()
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -206,18 +208,6 @@ class Simulator(RBC):
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
-        # Every active solver and the coupler of a differentiable scene support gradients, which they declare
-        if self._requires_grad:
-            unsupported = [
-                type(solver).__name__ for solver in self._solvers if solver.is_active and not solver.is_differentiable
-            ]
-            if not self._coupler.is_differentiable:
-                unsupported.append(type(self._coupler).__name__)
-            if unsupported:
-                gs.raise_exception(
-                    f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported}."
-                )
-
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
@@ -232,6 +222,19 @@ class Simulator(RBC):
         # A coupler exchanges state once per substep, so it is built once the rate that loop runs at is known.
         self._coupler.build()
 
+        # Every active solver and the coupler of a differentiable scene support gradients, which they declare. The
+        # coupler declares it for the couplings it activated at build.
+        if self._requires_grad:
+            unsupported_names = [
+                type(solver).__name__ for solver in self._active_solvers if not solver.is_differentiable
+            ]
+            if not self._coupler.is_differentiable:
+                unsupported_names.append(type(self._coupler).__name__)
+            if unsupported_names:
+                gs.raise_exception(
+                    f"Differentiable simulation ('requires_grad=True') is not supported by {unsupported_names}."
+                )
+
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
 
@@ -244,7 +247,8 @@ class Simulator(RBC):
         # changes of the state go through the solvers (see 'Solver.record_input'). The state of a solver tracking no
         # gradient is outside the graph.
         for solver in self._active_solvers:
-            if solver._requires_grad:
+            if solver.requires_grad:
+                self._differentiable_solvers.append(solver)
                 solver.subscribe(Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate))
 
         self._step_timer.add_phases("physics", "sensors")
@@ -309,8 +313,9 @@ class Simulator(RBC):
 
         Everything around the state restarts as under a reset.
 
-        The clock of each environment comes back as recorded, since simulated time is state. The tape cursor, the
-        gradients, the coupler and the sensors are restarted (see 'reset'): they describe the run that led here.
+        The clock of each environment comes back as recorded, since simulated time is state. The autograd graph of the
+        rollout, the gradients, the coupler and the sensors are restarted (see 'reset'): they describe the run that led
+        here.
         """
         # The record was checked against every solver by the scene (see 'Scene.__setstate__'). The restart precedes the
         # state, whose gradients it would zero otherwise.
@@ -333,8 +338,8 @@ class Simulator(RBC):
         """
         Start a backward pass through the rollout from zero adjoints.
 
-        The pass rewinds the state of the simulation, which forbids stepping forward again until the next reset, a pass
-        that raises included.
+        The pass rewinds the state of the simulation, so stepping forward stays forbidden until the next reset, even
+        after a pass that raises.
         """
         self._is_forward_ready = False
         for solver in self._active_solvers:
@@ -345,9 +350,6 @@ class Simulator(RBC):
         for solver in self._active_solvers:
             solver.check_errors()
 
-    # ------------------------------------------------------------------------------------
-    # -------------------------------- step computation ----------------------------------
-    # ------------------------------------------------------------------------------------
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
@@ -402,7 +404,7 @@ class Simulator(RBC):
         self._cur_substep_global = substep_start
         for solver, checkpoint in zip(self._differentiable_solvers, checkpoints):
             solver.set_checkpoint(checkpoint)
-        # Flush the zero-copy writes of the restore on Metal.
+        # Flush the zero-copy writes of the restore on Metal
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
         for solver in self._active_solvers:
@@ -498,11 +500,6 @@ class Simulator(RBC):
         return self._requires_grad
 
     @property
-    def _differentiable_solvers(self) -> list["Solver"]:
-        """The active solvers whose state tracks gradients, which a recorded step checkpoints."""
-        return [solver for solver in self._active_solvers if solver._requires_grad]
-
-    @property
     def is_forward_ready(self) -> bool:
         """Whether the simulation may step forward, which a backward pass rewinding it to its start forbids until reset."""
         return self._is_forward_ready
@@ -590,12 +587,11 @@ class StepOperation(Operation):
         self._steps_start = sim.steps.clone()
         # The state each differentiable solver holds at the start of the step, which its backward pass replays it from
         self._checkpoints = None
-        self.inputs = ()
 
     def forward(self) -> tuple[torch.Tensor, ...]:
         sim = self._sim()
         self._checkpoints = [
-            solver.get_checkpoint(frozenset((DataKind.STATE,)), is_boundary_only=True)
+            solver.get_checkpoint(frozenset((DataKind.STATE,)), boundary_only=True)
             for solver in sim._differentiable_solvers
         ]
         sim._advance()

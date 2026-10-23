@@ -115,10 +115,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         # construct fields
         self.particles = struct_particle_state.field(
-            shape=(self._n_frames, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
+            shape=(self.n_frames, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
         )
         self.particles_ng = struct_particle_state_ng.field(
-            shape=(self._n_frames, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
+            shape=(self.n_frames, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
         self.particles_info = struct_particle_info.field(
             shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
@@ -136,7 +136,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so one frame per substep is enough.
         # Particles still need one more, because g2p writes the next-frame state at [f+1].
         self.grid = grid_cell_state.field(
-            shape=(self._n_frames - 1, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
+            shape=(self.n_frames - 1, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
         )
 
         # Sparse-reset bookkeeping for forward-only mode. A single global dirty list captures unique cells touched by
@@ -207,9 +207,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vfaces = self.n_vfaces
 
         self._coupler = self.sim._coupler
-        # The frames of the substeps the solver holds: those of one step with gradients, whose backward pass replays it
-        # whole, otherwise those of one substep (see 'roll_frame_window')
-        self._n_frames = self.substeps + 1 if self._requires_grad else 2
 
         # Aggregate SVD requirement across registered materials. If no material reads U/V/S, the solver can skip the SVD
         # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
@@ -717,11 +714,11 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 kernel(0, grad)
 
     def roll_frame_window(self):
-        self.copy_frame(self._n_frames - 1, 0)
+        self.copy_frame(self.n_frames - 1, 0)
 
     def roll_frame_window_grad(self):
-        self.copy_grad(0, self._n_frames - 1)
-        self.reset_grad_till_frame(self._n_frames - 1)
+        self.copy_grad(0, self.n_frames - 1)
+        self.reset_grad_till_frame(self.n_frames - 1)
 
     @property
     def data(self):
@@ -782,8 +779,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def set_state(self, f, state, envs_idx=None):
         # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
-        if self._requires_grad:
-            self._rollout_graph.mark_state_changed()
+        self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active)
 

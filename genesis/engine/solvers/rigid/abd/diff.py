@@ -28,8 +28,8 @@ def func_copy_next_to_curr(
 ):
     """Copy the integrated velocities and positions of every env to its state, unless one of them is not a number.
 
-    A NaN raises INVALID_ACC_NAN for its env, which halts the simulation, and leaves the state of that env as it was so
-    that the NaN does not propagate. Every velocity and position takes its own thread.
+    A 'nan' or an 'inf' raises INVALID_ACC_NAN for its env, which halts the simulation, and leaves the state of that env
+    as it was so that the value does not propagate. Every velocity and position takes its own thread.
     """
     n_qs = rigid_info.qpos.shape[0]
     n_dofs = dyn_state.dofs.vel.shape[0]
@@ -40,9 +40,11 @@ def func_copy_next_to_curr(
     for i_dq, i_b in qd.ndrange(n_dofs_qs, _B):
         is_valid = True
         if i_dq < n_dofs:
-            is_valid = not qd.math.isnan(dyn_state.dofs.vel_next[i_dq, i_b])
+            vel_next = dyn_state.dofs.vel_next[i_dq, i_b]
+            is_valid = not (qd.math.isnan(vel_next) or qd.math.isinf(vel_next))
         if i_dq < n_qs:
-            is_valid = is_valid and not qd.math.isnan(rigid_info.qpos_next[i_dq, i_b])
+            qpos_next = rigid_info.qpos_next[i_dq, i_b]
+            is_valid = is_valid and not (qd.math.isnan(qpos_next) or qd.math.isinf(qpos_next))
         if not is_valid:
             qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_ACC_NAN)
 
@@ -189,7 +191,7 @@ def kernel_begin_backward_substep(
     rigid_config: qd.template(),
     errno: qd.Tensor,
 ):
-    func_flag_nan_grad(dyn_state, rigid_info, rigid_config, errno)
+    func_flag_non_finite_grad(dyn_state, rigid_info, rigid_config, errno)
     func_copy_next_to_curr_grad(f, dyn_state, rigid_adjoint_cache, rigid_info, rigid_config)
 
     if qd.static(not rigid_config.enable_mujoco_compatibility):
@@ -199,23 +201,26 @@ def kernel_begin_backward_substep(
 
 
 @qd.func
-def func_flag_nan_grad(
+def func_flag_non_finite_grad(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
     """
-    Flag INVALID_GRAD_NAN for every environment whose gradient of the positions or velocities of the dofs is 'nan'.
+    Flag INVALID_GRAD_NAN for every environment whose gradient of the positions or velocities of the dofs is 'nan' or
+    'inf'.
 
-    The flag stays on the device until the backward pass is over (see '_begin_reverse_pass' of Simulator), so the
-    reverse substeps never wait on the host.
+    The flag stays on the device until the backward pass is over (see 'Simulator._end_backward_pass'), so the reverse
+    substeps never wait on the host.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q, i_b in qd.ndrange(rigid_info.qpos.shape[0], rigid_info.qpos.shape[1]):
-        if qd.math.isnan(rigid_info.qpos.grad[i_q, i_b]):
+        qpos_grad = rigid_info.qpos.grad[i_q, i_b]
+        if qd.math.isnan(qpos_grad) or qd.math.isinf(qpos_grad):
             qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_GRAD_NAN)
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(dyn_state.dofs.vel.shape[0], dyn_state.dofs.vel.shape[1]):
-        if qd.math.isnan(dyn_state.dofs.vel.grad[i_d, i_b]):
+        vel_grad = dyn_state.dofs.vel.grad[i_d, i_b]
+        if qd.math.isnan(vel_grad) or qd.math.isinf(vel_grad):
             qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_GRAD_NAN)
 
 

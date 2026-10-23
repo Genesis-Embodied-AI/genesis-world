@@ -96,6 +96,28 @@ def grad_free_with_revolute():
 
 
 @pytest.fixture(scope="session")
+def grad_free_with_hinge_ball_slide():
+    # A free chassis carrying one arm per other joint type, so that every way of deriving DOF positions from the
+    # configuration is exercised: a coordinate, a coordinate offset by the neutral configuration, and Euler angles.
+    mjcf = ET.Element("mujoco", model="free_with_hinge_ball_slide")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    chassis = ET.SubElement(worldbody, "body", name="chassis", pos="0 0 0.5")
+    ET.SubElement(chassis, "freejoint")
+    ET.SubElement(chassis, "inertial", mass="1.0", pos="0 0 0", diaginertia="0.1 0.1 0.1")
+    ET.SubElement(chassis, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+    _add_hinge_arm(chassis, "hinge_arm", "0.1 0 0")
+    for name, pos, joint_kwargs in (
+        ("ball_arm", "-0.1 0 0", {"type": "ball"}),
+        ("slide_arm", "0 0.1 0", {"type": "slide", "axis": "0 1 0"}),
+    ):
+        arm = ET.SubElement(chassis, "body", name=name, pos=pos)
+        ET.SubElement(arm, "joint", **joint_kwargs)
+        ET.SubElement(arm, "inertial", mass="0.5", pos="0.1 0 0", diaginertia="0.01 0.01 0.01")
+        ET.SubElement(arm, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", contype="0", conaffinity="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def grad_chain3():
     # Hinge -> offset slide -> hinge: the middle slide joint carries a position offset so its anchor depends on the
     # moving parent orientation, and the chain mixes joint types within one entity.

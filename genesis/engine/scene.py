@@ -1015,8 +1015,9 @@ class Scene(RBC):
         """
         Differentiates `loss` through the recorded rollout and restores the pre-backward physics state.
 
-        Unrolling the gradient tape rewinds the physics state to step 0, so this method snapshots the current state
-        first, runs the backward pass, and restores the snapshot afterwards. The scene then sits at the same physics
+        The backward pass of each step restores the state the step started from, which rewinds the physics state to the
+        first step the loss reaches, so this method snapshots the current state first, runs the backward pass, and
+        restores the snapshot afterwards. The scene then sits at the same physics
         state as before the call, with gradients populated and forward / backward re-armed, ready to continue the
         rollout or to be reset. The registered initial state (`reset()` with no argument) is preserved.
 
@@ -1031,8 +1032,8 @@ class Scene(RBC):
         snapshot : SimState
             The physics state the scene was restored to.
         """
-        # Snapshot the current state before the gradient-tape unroll rewinds physics to step 0. The clocks go with
-        # it: the unroll winds them down step by step, and the restore below puts the physics back where they were.
+        # Snapshot the current state before the backward pass rewinds the physics. The clocks go with it: the backward
+        # pass of each step winds them down, and the restore below puts the physics back where they were.
         snapshot = self._get_state()
         steps = self._sim._steps.clone()
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
@@ -1818,8 +1819,8 @@ class Scene(RBC):
         The scene must be built from the description the state was read from, with the same environment layout, since
         the arrays written back are the ones that build allocates. A state from another layout is rejected, and a state
         from another build by the names of the arrays that differ. Everything around the state restarts as under
-        'reset': the gradient tape, the sensors and the recorders forget the run that led here, and the visualizer
-        redraws, the interactive viewer when a refresh is due.
+        'reset': the autograd graph of the rollout, the sensors and the recorders forget the run that led here, and the
+        visualizer redraws, the interactive viewer when a refresh is due.
 
         Parameters
         ----------

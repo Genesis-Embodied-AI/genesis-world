@@ -229,6 +229,16 @@ class TimeBasedMixin:
         """The number of times this solver integrates per scene step."""
         return self._substeps
 
+    @property
+    def n_frames(self):
+        """
+        The number of frames of substeps the solver holds.
+
+        A solver holding its state in frames keeps those of one step with gradients, whose backward pass replays it
+        whole, and those of one substep otherwise (see 'Solver.roll_frame_window').
+        """
+        return self._substeps + 1 if self._requires_grad else 2
+
 
 class GravityMixin:
     """Gravity of one solver: the buffer storing it, and the accessors reading and writing it.
@@ -374,6 +384,11 @@ class Solver(RBC):
         """Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must."""
         return False
 
+    @property
+    def requires_grad(self) -> bool:
+        """Whether the state of the solver tracks gradients, as that of every differentiable solver of such a scene."""
+        return self._requires_grad
+
     def set_rollout_graph(self, rollout_graph: RolloutGraph) -> None:
         """Give the solver the autograd graph recording its operations, before it builds."""
         self._rollout_graph = rollout_graph
@@ -384,7 +399,7 @@ class Solver(RBC):
         return self._requires_grad and self._rollout_graph is not None and self._rollout_graph.is_recording
 
     def record_input(
-        self, launches: tuple[KernelLaunch, ...], saved_state=None, *, is_differentiable: bool = True
+        self, launches: tuple[KernelLaunch, ...], saved_state=None, *, differentiable: bool = True
     ) -> None:
         """
         Run the launches of a setter, recorded as one operation of the rollout while it is recorded (see
@@ -396,10 +411,10 @@ class Solver(RBC):
         differentiable solver goes through here, so a differentiable scene takes no shortcut around it.
         """
         if self.is_recording:
-            op = InputOperation(self, launches, saved_state)
-            if op.inputs and not is_differentiable:
+            operation = InputOperation(self, launches, saved_state)
+            if operation.inputs and not differentiable:
                 gs.raise_exception("Gradients with respect to this input are not supported.")
-            self._rollout_graph.record(op, *op.inputs)
+            self._rollout_graph.record(operation, *operation.inputs)
             return
         for launch in launches:
             launch.kernel(*launch.args)
@@ -437,7 +452,7 @@ class Solver(RBC):
         """Reverse 'roll_frame_window': move the adjoint of frame 0 to the last frame, before a step is replayed."""
 
     def end_step(self) -> None:
-        """Run what ends a step once its substeps are over."""
+        """Clear the inputs that hold for one step alone, once its substeps are over."""
 
     def end_step_grad(self) -> None:
         """Reverse 'end_step', first thing of the backward pass of a step."""
@@ -456,9 +471,10 @@ class Solver(RBC):
         gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
     def get_checkpoint(
-        self, kinds: frozenset[array_class.DataKind], *, is_boundary_only: bool = False
+        self, kinds: frozenset[array_class.DataKind], *, boundary_only: bool = False
     ) -> SolverCheckpoint:
-        """Return a SolverCheckpoint of the arrays of the given kinds this solver holds, for 'set_checkpoint' to restore.
+        """
+        Return a checkpoint of the arrays of the given kinds this solver holds, for 'set_checkpoint' to restore.
 
         The arrays are what 'data' yields of those kinds. A full checkpoint copies them with their gradients where they
         live: on the device as torch tensors when zero-copy views exist, which keeps a save and a restore within one
@@ -468,14 +484,14 @@ class Solver(RBC):
         """
         configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
         arrays = {}
-        for item in self._checkpoint_items(kinds, is_boundary_only):
+        for item in self._checkpoint_items(kinds, boundary_only):
             if isinstance(item, array_class.ScalarItem):
                 arrays[item.name] = np.array(getattr(item.owner, item.attr))
-            elif is_boundary_only and item.is_framed:
-                arrays[item.name] = qd_to_torch(item.array, 0, keepdim=False, copy=True)
+            elif boundary_only and item.is_framed:
+                arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
             else:
-                arrays[item.name] = data_to_array(item.array, to_torch=is_boundary_only or gs.use_zerocopy, copy=True)
-        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds, is_boundary_only=is_boundary_only)
+                arrays[item.name] = data_to_array(item.array, to_torch=boundary_only or gs.use_zerocopy, copy=True)
+        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds, is_boundary_only=boundary_only)
 
     def set_checkpoint(self, checkpoint: SolverCheckpoint) -> None:
         """Write back the arrays of a checkpoint 'get_checkpoint' read, rejecting a record read from another build.
@@ -485,14 +501,14 @@ class Solver(RBC):
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
         """
         items = self._checkpoint_items(checkpoint.kinds, checkpoint.is_boundary_only)
-        array_class.fill_data(items, checkpoint.arrays, is_boundary_only=checkpoint.is_boundary_only)
+        array_class.fill_data(items, checkpoint.arrays, boundary_only=checkpoint.is_boundary_only)
 
-    def _checkpoint_items(self, kinds, is_boundary_only) -> Iterator[array_class.DataItem]:
+    def _checkpoint_items(self, kinds, boundary_only) -> Iterator[array_class.DataItem]:
         """Yield the items a checkpoint of the given kinds holds, without the gradients for a boundary checkpoint."""
         for item in self.data:
             if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
                 continue
-            if not (is_boundary_only and isinstance(item, array_class.ArrayItem) and item.is_grad):
+            if not (boundary_only and isinstance(item, array_class.ArrayItem) and item.is_grad):
                 yield item
 
     def __getstate__(self) -> SolverCheckpoint:

@@ -270,13 +270,13 @@ class MPMEntity(ParticleEntity):
         poss = self._sanitize_particles_tensor(poss, gs.tc_float, particles_idx, envs_idx, (3,))
         # Between two steps, the state sits in frame 0 (see 'MPMSolver.roll_frame_window')
         self._solver.record_input(
-            (KernelLaunch(self.solver._kernel_set_particles_pos, (0, particles_idx, envs_idx, poss)),)
+            (KernelLaunch(self._solver._kernel_set_particles_pos, (0, particles_idx, envs_idx, poss)),)
         )
 
     def get_particles_pos(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         poss = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx, (3,))
-        self.solver._kernel_get_particles_pos(
+        self._solver._kernel_get_particles_pos(
             self._sim.cur_substep_local, self._particle_start, self.n_particles, envs_idx, poss
         )
         if self._scene.n_envs == 0:
@@ -291,13 +291,13 @@ class MPMEntity(ParticleEntity):
         vels = self._sanitize_particles_tensor(vels, gs.tc_float, particles_idx, envs_idx, (3,))
         # See 'set_particles_pos'
         self._solver.record_input(
-            (KernelLaunch(self.solver._kernel_set_particles_vel, (0, particles_idx, envs_idx, vels)),)
+            (KernelLaunch(self._solver._kernel_set_particles_vel, (0, particles_idx, envs_idx, vels)),)
         )
 
     def get_particles_vel(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         vels = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx, (3,))
-        self.solver._kernel_get_particles_vel(
+        self._solver._kernel_get_particles_vel(
             self._sim.cur_substep_local, self._particle_start, self.n_particles, envs_idx, vels
         )
         if self._scene.n_envs == 0:
@@ -317,14 +317,14 @@ class MPMEntity(ParticleEntity):
 
         # See 'set_particles_pos'
         self._solver.record_input(
-            (KernelLaunch(self.solver._kernel_set_particles_active, (0, particles_idx, envs_idx, actives)),),
-            is_differentiable=False,
+            (KernelLaunch(self._solver._kernel_set_particles_active, (0, particles_idx, envs_idx, actives)),),
+            differentiable=False,
         )
 
     def get_particles_active(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         actives = self._sanitize_particles_tensor(None, gs.tc_bool, None, envs_idx)
-        self.solver._kernel_get_particles_active(
+        self._solver._kernel_get_particles_active(
             self._sim.cur_substep_local, self._particle_start, self.n_particles, envs_idx, actives
         )
         if self._scene.n_envs == 0:
@@ -371,7 +371,7 @@ class MPMEntity(ParticleEntity):
         self._solver.record_input(
             (
                 KernelLaunch(
-                    self.solver._kernel_set_particles_actu, (0, self.material.n_groups, particles_idx, envs_idx, actus)
+                    self._solver._kernel_set_particles_actu, (0, self.material.n_groups, particles_idx, envs_idx, actus)
                 ),
             )
         )
@@ -379,7 +379,7 @@ class MPMEntity(ParticleEntity):
     def get_particles_actu(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         actus = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx)
-        self.solver._kernel_get_particles_actu(
+        self._solver._kernel_get_particles_actu(
             self._sim.cur_substep_local, self._particle_start, self.n_particles, envs_idx, actus
         )
         if self._scene.n_envs == 0:
@@ -404,7 +404,7 @@ class MPMEntity(ParticleEntity):
         # if not (0 <= muscle_group & muscle_group < self.material.n_groups).all():
         #     gs.raise_exception("Elements of `muscle_group' are out-of-range.")
 
-        self.solver._kernel_set_particles_muscle_group(particles_idx, muscle_group)
+        self._solver._kernel_set_particles_muscle_group(particles_idx, muscle_group)
 
     @assert_muscle
     @assert_active
@@ -418,7 +418,7 @@ class MPMEntity(ParticleEntity):
             A tensor containing the muscle group ID of each particle.
         """
         muscle_group = torch.zeros((self._n_particles,), dtype=gs.tc_int, device=gs.device)
-        self.solver._kernel_get_particles_muscle_group(self._particle_start, self._n_particles, muscle_group)
+        self._solver._kernel_get_particles_muscle_group(self._particle_start, self._n_particles, muscle_group)
         return muscle_group
 
     @assert_muscle
@@ -442,7 +442,7 @@ class MPMEntity(ParticleEntity):
         # if not ((muscle_direction.norm(dim=-1) - 1.0).abs() < gs.EPS).all():
         #     gs.raise_exception("Last dimension of `muscle_direction' must be normalized.")
 
-        self.solver._kernel_set_particles_muscle_direction(particles_idx, muscle_direction)
+        self._solver._kernel_set_particles_muscle_direction(particles_idx, muscle_direction)
 
     def set_muscle(self, muscle_group=None, muscle_direction=None):
         """
@@ -479,7 +479,7 @@ class MPMEntity(ParticleEntity):
         # if not torch.isin(free, torch.Tensor([False, True], dtype=gs.tc_bool, device=gs.device)).all():
         #     gs.raise_exception("Elements of `free' must be either True or False.")
 
-        self.solver._kernel_set_particles_free(particles_idx, free)
+        self._solver._kernel_set_particles_free(particles_idx, free)
 
     @assert_active
     def get_free(self):
@@ -492,7 +492,7 @@ class MPMEntity(ParticleEntity):
             A tensor indicating free (1) or fixed (0) status.
         """
         free = self._sanitize_particles_tensor(None, gs.tc_bool)
-        self.solver._kernel_get_particles_free(self._particle_start, self._n_particles, free)
+        self._solver._kernel_get_particles_free(self._particle_start, self._n_particles, free)
         return free
 
     # ------------------------------------------------------------------------------------

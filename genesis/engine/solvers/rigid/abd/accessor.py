@@ -837,9 +837,9 @@ def kernel_set_dofs_position_qs(
     envs_idx: qd.types.ndarray(),
     linear_cols: qd.types.ndarray(),
     linear_qs_idx: qd.types.ndarray(),
-    linear_qpos0_weights: qd.types.ndarray(),
     rotation_cols: qd.types.ndarray(),
     rotation_qs_start: qd.types.ndarray(),
+    linear_qpos0_weights: qd.types.ndarray(),
     position: qd.types.ndarray(),
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -854,20 +854,20 @@ def kernel_set_dofs_position_qs(
     in qpos. The positions of the dofs themselves are derived from qpos by forward kinematics.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_c_, i_b_ in qd.ndrange(linear_cols.shape[0], envs_idx.shape[0]):
+    for i_col_, i_b_ in qd.ndrange(linear_cols.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        i_c = linear_cols[i_c_]
-        i_q = linear_qs_idx[i_c_]
-        rigid_info.qpos[i_q, i_b] = linear_qpos0_weights[i_c_] * rigid_info.qpos0[i_q, i_b] + position[i_b_, i_c]
+        i_col = linear_cols[i_col_]
+        i_q = linear_qs_idx[i_col_]
+        rigid_info.qpos[i_q, i_b] = linear_qpos0_weights[i_col_] * rigid_info.qpos0[i_q, i_b] + position[i_b_, i_col]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_r_, i_b_ in qd.ndrange(rotation_cols.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        i_c_x = rotation_cols[i_r_, 0]
-        i_c_y = rotation_cols[i_r_, 1]
-        i_c_z = rotation_cols[i_r_, 2]
+        i_col_x = rotation_cols[i_r_, 0]
+        i_col_y = rotation_cols[i_r_, 1]
+        i_col_z = rotation_cols[i_r_, 2]
         quat = gu.qd_xyz_to_quat(
-            qd.Vector([position[i_b_, i_c_x], position[i_b_, i_c_y], position[i_b_, i_c_z]], dt=gs.qd_float)
+            qd.Vector([position[i_b_, i_col_x], position[i_b_, i_col_y], position[i_b_, i_col_z]], dt=gs.qd_float)
         )
         q_start = rotation_qs_start[i_r_]
         for j in qd.static(range(4)):
