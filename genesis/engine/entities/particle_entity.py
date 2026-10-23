@@ -73,6 +73,8 @@ class ParticleEntityDescription(VerticesDescription, EntityDescription):
                     f"Got: {sampler}."
                 )
 
+        if isinstance(morph, gs.options.morphs.MeshSet) and not morph.files:
+            gs.raise_exception("A mesh set needs at least one mesh file.")
         vmesh = cls.resolve_mesh(morph, surface)
         mesh_set_group_ids = None
         if isinstance(morph, gs.options.morphs.MeshSet):

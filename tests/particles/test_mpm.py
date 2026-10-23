@@ -66,6 +66,8 @@ def test_particle_constraints(tmp_path, show_viewer, tol):
             ),
         ),
     )
+    with pytest.raises(gs.GenesisException):
+        scene.add_entity(morph=gs.morphs.MeshSet(files=()), material=gs.materials.MPM.Elastic())
     # The sampled particles and the member poses are resolved into the descriptions that the scene file holds
     exported = tmp_path / f"particle_constraints{SCENE_FORMAT}"
     scene.export(exported)
