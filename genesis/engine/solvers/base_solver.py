@@ -423,6 +423,8 @@ class Solver(RBC):
             yield
         operation = InputOperation(self, recorder.launches, saved_state)
         if operation.inputs and not differentiable:
+            # The kernels wrote the state already, which no operation records
+            self._rollout_graph.mark_state_changed()
             gs.raise_exception("Gradients with respect to this input are not supported.")
         self._rollout_graph.record(operation, *operation.inputs)
 

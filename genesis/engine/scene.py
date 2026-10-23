@@ -1018,9 +1018,9 @@ class Scene(RBC):
 
         The backward pass of each step restores the state the step started from, which rewinds the physics state to the
         first step the loss reaches, so this method snapshots the current state first, runs the backward pass, and
-        restores the snapshot afterwards. The scene then sits at the same physics
-        state as before the call, with gradients populated and forward / backward re-armed, ready to continue the
-        rollout or to be reset. The registered initial state (`reset()` with no argument) is preserved.
+        restores the snapshot afterwards. The scene then sits at the same physics state as before the call, with
+        gradients populated and forward / backward re-armed, ready to continue the rollout or to be reset. The
+        registered initial state (`reset()` with no argument) is preserved.
 
         Parameters
         ----------
@@ -1040,7 +1040,7 @@ class Scene(RBC):
         # The autograd nodes of the steps unroll the rollout within this backward pass (see genesis.grad.bridge).
         torch.autograd.backward(loss, *args, **kwargs)
         # keep_init semantics: see _reset. Restoring the snapshot puts the physics back where the forward pass left
-        # it, so the clocks snapshotted above are put back with it rather than left at zero.
+        # it, and the clocks snapshotted above with it.
         self._reset(snapshot, keep_init=True)
         self._sim._steps[:] = steps
         return snapshot
@@ -1086,7 +1086,7 @@ class Scene(RBC):
                 gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
             # The recorders read the state a step starts from, with the inputs the step consumes: 'Simulator.step'
             # zeroes the applied forces at its end. The pre-step callbacks ran, so their inputs are read as well.
-            # The recorders read the state for themselves, outside of the autograd graph of a differentiable rollout
+            # See 'Simulator.step' for the reads of the sensors
             grad_context = torch.no_grad() if self._sim.requires_grad else contextlib.nullcontext()
             with step_timer.phase("recorders"), grad_context:
                 self._recorder_manager.step(self._sim.cur_step_global)

@@ -948,9 +948,8 @@ def qd_to_numpy(
     return _apply_masks(array, value, row_mask, col_mask, keepdim, copy, to_torch=False)
 
 
-# FIXME: quadrants - the fastcache key of a torch tensor argument omits whether it tracks gradients, which the launch
-# bakes into the argument layout as for an ndarray, so a kernel compiled for a tensor tracking none segfaults when
-# launched with one that does. The key of a tensor tracking gradients carries the grad tag of an ndarray.
+# FIXME: quadrants - the fastcache key of a torch tensor omits whether it tracks gradients, which the argument layout
+# depends on, so a launch with one after a plain one segfaults. The key takes the grad tag an ndarray carries.
 _stringify_obj_type = args_hasher.stringify_obj_type
 
 
@@ -1123,7 +1122,7 @@ def get_last_occurrence(index: torch.Tensor) -> torch.Tensor:
     Return the position of the last entry holding the same index as each entry, along the last axis of an index tensor.
 
     The positions are computed on the device of the index, without synchronizing it. A write given an index several
-    times leaves the value of its last occurrence, which is what each occurrence takes.
+    times leaves the value of its last occurrence.
     """
     n_entries = index.shape[-1]
     index_sorted, order = torch.sort(index, dim=-1, stable=True)
@@ -1355,11 +1354,11 @@ def assign_indexed_tensor(
                 if index.ndim == 1 and index.dtype == torch.int64:
                     tensor.index_fill_(axis, index, value)
                     return
-    # An index given several times takes the value of its last occurrence at every occurrence (see
-    # 'get_last_occurrence'), as a scatter writes the occurrences in no defined order. The tensors and integers indexing
-    # the axes are broadcast against each other into a block of axes of the selection, which stands where they are when
-    # they are contiguous, and first otherwise, a tensor spanning the axis of the block it is not of size 1 along.
     else:
+        # Every occurrence of an index given several times writes the value of its last occurrence, since a scatter
+        # writes them in no defined order. The tensors and integers indexing the axes broadcast against each other into
+        # one block of axes of the selection, where the first of them stands when they are contiguous, and first
+        # otherwise. Each tensor spans the axis of the block along which its size is above 1.
         advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
         repeatable_axes = [
             axis
@@ -1379,7 +1378,7 @@ def assign_indexed_tensor(
                 index_shape = (1,) * (block_ndim - index.ndim) + tuple(index.shape)
                 block_axis = next(i for i, size in enumerate(index_shape) if size > 1)
                 # An index may live on another device than the values, which a scatter accepts and a gather does not
-                positions = get_last_occurrence(index.reshape(-1).to(device=value.device))
+                positions = get_last_occurrence(index.squeeze().to(device=value.device))
                 value = value.index_select(block_start + block_axis, positions)
     try:
         tensor[indices] = value

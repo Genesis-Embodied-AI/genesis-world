@@ -137,7 +137,7 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
 
 
 @pytest.mark.required
-def test_closed_loop_policy_grad_matches_fd(grad_revolute, precision, show_viewer):
+def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, show_viewer):
     # The control forces of a torch policy read the state queried before each step, are given to both arms and are
     # penalized in the loss, so their graph is shared by the loss and the rollout.
     HORIZON, DT = 50, 0.01
@@ -235,25 +235,22 @@ def test_closed_loop_policy_grad_matches_fd(grad_revolute, precision, show_viewe
         ([[0.3], [-0.5]], None, [1, 1], [[0.0], [-0.5]]),
         ([[0.3, -0.5], [0.2, 0.4]], [0, 0], None, [[-0.5], [0.4]]),
     ):
+        force_ana = torch.tensor(force_repeated, dtype=gs.tc_float, device=gs.device, requires_grad=True)
         velocities = []
-        for scene, arm, force in (
-            (scene_fd, arms_fd[0], force_last),
-            (scene_fd, arms_fd[0], force_repeated),
-            (scene_ana, arms_ana[0], torch.tensor(force_repeated, dtype=gs.tc_float, requires_grad=True)),
+        for scene, arm, force, force_dofs_idx_local, force_envs_idx in (
+            (scene_fd, arms_fd[0], force_last, None, None),
+            (scene_fd, arms_fd[0], force_repeated, dofs_idx_local, envs_idx),
+            (scene_ana, arms_ana[0], force_ana, dofs_idx_local, envs_idx),
         ):
             scene.reset()
             with torch.no_grad():
                 arm.control_dofs_force(0.0)
-            arm.control_dofs_force(
-                force,
-                dofs_idx_local=dofs_idx_local if force is not force_last else None,
-                envs_idx=envs_idx if force is not force_last else None,
-            )
+            arm.control_dofs_force(force, dofs_idx_local=force_dofs_idx_local, envs_idx=force_envs_idx)
             scene.step()
             velocities.append(arm.get_dofs_velocity())
         assert_allclose(velocities[1], velocities[0], tol=gs.EPS)
         assert_allclose(velocities[2], velocities[0], tol=gs.EPS)
-        (force_grad,) = torch.autograd.grad(velocities[2].sum(), force)
+        (force_grad,) = torch.autograd.grad(velocities[2].sum(), force_ana)
         assert_allclose(force_grad[0] if envs_idx else force_grad[:, 0], 0.0, tol=gs.EPS)
         assert ((force_grad[1] if envs_idx else force_grad[:, 1]).abs() > gs.EPS).all()
 

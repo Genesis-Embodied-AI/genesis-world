@@ -534,7 +534,8 @@ class FEMEntity(Entity):
     def _add_to_solver(self):
         self._step_global_added = self._sim.cur_step_global
         gs.logger.info(
-            f"Entity {self.uid} added. class: {self.__class__.__name__}, morph: {self.morph.__class__.__name__}, size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
+            f"Entity {self.uid} added. class: {self.__class__.__name__}, morph: {self.morph.__class__.__name__}, "
+            f"size: ({self.n_elements}, {self.n_vertices}), material: {self.material}."
         )
 
         # Convert to appropriate numpy array types

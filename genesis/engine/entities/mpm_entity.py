@@ -355,7 +355,7 @@ class MPMEntity(ParticleEntity):
         actus = to_gs_tensor(actus)
         if actus.ndim == 0:
             actus = actus.reshape((1,)).expand((self.material.n_groups,))
-        self._set_particles_state(self.set_particles_actu, (self.material.n_groups,), gs.tc_float, actus, envs_idx)
+        self.set_particles_actu(actus, None, envs_idx)
 
     @assert_muscle
     @gs.assert_built

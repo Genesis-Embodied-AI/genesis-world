@@ -87,7 +87,7 @@ def test_mpm_tool_push_grad(show_viewer):
 
 
 @pytest.mark.required
-def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
+def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
     # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
     scenes, boxes_by_scene = [], []
@@ -198,13 +198,13 @@ def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
     eps = 1e-5 if precision == "64" else 1e-2
     inputs = (actus, vels)
     inputs_fd_grad = (np.zeros_like(actus), np.zeros_like(vels))
-    for value, fd_grad in zip(inputs, inputs_fd_grad):
+    for i_input, (value, fd_grad) in enumerate(zip(inputs, inputs_fd_grad)):
         for idx in np.ndindex(value.shape):
             losses = []
             for sign in (+1, -1):
-                perturbed = value.copy()
-                perturbed[idx] += sign * eps
-                perturbed_inputs = (perturbed, vels) if value is actus else (actus, perturbed)
+                perturbed_inputs = list(inputs)
+                perturbed_inputs[i_input] = value.copy()
+                perturbed_inputs[i_input][idx] += sign * eps
                 losses.append(float(rollout(scenes[1], boxes_by_scene[1], *perturbed_inputs)[idx[0]]))
             fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
         assert (np.abs(fd_grad) > 1e-3).all()

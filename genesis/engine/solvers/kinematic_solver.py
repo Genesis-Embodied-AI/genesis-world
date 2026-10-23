@@ -959,9 +959,9 @@ class KinematicSolver(Solver):
     def set_checkpoint(self, checkpoint: SolverCheckpoint) -> None:
         super().set_checkpoint(checkpoint)
         if array_class.DataKind.DERIVED not in checkpoint.kinds:
-            # Without the derived arrays, the next step recomputes them from the state. Forward kinematics runs now for
-            # a record a scene is drawn from, and a boundary checkpoint leaves it to the step it is replayed by, which
-            # recomputes them with the very kernels its forward pass did.
+            # Without the derived arrays, the next step recomputes them from the state. A restored record runs forward
+            # kinematics at once, since the scene may be drawn from it, while the replay of a step restoring a boundary
+            # checkpoint recomputes them with the same kernels as its forward pass.
             self._is_forward_pos_updated = self._is_forward_vel_updated = False
             if not checkpoint.is_boundary_only:
                 self.update_forward_pos()
@@ -973,6 +973,11 @@ class KinematicSolver(Solver):
     @property
     def is_active(self):
         return self.n_links > 0
+
+    @property
+    def _is_view_writable(self) -> bool:
+        """Whether setters write the state through zero-copy views, which a differentiable scene cannot record."""
+        return gs.use_zerocopy and not self._requires_grad
 
     @property
     def is_differentiable(self) -> bool:
@@ -1134,7 +1139,7 @@ class KinematicSolver(Solver):
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             qs_mask = indices_to_mask(qs_idx)
             if (
@@ -1181,7 +1186,7 @@ class KinematicSolver(Solver):
 
     @mutates(StateChange.DYNAMICS, links=MutatedLinks.ARTICULATED)
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             vel = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
             dofs_mask = indices_to_mask(dofs_idx)
             if (
@@ -1223,12 +1228,12 @@ class KinematicSolver(Solver):
             velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
                 velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
             )
+            if self.n_envs == 0 and velocity is not None:
+                velocity = velocity[None]
             with self.recording_input():
                 if velocity is None:
                     kernel_set_dofs_zero_velocity(dofs_idx, envs_idx, self.dyn_state, self.rigid_config)
                 else:
-                    if self.n_envs == 0:
-                        velocity = velocity[None]
                     kernel_set_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
         if not skip_forward:

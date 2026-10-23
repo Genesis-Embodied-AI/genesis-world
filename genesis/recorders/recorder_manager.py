@@ -115,9 +115,8 @@ class RecorderManager:
         for recorder in self._recorders:
             recorder.step(global_step)
 
+    # See 'Simulator.step' for the reads of the sensors
     @gs.assert_built
-    # The recorders read the state for themselves, outside of the autograd graph of a differentiable rollout (see
-    # 'Scene.step' for their per-step reads)
     @torch.no_grad()
     def record(self, global_step: int):
         """Record the current state through every recorder, whatever its sampling rate."""

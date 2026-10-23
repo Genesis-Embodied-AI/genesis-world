@@ -651,7 +651,7 @@ class SAPCoupler(RBC):
         )
 
     def precompute(self, i_step):
-        from genesis.engine.solvers.rigid.rigid_solver import kernel_update_all_verts
+        from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
 
         if self.fem_solver.is_active:
             if qd.static(
@@ -712,9 +712,6 @@ class SAPCoupler(RBC):
     def is_differentiable(self) -> bool:
         """Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')."""
         return False
-
-    def couple_grad(self, i_step):
-        gs.raise_exception("couple_grad is not available for SAPCoupler. Please use LegacyCoupler instead.")
 
     @qd.kernel
     def update_vel(self, i_step: qd.i32, dofs_state: array_class.DofsState):

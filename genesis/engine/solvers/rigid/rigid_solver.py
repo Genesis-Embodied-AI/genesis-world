@@ -108,14 +108,12 @@ from .abd.forward_dynamics import (
 )
 from .abd.forward_kinematics import (
     func_forward_velocity,
-    func_update_all_verts,
     func_update_cartesian_space,
     kernel_COM_links_replay,
     kernel_forward_kinematics_links_geoms,
     kernel_forward_kinematics_replay,
     kernel_forward_velocity,
     kernel_masked_forward_kinematics_links_geoms,
-    kernel_update_all_verts,
     kernel_update_cartesian_space,
     kernel_update_geoms_replay,
     kernel_update_verts_for_geoms,
@@ -328,7 +326,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self._is_backward: bool = False
 
-        # The errors a backward pass flagged, which the restore of each step would erase otherwise (see 'end_step_grad')
+        # The errors a backward pass flagged so far, kept aside since restoring the state a step started from rewinds
+        # the error flags with it
         self._errno_backward: torch.Tensor | None = None
 
     def build(self):
@@ -792,8 +791,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
         self.data_manager = array_class.DataManager(self, kinematic_only=False)
         self._errno = self.data_manager.errno
-        # The errors the backward pass of a rollout flagged, kept aside while each step restores its own (see
-        # 'end_step_grad')
         if self._requires_grad:
             self._errno_backward = torch.zeros_like(qd_to_torch(self._errno))
 
@@ -1425,8 +1422,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         else:
             errno = kernel_bit_reduction(self._errno)
 
-        # A gradient that is not finite comes first: the forward substeps the backward pass replays flag errors of their
-        # own from it
         if errno & array_class.ErrorCode.INVALID_GRAD_NAN:
             gs.raise_exception(
                 "The backward pass produced a 'nan' or 'inf' gradient of the positions or velocities of the dofs. The "
@@ -1702,8 +1697,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def end_step_grad(self):
         # The external wrenches are cleared at the end of a step, which leaves their adjoint to the wrenches applied to
-        # it alone. The errors flagged so far are kept aside, since restoring the state the step started from rewinds
-        # the error flags with it.
+        # it alone. The errors flagged so far are kept aside (see '_errno_backward').
         qd_zero_grad(self.dyn_state.links.cfrc_applied_ang)
         qd_zero_grad(self.dyn_state.links.cfrc_applied_vel)
         if gs.use_zerocopy and gs.backend == gs.metal:
@@ -2145,13 +2139,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Zero-copy fast path: single base link, non-relative. Write the position buffer in place instead of
         # launching a kernel. The kernel path below handles relative or multi-link updates, as well as waking up
         # hibernated entities, which is required whenever hibernation is enabled.
-        if (
-            gs.use_zerocopy
-            and not relative
-            and isinstance(links_idx, int)
-            and not self._use_hibernation
-            and not self._requires_grad
-        ):
+        if self._is_view_writable and not relative and isinstance(links_idx, int) and not self._use_hibernation:
             link = self.links[links_idx]
             if link.is_fixed:
                 data = qd_to_torch(self.dyn_state.links.pos, transpose=True, copy=False)
@@ -2298,13 +2286,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Zero-copy fast path: single base link, non-relative. Write the quaternion buffer in place instead of
         # launching a kernel. The kernel path below handles relative or multi-link updates, as well as waking up
         # hibernated entities, which is required whenever hibernation is enabled.
-        if (
-            gs.use_zerocopy
-            and not relative
-            and isinstance(links_idx, int)
-            and not self._use_hibernation
-            and not self._requires_grad
-        ):
+        if self._is_view_writable and not relative and isinstance(links_idx, int) and not self._use_hibernation:
             link = self.links[links_idx]
             if link.is_fixed:
                 data = qd_to_torch(self.dyn_state.links.quat, transpose=True, copy=False)
@@ -2617,7 +2599,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.constraint_solver is not None:
             self.constraint_solver.reset(envs_idx)
 
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             errno = qd_to_torch(self._errno, copy=False)
             qs_mask = indices_to_mask(qs_idx)
@@ -2927,7 +2909,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def control_dofs_force(self, force, dofs_idx=None, envs_idx=None):
         # A control target is consumed by the actuation pass of the next step, which wakes a sleeping link it actuates
         # (see func_torque_and_passive_force), so the target is written without waking anything here.
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.FORCE
@@ -2947,7 +2929,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_control_dofs_force(dofs_idx, envs_idx, force, self.dyn_state, self.rigid_config)
 
     def control_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.VELOCITY
@@ -2965,12 +2947,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             velocity = velocity[None]
 
-        # The adjoint of a PD target is not propagated yet, so the target is an input that is not differentiable
+        # The backward pass of a step stops at the PD targets, which are inputs without gradient
         with self.recording_input(differentiable=False):
             kernel_control_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.POSITION
@@ -2993,7 +2975,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             kernel_control_dofs_position(dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
 
     def control_dofs_position_velocity(self, position, velocity, dofs_idx=None, envs_idx=None):
-        if gs.use_zerocopy and not self._requires_grad:
+        if self._is_view_writable:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.POSITION
@@ -3697,7 +3679,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         )
 
     def set_drone_rpm(self, propellers_link_idx, kf, km, propellers_rpm, propellers_spin, invert):
-        # The adjoint of the speed of the propellers is not propagated yet, so it is an input that is not differentiable
+        # The backward pass of a step stops at the speed of the propellers, an input without gradient
         with self.recording_input(differentiable=False):
             kernel_set_drone_rpm(
                 propellers_link_idx, kf, km, propellers_rpm, propellers_spin, self.dyn_state, self.rigid_config, invert

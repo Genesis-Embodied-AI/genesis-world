@@ -859,11 +859,6 @@ class IPCCoupler(RBC):
         """Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')."""
         return False
 
-    def couple_grad(self, f):
-        """Gradient computation for coupling"""
-        # IPC doesn't support gradients yet
-        pass
-
     def reset(self, envs_idx=None):
         """Reset coupling state"""
         assert gs.logger is not None

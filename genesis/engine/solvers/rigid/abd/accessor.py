@@ -842,10 +842,10 @@ def kernel_set_dofs_position(
     rigid_config: qd.template(),
 ):
     """
-    Write the positions of the dofs of every link one dof of which is set into the configuration of its joint.
+    Write the configuration of the joint of each link from the positions of its dofs, when one of them is set.
 
-    `position` holds the position of every dof in each of the environments, those of the dofs not set being the current
-    ones, which the three rotation dofs of a free or spherical joint need together. The positions of the dofs
+    `position` holds the position of every dof in each of the environments, the current one for a dof not set, since
+    the three rotation dofs of a free or spherical joint make one quaternion. The positions of the dofs
     themselves are derived from the configuration by forward kinematics.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

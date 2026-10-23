@@ -218,9 +218,7 @@ class ConfigItem(NamedTuple):
     config: object
 
 
-def iter_data(
-    owner: object, attr: str, kind: DataKind | None = None, *, framed: bool = False
-) -> Iterator[DataItem | ConfigItem]:
+def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterator[DataItem | ConfigItem]:
     """Yield the data of an attribute, one item per array if it is a struct, named by the fields reaching it.
 
     The attribute is 'attr' of 'owner', and an item of a struct is named by 'attr' plus field names joined with dots.
@@ -229,8 +227,7 @@ def iter_data(
     field applies to every array of that struct. An array is a quadrants array or a torch tensor, and a quadrants array
     carrying gradients yields them as one more item of its kind, named 'grad'. A Python native scalar of an object that
     is no struct, such as a flag, yields an item of the given kind, which a restore sets back as the attribute. A static
-    config yields a ConfigItem. Anything else raises and names the offending attribute. `framed` marks every array
-    yielded (see 'ArrayItem').
+    config yields a ConfigItem. Anything else raises and names the offending attribute.
     """
     value = getattr(owner, attr)
     if isinstance(type(value), AutoInitMeta):
@@ -238,9 +235,9 @@ def iter_data(
     elif isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor)):
         if kind is None:
             gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
-        yield ArrayItem(attr, kind, value, is_framed=framed)
+        yield ArrayItem(attr, kind, value)
         if not isinstance(value, torch.Tensor) and value.has_grad():
-            yield ArrayItem(f"{attr}.grad", kind, value.grad, is_grad=True, is_framed=framed)
+            yield ArrayItem(f"{attr}.grad", kind, value.grad, is_grad=True)
     elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
         if dataclasses.is_dataclass(value):
             members = [(field.name, field.metadata.get(KIND)) for field in dataclasses.fields(value)]
@@ -250,7 +247,7 @@ def iter_data(
             is_member_array = isinstance(getattr(value, member), (qd.Tensor, qd.Field, qd.Ndarray, torch.Tensor))
             if stated_kind is None and kind is None and is_member_array:
                 stated_kind = type(value).kind
-            for item in iter_data(value, member, kind if stated_kind is None else stated_kind, framed=framed):
+            for item in iter_data(value, member, kind if stated_kind is None else stated_kind):
                 yield item._replace(name=f"{attr}.{item.name}")
     elif isinstance(value, (bool, int, float)) and not (dataclasses.is_dataclass(owner) or isinstance(owner, tuple)):
         if kind is None:
@@ -324,11 +321,11 @@ def fill_data(
     """
     for item in check_data(items, values, boundary_only=boundary_only):
         value = values[item.name]
-        is_frame_only = boundary_only and item.is_framed
         if isinstance(item, ScalarItem):
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
             setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
             continue
+        is_frame_only = boundary_only and item.is_framed
         view = None
         if isinstance(item.array, torch.Tensor):
             view = item.array
@@ -3040,8 +3037,8 @@ class RigidAdjointCache:
 
 def get_rigid_adjoint_cache(solver):
     requires_grad = solver._requires_grad
-    # One frame per substep of a step and one for the state it ends at (see 'Solver.roll_frame_window')
-    n_frames = solver.substeps + 1 if requires_grad else 1
+    # The kinematic solver tracks no gradient, and holds no frame
+    n_frames = solver.n_frames if requires_grad else 1
 
     qs_shape = maybe_shape((n_frames, solver.n_qs_, solver._B), requires_grad)
     dofs_shape = maybe_shape((n_frames, solver.n_dofs_, solver._B), requires_grad)

@@ -504,7 +504,7 @@ class Simulator(RBC):
 
     @property
     def is_forward_ready(self) -> bool:
-        """Whether the simulation may step forward, which a backward pass rewinding it to its start forbids until reset."""
+        """Whether the simulation may step forward, which a backward pass rewinding it forbids until the next reset."""
         return self._is_forward_ready
 
     @property

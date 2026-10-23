@@ -21,7 +21,7 @@ class SimOptions(Options):
 
     Note
     ----
-    1. `SimOptions` specifies the global settings for the simulator. Some parameters exist both in `SimOptions` and
+    `SimOptions` specifies the global settings for the simulator. Some parameters exist both in `SimOptions` and
     `SolverOptions`. In this case, if such parameters are given in `SolverOptions`, it will override the one specified
     in `SimOptions` for this specific solver. For example, if `dt` is only given in `SimOptions`, it will be shared by
     all the solvers, while a solver given its own `dt` integrates over that interval instead, and the number of

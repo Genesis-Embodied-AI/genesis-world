@@ -142,13 +142,13 @@ class RolloutGraph:
 
     def _enter_pass(self):
         """Start a backward pass from zero adjoints the first time one of its nodes runs."""
-        # FIXME: private torch API, the same graph task identity 'register_multi_grad_hook' relies on.
+        # The identity of the graph task running the pass, private torch API on which 'register_multi_grad_hook' relies
         pass_id = torch._C._current_graph_task_id()
         if pass_id != self._pass_id:
             self._pass_id = pass_id
             self._on_pass_start()
-            # FIXME: 'torch.autograd.graph.queue_callback', the public alias of this call, once the minimum supported
-            # torch has it.
+            # FIXME: torch - 'torch.autograd.graph.queue_callback', the public alias of this call, is missing from the
+            # releases of torch Genesis supports.
             torch.autograd.Variable._execution_engine.queue_callback(self._on_pass_end)
 
     def _run(self, operation_method, *args):
@@ -174,9 +174,8 @@ class LaunchRecorder:
         self._warnings_context = warnings.catch_warnings()
 
     def __enter__(self) -> "LaunchRecorder":
-        # FIXME: quadrants - a forward launch reads the gradient of a torch tensor tracking gradients and allocates it
-        # if it has none, which torch warns about for a tensor it computed. The warning is silenced, and the gradients
-        # the launches allocated are taken back, so that an input the loss never reaches keeps none, as in torch.
+        # FIXME: quadrants - a forward launch reads and allocates the gradient of a torch tensor tracking gradients. The
+        # warning of torch is silenced, and the allocated gradients are taken back in '__exit__'.
         self._warnings_context.__enter__()
         warnings.filterwarnings("ignore", message="The .grad attribute of a Tensor that is not a leaf Tensor")
         runtime = impl.get_runtime()
@@ -205,8 +204,8 @@ class InputOperation(Operation):
     inputs are the torch tensors among the arguments of the launches that track gradients. The backward pass runs the
     autodiff of the kernels in reverse order, which gives the gradient of each value and clears the adjoint of the slots
     it overwrote. Launches whose kernels read quantities derived from the state, such as a wrench applied at a point of
-    a link, run backward at the state its solver saved (`saved_state`), which folds the adjoint they leave on derived
-    quantities afterwards.
+    a link, run backward at the state their solver saved (`saved_state`), and the solver folds the adjoint they leave on
+    derived quantities into the state afterwards.
     """
 
     def __init__(self, solver: "Solver", launches: list[tuple[Callable, tuple]], saved_state=None):

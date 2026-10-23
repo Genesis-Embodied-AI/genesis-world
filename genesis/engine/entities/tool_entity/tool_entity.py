@@ -253,22 +253,26 @@ class ToolEntity(Entity):
                 self.quat[f, i_b][k] = quat[i_b, k]
 
     def set_velocity(self, vel=None, ang=None):
+        vel = None if vel is None else to_gs_tensor(vel).contiguous()
+        ang = None if ang is None else to_gs_tensor(ang).contiguous()
         # Between two steps, the state sits in frame 0 (see 'ToolSolver.roll_frame_window')
         with self._solver.recording_input():
             if vel is not None:
-                self.set_vel(0, to_gs_tensor(vel).contiguous())
+                self.set_vel(0, vel)
             if ang is not None:
-                self.set_ang(0, to_gs_tensor(ang).contiguous())
+                self.set_ang(0, ang)
 
     def set_position(self, pos):
+        pos = to_gs_tensor(pos).contiguous()
         # See 'set_velocity'
         with self._solver.recording_input():
-            self.set_pos(0, to_gs_tensor(pos).contiguous())
+            self.set_pos(0, pos)
 
     def set_quaternion(self, quat):
+        quat = to_gs_tensor(quat).contiguous()
         # See 'set_velocity'
         with self._solver.recording_input():
-            self.set_quat(0, to_gs_tensor(quat).contiguous())
+            self.set_quat(0, quat)
 
     def add_grad_from_state(self, grads):
         """Add the gradients of a queried state of the tool, ordered as its `grad_tensors`, to the frame 0 adjoint."""
