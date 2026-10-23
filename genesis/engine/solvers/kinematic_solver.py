@@ -121,6 +121,24 @@ def _read_state_fields(solver: "KinematicSolver", fields, envs_idx, idx, *, deri
     return tuple(tensor[mask] for tensor in tensors)
 
 
+def _write_dofs_position(solver: "KinematicSolver", position, dofs_idx, envs_idx) -> None:
+    """
+    Write the positions of the given dofs into the configuration of their joints, whose other dofs keep theirs.
+
+    The positions of the other dofs are read from the state (see 'kernel_set_dofs_position'), so the gradient of a
+    recorded write reaches both the positions given and the state the others are read from.
+    """
+    (positions,) = _read_state_fields(solver, (solver.dyn_state.dofs.pos,), envs_idx, None, derived=True)
+    positions = positions.clone()
+    positions[:, dofs_idx] = position
+    is_dof_set = torch.zeros((solver.n_dofs,), dtype=gs.tc_bool, device=gs.device)
+    is_dof_set[dofs_idx] = True
+    with solver.recording_input():
+        kernel_set_dofs_position(
+            envs_idx, is_dof_set, positions, solver.dyn_info, solver.rigid_info, solver.rigid_config
+        )
+
+
 def _fill_base_link_geom_offsets(offset_pos, offset_quat, entity, geoms, ranges):
     """Fill the per-geom forward offset for an entity's collision or visual geoms.
 
@@ -981,14 +999,16 @@ class KinematicSolver(Solver):
         *,
         batched=True,
         skip_allocation=False,
-        drop_repeated=False,
+        accumulate=False,
     ):
         """
         Sanitize the indices of the entries of a state a getter reads or a setter writes, and the values written.
 
-        A setter asks for `drop_repeated`, which keeps the last occurrence of an index given several times and its
-        values alone, as writing them in turn would leave (see 'drop_repeated_index').
+        A write keeps the last occurrence of an index given several times and its values alone, as writing them in turn
+        would leave (see 'drop_repeated_index'), except a write adding its values to the state (`accumulate`), whose
+        repeated indices add up.
         """
+        is_overwrite = tensor is not None and not accumulate
         envs_idx_ = self._scene._sanitize_envs_idx(envs_idx) if batched else self._scene._envs_idx[:0]
 
         if self.n_envs == 0 or not batched:
@@ -1011,9 +1031,9 @@ class KinematicSolver(Solver):
                 ("envs_idx", idx_name, *("" for _ in element_shape)),
                 skip_allocation=skip_allocation,
             )
-            if drop_repeated:
+            if is_overwrite:
                 envs_idx_, (tensor_,) = drop_repeated_index(envs_idx, envs_idx_, (tensor_,), 0, self.n_envs)
-        if drop_repeated:
+        if is_overwrite:
             axis = 1 if self.n_envs > 0 and batched else 0
             inputs_idx_, (tensor_,) = drop_repeated_index(inputs_idx, inputs_idx_, (tensor_,), axis, input_size)
 
@@ -1029,7 +1049,7 @@ class KinematicSolver(Solver):
         if relative and self._links_offset_pos_is_identity[idx].all():
             relative = False
         pos, links_idx, envs_idx = self._sanitize_io_variables(
-            pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, drop_repeated=True
+            pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
         )
         if self.n_envs == 0:
             pos = pos[None]
@@ -1069,7 +1089,7 @@ class KinematicSolver(Solver):
             relative = False
         relative_pos_passthrough = relative and self._links_offset_pos_is_identity[idx].all()
         quat, links_idx, envs_idx = self._sanitize_io_variables(
-            quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True, drop_repeated=True
+            quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True
         )
         if self.n_envs == 0:
             quat = quat[None]
@@ -1138,7 +1158,7 @@ class KinematicSolver(Solver):
                 torch.mps.synchronize()
         else:
             qpos, qs_idx, envs_idx = self._sanitize_io_variables(
-                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True
             )
             if self.n_envs == 0:
                 qpos = qpos[None]
@@ -1201,7 +1221,7 @@ class KinematicSolver(Solver):
                 envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         else:
             velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
-                velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+                velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
             )
             with self.recording_input():
                 if velocity is None:
@@ -1224,14 +1244,11 @@ class KinematicSolver(Solver):
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         if self.n_envs == 0:
             position = position[None]
-        with self.recording_input():
-            kernel_set_dofs_position(
-                dofs_idx, envs_idx, position, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
+        _write_dofs_position(self, position, dofs_idx, envs_idx)
 
         kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self._is_forward_pos_updated = True

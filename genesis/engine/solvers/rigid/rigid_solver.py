@@ -38,6 +38,7 @@ from ..kinematic_solver import (
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _read_state_fields,
+    _write_dofs_position,
     _select_links_offset,
 )
 from .abd.accessor import (
@@ -59,8 +60,6 @@ from .abd.accessor import (
     kernel_set_dofs_kp,
     kernel_set_dofs_kv,
     kernel_set_dofs_limit,
-    kernel_set_dofs_position,
-    kernel_set_dofs_position_qs,
     kernel_set_dofs_stiffness,
     kernel_set_drone_rpm,
     kernel_set_geom_friction,
@@ -331,12 +330,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         # The errors a backward pass flagged, which the restore of each step would erase otherwise (see 'end_step_grad')
         self._errno_backward: torch.Tensor | None = None
-        # Where the position of each dof lands in qpos, for a differentiable scene (see 'build')
-        self._dofs_q_idx: torch.Tensor | None = None
-        self._dofs_qpos0_weight: torch.Tensor | None = None
-        self._dofs_rotation_idx: torch.Tensor | None = None
-        self._rotations_dof_start: torch.Tensor | None = None
-        self._rotations_q_start: torch.Tensor | None = None
 
     def build(self):
         self._n_geoms = self.n_geoms
@@ -373,35 +366,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._init_geom_fields()
         self._init_equality_fields()
         self._init_dof_length()
-
-        # Where the position of each dof lands in qpos, for a recorded 'set_dofs_position' to write it there directly:
-        # one entry for the dofs of revolute and prismatic joints and the translation dofs of free joints, offset by
-        # the neutral configuration for the former, and one quaternion per triplet of rotation dofs of free and
-        # spherical joints
-        if self._requires_grad:
-            dofs_q_idx = np.full((self.n_dofs,), -1, dtype=gs.np_int)
-            dofs_qpos0_weight = np.zeros((self.n_dofs,), dtype=gs.np_float)
-            dofs_rotation_idx = np.full((self.n_dofs,), -1, dtype=gs.np_int)
-            rotations_dof_start, rotations_q_start = [], []
-            for joint in self.joints:
-                if joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC):
-                    dofs_q_idx[joint.dof_start : joint.dof_start + joint.n_dofs] = range(
-                        joint.q_start, joint.q_start + joint.n_dofs
-                    )
-                    dofs_qpos0_weight[joint.dof_start : joint.dof_start + joint.n_dofs] = 1.0
-                elif joint.type in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.SPHERICAL):
-                    rotation_dof_start, rotation_q_start = joint.dof_start, joint.q_start
-                    if joint.type == gs.JOINT_TYPE.FREE:
-                        dofs_q_idx[joint.dof_start : joint.dof_start + 3] = range(joint.q_start, joint.q_start + 3)
-                        rotation_dof_start, rotation_q_start = joint.dof_start + 3, joint.q_start + 3
-                    dofs_rotation_idx[rotation_dof_start : rotation_dof_start + 3] = len(rotations_dof_start)
-                    rotations_dof_start.append(rotation_dof_start)
-                    rotations_q_start.append(rotation_q_start)
-            self._dofs_q_idx = torch.as_tensor(dofs_q_idx, device=gs.device)
-            self._dofs_qpos0_weight = torch.as_tensor(dofs_qpos0_weight, device=gs.device)
-            self._dofs_rotation_idx = torch.as_tensor(dofs_rotation_idx, device=gs.device)
-            self._rotations_dof_start = torch.tensor(rotations_dof_start, dtype=gs.tc_int, device=gs.device)
-            self._rotations_q_start = torch.tensor(rotations_q_start, dtype=gs.tc_int, device=gs.device)
 
         # Compute the pose of every link in the neutral configuration and update the pose of all the geometries,
         # including inactive variants for a given env: the step updates the active variant alone, so this is the only
@@ -1660,16 +1624,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if pos is not None:
             pos, _, _ = self._sanitize_io_variables(
-                pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+                pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, accumulate=True
             )
         # An absent wrench component contributes nothing, which the kernel spells out as zeros.
         force = 0.0 if force is None else force
         torque = 0.0 if torque is None else torque
         force, _, _ = self._sanitize_io_variables(
-            force, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+            force, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, accumulate=True
         )
         torque, links_idx, envs_idx = self._sanitize_io_variables(
-            torque, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+            torque, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, accumulate=True
         )
         if self.n_envs == 0:
             force, torque = force[None], torque[None]
@@ -2225,7 +2189,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             pos, links_idx, envs_idx = self._sanitize_io_variables(
-                pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, drop_repeated=True
+                pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
             )
             if self.n_envs == 0:
                 pos = pos[None]
@@ -2377,7 +2341,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             quat, links_idx, envs_idx = self._sanitize_io_variables(
-                quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True, drop_repeated=True
+                quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True
             )
             if self.n_envs == 0:
                 quat = quat[None]
@@ -2684,7 +2648,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             qpos, qs_idx, envs_idx = self._sanitize_io_variables(
-                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True
             )
             if self.n_envs == 0:
                 qpos = qpos[None]
@@ -2909,46 +2873,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.constraint_solver.reset(envs_idx)
 
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         if self.n_envs == 0:
             position = position[None]
 
         self._wake_dofs(dofs_idx, envs_idx)
 
-        if self._requires_grad:
-            # The positions are written into qpos directly, so that autodiff gives the gradient of the input from the
-            # adjoint of qpos alone (see 'kernel_set_dofs_position_qs')
-            dofs_q_idx = self._dofs_q_idx[dofs_idx]
-            is_linear = dofs_q_idx >= 0
-            linear_cols = is_linear.nonzero()[:, 0]
-            dofs_col = torch.full((self.n_dofs,), -1, dtype=gs.tc_int, device=gs.device)
-            dofs_col[dofs_idx] = torch.arange(len(dofs_idx), dtype=gs.tc_int, device=gs.device)
-            rotations_idx = torch.unique(self._dofs_rotation_idx[dofs_idx][~is_linear])
-            rotation_cols = dofs_col[
-                self._rotations_dof_start[rotations_idx, None] + torch.arange(3, dtype=gs.tc_int, device=gs.device)
-            ]
-            if (rotation_cols < 0).any():
-                gs.raise_exception(
-                    "A differentiable scene sets the position of the three rotation dofs of a free or spherical joint "
-                    "together."
-                )
-            with self.recording_input():
-                kernel_set_dofs_position_qs(
-                    envs_idx,
-                    linear_cols,
-                    dofs_q_idx[linear_cols],
-                    rotation_cols,
-                    self._rotations_q_start[rotations_idx],
-                    self._dofs_qpos0_weight[dofs_idx[linear_cols]],
-                    position,
-                    self.rigid_info,
-                    self.rigid_config,
-                )
-        else:
-            kernel_set_dofs_position(
-                dofs_idx, envs_idx, position, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
+        _write_dofs_position(self, position, dofs_idx, envs_idx)
 
         if gs.use_zerocopy:
             errno = qd_to_torch(self._errno, copy=False)
@@ -3006,7 +2938,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         force, dofs_idx, envs_idx = self._sanitize_io_variables(
-            force, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            force, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         if self.n_envs == 0:
             force = force[None]
@@ -3028,7 +2960,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
-            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         if self.n_envs == 0:
             velocity = velocity[None]
@@ -3051,7 +2983,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         if self.n_envs == 0:
             position = position[None]
@@ -3074,10 +3006,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         position, _, _ = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
-            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
+            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
         )
         if self.n_envs == 0:
             position = position[None]

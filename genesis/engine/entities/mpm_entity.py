@@ -1,13 +1,12 @@
 import functools
 
-import numpy as np
 import torch
 
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
-from genesis.utils.misc import drop_repeated_index, get_last_occurrence, to_gs_tensor
+from genesis.utils.misc import drop_repeated_index, to_gs_tensor
 
 from .particle_entity import ParticleEntity, assert_active
 
@@ -266,8 +265,7 @@ class MPMEntity(ParticleEntity):
         """
         Sanitize the particles a setter writes and the values written, as the global indices of the particles.
 
-        An environment given several times keeps its last occurrence and its values alone, and so does a particle given
-        several times, whose earlier occurrences become -1, which the kernels skip (see 'drop_repeated_index').
+        An environment or a particle given several times keeps its last occurrence (see 'drop_repeated_index').
         """
         envs_idx_ = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx = self._sanitize_particles_idx_local(particles_idx_local, envs_idx_) + self._particle_start
@@ -275,9 +273,9 @@ class MPMEntity(ParticleEntity):
         envs_idx_, (tensor, particles_idx) = drop_repeated_index(
             envs_idx, envs_idx_, (tensor, particles_idx), 0, self._scene.n_envs
         )
-        if isinstance(particles_idx_local, (list, tuple, np.ndarray, torch.Tensor)):
-            is_last = get_last_occurrence(particles_idx) == torch.arange(particles_idx.shape[-1], device=gs.device)
-            particles_idx = torch.where(is_last, particles_idx, -1)
+        particles_idx, (tensor,) = drop_repeated_index(
+            particles_idx_local, particles_idx, (tensor,), 1, self._n_particles
+        )
         return tensor, particles_idx, envs_idx_
 
     @gs.assert_built

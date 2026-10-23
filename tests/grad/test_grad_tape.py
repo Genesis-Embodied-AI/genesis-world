@@ -289,7 +289,7 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_vie
         grad_free_with_hinge_ball_slide, n_envs=2, gravity=(0.0, 0.0, -1.0), show_viewer=show_viewer
     )
     velocity = np.linspace(-0.8, 0.9, 11) * np.array([[1.0], [-0.7]])
-    params = np.array([3.0, 0.4, 0.5])
+    params = np.array([3.0, 0.4, 0.5, 0.3])
     joints_dofs, base_rotation_dofs = slice(6, 11), slice(3, 6)
 
     # In a differentiable scene, the getters track gradients and give the values the solver holds
@@ -319,10 +319,16 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_vie
         assert_allclose(value, reads[1][name], tol=gs.EPS, err_msg=name)
 
     def rollout(scene, entity, params):
-        kp, kd, amplitude = torch.as_tensor(params, dtype=gs.tc_float, device=gs.device)
+        kp, kd, amplitude, rotation = torch.as_tensor(params, dtype=gs.tc_float, device=gs.device)
         scene.reset()
         entity.set_dofs_velocity(velocity)
         for i_step in range(HORIZON):
+            # One rotation dof of the free joint and of the ball joint, mid-rollout, whose other rotation dofs keep the
+            # positions the controller drove them to
+            if i_step == HORIZON // 2:
+                entity.set_dofs_position(
+                    rotation * torch.tensor([1.0, -0.5], dtype=gs.tc_float, device=gs.device), [4, 8]
+                )
             position = entity.get_dofs_position(joints_dofs)
             force = kp * (amplitude * np.sin(0.2 * i_step) - position) - kd * entity.get_dofs_velocity(joints_dofs)
             entity.control_dofs_force(force, joints_dofs)

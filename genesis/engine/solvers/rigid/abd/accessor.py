@@ -833,116 +833,66 @@ def kernel_set_dofs_zero_velocity(
 
 
 @qd.kernel(fastcache=True)
-def kernel_set_dofs_position_qs(
-    envs_idx: qd.types.ndarray(),
-    linear_cols: qd.types.ndarray(),
-    linear_qs_idx: qd.types.ndarray(),
-    rotation_cols: qd.types.ndarray(),
-    rotation_qs_start: qd.types.ndarray(),
-    linear_qpos0_weights: qd.types.ndarray(),
-    position: qd.types.ndarray(),
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    """
-    Write the positions of the targeted dofs into the positions of their joints, which autodiff reverses.
-
-    A dof of a revolute or prismatic joint, or a translation dof of a free joint, is one entry of qpos, offset by the
-    neutral configuration for the former (`linear_qpos0_weights` is 1 or 0): `linear_cols` are their columns in
-    `position`, `linear_qs_idx` their entries of qpos. The three rotation dofs of a free or spherical joint make one
-    quaternion: `rotation_cols` are their columns in `position`, `rotation_qs_start` the first entry of the quaternion
-    in qpos. The positions of the dofs themselves are derived from qpos by forward kinematics.
-    """
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_col_, i_b_ in qd.ndrange(linear_cols.shape[0], envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        i_col = linear_cols[i_col_]
-        i_q = linear_qs_idx[i_col_]
-        rigid_info.qpos[i_q, i_b] = linear_qpos0_weights[i_col_] * rigid_info.qpos0[i_q, i_b] + position[i_b_, i_col]
-
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_r_, i_b_ in qd.ndrange(rotation_cols.shape[0], envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        i_col_x = rotation_cols[i_r_, 0]
-        i_col_y = rotation_cols[i_r_, 1]
-        i_col_z = rotation_cols[i_r_, 2]
-        quat = gu.qd_xyz_to_quat(
-            qd.Vector([position[i_b_, i_col_x], position[i_b_, i_col_y], position[i_b_, i_col_z]], dt=gs.qd_float)
-        )
-        q_start = rotation_qs_start[i_r_]
-        for j in qd.static(range(4)):
-            rigid_info.qpos[q_start + j, i_b] = quat[j]
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_dofs_position(
-    dofs_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
+    is_dof_set: qd.types.ndarray(),
     position: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    n_entities = dyn_info.entities.link_start.shape[0]
+    """
+    Write the positions of the dofs of every link one dof of which is set into the configuration of its joint.
 
+    `position` holds the position of every dof in each of the environments, those of the dofs not set being the current
+    ones, which the three rotation dofs of a free or spherical joint need together. The positions of the dofs
+    themselves are derived from the configuration by forward kinematics.
+    """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
-        dyn_state.dofs.pos[dofs_idx[i_d_], envs_idx[i_b_]] = position[i_b_, i_d_]
-
-    # Note that qpos must be updated, as dofs_state.pos is not used for actual IK.
-    # TODO: Make this more efficient by only taking care of releavant qs/dofs.
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_e, i_b_ in qd.ndrange(n_entities, envs_idx.shape[0]):
+    for i_l, i_b_ in qd.ndrange(dyn_info.links.dof_start.shape[0], envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        for i_l in range(dyn_info.entities.link_start[i_e], dyn_info.entities.link_end[i_e]):
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            if dyn_info.links.n_dofs[I_l] == 0:
-                continue
-
-            dof_start = dyn_info.links.dof_start[I_l]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        dof_start = dyn_info.links.dof_start[I_l]
+        dof_end = dyn_info.links.dof_end[I_l]
+        has_dof_set = False
+        for i_d in range(dof_start, dof_end):
+            if is_dof_set[i_d]:
+                has_dof_set = True
+        if has_dof_set:
             q_start = dyn_info.links.q_start[I_l]
-
             i_j = dyn_info.links.joint_start[I_l]
             I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
             joint_type = dyn_info.joints.type[I_j]
-
-            if joint_type == gs.JOINT_TYPE.FIXED:
-                pass
-            elif joint_type == gs.JOINT_TYPE.FREE:
+            if joint_type == gs.JOINT_TYPE.FREE:
                 xyz = qd.Vector(
                     [
-                        dyn_state.dofs.pos[0 + 3 + dof_start, i_b],
-                        dyn_state.dofs.pos[1 + 3 + dof_start, i_b],
-                        dyn_state.dofs.pos[2 + 3 + dof_start, i_b],
+                        position[i_b_, dof_start + 3 + 0],
+                        position[i_b_, dof_start + 3 + 1],
+                        position[i_b_, dof_start + 3 + 2],
                     ],
                     dt=gs.qd_float,
                 )
                 quat = gu.qd_xyz_to_quat(xyz)
-
                 for j in qd.static(range(3)):
-                    rigid_info.qpos[j + q_start, i_b] = dyn_state.dofs.pos[j + dof_start, i_b]
-
+                    rigid_info.qpos[q_start + j, i_b] = position[i_b_, dof_start + j]
                 for j in qd.static(range(4)):
-                    rigid_info.qpos[j + 3 + q_start, i_b] = quat[j]
+                    rigid_info.qpos[q_start + 3 + j, i_b] = quat[j]
             elif joint_type == gs.JOINT_TYPE.SPHERICAL:
                 xyz = qd.Vector(
                     [
-                        dyn_state.dofs.pos[0 + dof_start, i_b],
-                        dyn_state.dofs.pos[1 + dof_start, i_b],
-                        dyn_state.dofs.pos[2 + dof_start, i_b],
+                        position[i_b_, dof_start + 0],
+                        position[i_b_, dof_start + 1],
+                        position[i_b_, dof_start + 2],
                     ],
                     dt=gs.qd_float,
                 )
                 quat = gu.qd_xyz_to_quat(xyz)
-                for i_q_ in qd.static(range(4)):
-                    i_q = q_start + i_q_
-                    rigid_info.qpos[i_q, i_b] = quat[i_q_]
+                for j in qd.static(range(4)):
+                    rigid_info.qpos[q_start + j, i_b] = quat[j]
             else:  # (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
-                for i_d_ in range(dyn_info.links.dof_end[I_l] - dof_start):
+                for i_d_ in range(dof_end - dof_start):
                     i_q = q_start + i_d_
-                    i_d = dof_start + i_d_
-                    rigid_info.qpos[i_q, i_b] = rigid_info.qpos0[i_q, i_b] + dyn_state.dofs.pos[i_d, i_b]
+                    rigid_info.qpos[i_q, i_b] = rigid_info.qpos0[i_q, i_b] + position[i_b_, dof_start + i_d_]
 
 
 @qd.kernel(fastcache=True)

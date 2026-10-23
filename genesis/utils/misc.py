@@ -1139,26 +1139,40 @@ def drop_repeated_index(
     index_input: Any, index: torch.Tensor, tensors: Sequence[torch.Tensor | None], axis: int, max_size: int
 ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, ...]]:
     """
-    Keep the last occurrence of every index given several times, and the matching entries of tensors along an axis.
+    Keep the last occurrence of every index given several times, as a write leaves it, and the matching values.
 
-    `index_input` is the index as given, and `index` its sanitized form (see 'sanitize_index'), whose entries count
-    `max_size` at most. A tensor given as None stays None. An index given as a range, a slice, an integer or a boolean
-    mask holds no repeated entry and is returned as it is. Repeats are found on the host for an index given as a
-    sequence, and on the device for a torch tensor, whose compaction then synchronizes the device.
+    `index_input` is the index as given, and `index` its sanitized form, whose entries count `max_size` at most and
+    whose last axis holds the entries of `index_input`. An index given as a sequence is compacted along that axis, and
+    so are the tensors given along `axis`, the repeats being found on the host for an index given as a list, a tuple or
+    an array, and on the device for a torch tensor, whose compaction then synchronizes the device. An index given one
+    row per environment cannot be compacted, its rows differing: the earlier occurrences of a row become -1 instead,
+    which the kernels skip. A range, a slice, an integer or a boolean mask holds no repeated entry, and the index is
+    returned as it is.
     """
     tensors = tuple(tensors)
-    if isinstance(index_input, (list, tuple, np.ndarray)):
+    if isinstance(index_input, torch.Tensor):
+        if index_input.dtype == torch.bool or index_input.numel() < 2:
+            return index, tensors
+        n_dims = index_input.ndim
+    elif isinstance(index_input, (list, tuple, np.ndarray)):
+        n_dims = np.ndim(index_input)
+    else:
+        return index, tensors
+    if n_dims > 1:
+        is_last = get_last_occurrence(index) == torch.arange(index.shape[-1], device=index.device)
+        return torch.where(is_last, index, -1), tensors
+    if isinstance(index_input, torch.Tensor):
+        is_last = get_last_occurrence(index[(0,) * (index.ndim - 1)]) == torch.arange(
+            index.shape[-1], device=index.device
+        )
+        positions = is_last.nonzero()[:, 0]
+    else:
         entries = np.mod(index_input, max_size)
         if len(np.unique(entries)) == len(entries):
             return index, tensors
         _, first_reversed = np.unique(entries[::-1], return_index=True)
         positions = torch.tensor(np.sort(len(entries) - 1 - first_reversed), dtype=gs.tc_int, device=gs.device)
-    elif isinstance(index_input, torch.Tensor) and index_input.dtype != torch.bool and index.numel() > 1:
-        is_last = get_last_occurrence(index) == torch.arange(len(index), device=index.device)
-        positions = is_last.nonzero()[:, 0]
-    else:
-        return index, tensors
-    return index[positions], tuple(
+    return index.index_select(-1, positions), tuple(
         None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors
     )
 
