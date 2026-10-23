@@ -582,6 +582,7 @@ def test_parsing_inertia_defaults(
     torus_mass = 1000.0 * trimesh.load(torus_obj).volume
     entity_torus = inertia_scene.add_entity(
         morph=gs.morphs.Mesh(
+            visualization=False,
             file=torus_obj,
             inertia_from_visual=True,
         ),
@@ -597,6 +598,9 @@ def test_parsing_inertia_defaults(
     )
     assert_allclose(entity_torus.base_link.desc.mass, torus_mass, rtol=1e-6)
     assert_allclose(entity_torus_variants.desc.variants[1].links[0].mass, torus_mass, rtol=1e-6)
+
+    # The URDF loads go through the parser MuJoCo provides, the undecodable visual meshes included
+    assert not any("legacy URDF parser" in record.getMessage() for record in caplog.records)
 
     # Every link of an aligned free body keeps its own mass, so each link reads its authored mass. The two totals are
     # accumulated by independent code paths, so their agreement is bounded by that cross-path floor.

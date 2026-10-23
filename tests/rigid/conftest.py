@@ -753,9 +753,11 @@ def undefined_inertia():
 
 
 @pytest.fixture(scope="session")
-def visual_collision_inertia():
-    """Generate URDFs of one link holding a small collision box: alone, beside a large visual box, and beside that
-    visual box with an authored inertial."""
+def visual_collision_inertia(asset_tmp_path):
+    """Generate URDFs of one link holding a small collision box: alone, beside a large visual box mesh, and beside
+    that visual mesh with an authored inertial. The visual mesh is a GLB file, which MuJoCo cannot load."""
+    visual_path = str(asset_tmp_path / "visual_box.glb")
+    trimesh.creation.box(extents=(0.2, 0.4, 0.6)).export(visual_path)
     urdf = ET.Element("robot", name="visual_collision_inertia")
     link = ET.SubElement(urdf, "link", name="base_link")
     collision = ET.SubElement(link, "collision")
@@ -763,7 +765,7 @@ def visual_collision_inertia():
     urdf_collision_only = ET.tostring(urdf, encoding="unicode")
     visual = ET.SubElement(link, "visual")
     ET.SubElement(visual, "origin", xyz="0.2 0.0 0.0")
-    ET.SubElement(ET.SubElement(visual, "geometry"), "box", size="0.2 0.4 0.6")
+    ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=visual_path)
     urdf_without_inertial = ET.tostring(urdf, encoding="unicode")
     inertial = ET.SubElement(link, "inertial")
     ET.SubElement(inertial, "mass", value="2.0")

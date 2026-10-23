@@ -921,8 +921,9 @@ class KinematicEntityDescription(EntityDescription):
             # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
             l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, self.surface)
 
-            # Mujoco's unified MJCF+URDF parser for only link, joints, and collision geometries properties
-            morph_ = morph.model_copy(update=dict(visualization=False))
+            # Mujoco's unified MJCF+URDF parser for only link, joints, and collision geometries properties. The
+            # visual geometry comes from the URDF parser alone, inertia estimate included.
+            morph_ = morph.model_copy(update=dict(visualization=False, inertia_from_visual=False))
             try:
                 # Mujoco's unified MJCF+URDF parser for URDF files.
                 # Note that Mujoco URDF parser completely ignores equality constraints.
@@ -1515,7 +1516,8 @@ class KinematicEntityDescription(EntityDescription):
         geoms for a link without collision geometry. With 'from_visual', the visual geoms replace the collision ones in
         both estimates, unless the link has no visual geometry of its own.
         """
-        # A drawn collision geom also stands among the visual ones (see 'parse_geom' in mjcf.py), so it counts once
+        # A drawn collision geom also stands among the visual ones (see 'parse_geom' in mjcf.py and
+        # 'parse_usd_rigid_entity'), so it counts once
         vg_inertia_infos = [g_info for g_info in vg_infos if not g_info.get("is_drawn_collision")]
         if from_visual and vg_inertia_infos:
             cg_infos = vg_inertia_infos

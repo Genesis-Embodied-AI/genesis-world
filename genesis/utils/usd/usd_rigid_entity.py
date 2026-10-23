@@ -712,7 +712,7 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
             g_info = g_info.copy()
             mesh = g_info.pop("mesh")
             mesh = gs.Mesh.from_trimesh(mesh=mesh.trimesh, surface=surface, metadata=mesh.metadata)
-            g_info = {**g_info, "vmesh": mesh, "contype": 0, "conaffinity": 0}
+            g_info = {**g_info, "vmesh": mesh, "contype": 0, "conaffinity": 0, "is_drawn_collision": True}
             link_g_infos.append(g_info)
 
     # Apply USD collision filtering (CollisionGroup / FilteredPairsAPI) to this entity's collision geoms.

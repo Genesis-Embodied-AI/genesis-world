@@ -345,6 +345,7 @@ def parse_prim_geoms(
                         conaffinity=0,
                         type=gs_type,
                         data=geom_data,
+                        is_drawn_collision=is_collision,
                     )
                 )
         if is_collision:
