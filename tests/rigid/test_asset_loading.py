@@ -455,16 +455,23 @@ def test_parsing_inertia_defaults(
     assert_allclose(masses["unstated"], 1000.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["mixed"], (250.0 + 1000.0) * VOLUME, tol=gs.EPS)
     assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
+    assert_allclose(masses["weighed"], 5.0 + 1000.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
     assert_equal(entity_density.get_link("weightless").desc.inertia, 0.0)
 
     assert_allclose(entity_density.get_link("mixed").get_pos(relative=False), (4.18, 4.0, 1.0), tol=gs.EPS)
     assert_allclose(entity_density.get_link("fused").get_pos(relative=False), (5.12, 4.0, 1.0), tol=gs.EPS)
+    # A geom stating its mass beside one stating none leaves the link aligned on its center of mass, recomputed or not
+    weighed_com_x = 3.0 + 0.3 * (1000.0 * VOLUME - 5.0) / (5.0 + 1000.0 * VOLUME)
+    assert_allclose(entity_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, 4.0, 1.0), tol=gs.EPS)
+    assert_allclose(
+        entity_zero_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, -2.0, 0.5), tol=gs.EPS
+    )
     assert_allclose(
         entity_density.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * VOLUME * 0.2**2 / 6.0, tol=gs.EPS
     )
 
-    for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused"):
+    for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused", "weighed"):
         link = entity_density.get_link(name)
         scaled_link = entity_density_scaled.get_link(name)
         assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, tol=gs.EPS, err_msg=name)

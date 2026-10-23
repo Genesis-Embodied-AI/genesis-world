@@ -52,6 +52,7 @@ from .inertial import (
     compose_inertial_from_g_infos,
     compose_inertial_properties,
     finalize_inertial,
+    get_local_inertial_from_geom,
 )
 
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
@@ -1398,6 +1399,16 @@ class KinematicEntityDescription(EntityDescription):
         if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
             for g_info in g_infos:
                 g_info.pop("density", None)
+                g_info.pop("mass", None)
+
+        # A geom stating its mass takes the density giving that mass, so that its link holds densities alone. A geom
+        # spanning no volume keeps none.
+        for g_info in g_infos:
+            mass = g_info.pop("mass", None)
+            if mass is not None:
+                unit_mass = get_local_inertial_from_geom(g_info["type"], g_info["data"], g_info["mesh"]).mass
+                if unit_mass > 0.0:
+                    g_info["density"] = mass / unit_mass
 
         cg_infos, vg_infos = [], []
         for g_info in g_infos:

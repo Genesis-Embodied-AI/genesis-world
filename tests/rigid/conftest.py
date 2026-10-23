@@ -775,6 +775,11 @@ def authored_geom_density_mjcf():
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
 
+    weighed = ET.SubElement(worldbody, "body", name="weighed", pos="3.0 0.0 1.0")
+    ET.SubElement(weighed, "freejoint")
+    ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="5")
+    ET.SubElement(weighed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
     unstated = ET.SubElement(worldbody, "body", name="unstated", pos="6.0 0.0 1.0")
     ET.SubElement(unstated, "freejoint")
     ET.SubElement(unstated, "geom", type="box", size="0.1 0.1 0.1")
