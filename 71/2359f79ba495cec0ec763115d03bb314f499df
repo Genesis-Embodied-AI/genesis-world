@@ -1,0 +1,19 @@
+genesis/engine/scene.py
+  s_33aab527a44173::t_49e678dbb7f12b 972
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "712359f79ba495cec0ec763115d03bb314f499df",
+  "prompts": {},
+  "sessions": {
+    "s_33aab527a44173": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "28f96fc5-3905-4f11-a3af-5f67dc372dbe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
