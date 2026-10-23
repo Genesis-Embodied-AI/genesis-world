@@ -65,7 +65,7 @@ class RigidGeomData(GeomData):
 
 @dataclass(frozen=True, kw_only=True)
 class ArticulatedDescription(SystemDataDescription[ArticulatedData]):
-    """Collision geometry and equality counts default to single-entry placeholders for kinematic-only solvers."""
+    """Collision geometry and equality counts stay at zero for a kinematic solver, which allocates none of them."""
 
     _B: int
     n_dofs_: int
@@ -78,13 +78,13 @@ class ArticulatedDescription(SystemDataDescription[ArticulatedData]):
     n_vfaces_: int
     n_vgeoms_: int
     n_joints_per_link_max: int
-    n_geoms_: int = 1
-    n_verts_: int = 1
-    n_faces_: int = 1
-    n_edges_: int = 1
-    n_free_verts_: int = 1
-    n_fixed_verts_: int = 1
-    n_candidate_equalities_: int = 1
+    n_geoms_: int = 0
+    n_verts_: int = 0
+    n_faces_: int = 0
+    n_edges_: int = 0
+    n_free_verts_: int = 0
+    n_fixed_verts_: int = 0
+    n_candidate_equalities_: int = 0
     is_dynamic: bool = False
     requires_grad: bool
     is_batch_links_info: bool
