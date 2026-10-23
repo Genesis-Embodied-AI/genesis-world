@@ -1119,3 +1119,20 @@ def _loaded_geometry(raw: dict, loading: serialization.Loading) -> trimesh.Trime
 
 
 serialization.register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)
+
+
+def _exported_inertial(inertial: InertialProperties, exporting: serialization.Exporting) -> dict:
+    """Export an inertial: its mass, its center of mass and its inertia tensor."""
+    return {
+        "mass": exporting.value(inertial.mass, float),
+        "com": exporting.array(inertial.com),
+        "i": exporting.array(inertial.i),
+    }
+
+
+def _loaded_inertial(raw: dict, loading: serialization.Loading) -> InertialProperties:
+    """Recreate the inertial as it was exported."""
+    return InertialProperties(raw["mass"], loading.array(raw["com"]), loading.array(raw["i"]))
+
+
+serialization.register(InertialProperties, _exported_inertial, _loaded_inertial)
