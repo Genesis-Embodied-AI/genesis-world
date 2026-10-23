@@ -47,7 +47,7 @@ def build_mujoco_sim(
         asset_path = get_hf_dataset(pattern=xml_path)
         file = os.path.join(asset_path, xml_path)
 
-    model = mju.build_model(file, discard_visual=True, merge_fixed_links=merge_fixed_links, links_to_keep=())
+    model, _ = mju.build_model(file, discard_visual=True, merge_fixed_links=merge_fixed_links, links_to_keep=())
 
     model.opt.solver = mj_solver
     model.opt.integrator = mj_integrator
