@@ -211,16 +211,6 @@ class HybridEntity(Entity):
             self._part_soft_init_positions = qd.field(dtype=gs.qd_vec3, shape=(part_soft.init_particles.shape[0],))
             self._part_soft_init_positions.from_numpy(part_soft.init_particles)
 
-            # NOTE: coupling operating at particle level and here we modify post_coupling, i.e., update particle state
-            # after g2p
-            substep_post_coupling = part_soft.solver.substep_post_coupling
-
-            def substep_post_coupling_and_update(f):
-                substep_post_coupling(f)
-                self.update_soft_part(f)
-
-            part_soft.solver.substep_post_coupling = substep_post_coupling_and_update
-
         # set members
         self._material_rigid = part_rigid.material
         self._part_rigid = part_rigid
