@@ -175,6 +175,18 @@ def test_muscle_actuation_grad_matches_fd(precision, show_viewer):
         rollout(scene, boxes, actus, vels)
         assert_allclose(boxes[0].get_particles_actu(), actus[0, 2][mpm_muscle_group], tol=gs.EPS)
 
+    # A particle given several times takes the value of its last occurrence, which alone gets a gradient
+    scenes[0].reset()
+    vels_repeated = torch.tensor(
+        [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]] * 2, dtype=gs.tc_float, device=gs.device, requires_grad=True
+    )
+    boxes_by_scene[0][0].set_particles_vel(vels_repeated, particles_idx_local=[0, 0])
+    vel = boxes_by_scene[0][0].get_state().vel[:, 0]
+    assert_allclose(vel, vels_repeated[:, 1], tol=gs.EPS)
+    (vels_grad,) = torch.autograd.grad(vel.sum(), vels_repeated)
+    assert_allclose(vels_grad[:, 0], 0.0, tol=gs.EPS)
+    assert_allclose(vels_grad[:, 1], 1.0, tol=gs.EPS)
+
     actus_ana = torch.tensor(actus, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     vels_ana = torch.tensor(vels, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     sum(rollout(scenes[0], boxes_by_scene[0], actus_ana, vels_ana)).backward()

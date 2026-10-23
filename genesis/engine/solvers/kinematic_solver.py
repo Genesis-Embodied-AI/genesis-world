@@ -18,12 +18,12 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_set_ik_targets,
 )
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
-from genesis.grad.bridge import KernelLaunch
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
+    drop_repeated_index,
     indices_to_mask,
     qd_to_numpy,
     qd_to_torch,
@@ -111,12 +111,12 @@ def _read_state_fields(solver: "KinematicSolver", fields, envs_idx, idx, *, deri
 
     While the operations of the solver are recorded, the read is one operation of the rollout whose outputs are the
     whole fields, from which torch selects the slots. Fields derived from the state come with the state they are read
-    at (see 'RigidSolver.save_kinematic_state').
+    at (see 'RigidSolver.save_derived_state').
     """
     if not solver.is_recording:
         return tuple(qd_to_torch(field, envs_idx, idx, transpose=True, copy=True) for field in fields)
     tensors = tuple(qd_to_torch(field, transpose=True, copy=True) for field in fields)
-    solver.record_read(tensors, fields, solver.save_kinematic_state() if derived else None)
+    solver.record_read(tensors, fields, solver.save_derived_state() if derived else None)
     mask = indices_to_mask(envs_idx, idx)
     return tuple(tensor[mask] for tensor in tensors)
 
@@ -970,13 +970,6 @@ class KinematicSolver(Solver):
     # ------------------------------------ control ---------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def _check_written_idx(self, inputs_idx, envs_idx, idx_name):
-        """Refuse repeated indices for a write the autograd graph records, whose reverse pass would race on them."""
-        if self.is_recording:
-            for idx, name in ((inputs_idx, idx_name), (envs_idx, "envs_idx")):
-                if len(torch.unique(idx)) != len(idx):
-                    gs.raise_exception(f"'{name}' repeats an index, which a differentiable scene does not support.")
-
     def _sanitize_io_variables(
         self,
         tensor,
@@ -988,7 +981,14 @@ class KinematicSolver(Solver):
         *,
         batched=True,
         skip_allocation=False,
+        drop_repeated=False,
     ):
+        """
+        Sanitize the indices of the entries of a state a getter reads or a setter writes, and the values written.
+
+        A setter asks for `drop_repeated`, which keeps the last occurrence of an index given several times and its
+        values alone, as writing them in turn would leave (see 'drop_repeated_index').
+        """
         envs_idx_ = self._scene._sanitize_envs_idx(envs_idx) if batched else self._scene._envs_idx[:0]
 
         if self.n_envs == 0 or not batched:
@@ -1011,6 +1011,11 @@ class KinematicSolver(Solver):
                 ("envs_idx", idx_name, *("" for _ in element_shape)),
                 skip_allocation=skip_allocation,
             )
+            if drop_repeated:
+                envs_idx_, (tensor_,) = drop_repeated_index(envs_idx, envs_idx_, (tensor_,), 0, self.n_envs)
+        if drop_repeated:
+            axis = 1 if self.n_envs > 0 and batched else 0
+            inputs_idx_, (tensor_,) = drop_repeated_index(inputs_idx, inputs_idx_, (tensor_,), axis, input_size)
 
         return tensor_, inputs_idx_, envs_idx_
 
@@ -1024,9 +1029,8 @@ class KinematicSolver(Solver):
         if relative and self._links_offset_pos_is_identity[idx].all():
             relative = False
         pos, links_idx, envs_idx = self._sanitize_io_variables(
-            pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+            pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(links_idx, envs_idx, "links_idx")
         if self.n_envs == 0:
             pos = pos[None]
 
@@ -1039,14 +1043,10 @@ class KinematicSolver(Solver):
             pos = pos + _offset_world_shift(offset_pos, offset_quat, cur_quat)
             relative = False
 
-        self.record_input(
-            (
-                KernelLaunch(
-                    kernel_set_links_pos,
-                    (links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config),
-                ),
+        with self.recording_input():
+            kernel_set_links_pos(
+                links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
             )
-        )
 
         if not skip_forward:
             kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
@@ -1069,13 +1069,11 @@ class KinematicSolver(Solver):
             relative = False
         relative_pos_passthrough = relative and self._links_offset_pos_is_identity[idx].all()
         quat, links_idx, envs_idx = self._sanitize_io_variables(
-            quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True
+            quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(links_idx, envs_idx, "links_idx")
         if self.n_envs == 0:
             quat = quat[None]
 
-        launches = []
         if relative:
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             if not relative_pos_passthrough:
@@ -1087,31 +1085,24 @@ class KinematicSolver(Solver):
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                 authored_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
                 world_pos = authored_pos + gu.transform_by_quat(offset_pos, quat)
-                launches.append(
-                    KernelLaunch(
-                        kernel_set_links_pos,
-                        (
-                            links_idx,
-                            envs_idx,
-                            world_pos,
-                            self.dyn_state,
-                            self.dyn_info,
-                            self.rigid_info,
-                            self.rigid_config,
-                        ),
+                with self.recording_input():
+                    kernel_set_links_pos(
+                        links_idx,
+                        envs_idx,
+                        world_pos,
+                        self.dyn_state,
+                        self.dyn_info,
+                        self.rigid_info,
+                        self.rigid_config,
                     )
-                )
             # Compose the offset onto the authored orientation, then set the resulting world orientation.
             quat = gu.transform_quat_by_quat(offset_quat, quat)
             relative = False
 
-        launches.append(
-            KernelLaunch(
-                kernel_set_links_quat,
-                (links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config),
+        with self.recording_input():
+            kernel_set_links_quat(
+                links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
             )
-        )
-        self.record_input(tuple(launches))
 
         if not skip_forward:
             kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
@@ -1147,14 +1138,12 @@ class KinematicSolver(Solver):
                 torch.mps.synchronize()
         else:
             qpos, qs_idx, envs_idx = self._sanitize_io_variables(
-                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True
+                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True, drop_repeated=True
             )
-            self._check_written_idx(qs_idx, envs_idx, "qs_idx")
             if self.n_envs == 0:
                 qpos = qpos[None]
-            self.record_input(
-                (KernelLaunch(kernel_set_qpos, (qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)),)
-            )
+            with self.recording_input():
+                kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
 
         if not skip_forward:
             if not isinstance(envs_idx, torch.Tensor):
@@ -1212,20 +1201,15 @@ class KinematicSolver(Solver):
                 envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         else:
             velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
-                velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+                velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
             )
-            self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
-            if velocity is None:
-                launch = KernelLaunch(
-                    kernel_set_dofs_zero_velocity, (dofs_idx, envs_idx, self.dyn_state, self.rigid_config)
-                )
-            else:
-                if self.n_envs == 0:
-                    velocity = velocity[None]
-                launch = KernelLaunch(
-                    kernel_set_dofs_velocity, (dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
-                )
-            self.record_input((launch,))
+            with self.recording_input():
+                if velocity is None:
+                    kernel_set_dofs_zero_velocity(dofs_idx, envs_idx, self.dyn_state, self.rigid_config)
+                else:
+                    if self.n_envs == 0:
+                        velocity = velocity[None]
+                    kernel_set_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
         if not skip_forward:
             if envs_idx.dtype == torch.bool:
@@ -1240,19 +1224,14 @@ class KinematicSolver(Solver):
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
         if self.n_envs == 0:
             position = position[None]
-        self.record_input(
-            (
-                KernelLaunch(
-                    kernel_set_dofs_position,
-                    (dofs_idx, envs_idx, position, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config),
-                ),
+        with self.recording_input():
+            kernel_set_dofs_position(
+                dofs_idx, envs_idx, position, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
             )
-        )
 
         kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         self._is_forward_pos_updated = True

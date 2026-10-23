@@ -1,13 +1,13 @@
 import functools
 
+import numpy as np
 import torch
 
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
-from genesis.grad.bridge import KernelLaunch
-from genesis.utils.misc import to_gs_tensor
+from genesis.utils.misc import drop_repeated_index, get_last_occurrence, to_gs_tensor
 
 from .particle_entity import ParticleEntity, assert_active
 
@@ -262,16 +262,32 @@ class MPMEntity(ParticleEntity):
     # ---------------------------------- io & control ------------------------------------
     # ------------------------------------------------------------------------------------
 
+    def _sanitize_written_particles(self, tensor, dtype, particles_idx_local, envs_idx, element_shape=()):
+        """
+        Sanitize the particles a setter writes and the values written, as the global indices of the particles.
+
+        An environment given several times keeps its last occurrence and its values alone, and so does a particle given
+        several times, whose earlier occurrences become -1, which the kernels skip (see 'drop_repeated_index').
+        """
+        envs_idx_ = self._scene._sanitize_envs_idx(envs_idx)
+        particles_idx = self._sanitize_particles_idx_local(particles_idx_local, envs_idx_) + self._particle_start
+        tensor = self._sanitize_particles_tensor(tensor, dtype, particles_idx, envs_idx_, element_shape)
+        envs_idx_, (tensor, particles_idx) = drop_repeated_index(
+            envs_idx, envs_idx_, (tensor, particles_idx), 0, self._scene.n_envs
+        )
+        if isinstance(particles_idx_local, (list, tuple, np.ndarray, torch.Tensor)):
+            is_last = get_last_occurrence(particles_idx) == torch.arange(particles_idx.shape[-1], device=gs.device)
+            particles_idx = torch.where(is_last, particles_idx, -1)
+        return tensor, particles_idx, envs_idx_
+
     @gs.assert_built
     def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        particles_idx = particles_idx_local + self._particle_start
-        poss = self._sanitize_particles_tensor(poss, gs.tc_float, particles_idx, envs_idx, (3,))
-        # Between two steps, the state sits in frame 0 (see 'MPMSolver.roll_frame_window')
-        self._solver.record_input(
-            (KernelLaunch(self._solver._kernel_set_particles_pos, (0, particles_idx, envs_idx, poss)),)
+        poss, particles_idx, envs_idx = self._sanitize_written_particles(
+            poss, gs.tc_float, particles_idx_local, envs_idx, (3,)
         )
+        # Between two steps, the state sits in frame 0 (see 'MPMSolver.roll_frame_window')
+        with self._solver.recording_input():
+            self._solver._kernel_set_particles_pos(0, particles_idx, envs_idx, poss)
 
     def get_particles_pos(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -285,14 +301,12 @@ class MPMEntity(ParticleEntity):
 
     @gs.assert_built
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        particles_idx = particles_idx_local + self._particle_start
-        vels = self._sanitize_particles_tensor(vels, gs.tc_float, particles_idx, envs_idx, (3,))
-        # See 'set_particles_pos'
-        self._solver.record_input(
-            (KernelLaunch(self._solver._kernel_set_particles_vel, (0, particles_idx, envs_idx, vels)),)
+        vels, particles_idx, envs_idx = self._sanitize_written_particles(
+            vels, gs.tc_float, particles_idx_local, envs_idx, (3,)
         )
+        # See 'set_particles_pos'
+        with self._solver.recording_input():
+            self._solver._kernel_set_particles_vel(0, particles_idx, envs_idx, vels)
 
     def get_particles_vel(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -306,20 +320,17 @@ class MPMEntity(ParticleEntity):
 
     @gs.assert_built
     def set_particles_active(self, actives, particles_idx_local=None, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        particles_idx = particles_idx_local + self._particle_start
-        actives = self._sanitize_particles_tensor(actives, gs.tc_bool, particles_idx, envs_idx)
+        actives, particles_idx, envs_idx = self._sanitize_written_particles(
+            actives, gs.tc_bool, particles_idx_local, envs_idx
+        )
 
         # FIXME: This check is too expensive
         # if not torch.isin(actives, torch.Tensor([False, True], dtype=gs.tc_bool, device=gs.device)).all():
         #     gs.raise_exception("Elements of `actives' must be either True or False.")
 
         # See 'set_particles_pos'
-        self._solver.record_input(
-            (KernelLaunch(self._solver._kernel_set_particles_active, (0, particles_idx, envs_idx, actives)),),
-            differentiable=False,
-        )
+        with self._solver.recording_input(differentiable=False):
+            self._solver._kernel_set_particles_active(0, particles_idx, envs_idx, actives)
 
     def get_particles_active(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -363,18 +374,12 @@ class MPMEntity(ParticleEntity):
         envs_idx : torch.Tensor, shape (M,)
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        particles_idx = particles_idx_local + self._particle_start
-        actus = self._sanitize_particles_tensor(actus, gs.tc_float, particles_idx, envs_idx, (self.material.n_groups,))
-        # See 'set_particles_pos'
-        self._solver.record_input(
-            (
-                KernelLaunch(
-                    self._solver._kernel_set_particles_actu, (0, self.material.n_groups, particles_idx, envs_idx, actus)
-                ),
-            )
+        actus, particles_idx, envs_idx = self._sanitize_written_particles(
+            actus, gs.tc_float, particles_idx_local, envs_idx, (self.material.n_groups,)
         )
+        # See 'set_particles_pos'
+        with self._solver.recording_input():
+            self._solver._kernel_set_particles_actu(0, self.material.n_groups, particles_idx, envs_idx, actus)
 
     def get_particles_actu(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)

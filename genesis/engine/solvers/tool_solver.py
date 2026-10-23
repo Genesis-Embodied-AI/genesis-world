@@ -73,7 +73,7 @@ class ToolSolver(TimeBasedMixin, Solver):
         return state
 
     def set_state(self, f, state, envs_idx=None):
-        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.recording_input')
         self._rollout_graph.mark_state_changed()
         if state is not None:
             assert len(state) == len(self._entities)

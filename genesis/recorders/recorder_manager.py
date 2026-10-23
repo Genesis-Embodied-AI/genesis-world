@@ -103,8 +103,6 @@ class RecorderManager:
                 recorder.reset(envs_idx)
 
     @gs.assert_built
-    # The recorders read the state of the scene for themselves, which is no query of a differentiable rollout
-    @torch.no_grad()
     def step(self, global_step: int):
         """
         Increment the step count and process data from each recording configuration.
@@ -118,6 +116,8 @@ class RecorderManager:
             recorder.step(global_step)
 
     @gs.assert_built
+    # The recorders read the state for themselves, outside of the autograd graph of a differentiable rollout (see
+    # 'Scene.step' for their per-step reads)
     @torch.no_grad()
     def record(self, global_step: int):
         """Record the current state through every recorder, whatever its sampling rate."""

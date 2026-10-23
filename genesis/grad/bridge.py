@@ -13,13 +13,16 @@ they invalidate raises. Both handles live on `gs.device`: autograd runs a node o
 the gradients it receives, which is then the thread issuing the torch operations around it.
 """
 
+import warnings
 import weakref
 from collections.abc import Callable
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import torch
 from torch.autograd.function import once_differentiable
 from torch.autograd.graph import increment_version
+
+from quadrants.lang import impl
 
 import genesis as gs
 
@@ -157,29 +160,56 @@ class RolloutGraph:
             self._is_running_operation = False
 
 
-class KernelLaunch(NamedTuple):
+class LaunchRecorder:
     """
-    One launch of a kernel writing state, with its arguments in order.
+    Record the kernels launched in its context, each with its arguments, in the order of the launches.
 
-    The values a setter writes are torch tensors among the arguments. An `InputOperation` runs the launch forward with
-    them detached, and backward through the autodiff of the kernel, which gives the gradient of each value and clears
-    the adjoint of the slots it overwrote.
+    It stands for the autodiff tape of Quadrants, whose kernels hand it every forward launch before running it.
     """
 
-    kernel: Callable
-    args: tuple
+    def __init__(self):
+        self.launches: list[tuple[Callable, tuple]] = []
+        self._tensors_without_grad: list[torch.Tensor] = []
+        self._previous_tape = None
+        self._warnings_context = warnings.catch_warnings()
+
+    def __enter__(self) -> "LaunchRecorder":
+        # FIXME: quadrants - a forward launch reads the gradient of a torch tensor tracking gradients and allocates it
+        # if it has none, which torch warns about for a tensor it computed. The warning is silenced, and the gradients
+        # the launches allocated are taken back, so that an input the loss never reaches keeps none, as in torch.
+        self._warnings_context.__enter__()
+        warnings.filterwarnings("ignore", message="The .grad attribute of a Tensor that is not a leaf Tensor")
+        runtime = impl.get_runtime()
+        self._previous_tape, runtime.target_tape = runtime.target_tape, self
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        impl.get_runtime().target_tape = self._previous_tape
+        for tensor in self._tensors_without_grad:
+            tensor.grad = None
+        self._warnings_context.__exit__(exc_type, exc_value, traceback)
+
+    def insert(self, kernel: Callable, args: tuple) -> None:
+        """Record the launch of a kernel, before it runs (the hook of the autodiff tape of Quadrants)."""
+        self.launches.append((kernel, args))
+        self._tensors_without_grad += [
+            arg for arg in args if isinstance(arg, torch.Tensor) and arg.requires_grad and arg.grad is None
+        ]
 
 
 class InputOperation(Operation):
     """
     A setter of the state, or any input given to the simulation between two steps, as one operation of the graph.
 
-    Its inputs are the values among the arguments of its launches that track gradients. A launch whose kernel reads
-    quantities derived from the state, such as a wrench applied at a point of a link, runs backward at the state its
-    solver saved (`saved_state`), which folds the adjoint it leaves on derived quantities afterwards.
+    The kernels of the setter ran as it was recorded (see 'LaunchRecorder'), so the forward pass does nothing. Its
+    inputs are the torch tensors among the arguments of the launches that track gradients. The backward pass runs the
+    autodiff of the kernels in reverse order, which gives the gradient of each value and clears the adjoint of the slots
+    it overwrote. Launches whose kernels read quantities derived from the state, such as a wrench applied at a point of
+    a link, run backward at the state its solver saved (`saved_state`), which folds the adjoint they leave on derived
+    quantities afterwards.
     """
 
-    def __init__(self, solver: "Solver", launches: tuple[KernelLaunch, ...], saved_state=None):
+    def __init__(self, solver: "Solver", launches: list[tuple[Callable, tuple]], saved_state=None):
         # See OperationNode for the weak reference
         self._solver = weakref.ref(solver)
         self._launches = launches
@@ -187,15 +217,13 @@ class InputOperation(Operation):
         self.inputs = tuple(
             {
                 id(arg): arg
-                for launch in launches
-                for arg in launch.args
+                for _, args in launches
+                for arg in args
                 if isinstance(arg, torch.Tensor) and arg.requires_grad
             }.values()
         )
 
     def forward(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        for launch in self._launches:
-            launch.kernel(*(arg.detach() if isinstance(arg, torch.Tensor) else arg for arg in launch.args))
         return ()
 
     def backward(self) -> tuple[torch.Tensor | None, ...]:
@@ -204,10 +232,8 @@ class InputOperation(Operation):
             solver.restore_saved_state(self._saved_state)
         # Each value gets a fresh copy tracking gradients, into which the autodiff of the kernels accumulates
         values_grad = {id(value): value.detach().clone().requires_grad_() for value in self.inputs}
-        for launch in reversed(self._launches):
-            launch.kernel.grad(
-                *(values_grad.get(id(arg), arg) if isinstance(arg, torch.Tensor) else arg for arg in launch.args)
-            )
+        for kernel, args in reversed(self._launches):
+            kernel.grad(*(values_grad.get(id(arg), arg) for arg in args))
         if self._saved_state is not None:
             solver.fold_derived_grad(self._saved_state)
         return tuple(values_grad[id(value)].grad for value in self.inputs)

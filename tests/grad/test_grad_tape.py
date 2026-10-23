@@ -229,11 +229,33 @@ def test_closed_loop_policy_grad_matches_fd(grad_revolute, precision, show_viewe
     with pytest.raises(gs.GenesisException, match="Invalid accelerations"):
         torch.autograd.grad(loss, params_ana)
 
-    # A recorded write given an index twice raises, as its reverse pass would race on the slot it overwrites
-    with pytest.raises(gs.GenesisException, match="'envs_idx' repeats an index"):
-        arms_ana[0].control_dofs_force([[0.0], [0.0]], envs_idx=[0, 0])
-    with pytest.raises(gs.GenesisException, match="'dofs_idx' repeats an index"):
-        arms_ana[0].control_dofs_force([[0.0, 0.0], [0.0, 0.0]], dofs_idx_local=[0, 0])
+    # A write given an index several times leaves the value of its last occurrence, which alone gets a gradient, whether
+    # the write is recorded or not
+    for force_repeated, dofs_idx_local, envs_idx, force_last in (
+        ([[0.3], [-0.5]], None, [1, 1], [[0.0], [-0.5]]),
+        ([[0.3, -0.5], [0.2, 0.4]], [0, 0], None, [[-0.5], [0.4]]),
+    ):
+        velocities = []
+        for scene, arm, force in (
+            (scene_fd, arms_fd[0], force_last),
+            (scene_fd, arms_fd[0], force_repeated),
+            (scene_ana, arms_ana[0], torch.tensor(force_repeated, dtype=gs.tc_float, requires_grad=True)),
+        ):
+            scene.reset()
+            with torch.no_grad():
+                arm.control_dofs_force(0.0)
+            arm.control_dofs_force(
+                force,
+                dofs_idx_local=dofs_idx_local if force is not force_last else None,
+                envs_idx=envs_idx if force is not force_last else None,
+            )
+            scene.step()
+            velocities.append(arm.get_dofs_velocity())
+        assert_allclose(velocities[1], velocities[0], tol=gs.EPS)
+        assert_allclose(velocities[2], velocities[0], tol=gs.EPS)
+        (force_grad,) = torch.autograd.grad(velocities[2].sum(), force)
+        assert_allclose(force_grad[0] if envs_idx else force_grad[:, 0], 0.0, tol=gs.EPS)
+        assert ((force_grad[1] if envs_idx else force_grad[:, 1]).abs() > gs.EPS).all()
 
     # fp32 needs a large step to clear the state-noise floor. fp64 needs a small step to bound truncation error.
     eps = 3e-5 if precision == "64" else 3e-2
@@ -251,7 +273,7 @@ def test_closed_loop_policy_grad_matches_fd(grad_revolute, precision, show_viewe
 
     # A differentiable scene is freed once the user drops it, whatever rollout it recorded
     scene_ref = weakref.ref(scene_ana)
-    del scenes, arms, scene, scene_ana, arms_ana
+    del scenes, arms, arm, scene, scene_ana, arms_ana, velocities
     gc.collect()
     assert scene_ref() is None
 

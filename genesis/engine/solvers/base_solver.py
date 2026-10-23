@@ -1,3 +1,4 @@
+import contextlib
 import enum
 import functools
 import inspect
@@ -14,7 +15,7 @@ import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
 from genesis.engine.states import SolverCheckpoint
-from genesis.grad.bridge import InputOperation, KernelLaunch, ReadOperation, RolloutGraph
+from genesis.grad.bridge import InputOperation, LaunchRecorder, ReadOperation, RolloutGraph
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -398,30 +399,32 @@ class Solver(RBC):
         """Whether the operations on the state of the solver are recorded in the autograd graph of the rollout."""
         return self._requires_grad and self._rollout_graph is not None and self._rollout_graph.is_recording
 
-    def record_input(
-        self, launches: tuple[KernelLaunch, ...], saved_state=None, *, differentiable: bool = True
-    ) -> None:
+    @contextlib.contextmanager
+    def recording_input(self, *, differentiable: bool = True, derived: bool = False) -> Iterator[None]:
         """
-        Run the launches of a setter, recorded as one operation of the rollout while it is recorded (see
-        InputOperation).
+        Record the kernels a setter launches in this context as one operation of the rollout, while it is recorded.
 
-        `saved_state` is the state the solver saved for launches whose kernels read quantities derived from it, None
-        otherwise (see 'restore_saved_state'). The values of an input that is not differentiable track no gradient,
-        and its operation only clears the adjoint of the state it overwrote. Every change of the state of a
-        differentiable solver goes through here, so a differentiable scene takes no shortcut around it.
+        The context holds the launches of the kernels writing the state alone, the side effects of the setter (forward
+        kinematics, wake-up, ...) staying outside of it. The values given to the kernels of an input that is not
+        `differentiable` track no gradient, and its operation only clears the adjoint of the state it overwrote. A
+        setter whose kernels read quantities derived from the state asks for `derived`, which saves the state they read
+        before they run (see 'save_derived_state'). Every change of the state of a differentiable solver goes through
+        here, so a differentiable scene takes no shortcut around it.
         """
-        if self.is_recording:
-            operation = InputOperation(self, launches, saved_state)
-            if operation.inputs and not differentiable:
-                gs.raise_exception("Gradients with respect to this input are not supported.")
-            self._rollout_graph.record(operation, *operation.inputs)
+        if not self.is_recording:
+            yield
+            # A change of the state of a differentiable solver the graph does not record overwrites the output of the
+            # last operation recorded
+            if self._requires_grad:
+                self._rollout_graph.mark_state_changed()
             return
-        for launch in launches:
-            launch.kernel(*launch.args)
-        # A change of the state of a differentiable solver the graph does not record overwrites the output of the last
-        # operation recorded
-        if self._requires_grad:
-            self._rollout_graph.mark_state_changed()
+        saved_state = self.save_derived_state() if derived else None
+        with LaunchRecorder() as recorder:
+            yield
+        operation = InputOperation(self, recorder.launches, saved_state)
+        if operation.inputs and not differentiable:
+            gs.raise_exception("Gradients with respect to this input are not supported.")
+        self._rollout_graph.record(operation, *operation.inputs)
 
     def record_read(self, tensors: tuple[torch.Tensor, ...], selection, saved_state=None) -> None:
         """
@@ -437,6 +440,10 @@ class Solver(RBC):
     def add_grad_from_state(self, grads, selection, saved_state) -> None:
         """Add the gradients of the tensors of a queried state to the adjoint of the state of the solver."""
         gs.raise_exception(f"{type(self).__name__} records no differentiable query.")
+
+    def save_derived_state(self):
+        """Return a copy of the state at which an operation reads quantities derived from it, for its backward pass."""
+        gs.raise_exception(f"{type(self).__name__} reads no quantity derived from its state.")
 
     def restore_saved_state(self, saved_state) -> None:
         """Put back the state the solver saved for an operation reading quantities derived from it."""

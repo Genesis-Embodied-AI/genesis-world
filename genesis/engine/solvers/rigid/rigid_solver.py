@@ -13,7 +13,6 @@ from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.states import RigidSolverState, SolverCheckpoint
-from genesis.grad.bridge import KernelLaunch
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
@@ -1690,19 +1689,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
 
         # The moment arm and the local axes of the wrench follow the pose of the links, quantities derived from the
-        # state, which the recorded operation saves for its backward pass (see RigidKinematicSnapshot)
-        saved_state = self.save_kinematic_state() if self.is_recording else None
-        if pos is None:
-            launch = KernelLaunch(
-                kernel_apply_links_external_wrench,
-                (links_idx, envs_idx, force, torque, self.dyn_state, self.rigid_config, ref_frame, local),
-            )
-        else:
-            launch = KernelLaunch(
-                kernel_apply_links_external_wrench_at_pos,
-                (links_idx, envs_idx, pos, force, torque, self.dyn_state, self.rigid_config, ref_frame, local),
-            )
-        self.record_input((launch,), saved_state)
+        # state
+        with self.recording_input(derived=True):
+            if pos is None:
+                kernel_apply_links_external_wrench(
+                    links_idx, envs_idx, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
+                )
+            else:
+                kernel_apply_links_external_wrench_at_pos(
+                    links_idx, envs_idx, pos, force, torque, self.dyn_state, self.rigid_config, ref_frame, local
+                )
 
     def substep_pre_coupling(self, f):
         if self.is_active:
@@ -1772,7 +1768,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             links_state.root_COM,
         )
 
-    def save_kinematic_state(self) -> "RigidKinematicSnapshot":
+    def save_derived_state(self) -> "RigidKinematicSnapshot":
         """Return a copy of the state an operation reads quantities derived from (see RigidKinematicSnapshot)."""
         return RigidKinematicSnapshot(
             *(qd_to_torch(field, copy=True) for field in self._kinematic_snapshot_fields),
@@ -1973,7 +1969,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.dyn_state.links.pos,
                         self.dyn_state.links.quat,
                     ),
-                    self.save_kinematic_state(),
+                    self.save_derived_state(),
                 )
         else:
             state = None
@@ -1983,7 +1979,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def set_state(self, f, state, envs_idx=None, *, partial: bool = False) -> None:
         if not self.is_active:
             return
-        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.recording_input')
         self._rollout_graph.mark_state_changed()
 
         if partial:
@@ -2229,9 +2225,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             pos, links_idx, envs_idx = self._sanitize_io_variables(
-                pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+                pos, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True, drop_repeated=True
             )
-            self._check_written_idx(links_idx, envs_idx, "links_idx")
             if self.n_envs == 0:
                 pos = pos[None]
 
@@ -2282,14 +2277,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.rigid_config,
                     )
 
-            self.record_input(
-                (
-                    KernelLaunch(
-                        kernel_set_links_pos,
-                        (links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config),
-                    ),
+            with self.recording_input():
+                kernel_set_links_pos(
+                    links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
                 )
-            )
 
         if not skip_forward:
             if not isinstance(envs_idx, torch.Tensor):
@@ -2386,13 +2377,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             quat, links_idx, envs_idx = self._sanitize_io_variables(
-                quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True
+                quat, links_idx, self.n_links, "links_idx", envs_idx, (4,), skip_allocation=True, drop_repeated=True
             )
-            self._check_written_idx(links_idx, envs_idx, "links_idx")
             if self.n_envs == 0:
                 quat = quat[None]
 
-            launches = []
             if relative:
                 offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
                 if not relative_pos_passthrough:
@@ -2408,20 +2397,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                     authored_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
                     world_pos = authored_pos + gu.transform_by_quat(offset_pos, quat)
-                    launches.append(
-                        KernelLaunch(
-                            kernel_set_links_pos,
-                            (
-                                links_idx,
-                                envs_idx,
-                                world_pos,
-                                self.dyn_state,
-                                self.dyn_info,
-                                self.rigid_info,
-                                self.rigid_config,
-                            ),
+                    with self.recording_input():
+                        kernel_set_links_pos(
+                            links_idx,
+                            envs_idx,
+                            world_pos,
+                            self.dyn_state,
+                            self.dyn_info,
+                            self.rigid_info,
+                            self.rigid_config,
                         )
-                    )
                 # Compose the offset onto the authored orientation, then set the resulting world orientation absolutely.
                 quat = gu.transform_quat_by_quat(offset_quat, quat)
                 relative = False
@@ -2458,13 +2443,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.rigid_config,
                     )
 
-            launches.append(
-                KernelLaunch(
-                    kernel_set_links_quat,
-                    (links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config),
+            with self.recording_input():
+                kernel_set_links_quat(
+                    links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
                 )
-            )
-            self.record_input(tuple(launches))
 
         if not skip_forward:
             if not isinstance(envs_idx, torch.Tensor):
@@ -2702,9 +2684,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             qpos, qs_idx, envs_idx = self._sanitize_io_variables(
-                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True
+                qpos, qs_idx, self.n_qs, "qs_idx", envs_idx, skip_allocation=True, drop_repeated=True
             )
-            self._check_written_idx(qs_idx, envs_idx, "qs_idx")
             if self.n_envs == 0:
                 qpos = qpos[None]
 
@@ -2721,9 +2702,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                 )
 
-            self.record_input(
-                (KernelLaunch(kernel_set_qpos, (qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)),)
-            )
+            with self.recording_input():
+                kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
             kernel_set_zero(envs_idx, self._errno)
 
         if not skip_forward:
@@ -2929,9 +2909,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.constraint_solver.reset(envs_idx)
 
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
         if self.n_envs == 0:
             position = position[None]
 
@@ -2954,9 +2933,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     "A differentiable scene sets the position of the three rotation dofs of a free or spherical joint "
                     "together."
                 )
-            launch = KernelLaunch(
-                kernel_set_dofs_position_qs,
-                (
+            with self.recording_input():
+                kernel_set_dofs_position_qs(
                     envs_idx,
                     linear_cols,
                     dofs_q_idx[linear_cols],
@@ -2966,14 +2944,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     position,
                     self.rigid_info,
                     self.rigid_config,
-                ),
-            )
+                )
         else:
-            launch = KernelLaunch(
-                kernel_set_dofs_position,
-                (dofs_idx, envs_idx, position, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config),
+            kernel_set_dofs_position(
+                dofs_idx, envs_idx, position, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
             )
-        self.record_input((launch,))
 
         if gs.use_zerocopy:
             errno = qd_to_torch(self._errno, copy=False)
@@ -3031,15 +3006,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         force, dofs_idx, envs_idx = self._sanitize_io_variables(
-            force, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+            force, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
         if self.n_envs == 0:
             force = force[None]
 
-        self.record_input(
-            (KernelLaunch(kernel_control_dofs_force, (dofs_idx, envs_idx, force, self.dyn_state, self.rigid_config)),)
-        )
+        with self.recording_input():
+            kernel_control_dofs_force(dofs_idx, envs_idx, force, self.dyn_state, self.rigid_config)
 
     def control_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy and not self._requires_grad:
@@ -3055,21 +3028,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
-            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
         if self.n_envs == 0:
             velocity = velocity[None]
 
         # The adjoint of a PD target is not propagated yet, so the target is an input that is not differentiable
-        self.record_input(
-            (
-                KernelLaunch(
-                    kernel_control_dofs_velocity, (dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
-                ),
-            ),
-            differentiable=False,
-        )
+        with self.recording_input(differentiable=False):
+            kernel_control_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy and not self._requires_grad:
@@ -3085,21 +3051,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             return
 
         position, dofs_idx, envs_idx = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
         if self.n_envs == 0:
             position = position[None]
 
         # See 'control_dofs_velocity'
-        self.record_input(
-            (
-                KernelLaunch(
-                    kernel_control_dofs_position, (dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
-                ),
-            ),
-            differentiable=False,
-        )
+        with self.recording_input(differentiable=False):
+            kernel_control_dofs_position(dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
 
     def control_dofs_position_velocity(self, position, velocity, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy and not self._requires_grad:
@@ -3114,27 +3073,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
             return
 
-        position, dofs_idx, _ = self._sanitize_io_variables(
-            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+        position, _, _ = self._sanitize_io_variables(
+            position, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
         velocity, dofs_idx, envs_idx = self._sanitize_io_variables(
-            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True
+            velocity, dofs_idx, self.n_dofs, "dofs_idx", envs_idx, skip_allocation=True, drop_repeated=True
         )
-        self._check_written_idx(dofs_idx, envs_idx, "dofs_idx")
         if self.n_envs == 0:
             position = position[None]
             velocity = velocity[None]
 
         # See 'control_dofs_velocity'
-        self.record_input(
-            (
-                KernelLaunch(
-                    kernel_control_dofs_position_velocity,
-                    (dofs_idx, envs_idx, position, velocity, self.dyn_state, self.rigid_config),
-                ),
-            ),
-            differentiable=False,
-        )
+        with self.recording_input(differentiable=False):
+            kernel_control_dofs_position_velocity(
+                dofs_idx, envs_idx, position, velocity, self.dyn_state, self.rigid_config
+            )
 
     def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None):
         """
@@ -3813,24 +3766,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def set_drone_rpm(self, propellers_link_idx, kf, km, propellers_rpm, propellers_spin, invert):
         # The adjoint of the speed of the propellers is not propagated yet, so it is an input that is not differentiable
-        self.record_input(
-            (
-                KernelLaunch(
-                    kernel_set_drone_rpm,
-                    (
-                        propellers_link_idx,
-                        kf,
-                        km,
-                        propellers_rpm,
-                        propellers_spin,
-                        self.dyn_state,
-                        self.rigid_config,
-                        invert,
-                    ),
-                ),
-            ),
-            differentiable=False,
-        )
+        with self.recording_input(differentiable=False):
+            kernel_set_drone_rpm(
+                propellers_link_idx, kf, km, propellers_rpm, propellers_spin, self.dyn_state, self.rigid_config, invert
+            )
 
     def update_verts_for_geoms(self, geoms_idx):
         _, geoms_idx, _ = self._sanitize_io_variables(

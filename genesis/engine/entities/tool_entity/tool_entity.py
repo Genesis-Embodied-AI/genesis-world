@@ -6,7 +6,6 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import ToolEntityState
-from genesis.grad.bridge import KernelLaunch
 from genesis.utils.geom import (
     qd_rotvec_to_quat,
     qd_transform_quat_by_quat,
@@ -255,20 +254,21 @@ class ToolEntity(Entity):
 
     def set_velocity(self, vel=None, ang=None):
         # Between two steps, the state sits in frame 0 (see 'ToolSolver.roll_frame_window')
-        launches = []
-        if vel is not None:
-            launches.append(KernelLaunch(self.set_vel, (0, to_gs_tensor(vel).contiguous())))
-        if ang is not None:
-            launches.append(KernelLaunch(self.set_ang, (0, to_gs_tensor(ang).contiguous())))
-        self._solver.record_input(tuple(launches))
+        with self._solver.recording_input():
+            if vel is not None:
+                self.set_vel(0, to_gs_tensor(vel).contiguous())
+            if ang is not None:
+                self.set_ang(0, to_gs_tensor(ang).contiguous())
 
     def set_position(self, pos):
         # See 'set_velocity'
-        self._solver.record_input((KernelLaunch(self.set_pos, (0, to_gs_tensor(pos).contiguous())),))
+        with self._solver.recording_input():
+            self.set_pos(0, to_gs_tensor(pos).contiguous())
 
     def set_quaternion(self, quat):
         # See 'set_velocity'
-        self._solver.record_input((KernelLaunch(self.set_quat, (0, to_gs_tensor(quat).contiguous())),))
+        with self._solver.recording_input():
+            self.set_quat(0, to_gs_tensor(quat).contiguous())
 
     def add_grad_from_state(self, grads):
         """Add the gradients of a queried state of the tool, ordered as its `grad_tensors`, to the frame 0 adjoint."""

@@ -25,6 +25,7 @@ import psutil
 import pyglet
 
 import quadrants as qd
+from quadrants.lang._fast_caching import args_hasher
 
 import genesis as gs
 from genesis.typing import is_sequence
@@ -947,6 +948,22 @@ def qd_to_numpy(
     return _apply_masks(array, value, row_mask, col_mask, keepdim, copy, to_torch=False)
 
 
+# FIXME: quadrants - the fastcache key of a torch tensor argument omits whether it tracks gradients, which the launch
+# bakes into the argument layout as for an ndarray, so a kernel compiled for a tensor tracking none segfaults when
+# launched with one that does. The key of a tensor tracking gradients carries the grad tag of an ndarray.
+_stringify_obj_type = args_hasher.stringify_obj_type
+
+
+def _stringify_obj_type_with_grad(raise_on_templated_floats, path, obj, arg_meta, *args, **kwargs):
+    obj_repr = _stringify_obj_type(raise_on_templated_floats, path, obj, arg_meta, *args, **kwargs)
+    if isinstance(obj, torch.Tensor) and obj.requires_grad:
+        return f"{obj_repr[:-1]}-g]"
+    return obj_repr
+
+
+args_hasher.stringify_obj_type = _stringify_obj_type_with_grad
+
+
 def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor) -> None:
     """Write a torch tensor into a Quadrants field / ndarray, in the native layout of the latter (see qd_to_torch).
 
@@ -1099,6 +1116,51 @@ def sanitize_index(
     #     gs.raise_exception(f"Indices out-of-range for {i}-th index{dim_info}.")
 
     return index.contiguous()
+
+
+def get_last_occurrence(index: torch.Tensor) -> torch.Tensor:
+    """
+    Return the position of the last entry holding the same index as each entry, along the last axis of an index tensor.
+
+    The positions are computed on the device of the index, without synchronizing it. A write given an index several
+    times leaves the value of its last occurrence, which is what each occurrence takes.
+    """
+    n_entries = index.shape[-1]
+    index_sorted, order = torch.sort(index, dim=-1, stable=True)
+    is_last_sorted = torch.ones_like(index_sorted, dtype=torch.bool)
+    is_last_sorted[..., :-1] = index_sorted[..., 1:] != index_sorted[..., :-1]
+    # The sort is stable, so the last entry of each run of equal indices is their last occurrence
+    positions = torch.arange(n_entries, device=index.device).expand_as(order)
+    run_last = torch.where(is_last_sorted, positions, n_entries).flip(-1).cummin(-1).values.flip(-1)
+    return torch.empty_like(order).scatter_(-1, order, order.gather(-1, run_last))
+
+
+def drop_repeated_index(
+    index_input: Any, index: torch.Tensor, tensors: Sequence[torch.Tensor | None], axis: int, max_size: int
+) -> tuple[torch.Tensor, tuple[torch.Tensor | None, ...]]:
+    """
+    Keep the last occurrence of every index given several times, and the matching entries of tensors along an axis.
+
+    `index_input` is the index as given, and `index` its sanitized form (see 'sanitize_index'), whose entries count
+    `max_size` at most. A tensor given as None stays None. An index given as a range, a slice, an integer or a boolean
+    mask holds no repeated entry and is returned as it is. Repeats are found on the host for an index given as a
+    sequence, and on the device for a torch tensor, whose compaction then synchronizes the device.
+    """
+    tensors = tuple(tensors)
+    if isinstance(index_input, (list, tuple, np.ndarray)):
+        entries = np.mod(index_input, max_size)
+        if len(np.unique(entries)) == len(entries):
+            return index, tensors
+        _, first_reversed = np.unique(entries[::-1], return_index=True)
+        positions = torch.tensor(np.sort(len(entries) - 1 - first_reversed), dtype=gs.tc_int, device=gs.device)
+    elif isinstance(index_input, torch.Tensor) and index_input.dtype != torch.bool and index.numel() > 1:
+        is_last = get_last_occurrence(index) == torch.arange(len(index), device=index.device)
+        positions = is_last.nonzero()[:, 0]
+    else:
+        return index, tensors
+    return index[positions], tuple(
+        None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors
+    )
 
 
 def sanitize_indices(
@@ -1279,6 +1341,32 @@ def assign_indexed_tensor(
                 if index.ndim == 1 and index.dtype == torch.int64:
                     tensor.index_fill_(axis, index, value)
                     return
+    # An index given several times takes the value of its last occurrence at every occurrence (see
+    # 'get_last_occurrence'), as a scatter writes the occurrences in no defined order. The tensors and integers indexing
+    # the axes are broadcast against each other into a block of axes of the selection, which stands where they are when
+    # they are contiguous, and first otherwise, a tensor spanning the axis of the block it is not of size 1 along.
+    else:
+        advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
+        repeatable_axes = [
+            axis
+            for axis in advanced_axes
+            if isinstance(indices[axis], torch.Tensor)
+            and indices[axis].dtype != torch.bool
+            and indices[axis].numel() > 1
+        ]
+        if repeatable_axes:
+            indexed_shape = get_indexed_shape(tensor.shape, indices)
+            value = broadcast_tensor(value, tensor.dtype, indexed_shape, dim_names)
+            is_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
+            block_start = advanced_axes[0] if is_contiguous else 0
+            block_ndim = max(indices[axis].ndim for axis in repeatable_axes)
+            for axis in repeatable_axes:
+                index = indices[axis]
+                index_shape = (1,) * (block_ndim - index.ndim) + tuple(index.shape)
+                block_axis = next(i for i, size in enumerate(index_shape) if size > 1)
+                # An index may live on another device than the values, which a scatter accepts and a gather does not
+                positions = get_last_occurrence(index.reshape(-1).to(device=value.device))
+                value = value.index_select(block_start + block_axis, positions)
     try:
         tensor[indices] = value
     except (TypeError, RuntimeError):

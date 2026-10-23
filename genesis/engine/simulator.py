@@ -1,3 +1,4 @@
+import contextlib
 import weakref
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -244,7 +245,7 @@ class Simulator(RBC):
                 entity.build()
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while the
-        # changes of the state go through the solvers (see 'Solver.record_input'). The state of a solver tracking no
+        # changes of the state go through the solvers (see 'Solver.recording_input'). The state of a solver tracking no
         # gradient is outside the graph.
         for solver in self._active_solvers:
             if solver.requires_grad:
@@ -376,7 +377,9 @@ class Simulator(RBC):
                 self._rollout_graph.mark_state_changed()
                 self._advance()
 
-        with self._step_timer.phase("sensors"):
+        # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
+        grad_context = torch.no_grad() if self._requires_grad else contextlib.nullcontext()
+        with self._step_timer.phase("sensors"), grad_context:
             self._sensor_manager.step()
 
     def _advance(self):

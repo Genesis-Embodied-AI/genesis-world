@@ -1,4 +1,5 @@
 import collections.abc
+import contextlib
 import dataclasses
 import gc
 import hashlib
@@ -1085,7 +1086,9 @@ class Scene(RBC):
                 gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
             # The recorders read the state a step starts from, with the inputs the step consumes: 'Simulator.step'
             # zeroes the applied forces at its end. The pre-step callbacks ran, so their inputs are read as well.
-            with step_timer.phase("recorders"):
+            # The recorders read the state for themselves, outside of the autograd graph of a differentiable rollout
+            grad_context = torch.no_grad() if self._sim.requires_grad else contextlib.nullcontext()
+            with step_timer.phase("recorders"), grad_context:
                 self._recorder_manager.step(self._sim.cur_step_global)
             self._sim.step()
 

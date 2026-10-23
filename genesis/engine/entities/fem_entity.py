@@ -16,7 +16,6 @@ import genesis.utils.mesh as mu
 from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.entities import FEMEntityState
-from genesis.grad.bridge import KernelLaunch
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor, unique_rows
 
@@ -633,9 +632,8 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_vertices, 3) containing new positions.
         """
 
-        self._solver.record_input(
-            (KernelLaunch(self._solver._kernel_set_elements_pos, (f, self._v_start, self.n_vertices, pos)),)
-        )
+        with self._solver.recording_input():
+            self._solver._kernel_set_elements_pos(f, self._v_start, self.n_vertices, pos)
 
     def set_vel(self, f, vel):
         """
@@ -650,9 +648,8 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_vertices, 3) containing velocities.
         """
 
-        self._solver.record_input(
-            (KernelLaunch(self._solver._kernel_set_elements_vel, (f, self._v_start, self.n_vertices, vel)),)
-        )
+        with self._solver.recording_input():
+            self._solver._kernel_set_elements_vel(f, self._v_start, self.n_vertices, vel)
 
     def set_actu(self, f, actu):
         """
@@ -667,14 +664,8 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_groups) specifying actuation values.
         """
 
-        self._solver.record_input(
-            (
-                KernelLaunch(
-                    self._solver._kernel_set_elements_actu,
-                    (f, self._el_start, self.n_elements, self.material.n_groups, actu),
-                ),
-            )
-        )
+        with self._solver.recording_input():
+            self._solver._kernel_set_elements_actu(f, self._el_start, self.n_elements, self.material.n_groups, actu)
 
     def set_active(self, f, active):
         """
@@ -689,10 +680,8 @@ class FEMEntity(Entity):
             Activity flag (gs.ACTIVE or gs.INACTIVE).
         """
         actives = torch.full((self._sim._B, self.n_elements), active, dtype=gs.tc_int, device=gs.device)
-        self._solver.record_input(
-            (KernelLaunch(self._solver._kernel_set_active, (f, self._el_start, self.n_elements, actives)),),
-            differentiable=False,
-        )
+        with self._solver.recording_input(differentiable=False):
+            self._solver._kernel_set_active(f, self._el_start, self.n_elements, actives)
 
     @assert_muscle
     def set_muscle_group(self, muscle_group):

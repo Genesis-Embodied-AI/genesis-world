@@ -778,7 +778,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     def set_state(self, f, state, envs_idx=None):
-        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.recording_input')
         self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.C, state.F, state.Jp, state.actu, state.active)
@@ -908,15 +908,15 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
+            if i_p >= 0:
+                for i in qd.static(range(3)):
+                    self.particles[f, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
 
-            for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
-
-            # Reset these attributes whenever overwritting particle positions manually
-            self.particles[f, i_p, i_b].vel.fill(0.0)
-            self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].C.fill(0.0)
-            self.particles[f, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
+                # Reset these attributes whenever overwritting particle positions manually
+                self.particles[f, i_p, i_b].vel.fill(0.0)
+                self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
+                self.particles[f, i_p, i_b].C.fill(0.0)
+                self.particles[f, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
 
     @qd.kernel
     def _kernel_get_particles_pos(
@@ -944,8 +944,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
+            if i_p >= 0:
+                for i in qd.static(range(3)):
+                    self.particles[f, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
 
     @qd.kernel
     def _kernel_get_particles_vel(
@@ -973,7 +974,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            self.particles_ng[f, i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
+            if i_p >= 0:
+                self.particles_ng[f, i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
 
     @qd.kernel
     def _kernel_get_particles_active(
@@ -1001,8 +1003,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_g, i_b_ in qd.ndrange(particles_idx.shape[1], n_groups, envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            if self.particles_info[i_p].muscle_group == i_g:
-                self.particles[f, i_p, i_b].actu = actus[i_b_, i_p_, i_g]
+            if i_p >= 0:
+                if self.particles_info[i_p].muscle_group == i_g:
+                    self.particles[f, i_p, i_b].actu = actus[i_b_, i_p_, i_g]
 
     @qd.kernel
     def _kernel_get_particles_actu(

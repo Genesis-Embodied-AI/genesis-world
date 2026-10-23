@@ -321,8 +321,6 @@ class SensorManager:
                 self._sensors_metadata[sensor_cls], self._ground_truth_intermediate_cache[dtype][cache_slice], envs_idx
             )
 
-    # The sensors read the state of the scene for themselves, which is no query of a differentiable rollout
-    @torch.no_grad()
     def step(self):
         # Timeline rings must rotate before `_update_shared_cache` because `_apply_transform` mutates `at(0)` of the
         # timeline ring and needs a fresh write slot. Return-space rings, by contrast, are read during `_post_process`

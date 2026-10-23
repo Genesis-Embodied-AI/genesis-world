@@ -1068,7 +1068,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     def set_state(self, f, state, envs_idx=None):
-        # A state set whole overwrites the output of the last operation recorded (see 'Solver.record_input')
+        # A state set whole overwrites the output of the last operation recorded (see 'Solver.recording_input')
         self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.active)
