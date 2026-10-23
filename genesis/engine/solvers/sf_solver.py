@@ -77,6 +77,9 @@ class SFSolver(TimeBasedMixin, Solver):
 
     def set_jets(self, jets):
         assert isinstance(jets, (list, tuple))
+        # The jets size the grid allocated at build
+        if self._scene.is_built:
+            gs.raise_exception("Jets must be set before the scene is built.")
         self.jets = tuple(jets)
 
     def reset_swap(self):

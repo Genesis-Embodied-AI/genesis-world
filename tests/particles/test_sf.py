@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 import genesis as gs
 
@@ -109,4 +110,6 @@ def test_jets(show_viewer):
     ]
     scene.sim.sf_solver.set_jets(jet)
     scene.build()
+    with pytest.raises(gs.GenesisException):
+        scene.sim.sf_solver.set_jets(jet[:1])
     scene.step()
