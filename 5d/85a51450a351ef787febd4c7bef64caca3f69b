@@ -1,0 +1,54 @@
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_33aab527a44173::t_c4b8d3c3e7a6a7 1848-1858
+genesis/engine/scene.py
+  s_33aab527a44173::t_411b001c0af9d6 27,30
+genesis/engine/solvers/rigid/contact_pair.py
+  s_33aab527a44173::t_411b001c0af9d6 7
+tests/rigid/test_serialization.py
+  s_33aab527a44173::t_8ba6aafece20aa 85-93
+  s_33aab527a44173::t_18c98c1ee72580 288-292
+  s_33aab527a44173::t_e3713892494d28 352,354
+  s_33aab527a44173::t_78d86a3169b1d9 293-294
+genesis/engine/solvers/rigid/collider/collider.py
+  s_33aab527a44173::t_87c0f946e5ba6c 424-425
+  s_33aab527a44173::t_c4b8d3c3e7a6a7 426-427
+tests/rigid/test_friction.py
+  s_33aab527a44173::t_ab82c8ceaa3169 962,1038-1039,1041,1132,1136-1137
+  s_33aab527a44173::t_25d7f7e144a483 1-2,969-970,1050-1067,1074,1085,1103
+  s_33aab527a44173::t_e388b352405634 1040,1042-1044
+  s_33aab527a44173::t_423e48a28337ef 1114-1117,1124-1126
+  s_33aab527a44173::t_88eb968accf1be 1138-1147
+genesis/utils/mjcf.py
+  s_33aab527a44173::t_46944c4f4f23f5 852
+  s_33aab527a44173::t_b3484e2649b9d5 260,262,285,514,518-520,738,750,759,827-851,853-870
+tests/rigid/test_mujoco_parity.py
+  s_33aab527a44173::t_f4a0565d6bb2ec 156
+genesis/engine/entities/rigid_entity/description.py
+  s_33aab527a44173::t_411b001c0af9d6 15,266-303
+  s_33aab527a44173::t_46944c4f4f23f5 557-559,562,953-955,960,967,1023,1243,1246,1458,1648,1683,1689,1691-1702
+  s_33aab527a44173::t_fc32c664eb2a16 560-561
+  s_33aab527a44173::t_3ece295938dff7 304-305
+tests/rigid/test_heterogeneous.py
+  s_33aab527a44173::t_c4d506618c83cb 1-2
+  s_33aab527a44173::t_e3713892494d28 443,478-484
+  s_33aab527a44173::t_86479fc72b7373 485-486
+tests/rigid/conftest.py
+  s_33aab527a44173::t_f4a0565d6bb2ec 188-200,215-224
+  s_33aab527a44173::t_ab82c8ceaa3169 187,201-214
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d85a51450a351ef787febd4c7bef64caca3f69b",
+  "prompts": {},
+  "sessions": {
+    "s_33aab527a44173": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "28f96fc5-3905-4f11-a3af-5f67dc372dbe",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
