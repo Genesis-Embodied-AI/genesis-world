@@ -243,8 +243,7 @@ def test_parsing_inertia_defaults(
     # Principal moments per unit mass of the two geometries a recovered inertia is derived from.
     SPHERE_INERTIA_PER_MASS = 2.0 * 0.06**2 / 5.0
     BOX_INERTIA_PER_MASS = 2.0 * 0.2**2 / 12.0
-    # Every geom of the density assets is a 0.2 m cube.
-    VOLUME = 0.2**3
+    CUBE_VOLUME = 0.2**3
     GRAVITY = (0.0, 0.0, -9.81)
 
     scene = gs.Scene(
@@ -449,13 +448,13 @@ def test_parsing_inertia_defaults(
     assert_allclose(stacked_tip.base_link.get_mass(), 8000.0 * 0.1**3, tol=gs.EPS)
 
     masses = {link.name: link.get_mass() for link in entity_density.links}
-    assert_allclose(masses["on_geom"], 250.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["on_default"], 1000.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["unstated"], 1000.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["mixed"], (250.0 + 1000.0) * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_geom"], 250.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_class"], 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_default"], 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["unstated"], 1000.0 * CUBE_VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], (250.0 + 1000.0) * CUBE_VOLUME, tol=gs.EPS)
     assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
-    assert_allclose(masses["weighed"], 5.0 + 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["weighed"], 5.0 + 1000.0 * CUBE_VOLUME, tol=gs.EPS)
     # The unscaled copy watertightens the open mesh and the scaled one decomposes it, which keeps the mass alone
     assert_allclose(masses["weighed_mesh"], 5.0, tol=gs.EPS)
     assert_allclose(entity_density_scaled.get_link("weighed_mesh").get_mass(), 5.0 * 2.0**3, tol=gs.EPS)
@@ -465,14 +464,14 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity_density.get_link("mixed").get_pos(relative=False), (4.18, 4.0, 1.0), tol=gs.EPS)
     assert_allclose(entity_density.get_link("fused").get_pos(relative=False), (5.12, 4.0, 1.0), tol=gs.EPS)
     # A geom stating its mass beside one stating none leaves the link aligned on its center of mass, recomputed or not
-    weighed_com_x = 3.0 + 0.3 * (1000.0 * VOLUME - 5.0) / (5.0 + 1000.0 * VOLUME)
+    weighed_com_x = 3.0 + 0.3 * (1000.0 * CUBE_VOLUME - 5.0) / (5.0 + 1000.0 * CUBE_VOLUME)
     assert_allclose(entity_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, 4.0, 1.0), tol=gs.EPS)
     assert_allclose(entity_density.get_link("weighed_pair").get_pos(relative=False), (-1.76, 4.0, 1.0), tol=gs.EPS)
     assert_allclose(
         entity_zero_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, -2.0, 0.5), tol=gs.EPS
     )
     assert_allclose(
-        entity_density.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * VOLUME * 0.2**2 / 6.0, tol=gs.EPS
+        entity_density.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * CUBE_VOLUME * 0.2**2 / 6.0, tol=gs.EPS
     )
 
     for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused", "weighed"):
@@ -487,10 +486,10 @@ def test_parsing_inertia_defaults(
         entities_density_mounted, mjcf_geom_density_defaults
     ):
         if material_density is not None:
-            geoms_mass = np.full(7, material_density) * VOLUME
+            geoms_mass = np.full(7, material_density) * CUBE_VOLUME
         else:
             density = 1000.0 if root_density is None else root_density
-            geoms_mass = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * VOLUME
+            geoms_mass = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * CUBE_VOLUME
         center = np.dot(geoms_mass, np.arange(7)) / geoms_mass.sum()
         inertia = np.eye(3) * geoms_mass.sum() * 0.2**2 / 6.0
         inertia[1, 1] += np.dot(geoms_mass, (np.arange(7) - center) ** 2)

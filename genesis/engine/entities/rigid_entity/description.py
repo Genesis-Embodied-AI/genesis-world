@@ -1463,9 +1463,8 @@ class KinematicEntityDescription(EntityDescription):
                     morph.watertighten,
                 )
 
-        # A geom stating its mass takes the density giving that mass on its final geometry, so that its link holds
-        # densities alone. Post-processing carries the mass over to that geometry, and a geom spanning no volume keeps
-        # no density.
+        # A geom stating its mass takes the density giving that mass on its final geometry, which post-processing
+        # carries the mass to. A geom spanning no volume keeps no density.
         for g_info in cg_infos:
             mass = g_info.pop("mass", None)
             if mass is not None:
