@@ -467,6 +467,7 @@ def test_parsing_inertia_defaults(
     # A geom stating its mass beside one stating none leaves the link aligned on its center of mass, recomputed or not
     weighed_com_x = 3.0 + 0.3 * (1000.0 * VOLUME - 5.0) / (5.0 + 1000.0 * VOLUME)
     assert_allclose(entity_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, 4.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity_density.get_link("weighed_pair").get_pos(relative=False), (-1.76, 4.0, 1.0), tol=gs.EPS)
     assert_allclose(
         entity_zero_density.get_link("weighed").get_pos(relative=False), (weighed_com_x, -2.0, 0.5), tol=gs.EPS
     )
