@@ -748,7 +748,7 @@ def parse_geom(mj, i_g, density, scale, surface, xml_path):
     if is_col:
         mesh = gs.Mesh.from_trimesh(tmesh, scale=scale, surface=gs.surfaces.Collision(), metadata=metadata.copy())
         g_infos.append({**info, "mesh": mesh})
-        # Omit unspecified values because fusion grouping compares densities numerically
+        # A missing key is NaN in fusion grouping, so geoms of unstated density fuse together, where None would fail
         if density is not None:
             g_infos[-1]["density"] = density
 
