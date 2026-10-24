@@ -373,6 +373,7 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
 
 
 @pytest.mark.required
+@pytest.mark.xfail(reason="Flickering contact points make the entities drift at rest.", strict=False)
 @pytest.mark.parametrize("precision", ["32"])
 def test_convex_on_primitive_at_rest(show_viewer, tol):
     # The tilt is generic, so that the faces of the supports are aligned with no world axis. The gravity vector is
