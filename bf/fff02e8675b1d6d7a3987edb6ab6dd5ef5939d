@@ -1,0 +1,20 @@
+tests/rigid/test_asset_loading.py
+  s_0ad35ed8e9a835::t_36139b808f7475 566,581-582
+  s_0ad35ed8e9a835::t_64b5591d92089b 476-477,508-510,512,528-532,553
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bffff02e8675b1d6d7a3987edb6ab6dd5ef5939d",
+  "prompts": {},
+  "sessions": {
+    "s_0ad35ed8e9a835": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "63313966-a999-4420-a5cc-36e8123cdaf7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
