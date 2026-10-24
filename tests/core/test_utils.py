@@ -11,6 +11,7 @@ import torch
 import igl
 import pytest
 import trimesh
+from PIL import Image
 from scipy.linalg import polar as scipy_polar
 from scipy.spatial.transform import Rotation as R, Slerp
 
@@ -1055,8 +1056,6 @@ def test_as_grayscale_image(tmp_path):
             assert_equal(depth_image, depth_expected)
 
     # Depth images have no channel axis, so a narrow width must not be mistaken for one when exporting
-    import cv2
-
     exporter = FrameImageExporter(tmp_path)
     for width in range(1, 6):
         for n_envs in (0, 2):
@@ -1066,8 +1065,8 @@ def test_as_grayscale_image(tmp_path):
             image_files = sorted(tmp_path.glob(f"DEPTH_cam{n_envs}_env*_{width:03d}.png"))
             assert len(image_files) == max(n_envs, 1)
             for image_file, depth_env in zip(image_files, depth.reshape(-1, 5, width)):
-                image = cv2.imread(str(image_file), cv2.IMREAD_UNCHANGED)
-                assert_equal(image, as_grayscale_image(depth_env))
+                with Image.open(image_file) as image:
+                    assert_equal(np.asarray(image), as_grayscale_image(depth_env))
 
 
 @pytest.mark.required
