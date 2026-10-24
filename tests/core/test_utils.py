@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils import warnings as warnings_mod
-from genesis.utils.image_exporter import as_grayscale_image
+from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array
 from genesis.utils.tools import RunningMean
 from genesis.utils.urdf import compose_inertial_properties
@@ -1047,13 +1047,27 @@ def test_genuine_interpenetration(show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [None])
-def test_as_grayscale_image():
+def test_as_grayscale_image(tmp_path):
     for batch_shape in ((), (2,)):
         depth = np.broadcast_to(array=[[1.0, 3.0, 7.0]], shape=(*batch_shape, 1, 3))
         for is_black_to_white, depth_expected in ((False, [[255, 127, 0]]), (True, [[0, 127, 255]])):
             depth_image = as_grayscale_image(depth, enable_log_scale=True, black_to_white=is_black_to_white)
             assert_equal(depth_image, depth_expected)
+
+    # Depth images have no channel axis, so a narrow width must not be mistaken for one when exporting
+    import cv2
+
+    exporter = FrameImageExporter(tmp_path)
+    for width in range(1, 6):
+        for n_envs in (0, 2):
+            shape = (*((n_envs,) if n_envs else ()), 5, width)
+            depth = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+            exporter.export_frame_single_camera(width, n_envs, depth=depth)
+            image_files = sorted(tmp_path.glob(f"DEPTH_cam{n_envs}_env*_{width:03d}.png"))
+            assert len(image_files) == max(n_envs, 1)
+            for image_file, depth_env in zip(image_files, depth.reshape(-1, 5, width)):
+                image = cv2.imread(str(image_file), cv2.IMREAD_UNCHANGED)
+                assert_equal(image, as_grayscale_image(depth_env))
 
 
 @pytest.mark.required

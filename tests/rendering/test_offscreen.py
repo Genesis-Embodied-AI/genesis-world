@@ -1138,27 +1138,6 @@ def test_render_planes(tmp_path, png_snapshot, renderer_type, renderer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("width", [1, 2, 3, 4, 5])
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_export_narrow_depth(tmp_path, width, n_envs):
-    import cv2
-
-    # Depth images have no channel axis, so a narrow width must not be mistaken for one
-    height = 5
-    shape = (n_envs, height, width) if n_envs else (height, width)
-    depth = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
-
-    exporter = FrameImageExporter(tmp_path)
-    exporter.export_frame_single_camera(0, 0, depth=depth)
-
-    image_files = sorted(tmp_path.glob("*.png"))
-    assert len(image_files) == max(n_envs, 1)
-    for image_file, depth_env in zip(image_files, depth.reshape(-1, height, width)):
-        image = cv2.imread(str(image_file), cv2.IMREAD_UNCHANGED)
-        assert_equal(image, as_grayscale_image(depth_env))
-
-
-@pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_render_oversized_resolution(renderer):
