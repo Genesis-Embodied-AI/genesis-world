@@ -192,6 +192,7 @@ def compile_model(spec, robot):
     with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
         mj = spec.compile()
 
+    # Special treatment for URDF
     if robot is not None:
         # Discard placeholder inertias that were used to avoid parsing failure
         for link in robot.links:
