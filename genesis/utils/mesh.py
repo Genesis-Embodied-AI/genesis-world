@@ -730,7 +730,7 @@ def _postprocess_collision_geoms_impl(
                 parts_g_info = [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
                 # The parts share a stated mass in proportion to their volume
                 if "mass" in g_info:
-                    parts_volume = np.array([tmesh.volume for tmesh in tmeshes])
+                    parts_volume = np.abs([tmesh.volume for tmesh in tmeshes])
                     for part_g_info, part_volume in zip(parts_g_info, parts_volume):
                         part_g_info["mass"] = g_info["mass"] * part_volume / parts_volume.sum()
                 _g_infos += parts_g_info
