@@ -1,0 +1,21 @@
+genesis/utils/mjcf.py
+  s_0ad35ed8e9a835::t_1db08627df73d3 72-225,227-228,243,247
+tests/utils/simulators.py
+  s_0ad35ed8e9a835::t_1db08627df73d3 50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "947ef05ed53fc76c8704f49807eef53b27104cb0",
+  "prompts": {},
+  "sessions": {
+    "s_0ad35ed8e9a835": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "63313966-a999-4420-a5cc-36e8123cdaf7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

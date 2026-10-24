@@ -1,0 +1,27 @@
+genesis/utils/mjcf.py
+  s_0ad35ed8e9a835::t_276c3daeade6df 246,252-256,264,525,751-753,763,773
+tests/rigid/conftest.py
+  s_0ad35ed8e9a835::t_b144e4f164ab3f 778-782
+tests/rigid/test_asset_loading.py
+  s_0ad35ed8e9a835::t_b144e4f164ab3f 458,464-469,474
+genesis/engine/entities/rigid_entity/description.py
+  s_0ad35ed8e9a835::t_276c3daeade6df 55,1402-1411
+genesis/options/morphs.py
+  s_0ad35ed8e9a835::t_b144e4f164ab3f 958-959
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "20854ac9bffc7448db0e1bd8f20c992d24e857e4",
+  "prompts": {},
+  "sessions": {
+    "s_0ad35ed8e9a835": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "63313966-a999-4420-a5cc-36e8123cdaf7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
