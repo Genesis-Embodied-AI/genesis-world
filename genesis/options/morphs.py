@@ -565,8 +565,8 @@ class FileMorph(Morph):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate missing or recomputed inertia from visual geometry, drawn or not. Enable it when collision geometry is
-        a coarse stand-in such as a convex hull, and leave it off when visual meshes are open or overlapping. Defaults
-        to False.
+        a coarse stand-in such as a convex hull. Leave it off when visual meshes overlap, and expect a longer first load
+        for open ones, which are closed first. Defaults to False.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. This makes the inertia tensor diagonal, which improves numerical
@@ -772,8 +772,8 @@ class Mesh(FileMorph, TetGenMixin):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate missing or recomputed inertia from visual geometry, drawn or not. Enable it when collision geometry is
-        a coarse stand-in such as a convex hull, and leave it off when visual meshes are open or overlapping. Defaults
-        to False.
+        a coarse stand-in such as a convex hull. Leave it off when visual meshes overlap, and expect a longer first load
+        for open ones, which are closed first. Defaults to False.
     merge_submeshes_for_collision : bool, optional
         Whether to merge submeshes for collision. Defaults to False. **This is only used for RigidEntity.**
     visualization : bool, optional
@@ -967,8 +967,8 @@ class MJCF(FileMorph):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate missing or recomputed inertia from visual geometry, drawn or not. Enable it when collision geometry is
-        a coarse stand-in such as a convex hull, and leave it off when visual meshes are open or overlapping. Turns on
-        'recompute_inertia'. Defaults to False.
+        a coarse stand-in such as a convex hull. Leave it off when visual meshes overlap, and expect a longer first load
+        for open ones, which are closed first. Turns on 'recompute_inertia'. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1114,8 +1114,8 @@ class URDF(FileMorph):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate missing or recomputed inertia from visual geometry, drawn or not. Enable it when collision geometry is
-        a coarse stand-in such as a convex hull, and leave it off when visual meshes are open or overlapping. Defaults
-        to False.
+        a coarse stand-in such as a convex hull. Leave it off when visual meshes overlap, and expect a longer first load
+        for open ones, which are closed first. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1257,8 +1257,8 @@ class Drone(FileMorph):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate missing or recomputed inertia from visual geometry, drawn or not. Enable it when collision geometry is
-        a coarse stand-in such as a convex hull, and leave it off when visual meshes are open or overlapping. Defaults
-        to False.
+        a coarse stand-in such as a convex hull. Leave it off when visual meshes overlap, and expect a longer first load
+        for open ones, which are closed first. Defaults to False.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1609,8 +1609,8 @@ class USD(FileMorph):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate missing or recomputed inertia from visual geometry, drawn or not. Enable it when collision geometry is
-        a coarse stand-in such as a convex hull, and leave it off when visual meshes are open or overlapping. Defaults
-        to False.
+        a coarse stand-in such as a convex hull. Leave it off when visual meshes overlap, and expect a longer first load
+        for open ones, which are closed first. Defaults to False.
     align : bool, optional
         Whether to reframe root links so that the link origin coincides with the center of mass and its axes are
         aligned with the principal axes of inertia. Only applies to root (floating-base) links. Default to False.
