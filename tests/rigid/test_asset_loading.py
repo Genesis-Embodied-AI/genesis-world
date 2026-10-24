@@ -228,8 +228,6 @@ def test_parsing_inertia_defaults(
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
     visual_collision_inertia,
-    visual_collision_inertia_mjcf,
-    torus_obj,
     show_viewer,
     tol,
     caplog,
@@ -473,7 +471,7 @@ def test_parsing_inertia_defaults(
     dubious_com_records = [record for record in caplog.records if "dubious center of mass" in record.getMessage()]
     assert len(dubious_com_records) == 3
 
-    urdf_collision_only, urdf_without_inertial, urdf_with_inertial = visual_collision_inertia
+    urdf_collision_only, urdf_without_inertial, urdf_with_inertial, mjcf_visual_collision = visual_collision_inertia
     inertia_scene = gs.Scene()
     for is_from_visual, is_aligned, has_collision, has_visual, has_inertial, is_recomputed in (
         (False, False, True, True, False, False),
@@ -567,7 +565,7 @@ def test_parsing_inertia_defaults(
     entity_inertia_mjcf = inertia_scene.add_entity(
         morph=gs.morphs.MJCF(
             visualization=False,
-            file=visual_collision_inertia_mjcf,
+            file=mjcf_visual_collision,
             inertia_from_visual=True,
             align=False,
         ),
@@ -579,25 +577,28 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity_inertia_mjcf.base_link.desc.inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
 
     # A mesh takes the volume its surface encloses, rather than that of the convex pieces its collision is split into
-    torus_mass = 1000.0 * trimesh.load(torus_obj).volume
-    entity_torus = inertia_scene.add_entity(
+    bunny_mass = 1000.0 * trimesh.load(os.path.join(get_assets_dir(), "meshes", "bunny.obj")).volume
+    entity_bunny = inertia_scene.add_entity(
         morph=gs.morphs.Mesh(
             visualization=False,
-            file=torus_obj,
+            file="meshes/bunny.obj",
             inertia_from_visual=True,
         ),
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
     )
-    entity_torus_variants = inertia_scene.add_entity(
-        morph=(gs.morphs.Mesh(file=torus_obj), gs.morphs.Mesh(file=torus_obj, inertia_from_visual=True)),
+    entity_bunny_variants = inertia_scene.add_entity(
+        morph=(
+            gs.morphs.Mesh(file="meshes/bunny.obj"),
+            gs.morphs.Mesh(file="meshes/bunny.obj", inertia_from_visual=True),
+        ),
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_torus.base_link.desc.mass, torus_mass, rtol=1e-6)
-    assert_allclose(entity_torus_variants.desc.variants[1].links[0].mass, torus_mass, rtol=1e-6)
+    assert_allclose(entity_bunny.base_link.desc.mass, bunny_mass, rtol=1e-6)
+    assert_allclose(entity_bunny_variants.desc.variants[1].links[0].mass, bunny_mass, rtol=1e-6)
 
     # The URDF loads go through the parser MuJoCo provides, the undecodable visual meshes included
     assert not any("legacy URDF parser" in record.getMessage() for record in caplog.records)

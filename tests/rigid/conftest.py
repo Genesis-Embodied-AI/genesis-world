@@ -754,8 +754,9 @@ def undefined_inertia():
 
 @pytest.fixture(scope="session")
 def visual_collision_inertia(asset_tmp_path):
-    """Generate URDFs of one link holding a small collision box: alone, beside a large visual box mesh, and beside
-    that visual mesh with an authored inertial. The visual mesh is a GLB file, which MuJoCo cannot load."""
+    """Generate one link holding a small collision box: as URDFs alone, beside a large visual box mesh, and beside
+    that visual mesh with an authored inertial, then as an MJCF beside a large visual box, both drawn. The visual mesh
+    of the URDFs is a GLB file, which MuJoCo cannot load."""
     visual_path = str(asset_tmp_path / "visual_box.glb")
     trimesh.creation.box(extents=(0.2, 0.4, 0.6)).export(visual_path)
     urdf = ET.Element("robot", name="visual_collision_inertia")
@@ -770,25 +771,14 @@ def visual_collision_inertia(asset_tmp_path):
     inertial = ET.SubElement(link, "inertial")
     ET.SubElement(inertial, "mass", value="2.0")
     ET.SubElement(inertial, "inertia", ixx="0.01", iyy="0.02", izz="0.025", ixy="0", ixz="0", iyz="0")
-    return urdf_collision_only, urdf_without_inertial, ET.tostring(urdf, encoding="unicode")
+    urdf_with_inertial = ET.tostring(urdf, encoding="unicode")
 
-
-@pytest.fixture(scope="session")
-def visual_collision_inertia_mjcf():
-    """Generate an MJCF of one free body holding a small collision box beside a large visual box, both drawn."""
     mjcf = ET.Element("mujoco", model="visual_collision_inertia")
     body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="base_link")
     ET.SubElement(body, "freejoint")
     ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05")
     ET.SubElement(body, "geom", type="box", size="0.1 0.2 0.3", pos="0.2 0.0 0.0", contype="0", conaffinity="0")
-    return ET.tostring(mjcf, encoding="unicode")
-
-
-@pytest.fixture(scope="session")
-def torus_obj(asset_tmp_path):
-    path = str(asset_tmp_path / "torus.obj")
-    trimesh.creation.torus(major_radius=0.2, minor_radius=0.05).export(path)
-    return path
+    return urdf_collision_only, urdf_without_inertial, urdf_with_inertial, ET.tostring(mjcf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
