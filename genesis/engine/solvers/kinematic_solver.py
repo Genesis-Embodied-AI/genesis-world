@@ -206,6 +206,9 @@ class KinematicSolver(Solver):
         self._enable_collision = False
         self._enable_mujoco_compatibility = False
         self._requires_grad = False
+        # Whether setters write the state through zero-copy views, which a differentiable scene cannot record. It is
+        # read by every setter on the hot path, so it is computed once.
+        self._is_view_writable = gs.use_zerocopy
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
         self.collider = None
@@ -973,11 +976,6 @@ class KinematicSolver(Solver):
     @property
     def is_active(self):
         return self.n_links > 0
-
-    @property
-    def _is_view_writable(self) -> bool:
-        """Whether setters write the state through zero-copy views, which a differentiable scene cannot record."""
-        return gs.use_zerocopy and not self._requires_grad
 
     @property
     def is_differentiable(self) -> bool:

@@ -66,6 +66,9 @@ class Simulator(RBC):
         self._substep_dt: float = self.options.dt / self.options.substeps
         self._substeps: int = self.options.substeps
         self._requires_grad: bool = self.options.requires_grad
+        # The sensors and the recorders read the state for themselves, outside of the autograd graph of a differentiable
+        # rollout. One context serves every step, which spares building one per step on the hot path.
+        self._read_context = torch.no_grad() if self._requires_grad else contextlib.nullcontext()
 
         self._cur_substep_global = 0
 
@@ -377,9 +380,8 @@ class Simulator(RBC):
                 self._rollout_graph.mark_state_changed()
                 self._advance()
 
-        # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
-        grad_context = torch.no_grad() if self._requires_grad else contextlib.nullcontext()
-        with self._step_timer.phase("sensors"), grad_context:
+        # See 'read_context'
+        with self._step_timer.phase("sensors"), self._read_context:
             self._sensor_manager.step()
 
     def _advance(self):
@@ -501,6 +503,11 @@ class Simulator(RBC):
     def requires_grad(self):
         """Whether the simulator requires gradients."""
         return self._requires_grad
+
+    @property
+    def read_context(self):
+        """The context under which the sensors and the recorders read the state, outside of the autograd graph."""
+        return self._read_context
 
     @property
     def is_forward_ready(self) -> bool:

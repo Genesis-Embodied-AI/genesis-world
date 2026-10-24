@@ -1359,15 +1359,13 @@ def assign_indexed_tensor(
         # writes them in no defined order. The tensors and integers indexing the axes broadcast against each other into
         # one block of axes of the selection, where the first of them stands when they are contiguous, and first
         # otherwise. Each tensor spans the axis of the block along which its size is above 1.
-        advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
-        repeatable_axes = [
-            axis
-            for axis in advanced_axes
-            if isinstance(indices[axis], torch.Tensor)
-            and indices[axis].dtype != torch.bool
-            and indices[axis].numel() > 1
-        ]
+        # A loop spares the frame of a comprehension, which the many small writes of the hot path would pay
+        repeatable_axes = []
+        for axis, index in enumerate(indices):
+            if isinstance(index, torch.Tensor) and index.dtype != torch.bool and index.numel() > 1:
+                repeatable_axes.append(axis)
         if repeatable_axes:
+            advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
             indexed_shape = get_indexed_shape(tensor.shape, indices)
             value = broadcast_tensor(value, tensor.dtype, indexed_shape, dim_names)
             is_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))

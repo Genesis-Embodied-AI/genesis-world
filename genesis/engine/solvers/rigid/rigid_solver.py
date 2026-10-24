@@ -263,6 +263,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._integrator = options.integrator
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
+        # See 'KinematicSolver.__init__'
+        self._is_view_writable = gs.use_zerocopy and not self._requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
         # The differentiable solve keeps every body in its iteration trace, so hibernation stays off there (see the
