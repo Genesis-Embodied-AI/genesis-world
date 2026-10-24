@@ -25,7 +25,8 @@ dependencies = [
     "libigl!=2.6.2",
     # Cross-platform library to get various kind of CPU information such as model name
     "py-cpuinfo",
-    "mujoco>=3.2.5",
+    # * Mujoco 3.3.1 gives spec elements the index of what they compile into, which the MJCF parser reads densities by.
+    "mujoco>=3.3.1",
     "moviepy>=2.0.0",
     # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
     "av",
