@@ -473,6 +473,8 @@ def test_parsing_inertia_defaults(
     assert len(dubious_com_records) == 3
 
     urdf_collision_only, urdf_without_inertial, urdf_with_inertial, mjcf_visual_collision = visual_collision_inertia
+    # A GLB file stores its vertices in single precision, which bounds the inertia estimated from its visual mesh
+    GLB_TOL = 2e-7
     inertia_scene = gs.Scene()
     for is_from_visual, is_aligned, has_collision, has_visual, has_inertial, is_recomputed in (
         (False, False, True, True, False, False),
@@ -503,11 +505,11 @@ def test_parsing_inertia_defaults(
         else:
             mass, com, inertia = 1.0, (0.0, 0.0, 0.0), (1.0 / 600.0,) * 3
         link = entity_inertia.base_link
-        assert_allclose(link.desc.mass, mass, rtol=1e-6)
-        assert_allclose(link.desc.inertial_pos, 0.0 if is_aligned else com, atol=1e-7)
-        assert_allclose(np.linalg.eigvalsh(link.desc.inertia), sorted(inertia), rtol=1e-6)
+        assert_allclose(link.desc.mass, mass, tol=GLB_TOL)
+        assert_allclose(link.desc.inertial_pos, 0.0 if is_aligned else com, tol=GLB_TOL)
+        assert_allclose(np.linalg.eigvalsh(link.desc.inertia), sorted(inertia), tol=GLB_TOL)
         if is_aligned:
-            assert_allclose(link.desc.offset_pos, com, atol=1e-7)
+            assert_allclose(link.desc.offset_pos, com, tol=GLB_TOL)
         # Visual geometry estimates the inertia without being drawn
         assert len(link.desc.vgeoms) == has_visual
 
@@ -523,9 +525,11 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_variants.desc.variants[1].links[0].mass, 48.0, rtol=1e-6)
-    assert_allclose(entity_variants.desc.variants[1].links[0].inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
-    assert_allclose(np.linalg.eigvalsh(entity_variants.desc.variants[1].links[0].inertia), (0.8, 1.6, 2.08), rtol=1e-6)
+    assert_allclose(entity_variants.desc.variants[1].links[0].mass, 48.0, tol=GLB_TOL)
+    assert_allclose(entity_variants.desc.variants[1].links[0].inertial_pos, (0.2, 0.0, 0.0), tol=GLB_TOL)
+    assert_allclose(
+        np.linalg.eigvalsh(entity_variants.desc.variants[1].links[0].inertia), (0.8, 1.6, 2.08), tol=GLB_TOL
+    )
 
     # Attaching makes the welded base movable, which estimates its inertia from the same geometry selection
     carrier_inertia = inertia_scene.add_entity(
@@ -546,7 +550,7 @@ def test_parsing_inertia_defaults(
         ),
     )
     entity_inertia_mounted.attach(carrier_inertia, parent_link_name=carrier_inertia.base_link.name)
-    assert_allclose(entity_inertia_mounted.base_link.desc.mass, 48.0, rtol=1e-6)
+    assert_allclose(entity_inertia_mounted.base_link.desc.mass, 48.0, tol=GLB_TOL)
 
     # A link without visual geometry falls back to its collision geometry
     entity_collision_only = inertia_scene.add_entity(
@@ -559,7 +563,7 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_collision_only.base_link.desc.mass, 1.0, rtol=1e-6)
+    assert_allclose(entity_collision_only.base_link.desc.mass, 1.0, tol=gs.EPS)
 
     # The collision box an MJCF draws counts once, as collision geometry. Estimating from visual geometry recomputes
     # the inertia MuJoCo compiled, from visual geometry kept undrawn.
@@ -574,8 +578,8 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_inertia_mjcf.base_link.desc.mass, 48.0, rtol=1e-6)
-    assert_allclose(entity_inertia_mjcf.base_link.desc.inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
+    assert_allclose(entity_inertia_mjcf.base_link.desc.mass, 48.0, tol=gs.EPS)
+    assert_allclose(entity_inertia_mjcf.base_link.desc.inertial_pos, (0.2, 0.0, 0.0), tol=gs.EPS)
 
     # A mesh takes the volume its surface encloses, closed by its watertight wrap when open, rather than that of the
     # convex pieces its collision is split into. The wrap encloses the surface within a small offset.
