@@ -24,7 +24,7 @@ from genesis.utils.tools import RunningMean
 from genesis.utils.urdf import compose_inertial_properties
 from genesis.utils.warnings import warn_once
 
-from ..utils.assertions import assert_allclose, assert_equal
+from ..utils.assertions import assert_allclose, assert_equal, assert_pixel_match
 from ..utils.assets import get_hf_dataset
 from ..utils.collision import display_collision_pairs, get_genuine_interpenetration
 
@@ -1066,7 +1066,7 @@ def test_as_grayscale_image(tmp_path):
             assert len(image_files) == max(n_envs, 1)
             for image_file, depth_env in zip(image_files, depth.reshape(-1, 5, width)):
                 with Image.open(image_file) as image:
-                    assert_equal(np.asarray(image), as_grayscale_image(depth_env))
+                    assert_pixel_match(image, as_grayscale_image(depth_env))
 
 
 @pytest.mark.required
