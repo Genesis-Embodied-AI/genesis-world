@@ -1,0 +1,19 @@
+genesis/options/morphs.py
+  s_0ad35ed8e9a835::t_932571918e6aee 567-569,774-776,969-970,1116-1118,1259-1261,1611-1613
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "042eb5110e4a382123be35854d94347dc0c6531b",
+  "prompts": {},
+  "sessions": {
+    "s_0ad35ed8e9a835": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "63313966-a999-4420-a5cc-36e8123cdaf7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
