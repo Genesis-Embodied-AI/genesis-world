@@ -228,6 +228,7 @@ def test_parsing_inertia_defaults(
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
     visual_collision_inertia,
+    asset_tmp_path,
     show_viewer,
     tol,
     caplog,
@@ -576,29 +577,32 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity_inertia_mjcf.base_link.desc.mass, 48.0, rtol=1e-6)
     assert_allclose(entity_inertia_mjcf.base_link.desc.inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
 
-    # A mesh takes the volume its surface encloses, rather than that of the convex pieces its collision is split into
-    bunny_mass = 1000.0 * trimesh.load(os.path.join(get_assets_dir(), "meshes", "bunny.obj")).volume
-    entity_bunny = inertia_scene.add_entity(
+    # A mesh takes the volume its surface encloses, closed by its watertight wrap when open, rather than that of the
+    # convex pieces its collision is split into. The wrap encloses the surface within a small offset.
+    torus = trimesh.creation.torus(major_radius=0.2, minor_radius=0.05)
+    open_torus_path = str(asset_tmp_path / "open_torus.obj")
+    trimesh.Trimesh(torus.vertices, torus.faces[1:]).export(open_torus_path)
+    entity_torus = inertia_scene.add_entity(
         morph=gs.morphs.Mesh(
             visualization=False,
-            file="meshes/bunny.obj",
+            file=open_torus_path,
             inertia_from_visual=True,
         ),
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
     )
-    entity_bunny_variants = inertia_scene.add_entity(
+    entity_torus_variants = inertia_scene.add_entity(
         morph=(
-            gs.morphs.Mesh(file="meshes/bunny.obj"),
-            gs.morphs.Mesh(file="meshes/bunny.obj", inertia_from_visual=True),
+            gs.morphs.Mesh(file=open_torus_path),
+            gs.morphs.Mesh(file=open_torus_path, inertia_from_visual=True),
         ),
         material=gs.materials.Rigid(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_bunny.base_link.desc.mass, bunny_mass, rtol=1e-6)
-    assert_allclose(entity_bunny_variants.desc.variants[1].links[0].mass, bunny_mass, rtol=1e-6)
+    assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * torus.volume, rtol=0.02)
+    assert_allclose(entity_torus_variants.desc.variants[1].links[0].mass, 1000.0 * torus.volume, rtol=0.02)
 
     # The URDF loads go through the parser MuJoCo provides, the undecodable visual meshes included
     assert not any("legacy URDF parser" in record.getMessage() for record in caplog.records)

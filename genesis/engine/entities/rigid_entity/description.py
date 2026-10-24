@@ -1514,13 +1514,20 @@ class KinematicEntityDescription(EntityDescription):
         so it never needs the material density - which a kinematic entity does not have. The geometry hint consumed
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
         geoms for a link without collision geometry. With 'from_visual', the visual geoms replace the collision ones in
-        both estimates, unless the link has no visual geometry of its own.
+        both estimates, open ones closed first, unless the link has no visual geometry of its own.
         """
         # A drawn collision geom also stands among the visual ones (see 'parse_geom' in mjcf.py and
         # 'parse_usd_rigid_entity'), so it counts once
         vg_inertia_infos = [g_info for g_info in vg_infos if not g_info.get("is_drawn_collision")]
         if from_visual and vg_inertia_infos:
-            cg_infos = vg_inertia_infos
+            # An open visual mesh encloses no well-defined volume, and its convex hull would fill every concavity, so
+            # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
+            cg_infos = []
+            for g_info in vg_inertia_infos:
+                if not g_info["vmesh"].is_watertight:
+                    tmesh = mu.get_watertight_mesh(g_info["vmesh"].trimesh, aggressiveness=5)
+                    g_info = {**g_info, "vmesh": gs.Mesh.from_trimesh(tmesh)}
+                cg_infos.append(g_info)
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *anchor_inertial, clamp_min_mass=False
