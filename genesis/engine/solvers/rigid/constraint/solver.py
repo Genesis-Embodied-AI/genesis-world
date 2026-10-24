@@ -38,21 +38,16 @@ from . import noslip as constraint_noslip
 
 
 @qd.func
-def _func_clear_jac_row(
-    i_con: int, i_b: int, constraint_state: array_class.ConstraintState, rigid_config: qd.template()
-):
+def _func_clear_jac_row(i_con: int, i_b: int, constraint_state: array_class.ConstraintState):
     """Zero one row of the constraint Jacobian.
 
-    Under sparse solve, only the dofs of the support last recorded for row i_con are cleared, the row being zero
-    elsewhere.
+    Only the dofs of the support last recorded for row i_con are cleared, the row being zero elsewhere: every writer of
+    a row records its support, and a cleared env records empty supports over zero rows (see
+    func_clear_constraint_at_env).
     """
-    if qd.static(rigid_config.sparse_solve):
-        for i_d_ in range(constraint_state.jac_n_dofs[i_con, i_b]):
-            i_d = constraint_state.jac_dofs_idx[i_con, i_d_, i_b]
-            constraint_state.jac[i_con, i_d, i_b] = gs.qd_float(0.0)
-    else:
-        for i_d in range(constraint_state.jac.shape[1]):
-            constraint_state.jac[i_con, i_d, i_b] = gs.qd_float(0.0)
+    for i_d_ in range(constraint_state.jac_n_dofs[i_con, i_b]):
+        i_d = constraint_state.jac_dofs_idx[i_con, i_d_, i_b]
+        constraint_state.jac[i_con, i_d, i_b] = gs.qd_float(0.0)
 
 
 @qd.func
@@ -765,7 +760,7 @@ def _add_friction_constraint(
 
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
     n_con = collision_con_start + i_col_ * rows_per_contact + i_friction
-    _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
+    _func_clear_jac_row(n_con, i_b, constraint_state)
 
     con_n_dofs = 0
     jac_qvel = gs.qd_float(0.0)
@@ -778,7 +773,8 @@ def _add_friction_constraint(
     direction_ang_a = offset_a.cross(n) + n_ang
     direction_ang_b = offset_b.cross(n) + n_ang
 
-    # Shared ancestors contribute equal contact velocities. Descending link order stops both walks where they meet.
+    # Shared ancestors contribute equal contact velocities. Descending link order stops both walks where they meet, so
+    # the walk visits every dof of the row once and stores its entry outright.
     i_la, i_lb = link_a, link_b
     for i_walk in range(dyn_state.links.pos.shape[0]):
         if i_la == i_lb:
@@ -797,7 +793,7 @@ def _add_friction_constraint(
             direction_ang = direction_ang_a if i_la > i_lb else direction_ang_b
             jac = sign * (cdot_vel.dot(n) + cdof_ang.dot(direction_ang))
             jac_qvel = jac_qvel + jac * dyn_state.dofs.vel[i_d, i_b]
-            constraint_state.jac[n_con, i_d, i_b] = constraint_state.jac[n_con, i_d, i_b] + jac
+            constraint_state.jac[n_con, i_d, i_b] = jac
 
             con_n_dofs = _append_relevant_dof(
                 n_con, i_d, i_b, con_n_dofs, dedup=False, constraint_state=constraint_state
@@ -881,8 +877,8 @@ def _add_collision_constraints_per_friction(
 
     Per-friction threading: rows_per_contact times more threads than the legacy path; adjacent lanes vary the
     friction slot i_col_ * rows_per_contact + i_friction so within a warp adjacent threads write adjacent n_con
-    values. Under the flipped jac layout (_B, n_dofs, n_constraints), n_con is stride-1, so jac writes coalesce. One
-    block per env strides the rows of its live contacts, an env holding a small share of the contact capacity.
+    values. One block per env strides the rows of its live contacts, an env holding a small share of the contact
+    capacity.
     """
     _B = dyn_state.dofs.ctrl_mode.shape[1]
     rows_per_contact = qd.static(rigid_config.rows_per_contact)
@@ -979,7 +975,7 @@ def _add_collision_constraints_per_contact(
             n_con_head = collision_con_start + i_col_ * rows_per_contact
             for i_friction in range(rows_per_contact):
                 n_con = n_con_head + i_friction
-                _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
+                _func_clear_jac_row(n_con, i_b, constraint_state)
             # The rows of a contact share the point whose velocity each dof moves, so both kinematic chains are walked
             # once: every dof's contribution to the point velocity is projected on each row's direction in turn, and
             # the support built on the head row is copied to the others.
@@ -1415,7 +1411,7 @@ def func_equality_joint(
     n_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
     qd.atomic_add(constraint_state.n_constraints_equality[i_b], 1)
 
-    _func_clear_jac_row(n_con, i_b, constraint_state, rigid_config)
+    _func_clear_jac_row(n_con, i_b, constraint_state)
 
     pos1 = rigid_info.qpos[i_qpos1, i_b]
     ref1 = rigid_info.qpos0[i_qpos1, i_b]
@@ -1721,7 +1717,7 @@ def _func_add_joint_limit_row(
     constraint_state.aref[i_con, i_b] = aref
     constraint_state.efc_D[i_con, i_b] = 1 / diag
 
-    _func_clear_jac_row(i_con, i_b, constraint_state, rigid_config)
+    _func_clear_jac_row(i_con, i_b, constraint_state)
     constraint_state.jac[i_con, i_d, i_b] = jac
 
     constraint_state.jac_n_dofs[i_con, i_b] = 1
@@ -1788,7 +1784,7 @@ def func_add_relative_motion_rows(
     the rows record the support of the walk. Returns the rate of each row.
     """
     for i_r in range(n_rows):
-        _func_clear_jac_row(i_con + i_r, i_b, constraint_state, rigid_config)
+        _func_clear_jac_row(i_con + i_r, i_b, constraint_state)
 
     I_l1 = [i_l1, i_b] if qd.static(rigid_config.batch_links_info) else i_l1
     I_l2 = [i_l2, i_b] if qd.static(rigid_config.batch_links_info) else i_l2
@@ -2106,7 +2102,7 @@ def add_frictionloss_constraints(
                         constraint_state.aref[i_con, i_b] = aref
                         constraint_state.efc_D[i_con, i_b] = 1.0 / diag
                         constraint_state.efc_frictionloss[i_con, i_b] = dyn_info.dofs.frictionloss[I_d]
-                        _func_clear_jac_row(i_con, i_b, constraint_state, rigid_config)
+                        _func_clear_jac_row(i_con, i_b, constraint_state)
                         constraint_state.jac[i_con, i_d, i_b] = jac
 
                         constraint_state.jac_dofs_idx[i_con, 0, i_b] = i_d
@@ -2762,6 +2758,23 @@ def func_hessian_direct_batch(
 
 
 @qd.func
+def func_packed_tile_pos(i: int, j: int, tile_size: qd.template(), max_dofs: qd.template()):
+    """Return the row and column of entry (i, j), i >= j, of the lower triangle in the packed tile of the tiled factor.
+
+    The tile holds the blocks of tile_size x tile_size of the lower triangle of a block of up to max_dofs dofs, one
+    below the other in row-major block order ((0, 0), (1, 0), (1, 1), (2, 0), ...), the blocks above the diagonal being
+    left out. A block of a single tile is the tile itself.
+    """
+    row, col = i, j
+    if qd.static(max_dofs > tile_size):
+        i_blk = i // tile_size
+        j_blk = j // tile_size
+        row = (i_blk * (i_blk + 1) // 2 + j_blk) * tile_size + i - i_blk * tile_size
+        col = j - j_blk * tile_size
+    return row, col
+
+
+@qd.func
 def func_island_assemble_factor_solve_tiled(
     i_b: int,
     i_island: int,
@@ -2781,7 +2794,8 @@ def func_island_assemble_factor_solve_tiled(
 
     Stages the island's Hessian block, held at its global dof rows and columns of nt_H, into the shared tile sh_L and
     factors it there with register-streaming TileTxT primitives, a block whose dofs are one ascending run copied tile
-    by tile and a scattered one gathered through dof_id.
+    by tile and a scattered one gathered through dof_id. sh_L holds the blocks of the lower triangle alone, packed one
+    below the other (see func_packed_tile_pos), which spares the shared memory of the blocks above the diagonal.
 
     The call serves one size class of islands (see island_tile_caps), its tile of TileCls with tile_size lanes: an
     island of up to max_dofs dofs factors in the shared tile sh_L of max_dofs rows, and the last class also takes what
@@ -2836,7 +2850,8 @@ def func_island_assemble_factor_solve_tiled(
                     H_ik[:] = constraint_state.nt_H[
                         i_b, i_d_start + i_blk_lo : i_d_start + i_blk_hi, i_d_start + k_blk_lo : i_d_start + k_blk_hi
                     ]
-                    sh_L[i_blk_lo:i_blk_hi, k_blk_lo:k_blk_hi] = H_ik
+                    i_tile_row, _ = func_packed_tile_pos(i_blk_lo, k_blk_lo, T, max_dofs)
+                    sh_L[i_tile_row : i_tile_row + i_blk_hi - i_blk_lo, 0 : k_blk_hi - k_blk_lo] = H_ik
         else:
             n_tri = n * (n + 1) // 2
             i_tri = tid
@@ -2844,7 +2859,8 @@ def func_island_assemble_factor_solve_tiled(
                 i_d_local, j_d_local = linear_to_lower_tri(i_tri)
                 i_d = constraint_state.island.dof_id[dof_base + i_d_local, i_b]
                 j_d = constraint_state.island.dof_id[dof_base + j_d_local, i_b]
-                sh_L[i_d_local, j_d_local] = constraint_state.nt_H[i_b, i_d, j_d]
+                i_row, i_col = func_packed_tile_pos(i_d_local, j_d_local, T, max_dofs)
+                sh_L[i_row, i_col] = constraint_state.nt_H[i_b, i_d, j_d]
                 i_tri = i_tri + T
         qd.simt.block.sync()
 
@@ -2854,33 +2870,36 @@ def func_island_assemble_factor_solve_tiled(
         for k_blk in range(N_BLOCKS):
             k_blk_lo = k_blk * T
             k_blk_hi = qd.min(k_blk_lo + T, n)
+            k_n = k_blk_hi - k_blk_lo
+            k_tile_row, _ = func_packed_tile_pos(k_blk_lo, k_blk_lo, T, max_dofs)
             L_kk = TileCls.eye(dtype=gs.qd_float)
-            L_kk[:] = sh_L[k_blk_lo:k_blk_hi, k_blk_lo:k_blk_hi]
+            L_kk[:] = sh_L[k_tile_row : k_tile_row + k_n, 0:k_n]
             for j_blk in range(k_blk):
-                j_blk_lo = j_blk * T
+                kj_tile_row, _ = func_packed_tile_pos(k_blk_lo, j_blk * T, T, max_dofs)
                 for i_col in range(T):
-                    v = sh_L[k_blk_lo:k_blk_hi, j_blk_lo + i_col]
+                    v = sh_L[kj_tile_row : kj_tile_row + k_n, i_col]
                     L_kk -= qd.outer(v, v)
             # Floored relative to the row's original diagonal; see the tiled factor's floor comment.
-            d_row = k_blk_lo + tid
             diag_orig = gs.qd_float(1.0)
-            if d_row < k_blk_hi:
-                diag_orig = sh_L[d_row, d_row]
+            if tid < k_n:
+                diag_orig = sh_L[k_tile_row + tid, tid]
             L_kk.cholesky_(EPS * qd.max(diag_orig, EPS))
             for i_blk in range(k_blk + 1, N_BLOCKS):
                 i_blk_lo = i_blk * T
-                i_blk_hi = qd.min(i_blk_lo + T, n)
+                i_n = qd.min(i_blk_lo + T, n) - i_blk_lo
+                ik_tile_row, _ = func_packed_tile_pos(i_blk_lo, k_blk_lo, T, max_dofs)
                 L_ik = TileCls.zeros(dtype=gs.qd_float)
-                L_ik[:] = sh_L[i_blk_lo:i_blk_hi, k_blk_lo:k_blk_hi]
+                L_ik[:] = sh_L[ik_tile_row : ik_tile_row + i_n, 0:k_n]
                 for j_blk in range(k_blk):
-                    j_blk_lo = j_blk * T
+                    ij_tile_row, _ = func_packed_tile_pos(i_blk_lo, j_blk * T, T, max_dofs)
+                    kj_tile_row, _ = func_packed_tile_pos(k_blk_lo, j_blk * T, T, max_dofs)
                     for i_col in range(T):
-                        v_own = sh_L[i_blk_lo:i_blk_hi, j_blk_lo + i_col]
-                        v_diag = sh_L[k_blk_lo:k_blk_hi, j_blk_lo + i_col]
+                        v_own = sh_L[ij_tile_row : ij_tile_row + i_n, i_col]
+                        v_diag = sh_L[kj_tile_row : kj_tile_row + k_n, i_col]
                         L_ik -= qd.outer(v_own, v_diag)
                 L_kk.solve_triangular_(L_ik)
-                sh_L[i_blk_lo:i_blk_hi, k_blk_lo:k_blk_hi] = L_ik
-            sh_L[k_blk_lo:k_blk_hi, k_blk_lo:k_blk_hi] = L_kk
+                sh_L[ik_tile_row : ik_tile_row + i_n, 0:k_n] = L_ik
+            sh_L[k_tile_row : k_tile_row + k_n, 0:k_n] = L_kk
 
         # --- Triangular solve grad -> Mgrad from sh_L (local indices; grad/Mgrad global through dof_id) ---
         # Column-oriented substitutions on registers: lane tid holds rows tid + k * T of the vector, the lane owning row
@@ -2907,7 +2926,8 @@ def func_island_assemble_factor_solve_tiled(
                 j_d_local = j_step
                 if qd.static(i_pass == 1):
                     j_d_local = n - 1 - j_step
-                x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_d_local, j_d_local]
+                j_row, j_col = func_packed_tile_pos(j_d_local, j_d_local, T, max_dofs)
+                x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_row, j_col]
                 for k in qd.static(range(N_ROWS_PER_LANE)):
                     i_d_local = k * T + tid
                     if i_d_local == j_d_local:
@@ -2915,10 +2935,12 @@ def func_island_assemble_factor_solve_tiled(
                     else:
                         if qd.static(i_pass == 0):
                             if j_d_local < i_d_local and i_d_local < n:
-                                v[k] = v[k] - sh_L[i_d_local, j_d_local] * x_j
+                                i_row, i_col = func_packed_tile_pos(i_d_local, j_d_local, T, max_dofs)
+                                v[k] = v[k] - sh_L[i_row, i_col] * x_j
                         else:
                             if i_d_local < j_d_local:
-                                v[k] = v[k] - sh_L[j_d_local, i_d_local] * x_j
+                                i_row, i_col = func_packed_tile_pos(j_d_local, i_d_local, T, max_dofs)
+                                v[k] = v[k] - sh_L[i_row, i_col] * x_j
 
         # Write the solved Mgrad back to global memory (local registers -> global through dof_id)
         for k in qd.static(range(N_ROWS_PER_LANE)):
@@ -2945,7 +2967,8 @@ def func_island_assemble_factor_solve_tiled(
                     j_d = j_d_local
                     if qd.static(not rigid_config.is_single_island):
                         j_d = constraint_state.island.dof_id[dof_base + j_d_local, i_b]
-                    constraint_state.nt_H[i_b, i_d, j_d] = sh_L[i_r, j_d_local]
+                    i_row, i_col = func_packed_tile_pos(i_r, j_d_local, T, max_dofs)
+                    constraint_state.nt_H[i_b, i_d, j_d] = sh_L[i_row, i_col]
                 i_r = i_r + T
             qd.simt.block.sync()
     elif qd.static(is_last_class and rigid_config.has_island_above_tile_cap):
@@ -3087,7 +3110,9 @@ def func_island_hessian_assemble_block(
     i_island: int,
     tid: int,
     sh_jac,
-    sh_D,
+    sh_rows,
+    sh_weights,
+    sh_scan,
     constraint_state: array_class.ConstraintState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -3099,10 +3124,8 @@ def func_island_hessian_assemble_block(
     Every lane owns entries of the block's lower triangle at the island's global dof rows and columns, the dofs and rows
     indexed directly in a single-island scene (whose lists are the identity), by offset where the island's list holds
     consecutive dofs (see dof_range_start in IslandState) and read from the list otherwise. The mass block is written
-    first, then the rows are added row_tile at a time from the shared tiles sh_jac (the rows' Jacobian over the island's
-    dofs) and sh_D (their weights), each Jacobian entry read from global memory once per block instead of once per
-    Hessian entry. An island wider than the cap stages its rows by dof chunks of the cap, a pair of chunks at a time in
-    the two halves of sh_jac.
+    first, then active rows are compacted in constraint order within each tile. Each staged Jacobian row is scaled by
+    the square root of its weight. An island wider than the cap stages a pair of dof chunks in the two halves of sh_jac.
 
     Under Jacobi equilibration the block is scaled to unit diagonal afterwards, see nt_jacobi in array_class.py.
     """
@@ -3115,143 +3138,150 @@ def func_island_hessian_assemble_block(
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
     n_tri = n * (n + 1) // 2
-    i_tri = tid
-    while i_tri < n_tri:
-        i_d_local, j_d_local = linear_to_lower_tri(i_tri)
-        i_d, j_d = i_d_local, j_d_local
-        if qd.static(not rigid_config.is_single_island):
-            i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
-            j_d = func_list_item(constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b)
-        constraint_state.nt_H[i_b, i_d, j_d] = rigid_info.mass_mat[i_d, j_d, i_b]
-        i_tri = i_tri + block_dim
-    is_staged = True
-    if qd.static(rigid_config.has_island_above_tile_cap):
-        is_staged = n <= qd.static(rigid_config.island_tile_cap_last)
-    if is_staged:
-        for i_chunk in range((con_n + row_tile - 1) // row_tile):
-            i_lcon_chunk = i_chunk * row_tile
-            n_rows = qd.min(row_tile, con_n - i_lcon_chunk)
-            qd.simt.block.sync()
-            i_flat = tid
-            while i_flat < n_rows * n:
-                i_r = i_flat // n
-                i_d_local = i_flat % n
-                i_c = con_base + i_lcon_chunk + i_r
-                if qd.static(not rigid_config.is_single_island):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon_chunk + i_r, i_b]
-                i_d = i_d_local
-                if qd.static(not rigid_config.is_single_island):
-                    i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
-                sh_jac[i_r, i_d_local] = constraint_state.jac[i_c, i_d, i_b]
-                i_flat = i_flat + block_dim
-            if tid < n_rows:
-                i_c = con_base + i_lcon_chunk + tid
-                if qd.static(not rigid_config.is_single_island):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon_chunk + tid, i_b]
-                sh_D[tid] = constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
-            qd.simt.block.sync()
-            i_tri = tid
-            while i_tri < n_tri:
-                i_d_local, j_d_local = linear_to_lower_tri(i_tri)
-                h = gs.qd_float(0.0)
-                for i_r in range(n_rows):
-                    h = h + sh_jac[i_r, i_d_local] * sh_jac[i_r, j_d_local] * sh_D[i_r]
-                i_d, j_d = i_d_local, j_d_local
-                if qd.static(not rigid_config.is_single_island):
-                    i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
-                    j_d = func_list_item(constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b)
-                constraint_state.nt_H[i_b, i_d, j_d] = constraint_state.nt_H[i_b, i_d, j_d] + h
-                i_tri = i_tri + block_dim
-    else:
-        # Above the cap the rows are staged by dof chunks of the cap width, a pair of chunks (a, b <= a) filling the two
-        # halves of sh_jac, and the lanes accumulate the entries of that pair's block of the lower triangle, so a
-        # Jacobian entry is read from global memory once per chunk pair per row tile.
-        CAP = qd.static(rigid_config.island_tile_cap_last)
-        n_chunks = (n + CAP - 1) // CAP
-        for i_chunk in range((con_n + row_tile - 1) // row_tile):
-            i_lcon_chunk = i_chunk * row_tile
-            n_rows = qd.min(row_tile, con_n - i_lcon_chunk)
-            qd.simt.block.sync()
-            if tid < n_rows:
-                i_c = con_base + i_lcon_chunk + tid
-                if qd.static(not rigid_config.is_single_island):
-                    i_c = constraint_state.island.constraint_id[con_base + i_lcon_chunk + tid, i_b]
-                sh_D[tid] = constraint_state.efc_D[i_c, i_b] * constraint_state.active[i_c, i_b]
-            for a in range(n_chunks):
-                a_lo = a * CAP
-                a_n = qd.min(CAP, n - a_lo)
-                for b in range(a + 1):
-                    b_lo = b * CAP
-                    b_n = qd.min(CAP, n - b_lo)
-                    qd.simt.block.sync()
-                    i_flat = tid
-                    while i_flat < n_rows * (a_n + b_n):
-                        i_r = i_flat // (a_n + b_n)
-                        i_sh = i_flat - i_r * (a_n + b_n)
-                        i_d_local = a_lo + i_sh
-                        i_col = i_sh
-                        if i_sh >= a_n:
-                            i_d_local = b_lo + i_sh - a_n
-                            i_col = CAP + i_sh - a_n
-                        i_c = con_base + i_lcon_chunk + i_r
-                        if qd.static(not rigid_config.is_single_island):
-                            i_c = constraint_state.island.constraint_id[con_base + i_lcon_chunk + i_r, i_b]
-                        i_d = i_d_local
-                        if qd.static(not rigid_config.is_single_island):
-                            i_d = func_list_item(
-                                constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b
-                            )
-                        sh_jac[i_r, i_col] = constraint_state.jac[i_c, i_d, i_b]
-                        i_flat = i_flat + block_dim
-                    qd.simt.block.sync()
-                    # The lower triangle of the diagonal pair, the whole rectangle of an off-diagonal one.
-                    n_entries = a_n * b_n
-                    if a == b:
-                        n_entries = a_n * (a_n + 1) // 2
-                    i_e = tid
-                    while i_e < n_entries:
-                        i_local = i_e // b_n
-                        j_local = i_e - i_local * b_n
-                        if a == b:
-                            i_local, j_local = linear_to_lower_tri(i_e)
-                        h = gs.qd_float(0.0)
-                        for i_r in range(n_rows):
-                            h = h + sh_jac[i_r, i_local] * sh_jac[i_r, CAP + j_local] * sh_D[i_r]
-                        i_d, j_d = a_lo + i_local, b_lo + j_local
-                        if qd.static(not rigid_config.is_single_island):
-                            i_d = func_list_item(
-                                constraint_state.island.dof_id, dof_lo + a_lo + i_local, dof_lo, dof_base, i_b
-                            )
-                            j_d = func_list_item(
-                                constraint_state.island.dof_id, dof_lo + b_lo + j_local, dof_lo, dof_base, i_b
-                            )
-                        constraint_state.nt_H[i_b, i_d, j_d] = constraint_state.nt_H[i_b, i_d, j_d] + h
-                        i_e = i_e + block_dim
-    if qd.static(rigid_config.enable_jacobi_equilibration):
-        qd.simt.block.sync()
-        i_d_local = tid
-        while i_d_local < n:
-            i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
-            hess_diag = constraint_state.nt_H[i_b, i_d, i_d]
-            s = gs.qd_float(1.0)
-            if hess_diag > 0.0:
-                s = 1.0 / qd.sqrt(hess_diag)
-            constraint_state.nt_jacobi[i_d, i_b] = s
-            i_d_local = i_d_local + block_dim
-        qd.simt.block.sync()
-        i_tri = tid
-        while i_tri < n_tri:
+    for i_tri_chunk_ in range((n_tri + block_dim - 1) // block_dim):
+        i_tri = i_tri_chunk_ * block_dim + tid
+        if i_tri < n_tri:
             i_d_local, j_d_local = linear_to_lower_tri(i_tri)
             i_d, j_d = i_d_local, j_d_local
             if qd.static(not rigid_config.is_single_island):
                 i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
                 j_d = func_list_item(constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b)
-            constraint_state.nt_H[i_b, i_d, j_d] = (
-                constraint_state.nt_H[i_b, i_d, j_d]
-                * constraint_state.nt_jacobi[i_d, i_b]
-                * constraint_state.nt_jacobi[j_d, i_b]
-            )
-            i_tri = i_tri + block_dim
+            constraint_state.nt_H[i_b, i_d, j_d] = rigid_info.mass_mat[i_d, j_d, i_b]
+    is_staged = True
+    if qd.static(rigid_config.has_island_above_tile_cap):
+        is_staged = n <= qd.static(rigid_config.island_tile_cap_last)
+    for i_chunk in range((con_n + row_tile - 1) // row_tile):
+        i_lcon_chunk = i_chunk * row_tile
+        n_rows = qd.min(row_tile, con_n - i_lcon_chunk)
+        qd.simt.block.sync()
+        i_c = 0
+        is_active = 0
+        if tid < n_rows:
+            i_c = con_base + i_lcon_chunk + tid
+            if qd.static(not rigid_config.is_single_island):
+                i_c = constraint_state.island.constraint_id[i_c, i_b]
+            is_active = constraint_state.active[i_c, i_b]
+        rank, n_active = su.qd_block_scan(is_active)
+        if is_active:
+            sh_rows[rank - 1] = i_c
+            sh_weights[rank - 1] = qd.sqrt(constraint_state.efc_D[i_c, i_b])
+        if tid == row_tile - 1:
+            sh_scan[0] = n_active
+        qd.simt.block.sync()
+        n_rows = sh_scan[0]
+        if n_rows > 0:
+            if is_staged:
+                for i_flat_chunk_ in range((n_rows * n + block_dim - 1) // block_dim):
+                    i_flat = i_flat_chunk_ * block_dim + tid
+                    if i_flat < n_rows * n:
+                        i_r = i_flat // n
+                        i_d_local = i_flat % n
+                        i_c = sh_rows[i_r]
+                        i_d = i_d_local
+                        if qd.static(not rigid_config.is_single_island):
+                            i_d = func_list_item(
+                                constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b
+                            )
+                        weight = sh_weights[i_r]
+                        sh_jac[i_r, i_d_local] = constraint_state.jac[i_c, i_d, i_b] * weight
+                qd.simt.block.sync()
+                for i_tri_chunk_ in range((n_tri + block_dim - 1) // block_dim):
+                    i_tri = i_tri_chunk_ * block_dim + tid
+                    if i_tri < n_tri:
+                        i_d_local, j_d_local = linear_to_lower_tri(i_tri)
+                        h = gs.qd_float(0.0)
+                        for i_r in range(n_rows):
+                            h = h + sh_jac[i_r, i_d_local] * sh_jac[i_r, j_d_local]
+                        i_d, j_d = i_d_local, j_d_local
+                        if qd.static(not rigid_config.is_single_island):
+                            i_d = func_list_item(
+                                constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b
+                            )
+                            j_d = func_list_item(
+                                constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b
+                            )
+                        constraint_state.nt_H[i_b, i_d, j_d] += h
+            else:
+                # Above the cap the rows are staged by dof chunks of the cap width, a pair of chunks (a, b <= a) filling
+                # the two halves of sh_jac, and the lanes accumulate the entries of that pair's block of the lower
+                # triangle, so a Jacobian entry is read from global memory once per chunk pair per row tile.
+                CAP = qd.static(rigid_config.island_tile_cap_last)
+                n_chunks = (n + CAP - 1) // CAP
+                for a in range(n_chunks):
+                    a_lo = a * CAP
+                    a_n = qd.min(CAP, n - a_lo)
+                    for b in range(a + 1):
+                        b_lo = b * CAP
+                        b_n = qd.min(CAP, n - b_lo)
+                        qd.simt.block.sync()
+                        for i_flat_chunk_ in range((n_rows * (a_n + b_n) + block_dim - 1) // block_dim):
+                            i_flat = i_flat_chunk_ * block_dim + tid
+                            if i_flat < n_rows * (a_n + b_n):
+                                i_r = i_flat // (a_n + b_n)
+                                i_sh = i_flat - i_r * (a_n + b_n)
+                                i_d_local = a_lo + i_sh
+                                i_col = i_sh
+                                if i_sh >= a_n:
+                                    i_d_local = b_lo + i_sh - a_n
+                                    i_col = CAP + i_sh - a_n
+                                i_c = sh_rows[i_r]
+                                i_d = i_d_local
+                                if qd.static(not rigid_config.is_single_island):
+                                    i_d = func_list_item(
+                                        constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b
+                                    )
+                                weight = sh_weights[i_r]
+                                sh_jac[i_r, i_col] = constraint_state.jac[i_c, i_d, i_b] * weight
+                        qd.simt.block.sync()
+                        # The lower triangle of the diagonal pair, the whole rectangle of an off-diagonal one.
+                        n_entries = a_n * b_n
+                        if a == b:
+                            n_entries = a_n * (a_n + 1) // 2
+                        for i_e_chunk_ in range((n_entries + block_dim - 1) // block_dim):
+                            i_e = i_e_chunk_ * block_dim + tid
+                            if i_e < n_entries:
+                                i_local = i_e // b_n
+                                j_local = i_e - i_local * b_n
+                                if a == b:
+                                    i_local, j_local = linear_to_lower_tri(i_e)
+                                h = gs.qd_float(0.0)
+                                for i_r in range(n_rows):
+                                    h = h + sh_jac[i_r, i_local] * sh_jac[i_r, CAP + j_local]
+                                i_d, j_d = a_lo + i_local, b_lo + j_local
+                                if qd.static(not rigid_config.is_single_island):
+                                    i_d = func_list_item(
+                                        constraint_state.island.dof_id, dof_lo + a_lo + i_local, dof_lo, dof_base, i_b
+                                    )
+                                    j_d = func_list_item(
+                                        constraint_state.island.dof_id, dof_lo + b_lo + j_local, dof_lo, dof_base, i_b
+                                    )
+                                # Atomic add of a single lane per entry, see func_island_hessian_patch_block
+                                constraint_state.nt_H[i_b, i_d, j_d] += h
+    if qd.static(rigid_config.enable_jacobi_equilibration):
+        qd.simt.block.sync()
+        for i_d_local_chunk_ in range((n + block_dim - 1) // block_dim):
+            i_d_local = i_d_local_chunk_ * block_dim + tid
+            if i_d_local < n:
+                i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
+                hess_diag = constraint_state.nt_H[i_b, i_d, i_d]
+                s = gs.qd_float(1.0)
+                if hess_diag > 0.0:
+                    s = 1.0 / qd.sqrt(hess_diag)
+                constraint_state.nt_jacobi[i_d, i_b] = s
+        qd.simt.block.sync()
+        for i_tri_chunk_ in range((n_tri + block_dim - 1) // block_dim):
+            i_tri = i_tri_chunk_ * block_dim + tid
+            if i_tri < n_tri:
+                i_d_local, j_d_local = linear_to_lower_tri(i_tri)
+                i_d, j_d = i_d_local, j_d_local
+                if qd.static(not rigid_config.is_single_island):
+                    i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
+                    j_d = func_list_item(constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b)
+                constraint_state.nt_H[i_b, i_d, j_d] = (
+                    constraint_state.nt_H[i_b, i_d, j_d]
+                    * constraint_state.nt_jacobi[i_d, i_b]
+                    * constraint_state.nt_jacobi[j_d, i_b]
+                )
 
 
 @qd.func
@@ -3259,29 +3289,33 @@ def func_island_hessian_patch_block(
     i_b: int,
     i_island: int,
     tid: int,
+    sh_jac,
+    sh_rows,
+    sh_weights,
     sh_scan,
     constraint_state: array_class.ConstraintState,
     rigid_config: qd.template(),
     block_dim: qd.template(),
+    row_tile: qd.template(),
 ):
     """Patch the maintained Hessian block of island i_island with its flipped rows, by the block_dim lanes of a block.
 
     The J^T D J of a row whose active state flipped since the previous iteration is added where the row turned active
     and subtracted where it turned inactive. The flipped rows are listed first, in constraint order, in the island's own
     slice of incr_changed_idx: the lanes stride over the island's rows in chunks, each chunk ranked by a prefix sum over
-    the flip flags, per subgroup then across the subgroups through sh_scan (one slot per subgroup). Every lane then
-    accumulates the deltas of one lower-triangle entry over that list and adds the sum once, so the accumulation order
-    is the row order. The deltas ride the scale the block was assembled with under Jacobi equilibration, see nt_jacobi
-    in array_class.py.
+    the flip flags, per subgroup then across the subgroups through sh_scan (one slot per subgroup). The list is then
+    taken row_tile rows at a time: the rows are staged dense over the island's dofs in sh_jac and their D, signed by
+    their flip, in sh_weights, once for every lower-triangle entry, and every lane accumulates the deltas of one entry
+    over the rows of the tile and adds the sum once. The deltas ride the scale the block was assembled with under Jacobi
+    equilibration, see nt_jacobi in array_class.py.
     """
     _K = qd.static(32)
     N_SUBGROUPS = qd.static(block_dim // _K)
     con_base = constraint_state.island.constraint_slices.start[i_island, i_b]
     con_n = constraint_state.island.constraint_slices.n[i_island, i_b]
     n_changed = 0
-    i_chunk = 0
-    while i_chunk < con_n:
-        i_lcon = i_chunk + tid
+    for i_chunk_ in range((con_n + block_dim - 1) // block_dim):
+        i_lcon = i_chunk_ * block_dim + tid
         i_c = -1
         is_flipped = 0
         if i_lcon < con_n:
@@ -3302,36 +3336,48 @@ def func_island_hessian_patch_block(
             constraint_state.incr_changed_idx[con_base + rank, i_b] = i_c
         n_changed = n_changed + n_chunk
         qd.simt.block.sync()
-        i_chunk = i_chunk + block_dim
-    # One entry per lane, its delta summed over the listed rows and added once: a row-by-row accumulation into nt_H
-    # would round each entry differently. The dofs are read through the island's list, by offset where they are one
-    # run (see func_list_item).
     if n_changed > 0:
         n = constraint_state.island.dof_slices.n[i_island, i_b]
         dof_lo = constraint_state.island.dof_slices.start[i_island, i_b]
         dof_base = constraint_state.island.dof_range_start[i_island, i_b]
+        # One entry per lane, its delta summed over the rows of a tile and added once: a row-by-row accumulation into
+        # nt_H would round each entry differently. The dofs are read through the island's list, by offset where they
+        # are one run (see func_list_item).
         n_tri = n * (n + 1) // 2
-        i_tri = tid
-        while i_tri < n_tri:
-            i_d_local, j_d_local = linear_to_lower_tri(i_tri)
-            i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
-            j_d = func_list_item(constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b)
-            delta = gs.qd_float(0.0)
-            for i_lcon in range(n_changed):
-                i_c = constraint_state.incr_changed_idx[con_base + i_lcon, i_b]
-                contrib = (
-                    constraint_state.efc_D[i_c, i_b]
-                    * constraint_state.jac[i_c, i_d, i_b]
-                    * constraint_state.jac[i_c, j_d, i_b]
-                )
-                if constraint_state.active[i_c, i_b]:
-                    delta = delta + contrib
-                else:
-                    delta = delta - contrib
-            if qd.static(rigid_config.enable_jacobi_equilibration):
-                delta = delta * constraint_state.nt_jacobi[i_d, i_b] * constraint_state.nt_jacobi[j_d, i_b]
-            constraint_state.nt_H[i_b, i_d, j_d] = constraint_state.nt_H[i_b, i_d, j_d] + delta
-            i_tri = i_tri + block_dim
+        for i_tile_ in range((n_changed + row_tile - 1) // row_tile):
+            n_rows = qd.min(row_tile, n_changed - i_tile_ * row_tile)
+            qd.simt.block.sync()
+            if tid < n_rows:
+                i_c = constraint_state.incr_changed_idx[con_base + i_tile_ * row_tile + tid, i_b]
+                sh_rows[tid] = i_c
+                weight = constraint_state.efc_D[i_c, i_b]
+                if not constraint_state.active[i_c, i_b]:
+                    weight = -weight
+                sh_weights[tid] = weight
+            qd.simt.block.sync()
+            for i_flat_chunk_ in range((n_rows * n + block_dim - 1) // block_dim):
+                i_flat = i_flat_chunk_ * block_dim + tid
+                if i_flat < n_rows * n:
+                    i_r = i_flat // n
+                    i_d_local = i_flat % n
+                    i_c = sh_rows[i_r]
+                    i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
+                    sh_jac[i_r, i_d_local] = constraint_state.jac[i_c, i_d, i_b]
+            qd.simt.block.sync()
+            for i_tri_chunk_ in range((n_tri + block_dim - 1) // block_dim):
+                i_tri = i_tri_chunk_ * block_dim + tid
+                if i_tri < n_tri:
+                    i_d_local, j_d_local = linear_to_lower_tri(i_tri)
+                    i_d = func_list_item(constraint_state.island.dof_id, dof_lo + i_d_local, dof_lo, dof_base, i_b)
+                    j_d = func_list_item(constraint_state.island.dof_id, dof_lo + j_d_local, dof_lo, dof_base, i_b)
+                    delta = gs.qd_float(0.0)
+                    for i_r in range(n_rows):
+                        delta = delta + sh_weights[i_r] * sh_jac[i_r, i_d_local] * sh_jac[i_r, j_d_local]
+                    if qd.static(rigid_config.enable_jacobi_equilibration):
+                        delta = delta * constraint_state.nt_jacobi[i_d, i_b] * constraint_state.nt_jacobi[j_d, i_b]
+                    # One lane owns the entry, so the atomic add that += compiles to returns the bits of a plain update,
+                    # the lane issuing it without waiting on the read of the entry.
+                    constraint_state.nt_H[i_b, i_d, j_d] += delta
 
 
 @qd.func
@@ -3358,20 +3404,24 @@ def func_island_hessian_assemble_all(
     LAST_CAP = qd.static(rigid_config.island_tile_cap_last)
     BLOCK_DIM = qd.static(128)
     ROW_TILE = qd.static(32)
-    # A single-island scene launches one block per env, for its island 0 (see func_island_tiled_factor_solve_all)
-    n_slots = constraint_state.n_constraints.shape[0]
-    if qd.static(not rigid_config.is_single_island):
-        n_slots = constraint_state.island.factor_worklist_i_b.shape[0]
+    # A single-island scene launches one block per env, for its island 0 (see func_island_tiled_factor_solve_all). The
+    # tensor is picked at compile time, a kernel-scope variable assigned twice costing a serial launch.
+    n_slots = (
+        constraint_state.n_constraints
+        if qd.static(rigid_config.is_single_island)
+        else constraint_state.island.factor_worklist_i_b
+    ).shape[0]
     qd.loop_config(name="island_hessian_assemble", block_dim=BLOCK_DIM)
     for i_flat in range(n_slots * BLOCK_DIM):
         i_work = i_flat // BLOCK_DIM
         tid = i_flat % BLOCK_DIM
         sh_scan = qd.simt.block.SharedArray((BLOCK_DIM // 32,), gs.qd_int)
+        sh_rows = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_int)
+        sh_weights = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_float)
         # An island above the last cap stages its rows a chunk pair at a time (see func_island_hessian_assemble_block)
         sh_jac = qd.simt.block.SharedArray(
             (ROW_TILE, qd.static(2 * LAST_CAP if rigid_config.has_island_above_tile_cap else LAST_CAP)), gs.qd_float
         )
-        sh_D = qd.simt.block.SharedArray((ROW_TILE,), gs.qd_float)
         i_b = i_work
         i_island = 0
         is_listed = True
@@ -3389,7 +3439,17 @@ def func_island_hessian_assemble_all(
                         n = constraint_state.island.dof_slices.n[i_island, i_b]
                         if n <= LAST_CAP:
                             func_island_hessian_patch_block(
-                                i_b, i_island, tid, sh_scan, constraint_state, rigid_config, BLOCK_DIM
+                                i_b,
+                                i_island,
+                                tid,
+                                sh_jac,
+                                sh_rows,
+                                sh_weights,
+                                sh_scan,
+                                constraint_state,
+                                rigid_config,
+                                BLOCK_DIM,
+                                ROW_TILE,
                             )
                         else:
                             func_island_hessian_assemble_block(
@@ -3397,7 +3457,9 @@ def func_island_hessian_assemble_all(
                                 i_island,
                                 tid,
                                 sh_jac,
-                                sh_D,
+                                sh_rows,
+                                sh_weights,
+                                sh_scan,
                                 constraint_state,
                                 rigid_info,
                                 rigid_config,
@@ -3406,7 +3468,17 @@ def func_island_hessian_assemble_all(
                             )
                     elif qd.static(patch):
                         func_island_hessian_patch_block(
-                            i_b, i_island, tid, sh_scan, constraint_state, rigid_config, BLOCK_DIM
+                            i_b,
+                            i_island,
+                            tid,
+                            sh_jac,
+                            sh_rows,
+                            sh_weights,
+                            sh_scan,
+                            constraint_state,
+                            rigid_config,
+                            BLOCK_DIM,
+                            ROW_TILE,
                         )
                     else:
                         func_island_hessian_assemble_block(
@@ -3414,7 +3486,9 @@ def func_island_hessian_assemble_all(
                             i_island,
                             tid,
                             sh_jac,
-                            sh_D,
+                            sh_rows,
+                            sh_weights,
+                            sh_scan,
                             constraint_state,
                             rigid_info,
                             rigid_config,
@@ -3453,23 +3527,28 @@ def func_island_tiled_factor_solve_all(
     # work-list: the last cap is the env's dof count rounded up to the tile, or the shared-memory bound below it, and
     # the lower caps are its halvings, so the env's island is a last-class island. Every other scene launches every
     # class over its work-list region.
-    region = constraint_state.n_constraints.shape[0]
-    if qd.static(not rigid_config.is_single_island):
-        region = constraint_state.island.factor_worklist_i_b.shape[0] // N_CLASSES
+    # The tensor is picked at compile time and the list size read by the lanes, see func_island_hessian_assemble_all
+    region = (
+        constraint_state.n_constraints
+        if qd.static(rigid_config.is_single_island)
+        else constraint_state.island.factor_worklist_i_b
+    ).shape[0] // qd.static(1 if rigid_config.is_single_island else N_CLASSES)
     for i_class in qd.static(range(N_CLASSES)):
         if qd.static(not rigid_config.is_single_island or i_class == N_CLASSES - 1):
             MAX_DOFS = qd.static(TILE_CAPS[i_class])
             IS_LAST_CLASS = qd.static(i_class == N_CLASSES - 1)
             T = qd.static(array_class.cholesky_tile_size_for(MAX_DOFS))
-            n_work = region
-            if qd.static(not rigid_config.is_single_island):
-                n_work = constraint_state.island.factor_worklist_size[i_class]
             qd.loop_config(name="island_tiled_factor_solve", block_dim=T)
             for i_flat in range(region * T):
                 i_work = i_flat // T
                 tid = i_flat % T
-                sh_L = qd.simt.block.SharedArray((MAX_DOFS, MAX_DOFS + 1), gs.qd_float)
-                if i_work < n_work:
+                sh_L = qd.simt.block.SharedArray(
+                    qd.static(array_class.cholesky_packed_tile_shape(MAX_DOFS)), gs.qd_float
+                )
+                is_listed = True
+                if qd.static(not rigid_config.is_single_island):
+                    is_listed = i_work < constraint_state.island.factor_worklist_size[i_class]
+                if is_listed:
                     i_b = i_work
                     i_island = 0
                     if qd.static(not rigid_config.is_single_island):
@@ -5241,35 +5320,20 @@ def _func_update_efc_force(constraint_state: array_class.ConstraintState, rigid_
 
 @qd.func
 def _func_update_qfrc_constraint_coop(constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
-    """Compute qfrc_constraint = J^T @ efc_force with one cooperating warp per (env, dof).
+    """Compute qfrc_constraint = J^T @ efc_force with one thread per (dof, env), adjacent lanes varying the dof.
 
-    32 lanes stride i_c so adjacent reads of jac[i_c, i_d, i_b] and efc_force[i_c, i_b] are stride-1 under the flipped
-    jac and flipped efc_force layouts; each (env, dof) warp reduces over its constraints with one warp-reduce.
-
-    Gridding over (env, dof) - one warp per dof rather than one warp per env looping all dofs - keeps the GPU busy when
-    the env count alone does not fill it (a single env with many dofs leaves all but one warp idle in the per-env
-    layout). The per-lane summation order is unchanged, so the result is bit-identical to the per-env loop.
+    The lanes of a warp then read consecutive dofs of every row of the batch-first Jacobian (see jac_layout in
+    array_class.py), and each sums the rows of its env in order.
     """
     n_dofs = constraint_state.qfrc_constraint.shape[0]
     _B = constraint_state.grad.shape[1]
-    _K = qd.static(32)
 
-    qd.loop_config(name="update_constraint_qfrc", block_dim=_K)
-    for i_flat in range(_B * n_dofs * _K):
-        tid = i_flat % _K
-        work = i_flat // _K
-        i_d = work % n_dofs
-        i_b = work // n_dofs
-        n_con = constraint_state.n_constraints[i_b]
-
-        qfrc_lane = gs.qd_float(0.0)
-        i_c = tid
-        while i_c < n_con:
-            qfrc_lane = qfrc_lane + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
-            i_c = i_c + _K
-        qfrc_total = su.qd_block_sum(qfrc_lane)
-        if tid == 0:
-            constraint_state.qfrc_constraint[i_d, i_b] = qfrc_total
+    qd.loop_config(name="update_constraint_qfrc")
+    for i_d, i_b in qd.ndrange(n_dofs, _B, axes=(1, 0)):
+        qfrc = gs.qd_float(0.0)
+        for i_c in range(constraint_state.n_constraints[i_b]):
+            qfrc = qfrc + constraint_state.jac[i_c, i_d, i_b] * constraint_state.efc_force[i_c, i_b]
+        constraint_state.qfrc_constraint[i_d, i_b] = qfrc
 
 
 @qd.func
@@ -5355,7 +5419,7 @@ def func_update_constraint(
 
     Under ``enable_cooperative_constraint_kernels=True`` we run three sub-kernels (``_func_update_efc_force``,
     ``_func_update_qfrc_constraint_coop``, ``_func_update_cost_coop``) so per-constraint reads/writes coalesce against
-    the flipped jac and Tier-1 constraint-state tensors. Under canonical we keep the original 1-thread-per-env loop
+    the batch-first jac and Tier-1 constraint-state tensors. Under canonical we keep the original 1-thread-per-env loop
     (bit-identical to the previous code path). The transpose heuristic disables the flip entirely under sparse_solve,
     so sparse runs always take the canonical path here.
     """
