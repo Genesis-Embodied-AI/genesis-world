@@ -1,0 +1,19 @@
+genesis/utils/mjcf.py
+  s_0ad35ed8e9a835::t_eeedc9d9c700bb 195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4256d7f72a2d7c642904cc322e1cc84bde409eff",
+  "prompts": {},
+  "sessions": {
+    "s_0ad35ed8e9a835": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "63313966-a999-4420-a5cc-36e8123cdaf7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
