@@ -1031,7 +1031,8 @@ class ConstraintState:
     solver_iter_counter: qd.Tensor
     # Always ndarray (not field): graph.do_while requires the same physical ndarray on every call.
     graph_counter: qd.types.ndarray()
-    early_exit_flag: qd.Tensor
+    # Iterations left to the graph loop past the current one, which it resumes with once an env iterates on
+    graph_counter_next: qd.Tensor
     # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the row being updated, in the column of the
     # env, or of the lane of the cooperative sweep at [i_d, i_b * 32 + tid] (see func_noslip in noslip.py).
     noslip_MinvJT: qd.Tensor
@@ -1056,10 +1057,10 @@ def get_constraint_state(constraint_solver, solver, collider):
     # DRAM-bound once the combined per-env working sets exceed the CPU caches and batched stepping scales super-linearly
     # with n_envs.
     serialized = solver.rigid_config.para_level < gs.PARA_LEVEL.ALL
-    # Layout-flippable constraint-state tensors (Jaref, jv, efc_D, efc_frictionloss, diag, active) keep their
-    # canonical (len_constraints_, _B) shape; the static config flag picks the physical layout via ``layout=(1, 0)``.
-    # Cooperative kernels read the same flag at compile time to switch between serial and warp-cooperative reductions.
-    # The remaining (len_constraints_,) tensors outside the GPU cooperative flip set follow only the serialized flip.
+    # Layout-flippable constraint-state tensors (Jaref, jv, efc_D, efc_frictionloss, diag, active, aref, efc_force and
+    # the Newton row state) keep their canonical (len_constraints_, _B) shape. The static config flag picks the physical
+    # layout via ``layout=(1, 0)``. Cooperative kernels read the same flag at compile time to switch between serial and
+    # warp-cooperative reductions, their lanes striding the rows of one env.
     con_layout = (1, 0) if batch_first else None
     serial_layout = (1, 0) if serialized else None
     # The CPU incremental factor maintains the elliptic cone by a per-iteration rank-3 update reading the previous cone
@@ -1067,12 +1068,12 @@ def get_constraint_state(constraint_solver, solver, collider):
     is_cone_incremental = solver.rigid_config.enable_elliptic_friction and solver.rigid_config.backend == gs.cpu
     is_signorini = solver.rigid_config.enable_signorini_contact
     n_cones_ = max(1, constraint_solver.n_cone_constraints_ // solver.rigid_config.rows_per_contact)
-    # The 3D Jacobian and its sparse-column-index sibling extend the flip: canonical (len_constraints_, n_dofs_, _B) ->
-    # physical (_B, n_dofs_, len_constraints_) via layout=(2, 1, 0). This makes cooperative-warp-per-env access (lanes
-    # stride i_c) coalesced for the hot p0 J@search, hessian_direct_tiled, and patch_hessian_delta kernels.
-    # Serialized execution instead wants physical (_B, len_constraints_, n_dofs_) via layout=(2, 0, 1): constraint rows
-    # are read and written dof-by-dof for a fixed env.
-    jac_layout = (2, 1, 0) if cooperative else (2, 0, 1) if serialized else None
+    # The 3D Jacobian and its sparse-column-index sibling (the support of each row) extend the flip: canonical
+    # (len_constraints_, n_dofs_, _B) -> physical (_B, len_constraints_, n_dofs_) via layout=(2, 0, 1), each row of an
+    # env stored whole. The cooperative kernels then read the per-iteration J^T @ efc_force and the Hessian staging
+    # with lanes on consecutive dofs of one row, and a row's support spans a cache line or two. Serialized execution
+    # reads and writes the rows dof by dof for a fixed env.
+    jac_layout = (2, 0, 1) if cooperative or serialized else None
     # DOF-vec family flip: canonical (n_dofs_, _B) -> physical (_B, n_dofs_) via layout=(1, 0). Adjacent-lane reads
     # striding i_d in cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on
     # a per-consumer basis under the same enable_cooperative_constraint_kernels flag.
@@ -1088,7 +1089,7 @@ def get_constraint_state(constraint_solver, solver, collider):
     # The Hessian, its equilibration and the incremental factor update exist for the Newton solver alone
     is_newton = solver.rigid_config.solver_type == gs.constraint_solver.Newton
     newton_dof_vec_layout = dof_vec_layout if is_newton else None
-    newton_serial_layout = serial_layout if is_newton else None
+    newton_con_layout = con_layout if is_newton else None
     # The noslip scratch holds one M^{-1} J^T column per env, or per lane of the 32-lane blocks of the cooperative sweep
     # (see func_noslip in noslip.py).
     is_noslip_active = solver._options.noslip_iterations > 0
@@ -1162,28 +1163,24 @@ def get_constraint_state(constraint_solver, solver, collider):
             dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), is_newton), layout=newton_dof_vec_layout
         ),
         incr_changed_idx=V(
-            dtype=gs.qd_int, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_serial_layout
+            dtype=gs.qd_int, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_con_layout
         ),
         incr_n_changed=V(dtype=gs.qd_int, shape=(_B,)),
         # Layout-flippable constraint-state tensors: allocated as qd.Tensor wrappers, optionally with
         # ``layout=(1, 0)`` to physically store as (_B, len_constraints_). Canonical shape stays (len_constraints_, _B);
         # kernel-body indexing ``Jaref[i_c, i_b]`` is rewritten by the AST when ``layout != None``.
         active=V(dtype=gs.qd_bool, shape=(len_constraints_, _B), layout=con_layout),
-        prev_active=V(
-            dtype=gs.qd_bool, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_serial_layout
-        ),
+        prev_active=V(dtype=gs.qd_bool, shape=maybe_shape((len_constraints_, _B), is_newton), layout=newton_con_layout),
         diag=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
+        aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         Jaref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=serial_layout),
+        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),
-        jac_dofs_idx=V(
-            dtype=gs.qd_int, shape=jac_dofs_idx_shape, layout=jac_layout if constraint_solver.sparse_solve else None
-        ),
-        jac_n_dofs=V(dtype=gs.qd_int, shape=jac_n_dofs_shape, layout=serial_layout if jac_n_dofs_shape else None),
+        jac_dofs_idx=V(dtype=gs.qd_int, shape=jac_dofs_idx_shape, layout=jac_layout),
+        jac_n_dofs=V(dtype=gs.qd_int, shape=jac_n_dofs_shape, layout=con_layout),
         # Backward gradients
         dL_dqacc=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
         dL_dM=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, solver.n_dofs_, _B), solver._requires_grad)),
@@ -1202,7 +1199,7 @@ def get_constraint_state(constraint_solver, solver, collider):
         timers=V(dtype=qd.i64 if gs.backend != gs.metal else qd.i32, shape=(10, _B)),
         solver_iter_counter=V(dtype=qd.i32, shape=()),
         graph_counter=qd.ndarray(qd.i32, shape=()),
-        early_exit_flag=V(dtype=qd.i32, shape=()),
+        graph_counter_next=V(dtype=qd.i32, shape=()),
         nt_H_cone_free_diag=V(
             dtype=gs.qd_float,
             shape=maybe_shape((_B, solver.n_dofs_), solver.rigid_config.enable_cone_free_hessian_reuse),
@@ -3202,6 +3199,20 @@ def cholesky_tile_size_for(n_dofs):
     """Tile size of the register-streaming Cholesky kernels for a system of n_dofs dofs: 16 where one 16-lane tile
     holds it or where a 32-lane tile would pad it past its lane utilization (33 to 48 dofs), 32 otherwise."""
     return 16 if (n_dofs <= 16 or 32 < n_dofs <= 48) else 32
+
+
+def cholesky_packed_tile_shape(max_dofs):
+    """Shape of the shared tile of the tiled factor of a block of up to max_dofs dofs.
+
+    The tile holds the blocks of the lower triangle alone, one below the other, each a square of the tile size (see
+    cholesky_tile_size_for) padded by one column against shared-memory bank conflicts, a block of a single tile being
+    the tile itself (see func_packed_tile_pos in solver.py). The sizes are native integers, as the shared array takes
+    them.
+    """
+    tile_size = cholesky_tile_size_for(max_dofs)
+    n_blocks = (max_dofs + tile_size - 1) // tile_size
+    n_rows = min(tile_size, max_dofs)
+    return int(n_blocks * (n_blocks + 1) // 2 * n_rows), int(n_rows + 1)
 
 
 def island_tile_caps(cap_first, cap_last):

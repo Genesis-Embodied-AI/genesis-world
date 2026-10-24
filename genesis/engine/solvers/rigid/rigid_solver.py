@@ -661,6 +661,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 while island_tile_cap_first < min(min_tree_dofs, island_tile_cap_last):
                     island_tile_cap_first *= 2
                 island_tile_cap_first = min(island_tile_cap_first, island_tile_cap_last)
+                # An island holds at most every dof of the scene, so the first doubling that reaches the dof count is
+                # the last class holding islands: a larger cap would launch an empty class every iteration.
+                island_tile_cap_doubling = island_tile_cap_first
+                while island_tile_cap_doubling < min(self.n_dofs, island_tile_cap_last):
+                    island_tile_cap_doubling *= 2
+                island_tile_cap_last = min(island_tile_cap_last, island_tile_cap_doubling)
 
                 # The cooperative in-place LDL^T has no cap; the shared-memory tile is faster but capped. Same env logic
                 # as the Hessian: tile from the largest block >= 8 DOFs, drop the env guard above the cap where the
