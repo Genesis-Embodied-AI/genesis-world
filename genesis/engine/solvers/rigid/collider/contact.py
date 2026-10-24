@@ -1173,14 +1173,9 @@ def func_contact_support_hull(
                 i_ht = i_p
                 n_hull = n_hull + 1
 
-    # A hull vertex whose removal shrinks the hull by less than the fraction 'tol' of its area barely changes the
-    # support polygon, while one carrying a sizeable part of it stays, the corners of a sliver among them. The area lost
-    # is that of the triangle of the vertex with its two neighbours. Only the vertices losing strictly less than both
-    # neighbours are removed, which never removes two neighbours at once, so that every loss is that of the hull as it
-    # stands. Equal losses are ordered by the projected positions of the vertices, read lexicographically, which keeps
-    # the outcome independent of the order of the hull while a symmetric pair of neighbours, whose losses tie exactly,
-    # still loses one of them. Areas are compared twice over to spare the halving. A removed vertex is marked by
-    # encoding its contact index as negative, since its neighbours read it afterwards.
+    # Area-based removal limits each lost triangle to 'tol' of the original hull area. Removing local minima keeps
+    # adjacent corners for the next pass. Projected positions order near-equal losses (see area_rounding below).
+    # Negative contact indices mark removed corners while their neighbours still read them during the pass.
     hull_area_2 = gs.qd_float(0.0)
     hull_perimeter = gs.qd_float(0.0)
     # Collinear edge points follow the deep-interior rule. Preserve the deepest corner during area simplification
@@ -1203,6 +1198,8 @@ def func_contact_support_hull(
                 i_cb_deepest = i_cb
         pos_prev = pos_p
     area_tol = tol * qd.abs(hull_area_2)
+    # Near-equal area losses use the projected positions to keep corner selection stable under positional rounding.
+    area_rounding = rounding * hull_perimeter
 
     # A hull whose doubled area is within 'rounding' times its perimeter is a segment, every point within rounding of
     # one line. Its support is its two ends, the two vertices farthest apart, which a sweep to the farthest vertex from
@@ -1256,15 +1253,11 @@ def func_contact_support_hull(
                 is_vertex_collinear = losses[1] <= rounding * (dir_in.norm() + dir_out.norm())
                 is_least = True
                 for i_k in qd.static((0, 2)):
-                    is_least = is_least and (
-                        losses[1] < losses[i_k]
-                        or (
-                            losses[1] <= losses[i_k]
-                            and (
-                                poss[1, 0] < poss[i_k, 0] or (poss[1, 0] <= poss[i_k, 0] and poss[1, 1] < poss[i_k, 1])
-                            )
-                        )
-                    )
+                    # Removal eligibility takes precedence over positional tie-breaking.
+                    is_tie = qd.abs(losses[1] - losses[i_k]) <= area_rounding
+                    is_tie = is_tie and ((losses[1] <= area_tol) == (losses[i_k] <= area_tol))
+                    is_before = poss[1, 0] < poss[i_k, 0] or (poss[1, 0] <= poss[i_k, 0] and poss[1, 1] < poss[i_k, 1])
+                    is_least = is_least and ((not is_tie and losses[1] < losses[i_k]) or (is_tie and is_before))
                 if is_between and is_least and (is_vertex_collinear or losses[1] <= area_tol):
                     i_c = collider_state.contact_hull_stack[i_cb_start + i_h, i_b]
                     collider_state.contact_hull_stack[i_cb_start + i_h, i_b] = -1 - i_c

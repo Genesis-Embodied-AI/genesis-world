@@ -1393,6 +1393,28 @@ def test_contact_pruning(gjk_collision, show_viewer):
             color=(0, 0, 1, 0.8),
         ),
     )
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, 0.0, -0.3),
+        ),
+    )
+    meshes = []
+    for angle in np.linspace(0.0, np.pi / 2.0, 8, endpoint=False):
+        mesh = trimesh.creation.box(extents=(0.2, 0.2, 0.2))
+        quat = gu.xyz_to_quat(np.array((0.0, 0.0, angle)))
+        mesh.apply_transform(gu.trans_quat_to_T(trans=np.zeros(3), quat=quat))
+        meshes.append(mesh)
+    prism = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=meshes,
+            pos=(0.8, 0.0, 2.0),
+            decimate=False,
+        ),
+        surface=gs.surfaces.Default(
+            smooth=False,
+        ),
+        vis_mode="collision",
+    )
     scene.build(n_envs=2)
     # The box sits in the corner of the three walls in the first environment, and on the edge of the two walls after it
     # in the second one, where its only contacts come from the two link pairs of closest indices
@@ -1444,6 +1466,25 @@ def test_contact_pruning(gjk_collision, show_viewer):
                     f"dropped these {len(idxs) - n_hull_vertices} redundant contact(s):\n{details}"
                 )
     assert_allclose(box.get_pos(), ((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)), atol=2e-3)
+
+    # Micrometre translations preserve the supporting area even when several boundary reductions have equal cost.
+    areas_reference = None
+    for i_step in range(8):
+        positions = np.array(((0.8, 0.0, -0.2001), (1.8, 0.0, -0.2001)))
+        positions[:, 0] += 1e-6 * np.sin(0.3 * i_step)
+        positions[:, 1] += 1e-6 * np.cos(0.7 * i_step)
+        prism.set_pos(positions)
+        prism.set_quat((1.0, 0.0, 0.0, 0.0))
+        scene.step()
+        contacts = prism.get_contacts()
+        contact_positions = tensor_to_array(contacts["position"])
+        contact_mask = tensor_to_array(contacts["valid_mask"])
+        areas = np.array(
+            [ConvexHull(contact_positions[i_b, contact_mask[i_b], :2]).volume for i_b in range(scene.n_envs)]
+        )
+        if areas_reference is None:
+            areas_reference = areas
+        assert_allclose(areas / areas_reference, 1.0, tol=1e-4)
 
 
 @pytest.mark.required
