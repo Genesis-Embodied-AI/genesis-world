@@ -1918,8 +1918,11 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     dof_pos = het_obj.get_dofs_position()
     assert_allclose(dof_pos[..., -1], target_dof_pos, tol=1e-3)
     het_links_pos = het_obj.get_links_pos(relative=False)
-    assert_allclose(het_links_pos[..., 1, 0] - het_links_pos[..., 0, 0], target_dof_pos + 0.1, tol=1e-3)
-    assert_allclose(het_links_pos[..., 1, 1:], het_links_pos[..., 0, 1:], tol=5e-3)
+    links_offset = gu.inv_transform_by_quat(
+        het_links_pos[..., 1, :] - het_links_pos[..., 0, :], het_obj.get_quat(relative=False)
+    )
+    assert_allclose(links_offset[..., 0], target_dof_pos + 0.1, tol=1e-3)
+    assert_allclose(links_offset[..., 1:], 0.0, tol=tol)
 
     # Check that the acceleration is matching the analytical formula
     links_mass = qd_to_numpy(scene.rigid_solver.dyn_info.links.inertial_mass, None, links_idx, transpose=True)
