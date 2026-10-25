@@ -70,10 +70,14 @@ def func_filter_fem_surface_tets(i_t: int, i_a: int, i_q: int, fem_solver: qd.te
 
 @qd.func
 def func_filter_rigid_tets(i_t: int, i_a: int, i_q: int, coupler: qd.template()) -> bool:
-    """Drop a pair of rigid tets whose geoms hold no collision pair."""
+    """Drop a pair of rigid tets whose geoms hold no collision pair.
+
+    The tree and the queries hold the same tets, so every pair of geoms is found in both orders, the one of increasing
+    geom index alone being kept.
+    """
     i_ag = coupler.rigid_volume_elems_geom_idx[i_a]
     i_qg = coupler.rigid_volume_elems_geom_idx[i_q]
-    return coupler.rigid_collision_pair_idx[i_ag, i_qg] == -1
+    return i_ag >= i_qg or coupler.rigid_collision_pair_idx[i_ag, i_qg] == -1
 
 
 class FEMFloorContactType(IntEnum):

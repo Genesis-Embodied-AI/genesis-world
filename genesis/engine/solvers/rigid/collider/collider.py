@@ -532,8 +532,10 @@ class Collider:
         # --- Build collision_pair_idx, valid pairs list, and count ---
         valid_indices = np.where(valid)[0]
         n_possible_pairs = len(valid_indices)
+        # Symmetric, so a pair finds its index in whichever order it comes (see func_broad_phase_geoms)
         collision_pair_idx = np.full((n_geoms, n_geoms), fill_value=-1, dtype=gs.np_int)
         collision_pair_idx[row[valid_indices], col[valid_indices]] = np.arange(n_possible_pairs, dtype=gs.np_int)
+        collision_pair_idx[col[valid_indices], row[valid_indices]] = np.arange(n_possible_pairs, dtype=gs.np_int)
 
         valid_collision_pairs = np.stack([row[valid_indices], col[valid_indices]], axis=1).astype(gs.np_int)
 
@@ -1094,6 +1096,7 @@ def func_detection(
     func_update_geom_aabbs(geoms_init_AABB, dyn_state, dyn_info, rigid_config)
     if qd.static(has_possible_pairs):
         func_broad_phase(
+            geoms_init_AABB,
             dyn_state,
             collider_state,
             constraint_state,

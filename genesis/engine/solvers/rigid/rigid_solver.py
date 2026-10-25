@@ -1397,6 +1397,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 f"Exceeding max number of post-pruning contact points ({max_contacts}) supported by the constraint "
                 "solver. Please increase the value of RigidSolver's option 'max_contacts'."
             )
+        if errno & array_class.ErrorCode.UNSUPPORTED_COLLISION_PAIR:
+            gs.raise_exception(
+                "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or filter this "
+                "pair out via 'contype'/'conaffinity'."
+            )
         if errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
             gs.raise_exception(
                 "Collision detection reported a contact whose position, normal or penetration is not finite. This is a "

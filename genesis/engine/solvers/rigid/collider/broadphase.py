@@ -13,7 +13,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
 from .contact import func_collider_clear_env, func_is_link_pair_hibernated
-from .utils import func_is_geom_aabbs_overlap
+from .utils import func_is_geom_boxes_overlap
 
 
 @qd.func
@@ -54,6 +54,7 @@ def func_check_links_collision_valid(
 
 @qd.func
 def func_collision_clear(
+    geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
@@ -91,7 +92,7 @@ def func_collision_clear(
             for i_pair_ in range(i_chunk * n_pairs // n_chunks, (i_chunk + 1) * n_pairs // n_chunks):
                 i_ga = collider_state.broad_collision_pairs[i_pair_, i_b][0]
                 i_gb = collider_state.broad_collision_pairs[i_pair_, i_b][1]
-                if not func_is_geom_aabbs_overlap(i_ga, i_gb, i_b, dyn_state):
+                if not func_is_geom_boxes_overlap(i_ga, i_gb, i_b, geoms_init_AABB, dyn_state, dyn_info, rigid_info):
                     i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
                     collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
                     collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
@@ -265,9 +266,11 @@ def _func_broad_phase_links_all_vs_all(
 
 @qd.func
 def func_broad_phase_geoms(
+    geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     errno: qd.Tensor,
@@ -298,7 +301,13 @@ def func_broad_phase_geoms(
                         i_ga = qd.min(i_g, i_g_inner)
                         i_gb = qd.max(i_g, i_g_inner)
                         if collider_info.collision_pair_idx[i_ga, i_gb] != -1:
-                            if func_is_geom_aabbs_overlap(i_ga, i_gb, i_b, dyn_state):
+                            # A pair is stored by increasing geom type, then by index, the order every narrow phase
+                            # detection reads it in
+                            if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
+                                i_ga, i_gb = i_gb, i_ga
+                            if func_is_geom_boxes_overlap(
+                                i_ga, i_gb, i_b, geoms_init_AABB, dyn_state, dyn_info, rigid_info
+                            ):
                                 n_broad = qd.atomic_add(collider_state.n_broad_pairs[i_b], 1)
                                 if n_broad < collider_info.max_collision_pairs_broad[None]:
                                     collider_state.broad_collision_pairs[n_broad, i_b][0] = i_ga
@@ -309,6 +318,7 @@ def func_broad_phase_geoms(
 
 @qd.func
 def func_broad_phase(
+    geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     constraint_state: array_class.ConstraintState,
@@ -321,7 +331,14 @@ def func_broad_phase(
 ):
     """Run the broad phase, sweeping the links with the traversal the rigid config selects then testing their geoms."""
     func_collision_clear(
-        dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, collider_static_config
+        geoms_init_AABB,
+        dyn_state,
+        collider_state,
+        dyn_info,
+        rigid_info,
+        collider_info,
+        rigid_config,
+        collider_static_config,
     )
     if qd.static(rigid_config.broadphase_traversal == gs.broadphase_traversal.ALL_VS_ALL):
         _func_broad_phase_links_all_vs_all(
@@ -331,4 +348,6 @@ def func_broad_phase(
         _func_broad_phase_links_sap(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, collider_info, rigid_config
         )
-    func_broad_phase_geoms(dyn_state, collider_state, dyn_info, collider_info, rigid_config, errno)
+    func_broad_phase_geoms(
+        geoms_init_AABB, dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, errno
+    )

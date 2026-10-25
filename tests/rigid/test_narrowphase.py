@@ -442,11 +442,10 @@ class AnalyticalVsGJKSceneCreator:
         self.scene_gjk._sim.rigid_solver._errno.fill(0)
         self.scene_gjk.step()
         errno_val = self.scene_gjk._sim.rigid_solver._errno[0]
-        use_split_narrowphase = self.scene_gjk._sim.rigid_solver.collider._use_split_narrowphase
-        if use_split_narrowphase:
-            # Kernel1 always runs GJK for collision detection (analytical paths are disabled).
-            assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
         if expect_collision:
+            # Kernel1 runs GJK on every pair left by the broad phase (analytical paths are disabled).
+            if self.scene_gjk._sim.rigid_solver.collider._use_split_narrowphase:
+                assert (errno_val & ERRNO_CALLED_GJK_K1) != 0, "GJK scene should use GJK in contact0."
             # On GPU: multicontact is reached when contact0 detects a collision and enqueues the pair.
             # On CPU: the monolithic kernel calls gjk.func_gjk_contact directly (skipping gjk.func_gjk).
             assert (errno_val & ERRNO_CALLED_GJK_K2) != 0, "GJK scene should use GJK for contact generation."

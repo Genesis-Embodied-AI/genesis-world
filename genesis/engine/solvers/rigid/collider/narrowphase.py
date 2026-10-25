@@ -1722,9 +1722,7 @@ def func_contact_mpr_terrain(
                                             valid = False
 
                                         if valid:
-                                            i_pair = collider_info.collision_pair_idx[
-                                                (i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)
-                                            ]
+                                            i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
                                             func_add_contact(
                                                 i_ga,
                                                 i_gb,
@@ -2796,7 +2794,7 @@ def func_convex_convex_contact(
         # A zero axis skips the detection: see func_contact_overlap_axes
         has_target_corner = True
 
-        i_pair = collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
+        i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
         for i_detection in range(5):
             prefer_gjk = (
                 collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.GJK
@@ -4246,9 +4244,6 @@ def func_narrowphase_contact0(
             i_ga = collider_state.broad_collision_pairs[i_pair_idx, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair_idx, i_b][1]
 
-            if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
-                i_ga, i_gb = i_gb, i_ga
-
             if not (
                 dyn_info.geoms.is_convex[i_ga]
                 and dyn_info.geoms.is_convex[i_gb]
@@ -4291,7 +4286,7 @@ def func_narrowphase_contact0(
                 or collider_static_config.ccd_algorithm == CCD_ALGORITHM_CODE.MJ_GJK
             )
 
-            i_pair = collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
+            i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
 
             if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
                 is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
@@ -4498,9 +4493,6 @@ def func_narrow_phase_convex_vs_convex(
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 
-            if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
-                i_ga, i_gb = i_gb, i_ga
-
             if (
                 dyn_info.geoms.is_convex[i_ga]
                 and dyn_info.geoms.is_convex[i_gb]
@@ -4695,9 +4687,6 @@ def func_narrow_phase_convex_specializations(
             i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 
-            if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
-                i_ga, i_gb = i_gb, i_ga
-
             if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
                 func_plane_box_contact(
                     i_ga,
@@ -4759,25 +4748,27 @@ def func_narrow_phase_any_vs_terrain(
             i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
 
             if qd.static(collider_static_config.has_terrain):
-                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.TERRAIN:
-                    i_ga, i_gb = i_gb, i_ga
-
                 if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.TERRAIN:
-                    func_contact_mpr_terrain(
-                        i_ga,
-                        i_gb,
-                        i_b,
-                        geoms_init_AABB,
-                        dyn_state,
-                        collider_state,
-                        mpr_state,
-                        dyn_info,
-                        rigid_info,
-                        collider_info,
-                        rigid_config,
-                        collider_static_config,
-                        errno,
-                    )
+                    # The terrain is detected against the convex hull of the other geom, which would fill the cavities
+                    # of a non-convex geom
+                    if dyn_info.geoms.is_convex[i_ga]:
+                        func_contact_mpr_terrain(
+                            i_ga,
+                            i_gb,
+                            i_b,
+                            geoms_init_AABB,
+                            dyn_state,
+                            collider_state,
+                            mpr_state,
+                            dyn_info,
+                            rigid_info,
+                            collider_info,
+                            rigid_config,
+                            collider_static_config,
+                            errno,
+                        )
+                    else:
+                        errno[i_b] = errno[i_b] | array_class.ErrorCode.UNSUPPORTED_COLLISION_PAIR
 
 
 @qd.func
@@ -4830,11 +4821,9 @@ def func_narrow_phase_nonconvex_vs_nonterrain(
                     # Place the bounded side at i_ga: the polytope helper iterates A's verts and queries B's SDF.
                     # PLANE has infinite extent so it must be i_gb. For non-PLANE pairs the smaller-AABB side goes to
                     # i_ga (its verts are dense relative to the contact patch, while the larger side's scan wastes
-                    # cycles on verts far from any contact). Type-ascending order is preserved as a tiebreaker so
+                    # cycles on verts far from any contact). The type-ascending order of the pair is the tiebreaker so
                     # smooth primitives (SPHERE/ELLIPSOID/CAPSULE) stay at i_ga, matching the smooth-contact refinement
                     # convention shared with the convex-vs-convex narrowphase.
-                    if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
-                        i_ga, i_gb = i_gb, i_ga
                     if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                         i_ga, i_gb = i_gb, i_ga
                     elif dyn_info.geoms.type[i_gb] != gs.GEOM_TYPE.PLANE:
