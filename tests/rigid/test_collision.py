@@ -1814,10 +1814,17 @@ def test_num_contact_overflow(
     )
     assert solver.constraint_solver.len_constraints == expected_len_constraints
 
-    # errno is only polled every RATE_CHECK_ERRNO substeps, so one extra step is required to guarantee that an
-    # error triggered by the first steps gets raised.
+    # errno is only polled every RATE_CHECK_ERRNO substeps, from the copy enqueued by the previous poll, so two polls
+    # past the first steps are required to guarantee that an error triggered by them gets raised.
     with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
-        for _ in range(RATE_CHECK_ERRNO + 1):
+        for _ in range(2 * RATE_CHECK_ERRNO + 1):
+            scene.step()
+
+    # Setting a state clears the error, so the simulation proceeds once the bodies are lifted apart in the air.
+    if error_pattern is not None:
+        for i, entity in enumerate(scene.entities[1:]):
+            entity.set_qpos([3.0 * i, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0])
+        for _ in range(2 * RATE_CHECK_ERRNO + 1):
             scene.step()
 
 

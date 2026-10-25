@@ -399,12 +399,11 @@ class Simulator(RBC):
     # ------------------------------------------------------------------------------------
 
     def step(self, in_backward=False):
-        # Check errno at the very beginning of the step.
-        # This will trigger GPU sync, but it is not a big deal at the point, since we are going to enqueue very large
-        # kernel right away. Moreover, if computations are still not done at this point, then the queue will just
-        # continue growing endlessly, which will not make the simulation faster either.
+        # Check errno at the very beginning of the step, from the copy enqueued by the previous check, so that the host
+        # keeps enqueuing kernels while the device runs. Waiting for that copy still bounds how far the host runs ahead,
+        # which would not make the simulation faster anyway.
         if self.rigid_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
-            self.rigid_solver.check_errno()
+            self.rigid_solver.check_errno(wait=False)
 
         # Reconstructing a checkpoint window replays steps the environments already simulated, so only a forward step
         # advances their clock. The backward pass winds it down again through `_step_grad`.

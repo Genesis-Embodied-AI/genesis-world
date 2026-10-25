@@ -302,6 +302,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
 
+        # Page-locked host copy of the error flags of every environment, and the event recorded once it has landed (see
+        # check_errno)
+        self._errno_host: torch.Tensor | None = None
+        self._errno_event: torch.cuda.Event | None = None
+
         self._is_backward: bool = False
 
         self._ckpt = dict()
@@ -770,6 +775,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
         self.data_manager = array_class.DataManager(self, kinematic_only=False)
         self._errno = self.data_manager.errno
+        if gs.use_zerocopy and gs.device.type == "cuda":
+            self._errno_host = torch.zeros((self._B,), dtype=gs.tc_int, pin_memory=True)
+            self._errno_event = torch.cuda.Event()
 
         self.rigid_info = self.data_manager.rigid_info
         self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
@@ -1373,8 +1381,25 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def get_error_envs_mask(self):
         return qd_to_torch(self._errno) > 0
 
-    def check_errno(self):
-        if gs.use_zerocopy:
+    def check_errno(self, wait: bool = True):
+        """Raise an exception if any environment has flagged a simulation error since its state was last set.
+
+        With 'wait' set to False on CUDA, the error flags are copied to page-locked host memory without waiting for the
+        device, and the copy enqueued by the previous call is checked instead. An error then raises one call later, but
+        the host only waits for the device when it lags behind by more than the interval between two calls.
+        """
+        if not wait and self._errno_host is not None:
+            self._errno_event.synchronize()
+            errno = np.bitwise_or.reduce(tensor_to_array(self._errno_host))
+            if errno:
+                # The flags stay raised on the device until the state of the faulty environments is set, so the next
+                # call copies them again. Clearing the copy that raises spares raising it a second time after the user
+                # has set a valid state.
+                self._errno_host.zero_()
+            else:
+                self._errno_host.copy_(qd_to_torch(self._errno, copy=False), non_blocking=True)
+                self._errno_event.record()
+        elif gs.use_zerocopy:
             errno = np.bitwise_or.reduce(qd_to_numpy(self._errno))
         else:
             errno = kernel_bit_reduction(self._errno)
