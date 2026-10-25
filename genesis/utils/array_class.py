@@ -2004,6 +2004,8 @@ class SupportFieldInfo:
     support_face_normal: qd.Tensor
     # Ordered mesh-local vertex indices of each incident face, shared across coplanar triangles
     support_face_boundary: qd.Tensor
+    # Maximum surface tolerance for a complete boundary, after rounding reserve (see SupportTable in mesh.py)
+    support_face_margin: qd.Tensor
     support_boundary_vertex: qd.Tensor
     # Node parent, subtree end and face range in preorder. Bounds enclose all normals in that range.
     support_face_nodes: qd.Tensor
@@ -2029,6 +2031,7 @@ def get_support_field_info(
         support_vertex_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
         support_face_start=V_VEC(2, dtype=gs.qd_int, shape=(n_face_vertices + 1,)),
         support_face_normal=V_VEC(3, dtype=gs.qd_float, shape=(max(n_face_normals, 1),)),
+        support_face_margin=V(dtype=gs.qd_float, shape=(max(n_face_normals, 1),)),
         support_face_boundary=V_VEC(2, dtype=gs.qd_int, shape=(max(n_face_normals, 1),)),
         support_boundary_vertex=V(dtype=gs.qd_int, shape=(max(n_boundary_vertices, 1),)),
         support_face_nodes=V_VEC(4, dtype=gs.qd_int, shape=(max(n_face_nodes, 1),)),

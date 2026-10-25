@@ -111,7 +111,7 @@ def func_support_contact_patch(
             table_start = collider_info.support_field.support_vertex_start[geom_idx]
             i_v = table_start + i_v - vert_start
             normal_local, boundary = support_field._func_support_face_normal(
-                i_v, direction_local, collider_info.support_field, EPS
+                i_v, direction_local, surface_tolerance, collider_info.support_field, EPS
             )
             face_normal = gu.qd_transform_by_quat(normal_local, geom_quat)
             for i_axis in qd.static(range(3)):
@@ -120,21 +120,27 @@ def func_support_contact_patch(
             support_mesh = gu.qd_transform_by_trans_quat(support_local, geom_pos, geom_quat)
             support = support_mesh
             if dyn_info.geoms.type[geom_idx] != gs.GEOM_TYPE.MESH and dyn_info.geoms.type[geom_idx] != gs.GEOM_TYPE.BOX:
-                # Native support sets the plane offset while the hull normal selects its supporting feature.
-                support = mpr.support_driver(
-                    geom_idx,
-                    i_b,
-                    face_normal.normalized(EPS),
-                    geom_pos,
-                    geom_quat,
-                    collider_state,
-                    dyn_info,
-                    collider_info,
-                    rigid_config,
-                    collider_static_config,
-                )
-                if qd.abs(face_normal.dot(support - support_mesh)) > plane_tolerance:
-                    is_mesh_plane[i_g] = False
+                # A curved native surface follows the detector normal when the mesh face fails plane validation
+                for i_plane in range(2):
+                    if i_plane == 0 or is_mesh_plane[i_g] == 0:
+                        support = mpr.support_driver(
+                            geom_idx,
+                            i_b,
+                            face_normal.normalized(EPS),
+                            geom_pos,
+                            geom_quat,
+                            collider_state,
+                            dyn_info,
+                            collider_info,
+                            rigid_config,
+                            collider_static_config,
+                        )
+                        if i_plane == 0 and qd.abs(face_normal.dot(support - support_mesh)) > plane_tolerance:
+                            is_mesh_plane[i_g] = False
+                            face_normal = sign * normal
+                            normal_local = gu.qd_inv_transform_by_quat(face_normal, geom_quat)
+                for i_axis in qd.static(range(3)):
+                    face_normals[i_g, i_axis] = normal_local[i_axis]
             normal_z = face_normal.dot(normal)
             if qd.abs(normal_z) > EPS:
                 support_offset = support - contact_pos
@@ -434,7 +440,10 @@ def func_support_contact_patch(
                     edge_tolerance *= 0.5
                 tangent = sampling_tangent
                 if is_mesh_plane[i_g] == 0:
-                    tangent = 0.125 * coincidence_tolerance / qd.max(geoms_diameter[i_g], EPS)
+                    # Resolve supports throughout the detector's surface band when the native normal is approximate.
+                    tangent = qd.max(0.125 * coincidence_tolerance, surface_tolerance) / qd.max(
+                        geoms_diameter[i_g], EPS
+                    )
                 direction = tangent * (direction_x * axis_0 + direction_y * axis_1) + (normal if is_b else -normal)
                 sign = 1.0 if is_b else -1.0
                 if is_plane_valid[i_g]:

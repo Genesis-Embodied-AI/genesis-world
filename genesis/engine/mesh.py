@@ -65,6 +65,7 @@ class SupportTable(NamedTuple):
     'faces_normal' for each vertex when requested by the patch builder. Its second component holds the root of the
     supporting-normal tree, or -1 for a short list. 'faces_nodes' and 'faces_bounds' store those trees.
     'faces_boundary' indexes each incident face's ordered vertices in 'boundary_vertices'. Empty ranges use sampling.
+    'faces_margin' bounds the surface tolerance for which that boundary is complete, after reserving rounding error.
     """
 
     slots_vid: np.ndarray
@@ -75,6 +76,7 @@ class SupportTable(NamedTuple):
     faces_nodes: np.ndarray
     faces_bounds: np.ndarray
     faces_boundary: np.ndarray
+    faces_margin: np.ndarray
     boundary_vertices: np.ndarray
 
 
@@ -404,17 +406,14 @@ class Mesh(RBC, serialization.SerializationMixin):
         return _get_sdf_grid(self.verts, self.faces, sdf_tmesh, sdf, mesh_descr)
 
     @cached_by_tmesh
-    def get_support_table(
-        self, support_res: int, face_precision: float | None = None, face_tolerance: float = 0.0
-    ) -> SupportTable:
+    def get_support_table(self, support_res: int, face_precision: float | None = None) -> SupportTable:
         """Return the support table of the geometry, over a grid of directions of a given resolution.
 
         'support_res' is the number of cells of each spherical chart of the grid along its azimuth. The table is shared
         by reference across the meshes of one trimesh (see 'tmesh_hash'). 'face_precision' also requests incident face
-        normals, grouping coplanar triangle normals at that precision for patch construction. 'face_tolerance' is the
-        detector's relative distance tolerance used to certify complete face boundaries.
+        normals and complete face boundaries, with separation margins that reserve rounding error at that precision.
         """
-        return _get_support_table(self.verts, support_res, face_precision, face_tolerance)
+        return _get_support_table(self.verts, support_res, face_precision)
 
     @cached_by_tmesh
     def get_vert_adjacency(self):
@@ -903,9 +902,7 @@ def _get_sdf_grid(
     return sdf_grid
 
 
-def _get_support_table(
-    verts: np.ndarray, support_res: int, face_precision: float | None = None, face_tolerance: float = 0.0
-) -> SupportTable:
+def _get_support_table(verts: np.ndarray, support_res: int, face_precision: float | None = None) -> SupportTable:
     """Compute the support table of the convex hull of a set of vertices over the cells of a grid of directions.
 
     The grid is made of two spherical charts of 'support_res' cells along their azimuth, each one covering the band
@@ -947,6 +944,7 @@ def _get_support_table(
     # orthogonal to it, cut in four quarter arcs.
     faces_boundary = np.empty((0, 2), dtype=gs.np_int)
     boundary_vertices = np.empty(0, dtype=gs.np_int)
+    faces_margin = np.empty(0)
     faces_idx_incident = np.empty(0, dtype=gs.np_int)
     verts_centered = verts - verts.mean(axis=0)
     verts_rank = np.linalg.matrix_rank(verts_centered)
@@ -960,7 +958,7 @@ def _get_support_table(
         faces_direction = np.repeat(faces_normal, repeats=3, axis=0)
         faces_vid = hull.simplices.reshape(-1)
         if face_precision is not None:
-            faces_boundary, boundary_vertices = _get_convex_face_boundaries(verts, hull, face_precision, face_tolerance)
+            faces_boundary, boundary_vertices, faces_margin = _get_convex_face_boundaries(verts, hull, face_precision)
             faces_idx_incident = np.repeat(np.arange(len(hull.simplices)), repeats=3)
         arcs_start = faces_normal[faces_idx]
         arcs_end = faces_normal[hull.neighbors[faces_idx, i_vert]]
@@ -979,6 +977,7 @@ def _get_support_table(
         faces_vid = np.tile(hull_vid, reps=2)
         if face_precision is not None:
             faces_boundary = np.array(((0, len(hull_vid)), (len(hull_vid), 2 * len(hull_vid))))
+            faces_margin = np.full(2, np.inf)
             boundary_forward = hull_vid if np.cross(frame[0], frame[1]).dot(frame[2]) > 0.0 else hull_vid[::-1]
             boundary_vertices = np.concatenate((boundary_forward, boundary_forward[::-1]))
             faces_idx_incident = np.repeat(np.arange(2), repeats=len(hull_vid))
@@ -1009,6 +1008,7 @@ def _get_support_table(
         faces_root, faces_nodes, faces_bounds, faces_order = _build_support_trees(
             faces_start, faces_normal_incident, leaf_size=8, scan_size=32
         )
+        faces_margin = faces_margin[faces_idx_incident[indices][faces_order]]
         faces_boundary = faces_boundary[faces_idx_incident[indices][faces_order]]
         faces_start = np.column_stack((faces_start, faces_root))
 
@@ -1124,15 +1124,16 @@ def _get_support_table(
         faces_nodes,
         faces_bounds,
         faces_boundary,
+        faces_margin,
         boundary_vertices,
     )
 
 
-def _get_convex_face_boundaries(verts: np.ndarray, hull: ConvexHull, face_precision: float, face_tolerance: float):
+def _get_convex_face_boundaries(verts: np.ndarray, hull: ConvexHull, face_precision: float):
     """Group coplanar convex-hull triangles into ordered face boundaries.
 
-    Return a boundary range for each hull triangle and the concatenated mesh-local vertex indices. Empty ranges
-    identify faces whose complete support region requires sampling at the requested precision.
+    Return a boundary range and separation margin for each hull triangle, with concatenated mesh-local vertex indices.
+    Empty ranges identify faces requiring sampling. A boundary is complete when the surface tolerance is below its margin.
     """
     # Hull arithmetic sets coplanarity precision so shallow facets retain separate boundaries
     precision = 128 * np.finfo(float).eps
@@ -1181,7 +1182,7 @@ def _get_convex_face_boundaries(verts: np.ndarray, hull: ConvexHull, face_precis
     is_valid = np.maximum.reduceat(plane_errors, starts[:-1]) <= precision * scale
 
     # A neighbouring vertex inside the support query's rounding band makes the stored boundary incomplete.
-    # Certify separation from that band before bypassing sampling (see _func_support_mesh_face in support_field.py).
+    # Certify separation from every vertex neighbor of the face before bypassing sampling.
     faces_from = np.concatenate((faces_idx, faces_neighbour))
     faces_to = np.concatenate((faces_neighbour, faces_idx))
     is_external = groups[faces_from] != groups[faces_to]
@@ -1191,22 +1192,70 @@ def _get_convex_face_boundaries(verts: np.ndarray, hull: ConvexHull, face_precis
     vertices_opposite = triangles_to[np.arange(len(faces_to)), np.argmax(~is_shared, axis=-1)]
     offsets = verts[vertices_opposite] - verts[triangles_from[:, 0]]
     gaps = -np.sum(offsets * faces_normal[groups[faces_from]], axis=-1)
-    gaps_min = np.full(len(counts), np.inf)
-    np.minimum.at(gaps_min, groups[faces_from], gaps)
+    gaps_upper = np.full(len(counts), np.inf)
+    np.minimum.at(gaps_upper, groups[faces_from], gaps)
+    edges = np.concatenate((hull.simplices[:, (0, 1)], hull.simplices[:, (1, 2)], hull.simplices[:, (2, 0)]))
+    adjacency = csr_matrix(
+        (
+            np.ones(2 * len(edges)),
+            (np.concatenate((edges[:, 0], edges[:, 1])), np.concatenate((edges[:, 1], edges[:, 0]))),
+        ),
+        shape=(len(verts), len(verts)),
+    )
+    face_starts = np.concatenate(([0], np.cumsum(np.bincount(incidences[:, 0]))))
     normal_spread = np.zeros(len(counts))
     np.maximum.at(normal_spread, groups, np.linalg.norm(normals - faces_normal[groups], axis=-1))
     coordinate_scale = np.abs(faces_normal) @ np.max(np.abs(verts), axis=0)
     # Six rounded operations bound plane evaluation, in addition to the support predicate's 4 * eps band.
     arithmetic_error = 6.0 * face_precision / (1.0 - 6.0 * face_precision)
     support_rounding = (8.0 * face_precision + 2.0 * arithmetic_error) * coordinate_scale + normal_spread * scale
-    # A rotated bounding-box diagonal is at most sqrt(3) times the mesh-frame diagonal. Half the detector
-    # distance budget belongs to each surface, and the pair scale is half the smaller bounding-box diagonal.
-    support_rounding += 0.25 * np.sqrt(3.0) * face_tolerance * scale
-    is_valid &= gaps_min > support_rounding
+    # A known excluded vertex inside the rounding band already requires sampling
+    gaps_min = _convex_face_separation(
+        verts,
+        face_starts,
+        incidences[:, 1],
+        faces_normal,
+        adjacency.indptr,
+        adjacency.indices,
+        gaps_upper > support_rounding,
+    )
+    # Reserve conversion and comparison rounding before testing the pair-specific surface tolerance
+    margins = (gaps_min - support_rounding) * (1.0 - 2.0 * face_precision)
+    is_valid &= margins > 0.0
     vertices = vertices[np.repeat(is_valid, counts)]
     counts = np.where(is_valid, counts, 0)
     starts = np.concatenate(([0], np.cumsum(counts)))
-    return np.column_stack((starts[:-1], starts[1:]))[groups], vertices
+    return np.column_stack((starts[:-1], starts[1:]))[groups], vertices, np.where(is_valid, margins, 0.0)[groups]
+
+
+@numba.njit(cache=True)
+def _convex_face_separation(verts, face_starts, face_vertices, normals, neighbor_starts, neighbors, is_eligible):
+    """Return each convex face's minimum plane separation from vertices outside the face.
+
+    Every nonmaximal vertex has an ascending edge for a linear functional on a convex polytope. The closest excluded
+    vertex therefore neighbors a vertex of the face. Scan those vertex neighbors, including edges through face corners.
+    Ineligible faces return zero separation.
+    """
+    groups = np.full(len(verts), -1)
+    gaps = np.zeros(len(normals))
+    for i_f in range(len(normals)):
+        if not is_eligible[i_f]:
+            continue
+        gaps[i_f] = np.inf
+        i_start, i_end = face_starts[i_f], face_starts[i_f + 1]
+        anchor = verts[face_vertices[i_start]]
+        for i_v in range(i_start, i_end):
+            groups[face_vertices[i_v]] = i_f
+        for i_v in range(i_start, i_end):
+            vertex = face_vertices[i_v]
+            for i_n in range(neighbor_starts[vertex], neighbor_starts[vertex + 1]):
+                neighbor = neighbors[i_n]
+                if groups[neighbor] != i_f:
+                    gap = 0.0
+                    for i_axis in range(3):
+                        gap -= (verts[neighbor, i_axis] - anchor[i_axis]) * normals[i_f, i_axis]
+                    gaps[i_f] = min(gaps[i_f], gap)
+    return gaps
 
 
 @numba.njit(cache=True)

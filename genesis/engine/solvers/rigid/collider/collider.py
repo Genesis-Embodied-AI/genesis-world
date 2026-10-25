@@ -102,7 +102,7 @@ class Collider:
         elif self.collider_config.has_non_box_plane_convex_convex:
             self.gjk.activate()
         if self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex:
-            self._support_field.activate(qd_to_numpy(self.mpr._mpr_info.CCD_TOLERANCE, transpose=True).item())
+            self._support_field.activate()
 
         self._init_collision_fields()
 

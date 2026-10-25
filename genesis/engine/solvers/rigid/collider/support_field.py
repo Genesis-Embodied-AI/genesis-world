@@ -42,7 +42,7 @@ class SupportField:
         self._support_field_info: array_class.SupportFieldInfo | None = None
         self._is_active = False
 
-    def activate(self, face_tolerance: float) -> None:
+    def activate(self) -> None:
         if self.is_active:
             return
 
@@ -76,6 +76,7 @@ class SupportField:
         n_face_nodes = 0
         faces_normal = [np.empty((0, 3))]
         faces_boundary = [np.empty((0, 2), dtype=gs.np_int)]
+        faces_margin = [np.empty(0)]
         boundary_vertices = [np.empty(0, dtype=gs.np_int)]
         n_boundary_vertices = 0
         n_face_vertices = 0
@@ -84,7 +85,7 @@ class SupportField:
         for i_t, geom in enumerate(tables_geom):
             cell_start = i_t * n_geom_cells
 
-            table = geom.mesh.get_support_table(self._support_res, face_precision, face_tolerance)
+            table = geom.mesh.get_support_table(self._support_res, face_precision)
             records_vid[cell_start : cell_start + n_geom_cells] = table.slots_vid
             extras_vid.append(table.extras_vid)
             support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = table.cells_n_extras
@@ -106,6 +107,7 @@ class SupportField:
             n_face_nodes += len(nodes)
             faces_normal.append(table.faces_normal)
             faces_boundary.append(table.faces_boundary + n_boundary_vertices)
+            faces_margin.append(table.faces_margin)
             boundary_vertices.append(table.boundary_vertices)
             n_boundary_vertices += len(table.boundary_vertices)
             n_face_vertices += len(table.faces_start) - 1
@@ -121,6 +123,7 @@ class SupportField:
         support_face_bounds = np.concatenate((np.empty((0, 2, 3)), *faces_bounds), dtype=gs.np_float)
         support_face_normal = np.concatenate(faces_normal, dtype=gs.np_float)
         support_face_boundary = np.concatenate(faces_boundary, dtype=gs.np_int)
+        support_face_margin = np.concatenate(faces_margin, dtype=gs.np_float)
         support_boundary_vertex = np.concatenate(boundary_vertices, dtype=gs.np_int)
 
         assert self._support_field_info is None
@@ -150,6 +153,7 @@ class SupportField:
             records_vid,
             extras_vid,
             support_face_normal,
+            support_face_margin,
             support_face_bounds,
             self.solver.dyn_info,
             self._support_field_info,
@@ -184,6 +188,7 @@ def _kernel_init_support(
     records_vid: qd.types.ndarray(),
     extras_vid: qd.types.ndarray(),
     support_face_normal: qd.types.ndarray(),
+    support_face_margin: qd.types.ndarray(),
     support_face_bounds: qd.types.ndarray(),
     dyn_info: array_class.DynInfo,
     support_field_info: array_class.SupportFieldInfo,
@@ -219,6 +224,7 @@ def _kernel_init_support(
         )
 
     for i_f in range(support_face_boundary.shape[0]):
+        support_field_info.support_face_margin[i_f] = support_face_margin[i_f]
         support_field_info.support_face_boundary[i_f] = qd.Vector(
             [support_face_boundary[i_f, 0], support_face_boundary[i_f, 1]]
         )
@@ -249,12 +255,17 @@ def _kernel_init_support(
 
 @qd.func
 def _func_support_face_normal(
-    i_v: int, direction: qd.types.vector(3), support_field_info: array_class.SupportFieldInfo, eps: float
+    i_v: int,
+    direction: qd.types.vector(3),
+    surface_tolerance: float,
+    support_field_info: array_class.SupportFieldInfo,
+    eps: float,
 ):
     """Return the incident face normal most aligned with a mesh-frame direction.
 
     Short lists use an exhaustive scan. Spatial bounds prune longer lists. Face order resolves alignment ties within
-    rounding tolerance. The point-set ranges and tree roots share the support table's vertex numbering.
+    rounding tolerance. Return its boundary when the separation margin exceeds the surface tolerance, or an empty
+    range otherwise. The point-set ranges and tree roots share the support table's vertex numbering.
     """
     direction = direction.normalized(eps)
     i_f_start, i_root = support_field_info.support_face_start[i_v]
@@ -345,7 +356,8 @@ def _func_support_face_normal(
                                 break
                     i_n += 1
         normal = support_field_info.support_face_normal[i_f_best]
-        boundary = support_field_info.support_face_boundary[i_f_best]
+        if surface_tolerance < support_field_info.support_face_margin[i_f_best]:
+            boundary = support_field_info.support_face_boundary[i_f_best]
     return normal, boundary
 
 
