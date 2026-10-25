@@ -3835,6 +3835,7 @@ def func_apply_staged_rank_updates_island(
         ss = qd.Vector.zero(gs.qd_float, rigid_config.hessian_rank_update_batch)
         cinvs = qd.Vector.zero(gs.qd_float, rigid_config.hessian_rank_update_batch)
         is_rotated = qd.Vector.zero(gs.qd_int, rigid_config.hessian_rank_update_batch)
+        is_any_rotated = False
         Lkk = constraint_state.nt_H[i_b, i_dg, i_dg]
         for i_u in qd.static(range(rigid_config.hessian_rank_update_batch)):
             if i_u < n_u and not is_degenerated:
@@ -3849,30 +3850,32 @@ def func_apply_staged_rank_updates_island(
                         cs[i_u] = r / Lkk
                         ss[i_u] = vk / Lkk
                         is_rotated[i_u] = 1
+                        is_any_rotated = True
                         Lkk = r
         if is_degenerated:
             break
         constraint_state.nt_H[i_b, i_dg, i_dg] = Lkk
         # Row phase: apply the n_u rotations to each coupled row, chaining L through the batch. Only rows whose
         # envelope reaches column i_d_local can couple; col_end bounds them so a banded island sweeps its
-        # bandwidth instead of every row below i_d_local.
-        j_d_local_end = n
-        if qd.static(rigid_config.sparse_solve):
-            j_d_local_end = constraint_state.island.dof_env_col_end[dof_base + i_d_local, i_b] + 1
-        for j_d_local in range(i_d_local + 1, j_d_local_end):
-            is_coupled = True
+        # bandwidth instead of every row below i_d_local. A column that no update rotates leaves its rows as they are.
+        if is_any_rotated:
+            j_d_local_end = n
             if qd.static(rigid_config.sparse_solve):
-                is_coupled = constraint_state.island.dof_env_start_local[dof_base + j_d_local, i_b] <= i_d_local
-            if is_coupled:
-                j_dg = constraint_state.island.dof_id[dof_base + j_d_local, i_b]
-                j_slot_base = j_dg * rigid_config.hessian_rank_update_batch
-                Lj = constraint_state.nt_H[i_b, j_dg, i_dg]
-                for i_u in qd.static(range(rigid_config.hessian_rank_update_batch)):
-                    if is_rotated[i_u] == 1:
-                        vj = constraint_state.nt_vec[j_slot_base + i_u, i_b]
-                        Lj = (Lj + signs[i_u] * ss[i_u] * vj) * cinvs[i_u]
-                        constraint_state.nt_vec[j_slot_base + i_u, i_b] = cs[i_u] * vj - ss[i_u] * Lj
-                constraint_state.nt_H[i_b, j_dg, i_dg] = Lj
+                j_d_local_end = constraint_state.island.dof_env_col_end[dof_base + i_d_local, i_b] + 1
+            for j_d_local in range(i_d_local + 1, j_d_local_end):
+                is_coupled = True
+                if qd.static(rigid_config.sparse_solve):
+                    is_coupled = constraint_state.island.dof_env_start_local[dof_base + j_d_local, i_b] <= i_d_local
+                if is_coupled:
+                    j_dg = constraint_state.island.dof_id[dof_base + j_d_local, i_b]
+                    j_slot_base = j_dg * rigid_config.hessian_rank_update_batch
+                    Lj = constraint_state.nt_H[i_b, j_dg, i_dg]
+                    for i_u in qd.static(range(rigid_config.hessian_rank_update_batch)):
+                        if is_rotated[i_u] == 1:
+                            vj = constraint_state.nt_vec[j_slot_base + i_u, i_b]
+                            Lj = (Lj + signs[i_u] * ss[i_u] * vj) * cinvs[i_u]
+                            constraint_state.nt_vec[j_slot_base + i_u, i_b] = cs[i_u] * vj - ss[i_u] * Lj
+                    constraint_state.nt_H[i_b, j_dg, i_dg] = Lj
         for i_u in qd.static(range(rigid_config.hessian_rank_update_batch)):
             if is_rotated[i_u] == 1:
                 constraint_state.nt_vec[slot_base + i_u, i_b] = gs.qd_float(0.0)
