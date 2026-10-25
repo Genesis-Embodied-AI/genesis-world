@@ -2325,25 +2325,33 @@ def func_add_cone_hessian_block(
             jac_n = constraint_state.jac_n_dofs[i_head, i_b]
             for i_d1_ in range(jac_n):
                 i_d1 = constraint_state.jac_dofs_idx[i_head, i_d1_, i_b]
+                # H_c applied to the entries of the cone rows at the first dof, the block being symmetric. A caller
+                # bracketing a non-destructive factor maintains nt_H in scaled coordinates, which the block rides (see
+                # nt_jacobi in array_class.py).
+                rows_jac = qd.Vector.zero(gs.qd_float, n_rows)
+                for i_r in qd.static(range(n_rows)):
+                    rows_jac[i_r] = constraint_state.jac[i_head + i_r, i_d1, i_b]
+                cone_H_jac = qd.Vector.zero(gs.qd_float, n_rows)
+                for i_r in qd.static(range(n_rows)):
+                    for j_r in qd.static(range(n_rows)):
+                        cone_H_jac[i_r] = (
+                            cone_H_jac[i_r]
+                            + cone_H[qd.static(_tri_idx(min(i_r, j_r), max(i_r, j_r), n_rows))] * rows_jac[j_r]
+                        )
+                if qd.static(scale_by_jacobi):
+                    cone_H_jac = cone_H_jac * constraint_state.nt_jacobi[i_d1, i_b]
+                if qd.static(is_removal):
+                    cone_H_jac = -cone_H_jac
                 for i_d2_ in range(i_d1_ + 1):
                     i_d2 = constraint_state.jac_dofs_idx[i_head, i_d2_, i_b]
+                    block = gs.qd_float(0.0)
+                    for i_r in qd.static(range(n_rows)):
+                        block = block + cone_H_jac[i_r] * constraint_state.jac[i_head + i_r, i_d2, i_b]
+                    if qd.static(scale_by_jacobi):
+                        block = block * constraint_state.nt_jacobi[i_d2, i_b]
                     row = qd.max(i_d1, i_d2)
                     col = qd.min(i_d1, i_d2)
-                    rows_jac_row = qd.Vector.zero(gs.qd_float, n_rows)
-                    rows_jac_col = qd.Vector.zero(gs.qd_float, n_rows)
-                    for i_r in qd.static(range(n_rows)):
-                        rows_jac_row[i_r] = constraint_state.jac[i_head + i_r, row, i_b]
-                        rows_jac_col[i_r] = constraint_state.jac[i_head + i_r, col, i_b]
-                    block = _func_cone_block_product(cone_H, rows_jac_row, rows_jac_col)
-                    w_row = row
-                    w_col = col
-                    # A caller bracketing a non-destructive factor maintains nt_H in scaled coordinates; the block
-                    # rides the stored scale (see nt_jacobi in array_class.py).
-                    if qd.static(scale_by_jacobi):
-                        block = block * constraint_state.nt_jacobi[row, i_b] * constraint_state.nt_jacobi[col, i_b]
-                    if qd.static(is_removal):
-                        block = -block
-                    constraint_state.nt_H[i_b, w_row, w_col] = constraint_state.nt_H[i_b, w_row, w_col] + block
+                    constraint_state.nt_H[i_b, row, col] = constraint_state.nt_H[i_b, row, col] + block
 
 
 @qd.func
@@ -2491,6 +2499,20 @@ def func_add_cone_hessian_block_island(
                 jac_n = constraint_state.jac_n_dofs[i_c, i_b]
                 for i_d1_ in range(jac_n):
                     i_d1 = constraint_state.jac_dofs_idx[i_c, i_d1_, i_b]
+                    # H_c applied to the entries of the cone rows at the first dof, the block being symmetric. H is
+                    # maintained in scaled coordinates; see nt_jacobi in array_class.py.
+                    rows_jac = qd.Vector.zero(gs.qd_float, n_rows)
+                    for i_r in qd.static(range(n_rows)):
+                        rows_jac[i_r] = constraint_state.jac[i_c + i_r, i_d1, i_b]
+                    cone_H_jac = qd.Vector.zero(gs.qd_float, n_rows)
+                    for i_r in qd.static(range(n_rows)):
+                        for j_r in qd.static(range(n_rows)):
+                            cone_H_jac[i_r] = (
+                                cone_H_jac[i_r]
+                                + cone_H[qd.static(_tri_idx(min(i_r, j_r), max(i_r, j_r), n_rows))] * rows_jac[j_r]
+                            )
+                    if qd.static(scale_by_jacobi):
+                        cone_H_jac = cone_H_jac * constraint_state.nt_jacobi[i_d1, i_b]
                     for i_d2_ in range(i_d1_, jac_n):
                         i_d2 = constraint_state.jac_dofs_idx[i_c, i_d2_, i_b]
                         row = qd.max(i_d1, i_d2)
@@ -2501,15 +2523,11 @@ def func_add_cone_hessian_block_island(
                                 >= constraint_state.island.dof_local_pos[i_d2, i_b]
                             ) != (i_d1 >= i_d2):
                                 row, col = col, row
-                        rows_jac_row = qd.Vector.zero(gs.qd_float, n_rows)
-                        rows_jac_col = qd.Vector.zero(gs.qd_float, n_rows)
+                        block = gs.qd_float(0.0)
                         for i_r in qd.static(range(n_rows)):
-                            rows_jac_row[i_r] = constraint_state.jac[i_c + i_r, row, i_b]
-                            rows_jac_col[i_r] = constraint_state.jac[i_c + i_r, col, i_b]
-                        block = _func_cone_block_product(cone_H, rows_jac_row, rows_jac_col)
-                        # H is maintained in scaled coordinates; see nt_jacobi in array_class.py
+                            block = block + cone_H_jac[i_r] * constraint_state.jac[i_c + i_r, i_d2, i_b]
                         if qd.static(scale_by_jacobi):
-                            block = block * constraint_state.nt_jacobi[row, i_b] * constraint_state.nt_jacobi[col, i_b]
+                            block = block * constraint_state.nt_jacobi[i_d2, i_b]
                         constraint_state.nt_H[i_b, row, col] = constraint_state.nt_H[i_b, row, col] + block
 
 
@@ -2702,6 +2720,17 @@ def func_hessian_direct_batch(
         if is_any_active:
             for i_d1_ in range(jac_n):
                 i_d1 = constraint_state.jac_dofs_idx[i_c, i_d1_, i_b]
+                # The entries of the block's rows at the first dof, weighted by D, the inactive rows left at zero. They
+                # carry the rows' scales so H assembles equilibrated; see nt_jacobi in array_class.py.
+                rows_coef = qd.Vector.zero(gs.qd_float, n_rows)
+                for i_r in qd.static(range(n_rows)):
+                    if i_r < n_block:
+                        if constraint_state.active[i_c + i_r, i_b]:
+                            rows_coef[i_r] = (
+                                constraint_state.jac[i_c + i_r, i_d1, i_b] * constraint_state.efc_D[i_c + i_r, i_b]
+                            )
+                if qd.static(rigid_config.enable_jacobi_equilibration):
+                    rows_coef = rows_coef * constraint_state.nt_jacobi[i_d1, i_b]
                 for i_d2_ in range(i_d1_, jac_n):
                     i_d2 = constraint_state.jac_dofs_idx[i_c, i_d2_, i_b]
                     row = qd.max(i_d1, i_d2)
@@ -2712,25 +2741,13 @@ def func_hessian_direct_batch(
                             >= constraint_state.island.dof_local_pos[i_d2, i_b]
                         ) != (i_d1 >= i_d2):
                             row, col = col, row
-                    h = constraint_state.nt_H[i_b, row, col]
-                    for i_r in range(n_block):
-                        i_cr = i_c + i_r
-                        if constraint_state.active[i_cr, i_b]:
-                            contrib = (
-                                constraint_state.jac[i_cr, i_d1, i_b]
-                                * constraint_state.jac[i_cr, i_d2, i_b]
-                                * constraint_state.efc_D[i_cr, i_b]
-                            )
-                            # Each contribution carries its rows' scales so H assembles equilibrated; see nt_jacobi in
-                            # array_class.py.
-                            if qd.static(rigid_config.enable_jacobi_equilibration):
-                                contrib = (
-                                    contrib
-                                    * constraint_state.nt_jacobi[i_d1, i_b]
-                                    * constraint_state.nt_jacobi[i_d2, i_b]
-                                )
-                            h = h + contrib
-                    constraint_state.nt_H[i_b, row, col] = h
+                    contrib = gs.qd_float(0.0)
+                    for i_r in qd.static(range(n_rows)):
+                        if i_r < n_block:
+                            contrib = contrib + rows_coef[i_r] * constraint_state.jac[i_c + i_r, i_d2, i_b]
+                    if qd.static(rigid_config.enable_jacobi_equilibration):
+                        contrib = contrib * constraint_state.nt_jacobi[i_d2, i_b]
+                    constraint_state.nt_H[i_b, row, col] = constraint_state.nt_H[i_b, row, col] + contrib
         i_lcon = i_lcon + n_block
     # H += M over the island's dofs, bounded by each dof's mass block (dofs_mass_block_start, mapped to local through
     # dof_local_pos): the mass couples no dofs across blocks, and a block lies within the envelope.
