@@ -151,7 +151,7 @@ def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, b
     # Batch layout and translation change rounding, which can change which nearly equivalent corners pruning retains.
     # The velocity comparison allows their accumulated effect over the drop.
     assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
-    assert_allclose(het_obj.get_vel(), ref_vel, tol=1e-3)
+    assert_allclose(het_obj.get_vel(), ref_vel, atol=1e-3)
     assert_allclose(het_obj.get_mass(), torch.cat([ref_obj.get_mass(envs_idx=0) for ref_obj in ref_objs]), tol=tol)
 
     # The arms stop against each other instead of swinging through each other. FIXME: pytorch#TBD - 'any' over an
