@@ -9,8 +9,11 @@ import numpy as np
 
 import fast_simplification
 import igl
-import trimesh
+import numba
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import ConvexHull, QhullError
+import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -58,12 +61,21 @@ class SupportTable(NamedTuple):
 
     'slots_vid' holds the first two candidates of each cell, the first one repeated when the cell has a single one,
     'extras_vid' the other candidates of all cells, in cell order, and 'cells_n_extras' their count per cell. Vertex
-    indices are local to the geometry (see 'SupportField').
+    indices are local to the geometry (see 'SupportField'). 'faces_start' indexes the incident supporting normals in
+    'faces_normal' for each vertex when requested by the patch builder. Its second component holds the root of the
+    supporting-normal tree, or -1 for a short list. 'faces_nodes' and 'faces_bounds' store those trees.
+    'faces_boundary' indexes each incident face's ordered vertices in 'boundary_vertices'. Empty ranges use sampling.
     """
 
     slots_vid: np.ndarray
     extras_vid: np.ndarray
     cells_n_extras: np.ndarray
+    faces_start: np.ndarray
+    faces_normal: np.ndarray
+    faces_nodes: np.ndarray
+    faces_bounds: np.ndarray
+    faces_boundary: np.ndarray
+    boundary_vertices: np.ndarray
 
 
 # Rotation from the mesh frame to the frame of each spherical chart of the support table. The second chart carries its
@@ -392,13 +404,17 @@ class Mesh(RBC, serialization.SerializationMixin):
         return _get_sdf_grid(self.verts, self.faces, sdf_tmesh, sdf, mesh_descr)
 
     @cached_by_tmesh
-    def get_support_table(self, support_res: int) -> SupportTable:
+    def get_support_table(
+        self, support_res: int, face_precision: float | None = None, face_tolerance: float = 0.0
+    ) -> SupportTable:
         """Return the support table of the geometry, over a grid of directions of a given resolution.
 
         'support_res' is the number of cells of each spherical chart of the grid along its azimuth. The table is shared
-        by reference across the meshes of one trimesh (see 'tmesh_hash').
+        by reference across the meshes of one trimesh (see 'tmesh_hash'). 'face_precision' also requests incident face
+        normals, grouping coplanar triangle normals at that precision for patch construction. 'face_tolerance' is the
+        detector's relative distance tolerance used to certify complete face boundaries.
         """
-        return _get_support_table(self.verts, support_res)
+        return _get_support_table(self.verts, support_res, face_precision, face_tolerance)
 
     @cached_by_tmesh
     def get_vert_adjacency(self):
@@ -887,7 +903,9 @@ def _get_sdf_grid(
     return sdf_grid
 
 
-def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
+def _get_support_table(
+    verts: np.ndarray, support_res: int, face_precision: float | None = None, face_tolerance: float = 0.0
+) -> SupportTable:
     """Compute the support table of the convex hull of a set of vertices over the cells of a grid of directions.
 
     The grid is made of two spherical charts of 'support_res' cells along their azimuth, each one covering the band
@@ -927,6 +945,9 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
     # vertices of their shared edge tie. A flat geom joins its two opposite face normals through the outward normal of
     # each outline edge by two quarter arcs. A segment or a point ties both of its ends along the great circle
     # orthogonal to it, cut in four quarter arcs.
+    faces_boundary = np.empty((0, 2), dtype=gs.np_int)
+    boundary_vertices = np.empty(0, dtype=gs.np_int)
+    faces_idx_incident = np.empty(0, dtype=gs.np_int)
     verts_centered = verts - verts.mean(axis=0)
     verts_rank = np.linalg.matrix_rank(verts_centered)
     # Principal axes of the vertices, from the eigenvectors of their 3x3 second moment, of fixed size
@@ -938,6 +959,9 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
         faces_normal = hull.equations[:, :3]
         faces_direction = np.repeat(faces_normal, repeats=3, axis=0)
         faces_vid = hull.simplices.reshape(-1)
+        if face_precision is not None:
+            faces_boundary, boundary_vertices = _get_convex_face_boundaries(verts, hull, face_precision, face_tolerance)
+            faces_idx_incident = np.repeat(np.arange(len(hull.simplices)), repeats=3)
         arcs_start = faces_normal[faces_idx]
         arcs_end = faces_normal[hull.neighbors[faces_idx, i_vert]]
         # The neighbour of a face across its i-th vertex shares the edge made of its two other vertices
@@ -953,6 +977,11 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
         n_edges = len(edges_normal)
         faces_direction = np.repeat(faces_normal, repeats=len(hull_vid), axis=0)
         faces_vid = np.tile(hull_vid, reps=2)
+        if face_precision is not None:
+            faces_boundary = np.array(((0, len(hull_vid)), (len(hull_vid), 2 * len(hull_vid))))
+            boundary_forward = hull_vid if np.cross(frame[0], frame[1]).dot(frame[2]) > 0.0 else hull_vid[::-1]
+            boundary_vertices = np.concatenate((boundary_forward, boundary_forward[::-1]))
+            faces_idx_incident = np.repeat(np.arange(2), repeats=len(hull_vid))
         arcs_start = np.concatenate((np.tile(faces_normal[0], reps=(n_edges, 1)), edges_normal))
         arcs_end = np.concatenate((edges_normal, np.tile(faces_normal[1], reps=(n_edges, 1))))
         arcs_vid = np.tile(outline.simplices, reps=(2, 1))
@@ -964,6 +993,24 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
         arcs_start = np.stack((frame[1], frame[2], -frame[1], -frame[2]))
         arcs_end = np.roll(arcs_start, shift=-1, axis=0)
         arcs_vid = np.tile(hull_vid, reps=(4, 1))
+
+    faces_start = np.array(((0, -1),), dtype=gs.np_int)
+    faces_nodes = np.empty((0, 4), dtype=gs.np_int)
+    faces_bounds = np.empty((0, 2, 3))
+    faces_normal_incident = np.empty((0, 3))
+    if face_precision is not None:
+        # Triangulation repeats coplanar incident normals. Group at the requested precision while retaining each
+        # representative's original normal, using the hull already required by the support table.
+        keys = np.column_stack((faces_vid, np.round(faces_direction / face_precision)))
+        _, indices = np.unique(keys, axis=0, return_index=True)
+        counts = np.bincount(faces_vid[indices], minlength=len(verts))
+        faces_start = np.concatenate((np.zeros(1, dtype=gs.np_int), np.cumsum(counts)))
+        faces_normal_incident = faces_direction[indices]
+        faces_root, faces_nodes, faces_bounds, faces_order = _build_support_trees(
+            faces_start, faces_normal_incident, leaf_size=8, scan_size=32
+        )
+        faces_boundary = faces_boundary[faces_idx_incident[indices][faces_order]]
+        faces_start = np.column_stack((faces_start, faces_root))
 
     # Support of every node, searched among the hull vertices alone, by chunks of nodes whose dot products take a
     # bounded memory whatever the vertex count
@@ -1068,7 +1115,149 @@ def _get_support_table(verts: np.ndarray, support_res: int) -> SupportTable:
     slots_vid = np.repeat(verts_idx[is_first, None], repeats=2, axis=-1)
     is_slot = candidates_rank < 2
     slots_vid[cells_idx[is_slot], candidates_rank[is_slot]] = verts_idx[is_slot]
-    return SupportTable(slots_vid, verts_idx[~is_slot], np.bincount(cells_idx[~is_slot], minlength=n_geom_cells))
+    return SupportTable(
+        slots_vid,
+        verts_idx[~is_slot],
+        np.bincount(cells_idx[~is_slot], minlength=n_geom_cells),
+        faces_start,
+        faces_normal_incident,
+        faces_nodes,
+        faces_bounds,
+        faces_boundary,
+        boundary_vertices,
+    )
+
+
+def _get_convex_face_boundaries(verts: np.ndarray, hull: ConvexHull, face_precision: float, face_tolerance: float):
+    """Group coplanar convex-hull triangles into ordered face boundaries.
+
+    Return a boundary range for each hull triangle and the concatenated mesh-local vertex indices. Empty ranges
+    identify faces whose complete support region requires sampling at the requested precision.
+    """
+    # Hull arithmetic sets coplanarity precision so shallow facets retain separate boundaries
+    precision = 128 * np.finfo(float).eps
+    normals = hull.equations[:, :3]
+    faces_idx, neighbours_idx = np.nonzero(hull.neighbors > np.arange(len(normals))[:, None])
+    faces_neighbour = hull.neighbors[faces_idx, neighbours_idx]
+    normal_error = np.linalg.norm(normals[faces_idx] - normals[faces_neighbour], axis=-1)
+    offset_error = np.abs(hull.equations[faces_idx, 3] - hull.equations[faces_neighbour, 3])
+    scale = np.linalg.norm(np.ptp(verts, axis=0))
+    is_coplanar = (normal_error <= precision) & (offset_error <= precision * scale)
+    adjacency = csr_matrix(
+        (np.ones(np.count_nonzero(is_coplanar)), (faces_idx[is_coplanar], faces_neighbour[is_coplanar])),
+        shape=(len(normals), len(normals)),
+    )
+    _, groups = connected_components(adjacency, directed=False)
+    _, faces_first = np.unique(groups, return_index=True)
+    incidences = np.unique(np.column_stack((np.repeat(groups, repeats=3), hull.simplices.reshape(-1))), axis=0)
+    counts = np.bincount(incidences[:, 0])
+    starts = np.concatenate(([0], np.cumsum(counts)))
+    vertices = incidences[:, 1].copy()
+    faces_normal = normals[faces_first]
+    is_triangle = counts == 3
+    triangles = vertices[starts[:-1][is_triangle, None] + np.arange(3)]
+    cross = np.cross(verts[triangles[:, 1]] - verts[triangles[:, 0]], verts[triangles[:, 2]] - verts[triangles[:, 0]])
+    is_reversed = np.sum(cross * faces_normal[is_triangle], axis=-1) < 0.0
+    triangles[is_reversed] = triangles[is_reversed][:, (0, 2, 1)]
+    vertices[starts[:-1][is_triangle, None] + np.arange(3)] = triangles
+    for i_f in np.flatnonzero(~is_triangle):
+        indices = vertices[starts[i_f] : starts[i_f + 1]]
+        points = verts[indices] - verts[indices[0]]
+        normal = faces_normal[i_f]
+        axis = np.eye(3)[np.argmin(np.abs(normal))]
+        tangent_0 = np.cross(axis, normal)
+        tangent_0 /= np.linalg.norm(tangent_0)
+        tangent_1 = np.cross(normal, tangent_0)
+        outline = ConvexHull(points @ np.stack((tangent_0, tangent_1), axis=-1))
+        n_points = len(outline.vertices)
+        vertices[starts[i_f] : starts[i_f] + n_points] = indices[outline.vertices]
+        counts[i_f] = n_points
+    # Compact after removing collinear vertices from merged faces.
+    is_used = np.arange(len(vertices)) - np.repeat(starts[:-1], np.diff(starts)) < np.repeat(counts, np.diff(starts))
+    vertices = vertices[is_used]
+    starts = np.concatenate(([0], np.cumsum(counts)))
+    vertex_offsets = verts[vertices] - np.repeat(verts[vertices[starts[:-1]]], counts, axis=0)
+    plane_errors = np.abs(np.sum(vertex_offsets * np.repeat(faces_normal, counts, axis=0), axis=-1))
+    is_valid = np.maximum.reduceat(plane_errors, starts[:-1]) <= precision * scale
+
+    # A neighbouring vertex inside the support query's rounding band makes the stored boundary incomplete.
+    # Certify separation from that band before bypassing sampling (see _func_support_mesh_face in support_field.py).
+    faces_from = np.concatenate((faces_idx, faces_neighbour))
+    faces_to = np.concatenate((faces_neighbour, faces_idx))
+    is_external = groups[faces_from] != groups[faces_to]
+    faces_from, faces_to = faces_from[is_external], faces_to[is_external]
+    triangles_from, triangles_to = hull.simplices[faces_from], hull.simplices[faces_to]
+    is_shared = (triangles_to[:, :, None] == triangles_from[:, None, :]).any(axis=-1)
+    vertices_opposite = triangles_to[np.arange(len(faces_to)), np.argmax(~is_shared, axis=-1)]
+    offsets = verts[vertices_opposite] - verts[triangles_from[:, 0]]
+    gaps = -np.sum(offsets * faces_normal[groups[faces_from]], axis=-1)
+    gaps_min = np.full(len(counts), np.inf)
+    np.minimum.at(gaps_min, groups[faces_from], gaps)
+    normal_spread = np.zeros(len(counts))
+    np.maximum.at(normal_spread, groups, np.linalg.norm(normals - faces_normal[groups], axis=-1))
+    coordinate_scale = np.abs(faces_normal) @ np.max(np.abs(verts), axis=0)
+    # Six rounded operations bound plane evaluation, in addition to the support predicate's 4 * eps band.
+    arithmetic_error = 6.0 * face_precision / (1.0 - 6.0 * face_precision)
+    support_rounding = (8.0 * face_precision + 2.0 * arithmetic_error) * coordinate_scale + normal_spread * scale
+    # A rotated bounding-box diagonal is at most sqrt(3) times the mesh-frame diagonal. Half the detector
+    # distance budget belongs to each surface, and the pair scale is half the smaller bounding-box diagonal.
+    support_rounding += 0.25 * np.sqrt(3.0) * face_tolerance * scale
+    is_valid &= gaps_min > support_rounding
+    vertices = vertices[np.repeat(is_valid, counts)]
+    counts = np.where(is_valid, counts, 0)
+    starts = np.concatenate(([0], np.cumsum(counts)))
+    return np.column_stack((starts[:-1], starts[1:]))[groups], vertices
+
+
+@numba.njit(cache=True)
+def _build_support_trees(points_start, points, leaf_size, scan_size):
+    """Build spatial trees for support queries over disjoint point sets, reordering each set in place.
+
+    Short sets retain their scan order. Return roots, node links, bounds and the point permutation. Each node stores its
+    parent, subtree end and point range. Preorder storage makes its first child adjacent and its second child follow the first
+    subtree. The root array includes a final sentinel matching the point-range offsets.
+    """
+    points_order = np.arange(len(points))
+    roots = np.full(len(points_start), -1, dtype=points_start.dtype)
+    n_nodes = 0
+    for i_p in range(len(points_start) - 1):
+        n_points = points_start[i_p + 1] - points_start[i_p]
+        if n_points > scan_size:
+            roots[i_p] = n_nodes
+            n_nodes += 2 * ((n_points + leaf_size - 1) // leaf_size) - 1
+    nodes = np.empty((n_nodes, 4), dtype=points_start.dtype)
+    bounds = np.empty((n_nodes, 2, 3), dtype=points.dtype)
+    ranges = np.empty((n_nodes, 2), dtype=points_start.dtype)
+    for i_p in range(len(points_start) - 1):
+        i_root = roots[i_p]
+        if i_root >= 0:
+            i_p_start, i_p_end = points_start[i_p], points_start[i_p + 1]
+            n_leaves = (i_p_end - i_p_start + leaf_size - 1) // leaf_size
+            ranges[i_root, 0], ranges[i_root, 1] = 0, n_leaves
+            nodes[i_root, 0] = -1
+            for i_n in range(i_root, i_root + 2 * n_leaves - 1):
+                i_l_start, i_l_end = ranges[i_n]
+                i_start = i_p_start + leaf_size * i_l_start
+                i_end = min(i_p_start + leaf_size * i_l_end, i_p_end)
+                nodes[i_n, 1] = i_n + 2 * (i_l_end - i_l_start) - 1
+                nodes[i_n, 2], nodes[i_n, 3] = i_start, i_end
+                for i_axis in range(3):
+                    lower = upper = points[i_start, i_axis]
+                    for i_v in range(i_start + 1, i_end):
+                        lower = min(lower, points[i_v, i_axis])
+                        upper = max(upper, points[i_v, i_axis])
+                    bounds[i_n, 0, i_axis], bounds[i_n, 1, i_axis] = lower, upper
+                if i_l_end - i_l_start > 1:
+                    i_axis = np.argmax(bounds[i_n, 1] - bounds[i_n, 0])
+                    order = np.argsort(points[i_start:i_end, i_axis])
+                    points[i_start:i_end] = points[i_start:i_end][order]
+                    points_order[i_start:i_end] = points_order[i_start:i_end][order]
+                    i_middle = (i_l_start + i_l_end) // 2
+                    i_left, i_right = i_n + 1, i_n + 2 * (i_middle - i_l_start)
+                    ranges[i_left, 0], ranges[i_left, 1] = i_l_start, i_middle
+                    ranges[i_right, 0], ranges[i_right, 1] = i_middle, i_l_end
+                    nodes[i_left, 0] = nodes[i_right, 0] = i_n
+    return roots, nodes, bounds, points_order
 
 
 def _exported_geometry(mesh: trimesh.Trimesh, exporting: serialization.Exporting) -> dict:

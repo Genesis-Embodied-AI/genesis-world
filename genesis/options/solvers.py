@@ -577,12 +577,12 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         Whether to use GJK for collision detection instead of MPR. More stable but much slower. Defaults to
         `sim_options.requires_grad`.
     enable_contact_patch: bool, optional
-        Whether to recover the full contact patch from the touching faces inside GJK, in a single detection pass,
-        instead of through perturbed re-detections. The contact patch is cheaper and reports the exact contact
-        polygon, but it is discouraged: it is less reliable than the perturbation-based detection, which is extremely
-        robust at the cost of extra detection passes. Requires GJK collision detection, and raises otherwise. If
-        None, it is enabled when MuJoCo compatibility is enabled together with GJK and multi-contact, and disabled
-        otherwise. Defaults to None.
+        Whether to construct contacts from supporting features instead of perturbed collision queries. Direct
+        patches recover planar overlaps on detailed faces, but retaining more contacts can increase simulation cost.
+        Unresolved features retain the initial contact. Perturbation uses additional detection passes to find contacts
+        around such features.
+        Requires multi-contact detection. If None, it is enabled with multi-contact detection, except in compatibility
+        mode and differentiable simulation, where perturbation is the default. Defaults to None.
     broadphase_traversal : gs.broadphase_traversal, optional
         Broadphase traversal strategy. ``SAP`` (sweep-and-prune) or ``ALL_VS_ALL`` (parallel pair iteration). Defaults
         to ``None`` (auto: ``SAP`` on CPU or with heterogeneous entities, ``ALL_VS_ALL`` on GPU otherwise). See

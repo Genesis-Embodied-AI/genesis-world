@@ -42,7 +42,7 @@ class SupportField:
         self._support_field_info: array_class.SupportFieldInfo | None = None
         self._is_active = False
 
-    def activate(self) -> None:
+    def activate(self, face_tolerance: float) -> None:
         if self.is_active:
             return
 
@@ -69,29 +69,88 @@ class SupportField:
         records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
         support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
         extras_vid = []
+        tables_vertex_start = np.zeros(len(tables_geom), dtype=gs.np_int)
+        faces_start = []
+        faces_nodes = []
+        faces_bounds = []
+        n_face_nodes = 0
+        faces_normal = [np.empty((0, 3))]
+        faces_boundary = [np.empty((0, 2), dtype=gs.np_int)]
+        boundary_vertices = [np.empty(0, dtype=gs.np_int)]
+        n_boundary_vertices = 0
+        n_face_vertices = 0
+        n_face_normals = 0
+        face_precision = gs.EPS if self.solver._options.enable_contact_patch else None
         for i_t, geom in enumerate(tables_geom):
             cell_start = i_t * n_geom_cells
 
-            slots_vid, table_extras_vid, cells_n_extras = geom.mesh.get_support_table(self._support_res)
-            records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
-            extras_vid.append(table_extras_vid)
-            support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
+            table = geom.mesh.get_support_table(self._support_res, face_precision, face_tolerance)
+            records_vid[cell_start : cell_start + n_geom_cells] = table.slots_vid
+            extras_vid.append(table.extras_vid)
+            support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = table.cells_n_extras
+            tables_vertex_start[i_t] = n_face_vertices
+            faces_start.append(
+                np.column_stack(
+                    (
+                        table.faces_start[:-1, 0] + n_face_normals,
+                        np.where(table.faces_start[:-1, 1] >= 0, table.faces_start[:-1, 1] + n_face_nodes, -1),
+                    )
+                )
+            )
+            nodes = table.faces_nodes.copy()
+            nodes[:, 0] = np.where(nodes[:, 0] >= 0, nodes[:, 0] + n_face_nodes, -1)
+            nodes[:, 1] += n_face_nodes
+            nodes[:, 2:] += n_face_normals
+            faces_nodes.append(nodes)
+            faces_bounds.append(table.faces_bounds)
+            n_face_nodes += len(nodes)
+            faces_normal.append(table.faces_normal)
+            faces_boundary.append(table.faces_boundary + n_boundary_vertices)
+            boundary_vertices.append(table.boundary_vertices)
+            n_boundary_vertices += len(table.boundary_vertices)
+            n_face_vertices += len(table.faces_start) - 1
+            n_face_normals += len(table.faces_normal)
 
         # The extra candidates of every cell start past the records of all cells, in cell order
         support_list_start[0] = 2 * n_support_cells
         np.cumsum(support_list_start, out=support_list_start)
         extras_vid = np.concatenate((np.zeros((0,), dtype=gs.np_int), *extras_vid), dtype=gs.np_int)
 
+        support_face_start = np.concatenate((*faces_start, np.array(((n_face_normals, -1),), dtype=gs.np_int)))
+        support_face_nodes = np.concatenate((np.empty((0, 4), dtype=gs.np_int), *faces_nodes), dtype=gs.np_int)
+        support_face_bounds = np.concatenate((np.empty((0, 2, 3)), *faces_bounds), dtype=gs.np_float)
+        support_face_normal = np.concatenate(faces_normal, dtype=gs.np_float)
+        support_face_boundary = np.concatenate(faces_boundary, dtype=gs.np_int)
+        support_boundary_vertex = np.concatenate(boundary_vertices, dtype=gs.np_int)
+
         assert self._support_field_info is None
         self._support_field_info = array_class.get_support_field_info(
-            self.solver.n_geoms, n_support_cells, 2 * n_support_cells + len(extras_vid), self._support_res
+            self.solver.n_geoms,
+            n_support_cells,
+            2 * n_support_cells + len(extras_vid),
+            self._support_res,
+            n_face_vertices,
+            n_face_normals,
+            n_face_nodes,
+            n_boundary_vertices,
         )
+        geoms_vertex_start = np.zeros(self.solver.n_geoms, dtype=gs.np_int)
+        for geom in self.solver.geoms:
+            if geom.type != gs.GEOM_TYPE.TERRAIN:
+                geoms_vertex_start[geom.idx] = tables_vertex_start[geoms_table_idx[geom.idx]]
         _kernel_init_support(
             n_geom_cells * geoms_table_idx,
+            geoms_vertex_start,
+            support_face_start,
+            support_face_nodes,
+            support_face_boundary,
+            support_boundary_vertex,
             support_list_start,
             np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
             records_vid,
             extras_vid,
+            support_face_normal,
+            support_face_bounds,
             self.solver.dyn_info,
             self._support_field_info,
             self.solver.rigid_config,
@@ -115,10 +174,17 @@ class SupportField:
 @qd.kernel
 def _kernel_init_support(
     support_cell_start: qd.types.ndarray(),
+    support_vertex_start: qd.types.ndarray(),
+    support_face_start: qd.types.ndarray(),
+    support_face_nodes: qd.types.ndarray(),
+    support_face_boundary: qd.types.ndarray(),
+    support_boundary_vertex: qd.types.ndarray(),
     support_list_start: qd.types.ndarray(),
     tables_vert_start: qd.types.ndarray(),
     records_vid: qd.types.ndarray(),
     extras_vid: qd.types.ndarray(),
+    support_face_normal: qd.types.ndarray(),
+    support_face_bounds: qd.types.ndarray(),
     dyn_info: array_class.DynInfo,
     support_field_info: array_class.SupportFieldInfo,
     rigid_config: qd.template(),
@@ -135,8 +201,30 @@ def _kernel_init_support(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g in range(support_cell_start.shape[0]):
         support_field_info.support_cell_start[i_g] = support_cell_start[i_g]
+        support_field_info.support_vertex_start[i_g] = support_vertex_start[i_g]
 
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v in range(support_face_start.shape[0]):
+        support_field_info.support_face_start[i_v] = qd.Vector([support_face_start[i_v, 0], support_face_start[i_v, 1]])
+
+    for i_n in range(support_face_nodes.shape[0]):
+        for i_k in qd.static(range(4)):
+            support_field_info.support_face_nodes[i_n][i_k] = support_face_nodes[i_n, i_k]
+        for i_side, i_axis in qd.static(qd.ndrange(2, 3)):
+            support_field_info.support_face_bounds[i_n][i_side, i_axis] = support_face_bounds[i_n, i_side, i_axis]
+
+    for i_f in range(support_face_normal.shape[0]):
+        support_field_info.support_face_normal[i_f] = qd.Vector(
+            [support_face_normal[i_f, 0], support_face_normal[i_f, 1], support_face_normal[i_f, 2]]
+        )
+
+    for i_f in range(support_face_boundary.shape[0]):
+        support_field_info.support_face_boundary[i_f] = qd.Vector(
+            [support_face_boundary[i_f, 0], support_face_boundary[i_f, 1]]
+        )
+    for i_v in range(support_boundary_vertex.shape[0]):
+        support_field_info.support_boundary_vertex[i_v] = support_boundary_vertex[i_v]
+
     for i_cell in range(support_list_start.shape[0]):
         support_field_info.support_list_start[i_cell] = support_list_start[i_cell]
 
@@ -157,6 +245,108 @@ def _kernel_init_support(
             i_v = extras_vid[i_s - 2 * n_records]
             support_field_info.support_vid[i_s] = i_v
             support_field_info.support_v[i_s] = dyn_info.verts.init_pos[i_v_start + i_v]
+
+
+@qd.func
+def _func_support_face_normal(
+    i_v: int, direction: qd.types.vector(3), support_field_info: array_class.SupportFieldInfo, eps: float
+):
+    """Return the incident face normal most aligned with a mesh-frame direction.
+
+    Short lists use an exhaustive scan. Spatial bounds prune longer lists. Face order resolves alignment ties within
+    rounding tolerance. The point-set ranges and tree roots share the support table's vertex numbering.
+    """
+    direction = direction.normalized(eps)
+    i_f_start, i_root = support_field_info.support_face_start[i_v]
+    i_f_end = support_field_info.support_face_start[i_v + 1][0]
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    boundary = qd.Vector.zero(gs.qd_int, 2)
+    if i_f_end > i_f_start:
+        i_f_best = i_f_start
+        normal = support_field_info.support_face_normal[i_f_start]
+        alignment_max = -(normal - direction).norm_sqr()
+        i_root_end = i_root
+        if i_root < 0:
+            for i_f in range(i_f_start + 1, i_f_end):
+                candidate = support_field_info.support_face_normal[i_f]
+                alignment = -(candidate - direction).norm_sqr()
+                if alignment > alignment_max:
+                    alignment_max, i_f_best = alignment, i_f
+        else:
+            i_root_end = support_field_info.support_face_nodes[i_root][1]
+            i_n, i_p = i_root, -1
+            # Each node is entered once and revisited after each child. Parent links bound storage per query.
+            for _ in range(3 * (i_root_end - i_root)):
+                if i_n < 0:
+                    break
+                parent, subtree_end, face_start, face_end = support_field_info.support_face_nodes[i_n]
+                i_next = parent
+                is_entering = i_p == parent
+                is_reached = True
+                if is_entering:
+                    bounds = support_field_info.support_face_bounds[i_n]
+                    point = qd.Vector.zero(gs.qd_float, 3)
+                    for i_axis in qd.static(range(3)):
+                        point[i_axis] = qd.min(qd.max(direction[i_axis], bounds[0, i_axis]), bounds[1, i_axis])
+                    is_reached = -(point - direction).norm_sqr() > alignment_max
+                if is_reached:
+                    if subtree_end == i_n + 1:
+                        for i_f in range(face_start, face_end):
+                            candidate = support_field_info.support_face_normal[i_f]
+                            alignment = -(candidate - direction).norm_sqr()
+                            if alignment > alignment_max:
+                                alignment_max, i_f_best = alignment, i_f
+                    else:
+                        i_left = i_n + 1
+                        i_right = support_field_info.support_face_nodes[i_left][1]
+                        upper = qd.Vector.zero(gs.qd_float, 2)
+                        for i_child in range(2):
+                            i_c = i_left if i_child == 0 else i_right
+                            bounds = support_field_info.support_face_bounds[i_c]
+                            point = qd.Vector.zero(gs.qd_float, 3)
+                            for i_axis in qd.static(range(3)):
+                                point[i_axis] = qd.min(qd.max(direction[i_axis], bounds[0, i_axis]), bounds[1, i_axis])
+                            upper[i_child] = -(point - direction).norm_sqr()
+                        i_first = i_left if upper[0] >= upper[1] else i_right
+                        if is_entering:
+                            i_next = i_first
+                        elif i_p == i_first:
+                            i_next = i_right if i_first == i_left else i_left
+                i_p, i_n = i_n, i_next
+        # Squared normal distance resolves shallow facets whose cosines round to the same value.
+        # Rotating a geom perturbs normal components, so the tie tolerance scales with angular separation.
+        alignment_min = alignment_max - 8.0 * eps * qd.max(qd.sqrt(-alignment_max), eps)
+        if i_root < 0:
+            for i_f in range(i_f_start, i_f_best):
+                candidate = support_field_info.support_face_normal[i_f]
+                if -(candidate - direction).norm_sqr() >= alignment_min:
+                    i_f_best = i_f
+                    break
+        else:
+            i_n = i_root
+            for _ in range(i_root_end - i_root):
+                if i_n >= i_root_end:
+                    break
+                parent, subtree_end, face_start, face_end = support_field_info.support_face_nodes[i_n]
+                if face_start >= i_f_best:
+                    break
+                bounds = support_field_info.support_face_bounds[i_n]
+                point = qd.Vector.zero(gs.qd_float, 3)
+                for i_axis in qd.static(range(3)):
+                    point[i_axis] = qd.min(qd.max(direction[i_axis], bounds[0, i_axis]), bounds[1, i_axis])
+                if -(point - direction).norm_sqr() < alignment_min:
+                    i_n = subtree_end
+                else:
+                    if subtree_end == i_n + 1:
+                        for i_f in range(face_start, qd.min(face_end, i_f_best)):
+                            candidate = support_field_info.support_face_normal[i_f]
+                            if -(candidate - direction).norm_sqr() >= alignment_min:
+                                i_f_best = i_f
+                                break
+                    i_n += 1
+        normal = support_field_info.support_face_normal[i_f_best]
+        boundary = support_field_info.support_face_boundary[i_f_best]
+    return normal, boundary
 
 
 @qd.func
@@ -266,6 +456,39 @@ def _func_support_mesh(
 
     # The table numbers the vertices of its geom from zero (see SupportFieldInfo)
     return v, i_v_start + vid
+
+
+@qd.func
+def _func_support_mesh_face(
+    i_g: int,
+    normal: qd.types.vector(3),
+    anchor: qd.types.vector(3),
+    tangent: qd.types.vector(3),
+    collider_info: array_class.ColliderInfo,
+    surface_tolerance: float,
+    EPS: float,
+):
+    """Maximize the tangent over vertices of a supporting face in the mesh frame."""
+    i_cell = _func_direction_cell(i_g, normal, collider_info)
+    i_start = collider_info.support_field.support_list_start[i_cell]
+    i_end = collider_info.support_field.support_list_start[i_cell + 1]
+    support = anchor
+    score_max = gs.qd_float(0.0)
+    for i_candidate in range(2 + i_end - i_start):
+        i_s = 2 * i_cell + i_candidate
+        if i_candidate >= 2:
+            i_s = i_start + i_candidate - 2
+        candidate = collider_info.support_field.support_v[i_s]
+        offset = candidate - anchor
+        # The direction cell includes every vertex whose normal cone touches its closure.
+        # Testing face membership before the tangent prevents neighboring facets from entering the outline.
+        tolerance = surface_tolerance + 4.0 * EPS * qd.abs(normal).dot(qd.abs(candidate) + qd.abs(anchor))
+        if qd.abs(normal.dot(offset)) <= tolerance:
+            score = tangent.dot(offset)
+            if score > score_max:
+                support = candidate
+                score_max = score
+    return support
 
 
 @qd.func

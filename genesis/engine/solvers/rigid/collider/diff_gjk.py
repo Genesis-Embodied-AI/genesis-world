@@ -338,7 +338,6 @@ def func_gjk_contact(
 
     gjk_state.n_contacts[i_b] = n_contacts
     gjk_state.is_col[i_b] = n_contacts > 0
-    gjk_state.multi_contact_flag[i_b] = True
 
 
 @qd.func

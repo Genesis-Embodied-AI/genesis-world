@@ -1754,63 +1754,6 @@ def get_epa_polytope_horizon_data(_B, polytope_max_horizons):
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactFace:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    vert1: qd.Tensor
-    vert2: qd.Tensor
-    endverts: qd.Tensor
-    normal1: qd.Tensor
-    normal2: qd.Tensor
-    id1: qd.Tensor
-    id2: qd.Tensor
-
-
-def get_contact_face(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactFace(
-        vert1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        vert2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactNormal:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    endverts: qd.Tensor
-    normal: qd.Tensor
-    id: qd.Tensor
-
-
-def get_contact_normal(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactNormal(
-        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactHalfspace:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    normal: qd.Tensor
-    dist: qd.Tensor
-
-
-def get_contact_halfspace(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactHalfspace(normal=V_VEC(3, dtype=gs.qd_float, shape=shape), dist=V(dtype=gs.qd_float, shape=shape))
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class Witness:
     kind: ClassVar[DataKind] = DataKind.SCRATCH
 
@@ -1843,11 +1786,6 @@ class GJKState:
     polytope_faces_map: qd.Tensor
     polytope_horizon_data: EPAPolytopeHorizonData
     polytope_horizon_stack: EPAPolytopeHorizonData
-    contact_faces: ContactFace
-    contact_normals: ContactNormal
-    contact_halfspaces: ContactHalfspace
-    contact_clipped_polygons: qd.Tensor
-    multi_contact_flag: qd.Tensor
     witness: Witness
     n_witness: qd.Tensor
     n_contacts: qd.Tensor
@@ -1869,7 +1807,6 @@ def get_gjk_state(_B, rigid_config, gjk_info, requires_grad=False):
     enable_mujoco_compatibility = rigid_config.enable_mujoco_compatibility
     polytope_max_faces = gjk_info.polytope_max_faces[None]
     max_contacts_per_pair = gjk_info.max_contacts_per_pair[None]
-    max_contact_polygon_verts = gjk_info.max_contact_polygon_verts[None]
 
     # FIXME: Define GJKState and MujocoCompatGJKState that derives from the former but defines additional attributes
     return GJKState(
@@ -1889,12 +1826,6 @@ def get_gjk_state(_B, rigid_config, gjk_info, requires_grad=False):
         polytope_faces_map=V(dtype=gs.qd_int, shape=(_B, polytope_max_faces)),
         polytope_horizon_data=get_epa_polytope_horizon_data(_B, 6 + gjk_info.epa_max_iterations[None]),
         polytope_horizon_stack=get_epa_polytope_horizon_data(_B, polytope_max_faces * 3),
-        # Multi-contact detection (MuJoCo compatibility)
-        contact_faces=get_contact_face(_B, max_contact_polygon_verts),
-        contact_normals=get_contact_normal(_B, max_contact_polygon_verts),
-        contact_halfspaces=get_contact_halfspace(_B, max_contact_polygon_verts),
-        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(_B, 2, max_contact_polygon_verts)),
-        multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
         # Final results
         witness=get_witness(_B, max_contacts_per_pair),
         n_witness=V(dtype=gs.qd_int, shape=(_B,)),
@@ -1946,12 +1877,6 @@ def get_gjk_state_contact_only(_B):
         polytope_faces_map=V(dtype=gs.qd_int, shape=(1, 1)),
         polytope_horizon_data=get_epa_polytope_horizon_data(_dummy_B, 1),
         polytope_horizon_stack=get_epa_polytope_horizon_data(_dummy_B, 1),
-        # Multi-contact - dummy
-        contact_faces=get_contact_face(_dummy_B, 1),
-        contact_normals=get_contact_normal(_dummy_B, 1),
-        contact_halfspaces=get_contact_halfspace(_dummy_B, 1),
-        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(1, 2, 1)),
-        multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
         # Results - full _B for fields func_gjk writes; dummy for EPA-only fields
         witness=get_witness(_B, 1),
         n_witness=V(dtype=gs.qd_int, shape=(_B,)),
@@ -1973,7 +1898,6 @@ class GJKInfo:
     kind: ClassVar[DataKind] = DataKind.CONSTANT
 
     max_contacts_per_pair: qd.Tensor
-    max_contact_polygon_verts: qd.Tensor
     # Maximum number of iterations for GJK and EPA algorithms
     gjk_max_iterations: qd.Tensor
     epa_max_iterations: qd.Tensor
@@ -2027,7 +1951,6 @@ class GJKInfo:
 def get_gjk_info(**kwargs):
     return GJKInfo(
         max_contacts_per_pair=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["max_contacts_per_pair"]),
-        max_contact_polygon_verts=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["max_contact_polygon_verts"]),
         gjk_max_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["gjk_max_iterations"]),
         epa_max_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["epa_max_iterations"]),
         FLOAT_MIN=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"]),
@@ -2075,15 +1998,41 @@ class SupportFieldInfo:
     # extra candidates of all cells
     support_v: qd.Tensor
     support_vid: qd.Tensor
+    # Incident supporting faces share the vertex numbering of each geom's support table.
+    support_vertex_start: qd.Tensor
+    support_face_start: qd.Tensor
+    support_face_normal: qd.Tensor
+    # Ordered mesh-local vertex indices of each incident face, shared across coplanar triangles
+    support_face_boundary: qd.Tensor
+    support_boundary_vertex: qd.Tensor
+    # Node parent, subtree end and face range in preorder. Bounds enclose all normals in that range.
+    support_face_nodes: qd.Tensor
+    support_face_bounds: qd.Tensor
     support_res: qd.Tensor
 
 
-def get_support_field_info(n_geoms, n_support_cells, n_support_candidates, support_res):
+def get_support_field_info(
+    n_geoms,
+    n_support_cells,
+    n_support_candidates,
+    support_res,
+    n_face_vertices=0,
+    n_face_normals=0,
+    n_face_nodes=0,
+    n_boundary_vertices=0,
+):
     return SupportFieldInfo(
         support_cell_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
         support_list_start=V(dtype=gs.qd_int, shape=(n_support_cells + 1,)),
         support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_candidates, 1),)),
         support_vid=V(dtype=gs.qd_int, shape=(max(n_support_candidates, 1),)),
+        support_vertex_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
+        support_face_start=V_VEC(2, dtype=gs.qd_int, shape=(n_face_vertices + 1,)),
+        support_face_normal=V_VEC(3, dtype=gs.qd_float, shape=(max(n_face_normals, 1),)),
+        support_face_boundary=V_VEC(2, dtype=gs.qd_int, shape=(max(n_face_normals, 1),)),
+        support_boundary_vertex=V(dtype=gs.qd_int, shape=(max(n_boundary_vertices, 1),)),
+        support_face_nodes=V_VEC(4, dtype=gs.qd_int, shape=(max(n_face_nodes, 1),)),
+        support_face_bounds=V_MAT(2, 3, dtype=gs.qd_float, shape=(max(n_face_nodes, 1),)),
         support_res=V_SCALAR_FROM(dtype=gs.qd_int, value=support_res),
     )
 

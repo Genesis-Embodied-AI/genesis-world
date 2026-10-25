@@ -17,7 +17,7 @@ from .epa import (
 )
 from .gjk_support import func_support, support_driver
 from .gjk_utils import func_project_origin_to_plane
-from .multi_contact import func_multi_contact, func_safe_normalize
+from .multi_contact import func_safe_normalize
 from .utils import func_det3, func_is_discrete_geoms
 
 
@@ -25,22 +25,14 @@ class GJK:
     def __init__(self, rigid_solver):
         self._solver = rigid_solver
 
-        # Resolve the 'enable_contact_patch' option in place, so later consumers (the collider's convex contact
-        # budget) read the resolved value. The contact patch (polygon clipping over the touching faces) skips
-        # perturbation whenever it ran (see multi_contact_flag). It defaults on under MuJoCo compatibility with GJK
-        # because the reference engine builds its manifolds that way inside its GJK/EPA and runs its perturbation
-        # scheme only in its legacy fallback pipeline, which the MPR compatibility pipeline mirrors. It defaults off
-        # otherwise, as the perturbation-based detection is more reliable on marginal manifolds.
         enable_contact_patch = rigid_solver._options.enable_contact_patch
         if enable_contact_patch is None:
             enable_contact_patch = (
-                rigid_solver._enable_mujoco_compatibility
-                and rigid_solver._options.use_gjk_collision
-                and rigid_solver._enable_multi_contact
+                rigid_solver._enable_multi_contact
+                and not rigid_solver._enable_mujoco_compatibility
+                and not rigid_solver.rigid_config.requires_grad
             )
         elif enable_contact_patch:
-            if not rigid_solver._options.use_gjk_collision:
-                gs.raise_exception("'enable_contact_patch' requires 'use_gjk_collision'.")
             if not rigid_solver._enable_multi_contact:
                 gs.raise_exception("'enable_contact_patch' requires 'enable_multi_contact'.")
         rigid_solver._options.enable_contact_patch = enable_contact_patch
@@ -52,25 +44,14 @@ class GJK:
         if rigid_solver.rigid_config.requires_grad:
             # For differentiable contact detection, we find multiple contact points for each pair.
             max_contacts_per_pair = 20
-            max_contact_polygon_verts = 1
-        elif enable_contact_patch:
-            # The maximum number of contacts per pair is related to the maximum number of contact manifold vertices.
-            # MuJoCo sets [max_contacts_per_pair] to 50 and [max_contact_polygon_verts] to 150, when it uses
-            # multi-contact detection algorithm, assuming that the faces could have more than 4 vertices. However, we
-            # set them to smaller values, because we do not expect the faces to have more than 4 vertices in most cases,
-            # and we want to keep the memory usage low.
-            max_contacts_per_pair = 8
-            max_contact_polygon_verts = 30
         else:
             max_contacts_per_pair = 1
-            max_contact_polygon_verts = 1
 
         self.gjk_config = array_class.GJKStaticConfig(enable_contact_patch=enable_contact_patch)
 
         # Initialize GJK info
         self._gjk_info = array_class.get_gjk_info(
             max_contacts_per_pair=max_contacts_per_pair,
-            max_contact_polygon_verts=max_contact_polygon_verts,
             gjk_max_iterations=gjk_max_iterations,
             epa_max_iterations=epa_max_iterations,
             # When using larger minimum values (e.g. gs.EPS), unstability could occur for some examples (e.g. box
@@ -133,14 +114,9 @@ class GJK:
 
 @qd.func
 def clear_cache(i_b: int, gjk_state: array_class.GJKState):
-    """
-    Clear the cache information to prepare for the next GJK-EPA run.
-
-    The cache includes the temporary information about simplex consturction or multi-contact detection.
-    """
+    """Reset support and simplex search indices for the next collision query."""
     gjk_state.support_mesh_prev_vertex_id[i_b, 0] = -1
     gjk_state.support_mesh_prev_vertex_id[i_b, 1] = -1
-    gjk_state.multi_contact_flag[i_b] = False
     gjk_state.last_searched_simplex_vertex_id[i_b] = 0
 
 
@@ -180,16 +156,13 @@ def func_gjk_contact(
     # No EPA penetration face yet; set to the nearest face index below if EPA runs.
     gjk_state.nearest_face[i_b] = -1
 
+    is_sphere_swept_geom_a = func_is_sphere_swept_geom(i_ga, dyn_info)
+    is_sphere_swept_geom_b = func_is_sphere_swept_geom(i_gb, dyn_info)
+    shrink_sphere = is_sphere_swept_geom_a or is_sphere_swept_geom_b
+    has_core_witness = False
+
     # We use MuJoCo's GJK implementation when the compatibility mode is enabled
     if qd.static(rigid_config.enable_mujoco_compatibility):
-        # If any one of the geometries is a sphere or capsule, which are sphere-swept primitives,
-        # we can shrink them to a point or line to detect shallow penetration faster
-        is_sphere_swept_geom_a, is_sphere_swept_geom_b = (
-            func_is_sphere_swept_geom(i_ga, dyn_info),
-            func_is_sphere_swept_geom(i_gb, dyn_info),
-        )
-        shrink_sphere = is_sphere_swept_geom_a or is_sphere_swept_geom_b
-
         # Run GJK
         for _ in range(2 if shrink_sphere else 1):
             distance = func_gjk(
@@ -215,20 +188,7 @@ def func_gjk_contact(
                 # get the actual distance. If the distance is smaller than the collision epsilon, it means a deep
                 # penetration, which requires the default GJK handling.
                 if distance > collider_info.gjk.collision_eps[None]:
-                    radius_a, radius_b = 0.0, 0.0
-                    if is_sphere_swept_geom_a:
-                        radius_a = dyn_info.geoms.data[i_ga][0]
-                    if is_sphere_swept_geom_b:
-                        radius_b = dyn_info.geoms.data[i_gb][0]
-
-                    wa = gjk_state.witness.point_obj1[i_b, 0]
-                    wb = gjk_state.witness.point_obj2[i_b, 0]
-                    n = func_safe_normalize(wb - wa, collider_info)
-
-                    gjk_state.distance[i_b] = distance - (radius_a + radius_b)
-                    gjk_state.witness.point_obj1[i_b, 0] = wa + (radius_a * n)
-                    gjk_state.witness.point_obj2[i_b, 0] = wb - (radius_b * n)
-
+                    has_core_witness = True
                     break
 
             # Only try shrinking the sphere once
@@ -318,42 +278,27 @@ def func_gjk_contact(
                     )
                     gjk_state.nearest_face[i_b] = i_f
 
-                    if qd.static(gjk_static_config.enable_contact_patch):
-                        # The patch needs a valid nearest polytope face and two discrete geometries to clip.
-                        if i_f >= 0 and func_is_discrete_geoms(i_ga, i_gb, dyn_info):
-                            func_multi_contact(
-                                i_ga, i_gb, i_b, i_f, pos_a, quat_a, pos_b, quat_b, gjk_state, dyn_info, collider_info
-                            )
-                            gjk_state.multi_contact_flag[i_b] = True
     else:
-        gjk_flag = func_safe_gjk(
-            i_ga,
-            i_gb,
-            i_b,
-            pos_a,
-            quat_a,
-            pos_b,
-            quat_b,
-            collider_state,
-            gjk_state,
-            dyn_info,
-            rigid_info,
-            collider_info,
-            rigid_config,
-            collider_static_config,
-        )
-        if gjk_flag == GJK_RETURN_CODE.INTERSECT:
-            # Initialize polytope
-            gjk_state.polytope.nverts[i_b] = 0
-            gjk_state.polytope.nfaces[i_b] = 0
-            gjk_state.polytope.nfaces_map[i_b] = 0
-            gjk_state.polytope.horizon_nedges[i_b] = 0
-
-            # Construct the initial polytope from the GJK simplex
-            func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, collider_info)
-
-            # Run EPA from the polytope
-            gjk_state.nearest_face[i_b] = func_safe_epa(
+        if shrink_sphere:
+            distance = func_gjk(
+                i_ga,
+                i_gb,
+                i_b,
+                pos_a,
+                quat_a,
+                pos_b,
+                quat_b,
+                collider_state,
+                gjk_state,
+                dyn_info,
+                collider_info,
+                rigid_config,
+                collider_static_config,
+                shrink_sphere,
+            )
+            has_core_witness = distance > collider_info.gjk.collision_eps[None]
+        if not has_core_witness:
+            gjk_flag = func_safe_gjk(
                 i_ga,
                 i_gb,
                 i_b,
@@ -369,15 +314,46 @@ def func_gjk_contact(
                 rigid_config,
                 collider_static_config,
             )
+            if gjk_flag == GJK_RETURN_CODE.INTERSECT:
+                # Initialize polytope
+                gjk_state.polytope.nverts[i_b] = 0
+                gjk_state.polytope.nfaces[i_b] = 0
+                gjk_state.polytope.nfaces_map[i_b] = 0
+                gjk_state.polytope.horizon_nedges[i_b] = 0
 
-            if qd.static(gjk_static_config.enable_contact_patch):
-                # The patch needs a valid nearest polytope face and two discrete geometries to clip.
-                i_f = gjk_state.nearest_face[i_b]
-                if i_f >= 0 and func_is_discrete_geoms(i_ga, i_gb, dyn_info):
-                    func_multi_contact(
-                        i_ga, i_gb, i_b, i_f, pos_a, quat_a, pos_b, quat_b, gjk_state, dyn_info, collider_info
-                    )
-                    gjk_state.multi_contact_flag[i_b] = True
+                # Construct the initial polytope from the GJK simplex
+                func_safe_epa_init(i_ga, i_gb, i_b, gjk_state, collider_info)
+
+                # Run EPA from the polytope
+                gjk_state.nearest_face[i_b] = func_safe_epa(
+                    i_ga,
+                    i_gb,
+                    i_b,
+                    pos_a,
+                    quat_a,
+                    pos_b,
+                    quat_b,
+                    collider_state,
+                    gjk_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    rigid_config,
+                    collider_static_config,
+                )
+
+    if has_core_witness:
+        radius_a, radius_b = 0.0, 0.0
+        if is_sphere_swept_geom_a:
+            radius_a = dyn_info.geoms.data[i_ga][0]
+        if is_sphere_swept_geom_b:
+            radius_b = dyn_info.geoms.data[i_gb][0]
+        wa = gjk_state.witness.point_obj1[i_b, 0]
+        wb = gjk_state.witness.point_obj2[i_b, 0]
+        n = func_safe_normalize(wb - wa, collider_info)
+        gjk_state.distance[i_b] -= radius_a + radius_b
+        gjk_state.witness.point_obj1[i_b, 0] = wa + radius_a * n
+        gjk_state.witness.point_obj2[i_b, 0] = wb - radius_b * n
 
     # Compute the final contact points and normals
     n_contacts = 0
@@ -546,10 +522,8 @@ def func_gjk(
         x_k = support_vector
         s_k = gjk_state.simplex_vertex.mink[i_b, n]
         diff = x_k - s_k
-        if diff.dot(x_k) < epsilon:
-            # Convergence condition is met, we can stop.
-            if i == 0:
-                n = 1
+        # The duality gap bounds distance only after the iterate belongs to the support simplex.
+        if i > 0 and diff.dot(x_k) < epsilon:
             break
 
         # Check if the objects are separated using support vector

@@ -1048,14 +1048,10 @@ def func_safe_epa(
             upper = upper_k
             upper2 = upper**2
 
-        # The bounds have converged once they are closer than the tolerance. The nearest face is also exact once its own
-        # support point lies on its plane up to the rounding of the support, the difference of the world support points
-        # of both geoms, which rounds with their magnitude: expanding the polytope by that point would attach faces too
-        # thin to be oriented, which aborts it. That rounding applies to the support along the normal of the nearest
-        # face alone, since the best upper bound may come from another direction and a face through the origin then
-        # meets it whichever way it faces.
+        # The selected face's support gap certifies its direction. A tight bound from another direction certifies
+        # only depth, so it can leave the selected face's normal pointing through the interior of the true surface.
         supports_norm = gjk_state.polytope_verts.obj1[i_b, wi].norm() + gjk_state.polytope_verts.obj2[i_b, wi].norm()
-        if (upper - lower) < tolerance or (upper_k - lower) < rigid_info.EPS[None] * supports_norm:
+        if (upper_k - lower) < qd.max(tolerance, rigid_info.EPS[None] * supports_norm):
             break
 
         if discrete:

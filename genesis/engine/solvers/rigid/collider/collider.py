@@ -102,7 +102,7 @@ class Collider:
         elif self.collider_config.has_non_box_plane_convex_convex:
             self.gjk.activate()
         if self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex:
-            self._support_field.activate()
+            self._support_field.activate(qd_to_numpy(self.mpr._mpr_info.CCD_TOLERANCE, transpose=True).item())
 
         self._init_collision_fields()
 
@@ -168,13 +168,8 @@ class Collider:
             else:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MPR
 
-        # The contact patch can hand back the full clipped polygon of a box-box pair, which the reference engine
-        # budgets at 8 contacts (see func_clip_polygon); the convex budget must hold it or the extra witnesses of the
-        # patch are silently dropped. 'enable_contact_patch' is resolved by the GJK constructor.
         if self._solver.rigid_config.requires_grad:
             n_contacts_per_convex_pair = 20
-        elif self._solver._options.enable_contact_patch:
-            n_contacts_per_convex_pair = 8
         else:
             n_contacts_per_convex_pair = 5
 
