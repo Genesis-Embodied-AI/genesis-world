@@ -16,13 +16,18 @@ def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid
     block_start = rigid_info.dofs_mass_block_start[i_d0]
     block_end = rigid_info.dofs_mass_block_end[i_d0]
 
+    # Each substitution walks the chain of mass parents of a dof (see func_solve_mass_block in forward_dynamics.py)
+    n_block = block_end - block_start
     # Step 1: Solve w s.t. L^T @ w = y (backward substitution)
-    for i_d_ in range(block_end - block_start):
+    for i_d_ in range(n_block):
         i_d = block_end - i_d_ - 1
-        curr = vec[i_d, i_col]
-        for j_d in range(i_d + 1, block_end):
-            curr = curr - rigid_info.mass_mat_L[j_d, i_d, i_b] * vec[j_d, i_col]
-        vec[i_d, i_col] = curr
+        w = vec[i_d, i_col]
+        j_d = i_d
+        for _ in range(n_block - 1):
+            j_d = rigid_info.dofs_mass_parent[j_d]
+            if j_d < 0:
+                break
+            vec[j_d, i_col] = vec[j_d, i_col] - rigid_info.mass_mat_L[i_d, j_d, i_b] * w
 
     # Step 2: z = D^{-1} @ w
     for i_d in range(block_start, block_end):
@@ -31,7 +36,11 @@ def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid
     # Step 3: Solve x s.t. L @ x = z (forward substitution)
     for i_d in range(block_start, block_end):
         curr = vec[i_d, i_col]
-        for j_d in range(block_start, i_d):
+        j_d = i_d
+        for _ in range(n_block - 1):
+            j_d = rigid_info.dofs_mass_parent[j_d]
+            if j_d < 0:
+                break
             curr = curr - rigid_info.mass_mat_L[i_d, j_d, i_b] * vec[j_d, i_col]
         vec[i_d, i_col] = curr
 

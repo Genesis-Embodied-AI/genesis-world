@@ -392,6 +392,9 @@ class RigidInfo:
     dofs_mass_block_start: qd.Tensor
     dofs_mass_block_end: qd.Tensor
     dofs_mass_envelope_start: qd.Tensor
+    # Mass parent of each dof, -1 for none: the previous dof of its link, else the last dof of its nearest ancestor link
+    # holding one, when it lies in the same mass block.
+    dofs_mass_parent: qd.Tensor
     # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
     # the dofs of its own link, within its mass block.
     mass_parent_mask: qd.Tensor
@@ -506,6 +509,7 @@ def get_rigid_info(solver, kinematic_only):
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
+            dofs_mass_parent=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
             substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
             iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
@@ -556,6 +560,7 @@ def get_rigid_info(solver, kinematic_only):
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
+        dofs_mass_parent=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
         substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
         iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),

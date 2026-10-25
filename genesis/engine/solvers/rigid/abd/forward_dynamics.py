@@ -1194,16 +1194,25 @@ def func_solve_mass_block(
     range is what lets several chains share one pair of buffers: writing a row outside it would race with the chain
     that owns it.
     """
-    # Step 1: Solve w st. L^T @ w = y. Reading out[j_d] (j_d > i_d) from the buffer being written is safe: those entries
-    # were finalized in earlier (larger i_d) iterations. This func is never auto-reversed: the backward pass seeds
-    # mass_mat.grad directly via the implicit function theorem (see kernel_manual_compute_qacc_bw in manual_bw.py).
-    for i_d_ in range(blocks_dof_end - blocks_dof_start):
+    # The LDL^T factor couples a dof with the chain of its mass parents alone (see dofs_mass_parent in array_class.py),
+    # which is shorter than its block, so each substitution walks that chain, the backward one scattering each final
+    # value to the ancestors of its dof, which the range holds since it starts on a mass block. This func is never
+    # auto-reversed: the backward pass seeds mass_mat.grad directly via the implicit function theorem (see
+    # kernel_manual_compute_qacc_bw in manual_bw.py).
+    n_dofs = blocks_dof_end - blocks_dof_start
+    for i_d in range(blocks_dof_start, blocks_dof_end):
+        out[i_d, i_b] = vec[i_d, i_b]
+
+    # Step 1: Solve w st. L^T @ w = y
+    for i_d_ in range(n_dofs):
         i_d = blocks_dof_end - i_d_ - 1
-        block_end = rigid_info.dofs_mass_block_end[i_d]
-        curr_out = vec[i_d, i_b]
-        for j_d in range(i_d + 1, block_end):
-            curr_out = curr_out - rigid_info.mass_mat_L[j_d, i_d, i_b] * out[j_d, i_b]
-        out[i_d, i_b] = curr_out
+        w = out[i_d, i_b]
+        j_d = i_d
+        for _ in range(n_dofs - 1):
+            j_d = rigid_info.dofs_mass_parent[j_d]
+            if j_d < 0:
+                break
+            out[j_d, i_b] = out[j_d, i_b] - rigid_info.mass_mat_L[i_d, j_d, i_b] * w
 
     # Step 2: z = D^{-1} w
     for i_d in range(blocks_dof_start, blocks_dof_end):
@@ -1211,9 +1220,12 @@ def func_solve_mass_block(
 
     # Step 3: Solve x st. L @ x = z
     for i_d in range(blocks_dof_start, blocks_dof_end):
-        block_start = rigid_info.dofs_mass_block_start[i_d]
         curr_out = out[i_d, i_b]
-        for j_d in range(block_start, i_d):
+        j_d = i_d
+        for _ in range(n_dofs - 1):
+            j_d = rigid_info.dofs_mass_parent[j_d]
+            if j_d < 0:
+                break
             curr_out = curr_out - rigid_info.mass_mat_L[i_d, j_d, i_b] * out[j_d, i_b]
         out[i_d, i_b] = curr_out
 

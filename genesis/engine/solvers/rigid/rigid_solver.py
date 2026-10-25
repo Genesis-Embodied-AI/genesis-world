@@ -1013,6 +1013,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.rigid_info.dofs_mass_block_start.from_numpy(dofs_mass_block_start)
         self.rigid_info.dofs_mass_block_end.from_numpy(dofs_mass_block_end)
 
+        dofs_mass_parent = np.full(self.n_dofs_, -1, dtype=gs.np_int)
+        for link in self.links:
+            for i_d in range(link.dof_start, link.dof_end):
+                j_d = i_d - 1
+                if i_d == link.dof_start:
+                    j_d = -1
+                    j_l = link.parent_idx
+                    while j_l != -1 and self.links[j_l].n_dofs == 0:
+                        j_l = self.links[j_l].parent_idx
+                    if j_l != -1:
+                        j_d = self.links[j_l].dof_end - 1
+                if j_d >= dofs_mass_block_start[i_d]:
+                    dofs_mass_parent[i_d] = j_d
+        self.rigid_info.dofs_mass_parent.from_numpy(dofs_mass_parent)
+
     def _dispatch_heterogeneous_vgeoms(self):
         """
         Dispatch per-environment geom/vgeom ranges and inertial properties for heterogeneous links.
