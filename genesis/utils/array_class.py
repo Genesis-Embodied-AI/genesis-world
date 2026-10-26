@@ -1456,8 +1456,16 @@ class ColliderState:
     contact_hull_stack: qd.Tensor
     # Per-bucket lex sort permutation used by the cooperative dedup kernel
     # (func_clamp_prune_contacts_coop) for the phase-3 (u, v) lex sort. Sized to max_candidate_contacts because
-    # each env writes its own permutation.
+    # each env writes its own permutation. The wrench reduction reuses it with contact_keep and contact_hull_stack once
+    # the support polygons are reduced (see func_reduce_contact_wrenches).
     contact_lex_idx: qd.Tensor
+    # Statistics of the supporting contacts of every support group of links (see links_support_group_idx in ColliderInfo
+    # and func_contact_support_statistics): first of them in contact order, centroid, radius about it, and whether they
+    # span several link pairs or normals
+    support_groups_contact_first: qd.Tensor
+    support_groups_pos: qd.Tensor
+    support_groups_radius: qd.Tensor
+    support_groups_is_spread: qd.Tensor
 
 
 def get_collider_state(
@@ -1465,6 +1473,7 @@ def get_collider_state(
     rigid_config,
     n_possible_pairs,
     n_terrain_threads,
+    n_support_groups,
     collider_info,
     collider_static_config,
     split_narrowphase,
@@ -1494,6 +1503,9 @@ def get_collider_state(
     # neighbouring slots from the same cache lines (see func_clamp_prune_contacts_coop)
     prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_static_config.has_prunable_contacts)
     prune_layout = (1, 0) if collider_static_config.has_prunable_contacts else None
+    # No support group is counted where the wrench reduction is compiled out (see Collider._init_collision_fields)
+    support_shape = maybe_shape((n_support_groups, _B), n_support_groups > 0)
+    support_layout = (1, 0) if n_support_groups > 0 else None
 
     return ColliderState(
         sort_buffer=get_sort_buffer(solver),
@@ -1535,6 +1547,10 @@ def get_collider_state(
         contact_keep=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
         contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
         contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
+        support_groups_contact_first=V(dtype=gs.qd_int, shape=support_shape, layout=support_layout),
+        support_groups_pos=V(dtype=gs.qd_vec3, shape=support_shape),
+        support_groups_radius=V(dtype=gs.qd_float, shape=support_shape, layout=support_layout),
+        support_groups_is_spread=V(dtype=gs.qd_bool, shape=support_shape, layout=support_layout),
     )
 
 
@@ -2210,6 +2226,10 @@ class ColliderInfo:
     # link-pair contact pruning
     contact_pruning_tolerance: qd.Tensor
     prune_deep_penetration_ratio: qd.Tensor
+    # Support group of every link: the links joined to their parent by joints of at most one degree of freedom join the
+    # group of their parent, whose contacts share the support statistics that normalize the wrench error of a contact
+    # removal (see func_reduce_contact_wrenches)
+    links_support_group_idx: qd.Tensor
 
 
 def get_collider_info(
@@ -2260,6 +2280,13 @@ def get_collider_info(
         diff_normal_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_normal_tolerance"]),
         contact_pruning_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_pruning_tolerance"]),
         prune_deep_penetration_ratio=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["prune_deep_penetration_ratio"]),
+        links_support_group_idx=V(
+            dtype=gs.qd_int,
+            shape=maybe_shape(
+                (solver.n_links_,),
+                collider_static_config.has_prunable_contacts and not solver.rigid_config.requires_grad,
+            ),
+        ),
     )
 
 
