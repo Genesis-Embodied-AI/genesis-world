@@ -1,0 +1,30 @@
+genesis/utils/usd/usd_rigid_entity.py
+  s_0ad35ed8e9a835::t_8096f2823cc3c1 715
+tests/parsers/test_usd.py
+  s_0ad35ed8e9a835::t_8096f2823cc3c1 413-420,423-426
+genesis/engine/entities/rigid_entity/description.py
+  s_0ad35ed8e9a835::t_8096f2823cc3c1 924-926,1519-1520
+genesis/utils/usd/usd_geometry.py
+  s_0ad35ed8e9a835::t_525c3bc5f4f527 348
+tests/rigid/test_asset_loading.py
+  s_0ad35ed8e9a835::t_8096f2823cc3c1 585,602-603
+  s_0ad35ed8e9a835::t_ab10e69809e824 604
+tests/rigid/conftest.py
+  s_0ad35ed8e9a835::t_8096f2823cc3c1 756-760,768
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6bc8b521f730cd6d4e1efcdc1e73c768f27e54fc",
+  "prompts": {},
+  "sessions": {
+    "s_0ad35ed8e9a835": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "63313966-a999-4420-a5cc-36e8123cdaf7",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
