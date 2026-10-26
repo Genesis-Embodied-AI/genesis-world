@@ -254,7 +254,8 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     duck_link_idx = duck.links[0].idx
     duck_mass = duck.get_mass()
     duck_init_link_pos = duck.base_link.get_pos()
-    duck_init_link_R = gu.quat_to_R(duck.base_link.get_quat())
+    duck_init_link_quat = duck.base_link.get_quat()
+    duck_init_link_R = gu.quat_to_R(duck_init_link_quat)
     # The duck is held at rest by cancelling gravity, but the cancelling force is applied away from its center of mass
     # so that the moment arm of 'pos' is exercised: the spurious torque it generates is undone by an opposite torque
     # about the very same frame, hence any error in the arm leaves the duck accelerating.
@@ -262,8 +263,8 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
     duck_force_local = tensor_to_array(duck_mass * GRAVITY * duck_init_link_R[2])
     for step in range(801):
         ee_pos = rigid_solver.get_links_pos(end_effector_link_idx)[0]
-        duck_pos = rigid_solver.get_links_pos(duck_link_idx)[0]
-        duck_quat = rigid_solver.get_links_quat(duck_link_idx)[0]
+        duck_pos = duck.base_link.get_pos()
+        duck_quat = duck.base_link.get_quat()
         if step == 0:
             assert_allclose(ee_pos, (0.8, 0.0, 0.02), tol=1e-4)
         elif step in (500, 600):
@@ -271,7 +272,7 @@ def test_apply_external_wrench(xml_path, show_viewer, tol):
         elif step == 800:
             assert_allclose(ee_pos, (-0.8 / math.sqrt(2), 0.8 / math.sqrt(2), 0.02), tol=0.02)
         assert_allclose(duck_pos, duck_init_link_pos, tol=1e-3)
-        assert_allclose(duck_quat, duck.base_link.desc.quat, tol=1e-3)
+        assert_allclose(duck_quat, duck_init_link_quat, tol=1e-3)
 
         if step >= 600:
             force = [-4.0, 4.0, 0.0]
