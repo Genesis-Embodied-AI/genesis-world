@@ -1367,44 +1367,48 @@ def get_contact_cache(solver, n_possible_pairs, active):
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class NarrowphaseWorkQueues:
+class NarrowphaseWorkQueue:
     kind: ClassVar[DataKind] = DataKind.SCRATCH
 
-    mpr_i_b: qd.Tensor
-    mpr_i_ga: qd.Tensor
-    mpr_i_gb: qd.Tensor
-    mpr_i_pair: qd.Tensor
+    # The pair of every entry (see collision_pair_idx in ColliderInfo), queued for the multicontact pass, then for the
+    # terrain pass, which runs after it
+    i_b: qd.Tensor
+    i_ga: qd.Tensor
+    i_gb: qd.Tensor
+    i_pair: qd.Tensor
     # Candidate contacts of the multicontact pass, one slot per contact a pair can hold. The contact0 kernel stores the
     # first contact of the pair in slot 0, the detections of the pass store theirs in their own slot, and the gather
     # accepts them in slot order according to their status (see MULTICONTACT_SLOT in collider/constants.py). Under the
     # contact patch an entry holds slot 0 alone and no status.
-    mpr_contact_pos: qd.Tensor
-    mpr_normal: qd.Tensor
-    mpr_penetration: qd.Tensor
-    mpr_contact_status: qd.Tensor
+    contact_pos: qd.Tensor
+    contact_normal: qd.Tensor
+    contact_penetration: qd.Tensor
+    contact_status: qd.Tensor
     # Where contact 0 of the entry stands (see MULTICONTACT_ENTRY in collider/constants.py). The contact0 kernel leaves
     # it to Gilbert-Johnson-Keerthi (GJK) when the per-pair gate from Minkowski portal refinement (MPR) to GJK fired,
     # and each perturbed contact otherwise falls back from MPR to GJK.
-    mpr_contact0_status: qd.Tensor
-    mpr_queue_size: qd.Tensor
-    mpr_work_counter: qd.Tensor
+    contact0_status: qd.Tensor
+    # The number of pairs queued and claimed so far
+    n_pairs: qd.Tensor
+    n_claimed: qd.Tensor
 
 
-def get_narrowphase_work_queues(max_entries, n_slots, active):
-    entries_shape = maybe_shape((max_entries,), active)
-    slots_shape = maybe_shape((max_entries, n_slots), active)
-    return NarrowphaseWorkQueues(
-        mpr_i_b=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_i_ga=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_i_gb=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_i_pair=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_contact_pos=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
-        mpr_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
-        mpr_penetration=V(dtype=gs.qd_float, shape=slots_shape),
-        mpr_contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), active and n_slots > 1)),
-        mpr_contact0_status=V(dtype=gs.qd_int, shape=entries_shape),
-        mpr_queue_size=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
-        mpr_work_counter=V(dtype=gs.qd_int, shape=maybe_shape((1,), active)),
+def get_narrowphase_work_queue(max_entries, n_slots, split_narrowphase, has_terrain):
+    is_queue_active = split_narrowphase or has_terrain
+    entries_shape = maybe_shape((max_entries,), is_queue_active)
+    slots_shape = maybe_shape((max_entries, n_slots), split_narrowphase)
+    return NarrowphaseWorkQueue(
+        i_b=V(dtype=gs.qd_int, shape=entries_shape),
+        i_ga=V(dtype=gs.qd_int, shape=entries_shape),
+        i_gb=V(dtype=gs.qd_int, shape=entries_shape),
+        i_pair=V(dtype=gs.qd_int, shape=entries_shape),
+        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
+        contact_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
+        contact_penetration=V(dtype=gs.qd_float, shape=slots_shape),
+        contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), split_narrowphase and n_slots > 1)),
+        contact0_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries,), split_narrowphase)),
+        n_pairs=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_queue_active)),
+        n_claimed=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_queue_active)),
     )
 
 
@@ -1431,7 +1435,7 @@ class ColliderState:
     box_axi: qd.Tensor
     box_ppts2: qd.Tensor
     box_pu: qd.Tensor
-    xyz_max_min: qd.Tensor
+    # The prism under the triangle every thread of the terrain pass tests, which reads its thread count from its shape
     prism: qd.Tensor
     n_contacts: qd.Tensor = of_kind(DataKind.DERIVED)
     # Kept contacts of the sleepers, at the front of the contact buffer with the identity permutation: a hibernated
@@ -1444,7 +1448,7 @@ class ColliderState:
     contact_cache: ContactCache
     # Input data for differentiable contact detection used in the backward pass
     diff_contact_input: DiffContactInput
-    narrowphase_work_queues: NarrowphaseWorkQueues
+    work_queue: NarrowphaseWorkQueue
     contact_sort_key: qd.Tensor
     contact_sort_idx: qd.Tensor = of_kind(DataKind.DERIVED)
     contact_proj_v: qd.Tensor
@@ -1457,7 +1461,13 @@ class ColliderState:
 
 
 def get_collider_state(
-    solver, rigid_config, n_possible_pairs, collider_info, collider_static_config, split_narrowphase
+    solver,
+    rigid_config,
+    n_possible_pairs,
+    n_terrain_threads,
+    collider_info,
+    collider_static_config,
+    split_narrowphase,
 ):
     _B = solver._B
     n_links = solver.n_links_
@@ -1501,8 +1511,7 @@ def get_collider_state(
         box_axi=V_VEC(3, dtype=gs.qd_float, shape=box_axi_shape),
         box_ppts2=V(dtype=gs.qd_float, shape=box_ppts2_shape),
         box_pu=V_VEC(3, dtype=gs.qd_float, shape=box_pu_shape),
-        xyz_max_min=V(dtype=gs.qd_float, shape=(6, _B)),
-        prism=V_VEC(3, dtype=gs.qd_float, shape=(6, _B)),
+        prism=V_VEC(3, dtype=gs.qd_float, shape=(6, n_terrain_threads)),
         n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
         n_contacts_hibernated=V(dtype=gs.qd_int, shape=(_B,)),
         first_time=V(dtype=gs.qd_bool, shape=(_B,)),
@@ -1513,11 +1522,12 @@ def get_collider_state(
         contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
         diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
         # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its
-        # first contact alone under the contact patch (see NarrowphaseWorkQueues).
-        narrowphase_work_queues=get_narrowphase_work_queues(
+        # first contact alone under the contact patch (see NarrowphaseWorkQueue).
+        work_queue=get_narrowphase_work_queue(
             max(max_collision_pairs_broad, 1) * _B,
             1 if solver._options.enable_contact_patch else 5,
             split_narrowphase,
+            collider_static_config.has_terrain,
         ),
         contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B), layout=(1, 0)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),

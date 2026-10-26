@@ -1515,7 +1515,9 @@ def func_contact_convex_convex_sdf(
 def func_contact_mpr_terrain(
     i_ga: int,
     i_gb: int,
+    i_scratch: int,
     i_b: int,
+    tid: int,
     geoms_init_AABB: array_class.GeomsInitAABB,
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
@@ -1525,12 +1527,21 @@ def func_contact_mpr_terrain(
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
     collider_static_config: qd.template(),
+    block_dim: qd.template(),
     errno: qd.Tensor,
 ):
+    """Detect the contacts of a convex geom against the terrain, the lanes of a block sharing the work.
+
+    The geom is tested with MPR against the prism under every triangle of the height field its bounds overlap, the
+    block_dim lanes of the block sharing the work, lane tid on slot i_scratch of the prism scratch and of mpr_state. The
+    contacts are those of a serial walk over the detections and triangles, whatever the number of lanes.
+    """
     ga_pos, ga_quat = dyn_state.geoms.pos[i_ga, i_b], dyn_state.geoms.quat[i_ga, i_b]
     gb_pos, gb_quat = dyn_state.geoms.pos[i_gb, i_b], dyn_state.geoms.quat[i_gb, i_b]
     margin = gs.qd_float(0.0)
     EPS = rigid_info.EPS[None]
+    n_max = qd.static(collider_static_config.n_contacts_per_convex_pair)
+    N_PERTURBATIONS = qd.static(4)
 
     multi_contact = (
         qd.static(rigid_config.enable_multi_contact)
@@ -1540,24 +1551,27 @@ def func_contact_mpr_terrain(
 
     is_return = False
     tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+    i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
 
-    if not is_return:
-        # Transform to terrain's frame (using local variables, not modifying global state)
-        ga_pos_terrain_frame, ga_quat_terrain_frame = gu.qd_transform_pos_quat_by_trans_quat(
-            ga_pos - gb_pos, ga_quat, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
-        )
-        gb_pos_terrain_frame = qd.Vector.zero(gs.qd_float, 3)
-        gb_quat_terrain_frame = gu.qd_identity_quat()
+    # Transform to terrain's frame (using local variables, not modifying global state)
+    ga_pos_terrain_frame, ga_quat_terrain_frame = gu.qd_transform_pos_quat_by_trans_quat(
+        ga_pos - gb_pos, ga_quat, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
+    )
+    gb_pos_terrain_frame = qd.Vector.zero(gs.qd_float, 3)
+    gb_quat_terrain_frame = gu.qd_identity_quat()
 
-        for i_axis, i_m in qd.ndrange(3, 2):
+    # Bounds of the geom in the frame of the terrain, max corner then min corner, one support query per lane
+    xyz_max_min = qd.Vector.zero(gs.qd_float, 6)
+    for i_dir_ in range((6 + block_dim - 1) // block_dim):
+        i_dir = i_dir_ * block_dim + tid
+        extent = gs.qd_float(0.0)
+        if i_dir < 6:
+            i_axis = i_dir % 3
             direction = qd.Vector.zero(gs.qd_float, 3)
-            if i_m == 0:
-                direction[i_axis] = 1.0
-            else:
-                direction[i_axis] = -1.0
+            direction[i_axis] = 1.0 if i_dir < 3 else -1.0
             v1 = mpr.support_driver(
                 i_ga,
-                i_b,
+                i_scratch,
                 direction,
                 ga_pos_terrain_frame,
                 ga_quat_terrain_frame,
@@ -1567,215 +1581,241 @@ def func_contact_mpr_terrain(
                 rigid_config,
                 collider_static_config,
             )
-            collider_state.xyz_max_min[3 * i_m + i_axis, i_b] = v1[i_axis]
+            extent = v1[i_axis]
+        if qd.static(block_dim > 1):
+            for k in qd.static(range(6)):
+                xyz_max_min[k] = su.qd_block_shuffle(extent, k)
+        else:
+            xyz_max_min[i_dir] = extent
 
-        for i in qd.static(range(3)):
-            collider_state.prism[i, i_b][2] = collider_info.terrain_xyz_maxmin[5]
+    for i in qd.static(range(3)):
+        if (
+            collider_info.terrain_xyz_maxmin[i] < xyz_max_min[i + 3] - margin
+            or collider_info.terrain_xyz_maxmin[i + 3] > xyz_max_min[i] + margin
+        ):
+            is_return = True
 
-            if (
-                collider_info.terrain_xyz_maxmin[i] < collider_state.xyz_max_min[i + 3, i_b] - margin
-                or collider_info.terrain_xyz_maxmin[i + 3] > collider_state.xyz_max_min[i, i_b] + margin
-            ):
-                is_return = True
+    if not is_return:
+        sh = collider_info.terrain_scale[0]
+        r_min = gs.qd_int(qd.floor((xyz_max_min[3] - collider_info.terrain_xyz_maxmin[3]) / sh))
+        r_max = gs.qd_int(qd.ceil((xyz_max_min[0] - collider_info.terrain_xyz_maxmin[3]) / sh))
+        c_min = gs.qd_int(qd.floor((xyz_max_min[4] - collider_info.terrain_xyz_maxmin[4]) / sh))
+        c_max = gs.qd_int(qd.ceil((xyz_max_min[1] - collider_info.terrain_xyz_maxmin[4]) / sh))
 
-        if not is_return:
-            sh = collider_info.terrain_scale[0]
-            r_min = gs.qd_int(qd.floor((collider_state.xyz_max_min[3, i_b] - collider_info.terrain_xyz_maxmin[3]) / sh))
-            r_max = gs.qd_int(qd.ceil((collider_state.xyz_max_min[0, i_b] - collider_info.terrain_xyz_maxmin[3]) / sh))
-            c_min = gs.qd_int(qd.floor((collider_state.xyz_max_min[4, i_b] - collider_info.terrain_xyz_maxmin[4]) / sh))
-            c_max = gs.qd_int(qd.ceil((collider_state.xyz_max_min[1, i_b] - collider_info.terrain_xyz_maxmin[4]) / sh))
+        r_min = qd.max(0, r_min)
+        c_min = qd.max(0, c_min)
+        r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
+        c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
 
-            r_min = qd.max(0, r_min)
-            c_min = qd.max(0, c_min)
-            r_max = qd.min(collider_info.terrain_rc[0] - 1, r_max)
-            c_max = qd.min(collider_info.terrain_rc[1] - 1, c_max)
+        # Row r lists its verts (r, c_min), (r + 1, c_min), (r, c_min + 1), ..., every three consecutive verts making a
+        # triangle, which cuts every cell along the diagonal of the visual mesh (see genesis/utils/terrain.py)
+        n_triangles_row = 2 * qd.max(c_max - c_min, 0)
+        n_triangles = qd.max(r_max - r_min, 0) * n_triangles_row
 
-            # Multi-contact perturbation state. The initial detection (i_detection == 0) finds the first face-vs-face
-            # contact; subsequent passes rotate geom A by a small angle about an axis orthogonal to that contact's
-            # normal, which tips the box face onto a different corner. After undoing the rotation each perturbed contact
-            # lands at a different corner of the contact patch, stabilizing a flat box on a triangulated cell.
-            # Perturbation is only applied when the initial contact is face-vs-face (snap fired); cliff-edge contacts
-            # are kept as a single MPR contact.
-            is_col_0 = False
-            face_face_0 = False
-            contact_pos_0 = qd.Vector.zero(gs.qd_float, 3)
-            normal_0 = qd.Vector.zero(gs.qd_float, 3)
-            axis_0 = qd.Vector.zero(gs.qd_float, 3)
-            axis_1 = qd.Vector.zero(gs.qd_float, 3)
-            qrot = qd.Vector.zero(gs.qd_float, 4)
-            n_con = 0
-            n_detections = 5 if multi_contact else 1
+        # The perturbed detections rotate geom A by a small angle about an axis orthogonal to the normal of the first
+        # contact, which tips a box face onto another corner of the contact patch. They only run when the first contact
+        # is face-vs-face (snap fired).
+        is_col_0 = False
+        face_face_0 = False
+        contact_pos_0 = qd.Vector.zero(gs.qd_float, 3)
+        normal_0 = qd.Vector.zero(gs.qd_float, 3)
+        axis_0 = qd.Vector.zero(gs.qd_float, 3)
+        axis_1 = qd.Vector.zero(gs.qd_float, 3)
+        n_con = 0
+        # Contacts of the pair, spread over the lanes (see su.qd_lane_vector_get), which a new contact merges against
+        # since the other pairs of the env append theirs to the buffer concurrently
+        contacts_pos = qd.Matrix.zero(gs.qd_float, qd.static((n_max + block_dim - 1) // block_dim), 3)
 
-            ga_pos_tf = ga_pos_terrain_frame
-            ga_quat_tf = ga_quat_terrain_frame
-            for i_detection in range(n_detections):
-                if i_detection > 0 and not face_face_0:
-                    break
-                if i_detection > 0:
-                    axis = axis_0 if i_detection < 3 else axis_1
-                    angle_sign = 2 * (i_detection % 2) - 1
-                    qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
-                    ga_pos_curr, ga_quat_curr = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
-                    ga_pos_tf, ga_quat_tf = gu.qd_transform_pos_quat_by_trans_quat(
-                        ga_pos_curr - gb_pos, ga_quat_curr, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
-                    )
-                center_a = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos_tf, ga_quat_tf)
+        # Pass 0 walks the triangles of the first detection, pass 1 those of every perturbed detection in turn
+        for i_pass in range(2):
+            n_items = n_triangles
+            if i_pass == 1:
+                n_items = 0
+                if multi_contact and face_face_0:
+                    n_items = N_PERTURBATIONS * n_triangles
+            for i_batch_ in range((n_items + block_dim - 1) // block_dim):
+                if n_con < n_max:
+                    i_item = i_batch_ * block_dim + tid
+                    i_detection = 0
+                    i_triangle = i_item
+                    if i_pass == 1:
+                        i_detection = 1 + i_item // n_triangles
+                        i_triangle = i_item % n_triangles
+                    ga_pos_tf = ga_pos_terrain_frame
+                    ga_quat_tf = ga_quat_terrain_frame
+                    if i_detection > 0:
+                        axis = axis_0 if i_detection < 3 else axis_1
+                        angle_sign = 2 * (i_detection % 2) - 1
+                        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+                        ga_pos_curr, ga_quat_curr = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
+                        ga_pos_tf, ga_quat_tf = gu.qd_transform_pos_quat_by_trans_quat(
+                            ga_pos_curr - gb_pos, ga_quat_curr, qd.Vector.zero(gs.qd_float, 3), gu.qd_inv_quat(gb_quat)
+                        )
+                    center_a = gu.qd_transform_by_trans_quat(dyn_info.geoms.center[i_ga], ga_pos_tf, ga_quat_tf)
+                    is_col = False
+                    is_contact_candidate = False
+                    face_face = False
+                    normal = qd.Vector.zero(gs.qd_float, 3)
+                    contact_pos = qd.Vector.zero(gs.qd_float, 3)
+                    penetration = gs.qd_float(0.0)
+                    if i_item < n_items:
+                        r = r_min + i_triangle // n_triangles_row
+                        i_v_end = i_triangle % n_triangles_row + 2
+                        # A triangle all of whose verts lie below the geom cannot touch it
+                        is_reachable = False
+                        for i_p in qd.static(range(3)):
+                            r_v = r + (i_v_end - 2 + i_p) % 2
+                            c_v = c_min + (i_v_end - 2 + i_p) // 2
+                            x = sh * r_v + collider_info.terrain_xyz_maxmin[3]
+                            y = sh * c_v + collider_info.terrain_xyz_maxmin[4]
+                            z = collider_info.terrain_hf[r_v, c_v] + margin
+                            collider_state.prism[i_p, i_scratch] = qd.Vector(
+                                [x, y, collider_info.terrain_xyz_maxmin[5]], dt=gs.qd_float
+                            )
+                            collider_state.prism[i_p + 3, i_scratch] = qd.Vector([x, y, z], dt=gs.qd_float)
+                            if z >= xyz_max_min[5]:
+                                is_reachable = True
+                        if is_reachable:
+                            center_b = qd.Vector.zero(gs.qd_float, 3)
+                            for i_p in qd.static(range(6)):
+                                center_b = center_b + collider_state.prism[i_p, i_scratch]
+                            center_b = center_b / 6.0
 
-                for r in range(r_min, r_max):
-                    nvert = 0
-                    for c in range(c_min, c_max + 1):
-                        for i in range(2):
-                            if n_con < qd.static(collider_static_config.n_contacts_per_convex_pair):
-                                nvert = nvert + 1
-                                func_add_prism_vert(
-                                    i_b,
-                                    sh * (r + i) + collider_info.terrain_xyz_maxmin[3],
-                                    sh * c + collider_info.terrain_xyz_maxmin[4],
-                                    collider_info.terrain_hf[r + i, c] + margin,
-                                    collider_state,
-                                )
-                                if nvert > 2 and (
-                                    collider_state.prism[3, i_b][2] >= collider_state.xyz_max_min[5, i_b]
-                                    or collider_state.prism[4, i_b][2] >= collider_state.xyz_max_min[5, i_b]
-                                    or collider_state.prism[5, i_b][2] >= collider_state.xyz_max_min[5, i_b]
-                                ):
-                                    center_b = qd.Vector.zero(gs.qd_float, 3)
-                                    for i_p in qd.static(range(6)):
-                                        center_b = center_b + collider_state.prism[i_p, i_b]
-                                    center_b = center_b / 6.0
+                            is_col, normal, penetration, contact_pos = mpr.func_mpr_contact_from_centers(
+                                i_ga,
+                                i_gb,
+                                i_scratch,
+                                center_a,
+                                center_b,
+                                ga_pos_tf,
+                                ga_quat_tf,
+                                gb_pos_terrain_frame,
+                                gb_quat_terrain_frame,
+                                geoms_init_AABB,
+                                collider_state,
+                                mpr_state,
+                                dyn_info,
+                                collider_info,
+                                rigid_config,
+                                collider_static_config,
+                            )
+                    if is_col:
+                        snap_fired = False
+                        # Snap normal to the prism's top face normal when MPR's reported normal is already close to it.
+                        # Cell boundaries on a SMOOTH heightfield are discretization artefacts, not physical edges, and
+                        # MPR's polytope-edge radial normal there picks up a small position-dependent bias relative to
+                        # the exact face normal. Only snap when the bias is small (dot > 0.95) so that contacts on real
+                        # cliff edges, where MPR's normal is genuinely far from any single cell's top face normal, keep
+                        # MPR's result.
+                        e1 = collider_state.prism[4, i_scratch] - collider_state.prism[3, i_scratch]
+                        e2 = collider_state.prism[5, i_scratch] - collider_state.prism[3, i_scratch]
+                        top_face_normal = e1.cross(e2).normalized()
+                        if top_face_normal[2] < 0.0:
+                            top_face_normal = -top_face_normal
+                        if top_face_normal.dot(normal) > 0.95:
+                            normal = top_face_normal
+                            snap_fired = True
+                            # Cell is essentially horizontal in the terrain's local frame (within ~8 deg). Independent
+                            # of the terrain's world orientation.
+                            face_face = top_face_normal[2] > 0.99
 
-                                    is_col, normal, penetration, contact_pos = mpr.func_mpr_contact_from_centers(
+                        normal = gu.qd_transform_by_quat(normal, gb_quat)
+                        contact_pos = gu.qd_transform_by_quat(contact_pos, gb_quat)
+                        contact_pos = contact_pos + gb_pos
+
+                        # No perturbation correction: the perturbation magnitude (mc_perturbation) is small enough that
+                        # the perturbed contact_pos stays close to the unperturbed contact patch. The deduplication
+                        # tolerance downstream picks the unique corner contacts and the constraint solver tolerates the
+                        # residual offset.
+
+                        contact_pos = func_apply_smooth_refinement(
+                            i_ga,
+                            i_gb,
+                            normal,
+                            penetration,
+                            contact_pos,
+                            dyn_state.geoms.pos[i_ga, i_b],
+                            dyn_state.geoms.quat[i_ga, i_b],
+                            dyn_state.geoms.pos[i_gb, i_b],
+                            dyn_state.geoms.quat[i_gb, i_b],
+                            dyn_info,
+                            rigid_config,
+                        )
+
+                        # Perturbed contacts are only kept when they still describe a face-vs-face contact on the same
+                        # horizontal cell face. A perturbed corner that landed against a cliff wall (snap did not fire)
+                        # is a fictitious contact.
+                        is_contact_candidate = i_detection == 0 or snap_fired
+
+                    lanes_candidate = qd.cast(is_contact_candidate, qd.u32)
+                    if qd.static(block_dim > 1):
+                        lanes_candidate = su.qd_block_ballot(is_contact_candidate)
+                    for _ in range(qd.cast(qd.math.popcnt(lanes_candidate), gs.qd_int)):
+                        i_lane = qd.cast(qd.math.ffs(lanes_candidate), gs.qd_int) - 1
+                        lanes_candidate = lanes_candidate & (lanes_candidate - 1)
+                        contact_pos_lane = contact_pos
+                        normal_lane = normal
+                        is_face_face_lane = face_face
+                        if qd.static(block_dim > 1):
+                            contact_pos_lane = qd.Vector(
+                                [su.qd_block_shuffle(contact_pos[k], i_lane) for k in qd.static(range(3))]
+                            )
+                            normal_lane = qd.Vector(
+                                [su.qd_block_shuffle(normal[k], i_lane) for k in qd.static(range(3))]
+                            )
+                            is_face_face_lane = su.qd_block_shuffle(qd.cast(face_face, gs.qd_int), i_lane) != 0
+
+                        if n_con < n_max:
+                            is_contact_duplicate = False
+                            for i_k in range(contacts_pos.n):
+                                if i_k * block_dim + tid < n_con:
+                                    contact_pos_prev = su.qd_lane_local_get(contacts_pos, i_k, block_dim)
+                                    if (contact_pos_lane - contact_pos_prev).norm() < tolerance:
+                                        is_contact_duplicate = True
+                            if qd.static(block_dim > 1):
+                                is_contact_duplicate = su.qd_block_any(is_contact_duplicate)
+
+                            if not is_contact_duplicate:
+                                if tid == i_lane:
+                                    func_add_contact(
                                         i_ga,
                                         i_gb,
                                         i_b,
-                                        center_a,
-                                        center_b,
-                                        ga_pos_tf,
-                                        ga_quat_tf,
-                                        gb_pos_terrain_frame,
-                                        gb_quat_terrain_frame,
-                                        geoms_init_AABB,
+                                        i_pair,
+                                        normal,
+                                        contact_pos,
+                                        penetration,
+                                        dyn_state,
                                         collider_state,
-                                        mpr_state,
                                         dyn_info,
+                                        rigid_info,
                                         collider_info,
-                                        rigid_config,
-                                        collider_static_config,
+                                        use_atomic=True,
+                                        errno=errno,
                                     )
-                                    if is_col:
-                                        snap_fired = False
-                                        face_face = False
-                                        # Snap normal to the prism's top face normal when MPR's reported normal is
-                                        # already close to it. Cell boundaries on a SMOOTH heightfield are
-                                        # discretization artefacts, not physical edges, and MPR's polytope-edge radial
-                                        # normal there picks up a small position-dependent bias relative to the exact
-                                        # face normal. Only snap when the bias is small (dot > 0.95) so that contacts on
-                                        # real cliff edges, where MPR's normal is genuinely far from any single cell's
-                                        # top face normal, keep MPR's result.
-                                        e1 = collider_state.prism[4, i_b] - collider_state.prism[3, i_b]
-                                        e2 = collider_state.prism[5, i_b] - collider_state.prism[3, i_b]
-                                        top_face_normal = e1.cross(e2).normalized()
-                                        if top_face_normal[2] < 0.0:
-                                            top_face_normal = -top_face_normal
-                                        if top_face_normal.dot(normal) > 0.95:
-                                            normal = top_face_normal
-                                            snap_fired = True
-                                            # Cell is essentially horizontal in the terrain's local frame (within ~8
-                                            # deg). Independent of the terrain's world orientation.
-                                            face_face = top_face_normal[2] > 0.99
-
-                                        normal = gu.qd_transform_by_quat(normal, gb_quat)
-                                        contact_pos = gu.qd_transform_by_quat(contact_pos, gb_quat)
-                                        contact_pos = contact_pos + gb_pos
-
-                                        # No perturbation correction: the perturbation magnitude (mc_perturbation) is
-                                        # small enough that the perturbed contact_pos stays close to the unperturbed
-                                        # contact patch. The deduplication tolerance downstream picks the unique corner
-                                        # contacts and the constraint solver tolerates the residual offset.
-
-                                        contact_pos = func_apply_smooth_refinement(
+                                su.qd_lane_slot_write(contacts_pos, n_con, contact_pos_lane, tid, block_dim)
+                                n_con = n_con + 1
+                                if i_pass == 0 and not is_col_0:
+                                    is_col_0 = True
+                                    # Perturbation only applies on essentially-horizontal cell faces (in the terrain's
+                                    # local frame, within ~8 deg of the heightfield +z): on steeper slopes the corner
+                                    # contacts generated by perturbation map to different parts of neighbouring cells
+                                    # and create constraint-solver oscillation.
+                                    face_face_0 = is_face_face_lane
+                                    contact_pos_0 = contact_pos_lane
+                                    normal_0 = normal_lane
+                                    if face_face_0:
+                                        axis_0, axis_1 = func_contact_orthogonals(
                                             i_ga,
                                             i_gb,
-                                            normal,
-                                            penetration,
-                                            contact_pos,
-                                            dyn_state.geoms.pos[i_ga, i_b],
-                                            dyn_state.geoms.quat[i_ga, i_b],
-                                            dyn_state.geoms.pos[i_gb, i_b],
-                                            dyn_state.geoms.quat[i_gb, i_b],
+                                            i_b,
+                                            normal_0,
+                                            geoms_init_AABB,
+                                            dyn_state,
                                             dyn_info,
+                                            rigid_info,
                                             rigid_config,
                                         )
-
-                                        valid = True
-                                        i_c = collider_state.n_contacts[i_b]
-                                        for j in range(n_con):
-                                            if (
-                                                contact_pos - collider_state.contact_data.pos[i_c - j - 1, i_b]
-                                            ).norm() < tolerance:
-                                                valid = False
-                                                break
-                                        if valid and i_detection > 0 and not snap_fired:
-                                            # Perturbed contacts are only kept when they still describe a face-vs-face
-                                            # contact on the same horizontal cell face. A perturbed corner that landed
-                                            # against a cliff wall (snap did not fire) is a fictitious contact.
-                                            valid = False
-
-                                        if valid:
-                                            i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
-                                            func_add_contact(
-                                                i_ga,
-                                                i_gb,
-                                                i_b,
-                                                i_pair,
-                                                normal,
-                                                contact_pos,
-                                                penetration,
-                                                dyn_state,
-                                                collider_state,
-                                                dyn_info,
-                                                rigid_info,
-                                                collider_info,
-                                                use_atomic=False,
-                                                errno=errno,
-                                            )
-                                            n_con = n_con + 1
-                                            if i_detection == 0 and not is_col_0:
-                                                is_col_0 = True
-                                                # Perturbation only applies on essentially-horizontal cell faces (in the
-                                                # terrain's local frame, within ~8 deg of the heightfield +z): on
-                                                # steeper slopes the corner contacts generated by perturbation map to
-                                                # different parts of neighbouring cells and create constraint-solver
-                                                # oscillation.
-                                                face_face_0 = face_face
-                                                contact_pos_0 = contact_pos
-                                                normal_0 = normal
-                                                if face_face_0:
-                                                    axis_0, axis_1 = func_contact_orthogonals(
-                                                        i_ga,
-                                                        i_gb,
-                                                        i_b,
-                                                        normal_0,
-                                                        geoms_init_AABB,
-                                                        dyn_state,
-                                                        dyn_info,
-                                                        rigid_info,
-                                                        rigid_config,
-                                                    )
-
-
-@qd.func
-def func_add_prism_vert(i_b: int, x: float, y: float, z: float, collider_state: array_class.ColliderState):
-    collider_state.prism[0, i_b] = collider_state.prism[1, i_b]
-    collider_state.prism[1, i_b] = collider_state.prism[2, i_b]
-    collider_state.prism[3, i_b] = collider_state.prism[4, i_b]
-    collider_state.prism[4, i_b] = collider_state.prism[5, i_b]
-
-    collider_state.prism[2, i_b][0] = x
-    collider_state.prism[5, i_b][0] = x
-    collider_state.prism[2, i_b][1] = y
-    collider_state.prism[5, i_b][1] = y
-    collider_state.prism[5, i_b][2] = z
 
 
 @qd.func
@@ -3431,18 +3471,18 @@ def _func_multicontact_detect(
     its own gate fires, except under the pure GJK algorithm where every contact is detected with GJK. A range starting
     past 0 requires contact 0 in slot 0.
 
-    Without the contact patch, detection i stores its contact in slot i of the entry (see mpr_contact_status in
+    Without the contact patch, detection i stores its contact in slot i of the entry (see NarrowphaseWorkQueue in
     array_class.py) for _func_multicontact_gather. With the contact patch, the call takes the manifold GJK returns for
     contact 0 when there is one, which skips perturbation, accepts each contact as it comes and writes those of the
     pair itself once its last detection ran.
     """
     EPS = rigid_info.EPS[None]
 
-    i_b = collider_state.narrowphase_work_queues.mpr_i_b[i_work]
-    i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
-    i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
-    i_pair = collider_state.narrowphase_work_queues.mpr_i_pair[i_work]
-    contact0_status = collider_state.narrowphase_work_queues.mpr_contact0_status[i_work]
+    i_b = collider_state.work_queue.i_b[i_work]
+    i_ga = collider_state.work_queue.i_ga[i_work]
+    i_gb = collider_state.work_queue.i_gb[i_work]
+    i_pair = collider_state.work_queue.i_pair[i_work]
+    contact0_status = collider_state.work_queue.contact0_status[i_work]
     is_gjk_preferred_0 = contact0_status == MULTICONTACT_ENTRY.GJK
     # Whether GJK detected contact 0, in an earlier stage (see MULTICONTACT_ENTRY) or in this one below
     is_gjk_used_0 = contact0_status == MULTICONTACT_ENTRY.DETECTED
@@ -3471,9 +3511,9 @@ def _func_multicontact_detect(
         tolerance = qd.min(tolerance, overlap_merge_tolerance)
     normal_cos_tol = qd.cos(2.0 * collider_info.mc_perturbation[None])
 
-    contact0_normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
-    contact0_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
-    contact0_penetration = collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0]
+    contact0_normal = collider_state.work_queue.contact_normal[i_work, 0]
+    contact0_pos = collider_state.work_queue.contact_pos[i_work, 0]
+    contact0_penetration = collider_state.work_queue.contact_penetration[i_work, 0]
     has_contact0 = contact0_status == MULTICONTACT_ENTRY.SEED or contact0_status == MULTICONTACT_ENTRY.DETECTED
     is_gjk_multi_done = False
     n_con = gs.qd_int(0)
@@ -3503,9 +3543,9 @@ def _func_multicontact_detect(
                 slot_status = MULTICONTACT_SLOT.BASE
                 slot_normal = contact0_normal
                 slot_pos = contact0_pos
-                slot_penetration = collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0]
+                slot_penetration = collider_state.work_queue.contact_penetration[i_work, 0]
             else:
-                collider_state.narrowphase_work_queues.mpr_contact_status[i_work, 0] = MULTICONTACT_SLOT.BASE
+                collider_state.work_queue.contact_status[i_work, 0] = MULTICONTACT_SLOT.BASE
                 is_slot_written = True
         if is_active:
             if not is_initial_detection and not is_axes_computed:
@@ -3732,10 +3772,10 @@ def _func_multicontact_detect(
         elif not is_slot_written:
             # The MPR seed marks its slot above, and every other detection stores its outcome here, empty when it did
             # not run or found no contact
-            collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, i_det] = slot_pos
-            collider_state.narrowphase_work_queues.mpr_normal[i_work, i_det] = slot_normal
-            collider_state.narrowphase_work_queues.mpr_penetration[i_work, i_det] = slot_penetration
-            collider_state.narrowphase_work_queues.mpr_contact_status[i_work, i_det] = slot_status
+            collider_state.work_queue.contact_pos[i_work, i_det] = slot_pos
+            collider_state.work_queue.contact_normal[i_work, i_det] = slot_normal
+            collider_state.work_queue.contact_penetration[i_work, i_det] = slot_penetration
+            collider_state.work_queue.contact_status[i_work, i_det] = slot_status
 
     # A contact 0 found with Gilbert-Johnson-Keerthi (GJK) is stored in slot 0 as the contact0 kernel stores the MPR
     # seed, for the stages that aim and perturb around it, unless nothing is left to detect for the pair
@@ -3747,10 +3787,10 @@ def _func_multicontact_detect(
             is_detected_for_later = True
             # Without the contact patch, detection 0 stored its contact in slot 0 already
             if qd.static(gjk_static_config.enable_contact_patch):
-                collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0] = contact0_pos
-                collider_state.narrowphase_work_queues.mpr_normal[i_work, 0] = contact0_normal
-                collider_state.narrowphase_work_queues.mpr_penetration[i_work, 0] = contact0_penetration
-        collider_state.narrowphase_work_queues.mpr_contact0_status[i_work] = contact0_status
+                collider_state.work_queue.contact_pos[i_work, 0] = contact0_pos
+                collider_state.work_queue.contact_normal[i_work, 0] = contact0_normal
+                collider_state.work_queue.contact_penetration[i_work, 0] = contact0_penetration
+        collider_state.work_queue.contact0_status[i_work] = contact0_status
 
     if qd.static(gjk_static_config.enable_contact_patch):
         if not is_detected_for_later:
@@ -3908,13 +3948,13 @@ def _func_multicontact_gather(
 ):
     """Accept the candidate contacts of a queued pair in slot order and write those it keeps.
 
-    The slots of multicontact queue entry i_work (see mpr_contact_status in array_class.py) go through
+    The slots of multicontact queue entry i_work (see NarrowphaseWorkQueue in array_class.py) go through
     _func_multicontact_accept in order, and the contacts kept are written by _func_multicontact_write.
     """
-    i_b = collider_state.narrowphase_work_queues.mpr_i_b[i_work]
-    i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
-    i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
-    i_pair = collider_state.narrowphase_work_queues.mpr_i_pair[i_work]
+    i_b = collider_state.work_queue.i_b[i_work]
+    i_ga = collider_state.work_queue.i_ga[i_work]
+    i_gb = collider_state.work_queue.i_gb[i_work]
+    i_pair = collider_state.work_queue.i_pair[i_work]
 
     tolerance = func_compute_mc_tolerance(i_ga, i_gb, geoms_init_AABB, dyn_info, collider_info, rigid_config)
     if overlap_merge_tolerance > 0.0:
@@ -3927,17 +3967,17 @@ def _func_multicontact_gather(
     contact_pos_local = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
     normal_local = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 3)
     penetration_local = qd.Matrix.zero(gs.qd_float, collider_static_config.n_contacts_per_convex_pair, 1)
-    for i_s in range(collider_state.narrowphase_work_queues.mpr_contact_status.shape[1]):
-        status = collider_state.narrowphase_work_queues.mpr_contact_status[i_work, i_s]
+    for i_s in range(collider_state.work_queue.contact_status.shape[1]):
+        status = collider_state.work_queue.contact_status[i_work, i_s]
         if status != MULTICONTACT_SLOT.EMPTY:
-            contact_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, i_s]
-            normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, i_s]
+            contact_pos = collider_state.work_queue.contact_pos[i_work, i_s]
+            normal = collider_state.work_queue.contact_normal[i_work, i_s]
             is_contact_kept, penetration = _func_multicontact_accept(
                 n_con,
                 status,
                 contact_pos,
                 normal,
-                collider_state.narrowphase_work_queues.mpr_penetration[i_work, i_s],
+                collider_state.work_queue.contact_penetration[i_work, i_s],
                 tolerance,
                 normal_cos_tol,
                 contact_pos_local,
@@ -4009,7 +4049,7 @@ def func_narrowphase_multicontact(
         sh_aim_axes = qd.simt.block.SharedArray((BLOCK_DIM, 4, 3), gs.qd_float)
         sh_n_aims = qd.simt.block.SharedArray((BLOCK_DIM,), gs.qd_int)
         sh_merge_tolerance = qd.simt.block.SharedArray((BLOCK_DIM,), gs.qd_float)
-        n_queue = collider_state.narrowphase_work_queues.mpr_queue_size[0]
+        n_queue = collider_state.work_queue.n_pairs[0]
         n_units = 1
         if qd.static(not gjk_static_config.enable_contact_patch):
             if N_PERTURBATIONS * n_queue <= collider_static_config.gpu_cores:
@@ -4023,9 +4063,7 @@ def func_narrowphase_multicontact(
             if i_claim_ > 0:
                 # FIXME: quadrants#925 - every lane of the block issues the claim atomic, the other lanes adding 0,
                 # instead of one atomic per block.
-                i_claim = qd.atomic_add(
-                    collider_state.narrowphase_work_queues.mpr_work_counter[0], n_works_per_claim if i_lane == 0 else 0
-                )
+                i_claim = qd.atomic_add(collider_state.work_queue.n_claimed[0], n_works_per_claim if i_lane == 0 else 0)
                 if i_lane == 0:
                     n_blocks = (collider_static_config.gpu_cores + BLOCK_DIM - 1) // BLOCK_DIM
                     sh_work_start[0] = n_blocks * n_works_per_claim + i_claim
@@ -4041,11 +4079,11 @@ def func_narrowphase_multicontact(
                 sh_merge_tolerance[i_lane // n_units] = 0.0
                 if qd.static(not gjk_static_config.enable_contact_patch):
                     for i_s in range(1, N_PERTURBATIONS + 1):
-                        collider_state.narrowphase_work_queues.mpr_contact_status[i_work, i_s] = MULTICONTACT_SLOT.EMPTY
+                        collider_state.work_queue.contact_status[i_work, i_s] = MULTICONTACT_SLOT.EMPTY
             for i_stage in range(3):
                 contact0_status = MULTICONTACT_ENTRY.DONE
                 if i_work < n_queue:
-                    contact0_status = collider_state.narrowphase_work_queues.mpr_contact0_status[i_work]
+                    contact0_status = collider_state.work_queue.contact0_status[i_work]
                 is_contact0_known = (
                     contact0_status == MULTICONTACT_ENTRY.SEED or contact0_status == MULTICONTACT_ENTRY.DETECTED
                 )
@@ -4054,11 +4092,11 @@ def func_narrowphase_multicontact(
                         if i_unit == 0 and is_contact0_known:
                             # Contact 0 is read from slot 0, where the contact0 kernel stores the Minkowski portal
                             # refinement (MPR) seed and the first stage stores a Gilbert-Johnson-Keerthi (GJK) contact
-                            i_b = collider_state.narrowphase_work_queues.mpr_i_b[i_work]
-                            i_ga = collider_state.narrowphase_work_queues.mpr_i_ga[i_work]
-                            i_gb = collider_state.narrowphase_work_queues.mpr_i_gb[i_work]
-                            normal = collider_state.narrowphase_work_queues.mpr_normal[i_work, 0]
-                            contact_pos = collider_state.narrowphase_work_queues.mpr_contact_pos[i_work, 0]
+                            i_b = collider_state.work_queue.i_b[i_work]
+                            i_ga = collider_state.work_queue.i_ga[i_work]
+                            i_gb = collider_state.work_queue.i_gb[i_work]
+                            normal = collider_state.work_queue.contact_normal[i_work, 0]
+                            contact_pos = collider_state.work_queue.contact_pos[i_work, 0]
                             geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
                             axis_0, axis_1 = func_contact_orthogonals(
                                 i_ga, i_gb, i_b, normal, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
@@ -4190,17 +4228,15 @@ def _func_enqueue_for_multicontact(
     collider_state: array_class.ColliderState,
     prefer_gjk: bool,
 ):
-    idx = qd.atomic_add(collider_state.narrowphase_work_queues.mpr_queue_size[0], 1)
-    collider_state.narrowphase_work_queues.mpr_i_b[idx] = i_b
-    collider_state.narrowphase_work_queues.mpr_i_ga[idx] = i_ga
-    collider_state.narrowphase_work_queues.mpr_i_gb[idx] = i_gb
-    collider_state.narrowphase_work_queues.mpr_i_pair[idx] = i_pair
-    collider_state.narrowphase_work_queues.mpr_contact_pos[idx, 0] = contact_pos_0
-    collider_state.narrowphase_work_queues.mpr_normal[idx, 0] = normal_0
-    collider_state.narrowphase_work_queues.mpr_penetration[idx, 0] = penetration_0
-    collider_state.narrowphase_work_queues.mpr_contact0_status[idx] = (
-        MULTICONTACT_ENTRY.GJK if prefer_gjk else MULTICONTACT_ENTRY.SEED
-    )
+    idx = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
+    collider_state.work_queue.i_b[idx] = i_b
+    collider_state.work_queue.i_ga[idx] = i_ga
+    collider_state.work_queue.i_gb[idx] = i_gb
+    collider_state.work_queue.i_pair[idx] = i_pair
+    collider_state.work_queue.contact_pos[idx, 0] = contact_pos_0
+    collider_state.work_queue.contact_normal[idx, 0] = normal_0
+    collider_state.work_queue.contact_penetration[idx, 0] = penetration_0
+    collider_state.work_queue.contact0_status[idx] = MULTICONTACT_ENTRY.GJK if prefer_gjk else MULTICONTACT_ENTRY.SEED
 
 
 @qd.func
@@ -4225,8 +4261,8 @@ def func_narrowphase_contact0(
     # The queue the loop below fills is emptied first. The top-level loops of a kernel run in order, so the reset
     # costs no launch of its own
     for _ in range(1):
-        collider_state.narrowphase_work_queues.mpr_queue_size[0] = 0
-        collider_state.narrowphase_work_queues.mpr_work_counter[0] = 0
+        collider_state.work_queue.n_pairs[0] = 0
+        collider_state.work_queue.n_claimed[0] = 0
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for flat_idx in range(_grid_size):
@@ -4734,41 +4770,80 @@ def func_narrow_phase_any_vs_terrain(
     collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
-    """
-    NOTE: for a single non-batched scene with a lot of collisioin pairs, it will be faster if we also parallelize over `self.n_collision_pairs`. However, parallelize over both B and collisioin_pairs (instead of only over B) leads to significantly slow performance for batched scene. We can treat B=0 and B>0 separately, but we will end up with messier code.
-    Therefore, for a big non-batched scene, users are encouraged to simply use `gs.cpu` backend.
-    Updated NOTE & TODO: For a HUGE scene with numerous bodies, it's also reasonable to run on GPU. Let's save this for later.
-    Update2: Now we use n_broad_pairs instead of n_collision_pairs, so we probably need to think about how to handle non-batched large scene better.
-    """
-    _B = collider_state.active_buffer.shape[1]
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_b in range(_B):
-        for i_pair in range(qd.min(collider_state.n_broad_pairs[i_b], collider_state.broad_collision_pairs.shape[0])):
-            i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
-            i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
+    """Detect the contacts of every convex geom against the terrain.
 
-            if qd.static(collider_static_config.has_terrain):
+    The terrain pairs of every env are queued, then claimed one at a time by the blocks of a pool of threads, which
+    balances the blocks whatever the cost of their pairs. A block detects its pair with its lanes (see
+    func_contact_mpr_terrain), every thread on its own slot of mpr_state and of the prism scratch.
+    """
+    if qd.static(collider_static_config.has_terrain):
+        is_coop = qd.static(rigid_config.backend != gs.cpu and rigid_config.para_level >= gs.PARA_LEVEL.PARTIAL)
+        BLOCK_DIM = qd.static(32 if is_coop else 1)
+        _B = collider_state.active_buffer.shape[1]
+        max_broad_pairs = collider_state.broad_collision_pairs.shape[0]
+        n_threads = collider_state.prism.shape[1]
+
+        # The top-level loops of a kernel run in order, so the reset costs no launch of its own
+        for _ in range(1):
+            collider_state.work_queue.n_pairs[0] = 0
+            collider_state.work_queue.n_claimed[0] = 0
+
+        qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+        for i_b, i_pair in qd.ndrange(_B, max_broad_pairs):
+            if i_pair < collider_state.n_broad_pairs[i_b]:
+                i_ga = collider_state.broad_collision_pairs[i_pair, i_b][0]
+                i_gb = collider_state.broad_collision_pairs[i_pair, i_b][1]
                 if dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.TERRAIN:
                     # The terrain is detected against the convex hull of the other geom, which would fill the cavities
                     # of a non-convex geom
                     if dyn_info.geoms.is_convex[i_ga]:
-                        func_contact_mpr_terrain(
-                            i_ga,
-                            i_gb,
-                            i_b,
-                            geoms_init_AABB,
-                            dyn_state,
-                            collider_state,
-                            mpr_state,
-                            dyn_info,
-                            rigid_info,
-                            collider_info,
-                            rigid_config,
-                            collider_static_config,
-                            errno,
-                        )
+                        i_work = qd.atomic_add(collider_state.work_queue.n_pairs[0], 1)
+                        collider_state.work_queue.i_b[i_work] = i_b
+                        collider_state.work_queue.i_ga[i_work] = i_ga
+                        collider_state.work_queue.i_gb[i_work] = i_gb
                     else:
                         errno[i_b] = errno[i_b] | array_class.ErrorCode.UNSUPPORTED_COLLISION_PAIR
+
+        qd.loop_config(
+            name="narrowphase_terrain",
+            serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL,
+            block_dim=qd.static(BLOCK_DIM if is_coop else None),
+        )
+        for i_scratch in range(n_threads):
+            tid = i_scratch % BLOCK_DIM
+            n_queue = collider_state.work_queue.n_pairs[0]
+            # A block takes its first pair by its rank and the next ones from the counter, which spares an atomic to the
+            # blocks a short queue leaves idle
+            i_work = i_scratch // BLOCK_DIM
+            for i_claim_ in range(n_queue + 1):
+                if i_claim_ > 0:
+                    # One claim per block, issued by its first lane
+                    i_claim = 0
+                    if tid == 0:
+                        i_claim = qd.atomic_add(collider_state.work_queue.n_claimed[0], 1)
+                    if qd.static(BLOCK_DIM > 1):
+                        i_claim = su.qd_block_shuffle(i_claim, 0)
+                    i_work = n_threads // BLOCK_DIM + i_claim
+                if i_work >= n_queue:
+                    break
+                func_contact_mpr_terrain(
+                    collider_state.work_queue.i_ga[i_work],
+                    collider_state.work_queue.i_gb[i_work],
+                    i_scratch,
+                    collider_state.work_queue.i_b[i_work],
+                    tid,
+                    geoms_init_AABB,
+                    dyn_state,
+                    collider_state,
+                    mpr_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    rigid_config,
+                    collider_static_config,
+                    block_dim=BLOCK_DIM,
+                    errno=errno,
+                )
 
 
 @qd.func

@@ -315,7 +315,7 @@ def create_modified_narrowphase_file(tmp_path: Path):
         "_func_multicontact_detect(",
         ERRNO_CALLED_GJK_K2,
         "MODIFIED: GJK path in multicontact",
-        "collider_state.narrowphase_work_queues.mpr_i_b[i_work]",
+        "collider_state.work_queue.i_b[i_work]",
     )
 
     content = "\n".join(lines)

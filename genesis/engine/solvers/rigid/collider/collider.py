@@ -92,15 +92,22 @@ class Collider:
             and not self._solver._requires_grad
         )
 
+        # Two threads per core fill the warp slots the register use of the terrain pass leaves
+        self._n_terrain_threads = 1
+        if self.collider_config.has_terrain and gs.backend != gs.cpu:
+            self._n_terrain_threads = 2 * self.collider_config.gpu_cores
         # The split narrowphase launches one thread per core, its contact0 pass rounding up to whole environments. An
         # upper-bound estimate of the core count sizes these launches (Genesis-Embodied-AI/Genesis#2616).
         if self._use_split_narrowphase:
             gpu_cores = self.collider_config.gpu_cores
             n_contact0_threads = self._solver._B * ((gpu_cores + self._solver._B - 1) // self._solver._B)
-            self.mpr.activate(n_contact0_threads, gpu_cores)
+            self.mpr.activate(n_contact0_threads, max(gpu_cores, self._n_terrain_threads))
             self.gjk.activate(n_contact0_threads, gpu_cores)
-        elif self.collider_config.has_non_box_plane_convex_convex:
-            self.gjk.activate()
+        else:
+            if self._n_terrain_threads > 1:
+                self.mpr.activate(None, self._n_terrain_threads)
+            if self.collider_config.has_non_box_plane_convex_convex:
+                self.gjk.activate()
         if self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex:
             self._support_field.activate()
 
@@ -152,6 +159,8 @@ class Collider:
             structs += [(self.gjk, name) for name in ("contact0_gjk_state", "multicontact_gjk_state")]
         elif self.collider_config.has_non_box_plane_convex_convex:
             structs.append((self.gjk, "gjk_state"))
+        if self._n_terrain_threads > 1 and not self._use_split_narrowphase:
+            structs.append((self.mpr, "multicontact_mpr_state"))
         for owner, name in structs:
             yield from array_class.iter_data(owner, name)
 
@@ -304,6 +313,7 @@ class Collider:
             self._solver,
             self._solver.rigid_config,
             n_possible_pairs_,
+            self._n_terrain_threads,
             self.collider_info,
             self.collider_config,
             split_narrowphase=self._use_split_narrowphase,
@@ -1168,7 +1178,7 @@ def func_detection(
                 geoms_init_AABB,
                 dyn_state,
                 collider_state,
-                mpr_state,
+                multicontact_mpr_state,
                 dyn_info,
                 rigid_info,
                 collider_info,
