@@ -354,9 +354,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Mass, center of mass and inertia tensor of the geometry in its own frame, at unit density.
 
-        Non-watertight geometry is closed by its convex hull first so the volume integral is well-defined. A degenerate
-        geometry has no mass, and composes as a geom of no mass at the origin. The result is shared by reference across
-        the meshes of one trimesh.
+        Geometry that stays open once its vertices are merged is closed by its convex hull first, so that the volume
+        integral is well-defined. A degenerate geometry has no mass, and composes as a geom of no mass at the origin.
+        The result is shared by reference across the meshes of one trimesh.
         """
         # A degenerate geometry carries no inertia: one enclosing no volume has no center of mass, and the convex hull
         # closing a non-watertight one raises when it has fewer than 4 non-coplanar vertices.
