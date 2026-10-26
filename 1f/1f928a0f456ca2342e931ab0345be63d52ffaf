@@ -1,0 +1,24 @@
+genesis/utils/watertighten.py
+  s_f8bb96e63e5f07::t_a085433f63faf7 1068-1070,1074-1081
+genesis/utils/cache.py
+  s_f8bb96e63e5f07::t_d6ce56a8e39df9 26
+tests/rigid/test_asset_loading.py
+  s_f8bb96e63e5f07::t_b7af89e3fb82a8 589,594
+  s_f8bb96e63e5f07::t_b9f78de705e8bc 610
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1f1f928a0f456ca2342e931ab0345be63d52ffaf",
+  "prompts": {},
+  "sessions": {
+    "s_f8bb96e63e5f07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8476bcac-d5d8-4320-89aa-f4a4ff5f8a18",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
