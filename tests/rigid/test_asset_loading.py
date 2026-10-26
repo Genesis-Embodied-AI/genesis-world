@@ -586,10 +586,12 @@ def test_parsing_inertia_defaults(
     torus = trimesh.creation.torus(major_radius=0.2, minor_radius=0.05)
     open_torus_path = str(asset_tmp_path / "open_torus.obj")
     trimesh.Trimesh(torus.vertices, torus.faces[1:]).export(open_torus_path)
+    # One copy is scaled down to a few centimeters, where the wrap must still measure the thickness of its solid
     entity_torus = inertia_scene.add_entity(
         morph=gs.morphs.Mesh(
             visualization=False,
             file=open_torus_path,
+            scale=0.1,
             inertia_from_visual=True,
         ),
         material=gs.materials.Rigid(
@@ -605,7 +607,7 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * torus.volume, rtol=0.02)
+    assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * 0.1**3 * torus.volume, rtol=0.02)
     assert_allclose(entity_torus_variants.desc.variants[1].links[0].mass, 1000.0 * torus.volume, rtol=0.02)
 
     # The URDF loads go through the parser MuJoCo provides, the undecodable visual meshes included

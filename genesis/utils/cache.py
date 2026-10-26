@@ -23,7 +23,7 @@ import genesis as gs
 # magnitude above the last-significant-digit noise separating two exports of the same model.
 MESH_CACHE_MATCH_RTOL = 1e-6
 # Bumped when watertighten output changes for a fixed (mesh, aggressiveness): forces a cache miss on stale entries.
-WT_CACHE_VERSION = 7
+WT_CACHE_VERSION = 8
 # Bumped when the wall-thickness estimate changes for a fixed (mesh, quantile): forces a cache miss on stale entries.
 WTH_CACHE_VERSION = 2
 # Bumped when the particles sampled for a fixed key change or when the layout of an entry does: forces a cache miss on
