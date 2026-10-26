@@ -125,8 +125,9 @@ def compose_inertial_properties(geoms_inertial_info: Sequence[GeomInertialInfo])
 def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> InertialProperties:
     """Compose the inertial of the geoms one link holds, at 'rho' where a geom states no density of its own.
 
-    Every primitive collision type is handled analytically, and a mesh defers to its cached unit-density mass
-    properties. A geom the link is only drawn with is taken as its visual mesh, so one call covers either kind.
+    Every primitive type is handled analytically, and a mesh defers to its cached unit-density mass properties. A geom
+    the link is only drawn with is integrated from its visual mesh unless the asset states a primitive for it, so one
+    call covers either kind.
 
     Parameters
     ----------
@@ -144,8 +145,8 @@ def compose_inertial_from_g_infos(g_infos: Sequence[dict], rho: float) -> Inerti
         tuple(
             GeomInertialInfo(
                 get_local_inertial_from_geom(
-                    gs.GEOM_TYPE.MESH if "vmesh" in g_info else g_info["type"],
-                    None if "vmesh" in g_info else g_info.get("data"),
+                    g_info.get("type", gs.GEOM_TYPE.MESH),
+                    g_info.get("data"),
                     g_info["vmesh"] if "vmesh" in g_info else g_info["mesh"],
                     rho if g_info.get("density") is None else g_info["density"],
                 ),
