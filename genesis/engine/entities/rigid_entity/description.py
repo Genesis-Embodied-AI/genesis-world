@@ -762,7 +762,11 @@ class KinematicEntityDescription(EntityDescription):
         if morph.visualization:
             g_infos.append(
                 dict(
-                    contype=0, conaffinity=0, vmesh=gs.Mesh.from_trimesh(tmesh, surface=self.surface, metadata=metadata)
+                    contype=0,
+                    conaffinity=0,
+                    vmesh=gs.Mesh.from_trimesh(tmesh, surface=self.surface, metadata=metadata),
+                    type=geom_type,
+                    data=geom_data,
                 )
             )
         if (morph.contype or morph.conaffinity) and morph.collision:
