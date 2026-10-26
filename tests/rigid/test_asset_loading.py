@@ -607,6 +607,19 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
+    # A closed STL mesh stores a vertex per face corner, and still encloses its volume without any wrap
+    closed_torus_path = str(asset_tmp_path / "closed_torus.stl")
+    torus.export(closed_torus_path)
+    entity_closed_torus = inertia_scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=closed_torus_path,
+            inertia_from_visual=True,
+        ),
+        material=gs.materials.Rigid(
+            rho=1000.0,
+        ),
+    )
+    assert_allclose(entity_closed_torus.base_link.desc.mass, 1000.0 * torus.volume, rtol=1e-6)
     assert_allclose(entity_torus.base_link.desc.mass, 1000.0 * 0.1**3 * torus.volume, rtol=0.02)
     assert_allclose(entity_torus_variants.desc.variants[1].links[0].mass, 1000.0 * torus.volume, rtol=0.02)
 

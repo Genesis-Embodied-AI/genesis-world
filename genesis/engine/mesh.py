@@ -365,10 +365,13 @@ class Mesh(RBC, serialization.SerializationMixin):
             # The watertightness of the mesh is cached and counted on edge keys (see 'is_watertight'), while this fresh
             # trimesh would group the rows of all its edges again.
             if not self.is_watertight:
-                gs.logger.warning(
-                    "Mesh is not watertight. Falling back to convex hull for estimating inertial properties."
-                )
-                tmesh = mu.convex_hull(tmesh)
+                # A mesh splitting its vertices along normal and texture seams is closed once they are merged
+                tmesh.merge_vertices()
+                if not tmesh.is_watertight:
+                    gs.logger.warning(
+                        "Mesh is not watertight. Falling back to convex hull for estimating inertial properties."
+                    )
+                    tmesh = mu.convex_hull(tmesh)
             volume = mu.get_signed_volume(tmesh.vertices, tmesh.faces)
         except QhullError:
             volume = 0.0

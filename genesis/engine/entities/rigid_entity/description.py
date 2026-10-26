@@ -1524,8 +1524,11 @@ class KinematicEntityDescription(EntityDescription):
             # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
             cg_infos = []
             for g_info in vg_inertia_infos:
-                if not g_info["vmesh"].is_watertight:
-                    tmesh = mu.get_watertight_mesh(g_info["vmesh"].trimesh, aggressiveness=5)
+                # A visual mesh splits its vertices along normal and texture seams, so closure is checked once merged
+                tmesh = g_info["vmesh"].trimesh.copy()
+                tmesh.merge_vertices(merge_tex=True, merge_norm=True)
+                if not tmesh.is_watertight:
+                    tmesh = mu.get_watertight_mesh(tmesh, aggressiveness=5)
                     g_info = {**g_info, "vmesh": gs.Mesh.from_trimesh(tmesh)}
                 cg_infos.append(g_info)
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
