@@ -98,7 +98,7 @@ class AutoInitMeta(type):
 
 
 # FIXME: quadrants#941 - a Python-scope fill of a field still being declared closes its SNode tree, one tree per filled
-# constant. 'V_SCALAR_FROM' defers it to the next materialization instead, at the cost of one synchronization there.
+# constant. 'V_FROM' defers it to the next materialization instead, at the cost of one synchronization there.
 _pending_fields_fill: list[tuple[qd.Tensor, Any]] = []
 _materialize = impl.PyQuadrants.materialize
 _clear = impl.PyQuadrants.clear
@@ -126,8 +126,13 @@ impl.PyQuadrants.materialize = _materialize_then_fill
 impl.PyQuadrants.clear = _clear_then_drop_fills
 
 
-def V_SCALAR_FROM(dtype, value):
-    data = V(dtype=dtype, shape=())
+# A zero quaternion is no rotation, so the quaternions of the model start from the identity. The slots no description
+# fills then stay valid rotations: the placeholder of an empty array, and the inertial frame of a kinematic link.
+IDENTITY_QUAT = (1.0, 0.0, 0.0, 0.0)
+
+
+def V_FROM(dtype, value, shape=()):
+    data = V(dtype=dtype, shape=shape)
     # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
     # materialization (see quadrants#941 above). An ndarray is filled right away: its zero-copy export runs no
     # materialization on CPU and CUDA, so a deferred value could be read before its fill.
@@ -512,18 +517,18 @@ def get_rigid_info(solver, kinematic_only):
             dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_parent=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
-            substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
-            iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
-            tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
-            ls_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
-            ls_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
-            noslip_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
-            noslip_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
-            impratio=V_SCALAR_FROM(dtype=gs.qd_float, value=1.0),
-            n_equalities=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
-            n_candidate_equalities=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
-            hibernation_thresh_vel=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
-            EPS=V_SCALAR_FROM(dtype=gs.qd_float, value=gs.EPS),
+            substep_dt=V_FROM(dtype=gs.qd_float, value=0.0),
+            iterations=V_FROM(dtype=gs.qd_int, value=0),
+            tolerance=V_FROM(dtype=gs.qd_float, value=0.0),
+            ls_iterations=V_FROM(dtype=gs.qd_int, value=0),
+            ls_tolerance=V_FROM(dtype=gs.qd_float, value=0.0),
+            noslip_iterations=V_FROM(dtype=gs.qd_int, value=0),
+            noslip_tolerance=V_FROM(dtype=gs.qd_float, value=0.0),
+            impratio=V_FROM(dtype=gs.qd_float, value=1.0),
+            n_equalities=V_FROM(dtype=gs.qd_int, value=0),
+            n_candidate_equalities=V_FROM(dtype=gs.qd_int, value=0),
+            hibernation_thresh_vel=V_FROM(dtype=gs.qd_float, value=0.0),
+            EPS=V_FROM(dtype=gs.qd_float, value=gs.EPS),
         )
 
     return RigidInfo(
@@ -563,18 +568,18 @@ def get_rigid_info(solver, kinematic_only):
         dofs_mass_envelope_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_parent=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
-        substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
-        iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),
-        tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._options.tolerance),
-        ls_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.ls_iterations),
-        ls_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._options.ls_tolerance),
-        noslip_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.noslip_iterations),
-        noslip_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._options.noslip_tolerance),
-        impratio=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._options.impratio),
-        n_equalities=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._n_equalities),
-        n_candidate_equalities=V_SCALAR_FROM(dtype=gs.qd_int, value=solver.n_candidate_equalities_),
-        hibernation_thresh_vel=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._hibernation_thresh_vel),
-        EPS=V_SCALAR_FROM(dtype=gs.qd_float, value=gs.EPS),
+        substep_dt=V_FROM(dtype=gs.qd_float, value=solver._substep_dt),
+        iterations=V_FROM(dtype=gs.qd_int, value=solver._options.iterations),
+        tolerance=V_FROM(dtype=gs.qd_float, value=solver._options.tolerance),
+        ls_iterations=V_FROM(dtype=gs.qd_int, value=solver._options.ls_iterations),
+        ls_tolerance=V_FROM(dtype=gs.qd_float, value=solver._options.ls_tolerance),
+        noslip_iterations=V_FROM(dtype=gs.qd_int, value=solver._options.noslip_iterations),
+        noslip_tolerance=V_FROM(dtype=gs.qd_float, value=solver._options.noslip_tolerance),
+        impratio=V_FROM(dtype=gs.qd_float, value=solver._options.impratio),
+        n_equalities=V_FROM(dtype=gs.qd_int, value=solver._n_equalities),
+        n_candidate_equalities=V_FROM(dtype=gs.qd_int, value=solver.n_candidate_equalities_),
+        hibernation_thresh_vel=V_FROM(dtype=gs.qd_float, value=solver._hibernation_thresh_vel),
+        EPS=V_FROM(dtype=gs.qd_float, value=gs.EPS),
     )
 
 
@@ -1636,9 +1641,9 @@ class MPRInfo:
 
 def get_mpr_info(**kwargs):
     return MPRInfo(
-        CCD_EPS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_EPS"]),
-        CCD_TOLERANCE=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_TOLERANCE"]),
-        CCD_ITERATIONS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_ITERATIONS"]),
+        CCD_EPS=V_FROM(dtype=gs.qd_float, value=kwargs["CCD_EPS"]),
+        CCD_TOLERANCE=V_FROM(dtype=gs.qd_float, value=kwargs["CCD_TOLERANCE"]),
+        CCD_ITERATIONS=V_FROM(dtype=gs.qd_float, value=kwargs["CCD_ITERATIONS"]),
     )
 
 
@@ -2043,31 +2048,31 @@ class GJKInfo:
 
 def get_gjk_info(**kwargs):
     return GJKInfo(
-        max_contacts_per_pair=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["max_contacts_per_pair"]),
-        max_contact_polygon_verts=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["max_contact_polygon_verts"]),
-        gjk_max_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["gjk_max_iterations"]),
-        epa_max_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["epa_max_iterations"]),
-        FLOAT_MIN=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"]),
-        FLOAT_MIN_SQ=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"] ** 2),
-        FLOAT_MAX=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MAX"]),
-        FLOAT_MAX_SQ=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MAX"] ** 2),
-        tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["tolerance"]),
-        collision_eps=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["collision_eps"]),
-        simplex_max_degeneracy_sq=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["simplex_max_degeneracy_sq"]),
-        polytope_max_faces=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["polytope_max_faces"]),
-        polytope_max_rel_reprojection_error=V_SCALAR_FROM(
+        max_contacts_per_pair=V_FROM(dtype=gs.qd_int, value=kwargs["max_contacts_per_pair"]),
+        max_contact_polygon_verts=V_FROM(dtype=gs.qd_int, value=kwargs["max_contact_polygon_verts"]),
+        gjk_max_iterations=V_FROM(dtype=gs.qd_int, value=kwargs["gjk_max_iterations"]),
+        epa_max_iterations=V_FROM(dtype=gs.qd_int, value=kwargs["epa_max_iterations"]),
+        FLOAT_MIN=V_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"]),
+        FLOAT_MIN_SQ=V_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"] ** 2),
+        FLOAT_MAX=V_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MAX"]),
+        FLOAT_MAX_SQ=V_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MAX"] ** 2),
+        tolerance=V_FROM(dtype=gs.qd_float, value=kwargs["tolerance"]),
+        collision_eps=V_FROM(dtype=gs.qd_float, value=kwargs["collision_eps"]),
+        simplex_max_degeneracy_sq=V_FROM(dtype=gs.qd_float, value=kwargs["simplex_max_degeneracy_sq"]),
+        polytope_max_faces=V_FROM(dtype=gs.qd_int, value=kwargs["polytope_max_faces"]),
+        polytope_max_rel_reprojection_error=V_FROM(
             dtype=gs.qd_float, value=kwargs["polytope_max_rel_reprojection_error"]
         ),
-        polytope_max_abs_reprojection_error=V_SCALAR_FROM(
+        polytope_max_abs_reprojection_error=V_FROM(
             dtype=gs.qd_float, value=kwargs["polytope_max_abs_reprojection_error"]
         ),
-        contact_face_tol=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_face_tol"]),
-        contact_edge_tol=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_edge_tol"]),
-        diff_contact_eps_boundary=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_boundary"]),
-        diff_contact_eps_distance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_distance"]),
-        diff_contact_eps_affine=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_affine"]),
-        diff_contact_min_normal_norm=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_min_normal_norm"]),
-        diff_contact_min_penetration=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_min_penetration"]),
+        contact_face_tol=V_FROM(dtype=gs.qd_float, value=kwargs["contact_face_tol"]),
+        contact_edge_tol=V_FROM(dtype=gs.qd_float, value=kwargs["contact_edge_tol"]),
+        diff_contact_eps_boundary=V_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_boundary"]),
+        diff_contact_eps_distance=V_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_distance"]),
+        diff_contact_eps_affine=V_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_affine"]),
+        diff_contact_min_normal_norm=V_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_min_normal_norm"]),
+        diff_contact_min_penetration=V_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_min_penetration"]),
     )
 
 
@@ -2101,7 +2106,7 @@ def get_support_field_info(n_geoms, n_support_cells, n_support_candidates, suppo
         support_list_start=V(dtype=gs.qd_int, shape=(n_support_cells + 1,)),
         support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_candidates, 1),)),
         support_vid=V(dtype=gs.qd_int, shape=(max(n_support_candidates, 1),)),
-        support_res=V_SCALAR_FROM(dtype=gs.qd_int, value=support_res),
+        support_res=V_FROM(dtype=gs.qd_int, value=support_res),
     )
 
 
@@ -2248,18 +2253,18 @@ def get_collider_info(
         max_candidate_contacts=V(dtype=gs.qd_int, shape=()),
         max_collision_pairs_broad=V(dtype=gs.qd_int, shape=()),
         max_contacts=V(dtype=gs.qd_int, shape=()),
-        n_valid_link_pairs=V_SCALAR_FROM(dtype=gs.qd_int, value=n_valid_link_pairs),
+        n_valid_link_pairs=V_FROM(dtype=gs.qd_int, value=n_valid_link_pairs),
         valid_link_pairs=V(dtype=gs.qd_ivec2, shape=(max(n_valid_link_pairs, 1),)),
         terrain_hf=V(dtype=gs.qd_float, shape=terrain_hf_shape),
         terrain_rc=V(dtype=gs.qd_int, shape=(2,)),
         terrain_scale=V(dtype=gs.qd_float, shape=(2,)),
         terrain_xyz_maxmin=V(dtype=gs.qd_float, shape=(6,)),
-        mc_perturbation=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mc_perturbation"]),
-        mc_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mc_tolerance"]),
-        diff_pos_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_pos_tolerance"]),
-        diff_normal_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_normal_tolerance"]),
-        contact_pruning_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_pruning_tolerance"]),
-        prune_deep_penetration_ratio=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["prune_deep_penetration_ratio"]),
+        mc_perturbation=V_FROM(dtype=gs.qd_float, value=kwargs["mc_perturbation"]),
+        mc_tolerance=V_FROM(dtype=gs.qd_float, value=kwargs["mc_tolerance"]),
+        diff_pos_tolerance=V_FROM(dtype=gs.qd_float, value=kwargs["diff_pos_tolerance"]),
+        diff_normal_tolerance=V_FROM(dtype=gs.qd_float, value=kwargs["diff_normal_tolerance"]),
+        contact_pruning_tolerance=V_FROM(dtype=gs.qd_float, value=kwargs["contact_pruning_tolerance"]),
+        prune_deep_penetration_ratio=V_FROM(dtype=gs.qd_float, value=kwargs["prune_deep_penetration_ratio"]),
     )
 
 
@@ -2526,11 +2531,11 @@ def get_links_info(solver):
         joint_end=V(dtype=gs.qd_int, shape=links_info_shape),
         n_dofs=V(dtype=gs.qd_int, shape=links_info_shape),
         pos=V(dtype=gs.qd_vec3, shape=links_info_shape),
-        quat=V(dtype=gs.qd_vec4, shape=links_info_shape),
+        quat=V_FROM(dtype=gs.qd_vec4, value=IDENTITY_QUAT, shape=links_info_shape),
         invweight=V(dtype=gs.qd_vec2, shape=links_info_shape),
         is_fixed=V(dtype=gs.qd_bool, shape=links_info_shape),
         inertial_pos=V(dtype=gs.qd_vec3, shape=links_info_shape),
-        inertial_quat=V(dtype=gs.qd_vec4, shape=links_info_shape),
+        inertial_quat=V_FROM(dtype=gs.qd_vec4, value=IDENTITY_QUAT, shape=links_info_shape),
         inertial_i=V(dtype=gs.qd_mat3, shape=links_info_shape),
         inertial_mass=V(dtype=gs.qd_float, shape=links_info_shape),
         entity_idx=V(dtype=gs.qd_int, shape=links_info_shape),
@@ -2638,7 +2643,7 @@ def get_geoms_info(solver, is_active=True):
     return GeomsInfo(
         pos=V(dtype=gs.qd_vec3, shape=shape),
         center=V(dtype=gs.qd_vec3, shape=shape),
-        quat=V(dtype=gs.qd_vec4, shape=shape),
+        quat=V_FROM(dtype=gs.qd_vec4, value=IDENTITY_QUAT, shape=shape),
         data=V(dtype=gs.qd_vec7, shape=shape),
         link_idx=V(dtype=gs.qd_int, shape=shape),
         type=V(dtype=gs.qd_int, shape=shape),
@@ -2867,7 +2872,7 @@ def get_vgeoms_info(solver):
 
     return VGeomsInfo(
         pos=V(dtype=gs.qd_vec3, shape=shape),
-        quat=V(dtype=gs.qd_vec4, shape=shape),
+        quat=V_FROM(dtype=gs.qd_vec4, value=IDENTITY_QUAT, shape=shape),
         link_idx=V(dtype=gs.qd_int, shape=shape),
         vvert_num=V(dtype=gs.qd_int, shape=shape),
         vvert_start=V(dtype=gs.qd_int, shape=shape),
@@ -3506,7 +3511,7 @@ def get_bvh_state(
         keys_scratch=V(dtype=qd.u64, shape=maybe_shape((n_trees * n_leaves,), is_active)),
         sort_scratch=V(dtype=qd.u32, shape=maybe_shape((n_sort_scratch,), is_device_radix)),
         sort_hist=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_sort_chunks, 256), is_per_tree_radix)),
-        n_keys=V_SCALAR_FROM(gs.qd_int, n_trees * n_leaves),
+        n_keys=V_FROM(gs.qd_int, n_trees * n_leaves),
         nodes_parent=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, n_nodes), is_active)),
         nodes_fitted=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, max(n_leaves - 1, 1)), is_active)),
         fit_frontier=V(dtype=gs.qd_int, shape=maybe_shape((n_trees, 2, max(n_leaves - 1, 1)), is_block_sweep)),

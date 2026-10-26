@@ -632,6 +632,12 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
         (scene.rigid_solver.get_state().qpos ** 2).sum().backward()
 
     checkpoint = scene.__getstate__()
+    # Every value the solvers hold is a number, the slots no description fills included
+    for record in checkpoint.sim.solvers.values():
+        for array in record.arrays.values():
+            values = tensor_to_array(array)
+            if values.dtype.kind == "f":
+                assert_equal(np.isnan(values).any(), False)
     # A record of another scene is rejected on its description, however its arrays compare
     other_desc = dataclasses.replace(checkpoint.scene, entities=checkpoint.scene.entities[:-1])
     other_checkpoint = dataclasses.replace(checkpoint, scene=other_desc, digest=description_digest(other_desc))
