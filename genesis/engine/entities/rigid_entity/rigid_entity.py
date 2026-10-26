@@ -366,10 +366,10 @@ class KinematicEntity(Entity):
                     desc = link.desc
                     # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so
                     # this resolves it exactly as '_describe_link' resolves a moving link.
-                    if desc.inertial_estimate is not None:
-                        desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
-                            desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *desc.inertial_estimate
-                        )
+                    assert desc.inertial_estimate is not None
+                    desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
+                        desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *desc.inertial_estimate
+                    )
 
         # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,
         # and the attached links now extend that body. Its frame and qpos stay where they are, so the anchor stops
