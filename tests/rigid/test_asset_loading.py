@@ -478,6 +478,8 @@ def test_parsing_inertia_defaults(
     inertia_scene = gs.Scene()
     for is_from_visual, is_aligned, has_collision, has_visual, has_inertial, is_recomputed in (
         (False, False, True, True, False, False),
+        (None, False, True, True, False, False),
+        (None, False, True, False, False, False),
         (True, False, True, True, False, False),
         (True, True, True, True, False, False),
         (True, False, False, True, False, False),
@@ -500,7 +502,7 @@ def test_parsing_inertia_defaults(
         )
         if has_inertial and not is_recomputed:
             mass, com, inertia = 2.0, (0.0, 0.0, 0.0), (0.01, 0.02, 0.025)
-        elif is_from_visual or (has_visual and not has_collision):
+        elif is_from_visual or (has_visual and (is_from_visual is None or not has_collision)):
             mass, com, inertia = 48.0, (0.2, 0.0, 0.0), (2.08, 1.6, 0.8)
         else:
             mass, com, inertia = 1.0, (0.0, 0.0, 0.0), (1.0 / 600.0,) * 3
@@ -613,7 +615,6 @@ def test_parsing_inertia_defaults(
     entity_closed_torus = inertia_scene.add_entity(
         morph=gs.morphs.Mesh(
             file=closed_torus_path,
-            inertia_from_visual=True,
         ),
         material=gs.materials.Rigid(
             rho=1000.0,

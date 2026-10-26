@@ -594,7 +594,7 @@ class KinematicEntityDescription(EntityDescription):
                         vg_infos,
                         bool(v_l_info["is_robot"]),
                         resolution,
-                        from_visual=morph.inertia_from_visual,
+                        from_visual=morph.inertia_from_visual is not False,
                     )
                     resolution.links_inertial_info[i_link].append(inertial_info)
                     v_joints = [description_from_info(RigidJointDescription, j_info) for j_info in v_j_infos]
@@ -642,6 +642,9 @@ class KinematicEntityDescription(EntityDescription):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
+                is_inertia_from_visual = (
+                    isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual is not False
+                )
                 inertial_info = self._resolve_inertial(
                     None,
                     None,
@@ -651,7 +654,7 @@ class KinematicEntityDescription(EntityDescription):
                     vg_infos,
                     False,
                     resolution,
-                    from_visual=isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual,
+                    from_visual=is_inertia_from_visual,
                 )
                 resolution.links_inertial_info[0].append(inertial_info)
                 # Such a morph states no joint parameters, so its variant moves through the joints of the primary
@@ -1583,7 +1586,7 @@ class KinematicEntityDescription(EntityDescription):
             vg_infos,
             l_info["is_robot"],
             resolution,
-            from_visual=isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual,
+            from_visual=isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual is not False,
         )
         resolution.links_inertial_info.append([inertial_info])
 
