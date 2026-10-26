@@ -14,7 +14,7 @@ from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
-from genesis.utils.misc import DeprecationError, qd_to_torch
+from genesis.utils.misc import DeprecationError
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
@@ -604,11 +604,11 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         # safe to wipe here. Forward-only; backward composes p2g/g2p through autodiff and uses reset_grid_and_grad.
         if not self._sim.requires_grad:
             self.reset_dirty_cells(f)
-            if gs.use_zerocopy:
-                grid_dirty_count = qd_to_torch(self.grid_dirty_count, copy=False)
-                grid_dirty_count.zero_()
-            else:
-                self.grid_dirty_count[0] = 0
+            # Clear the counter with a Quadrants kernel so it is stream-ordered after reset_dirty_cells and before the
+            # next p2g. Zeroing it through a zero-copy torch view ran on torch's stream with no synchronisation: when
+            # the memset landed after p2g had already started appending, the dirty entries of consecutive substeps
+            # accumulated until grid_dirty_list overflowed (illegal memory access at >~1M particles, 10 substeps).
+            self.clear_dirty_count()
 
         # FIXME: Use existing errno mechanism for this.
         # Rate-limit the NaN check. _is_state_valid triggers a GPU->CPU sync on its return value, so calling it every
@@ -662,6 +662,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.grid.grad[f, i, j, k, i_b].vel_in = qd.Vector.zero(gs.qd_float, 3)
             self.grid.grad[f, i, j, k, i_b].mass = gs.qd_float(0.0)
             self.grid.grad[f, i, j, k, i_b].vel_out = qd.Vector.zero(gs.qd_float, 3)
+
+    @qd.kernel
+    def clear_dirty_count(self):
+        self.grid_dirty_count[0] = gs.qd_int(0)
 
     @qd.kernel
     def reset_dirty_cells(self, f: qd.i32):
