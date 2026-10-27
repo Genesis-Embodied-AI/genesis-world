@@ -127,12 +127,14 @@ def test_entity_options(show_viewer, tol):
     rigid = entities[options_classes.index(gs.options.RigidEntityOptions)]
     assert rigid.options.surface is None
     assert rigid.desc.surface.vis_mode == "visual"
+    material = gs.materials.Rigid()
     surface = gs.surfaces.Default()
     flattened = scene.add_entity(
         gs.morphs.Box(
             pos=(5.0, 5.0, 0.6),
             size=(0.2, 0.2, 0.2),
         ),
+        material=material,
         surface=surface,
         vis_mode="collision",
     )
@@ -140,6 +142,7 @@ def test_entity_options(show_viewer, tol):
         options=flattened.options,
     )
     assert type(flattened) is gs.engine.entities.RigidEntity
+    assert flattened.material is material
     assert flattened.options.surface.vis_mode == "collision"
     assert surface.vis_mode is None
     assert twin.options == flattened.options
