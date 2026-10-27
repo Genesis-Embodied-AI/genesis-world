@@ -438,6 +438,7 @@ def test_compose_inertial_properties():
             [[np.iinfo(np.int32).min, 1], [np.iinfo(np.int32).max, 0], [np.iinfo(np.int32).min, 1]], dtype=np.int32
         ),
         np.array([[0, 0, 0], [2**40, 2**40, 2**40], [0, 0, 0]]),  # Too wide for an int64 key
+        np.random.default_rng(0).integers(0, 2, (100, 40)),  # More columns than 'np.ravel_multi_index' takes
         np.random.default_rng(0).integers(0, 5, (300, 3)).astype(np.float64),
         np.zeros((0, 3), dtype=np.int64),
     ],
