@@ -18,6 +18,8 @@ RHO_MUJOCO = 1000.0
 MASS_EPS = 0.005
 AABB_EPS = 0.002
 INERTIA_RATIO_MAX = 100.0
+# Volume ratio between the visual and collision geometry of a link beyond which its visual inertia estimate is dubious
+VISUAL_VOLUME_RATIO_MAX = 1.5
 # Rounding of an authored inertia tensor, relative to its largest eigenvalue and absolute, that its checks forgive
 INERTIA_EIGVAL_RTOL = 1e-6
 INERTIA_EIGVAL_ATOL = 1e-9

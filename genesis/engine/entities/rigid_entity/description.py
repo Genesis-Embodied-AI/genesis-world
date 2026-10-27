@@ -46,6 +46,7 @@ from .inertial import (
     RHO_MUJOCO,
     RHO_OBJECT,
     RHO_ROBOT,
+    VISUAL_VOLUME_RATIO_MAX,
     GeomInertialInfo,
     LinkInertial,
     LinkInertialInfo,
@@ -586,6 +587,7 @@ class KinematicEntityDescription(EntityDescription):
                     zip(v_l_infos, v_links_j_infos, cg_vg_infos)
                 ):
                     inertial_info = self._resolve_inertial(
+                        v_l_info["name"],
                         None if is_inertia_recomputed else v_l_info.get("inertial_mass"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_pos"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_quat"),
@@ -646,6 +648,7 @@ class KinematicEntityDescription(EntityDescription):
                     isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual is not False
                 )
                 inertial_info = self._resolve_inertial(
+                    self.links[0].name,
                     None,
                     None,
                     None,
@@ -1505,6 +1508,7 @@ class KinematicEntityDescription(EntityDescription):
 
     def _resolve_inertial(
         self,
+        link_name,
         explicit_mass,
         explicit_com,
         explicit_quat,
@@ -1522,7 +1526,7 @@ class KinematicEntityDescription(EntityDescription):
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
         geoms for a link without collision geometry. With 'from_visual', the visual geoms replace the collision ones in
         both estimates of a link whose asset leaves part of its inertial out, open ones closed first, unless the link has
-        no visual geometry of its own.
+        no visual geometry of its own. A warning names the link if its visual and collision volumes differ widely.
         """
         # A drawn collision geom also stands among the visual ones (see 'parse_geom' in mjcf.py and
         # 'parse_usd_rigid_entity'), so it counts once
@@ -1530,7 +1534,10 @@ class KinematicEntityDescription(EntityDescription):
         # The estimate only fills what the asset leaves out, so a link stating its whole inertial keeps the collision
         # geometry, which spares closing its visual meshes
         is_inertial_explicit = not any(value is None for value in (explicit_mass, explicit_com, explicit_inertia))
+        cg_volume = None
         if from_visual and not is_inertial_explicit and vg_inertia_infos:
+            if cg_infos:
+                cg_volume = compose_inertial_from_g_infos(cg_infos, rho=1.0).mass
             # An open visual mesh encloses no well-defined volume, and its convex hull would fill every concavity, so
             # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
             cg_infos = []
@@ -1545,6 +1552,16 @@ class KinematicEntityDescription(EntityDescription):
                         g_info = {**g_info, "vmesh": gs.Mesh.from_trimesh(tmesh)}
                 cg_infos.append(g_info)
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
+        # A visual mesh this far from the collision volume is usually a hollow shell, overlapping parts or a stray
+        # decoration, which the collision geometry estimates better
+        if cg_volume is not None and not (
+            cg_volume / VISUAL_VOLUME_RATIO_MAX <= anchor_inertial.mass <= VISUAL_VOLUME_RATIO_MAX * cg_volume
+        ):
+            gs.logger.warning(
+                f"Link '{link_name}' has a visual volume {anchor_inertial.mass:0.3e} far from its collision volume "
+                f"{cg_volume:0.3e}. Its inertia is estimated from visual geometry, set 'inertia_from_visual=False' to "
+                "estimate it from collision geometry instead."
+            )
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *anchor_inertial, clamp_min_mass=False
         )
@@ -1588,6 +1605,7 @@ class KinematicEntityDescription(EntityDescription):
         # world-fixed, so it suffices to honor the morph flag here.
         is_inertia_recomputed = isinstance(morph, gs.options.morphs.FileMorph) and morph.recompute_inertia
         inertial_info = self._resolve_inertial(
+            l_info["name"],
             None if is_inertia_recomputed else l_info.get("inertial_mass"),
             None if is_inertia_recomputed else l_info.get("inertial_pos"),
             None if is_inertia_recomputed else l_info.get("inertial_quat"),
