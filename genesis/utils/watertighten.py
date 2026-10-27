@@ -690,7 +690,7 @@ def _seed_quadrics_and_heap(
     np.add.at(v_Q, faces[:, 1], face_q)
     np.add.at(v_Q, faces[:, 2], face_q)
     # One entry per unique undirected edge; sort each face corner pair into (min, max) and drop duplicates.
-    edges = unique_rows(np.sort(np.stack((faces, np.roll(faces, -1, axis=1)), axis=-1).reshape(-1, 2), axis=1))[0]
+    edges, *_ = unique_rows(np.sort(np.stack((faces, np.roll(faces, -1, axis=1)), axis=-1).reshape(-1, 2), axis=1))
     u, v = edges[:, 0], edges[:, 1]
     q_sum = v_Q[u] + v_Q[v]
     # Per-edge optimal collapse position via the symmetric 3x3 upper-left quadric block, with edge-midpoint fallback on
