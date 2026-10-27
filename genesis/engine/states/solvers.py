@@ -18,9 +18,8 @@ class SolverCheckpoint:
     on the device as a torch tensor when zero-copy views exist, as a numpy array otherwise. The static configs come
     along as provenance and are never written back.
 
-    A boundary checkpoint holds the state at the boundary of two steps alone, which the backward pass of a step of a
-    differentiable rollout replays it from: no gradient, frame 0 of the arrays holding frames, on the device whatever
-    the backend (see 'Solver.get_checkpoint').
+    A boundary checkpoint holds the state at the boundary of two steps alone, from which the backward pass of a step of
+    a differentiable rollout replays it (see 'Solver.get_checkpoint').
     """
 
     arrays: dict[str, np.ndarray | torch.Tensor]

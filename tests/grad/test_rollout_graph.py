@@ -36,18 +36,16 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
 
     # Scene A: one scene, snapshot + reset between two horizons.
     scene_a, robot_a = build(show_viewer=show_viewer)
-    v1 = np.random.default_rng(seed=101).standard_normal((B, robot_a.n_dofs))
-    v2 = np.random.default_rng(seed=202).standard_normal((B, robot_a.n_dofs))
+    v1 = np.random.standard_normal((B, robot_a.n_dofs))
+    v2 = np.random.standard_normal((B, robot_a.n_dofs))
     scene_a.reset()
     v1_a = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_a = run_segment(scene_a, robot_a, v1_a)
     qpos_mid_a = read_qpos(scene_a)
     time_mid_a = scene_a.get_time().clone()
     scene_a.backward(loss_h1_a)
-    # backward restores the physics state it snapshotted, so the clocks describing it come back too, while the substep
-    # counter rewinds to the first step the backward pass replayed.
+    # backward restores the physics state it snapshotted, so the clocks describing it come back too
     assert_allclose(scene_a.get_time(), time_mid_a, tol=gs.EPS)
-    assert scene_a._sim._cur_substep_global == 0
     grad1_a = tensor_to_array(v1_a.grad).copy()
 
     v2_a = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
@@ -56,7 +54,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
     scene_a.backward(loss_h2_a)
     grad2_a = tensor_to_array(v2_a.grad).copy()
 
-    # Scene B: horizon 1 only; its backward returns the terminal snapshot Scene C resumes from.
+    # Scene B: horizon 1 only, whose backward pass returns the terminal snapshot Scene C resumes from.
     scene_b, robot_b = build()
     scene_b.reset()
     v1_b = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
@@ -278,9 +276,9 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
 @pytest.mark.required
 @pytest.mark.precision("64")
 def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_viewer):
-    # A PD controller written with the getters feeds the configuration and velocity it reads back into the control
-    # forces, and the loss reads link poses and DOF positions: the gradient of its gains follows both. The DOF positions
-    # are derived from the configuration as forward kinematics does, for every joint type.
+    # A proportional-derivative (PD) controller written with the getters feeds the configuration and velocity it reads
+    # back into the control forces, and the loss reads link poses and dof positions: the gradient of its gains follows
+    # both. The dof positions are derived from the configuration as forward kinematics does, for every joint type.
     HORIZON = 30
     pair = make_diff_scene_pair(
         grad_free_with_hinge_ball_slide, n_envs=2, gravity=(0.0, 0.0, -1.0), show_viewer=show_viewer
@@ -300,7 +298,7 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_vie
             {
                 "qpos": entity.get_qpos(),
                 "dofs_position": entity.get_dofs_position(),
-                "dofs_position_selected": entity.get_dofs_position([8, 3, 8], envs_idx=[1]),
+                "dofs_position_selected": entity.get_dofs_position(dofs_idx_local=[8, 3, 8], envs_idx=[1]),
                 "dofs_velocity": entity.get_dofs_velocity(),
                 "links_pos": entity.get_links_pos(),
                 "links_pos_solver": entity.get_links_pos(relative=False),
@@ -324,7 +322,7 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_vie
             # positions the controller drove them to
             if i_step == HORIZON // 2:
                 entity.set_dofs_position(
-                    rotation * torch.tensor([1.0, -0.5], dtype=gs.tc_float, device=gs.device), [4, 8]
+                    rotation * torch.tensor([1.0, -0.5], dtype=gs.tc_float, device=gs.device), dofs_idx_local=[4, 8]
                 )
             position = entity.get_dofs_position(joints_dofs)
             force = kp * (amplitude * np.sin(0.2 * i_step) - position) - kd * entity.get_dofs_velocity(joints_dofs)

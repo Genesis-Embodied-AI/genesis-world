@@ -24,7 +24,7 @@ import dataclasses
 import warnings
 import weakref
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -39,7 +39,8 @@ from genesis.utils.cache import OwnedCache
 from genesis.utils.misc import qd_from_torch, qd_to_torch
 
 if TYPE_CHECKING:
-    from genesis.engine.solvers.base_solver import Solver, StateChange
+    from genesis.engine.solvers.base_solver import Solver
+    from genesis.engine.state_change import StateChange
 
 
 class Operation:
@@ -289,12 +290,13 @@ class LaunchRecorder:
         self._arrays_used_by_entry: set[int] = set()
 
     def __enter__(self) -> "LaunchRecorder":
-        # FIXME: quadrants#997 - a forward launch allocates the gradient of a torch tensor tracking gradients, which torch
-        # warns about for a tensor derived from another one: the warning is silenced, the gradients taken back on exit
         # The recorder of the calls between two steps is entered once per call, which a warnings context allows once
         self._warnings_context = warnings.catch_warnings()
         self._warnings_context.__enter__()
+        # FIXME: quadrants#997 - a forward launch allocates the gradient of a torch tensor tracking gradients, which
+        # torch warns about for a tensor derived from another one. The warning is silenced, the gradients taken back.
         warnings.filterwarnings("ignore", message="The .grad attribute of a Tensor that is not a leaf Tensor")
+        # FIXME: quadrants#1000 - the launch hook of Quadrants is reachable only through this private runtime slot
         runtime = impl.get_runtime()
         self._previous_tape, runtime.target_tape = runtime.target_tape, self
         return self
@@ -317,11 +319,21 @@ class LaunchRecorder:
             self._arrays_used |= self._arrays_used_by_entry
             self._arrays_used_by_entry.clear()
             if kernel.func in _KERNELS_BACKWARD:
-                self.entries.append(RecordedEntry([], False, _KERNELS_BACKWARD[kernel.func], args, [], None))
+                entry = RecordedEntry(
+                    launches=[],
+                    is_autodiff=False,
+                    backward=_KERNELS_BACKWARD[kernel.func],
+                    backward_args=args,
+                    arrays_saved=[],
+                    restore=None,
+                )
             else:
-                self.entries.append(RecordedEntry([], True, None, (), [], None))
-        launches, _, _, _, arrays_saved, _ = self.entries[-1]
-        launches.append((kernel, args))
+                entry = RecordedEntry(
+                    launches=[], is_autodiff=True, backward=None, backward_args=(), arrays_saved=[], restore=None
+                )
+            self.entries.append(entry)
+        entry = self.entries[-1]
+        entry.launches.append((kernel, args))
         # The arrays of the state the launch uses and those it may write are those its struct arguments hold, INFO and
         # CONSTANT apart, which a step never writes (see 'DataKind'). They depend on the compiled form of the kernel and
         # on the structs alone.
@@ -346,8 +358,8 @@ class LaunchRecorder:
         arrays_used, arrays_written = launch_arrays
         self._is_saving = True
         for array in arrays_written:
-            if id(array) in self._arrays_used and all(array is not saved for saved, _ in arrays_saved):
-                arrays_saved.append((array, qd_to_torch(array, copy=True)))
+            if id(array) in self._arrays_used and all(array is not saved for saved, _ in entry.arrays_saved):
+                entry.arrays_saved.append((array, qd_to_torch(array, copy=True)))
         self._is_saving = False
         self._arrays_used_by_entry |= arrays_used
 
@@ -357,19 +369,28 @@ class LaunchRecorder:
         backward: Callable[..., None] | None = None,
         *args,
         restore: Callable[[], None] | None = None,
-        is_autodiff: bool = False,
+        autodiff: bool = False,
     ) -> Iterator[None]:
         """
         Record the kernels launched in the block as one entry.
 
-        The launches are reversed by their autodiff when `is_autodiff` holds, by `backward` called with `args` otherwise,
+        The launches are reversed by their autodiff when `autodiff` holds, by `backward` called with `args` otherwise,
         None for launches without gradient. `restore` writes back, after the reversal, what the block overwrites in
         arrays the recorder cannot see, such as the frames of a solver.
         """
         assert not self._is_grouping, "A block recording one entry cannot open inside another."
         self._arrays_used |= self._arrays_used_by_entry
         self._arrays_used_by_entry.clear()
-        self.entries.append(RecordedEntry([], is_autodiff, backward, args, [], restore))
+        self.entries.append(
+            RecordedEntry(
+                launches=[],
+                is_autodiff=autodiff,
+                backward=backward,
+                backward_args=args,
+                arrays_saved=[],
+                restore=restore,
+            )
+        )
         self._is_grouping = True
         try:
             yield
@@ -395,8 +416,11 @@ class LaunchRecorder:
                         if isinstance(arg, torch.Tensor) and arg.requires_grad
                     }
                     kernel.grad(*(leaves.get(id(arg), arg) for arg in args))
-                    for i, leaf in leaves.items():
-                        tensors_grad[i] = leaf.grad if i not in tensors_grad else tensors_grad[i] + leaf.grad
+                    for tensor_id, leaf in leaves.items():
+                        if tensor_id in tensors_grad:
+                            tensors_grad[tensor_id] = tensors_grad[tensor_id] + leaf.grad
+                        else:
+                            tensors_grad[tensor_id] = leaf.grad
             elif backward is not None:
                 backward(*backward_args)
             for array, value in arrays_saved:

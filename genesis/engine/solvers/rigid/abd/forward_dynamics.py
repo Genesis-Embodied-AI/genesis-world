@@ -2138,7 +2138,6 @@ def func_midpoint_free_body(
                 break
     if qd.static(is_reversed):
         w_mid = w_try
-    # The solve alone stores the converged velocity and its residual, from which the integration resumes
     if qd.static(is_backward and not is_reversed):
         dyn_state.links.midpoint_ang[i_l, i_b] = w_mid
         dyn_state.links.midpoint_res[i_l, i_b] = f_mid
@@ -2415,10 +2414,14 @@ def kernel_forward_dynamics_without_qacc(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    # Backward-only kernel. func_factor_mass is omitted: its reverse is unneeded since the backward pass seeds
-    # mass_mat.grad directly via the implicit function theorem (see kernel_manual_compute_qacc_bw in manual_bw.py),
-    # skipping the LDL^T factor chain. func_compute_mass_matrix_and_link_force is kept so Quadrants autodiff
-    # auto-reverses mass_mat -> links pos / quat.
+    """
+    Run the forward dynamics of a substep, without the factor of the mass matrix and the smooth acceleration.
+
+    A differentiable scene launches the factor and the smooth acceleration apart (see kernel_compute_smooth_qacc), since
+    the backward pass seeds mass_mat.grad directly via the implicit function theorem (see kernel_manual_compute_qacc_bw
+    in manual_bw.py), skipping the LDL^T factor chain. Quadrants autodiff reverses the mass matrix computed here back
+    to the poses of the links.
+    """
     func_torque_and_passive_force(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward)
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=False, is_backward=is_backward)
     func_compute_mass_matrix_and_link_force(

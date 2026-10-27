@@ -37,10 +37,10 @@ class StateChange(enum.Enum):
 class MutatedLinks(enum.Enum):
     """Which links a @mutates-tagged method can affect, consumed by link-filtered subscribers (see Subscriber).
 
-    ALL: any link (the conservative default). ARTICULATED: only links whose pose is a function of the configuration
-    - a configuration-space setter (qpos, dofs) can never displace a fixed link, which carries no degree of freedom
-    (fixed links move only through explicit base-pose setters, whose reach is their link selection). A method whose
-    reach is an explicit link selection instead declares the name of its links-index argument.
+    ALL: any link (the conservative default). ARTICULATED: only links whose pose is a function of the configuration. A
+    configuration-space setter (qpos, dofs) can never displace a fixed link, which carries no degree of freedom (fixed
+    links move only through explicit base-pose setters, whose reach is their link selection). A method whose reach is an
+    explicit link selection instead declares the name of its links-index argument.
     """
 
     ALL = enum.auto()
@@ -51,7 +51,8 @@ def _expand_links_subtree(links_idx: np.ndarray, links_parent_idx: np.ndarray) -
     """Close a set of global link indices over their kinematic subtrees: every descendant of a member is a member.
 
     Iterates one tree level per pass (a link joins when its parent is a member), so it terminates after at most the
-    tree depth."""
+    tree depth.
+    """
     is_affected = np.zeros(links_parent_idx.shape[0], dtype=bool)
     is_affected[links_idx] = True
     has_parent = links_parent_idx >= 0
@@ -69,9 +70,10 @@ def mutates(
     differentiable: bool = True,
     derived: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Tag a state-mutating method of a solver or of one of its entities with the StateChange categories it produces
-    (one method may produce several, e.g. set_state changes both GEOMETRY and DYNAMICS, and an input of the next step
-    such as a control target produces none).
+    """Tag a state-mutating method of a solver or of one of its entities with the StateChange categories it produces.
+
+    One method may produce several (set_state changes both GEOMETRY and DYNAMICS), and an input of the next step such as
+    a control target produces none.
 
     Every tagged method writing the state, all but those changing the model, is a call the autograd graph of a
     differentiable rollout records and replays (see 'RolloutGraph.run_call'), so a differentiable scene takes no
@@ -85,10 +87,10 @@ def mutates(
     notify, so a subscriber only ever wakes on a genuine mutation.
 
     `links` declares which links the method can affect, so link-filtered subscribers can drop notifications that
-    cannot concern them: the name of the argument holding the targeted global link indices (e.g. "links_idx") - the
-    reach then closes over their kinematic subtrees, since forward kinematics carries a new pose to every descendant,
-    fixed children included - MutatedLinks.ARTICULATED for configuration-space setters, or MutatedLinks.ALL when any
-    link may change. Nested tagged calls union their mutated links, an unbounded reach absorbing the rest.
+    cannot concern them: the name of the argument holding the targeted global link indices (e.g. "links_idx"),
+    MutatedLinks.ARTICULATED for configuration-space setters, or MutatedLinks.ALL when any link may change. The reach of
+    named links closes over their kinematic subtrees, since forward kinematics carries a new pose to every descendant,
+    fixed children included. Nested tagged calls union their mutated links, an unbounded reach absorbing the rest.
     """
     triggered = frozenset(changes)
     is_recorded = StateChange.MODEL not in triggered
@@ -106,8 +108,8 @@ def mutates(
                 # The setter substitutes its own default selection (potentially reaching any link), or the solver
                 # exposes no kinematic structure to close the reach over: stay unbounded.
                 return None
-            # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor);
-            # the reach set lives host-side, where the subscriber filters compare.
+            # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor). The
+            # reach set lives host-side, where the subscriber filters compare.
             links_idx = tensor_to_array(sanitize_index(links_idx, -1, self.n_links, 0, links))
             return _expand_links_subtree(links_idx, self._links_parent_idx)
 

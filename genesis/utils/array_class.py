@@ -181,8 +181,7 @@ class ArrayItem(NamedTuple):
     feature switched off (see 'maybe_shape'), which a restore leaves as built (see 'check_data').
 
     `is_grad` marks the gradient of another item. `is_framed` marks an array whose first axis indexes the frames of
-    the substeps a solver holds, the state at the boundary of two steps sitting in frame 0 (see
-    'Solver.roll_frame_window').
+    the substeps a solver holds, frame 0 holding the state between two steps (see 'Solver.roll_frame_window').
     """
 
     name: str

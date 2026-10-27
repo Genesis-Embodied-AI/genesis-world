@@ -264,18 +264,18 @@ class MPMEntity(ParticleEntity):
 
     def _sanitize_written_particles(self, tensor, dtype, particles_idx_local, envs_idx, element_shape=()):
         """
-        Sanitize the particles a setter writes and the values written, as the global indices of the particles.
+        Sanitize the values written by a particle setter, the global indices of its particles and its environments.
 
-        An environment or a particle given several times keeps its last occurrence (see 'drop_repeated_index').
+        An environment or a particle given several times keeps its last occurrence alone (see 'drop_repeated_index').
         """
         envs_idx_ = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx = self._sanitize_particles_idx_local(particles_idx_local, envs_idx_) + self._particle_start
         tensor = self._sanitize_particles_tensor(tensor, dtype, particles_idx, envs_idx_, element_shape)
         envs_idx_, (tensor, particles_idx) = drop_repeated_index(
-            envs_idx, envs_idx_, (tensor, particles_idx), 0, self._scene.n_envs
+            envs_idx, envs_idx_, (tensor, particles_idx), axis=0, max_size=self._scene.n_envs
         )
         particles_idx, (tensor,) = drop_repeated_index(
-            particles_idx_local, particles_idx, (tensor,), 1, self._n_particles
+            particles_idx_local, particles_idx, (tensor,), axis=1, max_size=self._n_particles
         )
         return tensor, particles_idx, envs_idx_
 
@@ -283,7 +283,7 @@ class MPMEntity(ParticleEntity):
     @gs.assert_built
     def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
         poss, particles_idx, envs_idx = self._sanitize_written_particles(
-            poss, gs.tc_float, particles_idx_local, envs_idx, (3,)
+            poss, gs.tc_float, particles_idx_local, envs_idx, element_shape=(3,)
         )
         # Between two steps, the state sits in frame 0 (see 'MPMSolver.roll_frame_window')
         self._solver._kernel_set_particles_pos(0, particles_idx, envs_idx, poss)
@@ -302,7 +302,7 @@ class MPMEntity(ParticleEntity):
     @gs.assert_built
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
         vels, particles_idx, envs_idx = self._sanitize_written_particles(
-            vels, gs.tc_float, particles_idx_local, envs_idx, (3,)
+            vels, gs.tc_float, particles_idx_local, envs_idx, element_shape=(3,)
         )
         # See 'set_particles_pos'
         self._solver._kernel_set_particles_vel(0, particles_idx, envs_idx, vels)
@@ -356,7 +356,7 @@ class MPMEntity(ParticleEntity):
         actus = to_gs_tensor(actus)
         if actus.ndim == 0:
             actus = actus.reshape((1,)).expand((self.material.n_groups,))
-        self.set_particles_actu(actus, None, envs_idx)
+        self.set_particles_actu(actus, envs_idx=envs_idx)
 
     @mutates()
     @assert_muscle

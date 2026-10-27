@@ -1,9 +1,5 @@
-import contextlib
-import enum
-import functools
-import inspect
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import numpy as np
 import torch
@@ -16,7 +12,7 @@ from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states import SolverCheckpoint
-from genesis.grad.bridge import ReadOperation, RolloutGraph
+from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -362,7 +358,8 @@ class Solver(RBC):
         if boundary_only and gs.use_zerocopy.is_supported:
             boundary_views = self._boundary_views_by_kinds.get(kinds)
             if boundary_views is None:
-                boundary_views = self._boundary_views_by_kinds[kinds] = BoundaryViews([], [], [])
+                boundary_views = BoundaryViews(names=[], views=[], items_copied=[])
+                self._boundary_views_by_kinds[kinds] = boundary_views
                 for item in items:
                     if isinstance(item, array_class.ScalarItem):
                         boundary_views.items_copied.append(item)
@@ -413,7 +410,9 @@ class Solver(RBC):
         items = self._checkpoint_items(checkpoint.kinds, checkpoint.is_boundary_only)
         array_class.fill_data(items, checkpoint.arrays, boundary_only=checkpoint.is_boundary_only)
 
-    def _checkpoint_items(self, kinds, boundary_only) -> list[array_class.DataItem]:
+    def _checkpoint_items(
+        self, kinds: frozenset[array_class.DataKind], boundary_only: bool
+    ) -> list[array_class.DataItem]:
         """
         Return the items a checkpoint of the given kinds holds.
 

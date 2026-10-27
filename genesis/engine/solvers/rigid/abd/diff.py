@@ -1,5 +1,5 @@
 """
-Functions of the rigid body solver that a differentiable scene launches on their own.
+State updates of the rigid body solver outside its dynamics, and the finiteness checks guarding them.
 
 These functions handle:
 - Copying the integrated state to the current one, and flagging the envs whose integration is not finite
@@ -19,7 +19,7 @@ from genesis.grad.bridge import no_grad
 def func_copy_next_to_curr(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
-    """Copy the integrated velocities and positions of every env to its state, unless one of them is not a number.
+    """Copy the integrated velocities and positions of every env to its state, unless one of them is not finite.
 
     A 'nan' or an 'inf' raises INVALID_ACC_NAN for its env, which halts the simulation, and leaves the state of that env
     as it was so that the value does not propagate. Every velocity and position takes its own thread.
@@ -66,11 +66,10 @@ def func_flag_non_finite_grad(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template(), errno: qd.Tensor
 ):
     """
-    Flag INVALID_GRAD_NAN for every environment whose gradient of the positions or velocities of the dofs is 'nan' or
-    'inf'.
+    Flag INVALID_GRAD_NAN for every env whose gradient of the positions or velocities of the dofs is not finite.
 
-    The flag stays on the device until the backward pass is over (see 'Simulator._end_backward_pass'), so the reverse
-    substeps never wait on the host.
+    The flag stays on the device until the backward pass is over (see 'end_backward_pass' in 'Simulator.__init__'), so
+    the reverse substeps never wait on the host.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_q, i_b in qd.ndrange(rigid_info.qpos.shape[0], rigid_info.qpos.shape[1]):

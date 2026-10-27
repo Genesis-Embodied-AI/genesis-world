@@ -134,7 +134,6 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
             material=gs.materials.FEM.Muscle(
                 E=5e4,
                 nu=0.3,
-                rho=1000.0,
                 n_groups=2,
             ),
         )

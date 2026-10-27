@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import genesis as gs
-from genesis.grad.bridge import Operation, RolloutGraph, LaunchRecorder
+from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
@@ -85,8 +85,20 @@ class Simulator(RBC):
 
         # Autograd graph of the rollout (see genesis.grad.bridge), which a reset starts anew (see 'is_forward_ready' for
         # the steps a backward pass forbids)
+        def begin_backward_pass():
+            # The pass rewinds the state of the simulation, so stepping forward stays forbidden until the next reset,
+            # even after a pass that raises. The adjoints start from zero.
+            self._is_forward_ready = False
+            for solver in self._active_solvers:
+                solver.reset_grad()
+
+        def end_backward_pass():
+            # The errors the solvers flagged during the pass are raised once it is over
+            for solver in self._active_solvers:
+                solver.check_errors()
+
         self._rollout_graph = RolloutGraph(
-            self._requires_grad, on_pass_start=self._begin_backward_pass, on_pass_end=self._end_backward_pass
+            self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
         )
         self._is_forward_ready = True
 
@@ -260,9 +272,9 @@ class Simulator(RBC):
             if isinstance(entity, HybridEntity):
                 entity.build()
 
-        # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while the
-        # changes of the state are calls the graph records (see 'mutates'). The state of a solver tracking no gradient is
-        # outside the graph.
+        # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while a
+        # change of the state is a call the graph records (see 'mutates'). The state of a solver tracking no gradient
+        # stays outside the graph.
         for solver in self._active_solvers:
             if solver.requires_grad:
                 self._differentiable_solvers.append(solver)
@@ -353,22 +365,6 @@ class Simulator(RBC):
         self._rollout_graph.restart()
         self._is_forward_ready = True
 
-    def _begin_backward_pass(self):
-        """
-        Start a backward pass through the rollout from zero adjoints.
-
-        The pass rewinds the state of the simulation, so stepping forward stays forbidden until the next reset, even
-        after a pass that raises.
-        """
-        self._is_forward_ready = False
-        for solver in self._active_solvers:
-            solver.reset_grad()
-
-    def _end_backward_pass(self):
-        """Raise on the errors the solvers flagged during a backward pass, once it is over."""
-        for solver in self._active_solvers:
-            solver.check_errors()
-
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
@@ -411,7 +407,7 @@ class Simulator(RBC):
         for solver in self._active_solvers:
             solver.end_step()
 
-    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list) -> None:
+    def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
         """
         Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
         differentiable solvers.
@@ -449,7 +445,7 @@ class Simulator(RBC):
             with LaunchRecorder() as recorder:
                 self.substep(self.cur_substep_local)
                 if is_last_substep:
-                    with recorder.entry(restore=restore_frames, is_autodiff=True):
+                    with recorder.entry(restore=restore_frames, autodiff=True):
                         for solver in self._active_solvers:
                             solver.roll_frame_window()
                     for solver in self._active_solvers:
@@ -620,7 +616,7 @@ class StepOperation(Operation):
         self._sim = weakref.ref(sim)
         self._substep_start = sim.cur_substep_global
         self._steps_start = sim.steps.clone()
-        # The state each differentiable solver holds at the start of the step, which its backward pass replays it from
+        # The state each differentiable solver holds at the start of the step, from which its backward pass replays it
         self._checkpoints = None
 
     def forward(self) -> tuple[torch.Tensor, ...]:

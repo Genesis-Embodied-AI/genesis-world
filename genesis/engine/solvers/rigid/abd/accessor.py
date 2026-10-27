@@ -834,8 +834,8 @@ def kernel_set_dofs_zero_velocity(
 
 @qd.kernel(fastcache=True)
 def kernel_set_dofs_position(
-    envs_idx: qd.types.ndarray(),
     is_dof_set: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
     position: qd.types.ndarray(),
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -845,8 +845,8 @@ def kernel_set_dofs_position(
     Write the configuration of the joint of each link from the positions of its dofs, when one of them is set.
 
     `position` holds the position of every dof in each of the environments, the current one for a dof not set, since
-    the three rotation dofs of a free or spherical joint make one quaternion. The positions of the dofs
-    themselves are derived from the configuration by forward kinematics.
+    the three rotation dofs of a free or spherical joint make one quaternion. The positions of the dofs themselves are
+    derived from the configuration by forward kinematics.
     """
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_l, i_b_ in qd.ndrange(dyn_info.links.dof_start.shape[0], envs_idx.shape[0]):
@@ -889,7 +889,8 @@ def kernel_set_dofs_position(
                 quat = gu.qd_xyz_to_quat(xyz)
                 for j in qd.static(range(4)):
                     rigid_info.qpos[q_start + j, i_b] = quat[j]
-            else:  # (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
+            else:
+                # (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC)
                 for i_d_ in range(dof_end - dof_start):
                     i_q = q_start + i_d_
                     rigid_info.qpos[i_q, i_b] = rigid_info.qpos0[i_q, i_b] + position[i_b_, dof_start + i_d_]

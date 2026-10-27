@@ -21,9 +21,7 @@ from genesis.utils.misc import DeprecationError, qd_to_torch
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 if TYPE_CHECKING:
-    from genesis.engine.entities import MPMEntity
     from genesis.engine.scene import Scene
-    from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.simulator import Simulator
 
 
@@ -681,19 +679,16 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     @property
     def data(self):
         """Yield the state of the particles, the frame 0 of which a boundary checkpoint holds (see 'Solver.data')."""
-        particles = self.particles
         for name, field in (
-            ("pos", particles.pos),
-            ("vel", particles.vel),
-            ("C", particles.C),
-            ("F", particles.F),
-            ("Jp", particles.Jp),
-            ("actu", particles.actu),
+            ("particles.pos", self.particles.pos),
+            ("particles.vel", self.particles.vel),
+            ("particles.C", self.particles.C),
+            ("particles.F", self.particles.F),
+            ("particles.Jp", self.particles.Jp),
+            ("particles.actu", self.particles.actu),
+            ("particles_ng.active", self.particles_ng.active),
         ):
-            yield array_class.ArrayItem(f"particles.{name}", array_class.DataKind.STATE, field, is_framed=True)
-        yield array_class.ArrayItem(
-            "particles_ng.active", array_class.DataKind.STATE, self.particles_ng.active, is_framed=True
-        )
+            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field, is_framed=True)
 
     @qd.kernel
     def add_grad_from_pos(self, f: qd.i32, pos_grad: qd.types.ndarray()):
@@ -865,11 +860,12 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
+            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
             if i_p >= 0:
                 for i in qd.static(range(3)):
                     self.particles[f, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
 
-                # Reset these attributes whenever overwritting particle positions manually
+                # Reset these attributes whenever overwriting particle positions manually
                 self.particles[f, i_p, i_b].vel.fill(0.0)
                 self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
                 self.particles[f, i_p, i_b].C.fill(0.0)
@@ -901,6 +897,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
+            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
             if i_p >= 0:
                 for i in qd.static(range(3)):
                     self.particles[f, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
@@ -931,6 +928,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
+            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
             if i_p >= 0:
                 self.particles_ng[f, i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
 
@@ -960,6 +958,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_g, i_b_ in qd.ndrange(particles_idx.shape[1], n_groups, envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
+            # The earlier occurrences of a repeated particle are -1 (see 'drop_repeated_index')
             if i_p >= 0:
                 if self.particles_info[i_p].muscle_group == i_g:
                     self.particles[f, i_p, i_b].actu = actus[i_b_, i_p_, i_g]

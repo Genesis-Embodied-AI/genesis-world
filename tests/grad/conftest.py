@@ -97,7 +97,7 @@ def grad_free_with_revolute():
 
 @pytest.fixture(scope="session")
 def grad_free_with_hinge_ball_slide():
-    # A free chassis carrying one arm per other joint type, so that every way of deriving DOF positions from the
+    # A free chassis carrying one arm per other joint type, so that every way of deriving dof positions from the
     # configuration is exercised: a coordinate, a coordinate offset by the neutral configuration, and Euler angles.
     mjcf = ET.Element("mujoco", model="free_with_hinge_ball_slide")
     worldbody = ET.SubElement(mjcf, "worldbody")

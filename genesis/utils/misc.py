@@ -978,8 +978,8 @@ def qd_to_numpy(
     return _apply_masks(array, value, row_mask, col_mask, keepdim, copy, to_torch=False)
 
 
-# FIXME: quadrants - the fastcache key of a torch tensor omits whether it tracks gradients, which the argument layout
-# depends on, so a launch with one after a plain one segfaults. The key takes the grad tag an ndarray carries.
+# FIXME: quadrants#882 - the fastcache key of a torch tensor omits whether it tracks gradients, on which the argument
+# layout depends, so a launch with one after a plain one segfaults. The key takes the grad tag an ndarray carries.
 _stringify_obj_type = args_hasher.stringify_obj_type
 
 
@@ -1191,9 +1191,8 @@ def drop_repeated_index(
         is_last = get_last_occurrence(index) == torch.arange(index.shape[-1], device=index.device)
         return torch.where(is_last, index, -1), tensors
     if isinstance(index_input, torch.Tensor):
-        is_last = get_last_occurrence(index[(0,) * (index.ndim - 1)]) == torch.arange(
-            index.shape[-1], device=index.device
-        )
+        index_row = index[(0,) * (index.ndim - 1)]
+        is_last = get_last_occurrence(index_row) == torch.arange(index.shape[-1], device=index.device)
         positions = is_last.nonzero()[:, 0]
     else:
         entries = np.mod(index_input, max_size)
@@ -1201,9 +1200,8 @@ def drop_repeated_index(
             return index, tensors
         _, first_reversed = np.unique(entries[::-1], return_index=True)
         positions = torch.tensor(np.sort(len(entries) - 1 - first_reversed), dtype=gs.tc_int, device=gs.device)
-    return index.index_select(-1, positions), tuple(
-        None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors
-    )
+    tensors_kept = tuple(None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors)
+    return index.index_select(-1, positions), tensors_kept
 
 
 def sanitize_indices(
@@ -1387,8 +1385,8 @@ def assign_indexed_tensor(
     else:
         # Every occurrence of an index given several times writes the value of its last occurrence, since a scatter
         # writes them in no defined order. The tensors and integers indexing the axes broadcast against each other into
-        # one block of axes of the selection, where the first of them stands when they are contiguous, and first
-        # otherwise. Each tensor spans the axis of the block along which its size is above 1.
+        # one block of axes of the selection, which takes the place of the first of them when they are contiguous, and
+        # leads the selection otherwise. Each tensor spans the axis of the block along which its size is above 1.
         # A loop spares the frame of a comprehension, which the many small writes of the hot path would pay
         repeatable_axes = []
         for axis, index in enumerate(indices):
@@ -1398,8 +1396,8 @@ def assign_indexed_tensor(
             advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
             indexed_shape = get_indexed_shape(tensor.shape, indices)
             value = broadcast_tensor(value, tensor.dtype, indexed_shape, dim_names)
-            is_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
-            block_start = advanced_axes[0] if is_contiguous else 0
+            is_advanced_axes_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
+            block_start = advanced_axes[0] if is_advanced_axes_contiguous else 0
             block_ndim = max(indices[axis].ndim for axis in repeatable_axes)
             for axis in repeatable_axes:
                 index = indices[axis]

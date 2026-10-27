@@ -1045,7 +1045,7 @@ class Scene(RBC):
         return snapshot
 
     def _get_state(self):
-        # A state the scene keeps for itself is no query of a differentiable rollout
+        # The scene keeps this state for itself, outside of the autograd graph of a differentiable rollout
         with torch.no_grad():
             return self._sim.get_state()
 

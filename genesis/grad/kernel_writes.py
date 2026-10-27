@@ -31,6 +31,8 @@ class Callee(NamedTuple):
 _WRITTEN_PATHS_CACHE = OwnedCache()
 
 
+# FIXME: quadrants#1001 - Quadrants exposes no write set of a kernel, so it is derived from the source here, which
+# duplicates the analysis of its frontend and counts both branches of a static condition.
 def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tuple[str, ...]]:
     """
     Return the paths of the parameters of a kernel or a func that it may write.
@@ -41,9 +43,9 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
     is the object the first parameter of a method is bound to, through which it reaches the funcs of other objects.
     """
     cache_key = (fn, id(owner))
-    paths_written = _WRITTEN_PATHS_CACHE.find(cache_key)
-    if paths_written is not None:
-        return paths_written
+    paths_cached = _WRITTEN_PATHS_CACHE.find(cache_key)
+    if paths_cached is not None:
+        return paths_cached
     func_def = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
     params = [arg.arg for arg in (*func_def.args.posonlyargs, *func_def.args.args, *func_def.args.kwonlyargs)]
     owner_name = params[0] if owner is not None else None
@@ -76,13 +78,13 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
             if isinstance(target, ast.Name) and callee is not None:
                 funcs[target.id] = callee
 
-    written = set()
+    paths_written = set()
     for node in ast.walk(func_def):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                written |= _resolve_store(target, aliases)
+                paths_written |= _resolve_store(target, aliases)
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
-            written |= _resolve_store(node.target, aliases)
+            paths_written |= _resolve_store(node.target, aliases)
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute):
                 name = node.func.attr
@@ -91,9 +93,9 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
             else:
                 name = ""
             if name.startswith("atomic_") and node.args:
-                written |= _resolve(node.args[0], aliases)
+                paths_written |= _resolve(node.args[0], aliases)
             elif name == "fill" and isinstance(node.func, ast.Attribute):
-                written |= _resolve(node.func.value, aliases)
+                paths_written |= _resolve(node.func.value, aliases)
             else:
                 callee = _find_callee(node.func, fn, funcs, owner_name, owner)
                 if callee is None:
@@ -110,13 +112,13 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
                     for keyword in node.keywords
                     if keyword.arg is not None
                 ]
-                callee_written = get_written_paths(callee.fn, callee.owner)
+                callee_paths_written = get_written_paths(callee.fn, callee.owner)
                 for callee_param, arg_paths in bindings:
-                    for callee_path in callee_written:
+                    for callee_path in callee_paths_written:
                         if callee_path[0] == callee_param:
-                            written |= {(*path, *callee_path[1:]) for path in arg_paths}
-    paths_written = frozenset(path for path in written if path[0] in params)
-    return _WRITTEN_PATHS_CACHE.own(fn if owner is None else owner, cache_key, paths_written)
+                            paths_written |= {(*path, *callee_path[1:]) for path in arg_paths}
+    params_paths_written = frozenset(path for path in paths_written if path[0] in params)
+    return _WRITTEN_PATHS_CACHE.own(fn if owner is None else owner, cache_key, params_paths_written)
 
 
 def _resolve(node: ast.expr, aliases: dict[str, set[tuple[str, ...]]]) -> set[tuple[str, ...]]:
@@ -161,14 +163,14 @@ def _find_callee(
     names.reverse()
     if node.id == owner_name:
         # A method of the owner or of an object it holds, bound to that object
-        bound = owner
+        callee_owner = owner
         for name in names[:-1]:
-            bound = getattr(bound, name, None)
-        value = getattr(type(bound), names[-1], None) if names else None
-        callee_owner, owner_path = bound, (owner_name, *names[:-1])
+            callee_owner = getattr(callee_owner, name, None)
+        value = getattr(type(callee_owner), names[-1], None) if names else None
+        owner_path = (owner_name, *names[:-1])
         if value is None and names:
             # A func the object holds as an attribute of its own, unbound
-            value, callee_owner, owner_path = getattr(bound, names[-1], None), None, ()
+            value, callee_owner, owner_path = getattr(callee_owner, names[-1], None), None, ()
     else:
         closure = zip(fn.__code__.co_freevars, (cell.cell_contents for cell in fn.__closure__ or ()))
         scope = {**fn.__globals__, **dict(closure)}

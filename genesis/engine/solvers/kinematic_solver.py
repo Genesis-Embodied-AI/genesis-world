@@ -10,7 +10,6 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
-from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -18,6 +17,7 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_inverse_kinematics_entity,
     kernel_set_ik_targets,
 )
+from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
@@ -133,7 +133,7 @@ def _write_dofs_position(solver: "KinematicSolver", position, dofs_idx, envs_idx
     positions[:, dofs_idx] = position
     is_dof_set = torch.zeros((solver.n_dofs,), dtype=gs.tc_bool, device=gs.device)
     is_dof_set[dofs_idx] = True
-    kernel_set_dofs_position(envs_idx, is_dof_set, positions, solver.dyn_info, solver.rigid_info, solver.rigid_config)
+    kernel_set_dofs_position(is_dof_set, envs_idx, positions, solver.dyn_info, solver.rigid_info, solver.rigid_config)
 
 
 def _fill_base_link_geom_offsets(offset_pos, offset_quat, entity, geoms, ranges):
@@ -991,9 +991,9 @@ class KinematicSolver(Solver):
         """
         Sanitize the indices of the entries of a state a getter reads or a setter writes, and the values written.
 
-        A write keeps the last occurrence of an index given several times and its values alone, as writing them in turn
-        would leave (see 'drop_repeated_index'), except a write adding its values to the state (`accumulate`), whose
-        repeated indices add up.
+        A write keeps the last occurrence of an index given several times and its values, which is the state writing
+        them in turn leaves (see 'drop_repeated_index'). A write adding its values to the state (`accumulate`) keeps
+        every occurrence, so that the values of a repeated index add up.
         """
         is_overwrite = tensor is not None and not accumulate
         envs_idx_ = self._scene._sanitize_envs_idx(envs_idx) if batched else self._scene._envs_idx[:0]
@@ -1019,7 +1019,9 @@ class KinematicSolver(Solver):
                 skip_allocation=skip_allocation,
             )
             if is_overwrite:
-                envs_idx_, (tensor_,) = drop_repeated_index(envs_idx, envs_idx_, (tensor_,), 0, self.n_envs)
+                envs_idx_, (tensor_,) = drop_repeated_index(
+                    envs_idx, envs_idx_, (tensor_,), axis=0, max_size=self.n_envs
+                )
         if is_overwrite:
             axis = 1 if self.n_envs > 0 and batched else 0
             inputs_idx_, (tensor_,) = drop_repeated_index(inputs_idx, inputs_idx_, (tensor_,), axis, input_size)
@@ -1092,13 +1094,7 @@ class KinematicSolver(Solver):
                 authored_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
                 world_pos = authored_pos + gu.transform_by_quat(offset_pos, quat)
                 kernel_set_links_pos(
-                    links_idx,
-                    envs_idx,
-                    world_pos,
-                    self.dyn_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
+                    links_idx, envs_idx, world_pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
                 )
             # Compose the offset onto the authored orientation, then set the resulting world orientation.
             quat = gu.transform_quat_by_quat(offset_quat, quat)
@@ -1336,7 +1332,7 @@ class KinematicSolver(Solver):
             )
             cpos = pos - root_COM
             if is_relative:
-                (quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx)
+                (quat,) = _read_state_fields(self, (links_state.quat,), envs_idx, links_idx)
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                 offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
                 cpos = cpos - _offset_world_shift(offset_pos, offset_quat, quat)

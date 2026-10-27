@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -25,7 +25,6 @@ from genesis.utils.misc import (
     get_gpu_core_count,
     get_gpu_shared_tile_sizes,
     indices_to_mask,
-    qd_add_grad,
     qd_from_torch,
     qd_to_numpy,
     qd_to_torch,
@@ -40,8 +39,8 @@ from ..kinematic_solver import (
     _fill_base_link_geom_offsets,
     _offset_world_shift,
     _read_state_fields,
-    _write_dofs_position,
     _select_links_offset,
+    _write_dofs_position,
 )
 from .abd.accessor import (
     ConstraintType,
@@ -112,20 +111,12 @@ from .abd.forward_dynamics import (
 from .abd.forward_kinematics import (
     func_forward_velocity,
     func_update_cartesian_space,
-    kernel_COM_links_replay,
     kernel_forward_kinematics_links_geoms,
-    kernel_forward_kinematics_replay,
-    kernel_forward_velocity,
     kernel_masked_forward_kinematics_links_geoms,
     kernel_update_cartesian_space,
-    kernel_update_geoms_replay,
     kernel_update_verts_for_geoms,
 )
-from .abd.manual_bw import (
-    kernel_manual_compute_qacc_bw,
-    kernel_manual_forward_kinematics_bw,
-    kernel_manual_forward_velocity_bw,
-)
+from .abd.manual_bw import kernel_manual_compute_qacc_bw
 from .abd.misc import (
     func_apply_coupling_force,
     kernel_apply_links_external_wrench,
@@ -1071,7 +1062,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-            # Set active_envs on geoms — indicates which environments each geom is active in
+            # Set active_envs on geoms, which indicates the environments each geom is active in
             for geom in link.geoms:
                 active_envs_mask = (geom_starts <= geom.idx) & (geom.idx < geom_ends)
                 geom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
@@ -1273,7 +1264,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         Geoms are refreshed alongside links, unlike the geom-less base solver: the flag this sets also authorizes the
         next step to skip its own Cartesian-space update, which covers geoms too. Refreshing links alone would leave
-        collision - and any raycast deriving its vertices from geom poses - reading a one-step-stale pose.
+        collision (and any raycast deriving its vertices from geom poses) reading a one-step-stale pose.
         """
         if not self._is_forward_pos_updated:
             self._update_forward_kinematics(self.scene._envs_idx)
@@ -1291,7 +1282,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._is_forward_vel_updated = True
 
     def substep(self, f):
-        # from genesis.utils.tools import create_timer
         from genesis.engine.couplers import SAPCoupler
 
         # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
@@ -1315,8 +1305,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if is_recording and not isinstance(self.sim.coupler, SAPCoupler):
             envs_idx = self._scene._sanitize_envs_idx(None)
-            if not is_forward_pos_updated:
-                self._update_forward_kinematics(envs_idx)
+            self._update_forward_kinematics(envs_idx)
             kernel_forward_dynamics_without_qacc(
                 self.dyn_state,
                 self.constraint_solver.constraint_state,
@@ -1673,8 +1662,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-        # The moment arm and the local axes of the wrench follow the pose of the links, quantities derived from the
-        # state
+        # The moment arm and the local axes of the wrench follow the link poses, which derive from the state
         if pos is None:
             kernel_apply_links_external_wrench(
                 links_idx, envs_idx, force, torque, self.dyn_state, self.rigid_config, ref_frame, local

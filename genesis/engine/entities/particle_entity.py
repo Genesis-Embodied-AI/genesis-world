@@ -355,7 +355,7 @@ class ParticleEntity(Entity):
         if poss.ndim == 1 or (poss.ndim == 2 and poss.shape[0] != self._n_particles):
             poss = self._init_particles_offset + poss[..., None, :]
 
-        self.set_particles_pos(poss, None, envs_idx)
+        self.set_particles_pos(poss, envs_idx=envs_idx)
 
     @gs.assert_built
     def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
@@ -390,6 +390,7 @@ class ParticleEntity(Entity):
         """
         raise NotImplementedError
 
+    @assert_active
     def set_velocity(self, vels, envs_idx=None):
         """
         Set the velocity of all the particles individually.
@@ -401,7 +402,7 @@ class ParticleEntity(Entity):
         envs_idx : None | array_like, optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        self.set_particles_vel(vels, None, envs_idx)
+        self.set_particles_vel(vels, envs_idx=envs_idx)
 
     @gs.assert_built
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
@@ -447,7 +448,7 @@ class ParticleEntity(Entity):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        self.set_particles_active(actives, None, envs_idx)
+        self.set_particles_active(actives, envs_idx=envs_idx)
         self.active = bool((to_gs_tensor(actives) == gs.ACTIVE).any())
 
     def activate(self):
@@ -467,7 +468,7 @@ class ParticleEntity(Entity):
     @gs.assert_built
     def set_particles_active(self, actives, particles_idx_local=None, envs_idx=None):
         """
-        Set the velocity of some particles.
+        Set the activeness of some particles.
 
         Parameters
         ----------

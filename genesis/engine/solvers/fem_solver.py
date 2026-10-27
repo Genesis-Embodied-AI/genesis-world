@@ -482,7 +482,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.elements_v[f + 1, i_v, i_b].pos = (
                 self.substep_dt * self.elements_v[f + 1, i_v, i_b].vel + self.elements_v[f, i_v, i_b].pos
             )
-        # The frames of a step of a differentiable scene carry the actuation and the activity its inputs set in frame 0
+        # With gradients, the substeps of a step run in successive frames, to which the actuation and the activity set
+        # in frame 0 carry over
         if qd.static(self._requires_grad):
             for i_e, i_b in qd.ndrange(self.n_elements, self._B):
                 self.elements_el[f + 1, i_e, i_b].actu = self.elements_el[f, i_e, i_b].actu

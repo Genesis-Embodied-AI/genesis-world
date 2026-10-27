@@ -72,12 +72,12 @@ def make_diff_scene_pair(
 def assert_grad_matches_fd(
     pair, inputs, apply_fn, loss_fn, *, rtol, atol, eps, n_steps=None, setup_fn=None, step_fn=None
 ):
-    """Check the reverse-mode gradient of the inputs given to a rollout against central finite differences.
+    """Check the reverse-mode gradient of the inputs given to a rollout against central finite differences (FD).
 
     Input i of `inputs` is applied via `apply_fn(entity, x)` before step i and receives its own adjoint, None for a step
     given no input. The scene runs `n_steps` steps (default len(inputs)), the extra ones without input.
     `setup_fn(scene, entity)` runs once after reset, for initialization without gradient. `step_fn(entity, i_step)` runs
-    before every step on both scenes, for per-step scenario commands without gradient (e.g. PD targets). The FD
+    before every step on both scenes, for per-step scenario commands without gradient (e.g. position targets). The FD
     reference perturbs each input entry in turn, so the cost is O(n_steps * total input size). rtol / atol / eps are
     per-scenario, pinned to the measured finite-difference floor."""
     base = [None if inp is None else np.array(inp, dtype=np.float64) for inp in inputs]

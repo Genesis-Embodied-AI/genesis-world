@@ -222,7 +222,7 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show
             entity.control_dofs_force(force[..., :1], dofs_idx_local=[0])
             entity.control_dofs_force(force[..., 1], dofs_idx_local=slice(1, n_dofs))
 
-    # Both steps are bounded by the rounding error, which falls as they grow
+    # At both precisions, the finite-difference step is bounded by the rounding error alone, which falls as it grows
     assert_grad_matches_fd(
         pair,
         inputs,
