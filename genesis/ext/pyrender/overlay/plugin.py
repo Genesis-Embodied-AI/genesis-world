@@ -312,9 +312,13 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         panel, keyed by entity name.
 
         Each value is the options object the description of the entity holds, so a rebuild handed it unchanged
-        re-creates the entity from that description (see 'InteractiveScene.rebuild').
+        re-creates the entity from that description (see 'InteractiveScene.rebuild'). An entity without a description
+        is resolved again from its options.
         """
-        self._pending_entities_options = {entity.name: entity.desc.options for entity in self.scene.entities}
+        self._pending_entities_options = {
+            entity.name: entity.desc.options if entity.desc is not None else entity.options
+            for entity in self.scene.entities
+        }
 
     def _is_capturing(self) -> bool:
         """Check if ImGui or gizmo wants mouse/keyboard input."""
