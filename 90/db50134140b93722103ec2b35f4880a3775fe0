@@ -1,0 +1,42 @@
+genesis/engine/scene.py
+  s_917d10d40fc190::t_43db9f243bcb32 2,68,1055-1099,1949-1950
+genesis/engine/system_data/variants.py
+  s_917d10d40fc190::t_43db9f243bcb32 29-32,41
+genesis/engine/states/solvers.py
+  s_917d10d40fc190::t_43db9f243bcb32 1,73-80,128-132
+genesis/engine/solvers/kinematic_solver.py
+  s_917d10d40fc190::t_43db9f243bcb32 403,736,781-782,803-813,825-837,929-939,947
+genesis/engine/solvers/rigid/abd/misc.py
+  s_917d10d40fc190::t_43db9f243bcb32 446,451-454,471-477
+genesis/engine/solvers/rigid/collider/collider.py
+  s_917d10d40fc190::t_43db9f243bcb32 311-315,322,510,756-760,810-822,860
+genesis/utils/array_class.py
+  s_917d10d40fc190::t_43db9f243bcb32 1353-1355,1363,1365,1478-1479,1521,2183,3046,3069-3070,3073-3076
+  s_917d10d40fc190::t_69a8170e6d0ee9 1469
+tests/rigid/conftest.py
+  s_917d10d40fc190::t_43db9f243bcb32 80,87-88,110,132-134
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_917d10d40fc190::t_43db9f243bcb32 139,244-246,386,405-409,412-413,416-417,420,428-431,1132-1138,1142,1149-1167,1837-1838,1849-1868,2027,2029-2034,2036-2038,2526-2627
+genesis/engine/entities/rigid_entity/rigid_link.py
+  s_917d10d40fc190::t_43db9f243bcb32 259-262
+tests/rigid/test_heterogeneous.py
+  s_917d10d40fc190::t_43db9f243bcb32 7,548-813
+genesis/engine/entities/rigid_entity/rigid_entity.py
+  s_917d10d40fc190::t_43db9f243bcb32 3427-3447
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "90db50134140b93722103ec2b35f4880a3775fe0",
+  "prompts": {},
+  "sessions": {
+    "s_917d10d40fc190": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a1d595c-8377-490e-b2ca-361d69c2e084",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
