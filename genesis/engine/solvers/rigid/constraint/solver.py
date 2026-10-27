@@ -11,7 +11,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point
+from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point, kernel_wake_up_entities_by_links
 from genesis.engine.solvers.rigid.abd.misc import (
     func_hibernate_island_if_settled,
     func_list_item,
@@ -470,6 +470,17 @@ class ConstraintSolver:
 
     def delete_dynamic_constraint(self, eq_type, link1_idx, link2_idx, envs_idx=None):
         envs_idx = torch.unique(self._solver._scene._sanitize_envs_idx(envs_idx))
+        # Nothing else wakes a link the constraint held asleep (see the hibernation pass of func_build_islands).
+        if self._solver._use_hibernation:
+            kernel_wake_up_entities_by_links(
+                torch.tensor((link1_idx, link2_idx), dtype=gs.tc_int, device=gs.device),
+                envs_idx,
+                self._solver.dyn_state,
+                self.constraint_state,
+                self._solver.dyn_info,
+                self._solver.rigid_info,
+                self._solver.rigid_config,
+            )
         self._eq_const_info_cache.clear()
         kernel_delete_dynamic_constraint(
             int(link1_idx),

@@ -680,7 +680,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(gs.morphs.Plane())
+    plane = scene.add_entity(gs.morphs.Plane())
     box_force = scene.add_entity(
         gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
@@ -741,6 +741,12 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
             pos=(9.0, 0.0, 0.1),
         )
     )
+    box_weld = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(11.0, 0.0, 0.5),
+        )
+    )
     box_on_platform = scene.add_entity(
         gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
@@ -757,6 +763,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
     scene.build(n_envs=n_envs)
 
     solver = scene.rigid_solver
+    solver.add_weld_constraint(box_weld.base_link_idx, plane.base_link_idx)
 
     # The forced box carries an armature while it sleeps, which its mass matrix must hold once, whatever the time spent
     # asleep, when the force wakes it.
@@ -848,6 +855,17 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
     for _ in range(n_fall):
         scene.step()
     assert_allclose(z0 - box_on_platform.get_pos()[..., 2], free_fall_drop, rtol=0.2)
+    assert qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
+    ).all()
+
+    # A body a weld held in the air falls once the weld is deleted
+    solver.delete_weld_constraint(box_weld.base_link_idx, plane.base_link_idx)
+    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_weld.idx).any()
+    z0 = box_weld.get_pos()[..., 2]
+    for _ in range(n_fall):
+        scene.step()
+    assert_allclose(z0 - box_weld.get_pos()[..., 2], free_fall_drop, rtol=0.2)
     assert qd_to_numpy(
         solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
     ).all()
