@@ -31,6 +31,7 @@ from genesis.options import (
     BaseCouplerOptions,
     EntityOptions,
     FEMOptions,
+    KinematicEntityOptions,
     KinematicOptions,
     MPMOptions,
     PBDOptions,
@@ -508,44 +509,66 @@ class Scene(RBC):
     @gs.assert_unbuilt
     def add_stage(
         self,
-        morph: gs.morphs.USD,
+        morph: gs.morphs.USD | None = None,
         material: Rigid | None = None,
         surface: Surface | None = None,
-        visualize_contact: bool = False,
+        visualize_contact: bool | None = None,
         vis_mode: Literal["visual", "collision"] | None = None,
-    ):
-        """
-        Add a stage to the scene.
+        *,
+        options: RigidEntityOptions | KinematicEntityOptions | None = None,
+    ) -> list[KinematicEntity]:
+        """Add a USD stage to the scene, as one entity per articulation or rigid body it holds.
+
+        The class of ``options`` decides the kind of every entity of the stage, ``gs.options.RigidEntityOptions`` or
+        ``gs.options.KinematicEntityOptions``, its morph being the stage. The options name no entity, since a stage
+        adds several. As for ``Scene.add_entity``, the individual arguments are a shorthand for
+        ``options=gs.options.RigidEntityOptions(...)``, and passing both raises an error.
 
         Parameters
         ----------
-        morph : gs.morphs.USD
+        morph : gs.morphs.USD | None, optional
             The stage to add to the scene.
         material : gs.materials.Rigid | None, optional
             The material of the rigid entities of the stage. If None, use ``gs.materials.Rigid()`` for all morphs.
         surface : gs.surfaces.Surface | None, optional
             The surface of the stage. If None, use ``gs.surfaces.Default()`` for all morphs.
-        visualize_contact : bool
+        visualize_contact : bool | None, optional
             Whether to visualize contact forces applied to this stage as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+            The `RayTracer` renderer draws no arrows. If None, defaults to False.
         vis_mode : str | None, optional
             The visualization mode of the stage. This is a handy shortcut for setting `surface.vis_mode` without
             explicitly creating a surface object.
+        options : gs.options.RigidEntityOptions | gs.options.KinematicEntityOptions | None, optional
+            The options to construct the entities of the stage from. They replace every other argument.
 
         Returns
         -------
-        entities : List[genesis.Entity]
+        entities : list[genesis.Entity]
             The created entities.
         """
+        if options is not None:
+            if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode)):
+                gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
+            if not isinstance(options, (RigidEntityOptions, KinematicEntityOptions)):
+                gs.raise_exception(
+                    f"A stage holds rigid or kinematic entities, which {type(options).__name__} cannot construct."
+                )
+            if options.name is not None:
+                gs.raise_exception("A stage adds several entities, so its options take no name.")
+            morph = options.morph
         if not isinstance(morph, gs.morphs.USD):
             gs.raise_exception(f"Unsupported morph: {morph}.")
         from genesis.utils.usd import parse_usd_stage
 
-        # One `gs.morphs.USD` per rigid entity of the stage, added while the stage it was split from stays open.
+        # One `gs.morphs.USD` per entity of the stage, added while the stage it was split from stays open.
         with parse_usd_stage(morph) as entity_morphs:
             entities = []
             for entity_morph in entity_morphs:
-                entities.append(self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode))
+                if options is None:
+                    entity = self.add_entity(entity_morph, material, surface, visualize_contact, vis_mode)
+                else:
+                    entity = self.add_entity(options=options.model_copy(update={"morph": entity_morph}))
+                entities.append(entity)
         return entities
 
     @gs.assert_unbuilt

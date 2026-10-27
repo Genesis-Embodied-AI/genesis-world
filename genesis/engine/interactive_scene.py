@@ -279,17 +279,10 @@ class InteractiveScene:
                     # created from that description without reading its asset again. An edit hands in new options.
                     if desc is not None and options is desc.options:
                         scene._sim._add_entity(desc=desc)
-                    # A USD morph of a rigid entity describes a whole stage (potentially many bodies), which add_stage
-                    # parses and adds without a name. Every other entity is added by name, as it was originally.
-                    elif isinstance(options, gs.options.RigidEntityOptions) and isinstance(
-                        options.morph, gs.morphs.USD
-                    ):
-                        scene.add_stage(
-                            morph=options.morph,
-                            material=options.material,
-                            surface=options.surface,
-                            visualize_contact=options.visualize_contact,
-                        )
+                    # A USD morph describes a whole stage (potentially many bodies), which add_stage parses and adds
+                    # without a name. Every other morph is a single entity added by name.
+                    elif isinstance(options.morph, gs.morphs.USD):
+                        scene.add_stage(options=options)
                     else:
                         scene.add_entity(options=options.model_copy(update={"name": name}))
                 for sensor_opts in self._sensors_kwargs:
