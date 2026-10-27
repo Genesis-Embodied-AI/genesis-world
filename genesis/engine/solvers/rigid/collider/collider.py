@@ -45,7 +45,7 @@ from .contact import (
     kernel_masked_collider_clear,
 )
 from .narrowphase import (
-    func_fill_diff_contact_input_analytic,
+    func_fill_diff_contact_input_plane,
     func_narrow_phase_any_vs_terrain,
     func_narrow_phase_convex_specializations,
     func_narrow_phase_convex_vs_convex,
@@ -574,7 +574,7 @@ class Collider:
             # Minkowski difference. A sphere or ellipsoid has no flat facet, so a pair of them yields an everywhere
             # smoothly curved Minkowski boundary on which EPA never converges, and no contact is ever generated: the
             # bodies silently tunnel. Faceted partners (box, mesh) and the analytical plane branch are unaffected, and
-            # an analytic detection is rebuilt by rerunning it (see func_fill_diff_contact_input_analytic).
+            # an analytic detection is rebuilt by rerunning it (see func_narrow_phase_diff_convex_vs_convex).
             if self._solver._requires_grad:
                 is_smooth_a = (valid_type_a == gs.GEOM_TYPE.SPHERE) | (valid_type_a == gs.GEOM_TYPE.ELLIPSOID)
                 is_smooth_b = (valid_type_b == gs.GEOM_TYPE.SPHERE) | (valid_type_b == gs.GEOM_TYPE.ELLIPSOID)
@@ -1072,7 +1072,6 @@ class Collider:
             self._solver.rigid_info,
             self.collider_info,
             self._solver.rigid_config,
-            self.collider_config,
             self._solver._errno,
         )
 
@@ -1208,10 +1207,8 @@ def func_detection(
             func_clamp_prune_contacts(
                 dyn_state, collider_state, rigid_info, collider_info, rigid_config, collider_static_config, errno
             )
-        # Plane-convex contacts and the contacts of analytic detection leave diff_contact_input unfilled, so it is
-        # filled here for the differentiable narrow-phase reverse (see func_fill_diff_contact_input_analytic)
         if qd.static(rigid_config.requires_grad):
-            func_fill_diff_contact_input_analytic(dyn_state, collider_state, dyn_info, rigid_config)
+            func_fill_diff_contact_input_plane(dyn_state, collider_state, dyn_info, rigid_config)
 
 
 @qd.kernel(graph=True, fastcache=True)

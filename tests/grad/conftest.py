@@ -84,7 +84,7 @@ def grad_capsule():
 def grad_capsule_ground():
     mjcf = ET.Element("mujoco", model="capsule_ground")
     worldbody = ET.SubElement(mjcf, "worldbody")
-    ET.SubElement(worldbody, "geom", type="capsule", fromto="-0.2 0 0.1 0.2 0 0.1", size="0.1")
+    ET.SubElement(worldbody, "geom", type="capsule", fromto="1.3 0 -0.1 1.7 0 -0.1", size="0.1")
     return ET.tostring(mjcf, encoding="unicode")
 
 

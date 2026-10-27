@@ -1302,7 +1302,7 @@ class DiffContactInput:
     core_local: qd.Tensor
     # Reference id of the contact point, which is needed for the backward pass
     ref_id: qd.Tensor
-    # Capsule-capsule contacts only: the multi-contact detection that found the contact, 0 for the unperturbed one
+    # Analytic contacts only: the multi-contact detection that found the contact, 0 for the unperturbed one
     detection_idx: qd.Tensor
     # Flag whether the contact data can be computed in numerically stable way in both the forward and backward passes
     valid: qd.Tensor

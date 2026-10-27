@@ -23,6 +23,7 @@ from .contact import (
     func_compute_geom_pair_scale,
     func_compute_mc_tolerance,
     func_contact_orthogonals,
+    func_perturb_geom_pair,
     func_reserve_contacts,
     func_rotate_frame,
     func_set_contact,
@@ -2844,34 +2845,31 @@ def func_convex_convex_contact(
             # Whether GJK ran, which the analytic detections and the plane bypass whatever the algorithm prefers
             is_gjk_used = False
 
-            # Apply perturbations to thread-local state
+            # Apply perturbations to thread-local state, starting from the original state
             if multi_contact and is_col_0:
-                if qd.static(rigid_config.enable_mujoco_compatibility):
-                    # Match MuJoCo's perturbation pattern: single axis at a time i_detection 1: (axis_0, -angle), 2:
-                    # (axis_0, +angle), 3: (axis_1, -angle), 4: (axis_1, +angle)
-                    axis_idx = (i_detection - 1) // 2
-                    angle_sign = 2 * ((i_detection - 1) % 2) - 1
-                    axis = axis_0 if axis_idx == 0 else axis_1
-                    qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
-                else:
-                    # Each detection aims at a corner of the contact patch (see func_contact_overlap_axes)
-                    axis = qd.Vector.zero(gs.qd_float, 3)
-                    for i_t in qd.static(range(4)):
-                        if i_detection == i_t + 1:
-                            axis = qd.Vector([overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]])
-                    has_target_corner = axis.norm_sqr() > 0.0
-                    qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
-
-                # Apply perturbation starting from original state
-                ga_pos_current, ga_quat_current = func_rotate_frame(
-                    ga_pos_original, ga_quat_original, contact_pos_0, qrot
-                )
-                gb_pos_current, gb_quat_current = func_rotate_frame(
-                    gb_pos_original, gb_quat_original, contact_pos_0, gu.qd_inv_quat(qrot)
+                qrot, has_target_corner, ga_pos_current, ga_quat_current, gb_pos_current, gb_quat_current = (
+                    func_perturb_geom_pair(
+                        i_detection,
+                        axis_0,
+                        axis_1,
+                        overlap_axes,
+                        contact_pos_0,
+                        ga_pos_original,
+                        ga_quat_original,
+                        gb_pos_original,
+                        gb_quat_original,
+                        rigid_info,
+                        collider_info,
+                        rigid_config,
+                    )
                 )
 
             # A detection left without corner to target runs nothing, and must not pass on the outcome of the last one
             is_col = False
+            # Whether the contact comes from an analytic detection, which the differentiable narrowphase replays
+            is_analytic_detection = False
+            # Slot of the contact added by this detection, -1 if none
+            i_c_added = -1
             if (multi_contact and is_col_0 and has_target_corner) or (i_detection == 0):
                 if (
                     dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE
@@ -2887,6 +2885,7 @@ def func_convex_convex_contact(
                         dyn_info,
                         rigid_info,
                     )
+                    is_analytic_detection = True
                 elif (
                     dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE
                     and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
@@ -2894,6 +2893,7 @@ def func_convex_convex_contact(
                     is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_sphere_contact(
                         i_ga, i_gb, ga_pos_current, gb_pos_current, dyn_info, rigid_info
                     )
+                    is_analytic_detection = True
                 elif (
                     dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE
                     and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
@@ -2908,6 +2908,7 @@ def func_convex_convex_contact(
                         dyn_info,
                         rigid_info,
                     )
+                    is_analytic_detection = True
                 elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.BOX:
                     is_col, normal, contact_pos, penetration = func_sphere_box_contact(
                         i_ga,
@@ -2919,6 +2920,7 @@ def func_convex_convex_contact(
                         dyn_info,
                         rigid_info,
                     )
+                    is_analytic_detection = True
                 elif dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                     plane_dir = qd.Vector(
                         [dyn_info.geoms.data[i_ga][0], dyn_info.geoms.data[i_ga][1], dyn_info.geoms.data[i_ga][2]],
@@ -3151,7 +3153,7 @@ def func_convex_convex_contact(
                 is_col_0, normal_0, penetration_0, contact_pos_0 = is_col, normal, penetration, contact_pos
                 is_gjk_used_0 = is_gjk_used
                 if is_col_0:
-                    i_c_0 = func_add_contact(
+                    i_c_added = func_add_contact(
                         i_ga,
                         i_gb,
                         i_b,
@@ -3167,15 +3169,7 @@ def func_convex_convex_contact(
                         use_atomic=False,
                         errno=errno,
                     )
-                    if qd.static(rigid_config.requires_grad):
-                        # See the capsule pairs in func_fill_diff_contact_input_analytic
-                        if (
-                            i_c_0 >= 0
-                            and dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE
-                            and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
-                        ):
-                            collider_state.diff_contact_input.ref_id[i_b, i_c_0] = i_c_0
-                            collider_state.diff_contact_input.detection_idx[i_b, i_c_0] = 0
+                    i_c_0 = i_c_added
                     if multi_contact:
                         # Perturb geom_a around two orthogonal axes to find multiple contacts
                         axis_0, axis_1 = func_contact_orthogonals(
@@ -3284,7 +3278,7 @@ def func_convex_convex_contact(
                                 is_contact_duplicate = normal.dot(normal_kept) >= normal_cos_tol
 
                 if not is_contact_duplicate:
-                    i_c = func_add_contact(
+                    i_c_added = func_add_contact(
                         i_ga,
                         i_gb,
                         i_b,
@@ -3300,16 +3294,18 @@ def func_convex_convex_contact(
                         use_atomic=False,
                         errno=errno,
                     )
-                    if qd.static(rigid_config.requires_grad):
-                        # See the capsule pairs in func_fill_diff_contact_input_analytic
-                        if (
-                            i_c >= 0
-                            and dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE
-                            and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
-                        ):
-                            collider_state.diff_contact_input.ref_id[i_b, i_c] = i_c_0
-                            collider_state.diff_contact_input.detection_idx[i_b, i_c] = i_detection
                     n_con = n_con + 1
+
+            if qd.static(rigid_config.requires_grad):
+                # The differentiable narrowphase replays the detection from the geom poses, and a perturbed one from
+                # contact 0 of the pair, which needs the discrete choices of the forward pass (see
+                # func_narrow_phase_diff_convex_vs_convex)
+                if is_analytic_detection and i_c_added >= 0:
+                    collider_state.diff_contact_input.geom_a[i_b, i_c_added] = i_ga
+                    collider_state.diff_contact_input.geom_b[i_b, i_c_added] = i_gb
+                    collider_state.diff_contact_input.ref_id[i_b, i_c_added] = i_c_0
+                    collider_state.diff_contact_input.detection_idx[i_b, i_c_added] = i_detection
+                    collider_state.diff_contact_input.valid[i_b, i_c_added] = 1
 
 
 @qd.func
@@ -3580,25 +3576,21 @@ def _func_multicontact_detect(
             gb_pos_current = gb_pos_original
             gb_quat_current = gb_quat_original
             if not is_initial_detection:
-                if qd.static(rigid_config.enable_mujoco_compatibility):
-                    # Single-axis perturbation pattern: see the twin loop in func_convex_convex_contact.
-                    axis_idx = (i_det - 1) // 2
-                    angle_sign = 2 * ((i_det - 1) % 2) - 1
-                    axis = axis_0 if axis_idx == 0 else axis_1
-                    qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
-                else:
-                    # Each detection aims at a corner of the patch: see the twin loop in func_convex_convex_contact
-                    axis = qd.Vector.zero(gs.qd_float, 3)
-                    for i_t in qd.static(range(4)):
-                        if i_det == i_t + 1:
-                            axis = qd.Vector([overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]])
-                    has_target_corner = axis.norm_sqr() > 0.0
-                    qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
-                ga_pos_current, ga_quat_current = func_rotate_frame(
-                    ga_pos_original, ga_quat_original, contact0_pos, qrot
-                )
-                gb_pos_current, gb_quat_current = func_rotate_frame(
-                    gb_pos_original, gb_quat_original, contact0_pos, gu.qd_inv_quat(qrot)
+                qrot, has_target_corner, ga_pos_current, ga_quat_current, gb_pos_current, gb_quat_current = (
+                    func_perturb_geom_pair(
+                        i_det,
+                        axis_0,
+                        axis_1,
+                        overlap_axes,
+                        contact0_pos,
+                        ga_pos_original,
+                        ga_quat_original,
+                        gb_pos_original,
+                        gb_quat_original,
+                        rigid_info,
+                        collider_info,
+                        rigid_config,
+                    )
                 )
 
             # Perturbed contacts try MPR first under the MPR algorithm and fall back to GJK per contact. The pure GJK
@@ -4593,7 +4585,6 @@ def func_narrow_phase_diff_convex_vs_convex(
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
-    collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
     # Compute reference contacts
@@ -4692,10 +4683,11 @@ def func_narrow_phase_diff_convex_vs_convex(
                     dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.CAPSULE
                     and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.CAPSULE
                 ):
-                    # Replay of the perturbed detection of func_convex_convex_contact that found the contact, on the
-                    # current geom poses and from the unperturbed contact of the pair, which the reference contacts
-                    # above wrote. The capsule has no planar face, so func_contact_overlap_axes keeps the default axes.
-                    EPS = rigid_info.EPS[None]
+                    # The perturbed detection of func_convex_convex_contact that found the contact runs again on the
+                    # current geom poses. Contact 0 of the pair is read back from the contact data that the reference
+                    # loop above writes, so that the gradient also reaches the poses through it. The overlap axes of a
+                    # capsule are the default ones (see func_contact_overlap_axes), and MuJoCo compatibility disables
+                    # multi-contact between capsules (see func_convex_convex_contact).
                     ga_pos = dyn_state.geoms.pos[i_ga, i_b]
                     ga_quat = dyn_state.geoms.quat[i_ga, i_b]
                     gb_pos = dyn_state.geoms.pos[i_gb, i_b]
@@ -4709,14 +4701,19 @@ def func_narrow_phase_diff_convex_vs_convex(
                         i_ga, i_gb, i_b, normal_0, geoms_init_AABB, dyn_state, dyn_info, rigid_info, rigid_config
                     )
                     overlap_axes = qd.Matrix.rows([axis_0, -axis_0, axis_1, -axis_1])
-                    axis = qd.Vector.zero(gs.qd_float, 3)
-                    for i_t in qd.static(range(4)):
-                        if i_detection == i_t + 1:
-                            axis = qd.Vector([overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]])
-                    qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
-                    ga_pos_current, ga_quat_current = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
-                    gb_pos_current, gb_quat_current = func_rotate_frame(
-                        gb_pos, gb_quat, contact_pos_0, gu.qd_inv_quat(qrot)
+                    qrot, _, ga_pos_current, ga_quat_current, gb_pos_current, gb_quat_current = func_perturb_geom_pair(
+                        i_detection,
+                        axis_0,
+                        axis_1,
+                        overlap_axes,
+                        contact_pos_0,
+                        ga_pos,
+                        ga_quat,
+                        gb_pos,
+                        gb_quat,
+                        rigid_info,
+                        collider_info,
+                        rigid_config,
                     )
                     _, contact_normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
                         i_ga,
@@ -4728,38 +4725,32 @@ def func_narrow_phase_diff_convex_vs_convex(
                         dyn_info,
                         rigid_info,
                     )
-                    if qd.static(
-                        collider_static_config.ccd_algorithm
-                        not in (CCD_ALGORITHM_CODE.MJ_MPR, CCD_ALGORITHM_CODE.MJ_GJK)
-                    ):
-                        geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
-                        contact_normal, penetration, contact_pos = func_recompute_perturbed_contact(
-                            i_ga,
-                            i_gb,
-                            i_b,
-                            contact_normal,
-                            penetration,
-                            contact_pos,
-                            normal_0,
-                            contact_pos_0,
-                            penetration_0,
-                            qrot,
-                            ga_pos,
-                            ga_quat,
-                            gb_pos,
-                            gb_quat,
-                            mpr_state,
-                            gjk_state,
-                            dyn_info,
-                            rigid_info,
-                            collider_info,
-                            rigid_config,
-                            geom_pair_scale,
-                            used_gjk=False,
-                            used_gjk_0=False,
-                        )
-                    else:
-                        penetration = penetration_0
+                    geom_pair_scale = func_compute_geom_pair_scale(i_ga, i_gb, geoms_init_AABB, dyn_info)
+                    contact_normal, penetration, contact_pos = func_recompute_perturbed_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        contact_normal,
+                        penetration,
+                        contact_pos,
+                        normal_0,
+                        contact_pos_0,
+                        penetration_0,
+                        qrot,
+                        ga_pos,
+                        ga_quat,
+                        gb_pos,
+                        gb_quat,
+                        mpr_state,
+                        gjk_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        rigid_config,
+                        geom_pair_scale,
+                        used_gjk=False,
+                        used_gjk_0=False,
+                    )
                     weight = 1.0
                 else:
                     ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
@@ -4786,27 +4777,20 @@ def func_narrow_phase_diff_convex_vs_convex(
 
 
 @qd.func
-def func_fill_diff_contact_input_analytic(
+def func_fill_diff_contact_input_plane(
     dyn_state: array_class.DynState,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
 ):
-    """Populate diff_contact_input for the contacts of analytic detection paths.
+    """Populate diff_contact_input for the plane-convex contacts.
 
-    The analytic paths leave diff_contact_input unfilled, so the differentiable narrow-phase reverse would have
-    nothing to reconstruct. The plane paths (func_plane_box_contact, the plane branch of func_convex_convex_contact)
-    share the convention contact_pos = v - 0.5 * penetration * normal with
-    normal = -normalize(R(quat_plane) @ plane_local_dir), so the convex support point is recovered as
-    v = contact_pos + 0.5 * penetration * normal, and its pose-independent "core" (box vertex / sphere center /
-    capsule nearest endpoint) as v - radius * normal, stored in the convex geom's local frame. PLANE is the smallest
-    GEOM_TYPE so it is always geom_a after the canonical type-ordered swap. The sphere-sphere, sphere-capsule,
-    sphere-box and capsule-capsule contacts are reconstructed by their analytic detection from the geom poses alone,
-    so only the geom identities are stored, with a self-referential ref_id for the pairs involving a sphere, which
-    multi-contact skips. Between two capsules, multi-contact adds the contacts of perturbed detections, which the
-    differentiable narrowphase replays from the unperturbed contact of the pair. Their ref_id (that unperturbed
-    contact) and the detection that found each of them (detection_idx) are recorded by func_convex_convex_contact, as
-    discrete choices like the merge of duplicates.
+    The plane paths (func_plane_box_contact, the plane branch of func_convex_convex_contact) leave diff_contact_input
+    unfilled, so the differentiable narrow-phase reverse would have nothing to reconstruct. Both share the convention
+    contact_pos = v - 0.5 * penetration * normal with normal = -normalize(R(quat_plane) @ plane_local_dir), so the
+    convex support point is recovered as v = contact_pos + 0.5 * penetration * normal, and its pose-independent "core"
+    (box vertex / sphere center / capsule nearest endpoint) as v - radius * normal, stored in the convex geom's local
+    frame. PLANE is the smallest GEOM_TYPE so it is always geom_a after the canonical type-ordered swap.
     """
     _B = collider_state.active_buffer.shape[1]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
@@ -4814,22 +4798,7 @@ def func_fill_diff_contact_input_analytic(
         if i_c < collider_state.n_contacts[i_b]:
             i_ga = collider_state.contact_data.geom_a[i_c, i_b]
             i_gb = collider_state.contact_data.geom_b[i_c, i_b]
-            geom_type_a = dyn_info.geoms.type[i_ga]
-            geom_type_b = dyn_info.geoms.type[i_gb]
-            if (
-                geom_type_a == gs.GEOM_TYPE.SPHERE
-                and (
-                    geom_type_b == gs.GEOM_TYPE.SPHERE
-                    or geom_type_b == gs.GEOM_TYPE.CAPSULE
-                    or geom_type_b == gs.GEOM_TYPE.BOX
-                )
-            ) or (geom_type_a == gs.GEOM_TYPE.CAPSULE and geom_type_b == gs.GEOM_TYPE.CAPSULE):
-                collider_state.diff_contact_input.geom_a[i_b, i_c] = i_ga
-                collider_state.diff_contact_input.geom_b[i_b, i_c] = i_gb
-                if geom_type_a == gs.GEOM_TYPE.SPHERE:
-                    collider_state.diff_contact_input.ref_id[i_b, i_c] = i_c
-                collider_state.diff_contact_input.valid[i_b, i_c] = 1
-            elif geom_type_a == gs.GEOM_TYPE.PLANE:
+            if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
                 trans_convex = dyn_state.geoms.pos[i_gb, i_b]
                 quat_convex = dyn_state.geoms.quat[i_gb, i_b]
 

@@ -17,8 +17,6 @@ from ..utils.assertions import assert_allclose
     [
         pytest.param("ground_box", gs.cpu, marks=pytest.mark.required),
         pytest.param("ground_box", gs.gpu, marks=pytest.mark.required),
-        pytest.param("ground_box_sphere", gs.cpu, marks=pytest.mark.required),
-        pytest.param("ground_capsule", gs.cpu, marks=pytest.mark.required),
         pytest.param("box", gs.cpu, marks=pytest.mark.required),
         pytest.param("box", gs.gpu, marks=pytest.mark.required),
         pytest.param("sphere", gs.cpu, marks=pytest.mark.required),
@@ -44,94 +42,93 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
             ),
             show_viewer=show_viewer,
         )
-        if shape in ("ground_box", "ground_box_sphere"):
+        # Every entity starts at rest on a support of top z = 0: box / sphere half extent 0.2, upright capsule radius
+        # 0.1 + half length 0.2 = 0.3, lying capsule radius 0.1.
+        if shape == "ground_box":
+            # A box and a sphere on a ground box, and beside it a capsule lying on a fixed capsule along it, which
+            # multi-contact touches at both ends.
             scene.add_entity(
                 gs.morphs.Box(
                     size=(2.0, 2.0, 0.2),
-                    pos=(0.0, 0.0, 0.1),
+                    pos=(0.0, 0.0, -0.1),
                     fixed=True,
                 ),
                 vis_mode="collision",
             )
-            if shape == "ground_box":
-                obj = scene.add_entity(
-                    gs.morphs.Box(
-                        size=(0.4, 0.4, 0.4),
-                        pos=(0.0, 0.0, 0.4),
-                    ),
-                    vis_mode="collision",
-                )
-            else:
-                obj = scene.add_entity(
-                    gs.morphs.Sphere(
-                        radius=0.2,
-                        pos=(0.0, 0.0, 0.4),
-                    ),
-                    vis_mode="collision",
-                )
-        elif shape == "ground_capsule":
             scene.add_entity(
                 gs.morphs.MJCF(
                     file=mjcf_capsule_ground,
                 ),
                 vis_mode="collision",
             )
-            obj = scene.add_entity(
-                gs.morphs.MJCF(
-                    file=mjcf_capsule,
-                    align=False,
+            entities = (
+                scene.add_entity(
+                    gs.morphs.Box(
+                        size=(0.4, 0.4, 0.4),
+                        pos=(0.0, 0.0, 0.2),
+                    ),
+                    vis_mode="collision",
                 ),
-                vis_mode="collision",
+                scene.add_entity(
+                    gs.morphs.Sphere(
+                        radius=0.2,
+                        pos=(0.6, 0.0, 0.2),
+                    ),
+                    vis_mode="collision",
+                ),
+                scene.add_entity(
+                    gs.morphs.MJCF(
+                        file=mjcf_capsule,
+                        pos=(1.5, 0.0, 0.1),
+                        euler=(0.0, 90.0, 0.0),
+                    ),
+                    vis_mode="collision",
+                ),
             )
         else:
             scene.add_entity(gs.morphs.Plane())
             if shape == "box":
-                obj = scene.add_entity(
+                entity = scene.add_entity(
                     gs.morphs.Box(
                         size=(0.4, 0.4, 0.4),
-                        pos=(0.0, 0.0, 0.3),
+                        pos=(0.0, 0.0, 0.2),
                     ),
                     vis_mode="collision",
                 )
             elif shape == "sphere":
-                obj = scene.add_entity(
+                entity = scene.add_entity(
                     gs.morphs.Sphere(
                         radius=0.2,
-                        pos=(0.0, 0.0, 0.3),
+                        pos=(0.0, 0.0, 0.2),
                     ),
                     vis_mode="collision",
                 )
             elif shape == "capsule":
-                obj = scene.add_entity(
+                entity = scene.add_entity(
                     gs.morphs.MJCF(
                         file=mjcf_capsule,
-                        align=False,
+                        pos=(0.0, 0.0, 0.3),
                     ),
                     vis_mode="collision",
                 )
             else:
                 raise ValueError(shape)
+            entities = (entity,)
         scene.build(n_envs=0)
-        return scene, obj
+        return scene, entities
 
     def _n_contacts(scene):
         return qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts)[0]
 
-    # Rest z puts the body's lowest point on its support: box / sphere half extent 0.2, upright capsule
-    # radius 0.1 + half length 0.2 = 0.3, box / sphere on the ground box centered at 0.40, capsule lying on the ground
-    # capsule of top 0.2.
-    rest_z = {
-        "ground_box": 0.40,
-        "ground_box_sphere": 0.40,
-        "ground_capsule": 0.30,
-        "box": 0.20,
-        "sphere": 0.20,
-        "capsule": 0.30,
-    }[shape]
-    rest_dofs = [0.0, 0.0, rest_z, 0.0, 0.0, 0.0]
-    if shape == "ground_capsule":
-        # Lying along x, side by side with the ground capsule, which multi-contact touches at both ends
-        rest_dofs[4] = 0.5 * np.pi
+    def _losses(scene, entities):
+        # Each entity measures its position from the vertical axis it starts on, which gives every loss term the
+        # magnitude of a single entity at the origin, whose finite differences resolve its small gradient in fp32
+        qpos = scene.rigid_solver.get_state().qpos
+        return [
+            ((qpos[0, entity.q_start : entity.q_start + 3] - qpos.new_tensor((*entity.morph.pos[:2], 0.0))) ** 2).sum()
+            for entity in entities
+        ]
+
     n_settle = 12
     n_steps = 2
     eps = 1e-2
@@ -143,62 +140,71 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, grad_capsul
     # The small tangential preload keeps the contact manifold away from a gain / loss transition, which the
     # tangential finite-difference perturbation would otherwise cross (the in-test contact-count guard trips).
     base_force = np.array([0.5, 0.0, -8.0, 0.0, 0.0, 0.0])
-    init_force = np.broadcast_to(base_force, (n_steps, 6)).copy()
 
-    def settle(scene, obj):
+    def settle(scene, entities):
         # Settling under the same base force as the grad window keeps the contact manifold in its loaded
         # configuration throughout, so the in-window contact-count guards hold.
-        obj.set_dofs_position(torch.tensor(rest_dofs, dtype=gs.tc_float, device=gs.device))
         for _ in range(n_settle):
-            obj.control_dofs_force(base_force)
+            for entity in entities:
+                entity.control_dofs_force(base_force)
             scene.step()
 
-    scene_ana, obj_ana = _build_contact_scene(
+    scene_ana, entities_ana = _build_contact_scene(
         shape, grad_capsule, grad_capsule_ground, requires_grad=True, show_viewer=show_viewer
     )
+    init_force = np.broadcast_to(base_force, (n_steps, len(entities_ana), 6)).copy()
     scene_ana.reset()
-    settle(scene_ana, obj_ana)
+    settle(scene_ana, entities_ana)
     nc = _n_contacts(scene_ana)
     assert nc > 0, f"setup error: {shape} not in contact after settle (n_contacts={nc})"
-    if shape == "ground_capsule":
-        assert nc > 1, "setup error: multi-contact found no perturbed contact between the capsules"
-    forces = [
-        torch.tensor(init_force[t], dtype=gs.tc_float, device=gs.device, requires_grad=True) for t in range(n_steps)
-    ]
+    if shape == "ground_box":
+        contacts = scene_ana.rigid_solver.collider.get_contacts(as_tensor=True, to_torch=True, keep_batch_dim=True)
+        i_g = entities_ana[2].geoms[0].idx
+        n_contacts_capsule = ((contacts["geom_a"][0] == i_g) | (contacts["geom_b"][0] == i_g)).sum()
+        assert n_contacts_capsule > 1, "setup error: multi-contact found no perturbed contact between the capsules"
+    forces = torch.tensor(init_force, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     for t in range(n_steps):
-        obj_ana.control_dofs_force(forces[t])
+        for i_e, entity in enumerate(entities_ana):
+            entity.control_dofs_force(forces[t, i_e])
         scene_ana.step()
         assert _n_contacts(scene_ana) == nc, "contact set changed during grad window - FD invalid"
-    loss = (scene_ana.rigid_solver.get_state().qpos[0, :3] ** 2).sum()
-    scene_ana.backward(loss)
-    ana = np.stack([tensor_to_array(f.grad) for f in forces])
+    scene_ana.backward(sum(_losses(scene_ana, entities_ana)))
+    ana = tensor_to_array(forces.grad)
 
     # The FD reference must also run in diff mode: differentiable scenes route contacts through diff_gjk, whose
     # contact set and forces differ slightly from the production narrowphase, so a production-mode reference would
     # measure that forward gap instead of the gradient.
-    scene_fd, obj_fd = _build_contact_scene(shape, grad_capsule, grad_capsule_ground, requires_grad=True)
+    scene_fd, entities_fd = _build_contact_scene(shape, grad_capsule, grad_capsule_ground, requires_grad=True)
 
     def loss_at(perturbed):
         scene_fd.reset()
-        settle(scene_fd, obj_fd)
+        settle(scene_fd, entities_fd)
         for t in range(n_steps):
-            obj_fd.control_dofs_force(perturbed[t])
+            for i_e, entity in enumerate(entities_fd):
+                entity.control_dofs_force(perturbed[t, i_e])
             scene_fd.step()
             assert _n_contacts(scene_fd) == nc, "contact set changed under FD perturbation"
-        return float((scene_fd.rigid_solver.get_state().qpos[0, :3] ** 2).sum().detach())
+        return np.array([float(loss.detach()) for loss in _losses(scene_fd, entities_fd)])
 
     # Both the normal (z) and a tangential (x) force component: the tangential adjoint flows through the friction
     # rows and their contact-frame chains, which the normal component alone leaves untested.
     for t in range(n_steps):
-        for i_d in (2, 0):
-            plus = init_force.copy()
-            plus[t, i_d] += eps
-            minus = init_force.copy()
-            minus[t, i_d] -= eps
-            fd = (loss_at(plus) - loss_at(minus)) / (2 * eps)
-            assert_allclose(
-                ana[t, i_d], fd, rtol=fd_rtol, atol=fd_atol, err_msg=f"contact force.grad mismatch at t={t} dof={i_d}"
-            )
+        for i_e in range(len(entities_fd)):
+            for i_d in (2, 0):
+                plus = init_force.copy()
+                plus[t, i_e, i_d] += eps
+                minus = init_force.copy()
+                minus[t, i_e, i_d] -= eps
+                # The entities never touch each other, so that the force of an entity moves its own loss alone, whose
+                # finite difference leaves out the rounding of the other loss terms
+                fd = (loss_at(plus)[i_e] - loss_at(minus)[i_e]) / (2 * eps)
+                assert_allclose(
+                    ana[t, i_e, i_d],
+                    fd,
+                    rtol=fd_rtol,
+                    atol=fd_atol,
+                    err_msg=f"contact force.grad mismatch at t={t} entity={i_e} dof={i_d}",
+                )
 
 
 @pytest.mark.required
@@ -344,7 +350,8 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
         ),
     )
     # Overlapping pairs of analytic detection, placed apart from each other and from the boxes: sphere-sphere,
-    # sphere-box against an edge of the box, sphere-capsule and capsule-capsule, all off-axis.
+    # sphere-box against an edge of the box, sphere-capsule, crossing capsules and side-by-side capsules, which
+    # multi-contact touches at both ends, all off-axis.
     sphere0 = scene.add_entity(
         gs.morphs.Sphere(
             radius=0.2,
@@ -397,19 +404,39 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
             file=grad_capsule,
         ),
     )
+    capsule3 = scene.add_entity(
+        gs.morphs.MJCF(
+            pos=(10.0, 0.0, 0.0),
+            euler=(0.0, 90.0, 0.0),
+            file=grad_capsule,
+        ),
+    )
+    capsule4 = scene.add_entity(
+        gs.morphs.MJCF(
+            pos=(10.01, 0.02, 0.19),
+            euler=(0.0, 89.9, 0.1),
+            file=grad_capsule,
+        ),
+    )
     scene.build()
     collider = scene.sim.rigid_solver.collider
 
     box1.set_quat(R_to_quat(gs.euler_to_R([np.deg2rad(3.0), np.deg2rad(3.0), np.deg2rad(3.0)])))
-    # One geom per entity, so that the geom index of each entity is its position in this sequence
-    entities = (box0, box1, sphere0, sphere1, box2, sphere2, capsule0, sphere3, capsule1, capsule2)
+    entities = (box0, box1, sphere0, sphere1, box2, sphere2, capsule0, sphere3, capsule1, capsule2, capsule3, capsule4)
     entities_init_pos = [entity.get_pos().clone() for entity in entities]
     entities_init_quat = [entity.get_quat().clone() for entity in entities]
 
     collider.detection()
     contacts = collider.get_contacts(as_tensor=True, to_torch=True, keep_batch_dim=True)
-    geoms_pair = {frozenset(pair) for pair in zip(contacts["geom_a"][0].tolist(), contacts["geom_b"][0].tolist())}
-    assert {frozenset((2, 3)), frozenset((4, 5)), frozenset((6, 7)), frozenset((8, 9))} <= geoms_pair
+    geoms_pair = [frozenset(pair) for pair in zip(contacts["geom_a"][0].tolist(), contacts["geom_b"][0].tolist())]
+    for entity_a, entity_b, n_contacts_min in (
+        (sphere0, sphere1, 1),
+        (box2, sphere2, 1),
+        (capsule0, sphere3, 1),
+        (capsule1, capsule2, 1),
+        (capsule3, capsule4, 2),
+    ):
+        assert geoms_pair.count(frozenset((entity_a.geoms[0].idx, entity_b.geoms[0].idx))) >= n_contacts_min
     normal = contacts["normal"].requires_grad_()
     position = contacts["position"].requires_grad_()
     penetration = contacts["penetration"].requires_grad_()
@@ -437,7 +464,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
             losses = []
             for sign in (1, -1):
                 for i_e, entity in enumerate(entities):
-                    offset = sign * rand_dx[i_e, 0] * fd_eps
+                    offset = sign * rand_dx[entity.geoms[0].idx, 0] * fd_eps
                     entity.set_pos(entities_init_pos[i_e] + offset if x_type == "pos" else entities_init_pos[i_e])
                     entity.set_quat(entities_init_quat[i_e] + offset if x_type == "quat" else entities_init_quat[i_e])
                 collider.collider_state.n_contacts.fill(0)
@@ -456,7 +483,7 @@ def test_contact_detection_jacobian_matches_fd(grad_capsule):
     for entity, init_pos, init_quat in zip(entities, entities_init_pos, entities_init_quat):
         entity.set_pos(init_pos)
         entity.set_quat(init_quat)
-    sphere1.set_pos(entities_init_pos[2])
+    sphere1.set_pos(sphere0.get_pos())
     collider.collider_state.n_contacts.fill(0)
     collider.detection()
     contacts = collider.get_contacts(as_tensor=True, to_torch=True, keep_batch_dim=True)

@@ -70,8 +70,8 @@ def func_capsule_capsule_contact(
     penetration = gs.qd_float(0.0)
     if dist_sq < combined_radius_sq:
         is_col = True
-        # The differentiable narrowphase replays this detection, and the reverse of the square root is infinite at zero
-        # distance: the distance of coincident segments stays a constant zero.
+        # The differentiable narrowphase replays this detection, and the derivative of the square root is infinite at
+        # zero. The distance of coincident segments stays a constant zero, which keeps the gradient finite.
         dist = gs.qd_float(0.0)
         if dist_sq > 0.0:
             dist = qd.sqrt(dist_sq)
