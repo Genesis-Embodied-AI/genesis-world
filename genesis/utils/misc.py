@@ -452,7 +452,7 @@ def unique_rows(rows, *, return_index=False, **kwargs):
     rows = np.asarray(rows)
     if rows.ndim == 2 and len(rows) and np.issubdtype(rows.dtype, np.integer):
         rows_min = rows.min(axis=0)
-        # Python integers, so that neither the ranges nor their product overflow
+        # Use Python integers to avoid an int64 overflow when computing the ranges or their product
         dims = [int(hi) - int(lo) + 1 for lo, hi in zip(rows_min, rows.max(axis=0))]
         if math.prod(dims) < np.iinfo(np.int64).max:
             # Read each row as the digits of one number, in a base per column that spans the values of that column.
