@@ -10,8 +10,9 @@ These functions handle:
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
+from genesis.grad.bridge import no_grad
 
 
 @qd.func
@@ -92,6 +93,7 @@ def kernel_flag_non_finite_grad(
     func_flag_non_finite_grad(dyn_state, rigid_info, rigid_config, errno)
 
 
+@no_grad
 @qd.kernel(fastcache=True)
 def kernel_flag_non_finite_next(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template(), errno: qd.Tensor

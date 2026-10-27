@@ -5,6 +5,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.state_change import mutates
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import drop_repeated_index, to_gs_tensor
 
@@ -278,14 +279,14 @@ class MPMEntity(ParticleEntity):
         )
         return tensor, particles_idx, envs_idx_
 
+    @mutates()
     @gs.assert_built
     def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
         poss, particles_idx, envs_idx = self._sanitize_written_particles(
             poss, gs.tc_float, particles_idx_local, envs_idx, (3,)
         )
         # Between two steps, the state sits in frame 0 (see 'MPMSolver.roll_frame_window')
-        with self._solver.recording_input():
-            self._solver._kernel_set_particles_pos(0, particles_idx, envs_idx, poss)
+        self._solver._kernel_set_particles_pos(0, particles_idx, envs_idx, poss)
 
     def get_particles_pos(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -297,14 +298,14 @@ class MPMEntity(ParticleEntity):
             poss = poss[0]
         return poss
 
+    @mutates()
     @gs.assert_built
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
         vels, particles_idx, envs_idx = self._sanitize_written_particles(
             vels, gs.tc_float, particles_idx_local, envs_idx, (3,)
         )
         # See 'set_particles_pos'
-        with self._solver.recording_input():
-            self._solver._kernel_set_particles_vel(0, particles_idx, envs_idx, vels)
+        self._solver._kernel_set_particles_vel(0, particles_idx, envs_idx, vels)
 
     def get_particles_vel(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -316,6 +317,7 @@ class MPMEntity(ParticleEntity):
             vels = vels[0]
         return vels
 
+    @mutates(differentiable=False)
     @gs.assert_built
     def set_particles_active(self, actives, particles_idx_local=None, envs_idx=None):
         actives, particles_idx, envs_idx = self._sanitize_written_particles(
@@ -327,8 +329,7 @@ class MPMEntity(ParticleEntity):
         #     gs.raise_exception("Elements of `actives' must be either True or False.")
 
         # See 'set_particles_pos'
-        with self._solver.recording_input(differentiable=False):
-            self._solver._kernel_set_particles_active(0, particles_idx, envs_idx, actives)
+        self._solver._kernel_set_particles_active(0, particles_idx, envs_idx, actives)
 
     def get_particles_active(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
@@ -357,6 +358,7 @@ class MPMEntity(ParticleEntity):
             actus = actus.reshape((1,)).expand((self.material.n_groups,))
         self.set_particles_actu(actus, None, envs_idx)
 
+    @mutates()
     @assert_muscle
     @gs.assert_built
     def set_particles_actu(self, actus, particles_idx_local=None, envs_idx=None):
@@ -376,8 +378,7 @@ class MPMEntity(ParticleEntity):
             actus, gs.tc_float, particles_idx_local, envs_idx, (self.material.n_groups,)
         )
         # See 'set_particles_pos'
-        with self._solver.recording_input():
-            self._solver._kernel_set_particles_actu(0, self.material.n_groups, particles_idx, envs_idx, actus)
+        self._solver._kernel_set_particles_actu(0, self.material.n_groups, particles_idx, envs_idx, actus)
 
     def get_particles_actu(self, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)

@@ -348,7 +348,7 @@ def fill_data(
         view = None
         if isinstance(item.array, torch.Tensor):
             view = item.array
-        elif gs.use_zerocopy:
+        elif gs.use_zerocopy.is_supported:
             try:
                 view = data_to_array(item.array, to_torch=True, copy=False)
             except ValueError:

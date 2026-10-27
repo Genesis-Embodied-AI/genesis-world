@@ -2,7 +2,7 @@
 Arrays a Quadrants kernel may write, from its source.
 
 The backward pass of a recorded substep saves the values a launch overwrites that an earlier launch reads (see
-StepRecorder). Quadrants records the struct members a compiled kernel uses, but not which of them it writes, so the
+LaunchRecorder). Quadrants records the struct members a compiled kernel uses, but not which of them it writes, so the
 writes are read from the Python source of the kernel and of the funcs it calls. The analysis over-approximates: both
 branches of a static condition count, so a write it reports may never happen, which costs a copy, never a gradient.
 """

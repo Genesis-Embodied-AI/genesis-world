@@ -20,6 +20,7 @@ from genesis.engine.solvers.rigid.abd.misc import (
     func_wakeup_island,
     linear_to_lower_tri,
 )
+from genesis.grad.bridge import no_grad
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links
@@ -564,6 +565,7 @@ def kernel_get_equality_constraints(
 # ====================================== Reset and Clear Constraint Solver State ======================================
 
 
+@no_grad
 @qd.kernel(fastcache=True)
 def constraint_solver_kernel_reset(
     envs_idx: qd.types.ndarray(), constraint_state: array_class.ConstraintState, rigid_config: qd.template()

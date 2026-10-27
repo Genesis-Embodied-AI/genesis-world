@@ -11,8 +11,9 @@ import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
+from genesis.engine.state_change import mutates
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.grad.bridge import custom_backward
+from genesis.grad.bridge import no_grad
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import qd_to_torch
 
@@ -977,18 +978,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.init_pos_and_vel(f)
                 self.compute_vel(f)
                 self.apply_uniform_force(f)
-                # The constraints carry no gradient
                 if self._constraints_initialized:
-                    with custom_backward(None):
-                        self.apply_soft_constraints(f)
+                    self.apply_soft_constraints(f)
 
     def substep_post_coupling(self, f):
         if self.is_active:
             self.compute_pos(f)
-            # The constraints carry no gradient
             if self._constraints_initialized and not self._use_implicit_solver:
-                with custom_backward(None):
-                    self.apply_hard_constraints(f)
+                self.apply_hard_constraints(f)
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
@@ -1009,7 +1006,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def is_differentiable(self) -> bool:
         return not self._use_implicit_solver
 
-    def add_grad_from_state(self, grads, selection, saved_state):
+    def add_grad_from_state(self, grads, selection):
         """Add the gradients of a queried state, of the given entity or of the whole solver, to the frame 0 adjoint."""
         v_start, n_vertices = (0, self.n_vertices) if selection is None else (selection.v_start, selection.n_vertices)
         for kernel, grad in zip((self._kernel_add_grad_from_pos, self._kernel_add_grad_from_vel), grads):
@@ -1034,9 +1031,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @mutates()
     def set_state(self, f, state, envs_idx=None):
-        # A state set whole overwrites the output of the last operation recorded (see 'Solver.recording_input')
-        self._rollout_graph.mark_state_changed()
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.active)
 
@@ -1425,6 +1421,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 offset_quat = qd_transform_quat_by_quat(vc.link_init_quat, quat)
                 self.vertex_constraints[i_v, i_b].target_pos = pos + qd_transform_by_quat(offset_pos, offset_quat)
 
+    @no_grad
     @qd.kernel
     def apply_hard_constraints(self, f: qd.i32):
         """Apply hard constraints by directly overriding positions and velocities."""
@@ -1434,6 +1431,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.elements_v[f + 1, i_v, i_b].pos = vc.target_pos
                 self.elements_v[f + 1, i_v, i_b].vel.fill(0.0)
 
+    @no_grad
     @qd.kernel
     def apply_soft_constraints(self, f: qd.i32):
         """Apply soft constraints as spring forces for explicit solver."""

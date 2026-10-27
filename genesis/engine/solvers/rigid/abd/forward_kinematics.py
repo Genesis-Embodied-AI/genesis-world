@@ -14,11 +14,16 @@ This module contains Quadrants kernels and functions for:
 
 from enum import IntEnum
 
+import torch
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.grad.bridge import register_custom_backward
+
+from .manual_bw import kernel_manual_forward_kinematics_bw, kernel_manual_forward_velocity_bw
 from .misc import (
     func_add_safe_backward,
     func_atomic_add_if,
@@ -40,6 +45,35 @@ class LINK_SWEEP_PASS(IntEnum):
     INERTIA_FORCE_FOLD = 3
 
 
+def reverse_cartesian_space(envs, dyn_state, dyn_info, rigid_info, rigid_config):
+    """
+    Reverse an update of the cartesian space and of the velocities of the links, from the values it left.
+
+    `envs` selects the environments the update covered, every environment being reversed alike: the reversal consumes
+    the adjoint of the poses and velocities it reverses, which an environment the update left unchanged holds at the
+    state they derive from. The update is replayed first, stage by stage, to rebuild the intermediates the manual
+    reverses read (see kernel_manual_forward_kinematics_bw).
+    """
+    envs_idx = torch.arange(dyn_state.links.pos.shape[1], dtype=gs.tc_int, device=gs.device)
+    kernel_forward_kinematics_replay(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
+    kernel_COM_links_replay(dyn_state, dyn_info, rigid_info, rigid_config)
+    kernel_update_geoms_replay(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
+    kernel_forward_velocity(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
+    # The center of mass (COM) and the geoms both read the forward kinematics alone, so they reverse in either order
+    kernel_manual_forward_velocity_bw(dyn_state, dyn_info, rigid_info, rigid_config)
+    kernel_COM_links_replay.grad(dyn_state, dyn_info, rigid_info, rigid_config)
+    kernel_update_geoms_replay.grad(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
+    kernel_manual_forward_kinematics_bw(dyn_state, dyn_info, rigid_info, rigid_config)
+
+
+def reverse_forward_velocity(envs, dyn_state, dyn_info, rigid_info, rigid_config, is_backward):
+    """Reverse an update of the velocities of the links, from the values it left (see reverse_cartesian_space)."""
+    envs_idx = torch.arange(dyn_state.links.pos.shape[1], dtype=gs.tc_int, device=gs.device)
+    kernel_forward_velocity(envs_idx, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=True)
+    kernel_manual_forward_velocity_bw(dyn_state, dyn_info, rigid_info, rigid_config)
+
+
+@register_custom_backward(reverse_cartesian_space)
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics_links_geoms(
     envs_idx: qd.types.ndarray(),
@@ -66,6 +100,7 @@ def kernel_forward_kinematics_links_geoms(
         func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
+@register_custom_backward(reverse_cartesian_space)
 @qd.kernel(fastcache=True)
 def kernel_masked_forward_kinematics_links_geoms(
     envs_mask: qd.types.ndarray(),
@@ -122,6 +157,7 @@ def kernel_masked_forward_kinematics(
             func_update_kinematics_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
 
+@register_custom_backward(reverse_forward_velocity)
 @qd.kernel(fastcache=True)
 def kernel_forward_velocity(
     envs_idx: qd.types.ndarray(),
@@ -138,6 +174,7 @@ def kernel_forward_velocity(
         func_forward_velocity_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
 
+@register_custom_backward(reverse_forward_velocity)
 @qd.kernel(fastcache=True)
 def kernel_masked_forward_velocity(
     envs_mask: qd.types.ndarray(),
@@ -1257,12 +1294,12 @@ def kernel_update_cartesian_space(
     func_update_cartesian_space(dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward)
 
 
-# Standalone kernels for the update_cartesian_space sub-stages, which a differentiable scene launches one by one with
-# is_backward=True (static loops) so that each is reversed on its own (see '_update_cartesian_space_reversibly' in
-# rigid_solver.py): COM-links and geom-pose updates reverse through Quadrants autodiff, while forward kinematics and
-# forward velocity are reversed manually (see kernel_manual_forward_kinematics_bw / kernel_manual_forward_velocity_bw
-# in manual_bw.py) because autodiff silently drops their gradient. TODO: once every sub-stage reverses correctly under
-# autodiff, drop these kernels and the manual reverses, and differentiate kernel_update_cartesian_space as a whole.
+# Standalone kernels for the update_cartesian_space sub-stages, which the reversal of an update launches one by one with
+# is_backward=True (static loops) so that each is reversed on its own (see reverse_cartesian_space): COM-links and
+# geom-pose updates reverse through Quadrants autodiff, while forward kinematics and forward velocity are reversed
+# manually (see kernel_manual_forward_kinematics_bw / kernel_manual_forward_velocity_bw in manual_bw.py) because
+# autodiff silently drops their gradient. TODO: once every sub-stage reverses correctly under autodiff, drop these
+# kernels and the manual reverses, and differentiate kernel_update_cartesian_space as a whole.
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics_replay(
     envs_idx: qd.types.ndarray(),

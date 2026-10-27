@@ -254,6 +254,14 @@ def test_diff_unsupported_configuration_raises():
     with pytest.raises(gs.GenesisException):
         scene.build()
 
+    # Box-box contact detection records nothing the differentiable narrowphase reconstructs its contacts from
+    with pytest.raises(gs.GenesisException):
+        gs.Scene(
+            sim_options=gs.options.SimOptions(requires_grad=True),
+            rigid_options=gs.options.RigidOptions(box_box_detection=True),
+            show_viewer=False,
+        )
+
     # Attach merges kinematic trees across entities, which the per-entity backward kernels cannot reverse
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

@@ -5,8 +5,9 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.state_change import mutates
 from genesis.engine.states.entities import ToolEntityState
-from genesis.grad.bridge import custom_backward
+from genesis.grad.bridge import no_grad
 from genesis.utils.geom import (
     qd_rotvec_to_quat,
     qd_transform_quat_by_quat,
@@ -73,9 +74,7 @@ class ToolEntity(Entity):
         self.advect(f)
 
     def substep_post_coupling(self, f):
-        # The latest pose is read for rendering alone, without gradient
-        with custom_backward(None):
-            self.update_latest_pos(f)
+        self.update_latest_pos(f)
 
     @qd.func
     def collide(self, f, pos_world, vel_mat, i_b):
@@ -85,6 +84,8 @@ class ToolEntity(Entity):
     def pbd_collide(self, f, pos_world, thickness, dt):
         return self.mesh.pbd_collide(f, pos_world, thickness, dt)
 
+    # The latest pose is read for rendering alone
+    @no_grad
     @qd.kernel
     def update_latest_pos(self, f: qd.i32):
         self.latest_pos[0] = self.pos[f, 0]
@@ -232,27 +233,27 @@ class ToolEntity(Entity):
             for k in qd.static(range(4)):
                 self.quat[f, i_b][k] = quat[i_b, k]
 
+    @mutates()
     def set_velocity(self, vel=None, ang=None):
         vel = None if vel is None else to_gs_tensor(vel).contiguous()
         ang = None if ang is None else to_gs_tensor(ang).contiguous()
         # Between two steps, the state sits in frame 0 (see 'ToolSolver.roll_frame_window')
-        with self._solver.recording_input():
-            if vel is not None:
-                self.set_vel(0, vel)
-            if ang is not None:
-                self.set_ang(0, ang)
+        if vel is not None:
+            self.set_vel(0, vel)
+        if ang is not None:
+            self.set_ang(0, ang)
 
+    @mutates()
     def set_position(self, pos):
         pos = to_gs_tensor(pos).contiguous()
         # See 'set_velocity'
-        with self._solver.recording_input():
-            self.set_pos(0, pos)
+        self.set_pos(0, pos)
 
+    @mutates()
     def set_quaternion(self, quat):
         quat = to_gs_tensor(quat).contiguous()
         # See 'set_velocity'
-        with self._solver.recording_input():
-            self.set_quat(0, quat)
+        self.set_quat(0, quat)
 
     def add_grad_from_state(self, grads):
         """Add the gradients of a queried state of the tool, ordered as its `grad_tensors`, to the frame 0 adjoint."""

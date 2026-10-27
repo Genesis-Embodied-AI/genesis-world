@@ -10,6 +10,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
+from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -30,7 +31,7 @@ from genesis.utils.misc import (
     sanitize_indexed_tensor,
 )
 
-from .base_solver import MutatedLinks, Solver, StateChange, mutates
+from .base_solver import Solver
 from .rigid.abd.accessor import (
     kernel_get_kinematic_state,
     kernel_get_links_vel,
@@ -105,18 +106,17 @@ def _offset_world_shift(offset_pos, offset_quat, world_quat):
     return gu.transform_by_quat(offset_pos, authored_quat)
 
 
-def _read_state_fields(solver: "KinematicSolver", fields, envs_idx, idx, *, derived: bool) -> tuple[torch.Tensor, ...]:
+def _read_state_fields(solver: "KinematicSolver", fields, envs_idx, idx) -> tuple[torch.Tensor, ...]:
     """
     Read the given slots of fields of the state of a solver, in the layout of its getters (see 'qd_to_torch').
 
     While the operations of the solver are recorded, the read is one operation of the rollout whose outputs are the
-    whole fields, from which torch selects the slots. Fields derived from the state come with the state they are read
-    at (see 'RigidSolver.save_derived_state').
+    whole fields, from which torch selects the slots (see 'Solver.record_read').
     """
     if not solver.is_recording:
         return tuple(qd_to_torch(field, envs_idx, idx, transpose=True, copy=True) for field in fields)
     tensors = tuple(qd_to_torch(field, transpose=True, copy=True) for field in fields)
-    solver.record_read(tensors, fields, solver.save_derived_state() if derived else None)
+    solver.record_read(tensors, fields)
     mask = indices_to_mask(envs_idx, idx)
     return tuple(tensor[mask] for tensor in tensors)
 
@@ -128,15 +128,12 @@ def _write_dofs_position(solver: "KinematicSolver", position, dofs_idx, envs_idx
     The positions of the other dofs are read from the state (see 'kernel_set_dofs_position'), so the gradient of a
     recorded write reaches both the positions given and the state the others are read from.
     """
-    (positions,) = _read_state_fields(solver, (solver.dyn_state.dofs.pos,), envs_idx, None, derived=True)
+    (positions,) = _read_state_fields(solver, (solver.dyn_state.dofs.pos,), envs_idx, None)
     positions = positions.clone()
     positions[:, dofs_idx] = position
     is_dof_set = torch.zeros((solver.n_dofs,), dtype=gs.tc_bool, device=gs.device)
     is_dof_set[dofs_idx] = True
-    with solver.recording_input():
-        kernel_set_dofs_position(
-            envs_idx, is_dof_set, positions, solver.dyn_info, solver.rigid_info, solver.rigid_config
-        )
+    kernel_set_dofs_position(envs_idx, is_dof_set, positions, solver.dyn_info, solver.rigid_info, solver.rigid_config)
 
 
 def _fill_base_link_geom_offsets(offset_pos, offset_quat, entity, geoms, ranges):
@@ -206,9 +203,6 @@ class KinematicSolver(Solver):
         self._enable_collision = False
         self._enable_mujoco_compatibility = False
         self._requires_grad = False
-        # Whether setters write the state through zero-copy views, which a differentiable scene cannot record. It is
-        # read by every setter on the hot path, so it is computed once.
-        self._is_view_writable = gs.use_zerocopy
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
 
         self.collider = None
@@ -1050,16 +1044,15 @@ class KinematicSolver(Solver):
         if relative:
             # Compose the body-frame offset onto the authored position while keeping the current orientation, then set
             # the resulting world position.
-            (cur_quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx, derived=True)
+            (cur_quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             pos = pos + _offset_world_shift(offset_pos, offset_quat, cur_quat)
             relative = False
 
-        with self.recording_input():
-            kernel_set_links_pos(
-                links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
+        kernel_set_links_pos(
+            links_idx, envs_idx, pos, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
         if not skip_forward:
             kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
@@ -1093,29 +1086,27 @@ class KinematicSolver(Solver):
                 # The offset position rotates with the orientation, so keep the authored-frame position fixed by
                 # rewriting the world position from the current authored position and the new authored orientation.
                 cur_pos, cur_quat = _read_state_fields(
-                    self, (self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, links_idx, derived=True
+                    self, (self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, links_idx
                 )
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                 authored_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
                 world_pos = authored_pos + gu.transform_by_quat(offset_pos, quat)
-                with self.recording_input():
-                    kernel_set_links_pos(
-                        links_idx,
-                        envs_idx,
-                        world_pos,
-                        self.dyn_state,
-                        self.dyn_info,
-                        self.rigid_info,
-                        self.rigid_config,
-                    )
+                kernel_set_links_pos(
+                    links_idx,
+                    envs_idx,
+                    world_pos,
+                    self.dyn_state,
+                    self.dyn_info,
+                    self.rigid_info,
+                    self.rigid_config,
+                )
             # Compose the offset onto the authored orientation, then set the resulting world orientation.
             quat = gu.transform_quat_by_quat(offset_quat, quat)
             relative = False
 
-        with self.recording_input():
-            kernel_set_links_quat(
-                links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
-            )
+        kernel_set_links_quat(
+            links_idx, envs_idx, quat, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config
+        )
 
         if not skip_forward:
             kernel_forward_kinematics(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
@@ -1127,7 +1118,7 @@ class KinematicSolver(Solver):
 
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
-        if self._is_view_writable:
+        if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             qs_mask = indices_to_mask(qs_idx)
             if (
@@ -1155,8 +1146,7 @@ class KinematicSolver(Solver):
             )
             if self.n_envs == 0:
                 qpos = qpos[None]
-            with self.recording_input():
-                kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
+            kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
 
         if not skip_forward:
             if not isinstance(envs_idx, torch.Tensor):
@@ -1174,7 +1164,7 @@ class KinematicSolver(Solver):
 
     @mutates(StateChange.DYNAMICS, links=MutatedLinks.ARTICULATED)
     def set_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None, *, skip_forward=False):
-        if self._is_view_writable:
+        if gs.use_zerocopy:
             vel = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
             dofs_mask = indices_to_mask(dofs_idx)
             if (
@@ -1218,11 +1208,10 @@ class KinematicSolver(Solver):
             )
             if self.n_envs == 0 and velocity is not None:
                 velocity = velocity[None]
-            with self.recording_input():
-                if velocity is None:
-                    kernel_set_dofs_zero_velocity(dofs_idx, envs_idx, self.dyn_state, self.rigid_config)
-                else:
-                    kernel_set_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
+            if velocity is None:
+                kernel_set_dofs_zero_velocity(dofs_idx, envs_idx, self.dyn_state, self.rigid_config)
+            else:
+                kernel_set_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
         if not skip_forward:
             if envs_idx.dtype == torch.bool:
@@ -1292,16 +1281,16 @@ class KinematicSolver(Solver):
             _, links_idx, envs_idx = self._sanitize_io_variables(
                 None, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
             )
-        (tensor,) = _read_state_fields(self, (self.dyn_state.links.pos,), envs_idx, links_idx, derived=True)
+        (tensor,) = _read_state_fields(self, (self.dyn_state.links.pos,), envs_idx, links_idx)
         if relative and not self._links_offset_pos_is_identity[idx].all():
-            (quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx, derived=True)
+            (quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_links_quat(self, links_idx=None, envs_idx=None, *, relative=False):
-        (tensor,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx, derived=True)
+        (tensor,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx)
         idx = links_idx if isinstance(links_idx, int) else slice(None)
         if relative and not self._links_offset_quat_is_identity[idx].all():
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
@@ -1344,11 +1333,10 @@ class KinematicSolver(Solver):
                 (links_state.cd_vel, links_state.cd_ang, links_state.pos, links_state.root_COM),
                 envs_idx,
                 links_idx,
-                derived=True,
             )
             cpos = pos - root_COM
             if is_relative:
-                (quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx, derived=True)
+                (quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx)
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                 offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
                 cpos = cpos - _offset_world_shift(offset_pos, offset_quat, quat)
@@ -1374,7 +1362,7 @@ class KinematicSolver(Solver):
         return _tensor
 
     def get_links_ang(self, links_idx=None, envs_idx=None):
-        (tensor,) = _read_state_fields(self, (self.dyn_state.links.cd_ang,), envs_idx, links_idx, derived=True)
+        (tensor,) = _read_state_fields(self, (self.dyn_state.links.cd_ang,), envs_idx, links_idx)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def _build_dof_to_q_map(self, dofs_idx_t):
@@ -1389,16 +1377,16 @@ class KinematicSolver(Solver):
         return dof_to_q[dofs_idx_t]
 
     def get_qpos(self, qs_idx=None, envs_idx=None):
-        (tensor,) = _read_state_fields(self, (self.qpos,), envs_idx, qs_idx, derived=False)
+        (tensor,) = _read_state_fields(self, (self.qpos,), envs_idx, qs_idx)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_velocity(self, dofs_idx=None, envs_idx=None):
-        (tensor,) = _read_state_fields(self, (self.dyn_state.dofs.vel,), envs_idx, dofs_idx, derived=False)
+        (tensor,) = _read_state_fields(self, (self.dyn_state.dofs.vel,), envs_idx, dofs_idx)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_position(self, dofs_idx=None, envs_idx=None):
         """Read current DOF positions."""
-        (tensor,) = _read_state_fields(self, (self.dyn_state.dofs.pos,), envs_idx, dofs_idx, derived=True)
+        (tensor,) = _read_state_fields(self, (self.dyn_state.dofs.pos,), envs_idx, dofs_idx)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_limit(self, dofs_idx=None, envs_idx=None):

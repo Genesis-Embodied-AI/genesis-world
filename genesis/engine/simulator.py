@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import genesis as gs
-from genesis.grad.bridge import Operation, RolloutGraph, StepRecorder
+from genesis.grad.bridge import Operation, RolloutGraph, LaunchRecorder
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
@@ -48,7 +48,7 @@ def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverChec
     """Write back the checkpoint of every given solver, then flush the zero-copy writes of the restore on Metal."""
     for solver, checkpoint in solvers_checkpoints:
         solver.set_checkpoint(checkpoint)
-    if gs.use_zerocopy and gs.backend == gs.metal:
+    if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
         torch.mps.synchronize()
 
 
@@ -261,8 +261,8 @@ class Simulator(RBC):
                 entity.build()
 
         # A change of the model invalidates every operation of the rollout (see 'RolloutGraph.invalidate'), while the
-        # changes of the state go through the solvers (see 'Solver.recording_input'). The state of a solver tracking no
-        # gradient is outside the graph.
+        # changes of the state are calls the graph records (see 'mutates'). The state of a solver tracking no gradient is
+        # outside the graph.
         for solver in self._active_solvers:
             if solver.requires_grad:
                 self._differentiable_solvers.append(solver)
@@ -343,7 +343,7 @@ class Simulator(RBC):
             solver.__setstate__(state.solvers[type(solver).__name__])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
-        if gs.use_zerocopy and gs.backend == gs.metal:
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
 
     def reset_grad(self):
@@ -389,7 +389,7 @@ class Simulator(RBC):
                     self._cur_substep_global += 1
                 self.rigid_solver.end_step()
             elif self._rollout_graph.is_recording:
-                self._rollout_graph.record(StepOperation(self))
+                self._rollout_graph.record_step(StepOperation(self))
             else:
                 # A step the graph does not record overwrites the state the last recorded operation returned
                 self._rollout_graph.mark_state_changed()
@@ -417,7 +417,7 @@ class Simulator(RBC):
         differentiable solvers.
 
         Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
-        reversed (see StepRecorder), the end of the step with the last one. The substeps before the last are replayed
+        reversed (see LaunchRecorder), the end of the step with the last one. The substeps before the last are replayed
         once beforehand, to rebuild the frames of the step and save the start of each of them. The clocks of the
         environments go back to `steps_start`, the steps they counted before it.
         """
@@ -446,7 +446,7 @@ class Simulator(RBC):
             is_last_substep = i_substep == self._substeps - 1
             if not is_last_substep:
                 restore_checkpoints(substeps_checkpoints[i_substep])
-            with StepRecorder() as recorder:
+            with LaunchRecorder() as recorder:
                 self.substep(self.cur_substep_local)
                 if is_last_substep:
                     with recorder.entry(restore=restore_frames, is_autodiff=True):

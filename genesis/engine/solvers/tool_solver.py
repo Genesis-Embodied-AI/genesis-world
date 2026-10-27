@@ -4,6 +4,7 @@ import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.tool_entity.tool_entity import ToolEntity
 from genesis.engine.materials import Tool
+from genesis.engine.state_change import mutates
 from genesis.engine.states.solvers import ToolSolverState
 
 from .base_solver import Solver, TimeBasedMixin
@@ -72,9 +73,8 @@ class ToolSolver(TimeBasedMixin, Solver):
             state = None
         return state
 
+    @mutates()
     def set_state(self, f, state, envs_idx=None):
-        # A state set whole overwrites the output of the last operation recorded (see 'Solver.recording_input')
-        self._rollout_graph.mark_state_changed()
         if state is not None:
             assert len(state) == len(self._entities)
             for i, entity in enumerate(self._entities):
@@ -92,7 +92,7 @@ class ToolSolver(TimeBasedMixin, Solver):
     def is_differentiable(self) -> bool:
         return True
 
-    def add_grad_from_state(self, grads, selection, saved_state):
+    def add_grad_from_state(self, grads, selection):
         """Add the gradients of a queried state of the tool given as selection to its frame 0 adjoint."""
         selection.add_grad_from_state(grads)
 

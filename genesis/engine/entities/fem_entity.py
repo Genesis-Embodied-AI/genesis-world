@@ -15,6 +15,7 @@ import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
+from genesis.engine.state_change import mutates
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor, unique_rows
@@ -620,6 +621,7 @@ class FEMEntity(Entity):
     # ---------------------------- interfacing with solver -------------------------------
     # ------------------------------------------------------------------------------------
 
+    @mutates()
     def set_pos(self, f, pos):
         """
         Set element positions in the solver.
@@ -633,9 +635,9 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_vertices, 3) containing new positions.
         """
 
-        with self._solver.recording_input():
-            self._solver._kernel_set_elements_pos(f, self._v_start, self.n_vertices, pos)
+        self._solver._kernel_set_elements_pos(f, self._v_start, self.n_vertices, pos)
 
+    @mutates()
     def set_vel(self, f, vel):
         """
         Set element velocities in the solver.
@@ -649,9 +651,9 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_vertices, 3) containing velocities.
         """
 
-        with self._solver.recording_input():
-            self._solver._kernel_set_elements_vel(f, self._v_start, self.n_vertices, vel)
+        self._solver._kernel_set_elements_vel(f, self._v_start, self.n_vertices, vel)
 
+    @mutates()
     def set_actu(self, f, actu):
         """
         Set actuation values for elements in the solver.
@@ -665,9 +667,9 @@ class FEMEntity(Entity):
             Tensor of shape (n_envs, n_groups) specifying actuation values.
         """
 
-        with self._solver.recording_input():
-            self._solver._kernel_set_elements_actu(f, self._el_start, self.n_elements, self.material.n_groups, actu)
+        self._solver._kernel_set_elements_actu(f, self._el_start, self.n_elements, self.material.n_groups, actu)
 
+    @mutates(differentiable=False)
     def set_active(self, f, active):
         """
         Set the active status of each element.
@@ -681,8 +683,7 @@ class FEMEntity(Entity):
             Activity flag (gs.ACTIVE or gs.INACTIVE).
         """
         actives = torch.full((self._sim._B, self.n_elements), active, dtype=gs.tc_int, device=gs.device)
-        with self._solver.recording_input(differentiable=False):
-            self._solver._kernel_set_active(f, self._el_start, self.n_elements, actives)
+        self._solver._kernel_set_active(f, self._el_start, self.n_elements, actives)
 
     @assert_muscle
     def set_muscle_group(self, muscle_group):

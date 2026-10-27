@@ -14,14 +14,16 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states import SolverCheckpoint
-from genesis.grad.bridge import InputOperation, LaunchRecorder, ReadOperation, RolloutGraph
+from genesis.grad.bridge import ReadOperation, RolloutGraph
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
     data_to_array,
     indices_to_mask,
+    qd_add_grad,
     qd_to_torch,
     sanitize_index,
     tensor_to_array,
@@ -31,128 +33,6 @@ from genesis.utils.misc import (
 if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
-
-
-class StateChange(enum.Enum):
-    """Category of solver scene-state mutation broadcast to subscribers (see `Solver.subscribe`).
-
-    Solver-agnostic: it names what kind of state changed, never an index space (links, dofs, particles, ...), which
-    differs from one solver to the next. GEOMETRY is the kinematic configuration that places or deforms the world
-    surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is the model parameters (mass,
-    inertia, friction, gains, limits, gravity).
-    """
-
-    GEOMETRY = enum.auto()
-    DYNAMICS = enum.auto()
-    MODEL = enum.auto()
-
-
-class MutatedLinks(enum.Enum):
-    """Which links a @mutates-tagged method can affect, consumed by link-filtered subscribers (see Subscriber).
-
-    ALL: any link (the conservative default). ARTICULATED: only links whose pose is a function of the configuration
-    - a configuration-space setter (qpos, dofs) can never displace a fixed link, which carries no degree of freedom
-    (fixed links move only through explicit base-pose setters, whose reach is their link selection). A method whose
-    reach is an explicit link selection instead declares the name of its links-index argument.
-    """
-
-    ALL = enum.auto()
-    ARTICULATED = enum.auto()
-
-
-def _expand_links_subtree(links_idx: np.ndarray, links_parent_idx: np.ndarray) -> np.ndarray:
-    """Close a set of global link indices over their kinematic subtrees: every descendant of a member is a member.
-
-    Iterates one tree level per pass (a link joins when its parent is a member), so it terminates after at most the
-    tree depth."""
-    is_affected = np.zeros(links_parent_idx.shape[0], dtype=bool)
-    is_affected[links_idx] = True
-    has_parent = links_parent_idx >= 0
-    while True:
-        is_expanded = is_affected.copy()
-        is_expanded[has_parent] |= is_affected[links_parent_idx[has_parent]]
-        if (is_expanded == is_affected).all():
-            return np.flatnonzero(is_affected)
-        is_affected = is_expanded
-
-
-def mutates(
-    *changes: StateChange, links: str | MutatedLinks = MutatedLinks.ALL
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Tag a solver state-mutating method with the StateChange categories it produces (one method may produce several,
-    e.g. set_state changes both GEOMETRY and DYNAMICS).
-
-    Notification is deferred to the outermost tagged call: a setter that internally calls other tagged setters fires a
-    single notification per StateChange that occurred, when the outermost call returns, rather than one per nested
-    call. The outermost call's `envs_idx` (None meaning all envs) is forwarded. Untagged methods, reads included, never
-    notify, so a subscriber only ever wakes on a genuine mutation.
-
-    `links` declares which links the method can affect, so link-filtered subscribers can drop notifications that
-    cannot concern them: the name of the argument holding the targeted global link indices (e.g. "links_idx") - the
-    reach then closes over their kinematic subtrees, since forward kinematics carries a new pose to every descendant,
-    fixed children included - MutatedLinks.ARTICULATED for configuration-space setters, or MutatedLinks.ALL when any
-    link may change. Nested tagged calls union their mutated links, an unbounded reach absorbing the rest.
-    """
-    triggered = frozenset(changes)
-
-    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
-        signature = inspect.signature(method)
-
-        def resolve_mutated_links_idx(self: "Solver", bound_arguments) -> np.ndarray | None:
-            if links is MutatedLinks.ARTICULATED:
-                return self._articulated_links_idx
-            if links is MutatedLinks.ALL:
-                return None
-            links_idx = bound_arguments.get(links)
-            if links_idx is None or self._links_parent_idx is None:
-                # The setter substitutes its own default selection (potentially reaching any link), or the solver
-                # exposes no kinematic structure to close the reach over: stay unbounded.
-                return None
-            # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor);
-            # the reach set lives host-side, where the subscriber filters compare.
-            links_idx = tensor_to_array(sanitize_index(links_idx, -1, self.n_links, 0, links))
-            return _expand_links_subtree(links_idx, self._links_parent_idx)
-
-        @functools.wraps(method)
-        def wrapper(self: "Solver", *args: Any, **kwargs: Any) -> Any:
-            if not self._subscribers:
-                return method(self, *args, **kwargs)
-            bound_arguments = signature.bind(self, *args, **kwargs).arguments
-            mutated_links_idx = resolve_mutated_links_idx(self, bound_arguments)
-            if self._is_mutating:
-                # Nested tagged call: record the changes and mutated links, let the outermost call do the single
-                # notification.
-                self._mutation_changes |= triggered
-                if self._mutation_links_idx_list is not None:
-                    if mutated_links_idx is None:
-                        self._mutation_links_idx_list = None
-                    else:
-                        self._mutation_links_idx_list.append(mutated_links_idx)
-                return method(self, *args, **kwargs)
-            self._is_mutating = True
-            self._mutation_changes = set(triggered)
-            self._mutation_links_idx_list = None if mutated_links_idx is None else [mutated_links_idx]
-            try:
-                result = method(self, *args, **kwargs)
-            finally:
-                self._is_mutating = False
-            envs_idx = bound_arguments.get("envs_idx")
-            links_idx = None
-            if self._mutation_links_idx_list is not None:
-                links_idx = np.concatenate(self._mutation_links_idx_list)
-            for subscriber in self._subscribers:
-                if not subscriber.is_watching(links_idx):
-                    continue
-                for changed in self._mutation_changes & subscriber.to:
-                    if subscriber.callback is None:
-                        subscriber._pending.add(changed)
-                    else:
-                        subscriber.callback(changed, envs_idx)
-            return result
-
-        return wrapper
-
-    return decorator
 
 
 class Subscriber:
@@ -415,60 +295,28 @@ class Solver(RBC):
         """Whether the operations on the state of the solver are recorded in the autograd graph of the rollout."""
         return self._requires_grad and self._rollout_graph is not None and self._rollout_graph.is_recording
 
-    @contextlib.contextmanager
-    def recording_input(self, *, differentiable: bool = True, derived: bool = False) -> Iterator[None]:
-        """
-        Record the kernels a setter launches in this context as one operation of the rollout, while it is recorded.
-
-        The context holds the launches of the kernels writing the state alone, the side effects of the setter (forward
-        kinematics, wake-up, ...) staying outside of it. The values given to the kernels of an input that is not
-        `differentiable` track no gradient, and its operation only clears the adjoint of the state it overwrote. A
-        setter whose kernels read quantities derived from the state asks for `derived`, which saves the state they read
-        before they run (see 'save_derived_state'). Every change of the state of a differentiable solver goes through
-        here, so a differentiable scene takes no shortcut around it.
-        """
-        if not self.is_recording:
-            yield
-            # A change of the state of a differentiable solver the graph does not record overwrites the output of the
-            # last operation recorded
-            if self._requires_grad:
-                self._rollout_graph.mark_state_changed()
-            return
-        saved_state = self.save_derived_state() if derived else None
-        with LaunchRecorder() as recorder:
-            yield
-        operation = InputOperation(self, recorder.launches, saved_state)
-        if operation.inputs and not differentiable:
-            # The kernels wrote the state already, which no operation records
-            self._rollout_graph.mark_state_changed()
-            gs.raise_exception("Gradients with respect to this input are not supported.")
-        self._rollout_graph.record(operation, *operation.inputs)
-
-    def record_read(self, tensors: tuple[torch.Tensor, ...], selection, saved_state=None) -> None:
+    def record_read(self, tensors: tuple[torch.Tensor, ...], selection) -> None:
         """
         Record the query of the given tensors of a state as one operation of the rollout, while it is recorded (see
         ReadOperation).
 
-        `selection` names the state the tensors cover, which 'add_grad_from_state' interprets, and `saved_state` is the
-        state the solver saved for tensors of quantities derived from it, None otherwise.
+        `selection` names the state the tensors cover, which 'add_grad_from_state' interprets.
         """
         if self.is_recording:
-            self._rollout_graph.record(ReadOperation(self, tensors, selection, saved_state))
+            self._rollout_graph.record_read(self, tensors, selection)
 
-    def add_grad_from_state(self, grads, selection, saved_state) -> None:
-        """Add the gradients of the tensors of a queried state to the adjoint of the state of the solver."""
-        gs.raise_exception(f"{type(self).__name__} records no differentiable query.")
+    def add_grad_from_state(self, grads, selection) -> None:
+        """
+        Add the gradients of the tensors of a queried state to the adjoint of the state of the solver.
 
-    def save_derived_state(self):
-        """Return a copy of the state at which an operation reads quantities derived from it, for its backward pass."""
-        gs.raise_exception(f"{type(self).__name__} reads no quantity derived from its state.")
-
-    def restore_saved_state(self, saved_state) -> None:
-        """Put back the state the solver saved for an operation reading quantities derived from it."""
-        gs.raise_exception(f"{type(self).__name__} saves no state.")
-
-    def fold_derived_grad(self, saved_state) -> None:
-        """Fold the adjoint an operation left on quantities derived from the state into the adjoint of the state."""
+        By default, `selection` holds the fields the tensors are, each read whole in the layout of the getters.
+        """
+        for field, grad in zip(selection, grads):
+            # A field with no entry keeps one padding slot, to which no gradient goes
+            if grad is not None and grad.numel() > 0:
+                qd_add_grad(field, grad)
+        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+            torch.mps.synchronize()
 
     def roll_frame_window(self) -> None:
         """Copy the last frame of the substeps the solver holds into frame 0, which the next substeps start from."""
@@ -511,7 +359,7 @@ class Solver(RBC):
             self._configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
         items = self._checkpoint_items(kinds, boundary_only)
         arrays = {}
-        if boundary_only and gs.use_zerocopy:
+        if boundary_only and gs.use_zerocopy.is_supported:
             boundary_views = self._boundary_views_by_kinds.get(kinds)
             if boundary_views is None:
                 boundary_views = self._boundary_views_by_kinds[kinds] = BoundaryViews([], [], [])
@@ -550,7 +398,9 @@ class Solver(RBC):
             elif boundary_only and item.is_framed:
                 arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
             else:
-                arrays[item.name] = data_to_array(item.array, to_torch=boundary_only or gs.use_zerocopy, copy=True)
+                arrays[item.name] = data_to_array(
+                    item.array, to_torch=boundary_only or gs.use_zerocopy.is_supported, copy=True
+                )
         return SolverCheckpoint(arrays=arrays, configs=self._configs, kinds=kinds, is_boundary_only=boundary_only)
 
     def set_checkpoint(self, checkpoint: SolverCheckpoint) -> None:

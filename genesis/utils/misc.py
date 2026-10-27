@@ -9,7 +9,7 @@ import numbers
 import os
 import random
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import field
 from importlib import import_module
@@ -116,6 +116,36 @@ class redirect_libc_stderr:
         os.close(self.original_stderr_fileno)
         self.stderr_fileno = None
         self.original_stderr_fileno = None
+
+
+class ZeroCopyMode:
+    """
+    Whether the accessors of the solvers read and write their arrays through zero-copy torch views, read as a boolean.
+
+    The views exist when the backend and the torch device share memory (`is_supported`). The accessors use them unless
+    a block asks for their kernel path through 'disabled', as the recording of a differentiable rollout does to capture
+    the kernels of every accessor. The copy helpers (see 'qd_to_torch') read `is_supported` alone, so a copy stays a
+    torch operation whichever path the accessors take.
+    """
+
+    def __init__(self, is_supported: bool):
+        self.is_supported = is_supported
+        self._is_disabled = False
+
+    def __bool__(self) -> bool:
+        return self.is_supported and not self._is_disabled
+
+    def __repr__(self) -> str:
+        return repr(bool(self))
+
+    @contextmanager
+    def disabled(self) -> Iterator[None]:
+        """Make the accessors take their kernel path in the block."""
+        is_disabled, self._is_disabled = self._is_disabled, True
+        try:
+            yield
+        finally:
+            self._is_disabled = is_disabled
 
 
 @contextmanager
@@ -848,7 +878,7 @@ def qd_to_torch(
     # Try efficient shortcut first and only fallback to standard branching if necessary.
     # FIXME: Ideally one should detect if slicing would require a copy to avoid enforcing copy here.
     is_copy = False
-    if not gs.use_zerocopy:
+    if not gs.use_zerocopy.is_supported:
         # Transpose if necessary and requested.
         # Note that it is worth transposing here before slicing, as it preserve row-major memory alignment in case of
         # advanced masking, which would spare computation later on if expected from the user.
@@ -911,7 +941,7 @@ def qd_to_numpy(
 
     # Try efficient shortcut first and only fallback to standard branching if necessary.
     # FIXME: Ideally one should detect if slicing would require a copy to avoid enforcing copy here.
-    if not gs.use_zerocopy:
+    if not gs.use_zerocopy.is_supported:
         # Transpose if necessary and requested.
         # Note that it is worth transposing here before slicing, as it preserve row-major memory alignment in case of
         # advanced masking, which would spare computation later on if expected from the user.
@@ -971,7 +1001,7 @@ def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor
     """
     if isinstance(value, qd.Tensor):
         value = value._unwrap()
-    if gs.use_zerocopy:
+    if gs.use_zerocopy.is_supported:
         view = qd_to_torch(value, copy=False)
         view.copy_(tensor)
     else:
@@ -985,7 +1015,7 @@ def qd_add_grad(value: qd.Tensor, grad: torch.Tensor) -> None:
     adjoint.
     """
     value_grad = value.grad
-    if gs.use_zerocopy:
+    if gs.use_zerocopy.is_supported:
         view = qd_to_torch(value_grad, transpose=True, copy=False)
         view += grad
     else:
@@ -1013,7 +1043,7 @@ def qd_zero_grad(value) -> None:
     if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
         if value.has_grad():
             grad = value.grad
-            if gs.use_zerocopy:
+            if gs.use_zerocopy.is_supported:
                 try:
                     grad_view = qd_to_torch(grad, copy=False)
                     grad_view.zero_()

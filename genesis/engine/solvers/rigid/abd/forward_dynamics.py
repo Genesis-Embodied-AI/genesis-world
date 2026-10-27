@@ -20,6 +20,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
+from genesis.grad.bridge import no_grad
 
 from .forward_kinematics import (
     LINK_SWEEP_PASS,
@@ -2375,6 +2376,9 @@ def kernel_compute_smooth_qacc(
     func_compute_qacc(dyn_state, dyn_info, rigid_info, rigid_config)
 
 
+# The integration resumes from the velocity the Newton solve converged to (see func_midpoint_free_body), so the
+# solve itself has no gradient
+@no_grad
 @qd.kernel(fastcache=True)
 def kernel_solve_midpoint_free_bodies(
     dyn_state: array_class.DynState,
