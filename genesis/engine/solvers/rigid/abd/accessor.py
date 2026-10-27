@@ -264,7 +264,7 @@ def kernel_wake_up_entities_by_links(
 
 
 @qd.kernel(fastcache=True)
-def kernel_wake_up_entities_resting_on_links(
+def kernel_wake_up_entities_held_by_links(
     links_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
     dyn_state: array_class.DynState,
@@ -274,18 +274,28 @@ def kernel_wake_up_entities_resting_on_links(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    """Wake up the hibernated islands resting on the specified links, found through the contacts the sleepers keep.
+    """Wake up the hibernated islands resting on or constrained to the specified links.
 
-    A fixed link never sleeps, so moving it wakes nothing by itself, while the bodies resting on it would stay asleep
-    where it was. Their contacts with it are among those a sleeper keeps (see n_contacts_hibernated in array_class.py).
+    A fixed link never sleeps, so moving it wakes nothing by itself, while the links it holds would stay asleep where
+    it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in array_class.py) and the
+    equality constraints. JOINT equalities are skipped, since a fixed link carries no joint they could reference.
     """
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
-        for i_c_ in range(collider_state.n_contacts_hibernated[i_b]):
-            i_c = collider_state.contact_sort_idx[i_c_, i_b]
-            i_la = collider_state.contact_data.link_a[i_c, i_b]
-            i_lb = collider_state.contact_data.link_b[i_c, i_b]
+        n_contacts_hibernated = collider_state.n_contacts_hibernated[i_b]
+        for i_e in range(n_contacts_hibernated + constraint_state.qd_n_equalities[i_b]):
+            i_la = -1
+            i_lb = -1
+            if i_e < n_contacts_hibernated:
+                i_c = collider_state.contact_sort_idx[i_e, i_b]
+                i_la = collider_state.contact_data.link_a[i_c, i_b]
+                i_lb = collider_state.contact_data.link_b[i_c, i_b]
+            else:
+                i_eq = i_e - n_contacts_hibernated
+                if dyn_info.equalities.eq_type[i_eq, i_b] != gs.EQUALITY_TYPE.JOINT:
+                    i_la = dyn_info.equalities.eq_obj1id[i_eq, i_b]
+                    i_lb = dyn_info.equalities.eq_obj2id[i_eq, i_b]
             for i_l_ in range(links_idx.shape[0]):
                 i_l = links_idx[i_l_]
                 i_sleeper = -1

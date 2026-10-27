@@ -79,7 +79,7 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_dofs,
     kernel_wake_up_entities_by_links,
     kernel_wake_up_entities_by_qs,
-    kernel_wake_up_entities_resting_on_links,
+    kernel_wake_up_entities_held_by_links,
 )
 from .abd.diff import (
     func_copy_next_to_curr,
@@ -2136,8 +2136,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     "option 'batch_fixed_verts=True'."
                 )
 
-            # Wake up the entities of the links before moving them, and for a fixed link, which never sleeps, the bodies
-            # resting on it, which would stay asleep where it was otherwise
+            # Wake up the entities of the links before moving them, and for a fixed link, which never sleeps, the links
+            # resting on or constrained to it, which would stay asleep where it was otherwise
             if self._use_hibernation:
                 if not all(self.links[i_l].is_fixed for i_l in links_idx):
                     kernel_wake_up_entities_by_links(
@@ -2150,7 +2150,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.rigid_config,
                     )
                 if any(self.links[i_l].is_fixed for i_l in links_idx):
-                    kernel_wake_up_entities_resting_on_links(
+                    kernel_wake_up_entities_held_by_links(
                         links_idx,
                         envs_idx,
                         self.dyn_state,
@@ -2303,7 +2303,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                         self.rigid_config,
                     )
                 if any(self.links[i_l].is_fixed for i_l in links_idx):
-                    kernel_wake_up_entities_resting_on_links(
+                    kernel_wake_up_entities_held_by_links(
                         links_idx,
                         envs_idx,
                         self.dyn_state,

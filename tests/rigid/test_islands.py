@@ -753,6 +753,12 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
             pos=(10.0, 0.0, 0.35),
         )
     )
+    box_held_by_platform = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(10.0, 0.4, 0.6),
+        )
+    )
     platform = scene.add_entity(
         gs.morphs.Box(
             size=(0.3, 0.3, 0.1),
@@ -764,6 +770,7 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
 
     solver = scene.rigid_solver
     solver.add_weld_constraint(box_weld.base_link_idx, plane.base_link_idx)
+    solver.add_weld_constraint(box_held_by_platform.base_link_idx, platform.base_link_idx)
 
     # The forced box carries an armature while it sleeps, which its mass matrix must hold once, whatever the time spent
     # asleep, when the force wakes it.
@@ -848,13 +855,20 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
     ).all()
 
-    # A fixed link has no state to wake, but a body resting on it wakes when it moves rather than float where it was
+    # A fixed link has no state to wake, but a body resting on it or welded to it wakes when it moves rather than float
+    # where it was. The welded body follows the 0.4 m drop of the platform.
+    z0_held = box_held_by_platform.get_pos()[..., 2]
     platform.set_pos((10.0, 0.0, -0.15))
-    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_on_platform.idx).all()
+    assert not qd_to_numpy(
+        solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_on_platform, box_held_by_platform)]
+    ).any()
     z0 = box_on_platform.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
     assert_allclose(z0 - box_on_platform.get_pos()[..., 2], free_fall_drop, rtol=0.2)
+    for _ in range(22):
+        scene.step()
+    assert_allclose(z0_held - box_held_by_platform.get_pos()[..., 2], 0.4, atol=1e-3)
     assert qd_to_numpy(
         solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
     ).all()
