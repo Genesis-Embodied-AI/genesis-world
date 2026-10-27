@@ -1,0 +1,29 @@
+genesis/engine/solvers/rigid/abd/accessor.py
+  s_5039d48a28a029::t_903c2cd85d8f6c 267,277,279-281,286-295,297-298
+  s_5039d48a28a029::t_5aaf90bfffb9dd 296
+tests/rigid/test_islands.py
+  s_5039d48a28a029::t_61fa7788871afe 869,871
+  s_5039d48a28a029::t_8ce27bd0a3bb35 756-761
+  s_5039d48a28a029::t_be26c9476f60b2 870
+  s_5039d48a28a029::t_8bdc582aab7ec7 773
+  s_5039d48a28a029::t_05285cd7a24dfa 858-860,862-864
+genesis/engine/solvers/rigid/rigid_solver.py
+  s_5039d48a28a029::t_3e6b0c1ac143e0 82,2153,2306
+  s_5039d48a28a029::t_c5ac396a184345 2139-2140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "78db1248f3cf76205339f4d231a02b4c5aa5b19c",
+  "prompts": {},
+  "sessions": {
+    "s_5039d48a28a029": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a688be68-9f19-451c-983c-9525dc78c2ba",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
