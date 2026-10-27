@@ -1,0 +1,40 @@
+genesis/engine/couplers/legacy_coupler.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 4,9,42,46-47,510,512-513,515-517,527,530-531,541,548-550,597,602-604,649,653-655
+genesis/utils/serialization.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 5-6,255-272,274,281,302,308,407-413,417
+genesis/engine/scene.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 1704-1709
+.github/contributing/ARCHITECTURE.md
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 137,141
+genesis/engine/couplers/sap_coupler.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 16,188,247-248,724,737-744,788-789,794,879,882,885,940,967,1076,1083-1084,1088,1435,1439,1450-1451,1455,1569,1590,2450,2492,2604-2605,2635-2636,2679,2694,2703,2715,2731,2784-2789,2816-2817,2822-2823,2873-2874,2877-2878,2977,3015,3018,3038,3045,3062,3069,3089,3092,3139-3140,3148,3150,3461,3486-3487,3541-3542,3622,3675,3696,3721,3737
+genesis/engine/simulator.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 30
+tests/rigid/test_serialization.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 153-155,340-341
+tests/deformable/test_fem.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 7-8,10,169,174,184,193-198
+genesis/engine/solvers/fem_solver.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 13-14,16,201-202,212-267,306-307,309-311,331
+genesis/engine/entities/fem_entity.py
+  s_c8d7cbda7564fe::t_15870eb23cec24 284-287
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 1,18,20-21,25-48,50-54,57-129,131,245-247,266,274-276,288-298,577-579
+genesis/engine/system_data/fem.py
+  s_c8d7cbda7564fe::t_7bf712ea139fe4 1-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7f1f0bf4c1b716d195c369e90bdb4f5776455c13",
+  "prompts": {},
+  "sessions": {
+    "s_c8d7cbda7564fe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9ce42b86-b899-4650-b4da-3a8070dd912b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
