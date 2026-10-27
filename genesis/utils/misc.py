@@ -455,7 +455,8 @@ def unique_rows(rows, *, return_index=False, **kwargs):
         # Python integers, so that neither the ranges nor their product overflow
         dims = [int(hi) - int(lo) + 1 for lo, hi in zip(rows_min, rows.max(axis=0))]
         if math.prod(dims) < np.iinfo(np.int64).max:
-            # Same keys as 'np.ravel_multi_index', which takes at most 32 columns on numpy 1.x
+            # Read each row as the digits of one number, in a base per column that spans the values of that column.
+            # 'np.ravel_multi_index' computes the same keys, but raises an error past 32 columns on numpy 1.x.
             keys = np.zeros(len(rows), dtype=np.int64)
             for col, col_min, dim in zip(rows.T, rows_min, dims):
                 keys = keys * dim + np.subtract(col, col_min, dtype=np.int64)
