@@ -1,11 +1,16 @@
+import dataclasses
+import weakref
 from typing import NamedTuple
 
 import numpy as np
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 from genesis.engine.entities import RigidEntity
-from genesis.utils.misc import tensor_to_array
+from genesis.grad.bridge import LaunchRecorder
+from genesis.utils.misc import qd_to_torch, tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
@@ -132,3 +137,110 @@ def assert_grad_matches_fd(
             atol=atol,
             err_msg=f"input {i_input}: FD vs analytical mismatch",
         )
+
+
+class StepOverwriteChecker:
+    """
+    Check that the backward pass of a recorded rollout saves every overwrite it needs (see LaunchRecorder).
+
+    Before each entry of a recorder, it copies every array its launches take through struct arguments, and once the entry
+    is over it reports each of them the entry changed without the recorder saving it, when an earlier entry of the same
+    recorder used it. The arrays a kernel reaches through the solver it is a method of, such as the frames of the
+    particle solvers, are outside of its reach.
+    """
+
+    def __init__(self, monkeypatch):
+        self.overwrites: set[str] = set()
+        checker = self
+        insert, entry, reverse, exit_ = (
+            LaunchRecorder.insert,
+            LaunchRecorder.entry,
+            LaunchRecorder.reverse,
+            LaunchRecorder.__exit__,
+        )
+
+        def checked_insert(recorder, kernel, args):
+            # The copies of the checker are kernel launches of their own without zero-copy views
+            if checker._is_copying:
+                return
+            if not recorder._is_grouping:
+                checker.close_entry(recorder)
+            checker.track_launch(recorder, kernel, args)
+            insert(recorder, kernel, args)
+
+        def checked_entry(recorder, *args, **kwargs):
+            checker.close_entry(recorder)
+            return entry(recorder, *args, **kwargs)
+
+        def checked_reverse(recorder, *args, **kwargs):
+            checker.close_entry(recorder)
+            return reverse(recorder, *args, **kwargs)
+
+        # A recorder of the calls between two steps is exited after each call, before the step runs unrecorded
+        def checked_exit(recorder, *args):
+            checker.close_entry(recorder)
+            return exit_(recorder, *args)
+
+        monkeypatch.setattr(LaunchRecorder, "insert", checked_insert)
+        monkeypatch.setattr(LaunchRecorder, "__exit__", checked_exit)
+        monkeypatch.setattr(LaunchRecorder, "entry", checked_entry)
+        monkeypatch.setattr(LaunchRecorder, "reverse", checked_reverse)
+        self._is_copying = False
+        # The arrays each recorder's closed entries used, the values before the open entry, and its launches, released
+        # with the recorder, whose identity a later one may take
+        self._arrays_used: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        self._values_before: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        self._launches: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+    def track_launch(self, recorder, kernel, args) -> None:
+        # Only an array an earlier entry used can be an overwrite the backward pass misses
+        arrays_used = self._arrays_used.get(recorder, set())
+        values_before = self._values_before.setdefault(recorder, {})
+        self._is_copying = True
+        for path, array in self._iter_arrays_used(kernel, args):
+            if id(array) in arrays_used and id(array) not in values_before:
+                values_before[id(array)] = (".".join(path), array, qd_to_torch(array, copy=True))
+        self._is_copying = False
+        self._launches.setdefault(recorder, []).append((kernel, args))
+
+    def close_entry(self, recorder) -> None:
+        values_before = self._values_before.pop(recorder, {})
+        launches = self._launches.pop(recorder, [])
+        if not launches:
+            return
+        arrays_used = self._arrays_used.setdefault(recorder, set())
+        arrays_saved = {id(array) for array, _ in recorder.entries[-1].arrays_saved}
+        self._is_copying = True
+        for key, (path, array, value) in values_before.items():
+            if key not in arrays_saved:
+                value_after = qd_to_torch(array, copy=True)
+                # Entries the solver leaves at NaN compare equal to themselves
+                if value.is_floating_point():
+                    is_unchanged = torch.allclose(value_after, value, rtol=0.0, atol=0.0, equal_nan=True)
+                else:
+                    is_unchanged = torch.equal(value_after, value)
+                if not is_unchanged:
+                    self.overwrites.add(f"{launches[0][0].func.__name__} overwrites {path}")
+        self._is_copying = False
+        for kernel, args in launches:
+            for _, array in self._iter_arrays_used(kernel, args):
+                arrays_used.add(id(array))
+
+    @staticmethod
+    def _iter_arrays_used(kernel, args):
+        """Yield the arrays of its struct arguments that a launch uses, with their paths of parameter and fields."""
+        key = kernel.ensure_compiled(*args)
+        flat_names_used = kernel.used_py_dataclass_parameters_by_key_enforcing.get(key)
+        for arg_meta, arg in zip(kernel.arg_metas, args):
+            if dataclasses.is_dataclass(arg):
+                stack = [((arg_meta.name,), arg)]
+                while stack:
+                    path, struct = stack.pop()
+                    for field in dataclasses.fields(struct):
+                        value = getattr(struct, field.name)
+                        if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
+                            array_path = (*path, field.name)
+                            if flat_names_used is None or "__qd_" + "__qd_".join(array_path) in flat_names_used:
+                                yield array_path, value
+                        elif dataclasses.is_dataclass(value):
+                            stack.append(((*path, field.name), value))

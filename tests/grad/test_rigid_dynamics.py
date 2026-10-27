@@ -24,7 +24,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
         pytest.param("grad_hopper", marks=pytest.mark.required),
     ],
 )
-def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
+def test_fk_grad_matches_fd(model_name, request, precision, step_overwrites, show_viewer):
     is_tall = model_name in ("grad_cartpole", "grad_hopper")
     B = 2
     pair = make_diff_scene_pair(
@@ -163,7 +163,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     ],
 )
 @pytest.mark.debug(False)
-def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show_viewer):
+def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, step_overwrites, show_viewer):
     # Distinct control forces over the unroll, each of which must receive an independent adjoint.
     # (output kind: entity state pos / quat or rigid-solver links, per-link output shape, target seed, fp32
     # tolerance). Anchored single-joint topologies (revolute, spherical) read the quaternion: their base link
@@ -236,7 +236,7 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show
 
 @pytest.mark.required
 @pytest.mark.parametrize("control_mode", ["position", "velocity"])
-def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precision, show_viewer):
+def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precision, step_overwrites, show_viewer):
     # Per-step-varying PD targets are scenario commands, replayed by the backward unroll; the gradient of a tracked
     # initial velocity through the controlled rollout must match finite differences.
     pair = make_diff_scene_pair(

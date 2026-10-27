@@ -87,7 +87,7 @@ def test_mpm_tool_push_grad(show_viewer):
 
 
 @pytest.mark.required
-def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
+def test_deformable_inputs_grad_matches_fd(precision, step_overwrites, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
     # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
     scenes, boxes_by_scene = [], []
@@ -213,7 +213,7 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
-def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
+def test_coupling_wrench_grad_matches_fd(precision, step_overwrites, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,

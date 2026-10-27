@@ -13,7 +13,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
 
 @pytest.mark.required
 @pytest.mark.debug(False)
-def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
+def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrites, show_viewer):
     # Forward: the slider limit must actually bound the cart (it drifts freely when the constraint is off).
     off = make_diff_scene_pair(
         grad_slider_limit,
@@ -106,7 +106,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     ],
 )
 @pytest.mark.debug(False)
-def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precision, show_viewer):
+def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precision, step_overwrites, show_viewer):
     # Per-step control-force adjoint driving a joint into its limit, across three topologies. A constant force over
     # the horizon pushes the tracked dof into the active band; the setup-sanity assert guards against a vacuous run.
     # (gravity, n_steps, per-step force, loss reads links_pos, sanity dof, sanity threshold, initial dof pose,
@@ -157,7 +157,7 @@ def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precisio
 
 
 @pytest.mark.required
-def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, show_viewer):
+def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, step_overwrites, show_viewer):
     pair = make_diff_scene_pair(
         grad_revolute_frictionloss,
         n_envs=2,
@@ -196,7 +196,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
         ("grad_weld_pair", 6),
     ],
 )
-def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_viewer):
+def test_equality_grad_matches_fd(model_name, n_rows, request, precision, step_overwrites, show_viewer):
     pair = make_diff_scene_pair(
         request.getfixturevalue(model_name),
         n_envs=2,
@@ -233,7 +233,7 @@ def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_v
 
 
 @pytest.mark.required
-def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, show_viewer):
+def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, step_overwrites, show_viewer):
     # Integration scene: frictionloss + equality joint + connect + weld on disjoint link pairs. Guards row-offset
     # bookkeeping across every differentiated constraint group at once; per-group formulas are pinned elsewhere.
     pair = make_diff_scene_pair(

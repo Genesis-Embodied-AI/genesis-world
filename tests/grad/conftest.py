@@ -2,6 +2,23 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+import genesis as gs
+
+from .utils import StepOverwriteChecker
+
+
+@pytest.fixture
+def step_overwrites(backend, monkeypatch):
+    # The arrays a kernel writes follow from its source alone, the same on every backend
+    if isinstance(backend, str):
+        backend = getattr(gs.constants.backend, backend)
+    if backend != gs.cpu:
+        yield
+        return
+    checker = StepOverwriteChecker(monkeypatch)
+    yield
+    assert not checker.overwrites, f"Overwrites the backward pass does not save: {sorted(checker.overwrites)}"
+
 
 def _add_hinge_arm(parent, body_name, pos, axis="0 1 0", joint_pos=None, **joint_kwargs):
     """Add a 1-DOF hinge arm link (y-axis hinge by default, capsule geom, explicit inertia) and return its body
