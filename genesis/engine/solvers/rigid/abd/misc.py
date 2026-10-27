@@ -42,10 +42,8 @@ def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class
     i_l_a = dyn_info.equalities.eq_obj1id[i_eq, i_b]
     i_l_b = dyn_info.equalities.eq_obj2id[i_eq, i_b]
     if dyn_info.equalities.eq_type[i_eq, i_b] == gs.EQUALITY_TYPE.JOINT:
-        for i_side in range(2):
-            i_j = i_l_a
-            if i_side == 1:
-                i_j = i_l_b
+        for i_side in qd.static(range(2)):
+            i_j = i_l_a if qd.static(i_side == 0) else i_l_b
             i_l_joint = -1
             if i_j >= 0:
                 I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
@@ -55,7 +53,7 @@ def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class
                     if dyn_info.links.dof_start[I_l] <= i_d < dyn_info.links.dof_end[I_l]:
                         i_l_joint = i_l
                         break
-            if i_side == 0:
+            if qd.static(i_side == 0):
                 i_l_a = i_l_joint
             else:
                 i_l_b = i_l_joint
