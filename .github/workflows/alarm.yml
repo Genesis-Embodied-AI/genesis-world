@@ -17,7 +17,7 @@ permissions:
   contents: read
   actions: read
   pull-requests: write
-  checks: write
+  statuses: write
 
 jobs:
   comment-if-regressed:
@@ -136,7 +136,7 @@ jobs:
             /tmp/mem.csv
           if-no-files-found: warn
 
-      - name: Publish PR check
+      - name: Publish report and PR status
         id: publish_check
         uses: actions/github-script@v8
         env:
@@ -155,13 +155,13 @@ jobs:
             }
 
             let summary;
-            let conclusion = 'success';
+            let state = 'success';
             if ((process.env.HAS_ERRORS || '0') === '1') {
               summary = '❌ The comparison failed to run. See the job log.';
-              conclusion = 'failure';
+              state = 'failure';
             } else if ((process.env.HAS_REGRESSIONS || '0') === '1') {
               summary = '🔴 Regressions detected. See tables below.';
-              conclusion = 'failure';
+              state = 'failure';
             } else if ((process.env.HAS_ALERTS || '0') === '1') {
               summary = '⚠️ Large deviation detected. See tables below.';
             } else {
@@ -174,20 +174,25 @@ jobs:
               || context.payload.pull_request?.head.sha
               || context.sha;
 
-            const check = await github.rest.checks.create({
+            // Standalone check runs cannot select their workflow's check suite and can appear under an unrelated
+            // workflow. Keep the report on this run and publish only a commit status on the revision under test.
+            await core.summary
+              .addHeading(process.env.CHECK_NAME)
+              .addRaw(summary, true)
+              .addRaw(body, true)
+              .write();
+            const reportUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              head_sha: headSha,
-              name: process.env.CHECK_NAME,
-              status: 'completed',
-              conclusion: conclusion,
-              output: {
-                title: process.env.CHECK_NAME,
-                summary,
-                text: body || undefined
-              }
+              sha: headSha,
+              context: process.env.CHECK_NAME,
+              state,
+              target_url: reportUrl,
+              description: summary,
             });
-            core.setOutput("check-url", check.data.html_url);
+            core.setOutput("check-url", reportUrl);
 
       - name: Add PR comment
         if: ${{ env.HAS_REGRESSIONS == '1' || env.HAS_ALERTS == '1' }}
