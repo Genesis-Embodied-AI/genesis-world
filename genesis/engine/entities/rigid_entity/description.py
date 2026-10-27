@@ -259,8 +259,8 @@ class RigidLinkDescription(KinematicLinkDescription):
     invweight: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
     inertial_estimate: InertialProperties | None = None
-    """Inertial estimated from the geometry at the density of the entity. A link the world carries keeps it, so that
-    an attach setting the link moving resolves with it."""
+    """Inertial estimated from the geometry 'inertia_from_visual' selects, at the density of the entity of the link. A
+    link the world carries keeps it, so that an attach setting the link moving resolves with it."""
 
 
 @dataclass

@@ -360,8 +360,9 @@ class KinematicEntity(Entity):
                 link.desc.invweight = np.full((2,), fill_value=-1.0, dtype=gs.np_float)
 
                 # Inertial resolution skips the geometry estimate for a world-carried link (see '_describe_link'), so a
-                # link that starts moving resolves with the estimate its description keeps. Values the asset states
-                # still win over the estimate.
+                # link that starts moving resolves with the estimate the build made for it, from the same geometry and
+                # density as a link moving from the start (see 'inertial_estimate' in 'RigidLinkDescription'). Values
+                # the asset states still win over the estimate.
                 if was_fixed and not link.is_fixed and isinstance(link.desc, RigidLinkDescription):
                     desc = link.desc
                     # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so
