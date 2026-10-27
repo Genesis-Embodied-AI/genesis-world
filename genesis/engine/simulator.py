@@ -165,7 +165,7 @@ class Simulator(RBC):
         else:
             # The options decide the solver, by naming the class of the options configuring it
             for solver in self._solvers:
-                if type(solver._options) is options.scene_solver_options_cls:
+                if type(solver._options) is options._solver_options_cls:
                     break
             else:
                 gs.raise_exception(f"No solver simulates entities of options {type(options).__name__}.")

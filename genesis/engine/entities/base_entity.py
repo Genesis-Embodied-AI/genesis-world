@@ -22,7 +22,7 @@ class EntityDescription:
 
     A scene names every entity it holds as one of these, so a kind of entity described later stands there too. The
     options the entity was constructed from stand here as authored, before any default was resolved, and decide the
-    solver simulating it (see 'EntityOptions.scene_solver_options_cls').
+    solver simulating it (see 'EntityOptions._solver_options_cls').
     """
 
     material: Material

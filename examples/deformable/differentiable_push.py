@@ -63,8 +63,8 @@ def main():
             ),
             surface=gs.surfaces.Default(
                 color=(0.9, 0.9, 0.9, 1.0),
+                vis_mode="particle",
             ),
-            vis_mode="particle",
         ),
     )
     obj2 = scene.add_entity(
@@ -80,8 +80,8 @@ def main():
             ),
             surface=gs.surfaces.Default(
                 color=(0.9, 0.8, 0.2, 1.0),
+                vis_mode="particle",
             ),
-            vis_mode="particle",
         ),
     )
 

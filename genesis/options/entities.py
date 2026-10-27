@@ -1,8 +1,8 @@
 """Typed options an entity is constructed from, each class deciding the kind of entity and the solver simulating it."""
 
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar, Generic, TypeVar
 
-from pydantic import ConfigDict, Field, StrictBool, field_validator
+from pydantic import ConfigDict, Field, InstanceOf, StrictBool, field_validator
 
 import genesis as gs
 from genesis.engine.materials import FEM, MPM, PBD, SPH, Hybrid, Kinematic, Rigid, Tool
@@ -13,13 +13,32 @@ from .options import Options
 from .solvers import FEMOptions, KinematicOptions, MPMOptions, PBDOptions, RigidOptions, SPHOptions, ToolOptions
 from .surfaces import Surface
 
+if TYPE_CHECKING:
+    from genesis.engine.entities import (
+        Entity,
+        FEMEntity,
+        HybridEntity,
+        KinematicEntity,
+        MPMEntity,
+        PBD2DEntity,
+        PBD3DEntity,
+        PBDFreeParticleEntity,
+        PBDParticleEntity,
+        RigidEntity,
+        SPHEntity,
+        ToolEntity,
+    )
 
-class EntityOptions(Options):
+
+EntityT = TypeVar("EntityT", bound="Entity")
+
+
+class EntityOptions(Options, Generic[EntityT]):
     """Options an entity is constructed from, as passed to ``Scene.add_entity(options=...)``.
 
     A concrete subclass decides the kind of entity and the solver simulating it, and declares the materials it admits.
-    The options are immutable: derive a variant with ``model_copy(update=...)``. The scene keeps its own copy of them
-    as ``entity.options``, so one instance can construct several entities.
+    Its fields cannot be reassigned: derive a variant with ``model_copy(update=...)``. The scene keeps its own copy of
+    them as ``entity.options``, so one instance can construct several entities.
 
     Parameters
     ----------
@@ -29,10 +48,7 @@ class EntityOptions(Options):
     material : Material
         The physical properties of the entity, of a class the concrete subclass admits.
     surface : Surface | None, optional
-        The appearance of the entity. If None, use ``gs.surfaces.Default()``.
-    vis_mode : str | None, optional
-        The visualization mode of the entity, overriding ``surface.vis_mode``. If None, the surface decides, and
-        otherwise the kind of entity does.
+        The appearance of the entity, its visualization mode included. If None, use ``gs.surfaces.Default()``.
     name : str | None, optional
         The name of the entity, unique within the scene. If None, a name is generated from the morph and the entity
         identifier.
@@ -42,16 +58,17 @@ class EntityOptions(Options):
 
     # The class of the scene options configuring the solver that simulates the entity, or None for an entity simulated
     # by no solver of its own, such as a hybrid entity, whose parts are entities of their own
-    scene_solver_options_cls: ClassVar[type[Options] | None] = None
+    _solver_options_cls: ClassVar[type[Options] | None] = None
 
-    morph: Morph | Annotated[tuple[Morph, ...], Field(strict=False)]
-    material: Material
+    # Checked by instance alone, since validation would run the validators of the declared class on any value, such as
+    # the sequence of morphs tried against 'Morph' or a material of another family
+    morph: InstanceOf[Morph] | Annotated[tuple[InstanceOf[Morph], ...], Field(strict=False)]
+    material: InstanceOf[Material]
     surface: Surface | None = None
-    vis_mode: str | None = None
     name: str | None = None
 
 
-class RigidEntityOptions(EntityOptions):
+class RigidEntityOptions(EntityOptions["RigidEntity"]):
     """Options of a rigid entity, which the rigid solver simulates with contacts, joints and constraints.
 
     Use it for every entity whose motion follows from physics. Its links collide, so every geom adds to the cost of
@@ -65,13 +82,13 @@ class RigidEntityOptions(EntityOptions):
         arrow is drawn every frame, so reserve it for the entities being inspected. Defaults to False.
     """
 
-    scene_solver_options_cls = RigidOptions
+    _solver_options_cls = RigidOptions
 
-    material: Rigid = Field(default_factory=Rigid)
+    material: InstanceOf[Rigid] = Field(default_factory=Rigid)
     visualize_contact: StrictBool = False
 
 
-class KinematicEntityOptions(EntityOptions):
+class KinematicEntityOptions(EntityOptions["KinematicEntity"]):
     """Options of a kinematic entity, which follows the poses it is given and takes no part in physics.
 
     Use it for a ghost or a reference motion: forward kinematics is all it costs, while it collides with nothing and
@@ -79,9 +96,9 @@ class KinematicEntityOptions(EntityOptions):
     defaults to ``gs.materials.Kinematic()``. A rigid material is rejected, since it asks for physics.
     """
 
-    scene_solver_options_cls = KinematicOptions
+    _solver_options_cls = KinematicOptions
 
-    material: Kinematic = Field(default_factory=Kinematic)
+    material: InstanceOf[Kinematic] = Field(default_factory=Kinematic)
 
     @field_validator("material")
     @classmethod
@@ -92,7 +109,7 @@ class KinematicEntityOptions(EntityOptions):
         return material
 
 
-class FEMEntityOptions(EntityOptions):
+class FEMEntityOptions(EntityOptions["FEMEntity"]):
     """Options of a deformable entity, which the finite element method (FEM) solver simulates on a volume mesh.
 
     Use it for a solid whose deformation matters, such as a soft gripper pad or a rubber block. Every element of the
@@ -101,12 +118,12 @@ class FEMEntityOptions(EntityOptions):
     such as ``gs.materials.FEM.Elastic``.
     """
 
-    scene_solver_options_cls = FEMOptions
+    _solver_options_cls = FEMOptions
 
-    material: FEM.Base
+    material: InstanceOf[FEM.Base]
 
 
-class MPMEntityOptions(EntityOptions):
+class MPMEntityOptions(EntityOptions["MPMEntity"]):
     """Options of a particle entity, which the material point method (MPM) solver simulates on a background grid.
 
     Use it for a continuum that deforms without bound, tears or flows, such as sand, snow, dough or a liquid. Its
@@ -114,12 +131,12 @@ class MPMEntityOptions(EntityOptions):
     ``EntityOptions``, the material being a ``gs.materials.MPM.Base``, such as ``gs.materials.MPM.Elastic``.
     """
 
-    scene_solver_options_cls = MPMOptions
+    _solver_options_cls = MPMOptions
 
-    material: MPM.Base
+    material: InstanceOf[MPM.Base]
 
 
-class SPHEntityOptions(EntityOptions):
+class SPHEntityOptions(EntityOptions["SPHEntity"]):
     """Options of a liquid entity, which the smoothed particle hydrodynamics (SPH) solver simulates as particles.
 
     Use it for a liquid whose free surface and splashes matter. Each particle interacts with its neighbors, so the cost
@@ -127,12 +144,12 @@ class SPHEntityOptions(EntityOptions):
     material being a ``gs.materials.SPH.Base``, which defaults to ``gs.materials.SPH.Liquid()``.
     """
 
-    scene_solver_options_cls = SPHOptions
+    _solver_options_cls = SPHOptions
 
-    material: SPH.Base = Field(default_factory=SPH.Liquid)
+    material: InstanceOf[SPH.Base] = Field(default_factory=SPH.Liquid)
 
 
-class PBDClothEntityOptions(EntityOptions):
+class PBDClothEntityOptions(EntityOptions["PBD2DEntity"]):
     """Options of a cloth entity, which the position-based dynamics (PBD) solver simulates as a mesh of particles.
 
     Use it for a thin sheet that stretches and bends, such as a towel or a flag. The surface mesh is remeshed to the
@@ -140,12 +157,12 @@ class PBDClothEntityOptions(EntityOptions):
     ``EntityOptions``, the material being a ``gs.materials.PBD.Cloth``, which defaults to ``gs.materials.PBD.Cloth()``.
     """
 
-    scene_solver_options_cls = PBDOptions
+    _solver_options_cls = PBDOptions
 
-    material: PBD.Cloth = Field(default_factory=PBD.Cloth)
+    material: InstanceOf[PBD.Cloth] = Field(default_factory=PBD.Cloth)
 
 
-class PBDElasticEntityOptions(EntityOptions):
+class PBDElasticEntityOptions(EntityOptions["PBD3DEntity"]):
     """Options of an elastic solid, which the position-based dynamics (PBD) solver simulates on a volume mesh.
 
     Use it for a soft solid where speed and stability matter more than physically accurate stiffness, which the
@@ -154,12 +171,12 @@ class PBDElasticEntityOptions(EntityOptions):
     ``gs.materials.PBD.Elastic()``.
     """
 
-    scene_solver_options_cls = PBDOptions
+    _solver_options_cls = PBDOptions
 
-    material: PBD.Elastic = Field(default_factory=PBD.Elastic)
+    material: InstanceOf[PBD.Elastic] = Field(default_factory=PBD.Elastic)
 
 
-class PBDLiquidEntityOptions(EntityOptions):
+class PBDLiquidEntityOptions(EntityOptions["PBDParticleEntity"]):
     """Options of a liquid entity, which the position-based dynamics (PBD) solver simulates as incompressible particles.
 
     Use it for a liquid where speed and stability matter more than accurate pressure and viscosity. Each particle
@@ -167,12 +184,12 @@ class PBDLiquidEntityOptions(EntityOptions):
     material being a ``gs.materials.PBD.Liquid``, which defaults to ``gs.materials.PBD.Liquid()``.
     """
 
-    scene_solver_options_cls = PBDOptions
+    _solver_options_cls = PBDOptions
 
-    material: PBD.Liquid = Field(default_factory=PBD.Liquid)
+    material: InstanceOf[PBD.Liquid] = Field(default_factory=PBD.Liquid)
 
 
-class PBDParticleEntityOptions(EntityOptions):
+class PBDParticleEntityOptions(EntityOptions["PBDFreeParticleEntity"]):
     """Options of a set of free particles, which the position-based dynamics (PBD) solver moves under external forces.
 
     Use it for particle effects and animations: the particles ignore each other, which makes them the cheapest
@@ -180,12 +197,12 @@ class PBDParticleEntityOptions(EntityOptions):
     ``gs.materials.PBD.Particle``, which defaults to ``gs.materials.PBD.Particle()``.
     """
 
-    scene_solver_options_cls = PBDOptions
+    _solver_options_cls = PBDOptions
 
-    material: PBD.Particle = Field(default_factory=PBD.Particle)
+    material: InstanceOf[PBD.Particle] = Field(default_factory=PBD.Particle)
 
 
-class ToolEntityOptions(EntityOptions):
+class ToolEntityOptions(EntityOptions["ToolEntity"]):
     """Options of a tool, a mesh whose pose the user drives and which material point method (MPM) entities collide with.
 
     Use it to cut, push or scoop an MPM entity along a prescribed motion. A tool takes no forces in return, so use
@@ -193,12 +210,12 @@ class ToolEntityOptions(EntityOptions):
     material being a ``gs.materials.Tool``, which defaults to ``gs.materials.Tool()``.
     """
 
-    scene_solver_options_cls = ToolOptions
+    _solver_options_cls = ToolOptions
 
-    material: Tool = Field(default_factory=Tool)
+    material: InstanceOf[Tool] = Field(default_factory=Tool)
 
 
-class HybridEntityOptions(EntityOptions):
+class HybridEntityOptions(EntityOptions["HybridEntity"]):
     """Options of a hybrid entity, a soft skin simulated by the material point method around a rigid skeleton.
 
     Use it for a soft robot actuated through its joints. The scene adds the rigid skeleton and the soft skin as two
@@ -207,16 +224,23 @@ class HybridEntityOptions(EntityOptions):
     the material being a ``gs.materials.Hybrid``.
     """
 
-    material: Hybrid
+    material: InstanceOf[Hybrid]
 
 
 def get_entity_options_cls(material: Material) -> type[EntityOptions] | None:
     """Return the class of the entity options admitting a material, or None if no class admits it.
 
-    Each class admits the materials of its declared 'material' field. A rigid material resolves to
-    'RigidEntityOptions', since that class is declared before 'KinematicEntityOptions'.
+    Each class admits the materials of its declared 'material' field. Where several admit it, the class declaring the
+    most derived material class wins, so a rigid material resolves to 'RigidEntityOptions'.
     """
-    for options_cls in EntityOptions.__subclasses__():
-        if isinstance(material, options_cls.model_fields["material"].annotation):
-            return options_cls
-    return None
+    options_classes = []
+    classes = EntityOptions.__subclasses__()
+    while classes:
+        cls = classes.pop()
+        classes.extend(cls.__subclasses__())
+        # A parametrization such as 'EntityOptions["RigidEntity"]' is a class of its own, which admits any material
+        if cls.__pydantic_generic_metadata__["origin"] is None and isinstance(
+            material, cls.model_fields["material"].annotation
+        ):
+            options_classes.append(cls)
+    return max(options_classes, key=lambda cls: len(cls.model_fields["material"].annotation.__mro__), default=None)

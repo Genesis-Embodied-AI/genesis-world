@@ -30,32 +30,22 @@ from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
     BaseCouplerOptions,
     EntityOptions,
-    FEMEntityOptions,
     FEMOptions,
-    HybridEntityOptions,
-    KinematicEntityOptions,
     KinematicOptions,
-    MPMEntityOptions,
     MPMOptions,
-    PBDClothEntityOptions,
-    PBDElasticEntityOptions,
-    PBDLiquidEntityOptions,
     PBDOptions,
-    PBDParticleEntityOptions,
     ProfilingOptions,
     RigidEntityOptions,
     RigidOptions,
     SceneOptions,
     SFOptions,
     SimOptions,
-    SPHEntityOptions,
     SPHOptions,
-    ToolEntityOptions,
     ToolOptions,
     ViewerOptions,
     VisOptions,
 )
-from genesis.options.entities import get_entity_options_cls
+from genesis.options.entities import EntityT, get_entity_options_cls
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -72,17 +62,6 @@ from genesis.utils.warnings import warn_once
 from genesis.vis import Visualizer
 
 if TYPE_CHECKING:
-    from genesis.engine.entities import (
-        FEMEntity,
-        HybridEntity,
-        MPMEntity,
-        PBD2DEntity,
-        PBD3DEntity,
-        PBDFreeParticleEntity,
-        PBDParticleEntity,
-        SPHEntity,
-        ToolEntity,
-    )
     from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
@@ -329,37 +308,7 @@ class Scene(RBC):
             self._is_built = False
 
     @overload
-    def add_entity(self, *, options: RigidEntityOptions) -> "RigidEntity": ...
-
-    @overload
-    def add_entity(self, *, options: KinematicEntityOptions) -> KinematicEntity: ...
-
-    @overload
-    def add_entity(self, *, options: FEMEntityOptions) -> "FEMEntity": ...
-
-    @overload
-    def add_entity(self, *, options: MPMEntityOptions) -> "MPMEntity": ...
-
-    @overload
-    def add_entity(self, *, options: SPHEntityOptions) -> "SPHEntity": ...
-
-    @overload
-    def add_entity(self, *, options: PBDClothEntityOptions) -> "PBD2DEntity": ...
-
-    @overload
-    def add_entity(self, *, options: PBDElasticEntityOptions) -> "PBD3DEntity": ...
-
-    @overload
-    def add_entity(self, *, options: PBDLiquidEntityOptions) -> "PBDParticleEntity": ...
-
-    @overload
-    def add_entity(self, *, options: PBDParticleEntityOptions) -> "PBDFreeParticleEntity": ...
-
-    @overload
-    def add_entity(self, *, options: ToolEntityOptions) -> "ToolEntity": ...
-
-    @overload
-    def add_entity(self, *, options: HybridEntityOptions) -> "HybridEntity": ...
+    def add_entity(self, *, options: EntityOptions[EntityT]) -> EntityT: ...
 
     @overload
     def add_entity(
@@ -441,12 +390,16 @@ class Scene(RBC):
             # Heterogeneous morphs may come as any iterable of morphs
             if isinstance(morph, collections.abc.Iterable) and not isinstance(morph, Morph):
                 morph = tuple(morph)
+            # A copy, since the surface given may be shared with other entities
+            if vis_mode is not None:
+                if surface is None:
+                    surface = gs.surfaces.Default()
+                surface = surface.model_copy(update={"vis_mode": vis_mode})
             options = RigidEntityOptions(
                 morph=morph,
                 material=material if material is not None else Rigid(),
                 surface=surface,
                 visualize_contact=visualize_contact if visualize_contact is not None else False,
-                vis_mode=vis_mode,
                 name=name,
             )
         elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
@@ -463,7 +416,6 @@ class Scene(RBC):
         material = resolved_options.material
         surface = resolved_options.surface
         visualize_contact = isinstance(resolved_options, RigidEntityOptions) and resolved_options.visualize_contact
-        vis_mode = resolved_options.vis_mode
         name = resolved_options.name
         if surface is None:
             # assign a local surface, otherwise modification will apply on global default surface
@@ -478,8 +430,6 @@ class Scene(RBC):
         if surface.double_sided is None:
             surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
 
-        if vis_mode is not None:
-            surface.vis_mode = vis_mode
         # validate and populate default surface.vis_mode considering morph type
         if isinstance(material, gs.materials.Kinematic):
             if surface.vis_mode is None:
@@ -560,7 +510,7 @@ class Scene(RBC):
         material: Rigid | None = None,
         surface: Surface | None = None,
         visualize_contact: bool = False,
-        vis_mode: Literal["visual", "collision"] = "visual",
+        vis_mode: Literal["visual", "collision"] | None = None,
     ):
         """
         Add a stage to the scene.
