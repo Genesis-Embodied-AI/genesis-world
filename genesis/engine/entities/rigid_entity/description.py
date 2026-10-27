@@ -1534,10 +1534,11 @@ class KinematicEntityDescription(EntityDescription):
         # The estimate only fills what the asset leaves out, so a link stating its whole inertial keeps the collision
         # geometry, which spares closing its visual meshes
         is_inertial_explicit = not any(value is None for value in (explicit_mass, explicit_com, explicit_inertia))
-        cg_volume = None
         if from_visual and not is_inertial_explicit and vg_inertia_infos:
-            if cg_infos:
-                cg_volume = compose_inertial_from_g_infos(cg_infos, rho=1.0).mass
+            # An asset may state a density on the collision copy of a geom alone, so volumes are composed without them
+            cg_volume = compose_inertial_from_g_infos(
+                [{**g_info, "density": None} for g_info in cg_infos], rho=1.0
+            ).mass
             # An open visual mesh encloses no well-defined volume, and its convex hull would fill every concavity, so
             # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
             cg_infos = []
@@ -1551,17 +1552,20 @@ class KinematicEntityDescription(EntityDescription):
                         tmesh = mu.get_watertight_mesh(tmesh, aggressiveness=5)
                         g_info = {**g_info, "vmesh": gs.Mesh.from_trimesh(tmesh)}
                 cg_infos.append(g_info)
+            vg_volume = compose_inertial_from_g_infos(
+                [{**g_info, "density": None} for g_info in cg_infos], rho=1.0
+            ).mass
+            # A visual mesh this far from the collision volume is usually a hollow shell, overlapping parts or a stray
+            # decoration, which the collision geometry estimates better
+            if cg_volume > gs.EPS and not (
+                cg_volume / VISUAL_VOLUME_RATIO_MAX <= vg_volume <= VISUAL_VOLUME_RATIO_MAX * cg_volume
+            ):
+                gs.logger.warning(
+                    f"Link '{link_name}' has a visual volume {vg_volume:0.3e} far from its collision volume "
+                    f"{cg_volume:0.3e}. Its inertia is estimated from visual geometry, set 'inertia_from_visual=False' "
+                    "to estimate it from collision geometry instead."
+                )
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
-        # A visual mesh this far from the collision volume is usually a hollow shell, overlapping parts or a stray
-        # decoration, which the collision geometry estimates better
-        if cg_volume is not None and not (
-            cg_volume / VISUAL_VOLUME_RATIO_MAX <= anchor_inertial.mass <= VISUAL_VOLUME_RATIO_MAX * cg_volume
-        ):
-            gs.logger.warning(
-                f"Link '{link_name}' has a visual volume {anchor_inertial.mass:0.3e} far from its collision volume "
-                f"{cg_volume:0.3e}. Its inertia is estimated from visual geometry, set 'inertia_from_visual=False' to "
-                "estimate it from collision geometry instead."
-            )
         props = finalize_inertial(
             explicit_mass, explicit_com, explicit_quat, explicit_inertia, *anchor_inertial, clamp_min_mass=False
         )
