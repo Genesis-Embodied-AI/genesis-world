@@ -13,10 +13,12 @@ they invalidate raises. Both handles live on `gs.device`: autograd runs a node o
 the gradients it receives, which is then the thread issuing the torch operations around it.
 """
 
+import contextlib
+import dataclasses
 import warnings
 import weakref
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -25,6 +27,10 @@ from torch.autograd.graph import increment_version
 from quadrants.lang import impl
 
 import genesis as gs
+from genesis.grad.kernel_writes import get_written_paths
+from genesis.utils.array_class import iter_state_arrays
+from genesis.utils.cache import OwnedCache
+from genesis.utils.misc import qd_from_torch, qd_to_torch
 
 if TYPE_CHECKING:
     from genesis.engine.solvers.base_solver import Solver, StateChange
@@ -194,6 +200,148 @@ class LaunchRecorder:
         self._tensors_without_grad += [
             arg for arg in args if isinstance(arg, torch.Tensor) and arg.requires_grad and arg.grad is None
         ]
+
+
+# The arrays of the state each launch uses and those it may write, by compiled kernel and struct arguments, each entry
+# living as long as the structs
+_LAUNCH_ARRAYS_CACHE = OwnedCache()
+
+
+class StepRecorder(LaunchRecorder):
+    """
+    Record the kernels launched in its context as entries it can reverse.
+
+    Every launch is one entry, reversed by the autodiff of its kernel, unless it runs in a block opened by 'entry',
+    whose launches form one entry. An entry is reversed at the values it left, as the autodiff of Quadrants expects,
+    then the arrays it overwrote are restored, so that every entry before it is reversed at the values it left too.
+    Before each launch, the recorder saves the arrays of the state the launch writes that an earlier entry uses: the
+    writes come from the source of the kernel (see 'get_written_paths'), narrowed to the struct members its compiled
+    form uses, and the uses of the earlier entries from their compiled form. A backward pass follows the convention of
+    autodiff, consuming the adjoint of the values a launch wrote and clearing it.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.entries: list[RecordedEntry] = []
+        self._is_grouping = False
+        # The arrays the closed entries use, and those the open one does, by identity
+        self._arrays_used: set[int] = set()
+        self._arrays_used_by_entry: set[int] = set()
+
+    def insert(self, kernel: Callable, args: tuple) -> None:
+        if not self._is_grouping:
+            self._arrays_used |= self._arrays_used_by_entry
+            self._arrays_used_by_entry.clear()
+            self.entries.append(RecordedEntry([], True, None, (), [], None))
+        launches, _, _, _, arrays_saved, _ = self.entries[-1]
+        launches.append((kernel, args))
+        # The arrays of the state the launch uses and those it may write are those its struct arguments hold, INFO and
+        # CONSTANT apart, which a step never writes (see 'DataKind'). They depend on the compiled form of the kernel and
+        # on the structs alone.
+        key = kernel.ensure_compiled(*args)
+        structs = [arg for arg in args if dataclasses.is_dataclass(arg)]
+        launch_key = (key, *(id(struct) for struct in structs))
+        launch_arrays = _LAUNCH_ARRAYS_CACHE.find(launch_key)
+        if launch_arrays is None:
+            flat_names_used = kernel.used_py_dataclass_parameters_by_key_enforcing.get(key)
+            paths_written = get_written_paths(kernel.func, args[0] if kernel.is_classkernel else None)
+            arrays_used, arrays_written = set(), []
+            for arg_meta, arg in zip(kernel.arg_metas, args):
+                if dataclasses.is_dataclass(arg):
+                    for path, array in iter_state_arrays(arg, (arg_meta.name,)):
+                        if flat_names_used is None or "__qd_" + "__qd_".join(path) in flat_names_used:
+                            arrays_used.add(id(array))
+                            if path in paths_written:
+                                arrays_written.append(array)
+            launch_arrays = (arrays_used, arrays_written)
+            for struct in structs:
+                _LAUNCH_ARRAYS_CACHE.own(struct, launch_key, launch_arrays)
+        arrays_used, arrays_written = launch_arrays
+        for array in arrays_written:
+            if id(array) in self._arrays_used and all(array is not saved for saved, _ in arrays_saved):
+                arrays_saved.append((array, qd_to_torch(array, copy=True)))
+        self._arrays_used_by_entry |= arrays_used
+
+    @contextlib.contextmanager
+    def entry(
+        self,
+        backward: Callable[..., None] | None = None,
+        *args,
+        restore: Callable[[], None] | None = None,
+        is_autodiff: bool = False,
+    ) -> Iterator[None]:
+        """
+        Record the kernels launched in the block as one entry.
+
+        The launches are reversed by their autodiff when `is_autodiff` holds, by `backward` called with `args` otherwise,
+        None for launches without gradient. `restore` writes back, after the reversal, what the block overwrites in
+        arrays the recorder cannot see, such as the frames of a solver.
+        """
+        assert not self._is_grouping, "A block recording one entry cannot open inside another."
+        self._arrays_used |= self._arrays_used_by_entry
+        self._arrays_used_by_entry.clear()
+        self.entries.append(RecordedEntry([], is_autodiff, backward, args, [], restore))
+        self._is_grouping = True
+        try:
+            yield
+        finally:
+            self._is_grouping = False
+
+    def reverse(self) -> None:
+        """Run the backward pass of the entries in reverse order, which leaves the arrays as they were before them."""
+        for launches, is_autodiff, backward, backward_args, arrays_saved, restore in reversed(self.entries):
+            if is_autodiff:
+                for kernel, args in reversed(launches):
+                    kernel.grad(*args)
+            elif backward is not None:
+                backward(*backward_args)
+            for array, value in arrays_saved:
+                qd_from_torch(array, value)
+            if restore is not None:
+                restore()
+            if arrays_saved and gs.use_zerocopy and gs.backend == gs.metal:
+                torch.mps.synchronize()
+
+
+class RecordedEntry(NamedTuple):
+    """
+    An entry of a recorded step: its launches, whether autodiff reverses them, the backward reversing them otherwise
+    (None without gradient) with its arguments, the arrays it overwrites with their values before it, and the function
+    restoring what it overwrites that the recorder cannot save.
+    """
+
+    launches: list[tuple[Callable, tuple]]
+    is_autodiff: bool
+    backward: Callable[..., None] | None
+    backward_args: tuple
+    arrays_saved: list[tuple]
+    restore: Callable[[], None] | None
+
+
+@contextlib.contextmanager
+def custom_backward(backward: Callable[..., None] | None, *args) -> Iterator[None]:
+    """
+    Record the kernels launched in the block as one entry of the step being recorded, reversed by the given backward.
+
+    `backward` is called with `args`, and is None for launches without gradient. It does nothing outside of the
+    recording of a step (see StepRecorder).
+    """
+    recorder = impl.get_runtime().target_tape
+    if isinstance(recorder, StepRecorder):
+        with recorder.entry(backward, *args):
+            yield
+    else:
+        yield
+
+
+def is_recording_step() -> bool:
+    """
+    Whether the kernels being launched are recorded for the backward pass of a step (see StepRecorder).
+
+    The recorder sees kernel launches alone, so a step writes its state through kernels while it is recorded, never
+    through a zero-copy view.
+    """
+    return isinstance(impl.get_runtime().target_tape, StepRecorder)
 
 
 class InputOperation(Operation):

@@ -1963,9 +1963,9 @@ def func_midpoint_free_body(
     Otherwise the coupled midpoint center-of-mass velocity has a closed form, with gravity applied in the accelerating
     frame, and a linear augmentation couples the rotation to it through the origin.
 
-    Autodiff cannot reverse the Newton iteration, so the replay of the substep by the backward pass, selected by
-    `is_backward`, stores the converged velocity and its residual (see midpoint_ang in array_class.py), and the
-    integration the backward pass reverses, selected by `is_reversed`, resumes from them.
+    Autodiff cannot reverse the Newton iteration, so a differentiable scene runs the solve alone, selected by
+    `is_backward`, which stores the converged velocity and its residual (see midpoint_ang in array_class.py), then the
+    integration, selected by `is_reversed`, which resumes from them.
 
     Writes acc[dofs] = (new - old) / h, from which the integration advances the velocity, and the position with the
     midpoint velocity (see func_integrate).
@@ -2137,44 +2137,45 @@ def func_midpoint_free_body(
                 break
     if qd.static(is_reversed):
         w_mid = w_try
+    # The solve alone stores the converged velocity and its residual, from which the integration resumes
     if qd.static(is_backward and not is_reversed):
         dyn_state.links.midpoint_ang[i_l, i_b] = w_mid
         dyn_state.links.midpoint_res[i_l, i_b] = f_mid
-
-    # Next angular velocity in the body frame
-    w_new = 2.0 * w_mid - w
-    w_new_body = gu.qd_transform_by_quat(w_new, iquat)
-    for j in qd.static(range(3)):
-        dyn_state.dofs.acc[dof_start + 3 + j, i_b] = (w_new_body[j] - w_body[j]) / h
-
-    if not is_aligned:
-        # Closed-form midpoint solve of the coupled translation, (2/h * Id + skew(w_mid)) @ vcom_mid = b
-        v_world = gs.qd_vec3(
-            [
-                dyn_state.dofs.vel[dof_start, i_b],
-                dyn_state.dofs.vel[dof_start + 1, i_b],
-                dyn_state.dofs.vel[dof_start + 2, i_b],
-            ]
-        )
-        v = gu.qd_transform_by_quat(v_world, rot_x2i)
-        vcom = v + w.cross(r_com)
-        a_com = force / mass + gravity
-        if is_coupled:
-            alpha = i2h * (w_mid - w)
-            u = alpha.cross(r_com) + w_mid.cross(w_mid.cross(r_com))
-            a_com = mass_inv_mat @ (force + mass * gravity + aug_vel_mat @ u)
-        b = a_com + i2h * vcom
-        denom = i2h * i2h + w_mid.dot(w_mid)
-        vcom_mid = (i2h * b + (w_mid.dot(b) / i2h) * w_mid - w_mid.cross(b)) / denom
-        v_mid = vcom_mid - w_mid.cross(r_com)
-        v_new = 2.0 * v_mid - v
-        # The world-frame linear velocity goes through the estimated next orientation
-        w_mid_body = gu.qd_transform_by_quat(w_mid, iquat)
-        qrot = gu.qd_rotvec_to_quat(w_mid_body * h, EPS)
-        xquat_new = gu.qd_transform_quat_by_quat(qrot, xquat)
-        v_new_world = gu.qd_transform_by_quat(gu.qd_transform_by_quat(v_new, iquat), xquat_new)
+    else:
+        # Next angular velocity in the body frame
+        w_new = 2.0 * w_mid - w
+        w_new_body = gu.qd_transform_by_quat(w_new, iquat)
         for j in qd.static(range(3)):
-            dyn_state.dofs.acc[dof_start + j, i_b] = (v_new_world[j] - v_world[j]) / h
+            dyn_state.dofs.acc[dof_start + 3 + j, i_b] = (w_new_body[j] - w_body[j]) / h
+
+        if not is_aligned:
+            # Closed-form midpoint solve of the coupled translation, (2/h * Id + skew(w_mid)) @ vcom_mid = b
+            v_world = gs.qd_vec3(
+                [
+                    dyn_state.dofs.vel[dof_start, i_b],
+                    dyn_state.dofs.vel[dof_start + 1, i_b],
+                    dyn_state.dofs.vel[dof_start + 2, i_b],
+                ]
+            )
+            v = gu.qd_transform_by_quat(v_world, rot_x2i)
+            vcom = v + w.cross(r_com)
+            a_com = force / mass + gravity
+            if is_coupled:
+                alpha = i2h * (w_mid - w)
+                u = alpha.cross(r_com) + w_mid.cross(w_mid.cross(r_com))
+                a_com = mass_inv_mat @ (force + mass * gravity + aug_vel_mat @ u)
+            b = a_com + i2h * vcom
+            denom = i2h * i2h + w_mid.dot(w_mid)
+            vcom_mid = (i2h * b + (w_mid.dot(b) / i2h) * w_mid - w_mid.cross(b)) / denom
+            v_mid = vcom_mid - w_mid.cross(r_com)
+            v_new = 2.0 * v_mid - v
+            # The world-frame linear velocity goes through the estimated next orientation
+            w_mid_body = gu.qd_transform_by_quat(w_mid, iquat)
+            qrot = gu.qd_rotvec_to_quat(w_mid_body * h, EPS)
+            xquat_new = gu.qd_transform_quat_by_quat(qrot, xquat)
+            v_new_world = gu.qd_transform_by_quat(gu.qd_transform_by_quat(v_new, iquat), xquat_new)
+            for j in qd.static(range(3)):
+                dyn_state.dofs.acc[dof_start + j, i_b] = (v_new_world[j] - v_world[j]) / h
 
 
 @qd.func
@@ -2311,8 +2312,8 @@ def func_integrate(
                             )
 
     # The coupling wrench of this substep is consumed: the bias force read it during forward dynamics and the midpoint
-    # pass above read it last, and the coupler accumulates the next one after the substep. The replay of a substep in
-    # the backward pass restores it (see func_load_adjoint_cache in diff.py) for the reversed integration.
+    # pass above read it last, and the coupler accumulates the next one after the substep. A differentiable scene clears
+    # it in a launch of its own (see kernel_clear_coupling_wrench), so that the reversal of this one reads it.
     if qd.static(not is_backward):
         qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
@@ -2355,6 +2356,50 @@ def func_count_settled_step(
             dyn_state.links.awake_steps[i_l, i_b] = dyn_state.links.awake_steps[i_l, i_b] + 1
     else:
         dyn_state.links.awake_steps[i_l, i_b] = 0
+
+
+@qd.kernel(fastcache=True)
+def kernel_compute_smooth_qacc(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Factor the mass matrix and solve the smooth acceleration.
+
+    A differentiable scene launches this part of the forward dynamics on its own, to reverse it together with the
+    constraint solve (see kernel_forward_dynamics_without_qacc).
+    """
+    func_factor_mass(dyn_state, dyn_info, rigid_info, rigid_config, implicit_damping=False)
+    func_compute_qacc(dyn_state, dyn_info, rigid_info, rigid_config)
+
+
+@qd.kernel(fastcache=True)
+def kernel_solve_midpoint_free_bodies(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+):
+    """
+    Solve the midpoint velocity of every free link.
+
+    The converged velocity and its residual are stored for the integration, which resumes from them (see
+    func_midpoint_free_body).
+    """
+    func_midpoint_free_bodies(dyn_state, dyn_info, rigid_info, rigid_config, is_reversed=False, is_backward=True)
+
+
+@qd.kernel(fastcache=True)
+def kernel_clear_coupling_wrench(
+    dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
+):
+    """Clear the coupling wrench the substep consumed (see func_integrate)."""
+    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
+    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
+        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)

@@ -13,6 +13,7 @@ from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.states.solvers import MPMSolverState
+from genesis.grad.bridge import custom_backward
 from genesis.options.solvers import MPMOptions
 from genesis.utils.misc import DeprecationError, qd_to_torch
 
@@ -333,6 +334,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.kernel
     def svd_grad(self, f: qd.i32):
+        """Reverse the singular value decomposition of a frame, consuming the adjoint of its factors like autodiff."""
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[f, i_p, i_b].active:
                 self.particles.grad[f, i_p, i_b].F_tmp += backward_svd(
@@ -343,6 +345,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                     self.particles[f, i_p, i_b].S,
                     self.particles[f, i_p, i_b].V,
                 )
+                self.particles.grad[f, i_p, i_b].U = qd.Matrix.zero(gs.qd_float, 3, 3)
+                self.particles.grad[f, i_p, i_b].S = qd.Matrix.zero(gs.qd_float, 3, 3)
+                self.particles.grad[f, i_p, i_b].V = qd.Matrix.zero(gs.qd_float, 3, 3)
 
     @qd.kernel
     def p2g(
@@ -542,11 +547,13 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def substep_pre_coupling(self, f):
         if self._sim.requires_grad:
-            self.reset_grid_and_grad(f)
-            # Keep F_tmp and svd as separate kernels so their backward passes (compute_F_tmp.grad and svd_grad) remain
-            # correct.
+            # The grid of the substep starts from zero, its adjoint included
+            with custom_backward(None):
+                self.reset_grid_and_grad(f)
+            # The decomposition is reversed by its closed-form backward, which autodiff cannot derive
             self.compute_F_tmp(f)
-            self.svd(f)
+            with custom_backward(self.svd_grad, f):
+                self.svd(f)
         else:
             # Forward-only path: the grid is left zeroed by reset_dirty_cells at the end of the previous substep (and
             # is zero-init on the first call), so no reset kernel is needed here.
@@ -566,19 +573,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.sim.coupler.rigid_solver.collider.collider_config,
         )
 
-    def substep_pre_coupling_grad(self, f):
-        self.p2g.grad(
-            f,
-            self.sim.coupler.rigid_solver.dyn_state.geoms,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
-            self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider.sdf.sdf_info,
-            self.sim.coupler.rigid_solver.collider.collider_config,
-        )
-        self.svd_grad(f)
-        self.compute_F_tmp.grad(f)
-
     def substep_post_coupling(self, f):
         self.g2p(
             f,
@@ -587,9 +581,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.sim.coupler.rigid_solver.rigid_info,
         )
 
-        # Apply particle constraints after g2p
+        # The particle constraints apply after g2p and carry no gradient
         if self._constraints_initialized:
-            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
+            with custom_backward(None):
+                self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
 
         # Eager sparse reset: zero only the cells p2g touched this substep, across all envs, then clear the global
         # dirty count so the next substep starts fresh. The grid is no longer read after g2p / constraints, so it is
@@ -610,18 +605,12 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         # substep forces a sync every substep. Matching the cadence used by the rigid solver keeps the safety net while
         # letting the GPU stay ahead of the host queue.
         if self._sim._cur_substep_global % gs.engine.simulator.RATE_CHECK_ERRNO == 0:
-            if not self._is_state_valid(f):
+            with custom_backward(None):
+                is_state_valid = self._is_state_valid(f)
+            if not is_state_valid:
                 gs.raise_exception(
                     "NaN detected in MPM states. Try reducing the time step size or adjusting simulation parameters."
                 )
-
-    def substep_post_coupling_grad(self, f):
-        self.g2p.grad(
-            f,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
-            self.sim.coupler.rigid_solver.rigid_info,
-        )
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
@@ -633,17 +622,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.particles[target, i_p, i_b].Jp = self.particles[source, i_p, i_b].Jp
             self.particles[target, i_p, i_b].actu = self.particles[source, i_p, i_b].actu
 
-            self.particles_ng[target, i_p, i_b].active = self.particles_ng[source, i_p, i_b].active
-
-    @qd.kernel
-    def copy_grad(self, source: qd.i32, target: qd.i32):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles.grad[target, i_p, i_b].pos = self.particles.grad[source, i_p, i_b].pos
-            self.particles.grad[target, i_p, i_b].vel = self.particles.grad[source, i_p, i_b].vel
-            self.particles.grad[target, i_p, i_b].F = self.particles.grad[source, i_p, i_b].F
-            self.particles.grad[target, i_p, i_b].C = self.particles.grad[source, i_p, i_b].C
-            self.particles.grad[target, i_p, i_b].Jp = self.particles.grad[source, i_p, i_b].Jp
-            self.particles.grad[target, i_p, i_b].actu = self.particles.grad[source, i_p, i_b].actu
             self.particles_ng[target, i_p, i_b].active = self.particles_ng[source, i_p, i_b].active
 
     @qd.kernel
@@ -676,21 +654,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 if i_b == 0:
                     self.grid_dirty_flag[i, j, k] = gs.qd_int(0)
 
-    @qd.kernel
-    def reset_grad_till_frame(self, f: qd.i32):
-        # Zero out particle grads in frames [0, f-1], for all particles, all batch indices
-        for i_f, i_p, i_b in qd.ndrange(f, self._n_particles, self._B):
-            self.particles.grad[i_f, i_p, i_b].pos = qd.Vector.zero(gs.qd_float, 3)
-            self.particles.grad[i_f, i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
-            self.particles.grad[i_f, i_p, i_b].C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles.grad[i_f, i_p, i_b].F = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles.grad[i_f, i_p, i_b].F_tmp = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles.grad[i_f, i_p, i_b].Jp = gs.qd_float(0.0)
-            self.particles.grad[i_f, i_p, i_b].U = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles.grad[i_f, i_p, i_b].V = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles.grad[i_f, i_p, i_b].S = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles.grad[i_f, i_p, i_b].actu = gs.qd_float(0.0)
-
     # ------------------------------------------------------------------------------------
     # ------------------------------------ gradient --------------------------------------
     # ------------------------------------------------------------------------------------
@@ -715,10 +678,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def roll_frame_window(self):
         self.copy_frame(self.n_frames - 1, 0)
-
-    def roll_frame_window_grad(self):
-        self.copy_grad(0, self.n_frames - 1)
-        self.reset_grad_till_frame(self.n_frames - 1)
 
     @property
     def data(self):

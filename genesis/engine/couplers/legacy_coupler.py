@@ -945,29 +945,6 @@ class LegacyCoupler(RBC):
         """
         return not (self._rigid_fem or self._fem_mpm or self._fem_sph)
 
-    def couple_grad(self, f):
-        if self.fem_solver.is_active:
-            self.fem_surface_force.grad(
-                f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.dyn_state.links,
-                self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.sdf.sdf_info,
-                self.rigid_solver.collider.collider_config,
-            )
-        if self.mpm_solver.is_active:
-            self.mpm_grid_op.grad(
-                f,
-                self.sim.cur_t,
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
-                rigid_info=self.rigid_solver.rigid_info,
-                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
-                collider_static_config=self.rigid_solver.collider.collider_config,
-            )
-
     @property
     def active_solvers(self):
         """All the active solvers managed by the scene's simulator."""

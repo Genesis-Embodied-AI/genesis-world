@@ -3,7 +3,7 @@ import enum
 import functools
 import inspect
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import numpy as np
 import torch
@@ -241,6 +241,15 @@ class TimeBasedMixin:
         return self._substeps + 1 if self._requires_grad else 2
 
 
+class BoundaryViews(NamedTuple):
+    """The zero-copy views of the arrays a boundary checkpoint copies at once, with their names, and the items it copies
+    one by one: the scalars, and the arrays without a view."""
+
+    names: list[str]
+    views: list[torch.Tensor]
+    items_copied: list[array_class.DataItem]
+
+
 class GravityMixin:
     """Gravity of one solver: the buffer storing it, and the accessors reading and writing it.
 
@@ -340,6 +349,13 @@ class Solver(RBC):
         # simulator hands it at build (see 'set_rollout_graph')
         self._requires_grad: bool = sim.options.requires_grad
         self._rollout_graph: RolloutGraph | None = None
+
+        # The items of the checkpoints, the static configs and the views of the boundary checkpoints, built by the first
+        # checkpoint and valid from then on since the arrays are never reallocated, which spares walking the structs at
+        # every step
+        self._checkpoint_items_by_kinds: dict[tuple[frozenset, bool], list[array_class.DataItem]] = {}
+        self._configs: dict | None = None
+        self._boundary_views_by_kinds: dict[frozenset, BoundaryViews] = {}
 
         # force fields
         self._ffs = list()
@@ -457,14 +473,14 @@ class Solver(RBC):
     def roll_frame_window(self) -> None:
         """Copy the last frame of the substeps the solver holds into frame 0, which the next substeps start from."""
 
-    def roll_frame_window_grad(self) -> None:
-        """Reverse 'roll_frame_window': move the adjoint of frame 0 to the last frame, before a step is replayed."""
-
     def end_step(self) -> None:
         """Clear the inputs that hold for one step alone, once its substeps are over."""
 
-    def end_step_grad(self) -> None:
-        """Reverse 'end_step', first thing of the backward pass of a step."""
+    def keep_errors(self) -> None:
+        """Set aside the errors flagged so far, before the backward pass of a step rewinds the state."""
+
+    def flag_non_finite_grad(self) -> None:
+        """Flag the environments whose adjoint of the state is not finite, after the backward pass of each substep."""
 
     def reset_grad(self) -> None:
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
@@ -491,16 +507,51 @@ class Solver(RBC):
         two steps alone, from which the backward pass of a recorded step replays it: no gradient, frame 0 of the arrays
         holding frames, on the device whatever the backend.
         """
-        configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
+        if self._configs is None:
+            self._configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
+        items = self._checkpoint_items(kinds, boundary_only)
         arrays = {}
-        for item in self._checkpoint_items(kinds, boundary_only):
+        if boundary_only and gs.use_zerocopy:
+            boundary_views = self._boundary_views_by_kinds.get(kinds)
+            if boundary_views is None:
+                boundary_views = self._boundary_views_by_kinds[kinds] = BoundaryViews([], [], [])
+                for item in items:
+                    if isinstance(item, array_class.ScalarItem):
+                        boundary_views.items_copied.append(item)
+                        continue
+                    if isinstance(item.array, torch.Tensor):
+                        view = item.array
+                    else:
+                        try:
+                            if item.is_framed:
+                                view = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=False)
+                            else:
+                                view = qd_to_torch(item.array, copy=False)
+                        except ValueError:
+                            # A member of a struct field may have no zero-copy view (see 'fill_data')
+                            boundary_views.items_copied.append(item)
+                            continue
+                    boundary_views.names.append(item.name)
+                    boundary_views.views.append(view)
+            # One fused copy of every array with a view, rather than one launch each
+            copies = [torch.empty_like(view) for view in boundary_views.views]
+            # The views read the arrays as the last kernel left them once it is done (see qd_to_torch)
+            if gs.backend == gs.metal:
+                qd.sync()
+            torch._foreach_copy_(copies, boundary_views.views)
+            # The copy reads the arrays on the torch stream, before the next kernel writes them (see qd_zero_grad)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+            arrays.update(zip(boundary_views.names, copies))
+            items = boundary_views.items_copied
+        for item in items:
             if isinstance(item, array_class.ScalarItem):
                 arrays[item.name] = np.array(getattr(item.owner, item.attr))
             elif boundary_only and item.is_framed:
                 arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
             else:
                 arrays[item.name] = data_to_array(item.array, to_torch=boundary_only or gs.use_zerocopy, copy=True)
-        return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds, is_boundary_only=boundary_only)
+        return SolverCheckpoint(arrays=arrays, configs=self._configs, kinds=kinds, is_boundary_only=boundary_only)
 
     def set_checkpoint(self, checkpoint: SolverCheckpoint) -> None:
         """Write back the arrays of a checkpoint 'get_checkpoint' read, rejecting a record read from another build.
@@ -512,13 +563,25 @@ class Solver(RBC):
         items = self._checkpoint_items(checkpoint.kinds, checkpoint.is_boundary_only)
         array_class.fill_data(items, checkpoint.arrays, boundary_only=checkpoint.is_boundary_only)
 
-    def _checkpoint_items(self, kinds, boundary_only) -> Iterator[array_class.DataItem]:
-        """Yield the items a checkpoint of the given kinds holds, without the gradients for a boundary checkpoint."""
-        for item in self.data:
-            if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
-                continue
-            if not (boundary_only and isinstance(item, array_class.ArrayItem) and item.is_grad):
-                yield item
+    def _checkpoint_items(self, kinds, boundary_only) -> list[array_class.DataItem]:
+        """
+        Return the items a checkpoint of the given kinds holds.
+
+        A boundary checkpoint leaves out the gradients and the placeholders of the features switched off (see
+        'ArrayItem'), which hold nothing a replay reads.
+        """
+        items = self._checkpoint_items_by_kinds.get((kinds, boundary_only))
+        if items is None:
+            items = self._checkpoint_items_by_kinds[(kinds, boundary_only)] = []
+            for item in self.data:
+                if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
+                    continue
+                if boundary_only and isinstance(item, array_class.ArrayItem):
+                    is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
+                    if item.is_grad or is_placeholder:
+                        continue
+                items.append(item)
+        return items
 
     def __getstate__(self) -> SolverCheckpoint:
         """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""

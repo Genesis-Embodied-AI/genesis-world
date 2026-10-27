@@ -1257,13 +1257,12 @@ def kernel_update_cartesian_space(
     func_update_cartesian_space(dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward)
 
 
-# Standalone forward-replay kernels for the update_cartesian_space sub-stages, used only in the backward pass
-# (substep_pre_coupling_grad). The backward unroll replays each sub-stage with is_backward=True (static loops) and
-# then reverses it, stage by stage: COM-links and geom-pose updates reverse cleanly through Quadrants autodiff (their
-# replay kernel's .grad is called directly), while forward kinematics and forward velocity are reversed manually
-# (see kernel_manual_forward_kinematics_bw / kernel_manual_forward_velocity_bw in manual_bw.py) because autodiff
-# silently drops their gradient. TODO: once every sub-stage reverses correctly under autodiff, drop these kernels and
-# the manual reverses, and differentiate kernel_update_cartesian_space as a whole.
+# Standalone kernels for the update_cartesian_space sub-stages, which a differentiable scene launches one by one with
+# is_backward=True (static loops) so that each is reversed on its own (see '_update_cartesian_space_reversibly' in
+# rigid_solver.py): COM-links and geom-pose updates reverse through Quadrants autodiff, while forward kinematics and
+# forward velocity are reversed manually (see kernel_manual_forward_kinematics_bw / kernel_manual_forward_velocity_bw
+# in manual_bw.py) because autodiff silently drops their gradient. TODO: once every sub-stage reverses correctly under
+# autodiff, drop these kernels and the manual reverses, and differentiate kernel_update_cartesian_space as a whole.
 @qd.kernel(fastcache=True)
 def kernel_forward_kinematics_replay(
     envs_idx: qd.types.ndarray(),

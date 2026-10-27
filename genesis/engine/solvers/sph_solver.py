@@ -723,16 +723,10 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 self._kernel_predict_velocity(f)
                 self._density_solve(f)
 
-    def substep_pre_coupling_grad(self, f):
-        pass
-
     def substep_post_coupling(self, f):
         if self.is_active:
             self._kernel_advect_position(f)
             self._kernel_copy_from_reordered(f)
-
-    def substep_post_coupling_grad(self, f):
-        pass
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------

@@ -770,18 +770,12 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             # compute effective velocity
             self._kernel_compute_velocity(f)
 
-    def substep_pre_coupling_grad(self, f):
-        pass
-
     def substep_post_coupling(self, f):
         if self.is_active:
             self._kernel_copy_from_reordered(f)
 
             # boundary collision
             self._kernel_solve_boundary_collision(f)
-
-    def substep_post_coupling_grad(self, f):
-        pass
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------

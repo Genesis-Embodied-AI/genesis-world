@@ -1,16 +1,17 @@
 import contextlib
+import functools
 import weakref
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
 import torch
 
 import genesis as gs
-from genesis.grad.bridge import Operation, RolloutGraph
+from genesis.grad.bridge import Operation, RolloutGraph, StepRecorder
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import DataItem, DataKind, iter_data
+from genesis.utils.array_class import ArrayItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import indices_to_mask
 from genesis.utils.tools import StepTimer
 
@@ -28,7 +29,7 @@ from .solvers import (
     ToolSolver,
 )
 from .solvers.base_solver import GravityMixin, StateChange, Subscriber, TimeBasedMixin
-from .states.solvers import SimState, SimulatorCheckpoint
+from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
@@ -39,6 +40,16 @@ if TYPE_CHECKING:
 
 
 RATE_CHECK_ERRNO = 10
+# The kinds of the state a step or a substep starts from, from which its backward pass replays it
+STATE_KINDS = frozenset((DataKind.STATE,))
+
+
+def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
+    """Write back the checkpoint of every given solver, then flush the zero-copy writes of the restore on Metal."""
+    for solver, checkpoint in solvers_checkpoints:
+        solver.set_checkpoint(checkpoint)
+    if gs.use_zerocopy and gs.backend == gs.metal:
+        torch.mps.synchronize()
 
 
 class Simulator(RBC):
@@ -105,6 +116,8 @@ class Simulator(RBC):
         self._active_solvers: list["Solver"] = gs.List()
         # The active solvers whose state tracks gradients, which a recorded step checkpoints
         self._differentiable_solvers: list["Solver"] = gs.List()
+        # The differentiable solvers holding their state outside of frames, whose backward pass saves it per substep
+        self._unframed_solvers: list["Solver"] = gs.List()
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -253,6 +266,8 @@ class Simulator(RBC):
         for solver in self._active_solvers:
             if solver.requires_grad:
                 self._differentiable_solvers.append(solver)
+                if not any(isinstance(item, ArrayItem) and item.is_framed for item in solver.data):
+                    self._unframed_solvers.append(solver)
                 solver.subscribe(Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate))
 
         self._step_timer.add_phases("physics", "sensors")
@@ -401,25 +416,48 @@ class Simulator(RBC):
         Run the backward pass of the step starting at the given global substep, from the boundary checkpoints of the
         differentiable solvers.
 
-        The step is replayed from the checkpoints to rebuild the frames of its substeps, which are then reversed. The
-        clocks of the environments go back to `steps_start`, the steps they counted before it.
+        Each substep, last first, is replayed from its start while its kernels are recorded, and the recorded kernels
+        reversed (see StepRecorder), the end of the step with the last one. The substeps before the last are replayed
+        once beforehand, to rebuild the frames of the step and save the start of each of them. The clocks of the
+        environments go back to `steps_start`, the steps they counted before it.
         """
-        for solver in reversed(self._active_solvers):
-            solver.end_step_grad()
+        for solver in self._differentiable_solvers:
+            solver.keep_errors()
+        # A solver holding its state in frames keeps the state of every substep of the step. The state of the others is
+        # saved at the start of every substep but the first, whose start the boundary checkpoints hold.
+        boundary_checkpoints = list(zip(self._differentiable_solvers, checkpoints))
+        substeps_checkpoints = [boundary_checkpoints]
         self._cur_substep_global = substep_start
-        for solver, checkpoint in zip(self._differentiable_solvers, checkpoints):
-            solver.set_checkpoint(checkpoint)
-        # Flush the zero-copy writes of the restore on Metal
-        if gs.use_zerocopy and gs.backend == gs.metal:
-            torch.mps.synchronize()
-        for solver in self._active_solvers:
-            solver.roll_frame_window_grad()
-        for _ in range(self._substeps):
+        restore_checkpoints(boundary_checkpoints)
+        for _ in range(self._substeps - 1):
             self.substep(self.cur_substep_local)
             self._cur_substep_global += 1
-        for _ in range(self._substeps):
-            self._cur_substep_global -= 1
-            self.sub_step_grad(self.cur_substep_local)
+            substeps_checkpoints.append(
+                [(solver, solver.get_checkpoint(STATE_KINDS, boundary_only=True)) for solver in self._unframed_solvers]
+            )
+        # The roll of the frames overwrites frame 0 in arrays the recorder cannot see, which the boundary checkpoints of
+        # the solvers holding their state in frames restore
+        framed_checkpoints = [
+            (solver, checkpoint) for solver, checkpoint in boundary_checkpoints if solver not in self._unframed_solvers
+        ]
+        restore_frames = functools.partial(restore_checkpoints, framed_checkpoints)
+        for i_substep in reversed(range(self._substeps)):
+            self._cur_substep_global = substep_start + i_substep
+            is_last_substep = i_substep == self._substeps - 1
+            if not is_last_substep:
+                restore_checkpoints(substeps_checkpoints[i_substep])
+            with StepRecorder() as recorder:
+                self.substep(self.cur_substep_local)
+                if is_last_substep:
+                    with recorder.entry(restore=restore_frames, is_autodiff=True):
+                        for solver in self._active_solvers:
+                            solver.roll_frame_window()
+                    for solver in self._active_solvers:
+                        solver.end_step()
+            recorder.reverse()
+            for solver in self._differentiable_solvers:
+                solver.flag_non_finite_grad()
+        self._cur_substep_global = substep_start
         self._steps.copy_(steps_start)
 
     def substep(self, f):
@@ -428,28 +466,15 @@ class Simulator(RBC):
         self._coupler.couple(f)
         self.substep_post_coupling(f)
 
-    def sub_step_grad(self, f):
-        self.substep_post_coupling_grad(f)
-        self._coupler.couple_grad(f)
-        self.substep_pre_coupling_grad(f)
-
     # -------------- pre coupling --------------
     def substep_pre_coupling(self, f):
         for solver in self._active_solvers:
             solver.substep_pre_coupling(f)
 
-    def substep_pre_coupling_grad(self, f):
-        for solver in reversed(self._active_solvers):
-            solver.substep_pre_coupling_grad(f)
-
     # -------------- post coupling --------------
     def substep_post_coupling(self, f):
         for solver in self._active_solvers:
             solver.substep_post_coupling(f)
-
-    def substep_post_coupling_grad(self, f):
-        for solver in reversed(self._active_solvers):
-            solver.substep_post_coupling_grad(f)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------
@@ -601,8 +626,7 @@ class StepOperation(Operation):
     def forward(self) -> tuple[torch.Tensor, ...]:
         sim = self._sim()
         self._checkpoints = [
-            solver.get_checkpoint(frozenset((DataKind.STATE,)), boundary_only=True)
-            for solver in sim._differentiable_solvers
+            solver.get_checkpoint(STATE_KINDS, boundary_only=True) for solver in sim._differentiable_solvers
         ]
         sim._advance()
         return ()

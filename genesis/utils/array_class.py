@@ -257,6 +257,25 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
         gs.raise_exception(f"'{attr}' holds a {type(value).__name__} where an array, a struct or a scalar stands.")
 
 
+def iter_state_arrays(
+    struct, path: tuple[str, ...], kind: DataKind | None = None
+) -> Iterator[tuple[tuple[str, ...], qd.Tensor | qd.Field | qd.Ndarray]]:
+    """Yield the quadrants arrays of a struct a step may write, those of no kind INFO or CONSTANT, with their paths.
+
+    A path is 'path' followed by the fields reaching the array. Kinds resolve as in 'iter_data'.
+    """
+    for field in dataclasses.fields(struct):
+        value = getattr(struct, field.name)
+        field_kind = field.metadata.get(KIND, kind)
+        if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
+            if field_kind is None:
+                field_kind = type(struct).kind
+            if field_kind not in (DataKind.INFO, DataKind.CONSTANT):
+                yield (*path, field.name), value
+        elif dataclasses.is_dataclass(value):
+            yield from iter_state_arrays(value, (*path, field.name), field_kind)
+
+
 def check_data(
     items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, boundary_only: bool = False
 ) -> list[DataItem]:
@@ -3016,42 +3035,6 @@ def get_entities_state(solver, is_active=True):
     return EntitiesState(is_hibernated=V(dtype=gs.qd_int, shape=(solver.n_entities_, solver._B) if is_active else ()))
 
 
-# =========================================== RigidAdjointCache ===========================================
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class RigidAdjointCache:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    # This cache stores intermediate values during rigid body simulation to use Quadrants's AD. Quadrants's AD requires
-    # us not to overwrite the values that have been read during the forward pass, so we need to store the intemediate
-    # values in this cache to avoid overwriting them. Specifically, after we compute next frame's qpos, dofs_vel, and
-    # dofs_acc, we need to store them in this cache because we overwrite the values in the next frame. See how
-    # [kernel_save_adjoint_cache] is used in [rigid_solver.py] to store the values in this cache.
-    qpos: qd.Tensor
-    dofs_vel: qd.Tensor
-    dofs_acc: qd.Tensor
-    # The coupling wrench each substep consumes, which the couplers accumulate during the previous one (see
-    # func_integrate). The replay of a substep in the backward pass restores it.
-    links_cfrc_coupling_ang: qd.Tensor
-    links_cfrc_coupling_vel: qd.Tensor
-
-
-def get_rigid_adjoint_cache(solver):
-    requires_grad = solver._requires_grad
-    # The kinematic solver tracks no gradient, and holds no frame
-    n_frames = solver.n_frames if requires_grad else 1
-
-    qs_shape = maybe_shape((n_frames, solver.n_qs_, solver._B), requires_grad)
-    dofs_shape = maybe_shape((n_frames, solver.n_dofs_, solver._B), requires_grad)
-    links_shape = maybe_shape((n_frames, solver.n_links_, solver._B), requires_grad)
-    return RigidAdjointCache(
-        qpos=V(dtype=gs.qd_float, shape=qs_shape, needs_grad=requires_grad),
-        dofs_vel=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-        dofs_acc=V(dtype=gs.qd_float, shape=dofs_shape, needs_grad=requires_grad),
-        links_cfrc_coupling_ang=V(dtype=gs.qd_vec3, shape=links_shape),
-        links_cfrc_coupling_vel=V(dtype=gs.qd_vec3, shape=links_shape),
-    )
-
-
 # =========================================== DynInfo and DynState ===========================================
 
 
@@ -3094,20 +3077,6 @@ class DynState:
     fixed_verts: VertsState
     vverts: VVertsState
     vgeoms: VGeomsState
-
-
-def get_dyn_state_adjoint_cache(solver):
-    return DynState(
-        dofs=get_dofs_state(solver),
-        links=get_links_state(solver),
-        joints=get_joints_state(solver),
-        geoms=get_geoms_state(solver),
-        entities=get_entities_state(solver, is_active=False),
-        free_verts=get_free_verts_state(solver, is_active=False),
-        fixed_verts=get_fixed_verts_state(solver, is_active=False),
-        vverts=get_vverts_state(solver, is_active=False),
-        vgeoms=get_vgeoms_state(solver, is_active=False),
-    )
 
 
 # =================================== RigidSimStaticConfig ===================================
@@ -3350,11 +3319,6 @@ class DataManager:
             vgeoms=vgeoms_state,
         )
 
-        if solver.rigid_config.requires_grad:
-            # Data structures required for backward pass
-            self.dyn_state_adjoint_cache = get_dyn_state_adjoint_cache(solver)
-
-        self.rigid_adjoint_cache = get_rigid_adjoint_cache(solver)
         self.errno = V(dtype=gs.qd_int, shape=(solver._B,))
 
         self._solver = solver

@@ -84,17 +84,9 @@ class ToolSolver(TimeBasedMixin, Solver):
         for entity in self._entities:
             entity.substep_pre_coupling(f)
 
-    def substep_pre_coupling_grad(self, f):
-        for entity in self._entities[::-1]:
-            entity.substep_pre_coupling_grad(f)
-
     def substep_post_coupling(self, f):
         for entity in self._entities:
             entity.substep_post_coupling(f)
-
-    def substep_post_coupling_grad(self, f):
-        for entity in self._entities[::-1]:
-            entity.substep_post_coupling_grad(f)
 
     @property
     def is_differentiable(self) -> bool:
@@ -107,11 +99,6 @@ class ToolSolver(TimeBasedMixin, Solver):
     def roll_frame_window(self):
         for entity in self._entities:
             entity.copy_frame(self.n_frames - 1, 0)
-
-    def roll_frame_window_grad(self):
-        for entity in self._entities:
-            entity.copy_grad(0, self.n_frames - 1)
-            entity.reset_grad_till_frame(self.n_frames - 1)
 
     @property
     def data(self):

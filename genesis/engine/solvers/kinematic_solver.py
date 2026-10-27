@@ -455,7 +455,6 @@ class KinematicSolver(Solver):
     def _create_data_manager(self):
         self.data_manager = array_class.DataManager(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
-        self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
@@ -464,10 +463,7 @@ class KinematicSolver(Solver):
     def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
         yield from array_class.iter_data(self, "rigid_config")
         yield from array_class.iter_data(self.data_manager, "errno", array_class.DataKind.STATE)
-        structs = ["rigid_info", "dyn_info", "dyn_state", "rigid_adjoint_cache"]
-        if self.rigid_config.requires_grad:
-            structs.append("dyn_state_adjoint_cache")
-        for name in structs:
+        for name in ("rigid_info", "dyn_info", "dyn_state"):
             yield from array_class.iter_data(self.data_manager, name)
         # The flags describe the derived poses and velocities, so they travel with them
         yield from array_class.iter_data(self, "_is_forward_pos_updated", array_class.DataKind.DERIVED)
@@ -899,9 +895,6 @@ class KinematicSolver(Solver):
     def substep_pre_coupling(self, f):
         pass
 
-    def substep_pre_coupling_grad(self, f):
-        pass
-
     def substep_post_coupling(self, f):
         if not self._is_forward_pos_updated or not self._is_forward_vel_updated:
             kernel_forward_kinematics(
@@ -909,9 +902,6 @@ class KinematicSolver(Solver):
             )
             self._is_forward_pos_updated = True
             self._is_forward_vel_updated = True
-
-    def substep_post_coupling_grad(self, f):
-        pass
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------

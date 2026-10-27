@@ -13,6 +13,7 @@ from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.states import RigidSolverState, SolverCheckpoint
+from genesis.grad.bridge import custom_backward, is_recording_step
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
 from genesis.typing import Vec2FType, Vec3FType
@@ -87,11 +88,9 @@ from .abd.accessor import (
 from .abd.diff import (
     func_copy_next_to_curr,
     func_integrate_dq_entity,
-    kernel_begin_backward_substep,
-    kernel_copy_acc,
-    kernel_copy_next_to_curr_no_check,
-    kernel_prepare_backward_substep,
-    kernel_save_adjoint_cache,
+    kernel_copy_finite_next_to_curr,
+    kernel_flag_non_finite_grad,
+    kernel_flag_non_finite_next,
 )
 from .abd.forward_dynamics import (
     func_forward_dynamics,
@@ -99,9 +98,12 @@ from .abd.forward_dynamics import (
     func_integrate,
     func_update_acc,
     func_vel_at_point,
+    kernel_clear_coupling_wrench,
+    kernel_compute_smooth_qacc,
     kernel_forward_dynamics,
     kernel_forward_dynamics_without_qacc,
     kernel_refresh_invweight_and_meaninertia,
+    kernel_solve_midpoint_free_bodies,
     kernel_update_acc,
     update_qacc_from_qvel_delta,
     update_qvel,
@@ -225,7 +227,7 @@ class RigidKinematicSnapshot(NamedTuple):
     velocities when the operation ran, its backward pass then folding their adjoint at that state. Otherwise they stem
     from the state the step before started its last substep from (the compatibility mode with MuJoCo refreshes them
     before integrating), and their adjoint is left to the backward pass of that step, which folds it there (see
-    'substep_pre_coupling_grad').
+    'RigidSolver.substep').
     """
 
     qpos: torch.Tensor
@@ -325,8 +327,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self.constraint_solver = None
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
-
-        self._is_backward: bool = False
 
         # The errors a backward pass flagged so far, kept aside since restoring the state a step started from rewinds
         # the error flags with it
@@ -797,14 +797,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._errno_backward = torch.zeros_like(qd_to_torch(self._errno))
 
         self.rigid_info = self.data_manager.rigid_info
-        self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
         if self._use_hibernation:
             self.n_awake_dofs = self.rigid_info.n_awake_dofs
-        if self._requires_grad:
-            self.dyn_state_adjoint_cache = self.data_manager.dyn_state_adjoint_cache
 
         # Gravity lives with the rigid arrays, which the kernels read, so that array is the one handed over to hold it.
         self._build_gravity(self.rigid_info.gravity)
@@ -1310,13 +1307,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # from genesis.utils.tools import create_timer
         from genesis.engine.couplers import SAPCoupler
 
-        # The first substep of a step of a differentiable scene recomputes the cartesian space from the state with the
-        # kernels the previous step ran, so the result is the same, and the replay from a boundary checkpoint, which
-        # holds no derived quantity, runs exactly as the forward pass did
+        # The replay of a substep for its backward pass starts from a checkpoint, which holds no derived quantity, so it
+        # recomputes the cartesian space as the substep before did. It launches every stage on its own, reversed by the
+        # autodiff of its kernel or by the backward given to it (see StepRecorder), where the forward pass fuses them.
+        is_recording = self._requires_grad and is_recording_step()
         is_forward_pos_updated, is_forward_vel_updated = self._is_forward_pos_updated, self._is_forward_vel_updated
-        if self._requires_grad and f == 0:
+        if is_recording:
             is_forward_pos_updated = is_forward_vel_updated = False
-            kernel_save_adjoint_cache(f, self.dyn_state, self._rigid_adjoint_cache, self.rigid_info, self.rigid_config)
 
         # Coupling forces from the previous coupling phase may target hibernated links (see
         # kernel_wakeup_coupled_links in abd/misc.py). They can only exist when another solver is active.
@@ -1329,7 +1326,54 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-        if isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
+        if is_recording and not isinstance(self.sim.coupler, SAPCoupler):
+            envs_idx = self._scene._sanitize_envs_idx(None)
+            if not is_forward_pos_updated:
+                self._update_cartesian_space_reversibly(envs_idx)
+            kernel_forward_dynamics_without_qacc(
+                self.dyn_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+                is_backward=True,
+            )
+            # The smooth acceleration and the constraint solve are reversed together, through the implicit function
+            # theorem, which spares reversing the factor of the mass matrix
+            if self._disable_constraint:
+                constraint_force_backward = (
+                    kernel_manual_compute_qacc_bw,
+                    self.dyn_state,
+                    self.rigid_info,
+                    self.rigid_config,
+                )
+            else:
+                constraint_force_backward = (self._constraint_force_grad,)
+            with custom_backward(*constraint_force_backward):
+                kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+                self._func_constraint_force()
+            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
+            # The midpoint integration resumes from the velocity its Newton solve converged to (see
+            # func_midpoint_free_body), so the solve itself has no gradient
+            with custom_backward(None):
+                kernel_solve_midpoint_free_bodies(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+            kernel_step_2(
+                self.dyn_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+                is_reversed=True,
+                is_backward=True,
+                errno=self._errno,
+            )
+            with custom_backward(None):
+                kernel_flag_non_finite_next(self.dyn_state, self.rigid_info, self.rigid_config, self._errno)
+            kernel_copy_finite_next_to_curr(self.dyn_state, self.rigid_info, self.rigid_config, self._errno)
+            kernel_clear_coupling_wrench(self.dyn_state, self.dyn_info, self.rigid_config)
+            if not self._enable_mujoco_compatibility:
+                self._update_cartesian_space_reversibly(envs_idx)
+        elif isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
             # A SAP-coupled substep replaces the constraint solve by the coupler's own, so it keeps its own launches.
             # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
             # launches the substep kernels one by one.
@@ -1341,7 +1385,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
                 is_forward_pos_updated,
                 is_forward_vel_updated,
-                self._is_backward,
             )
             if isinstance(self.sim.coupler, SAPCoupler):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
@@ -1354,7 +1397,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_info,
                     self.rigid_config,
                     is_reversed=False,
-                    is_backward=self._is_backward,
+                    is_backward=False,
                     errno=self._errno,
                 )
         else:
@@ -1375,7 +1418,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
                 self._is_forward_pos_updated,
                 self._is_forward_vel_updated,
-                self._is_backward,
                 not self._disable_constraint,
             )
             if self._enable_collision:
@@ -1405,7 +1447,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                self._is_backward,
                 not self._disable_constraint,
                 self._options.noslip_iterations > 0,
                 self._errno,
@@ -1684,11 +1725,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             qd_zero_grad(self.rigid_info)
             qd_zero_grad(self.dyn_state.geoms)
             qd_zero_grad(self.dyn_state.entities)
-            qd_zero_grad(self.dyn_state_adjoint_cache.dofs)
-            qd_zero_grad(self.dyn_state_adjoint_cache.links)
-            qd_zero_grad(self.dyn_state_adjoint_cache.joints)
-            qd_zero_grad(self.dyn_state_adjoint_cache.geoms)
-            qd_zero_grad(self._rigid_adjoint_cache)
             # One flush for the zeroing batch; see qd_zero_grad in misc.py.
             if gs.use_zerocopy and gs.backend == gs.metal:
                 torch.mps.synchronize()
@@ -1697,13 +1733,11 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def end_step(self):
         self.clear_external_force()
 
-    def end_step_grad(self):
-        # The external wrenches are cleared at the end of a step, which leaves their adjoint to the wrenches applied to
-        # it alone. The errors flagged so far are kept aside (see '_errno_backward').
-        qd_zero_grad(self.dyn_state.links.cfrc_applied_ang)
-        qd_zero_grad(self.dyn_state.links.cfrc_applied_vel)
-        if gs.use_zerocopy and gs.backend == gs.metal:
-            torch.mps.synchronize()
+    def flag_non_finite_grad(self):
+        kernel_flag_non_finite_grad(self.dyn_state, self.rigid_info, self.rigid_config, self._errno)
+
+    def keep_errors(self):
+        # See '_errno_backward'
         self._errno_backward |= qd_to_torch(self._errno)
 
     def check_errors(self):
@@ -1744,7 +1778,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def fold_derived_grad(self, saved_state: "RigidKinematicSnapshot"):
         if saved_state.is_consistent:
-            self._update_cartesian_grad(self._scene._sanitize_envs_idx(None))
+            # The cartesian space is replayed at the saved state, then reversed
+            self._update_cartesian_space_reversibly(self._scene._sanitize_envs_idx(None))
+            self._update_cartesian_space_grad()
 
     def add_grad_from_state(self, grads, selection, saved_state):
         """Add the gradients of the tensors of a queried state to the adjoint of the fields they were read from.
@@ -1762,108 +1798,34 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self.restore_saved_state(saved_state)
             self.fold_derived_grad(saved_state)
 
-    def _update_cartesian_grad(self, envs_idx):
-        """Forward-replay the post-integrate cartesian-space update (FK -> COM -> geom poses -> velocity) under
-        is_backward=True, then reverse it stage by stage.
+    def _update_cartesian_space_reversibly(self, envs_idx):
+        """Update the cartesian space one stage per launch, recorded as one entry reversed by its manual backward."""
+        with custom_backward(self._update_cartesian_space_grad):
+            kernel_forward_kinematics_replay(
+                envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
+            )
+            kernel_COM_links_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+            kernel_update_geoms_replay(
+                self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
+            )
+            kernel_forward_velocity(
+                envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
+            )
 
-        Velocity and forward kinematics are reversed manually (kernel_manual_*_bw in manual_bw.py), while COM and
-        the link->geom transform are reversed by Quadrants autodiff (.grad). Shared by the post-integrate reverse
-        and the first-substep initial-state reverse in substep_pre_coupling_grad.
+    def _update_cartesian_space_grad(self):
         """
-        # Forward replay in dependency order (FK -> COM -> geoms -> velocity).
-        kernel_forward_kinematics_replay(
-            envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
-        )
-        kernel_COM_links_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-        kernel_update_geoms_replay(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
-        kernel_forward_velocity(
-            envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
-        )
+        Reverse '_update_cartesian_space_reversibly' from the values it left.
 
-        # Reverse the stages: velocity first, forward kinematics last. COM and geoms both consume only FK
-        # outputs, so their mutual order is free.
+        The velocity and the forward kinematics are reversed manually (kernel_manual_*_bw in manual_bw.py), the center
+        of mass (COM) and the poses of the geoms by the autodiff of Quadrants. The COM and the geoms both read the
+        forward kinematics alone, so they are reversed in either order.
+        """
         kernel_manual_forward_velocity_bw(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         kernel_COM_links_replay.grad(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
         kernel_update_geoms_replay.grad(
             self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True
         )
         kernel_manual_forward_kinematics_bw(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-
-    def substep_pre_coupling_grad(self, f):
-        # Change to backward mode
-        self._is_backward = True
-
-        # Run forward substep again to restore this step's information, this is needed because we do not store info
-        # of every substep.
-        kernel_prepare_backward_substep(
-            f,
-            self.dyn_state,
-            self.dyn_state_adjoint_cache,
-            self._rigid_adjoint_cache,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-        )
-        self.substep(f)
-        # =================== Backward substep ======================
-        envs_idx = self._scene._sanitize_envs_idx(None)
-        if not self._enable_mujoco_compatibility:
-            # The FK backward below builds its Jacobian at the post-integrate qpos / vel, so copy the integrator's
-            # _next outputs into the current slots first.
-            kernel_copy_next_to_curr_no_check(self.dyn_state, self.rigid_info, self.rigid_config)
-            self._update_cartesian_grad(envs_idx)
-
-        kernel_begin_backward_substep(
-            f,
-            self.dyn_state,
-            self.dyn_state_adjoint_cache,
-            self._rigid_adjoint_cache,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-            self._errno,
-        )
-
-        kernel_step_2.grad(
-            self.dyn_state,
-            self.constraint_solver.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-            is_reversed=True,
-            is_backward=True,
-            errno=self._errno,
-        )
-        kernel_update_acc.grad(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
-
-        # Mirror the forward branch in _func_constraint_force:
-        #   (A) _disable_constraint=True: the forward never calls the constraint solver; acc is the smooth-dynamics
-        #       result. Reverse via kernel_manual_compute_qacc_bw (implicit function theorem through M).
-        #   (B) _disable_constraint=False: the forward always calls constraint_solver.resolve. Reverse via
-        #       _constraint_force_grad.
-        if not self._disable_constraint:
-            self._constraint_force_grad()
-        else:
-            kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)
-        kernel_copy_acc(f, self.dyn_state, self._rigid_adjoint_cache, self.rigid_config)
-
-        kernel_forward_dynamics_without_qacc.grad(
-            self.dyn_state,
-            self.constraint_solver.constraint_state,
-            self.dyn_info,
-            self.rigid_info,
-            self.rigid_config,
-            is_backward=True,
-        )
-
-        # The first substep of a step recomputes the cartesian space from the state the step starts from (see
-        # 'substep'). Its adjoint belongs to that state, so it is folded in, leaving the adjoint of the step on the
-        # reduced state alone, which a boundary checkpoint holds (see 'Solver.get_checkpoint').
-        if self._enable_mujoco_compatibility or f == 0:
-            self._update_cartesian_grad(envs_idx)
-
-        # Change back to forward mode
-        self._is_backward = False
 
     def substep_post_coupling(self, f):
         from genesis.engine.couplers import SAPCoupler, IPCCoupler
@@ -1880,7 +1842,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_info,
                 self.rigid_config,
                 is_reversed=False,
-                is_backward=self._is_backward,
+                is_backward=False,
                 errno=self._errno,
             )
         elif isinstance(self.sim.coupler, IPCCoupler):
@@ -1888,12 +1850,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # Collision exclusion for IPC-coupled links is handled in the collider at build time.
             if self.sim.coupler.has_any_rigid_coupling:
                 self.substep(f)
-
-        if self._requires_grad and not isinstance(self.sim.coupler, SAPCoupler):
-            # After the couplers, which accumulate the coupling wrench the next substep consumes
-            kernel_save_adjoint_cache(
-                f + 1, self.dyn_state, self._rigid_adjoint_cache, self.rigid_info, self.rigid_config
-            )
 
     # ------------------------------------------------------------------------------------
     # -------------------------------- state get/set -------------------------------------
@@ -3665,7 +3621,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return self.constraint_solver.get_equality_constraints(as_tensor, to_torch)
 
     def clear_external_force(self):
-        if gs.use_zerocopy:
+        # The recording of a step needs the kernel, which the backward pass of the step reverses
+        if gs.use_zerocopy and not is_recording_step():
             for tensor in (self.dyn_state.links.cfrc_applied_ang, self.dyn_state.links.cfrc_applied_vel):
                 out = qd_to_torch(tensor, copy=False)
                 out.zero_()
@@ -3781,7 +3738,6 @@ def kernel_step_1(
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
-    is_backward: qd.template(),
 ):
     """Run the first half of a substep on its own (see func_step_1)."""
     func_step_1(
@@ -3792,7 +3748,7 @@ def kernel_step_1(
         rigid_config,
         is_forward_pos_updated,
         is_forward_vel_updated,
-        is_backward,
+        is_backward=False,
     )
 
 
@@ -3813,7 +3769,7 @@ def func_step_2(
     # before and after integration under the effect of external forces and constraints. This means that
     # acceleration data will be shifted one timestep in the past, but there isn't really any way around.
     # The midpoint integration overwrites the acceleration the link accelerations read, which a launch that autodiff
-    # reverses cannot do, so the backward pass reverses them as a launch of their own (see substep_pre_coupling_grad).
+    # reverses cannot do, so the backward pass reverses them as a launch of their own (see 'RigidSolver.substep').
     if qd.static(not is_reversed):
         func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=is_backward)
 
@@ -3857,7 +3813,6 @@ def kernel_substep_dynamics(
     rigid_config: qd.template(),
     is_forward_pos_updated: qd.template(),
     is_forward_vel_updated: qd.template(),
-    is_backward: qd.template(),
     enable_constraint: qd.template(),
 ):
     """Run the forward dynamics of a substep, then assemble its equality constraints, captured as one graph.
@@ -3872,7 +3827,7 @@ def kernel_substep_dynamics(
         rigid_config,
         is_forward_pos_updated,
         is_forward_vel_updated,
-        is_backward,
+        is_backward=False,
     )
     if qd.static(enable_constraint):
         func_add_equality_constraints(dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config)
@@ -3902,7 +3857,6 @@ def kernel_substep_post(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    is_backward: qd.template(),
     enable_constraint: qd.template(),
     noslip: qd.template(),
     errno: qd.Tensor,
@@ -3923,6 +3877,6 @@ def kernel_substep_post(
         rigid_info,
         rigid_config,
         is_reversed=False,
-        is_backward=is_backward,
+        is_backward=False,
         errno=errno,
     )

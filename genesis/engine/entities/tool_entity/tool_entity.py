@@ -6,6 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import ToolEntityState
+from genesis.grad.bridge import custom_backward
 from genesis.utils.geom import (
     qd_rotvec_to_quat,
     qd_transform_quat_by_quat,
@@ -71,14 +72,10 @@ class ToolEntity(Entity):
     def substep_pre_coupling(self, f):
         self.advect(f)
 
-    def substep_pre_coupling_grad(self, f):
-        self.advect.grad(f)
-
     def substep_post_coupling(self, f):
-        self.update_latest_pos(f)
-
-    def substep_post_coupling_grad(self, f):
-        pass
+        # The latest pose is read for rendering alone, without gradient
+        with custom_backward(None):
+            self.update_latest_pos(f)
 
     @qd.func
     def collide(self, f, pos_world, vel_mat, i_b):
@@ -114,23 +111,6 @@ class ToolEntity(Entity):
             self.quat[target, i_b] = self.quat[source, i_b]
             self.vel[target, i_b] = self.vel[source, i_b]
             self.ang[target, i_b] = self.ang[source, i_b]
-
-    @qd.kernel
-    def copy_grad(self, source: qd.i32, target: qd.i32):
-        for i_b in range(self._sim._B):
-            self.pos.grad[target, i_b] = self.pos.grad[source, i_b]
-            self.quat.grad[target, i_b] = self.quat.grad[source, i_b]
-            self.vel.grad[target, i_b] = self.vel.grad[source, i_b]
-            self.ang.grad[target, i_b] = self.ang.grad[source, i_b]
-
-    @qd.kernel
-    def reset_grad_till_frame(self, f: qd.i32):
-        for i_b in range(self._sim._B):
-            for i_f in range(f):
-                self.pos.grad[i_f, i_b].fill(0)
-                self.quat.grad[i_f, i_b].fill(0)
-                self.vel.grad[i_f, i_b].fill(0)
-                self.ang.grad[i_f, i_b].fill(0)
 
     @qd.kernel
     def get_frame(

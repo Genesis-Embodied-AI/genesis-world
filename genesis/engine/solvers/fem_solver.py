@@ -12,6 +12,7 @@ from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
 from genesis.engine.states.solvers import FEMSolverState
+from genesis.grad.bridge import custom_backward
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import qd_to_torch
 
@@ -976,26 +977,18 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.init_pos_and_vel(f)
                 self.compute_vel(f)
                 self.apply_uniform_force(f)
+                # The constraints carry no gradient
                 if self._constraints_initialized:
-                    self.apply_soft_constraints(f)
-
-    def substep_pre_coupling_grad(self, f):
-        if self.is_active:
-            if self._use_implicit_solver:
-                gs.raise_exception("Gradient computation is not supported for implicit solver.")
-            self.apply_uniform_force.grad(f)
-            self.compute_vel.grad(f)
-            self.init_pos_and_vel.grad(f)
+                    with custom_backward(None):
+                        self.apply_soft_constraints(f)
 
     def substep_post_coupling(self, f):
         if self.is_active:
             self.compute_pos(f)
+            # The constraints carry no gradient
             if self._constraints_initialized and not self._use_implicit_solver:
-                self.apply_hard_constraints(f)
-
-    def substep_post_coupling_grad(self, f):
-        if self.is_active:
-            self.compute_pos.grad(f)
+                with custom_backward(None):
+                    self.apply_hard_constraints(f)
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
@@ -1007,28 +1000,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # Copy 'active' for all elements and all batch indices
         for i_e, i_b in qd.ndrange(self.n_elements_max, self._B):
             self.elements_el_ng[target, i_e, i_b].active = self.elements_el_ng[source, i_e, i_b].active
-
-    @qd.kernel
-    def copy_grad(self, source: qd.i32, target: qd.i32):
-        # Copy gradients for vertices
-        for i_v, i_b in qd.ndrange(self.n_vertices_max, self._B):
-            self.elements_v.grad[target, i_v, i_b].pos = self.elements_v.grad[source, i_v, i_b].pos
-            self.elements_v.grad[target, i_v, i_b].vel = self.elements_v.grad[source, i_v, i_b].vel
-
-        # Copy the gradients of the actuation of elements
-        for i_e, i_b in qd.ndrange(self.n_elements_max, self._B):
-            self.elements_el.grad[target, i_e, i_b].actu = self.elements_el.grad[source, i_e, i_b].actu
-
-    @qd.kernel
-    def reset_grad_till_frame(self, f: qd.i32):
-        # Zero out v.grad in frame 0..(f-1) for all vertices, all batch indices
-        for frame_i, vert_i, i_b in qd.ndrange(f, self.n_vertices_max, self._B):
-            self.elements_v.grad[frame_i, vert_i, i_b].pos = 0
-            self.elements_v.grad[frame_i, vert_i, i_b].vel = 0
-
-        # Zero out elements_el.grad in frame 0..(f-1) for all elements, all batch indices
-        for frame_i, elem_i, i_b in qd.ndrange(f, self.n_elements_max, self._B):
-            self.elements_el.grad[frame_i, elem_i, i_b].actu = 0
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- gradient ---------------------------------------
@@ -1047,10 +1018,6 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def roll_frame_window(self):
         self.copy_frame(self.n_frames - 1, 0)
-
-    def roll_frame_window_grad(self):
-        self.copy_grad(0, self.n_frames - 1)
-        self.reset_grad_till_frame(self.n_frames - 1)
 
     @property
     def data(self):
