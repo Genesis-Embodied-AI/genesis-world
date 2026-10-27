@@ -25,7 +25,10 @@ import psutil
 import pyglet
 
 import quadrants as qd
-from quadrants.lang._fast_caching import args_hasher
+from quadrants.lang import kernel_impl
+from quadrants.lang._fast_caching import args_hasher, src_hasher
+from quadrants.lang.kernel import Kernel
+from quadrants.types.enums import AutodiffMode
 
 import genesis as gs
 from genesis.typing import is_sequence
@@ -991,6 +994,36 @@ def _stringify_obj_type_with_grad(raise_on_templated_floats, path, obj, arg_meta
 
 
 args_hasher.stringify_obj_type = _stringify_obj_type_with_grad
+
+# FIXME: quadrants#1003 - a reverse-mode kernel misses the fastcache, since it lacks the callable marking it pure. Both
+# are patched, the autodiff mode joining the key, without which a reverse kernel loads its forward one.
+_kernel_impl = kernel_impl._kernel_impl
+_make_source_config_key = src_hasher.make_source_config_key
+_try_load_fastcache = Kernel._try_load_fastcache
+
+
+def _kernel_impl_with_adjoint_callable(*args, level_of_class_stackframe, **kwargs):
+    # The decorator detects a class kernel from the stack, which this wrapper deepens by one frame
+    wrapped = _kernel_impl(*args, level_of_class_stackframe=level_of_class_stackframe + 1, **kwargs)
+    wrapped._adjoint.quadrants_callable = wrapped
+    return wrapped
+
+
+def _try_load_fastcache_by_autodiff_mode(kernel, args, key):
+    if kernel.autodiff_mode == AutodiffMode.NONE:
+        return _try_load_fastcache(kernel, args, key)
+    autodiff_mode = str(kernel.autodiff_mode)
+    src_hasher.make_source_config_key = lambda info: src_hasher.hash_iterable_strings(
+        (_make_source_config_key(info), autodiff_mode)
+    )
+    try:
+        return _try_load_fastcache(kernel, args, key)
+    finally:
+        src_hasher.make_source_config_key = _make_source_config_key
+
+
+kernel_impl._kernel_impl = _kernel_impl_with_adjoint_callable
+Kernel._try_load_fastcache = _try_load_fastcache_by_autodiff_mode
 
 
 def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor) -> None:
