@@ -1377,8 +1377,8 @@ def merge_submeshes(verts_list, faces_list):
     # Weld by quantized position (see VERT_WELD_QUANTIZE_FACTOR). int64 is required: quantized metre-scale
     # coordinates overflow int32.
     quantized = np.round(stacked_verts / VERT_WELD_QUANTIZE_FACTOR).astype(np.int64)
-    _, unique_idx, remap = unique_rows(quantized, return_index=True, return_inverse=True)
-    # The groups come ordered by quantized key; rank the first-occurrence indices to restore input order instead.
+    _, unique_idx, remap, _ = unique_rows(quantized)
+    # The groups come ordered by quantized position; rank the first-occurrence indices to restore input order instead.
     rank = np.empty(len(unique_idx), dtype=gs.np_int)
     rank[np.argsort(unique_idx)] = np.arange(len(unique_idx))
     remap = rank[remap]

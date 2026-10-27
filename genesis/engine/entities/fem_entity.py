@@ -198,7 +198,7 @@ class FEMEntity(Entity):
             )
             all_tri = el2tri.reshape((-1, 3))
             all_tri_sorted = np.sort(all_tri, axis=1)
-            _, unique_idcs, cnt = unique_rows(all_tri_sorted, return_index=True, return_counts=True)
+            _, unique_idcs, _, cnt = unique_rows(all_tri_sorted)
             unique_tri = all_tri[unique_idcs]
             surface_tri = unique_tri[cnt == 1]
 

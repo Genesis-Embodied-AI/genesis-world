@@ -654,7 +654,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
             uv = None
 
         pairs = np.stack(index_faces, axis=1)  # (face_num * 3, 2 or 3)
-        uniq, inv = unique_rows(pairs, return_inverse=True)
+        uniq, _, inv, _ = unique_rows(pairs)
 
         vertices = vertices[uniq[:, 0]]
         normals = normals[uniq[:, 1]]

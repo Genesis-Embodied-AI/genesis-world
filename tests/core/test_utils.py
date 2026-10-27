@@ -1,4 +1,3 @@
-import itertools
 import math
 import re
 import subprocess
@@ -430,49 +429,35 @@ def test_compose_inertial_properties():
 
 @pytest.mark.required
 def test_unique_rows():
-    INT32_MIN, INT32_MAX = np.iinfo(np.int32).min, np.iinfo(np.int32).max
+    INT64_MIN, INT64_MAX = np.iinfo(np.int64).min, np.iinfo(np.int64).max
     UINT64_MAX = np.iinfo(np.uint64).max
     rows_list = (
         np.random.randint(-50, 50, (2000, 3)),
         np.random.randint(0, 4, (500, 2)).astype(np.uint8),
         np.array(
             [
-                [INT32_MIN, 1],
-                [INT32_MAX, 0],
-                [INT32_MIN, 1],
+                [INT64_MIN, 1],
+                [INT64_MAX, 0],
+                [INT64_MIN, 1],
             ],
-            dtype=np.int32,
         ),
         np.array(
             [
                 [UINT64_MAX, 0],
-                [UINT64_MAX - 1, 1],
+                [0, 1],
                 [UINT64_MAX, 0],
             ],
             dtype=np.uint64,
         ),
-        # The product of the column value ranges overflows int64
-        np.array(
-            [
-                [3, 0],
-                [0, 0],
-                [0, 2**62],
-            ]
-        ),
+        np.random.randint(-(2**40), 2**40, (1000, 3)),
         np.random.randint(0, 2, (100, 40)),
-        np.random.randint(0, 5, (300, 3)).astype(np.float64),
         np.zeros((0, 3), dtype=np.int64),
     )
     for rows in rows_list:
-        for flags in itertools.product((False, True), repeat=3):
-            kwargs = dict(zip(("return_index", "return_inverse", "return_counts"), flags))
-            expected, result = np.unique(rows, axis=0, **kwargs), unique_rows(rows, **kwargs)
-            if not any(flags):
-                expected, result = (expected,), (result,)
-            assert len(result) == len(expected)
-            for value, expected_value in zip(result, expected):
-                assert value.dtype == expected_value.dtype
-                assert_equal(value, expected_value)
+        expected = np.unique(rows, axis=0, return_index=True, return_inverse=True, return_counts=True)
+        for value, expected_value in zip(unique_rows(rows), expected):
+            assert value.dtype == expected_value.dtype
+            assert_equal(value, expected_value)
 
 
 @pytest.mark.required

@@ -444,80 +444,77 @@ def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
 
 
 @nb.jit(nopython=True, cache=True)
-def _unique_keys(keys, n_bits):
-    """Find the unique values of non-negative integer keys spanning n_bits bits, in increasing order.
+def unique_rows(rows):
+    """Find the unique rows of a 2D integer array, in lexicographic order, as 'np.unique' along the first axis does.
 
-    Returns the index of the first occurrence of each unique key, the index of the unique key matching each key, and
-    the number of occurrences of each unique key. The keys are sorted by a stable least-significant-digit radix sort,
-    linear in the number of keys, whose stability makes the first key of each run of equal keys its first occurrence.
+    The rows are sorted by a stable least-significant-digit radix sort, linear in the number of rows, which goes through
+    the digits of the last column first. Its stability makes the first row of each run of equal rows its first
+    occurrence.
+
+    Returns the unique rows, the index of the first occurrence of each unique row, the index of the unique row matching
+    each row, and the number of occurrences of each unique row.
     """
-    n_keys = len(keys)
-    keys_order = np.arange(n_keys)
-    keys_order_next = np.empty(n_keys, dtype=np.int64)
+    n_rows, n_columns = rows.shape
+    # Unsigned arithmetic, modular, yields the exact offset of a value from the minimum of its column whatever the dtype
+    columns_value = np.empty((n_columns, n_rows), dtype=np.uint64)
+    columns_range = np.zeros(n_columns, dtype=np.uint64)
+    if n_rows:
+        for i_c in range(n_columns):
+            column_min = rows[:, i_c].min()
+            for i_r in range(n_rows):
+                columns_value[i_c, i_r] = np.uint64(rows[i_r, i_c]) - np.uint64(column_min)
+                columns_range[i_c] = max(columns_range[i_c], columns_value[i_c, i_r])
+
+    rows_order = np.arange(n_rows)
+    rows_order_next = np.empty(n_rows, dtype=np.int64)
     # Digits of 11 bits keep the histogram of a pass small enough to stay in cache
     digits_offset = np.empty(2049, dtype=np.int64)
-    for shift in range(0, n_bits, 11):
-        digits_offset[:] = 0
-        for i in range(n_keys):
-            digits_offset[((keys[keys_order[i]] >> shift) & 2047) + 1] += 1
-        for digit in range(2048):
-            digits_offset[digit + 1] += digits_offset[digit]
-        for i in range(n_keys):
-            i_k = keys_order[i]
-            digit = (keys[i_k] >> shift) & 2047
-            keys_order_next[digits_offset[digit]] = i_k
-            digits_offset[digit] += 1
-        keys_order, keys_order_next = keys_order_next, keys_order
+    for i_c in range(n_columns - 1, -1, -1):
+        shift = np.uint64(0)
+        while shift < np.uint64(64) and columns_range[i_c] >> shift:
+            # The digit counts are independent of the order of the rows, which spares a random access per row
+            digits_offset[:] = 0
+            for i_r in range(n_rows):
+                digits_offset[((columns_value[i_c, i_r] >> shift) & np.uint64(2047)) + 1] += 1
+            for digit in range(2048):
+                digits_offset[digit + 1] += digits_offset[digit]
+            for i in range(n_rows):
+                i_r = rows_order[i]
+                digit = (columns_value[i_c, i_r] >> shift) & np.uint64(2047)
+                rows_order_next[digits_offset[digit]] = i_r
+                digits_offset[digit] += 1
+            rows_order, rows_order_next = rows_order_next, rows_order
+            shift += np.uint64(11)
 
-    keys_inverse = np.empty(n_keys, dtype=np.int64)
+    # Equal rows are compared on the rows themselves, whose values are contiguous in memory
+    is_run_start = np.empty(n_rows, dtype=np.bool_)
     n_unique = 0
-    for i in range(n_keys):
-        i_k = keys_order[i]
-        if i == 0 or keys[i_k] != keys[keys_order[i - 1]]:
-            n_unique += 1
-        keys_inverse[i_k] = n_unique - 1
+    for i in range(n_rows):
+        i_r = rows_order[i]
+        is_run_start[i] = i == 0
+        if i > 0:
+            i_r_prev = rows_order[i - 1]
+            for i_c in range(n_columns):
+                if rows[i_r, i_c] != rows[i_r_prev, i_c]:
+                    is_run_start[i] = True
+                    break
+        n_unique += is_run_start[i]
+
+    rows_unique = np.empty((n_unique, n_columns), dtype=rows.dtype)
     unique_index = np.empty(n_unique, dtype=np.int64)
     unique_counts = np.zeros(n_unique, dtype=np.int64)
-    for i in range(n_keys - 1, -1, -1):
-        i_k = keys_order[i]
-        i_u = keys_inverse[i_k]
-        unique_index[i_u] = i_k
+    rows_inverse = np.empty(n_rows, dtype=np.int64)
+    i_u = -1
+    for i in range(n_rows):
+        i_r = rows_order[i]
+        if is_run_start[i]:
+            i_u += 1
+            unique_index[i_u] = i_r
+            for i_c in range(n_columns):
+                rows_unique[i_u, i_c] = rows[i_r, i_c]
         unique_counts[i_u] += 1
-    return unique_index, keys_inverse, unique_counts
-
-
-def unique_rows(rows, *, return_index=False, return_inverse=False, return_counts=False):
-    """Find the unique rows of a 2D array, as 'np.unique' along the first axis does, several times faster for integers.
-
-    The flags and the returned values are those of 'np.unique'. Integer rows are packed into one int64 key each, whose
-    increasing order is the lexicographic order of the rows, and the keys are deduplicated by a radix sort. Rows of
-    other dtypes, and rows whose column value ranges multiply past int64, go through 'np.unique' along the axis.
-    """
-    if rows.ndim == 2 and len(rows) and np.issubdtype(rows.dtype, np.integer):
-        columns_min = rows.min(axis=0)
-        # Python integers avoid an int64 overflow when computing the ranges or their product
-        columns_n_values = [
-            int(value_max) - int(value_min) + 1 for value_min, value_max in zip(columns_min, rows.max(axis=0))
-        ]
-        n_keys_max = math.prod(columns_n_values)
-        if n_keys_max <= np.iinfo(np.int64).max:
-            # Read each row as the digits of one number, in a base per column that spans the values of that column
-            keys = np.zeros(len(rows), dtype=np.int64)
-            for column, column_min, column_n_values in zip(rows.T, columns_min, columns_n_values):
-                keys *= column_n_values
-                keys += np.subtract(column, column_min, dtype=np.int64)
-            unique_index, keys_inverse, unique_counts = _unique_keys(keys, (n_keys_max - 1).bit_length())
-            outs = [rows[unique_index]]
-            if return_index:
-                outs.append(unique_index)
-            if return_inverse:
-                outs.append(keys_inverse)
-            if return_counts:
-                outs.append(unique_counts)
-            return tuple(outs) if len(outs) > 1 else outs[0]
-    return np.unique(
-        rows, axis=0, return_index=return_index, return_inverse=return_inverse, return_counts=return_counts
-    )
+        rows_inverse[i_r] = i_u
+    return rows_unique, unique_index, rows_inverse, unique_counts
 
 
 def is_approx_multiple(a, b, tol=1e-7):
