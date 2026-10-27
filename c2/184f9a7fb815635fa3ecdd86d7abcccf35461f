@@ -1,0 +1,29 @@
+genesis/engine/entities/sph_entity.py
+  s_917d10d40fc190::t_821616e7afce5f 1-2,6,12-16,28,36,51-53
+.github/contributing/ARCHITECTURE.md
+  s_917d10d40fc190::t_821616e7afce5f 139
+genesis/engine/couplers/legacy_coupler.py
+  s_917d10d40fc190::t_821616e7afce5f 11,43,52-53,392,395,414,417-419,630-631,651-654,685,689,692-695
+genesis/engine/solvers/sph_solver.py
+  s_917d10d40fc190::t_821616e7afce5f 9,12-14,63-64,75-76,83-108,111,121-123,150,153
+tests/particles/test_sph.py
+  s_917d10d40fc190::t_821616e7afce5f 10,13,286,320-324
+genesis/engine/system_data/sph.py
+  s_917d10d40fc190::t_821616e7afce5f 1-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c2184f9a7fb815635fa3ecdd86d7abcccf35461f",
+  "prompts": {},
+  "sessions": {
+    "s_917d10d40fc190": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a1d595c-8377-490e-b2ca-361d69c2e084",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
