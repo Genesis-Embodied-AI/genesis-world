@@ -442,13 +442,12 @@ def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
     return data
 
 
-def unique_rows(rows, *, return_index=False, return_inverse=False, return_counts=False):
+def unique_rows(rows, *, return_index=False, **kwargs):
     """Find the unique rows of an array, as 'np.unique' along the first axis does, but faster for integers.
 
-    Returns the same as 'np.unique(rows, axis=0, ...)' with the same flags. Each row is packed into one integer key,
-    since 'np.unique' along an axis sorts rows far slower than integers. The keys sort in the lexicographic order of the
-    rows, so the result is identical. Rows that are not integers, or whose columns span too wide a range for the key to
-    fit in int64, go through 'np.unique' along the axis.
+    Takes the same flags and returns the same result. Integer rows are packed into one int64 key each, which sorts in
+    the order of the rows, since 'np.unique' sorts integers far faster than rows. Other rows, and rows too wide for the
+    key, go through 'np.unique' along the axis.
     """
     rows = np.asarray(rows)
     if rows.ndim == 2 and len(rows) and np.issubdtype(rows.dtype, np.integer):
@@ -460,15 +459,10 @@ def unique_rows(rows, *, return_index=False, return_inverse=False, return_counts
             keys = np.zeros(len(rows), dtype=np.int64)
             for col, col_min, dim in zip(rows.T, rows_min, dims):
                 keys = keys * dim + np.subtract(col, col_min, dtype=np.int64)
-            _, index, *outs = np.unique(
-                keys, return_index=True, return_inverse=return_inverse, return_counts=return_counts
-            )
-            if return_index:
-                outs.insert(0, index)
+            _, index, *outs = np.unique(keys, return_index=True, **kwargs)
+            outs = (index, *outs) if return_index else tuple(outs)
             return (rows[index], *outs) if outs else rows[index]
-    return np.unique(
-        rows, axis=0, return_index=return_index, return_inverse=return_inverse, return_counts=return_counts
-    )
+    return np.unique(rows, axis=0, return_index=return_index, **kwargs)
 
 
 def is_approx_multiple(a, b, tol=1e-7):
