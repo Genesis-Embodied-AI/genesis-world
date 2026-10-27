@@ -567,7 +567,7 @@ def test_parsing_inertia_defaults(
     )
     assert_allclose(entity_collision_only.base_link.desc.mass, 1.0, tol=gs.EPS)
 
-    # The collision box an MJCF draws counts once, as collision geometry. Estimating from visual geometry recomputes
+    # The collision box an MJCF draws counts once, among the visual geoms. Estimating from visual geometry recomputes
     # the inertia MuJoCo compiled, from visual geometry kept undrawn.
     entity_inertia_mjcf = inertia_scene.add_entity(
         morph=gs.morphs.MJCF(
@@ -580,8 +580,8 @@ def test_parsing_inertia_defaults(
             rho=1000.0,
         ),
     )
-    assert_allclose(entity_inertia_mjcf.base_link.desc.mass, 48.0, tol=gs.EPS)
-    assert_allclose(entity_inertia_mjcf.base_link.desc.inertial_pos, (0.2, 0.0, 0.0), tol=gs.EPS)
+    assert_allclose(entity_inertia_mjcf.base_link.desc.mass, 49.0, tol=gs.EPS)
+    assert_allclose(entity_inertia_mjcf.base_link.desc.inertial_pos, (48.0 * 0.2 / 49.0, 0.0, 0.0), tol=gs.EPS)
 
     # A mesh takes the volume its surface encloses, closed by its watertight wrap when open, rather than that of the
     # convex pieces its collision is split into. The wrap encloses the surface within a small offset.

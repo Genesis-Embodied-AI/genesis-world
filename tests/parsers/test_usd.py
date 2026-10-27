@@ -408,7 +408,7 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
             recompute_inertia=True,
         ),
     )
-    # These links are drawn with their collision geometry alone, so estimating from visual geometry keeps it
+    # These links are drawn with their collision geometry alone, whose authored densities the visual estimate keeps
     entities_from_visual = scene.add_stage(
         morph=gs.morphs.USD(
             file=physics_material_usd,

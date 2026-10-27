@@ -737,7 +737,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
     # Geometries of visual groups (0, 1 or 2) are rendered in accordance with MuJoCo, collision ones included
     if not is_col or info["group"] in (0, 1, 2):
         vmesh = gs.Mesh.from_trimesh(tmesh, scale=scale, surface=surface, metadata=metadata)
-        g_infos.append({**info, "vmesh": vmesh, "contype": 0, "conaffinity": 0, "is_drawn_collision": is_col})
+        g_infos.append({**info, "vmesh": vmesh, "contype": 0, "conaffinity": 0})
 
     return g_infos
 

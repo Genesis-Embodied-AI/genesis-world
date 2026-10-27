@@ -1526,15 +1526,12 @@ class KinematicEntityDescription(EntityDescription):
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
         geoms for a link without collision geometry. With 'from_visual', the visual geoms replace the collision ones in
         both estimates of a link whose asset leaves part of its inertial out, open ones closed first, unless the link has
-        no visual geometry of its own. A warning names the link if its visual and collision volumes differ widely.
+        no visual geometry. A warning names the link if its visual and collision volumes differ widely.
         """
-        # A drawn collision geom also stands among the visual ones (see 'parse_geom' in mjcf.py and
-        # 'parse_usd_rigid_entity'), so it counts once
-        vg_inertia_infos = [g_info for g_info in vg_infos if not g_info.get("is_drawn_collision")]
         # The estimate only fills what the asset leaves out, so a link stating its whole inertial keeps the collision
         # geometry, which spares closing its visual meshes
         is_inertial_explicit = not any(value is None for value in (explicit_mass, explicit_com, explicit_inertia))
-        if from_visual and not is_inertial_explicit and vg_inertia_infos:
+        if from_visual and not is_inertial_explicit and vg_infos:
             # An asset may state a density on the collision copy of a geom alone, so volumes are composed without them
             cg_volume = None
             if cg_infos:
@@ -1544,7 +1541,7 @@ class KinematicEntityDescription(EntityDescription):
             # An open visual mesh encloses no well-defined volume, and its convex hull would fill every concavity, so
             # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
             cg_infos = []
-            for g_info in vg_inertia_infos:
+            for g_info in vg_infos:
                 # A primitive is integrated analytically (see 'compose_inertial_from_g_infos'), and a mesh splits its
                 # vertices along normal and texture seams, so its closure is checked once merged
                 if g_info.get("type", gs.GEOM_TYPE.MESH) == gs.GEOM_TYPE.MESH:
