@@ -313,11 +313,19 @@ class ImGuiOverlayPlugin(ViewerPlugin):
 
         Each value is the options object the description of the entity holds, so a rebuild handed it unchanged
         re-creates the entity from that description (see 'InteractiveScene.rebuild'). An entity without a description
-        is resolved again from its options.
+        is resolved again from its options. The parts of a hybrid entity are left out, since the hybrid entity adds
+        them itself.
         """
+        hybrid_parts_name = {
+            part.name
+            for entity in self.scene.entities
+            if isinstance(entity, gs.engine.entities.HybridEntity)
+            for part in (entity.part_rigid, entity.part_soft)
+        }
         self._pending_entities_options = {
             entity.name: entity.desc.options if entity.desc is not None else entity.options
             for entity in self.scene.entities
+            if entity.name not in hybrid_parts_name
         }
 
     def _is_capturing(self) -> bool:
