@@ -1,3 +1,4 @@
+import itertools
 import math
 import re
 import subprocess
@@ -19,7 +20,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils import warnings as warnings_mod
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
-from genesis.utils.misc import tensor_to_array
+from genesis.utils.misc import tensor_to_array, unique_rows
 from genesis.utils.tools import RunningMean
 from genesis.utils.urdf import compose_inertial_properties
 from genesis.utils.warnings import warn_once
@@ -425,6 +426,32 @@ def test_compose_inertial_properties():
     assert_allclose(combined_mass, expected_mass, tol=TOL)
     assert_allclose(combined_com, expected_com, tol=TOL)
     assert_allclose(combined_inertia, expected_inertia, tol=TOL)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize(
+    "rows",
+    [
+        np.random.default_rng(0).integers(-50, 50, (2000, 3)),
+        np.random.default_rng(0).integers(0, 4, (500, 2)).astype(np.uint8),
+        np.array(
+            [[np.iinfo(np.int32).min, 1], [np.iinfo(np.int32).max, 0], [np.iinfo(np.int32).min, 1]], dtype=np.int32
+        ),
+        np.array([[0, 0, 0], [2**40, 2**40, 2**40], [0, 0, 0]]),  # Too wide for an int64 key
+        np.random.default_rng(0).integers(0, 5, (300, 3)).astype(np.float64),
+        np.zeros((0, 3), dtype=np.int64),
+    ],
+)
+def test_unique_rows(rows):
+    for flags in itertools.product((False, True), repeat=3):
+        kwargs = dict(zip(("return_index", "return_inverse", "return_counts"), flags))
+        expected, result = np.unique(rows, axis=0, **kwargs), unique_rows(rows, **kwargs)
+        if not any(flags):
+            expected, result = (expected,), (result,)
+        assert len(result) == len(expected)
+        for value, expected_value in zip(result, expected):
+            assert value.dtype == expected_value.dtype
+            assert_equal(value, expected_value)
 
 
 @pytest.mark.required

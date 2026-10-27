@@ -17,7 +17,7 @@ from genesis.engine.couplers import SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
-from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor
+from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor, unique_rows
 
 from .base_entity import Entity
 
@@ -198,7 +198,7 @@ class FEMEntity(Entity):
             )
             all_tri = el2tri.reshape((-1, 3))
             all_tri_sorted = np.sort(all_tri, axis=1)
-            _, unique_idcs, cnt = np.unique(all_tri_sorted, axis=0, return_counts=True, return_index=True)
+            _, unique_idcs, cnt = unique_rows(all_tri_sorted, return_index=True, return_counts=True)
             unique_tri = all_tri[unique_idcs]
             surface_tri = unique_tri[cnt == 1]
 

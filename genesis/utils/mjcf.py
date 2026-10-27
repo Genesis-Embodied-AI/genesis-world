@@ -19,7 +19,7 @@ from genesis.ext import urdfpy
 from . import geom as gu
 from . import urdf as uu
 from .collision import solve_contype_conaffinity
-from .misc import get_assets_dir, redirect_libc_stderr
+from .misc import get_assets_dir, redirect_libc_stderr, unique_rows
 
 
 MIN_TIMECONST = np.finfo(np.double).eps
@@ -654,7 +654,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
             uv = None
 
         pairs = np.stack(index_faces, axis=1)  # (face_num * 3, 2 or 3)
-        uniq, inv = np.unique(pairs, axis=0, return_inverse=True)
+        uniq, inv = unique_rows(pairs, return_inverse=True)
 
         vertices = vertices[uniq[:, 0]]
         normals = normals[uniq[:, 1]]

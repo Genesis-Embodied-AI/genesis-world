@@ -29,6 +29,7 @@ from genesis.utils.misc import (
     qd_to_numpy,
     qd_to_torch,
     tensor_to_array,
+    unique_rows,
 )
 from genesis.utils.sdf import SDF
 
@@ -228,7 +229,7 @@ class Collider:
             is_multi_point_pair = ~is_point_pair & (
                 self._solver._options.enable_multi_contact | (pairs_type == gs.GEOM_TYPE.BOX).any(axis=1)
             )
-            _, links_pair_idx = np.unique(pairs_link_idx, axis=0, return_inverse=True)
+            _, links_pair_idx = unique_rows(pairs_link_idx, return_inverse=True)
             links_pair_n_contacts = np.bincount(links_pair_idx, weights=np.where(is_multi_point_pair, 3, 1))
             has_prunable_contacts = bool(links_pair_n_contacts.max() >= 3)
 
@@ -258,7 +259,7 @@ class Collider:
 
         # The link pairs holding a valid geom pair, oriented with the link carrying the most geoms first, whose geoms
         # the broad phase spreads its work over (see func_broad_phase_geoms).
-        valid_link_pairs = np.unique(np.sort(self._geoms_link_idx[self._valid_collision_pairs], axis=1), axis=0)
+        valid_link_pairs = unique_rows(np.sort(self._geoms_link_idx[self._valid_collision_pairs], axis=1))
         is_swapped = self._links_n_geoms[valid_link_pairs[:, 1]] > self._links_n_geoms[valid_link_pairs[:, 0]]
         valid_link_pairs[is_swapped] = valid_link_pairs[is_swapped, ::-1]
         n_valid_link_pairs = len(valid_link_pairs)

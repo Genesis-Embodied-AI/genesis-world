@@ -442,6 +442,31 @@ def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
     return data
 
 
+def unique_rows(rows, *, return_index=False, return_inverse=False, return_counts=False):
+    """Same as 'np.unique(rows, axis=0, ...)', but several times faster on a 2D array of integers.
+
+    Each row is packed into one integer key, since 'np.unique' along an axis sorts rows far slower than integers. The
+    keys sort in the lexicographic order of the rows, so the result is identical. Rows that are not integers, or whose
+    columns span too wide a range for the key to fit in int64, go through 'np.unique' along the axis.
+    """
+    rows = np.asarray(rows)
+    if rows.ndim == 2 and len(rows) and np.issubdtype(rows.dtype, np.integer):
+        rows_min = rows.min(axis=0)
+        # Python integers, so that neither the ranges nor their product overflow
+        dims = [int(hi) - int(lo) + 1 for lo, hi in zip(rows_min, rows.max(axis=0))]
+        if math.prod(dims) < np.iinfo(np.int64).max:
+            keys = np.ravel_multi_index(np.subtract(rows, rows_min, dtype=np.int64).T, dims)
+            _, index, *outs = np.unique(
+                keys, return_index=True, return_inverse=return_inverse, return_counts=return_counts
+            )
+            if return_index:
+                outs.insert(0, index)
+            return (rows[index], *outs) if outs else rows[index]
+    return np.unique(
+        rows, axis=0, return_index=return_index, return_inverse=return_inverse, return_counts=return_counts
+    )
+
+
 def is_approx_multiple(a, b, tol=1e-7):
     return abs(a % b) < tol or abs(b - (a % b)) < tol
 
