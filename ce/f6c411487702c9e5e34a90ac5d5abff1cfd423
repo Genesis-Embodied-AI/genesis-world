@@ -1,0 +1,19 @@
+genesis/utils/misc.py
+  s_b5b0a08cf5c920::t_3afb24a7f25e15 455
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cef6c411487702c9e5e34a90ac5d5abff1cfd423",
+  "prompts": {},
+  "sessions": {
+    "s_b5b0a08cf5c920": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3f55e438-3065-410e-84f6-99bf4a610fe1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
