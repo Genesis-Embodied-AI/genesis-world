@@ -6,9 +6,10 @@ adaptive defaults.
 
 from typing import Tuple
 
+import numpy as np
+
 import igl
 import numba as nb
-import numpy as np
 import trimesh
 
 import genesis as gs

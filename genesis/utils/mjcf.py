@@ -1,16 +1,16 @@
 import os
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from itertools import chain
 from bisect import bisect_right
+from itertools import chain
+from pathlib import Path
+
+import numpy as np
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
-
-import numpy as np
 import trimesh
-from trimesh.visual.texture import TextureVisuals
 from PIL import Image
+from trimesh.visual.texture import TextureVisuals
 
 import genesis as gs
 from genesis.constants import XACRO_FORMAT

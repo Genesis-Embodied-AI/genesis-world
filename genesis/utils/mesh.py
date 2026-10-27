@@ -27,7 +27,7 @@ from .cache import (
     get_wth_cache,
     register_cache_clear,
 )
-from .misc import get_assets_dir, get_src_dir
+from .misc import get_assets_dir, get_src_dir, unique_rows
 
 MESH_REPAIR_ERROR_THRESHOLD = 0.01
 # Vertex welding quantum: co-located vertices are authored with identical coordinates, so a tight absolute quantum
@@ -1377,8 +1377,8 @@ def merge_submeshes(verts_list, faces_list):
     # Weld by quantized position (see VERT_WELD_QUANTIZE_FACTOR). int64 is required: quantized metre-scale
     # coordinates overflow int32.
     quantized = np.round(stacked_verts / VERT_WELD_QUANTIZE_FACTOR).astype(np.int64)
-    _, unique_idx, remap = np.unique(quantized, axis=0, return_index=True, return_inverse=True)
-    # np.unique orders groups by quantized key; rank the first-occurrence indices to restore input order instead.
+    _, unique_idx, remap = unique_rows(quantized, return_index=True, return_inverse=True)
+    # The groups come ordered by quantized key; rank the first-occurrence indices to restore input order instead.
     rank = np.empty(len(unique_idx), dtype=gs.np_int)
     rank[np.argsort(unique_idx)] = np.arange(len(unique_idx))
     remap = rank[remap]

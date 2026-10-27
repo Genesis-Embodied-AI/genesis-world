@@ -11,14 +11,14 @@ import torch
 
 import igl
 import pytest
+import scipy.linalg
 import trimesh
 from PIL import Image
-from scipy.linalg import polar as scipy_polar
-from scipy.spatial.transform import Rotation as R, Slerp
+from scipy.spatial.transform import Rotation, Slerp
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils import warnings as warnings_mod
+from genesis.utils import warnings
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array, unique_rows
 from genesis.utils.tools import RunningMean
@@ -35,9 +35,9 @@ TOL = 1e-7
 
 @pytest.fixture
 def clear_seen_fixture():
-    warnings_mod._seen.clear()
+    warnings._seen.clear()
     yield
-    warnings_mod._seen.clear()
+    warnings._seen.clear()
 
 
 def _qd_kernel_wrapper(qd_func, num_inputs, num_outputs, *args):
@@ -346,10 +346,10 @@ def test_slerp(batch_shape, tol):
     lerp_true = np.empty_like(q0)
     lerp_from_one_true = np.empty_like(q1)
     for i in range(numel):
-        rots = R.from_quat([q0[i], q1[i]], scalar_first=True)
+        rots = Rotation.from_quat([q0[i], q1[i]], scalar_first=True)
         slerp = Slerp([0, 1], rots)
         lerp_true[i] = slerp([INTERP_RATIO]).as_quat(scalar_first=True)
-        rots = R.from_quat([q0[0], q1[i]], scalar_first=True)
+        rots = Rotation.from_quat([q0[0], q1[i]], scalar_first=True)
         slerp = Slerp([0, 1], rots)
         lerp_from_one_true[i] = slerp([INTERP_RATIO]).as_quat(scalar_first=True)
 
@@ -429,30 +429,50 @@ def test_compose_inertial_properties():
 
 
 @pytest.mark.required
-@pytest.mark.parametrize(
-    "rows",
-    [
-        np.random.default_rng(0).integers(-50, 50, (2000, 3)),
-        np.random.default_rng(0).integers(0, 4, (500, 2)).astype(np.uint8),
+def test_unique_rows():
+    INT32_MIN, INT32_MAX = np.iinfo(np.int32).min, np.iinfo(np.int32).max
+    UINT64_MAX = np.iinfo(np.uint64).max
+    rows_list = (
+        np.random.randint(-50, 50, (2000, 3)),
+        np.random.randint(0, 4, (500, 2)).astype(np.uint8),
         np.array(
-            [[np.iinfo(np.int32).min, 1], [np.iinfo(np.int32).max, 0], [np.iinfo(np.int32).min, 1]], dtype=np.int32
+            [
+                [INT32_MIN, 1],
+                [INT32_MAX, 0],
+                [INT32_MIN, 1],
+            ],
+            dtype=np.int32,
         ),
-        np.array([[3, 0], [0, 0], [0, 2**62]]),  # Too wide for an int64 key, which would wrap around
-        np.random.default_rng(0).integers(0, 2, (100, 40)),  # More columns than 'np.ravel_multi_index' takes
-        np.random.default_rng(0).integers(0, 5, (300, 3)).astype(np.float64),
+        np.array(
+            [
+                [UINT64_MAX, 0],
+                [UINT64_MAX - 1, 1],
+                [UINT64_MAX, 0],
+            ],
+            dtype=np.uint64,
+        ),
+        # The product of the column value ranges overflows int64
+        np.array(
+            [
+                [3, 0],
+                [0, 0],
+                [0, 2**62],
+            ]
+        ),
+        np.random.randint(0, 2, (100, 40)),
+        np.random.randint(0, 5, (300, 3)).astype(np.float64),
         np.zeros((0, 3), dtype=np.int64),
-    ],
-)
-def test_unique_rows(rows):
-    for flags in itertools.product((False, True), repeat=3):
-        kwargs = dict(zip(("return_index", "return_inverse", "return_counts"), flags))
-        expected, result = np.unique(rows, axis=0, **kwargs), unique_rows(rows, **kwargs)
-        if not any(flags):
-            expected, result = (expected,), (result,)
-        assert len(result) == len(expected)
-        for value, expected_value in zip(result, expected):
-            assert value.dtype == expected_value.dtype
-            assert_equal(value, expected_value)
+    )
+    for rows in rows_list:
+        for flags in itertools.product((False, True), repeat=3):
+            kwargs = dict(zip(("return_index", "return_inverse", "return_counts"), flags))
+            expected, result = np.unique(rows, axis=0, **kwargs), unique_rows(rows, **kwargs)
+            if not any(flags):
+                expected, result = (expected,), (result,)
+            assert len(result) == len(expected)
+            for value, expected_value in zip(result, expected):
+                assert value.dtype == expected_value.dtype
+                assert_equal(value, expected_value)
 
 
 @pytest.mark.required
@@ -533,7 +553,7 @@ def test_polar_decomposition(side, tol):
     assert np.all(np_eigenvals.real >= -tol), "P should be positive semi-definite"
 
     # Validate against scipy
-    scipy_U, scipy_P = scipy_polar(np_A, side=side)
+    scipy_U, scipy_P = scipy.linalg.polar(np_A, side=side)
     np_U_scipy, np_P_scipy = gu.polar(np_A, pure_rotation=False, side=side)
     assert_allclose(scipy_U, np_U_scipy, tol=tol)
     assert_allclose(scipy_P, np_P_scipy, tol=tol)
