@@ -971,10 +971,11 @@ class MJCF(FileMorph):
         broken assets from external providers that cannot be re-exported from source. Default to False.
     inertia_from_visual : bool, optional
         Estimate recomputed inertia from visual geometry, which tracks the true shape when collision geometry is a
-        coarse stand-in such as a convex hull. Set it to False when visual meshes overlap, which counts their shared
-        volume twice. Open visual meshes are closed first, which lengthens the first load. None uses the visual geometry
-        the entity draws, falling back to collision geometry for a link that draws none, and True also loads visual
-        geometry for this estimate when 'visualization' is False and turns on 'recompute_inertia'. Defaults to None.
+        coarse stand-in such as a convex hull. An MJCF file resolves every inertial it leaves out from its geoms, so
+        the estimate applies with 'recompute_inertia' alone. Set it to False when visual meshes overlap, which counts
+        their shared volume twice. Open visual meshes are closed first, which lengthens the first load. None uses the
+        visual geometry the entity draws, falling back to collision geometry for a link that draws none, and True also
+        loads visual geometry for this estimate when 'visualization' is False. Defaults to None.
     parse_glb_with_zup : bool, optional
         This parameter is deprecated, see file_meshes_are_zup.
     file_meshes_are_zup : bool, optional
@@ -1023,12 +1024,6 @@ class MJCF(FileMorph):
     def model_post_init(self, context: Any) -> None:
         if not self.is_format(MJCF_FORMAT):
             gs.raise_exception(f"Expected `{MJCF_FORMAT}` extension for MJCF file: {self.file}")
-        # MuJoCo computes the inertia of every moving body from its geoms, so estimating it from visual geometry
-        # recomputes it
-        if self.inertia_from_visual and not self.recompute_inertia:
-            if "recompute_inertia" in self.model_fields_set:
-                gs.raise_exception("'recompute_inertia' must be True when 'inertia_from_visual' is True for MJCF.")
-            self.recompute_inertia = True
 
     def _identifier(self) -> str:
         # A morph outlives the file it came from, because the entity builds only once. An unreadable file falls back

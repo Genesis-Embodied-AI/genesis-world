@@ -515,9 +515,6 @@ def test_parsing_inertia_defaults(
         # Visual geometry estimates the inertia without being drawn
         assert len(link.desc.vgeoms) == has_visual
 
-    with pytest.raises(gs.GenesisException, match="recompute_inertia"):
-        gs.morphs.MJCF(file=zero_density_marker_mjcf, recompute_inertia=False, inertia_from_visual=True)
-
     entity_variants = inertia_scene.add_entity(
         morph=(
             gs.morphs.URDF(file=urdf_without_inertial, align=False),
@@ -567,12 +564,13 @@ def test_parsing_inertia_defaults(
     )
     assert_allclose(entity_collision_only.base_link.desc.mass, 1.0, tol=gs.EPS)
 
-    # The collision box an MJCF draws counts once, among the visual geoms. Estimating from visual geometry recomputes
-    # the inertia MuJoCo compiled, from visual geometry kept undrawn.
+    # Recomputing the inertia of an MJCF body estimates it from the geoms it draws, its collision box included, kept
+    # undrawn.
     entity_inertia_mjcf = inertia_scene.add_entity(
         morph=gs.morphs.MJCF(
             visualization=False,
             file=mjcf_visual_collision,
+            recompute_inertia=True,
             inertia_from_visual=True,
             align=False,
         ),
