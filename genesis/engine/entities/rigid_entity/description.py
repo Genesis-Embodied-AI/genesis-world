@@ -1557,15 +1557,12 @@ class KinematicEntityDescription(EntityDescription):
             vg_volume = compose_inertial_from_g_infos(
                 [{**g_info, "density": None} for g_info in cg_infos], rho=1.0
             ).mass
-            # A visual mesh this far from the collision volume is usually a hollow shell, overlapping parts or a stray
-            # decoration, which the collision geometry estimates better
             if cg_volume is not None and not (
                 cg_volume / VISUAL_VOLUME_RATIO_MAX <= vg_volume <= VISUAL_VOLUME_RATIO_MAX * cg_volume
             ):
                 gs.logger.warning(
-                    f"Link '{link_name}' has a visual volume {vg_volume:0.3e} far from its collision volume "
-                    f"{cg_volume:0.3e}. Its inertia is estimated from visual geometry, set 'inertia_from_visual=False' "
-                    "to estimate it from collision geometry instead."
+                    f"Link '{link_name}' volume estimate from 'inertia_from_visual' is {vg_volume:0.3e}, which is far "
+                    f"from its collision volume {cg_volume:0.3e}."
                 )
         anchor_inertial = compose_inertial_from_g_infos(cg_infos, rho=1.0)
         props = finalize_inertial(
