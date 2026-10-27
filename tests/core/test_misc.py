@@ -21,13 +21,23 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
-def test_entity_options():
+def test_entity_options(show_viewer, tol):
+    DT = 1e-2
+    SUBSTEPS = 10
+    N_STEPS = 10
+    GRAVITY = 9.81
+
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            substeps=SUBSTEPS,
+            gravity=(0.0, 0.0, -GRAVITY),
+        ),
         mpm_options=gs.options.MPMOptions(
             grid_density=16,
             particle_size=0.05,
-            lower_bound=(0.0, 0.0, -0.2),
-            upper_bound=(1.0, 1.0, 1.0),
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(2.0, 1.5, 1.0),
         ),
         sph_options=gs.options.SPHOptions(
             particle_size=0.05,
@@ -35,200 +45,155 @@ def test_entity_options():
         pbd_options=gs.options.PBDOptions(
             particle_size=0.05,
         ),
-        show_viewer=False,
-    )
-    options = gs.options.RigidEntityOptions(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.75, -1.5, 1.5),
+            camera_lookat=(0.75, 0.55, 0.5),
         ),
-        material=gs.materials.Rigid(
-            rho=500.0,
-        ),
+        show_viewer=show_viewer,
     )
-    entity = scene.add_entity(
-        options=options,
-    )
-    second = scene.add_entity(
-        options=options,
-    )
-    flattened = scene.add_entity(
-        morph=options.morph,
-        material=options.material,
-    )
-    kinematic = scene.add_entity(
-        options=gs.options.KinematicEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(1.0, 0.0, 0.0),
+    options_classes = [
+        cls
+        for cls in vars(gs.options).values()
+        if isinstance(cls, type) and issubclass(cls, gs.options.EntityOptions) and cls is not gs.options.EntityOptions
+    ]
+    entities = []
+    for i, options_cls in enumerate(options_classes):
+        pos = (0.15 + 0.4 * (i % 4), 0.15 + 0.4 * (i // 4), 0.6)
+        options_kwargs = {
+            "morph": gs.morphs.Box(
+                pos=pos,
                 size=(0.2, 0.2, 0.2),
             ),
-        ),
-    )
-    heterogeneous = scene.add_entity(
-        options=gs.options.RigidEntityOptions(
-            morph=[
-                gs.morphs.Box(
-                    pos=(2.0, 0.0, 0.0),
-                    size=(0.2, 0.2, 0.2),
+        }
+        if issubclass(options_cls, gs.options.PBDClothEntityOptions):
+            options_kwargs.update(
+                morph=gs.morphs.Mesh(
+                    file="meshes/cloth.obj",
+                    pos=pos,
+                    scale=0.2,
                 ),
-                gs.morphs.Sphere(
-                    pos=(2.0, 0.0, 0.0),
-                    radius=0.1,
+            )
+        if issubclass(options_cls, gs.options.ToolEntityOptions):
+            options_kwargs.update(
+                morph=gs.morphs.Mesh(
+                    file="meshes/stirrer.obj",
+                    pos=pos,
+                    scale=0.2,
                 ),
-            ],
-        ),
-    )
-    fem = scene.add_entity(
-        options=gs.options.FEMEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.25, 0.25, 0.75),
-                size=(0.2, 0.2, 0.2),
-            ),
-            material=gs.materials.FEM.Elastic(),
-        ),
-    )
-    mpm = scene.add_entity(
-        options=gs.options.MPMEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.5, 0.5, 0.5),
-                size=(0.2, 0.2, 0.2),
-            ),
-            material=gs.materials.MPM.Snow(
-                sampler="regular",
-            ),
-        ),
-    )
-    sph = scene.add_entity(
-        options=gs.options.SPHEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.75, 0.75, 0.5),
-                size=(0.2, 0.2, 0.2),
-            ),
-            material=gs.materials.SPH.Liquid(
-                sampler="regular",
-            ),
-        ),
-    )
-    cloth = scene.add_entity(
-        options=gs.options.PBDClothEntityOptions(
-            morph=gs.morphs.Mesh(
-                file="meshes/cloth.obj",
-                pos=(0.25, 0.75, 0.75),
-                scale=0.4,
-            ),
-        ),
-    )
-    elastic = scene.add_entity(
-        options=gs.options.PBDElasticEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.5, 0.75, 0.75),
-                size=(0.1, 0.1, 0.1),
-            ),
-        ),
-    )
-    liquid = scene.add_entity(
-        options=gs.options.PBDLiquidEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.75, 0.75, 0.75),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.PBD.Liquid(
-                sampler="regular",
-            ),
-        ),
-    )
-    particles = scene.add_entity(
-        options=gs.options.PBDParticleEntityOptions(
-            morph=gs.morphs.Box(
-                pos=(0.75, 0.25, 0.75),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.PBD.Particle(
-                sampler="regular",
-            ),
-        ),
-    )
-    tool = scene.add_entity(
-        options=gs.options.ToolEntityOptions(
-            morph=gs.morphs.Mesh(
-                file="meshes/stirrer.obj",
-                pos=(0.75, 0.25, 0.25),
-                scale=0.2,
-            ),
-        ),
-    )
-    hybrid = scene.add_entity(
-        options=gs.options.HybridEntityOptions(
-            morph=gs.morphs.URDF(
-                file="urdf/simple/two_link_arm.urdf",
-                pos=(0.3, 0.45, 0.2),
-                scale=0.2,
-                fixed=True,
-            ),
-            material=gs.materials.Hybrid(
-                material_rigid=gs.materials.Rigid(),
-                material_soft=gs.materials.MPM.Muscle(),
-            ),
-        ),
-    )
-    assert type(entity) is gs.engine.entities.RigidEntity
-    assert entity.solver is scene.sim.rigid_solver
-    assert type(kinematic) is gs.engine.entities.KinematicEntity
-    assert kinematic.solver is scene.sim.kinematic_solver
-    assert_equal(entity.material.rho, 500.0)
-    assert entity.name != second.name
-    assert type(flattened) is gs.engine.entities.RigidEntity
-    assert flattened.options == options
-    assert len(heterogeneous.options.morph) == 2
-    assert type(fem) is gs.engine.entities.FEMEntity
-    assert type(mpm) is gs.engine.entities.MPMEntity
-    assert type(sph) is gs.engine.entities.SPHEntity
-    assert type(cloth) is gs.engine.entities.PBD2DEntity
-    assert type(elastic) is gs.engine.entities.PBD3DEntity
-    assert type(liquid) is gs.engine.entities.PBDParticleEntity
-    assert type(particles) is gs.engine.entities.PBDFreeParticleEntity
-    assert type(tool) is gs.engine.entities.ToolEntity
-    assert type(hybrid) is gs.engine.entities.HybridEntity
+            )
+        if issubclass(options_cls, gs.options.FEMEntityOptions):
+            options_kwargs.update(
+                material=gs.materials.FEM.Elastic(),
+            )
+        if issubclass(options_cls, gs.options.MPMEntityOptions):
+            options_kwargs.update(
+                material=gs.materials.MPM.Elastic(
+                    sampler="regular",
+                ),
+            )
+        if issubclass(options_cls, gs.options.SPHEntityOptions):
+            options_kwargs.update(
+                material=gs.materials.SPH.Liquid(
+                    sampler="regular",
+                ),
+            )
+        if issubclass(options_cls, gs.options.PBDLiquidEntityOptions):
+            options_kwargs.update(
+                material=gs.materials.PBD.Liquid(
+                    sampler="regular",
+                ),
+            )
+        if issubclass(options_cls, gs.options.PBDParticleEntityOptions):
+            options_kwargs.update(
+                material=gs.materials.PBD.Particle(
+                    sampler="regular",
+                ),
+            )
+        if issubclass(options_cls, gs.options.HybridEntityOptions):
+            options_kwargs.update(
+                morph=gs.morphs.URDF(
+                    file="urdf/simple/two_link_arm.urdf",
+                    pos=pos,
+                    scale=0.2,
+                ),
+                material=gs.materials.Hybrid(
+                    material_rigid=gs.materials.Rigid(),
+                    material_soft=gs.materials.MPM.Muscle(),
+                ),
+            )
+        entities.append(scene.add_entity(options=options_cls(**options_kwargs)))
 
     # Each entity owns options as authored, while its description holds what the scene resolved from them
-    assert entity.options == options
-    assert entity.options is not second.options
-    assert entity.options.surface is None
-    assert entity.desc.surface is not None
-    assert options.surface is None
+    rigid = entities[options_classes.index(gs.options.RigidEntityOptions)]
+    assert rigid.options.surface is None
+    assert rigid.desc.surface.vis_mode == "visual"
+    surface = gs.surfaces.Default()
+    flattened = scene.add_entity(
+        gs.morphs.Box(
+            pos=(5.0, 5.0, 0.6),
+            size=(0.2, 0.2, 0.2),
+        ),
+        surface=surface,
+        vis_mode="collision",
+    )
+    twin = scene.add_entity(
+        options=flattened.options,
+    )
+    assert type(flattened) is gs.engine.entities.RigidEntity
+    assert flattened.options.surface.vis_mode == "collision"
+    assert surface.vis_mode is None
+    assert twin.options == flattened.options
+    assert twin.name != flattened.name
     with pytest.raises(gs.GenesisException, match="frozen"):
-        entity.options.name = "renamed"
-    entity.options.morph.pos = (5.0, 0.0, 0.0)
-    entity.options.material.rho = 1000.0
-    assert entity.options == options
+        flattened.options.name = "renamed"
+    flattened.options.morph.pos = (0.0, 0.0, 0.0)
+    assert flattened.options == twin.options
 
+    # A class admits the materials of its own family alone, and the shorthand names the class admitting a material
+    for options_cls, entity in zip(options_classes, entities):
+        for other in entities:
+            if other is not entity:
+                with pytest.raises(gs.GenesisException, match="material"):
+                    options_cls(morph=gs.morphs.Sphere(), material=other.material)
+        if not isinstance(entity.material, gs.materials.Rigid):
+            with pytest.raises(gs.GenesisException, match=f"gs.options.{options_cls.__name__}"):
+                scene.add_entity(morph=gs.morphs.Sphere(), material=entity.material)
     with pytest.raises(gs.GenesisException, match="material"):
-        gs.options.RigidEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
-    with pytest.raises(gs.GenesisException, match="kinematic material"):
-        gs.options.KinematicEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid())
+        scene.add_entity(options=rigid.options.model_copy(update={"material": gs.materials.Kinematic()}))
     with pytest.raises(gs.GenesisException, match="visualize_contact"):
         gs.options.KinematicEntityOptions(morph=gs.morphs.Sphere(), visualize_contact=True)
-    with pytest.raises(gs.GenesisException, match="material"):
-        gs.options.FEMEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.MPM.Elastic())
-    with pytest.raises(gs.GenesisException, match="material"):
-        gs.options.PBDClothEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.PBD.Elastic())
-    with pytest.raises(gs.GenesisException, match="material"):
-        gs.options.HybridEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid())
-    with pytest.raises(gs.GenesisException, match="material"):
-        scene.add_entity(options=options.model_copy(update={"material": gs.materials.Kinematic()}))
     with pytest.raises(gs.GenesisException, match="either entity options"):
-        scene.add_entity(morph=gs.morphs.Sphere(), options=options)
+        scene.add_entity(morph=gs.morphs.Sphere(), options=rigid.options)
     with pytest.raises(gs.GenesisException, match="either entity options"):
-        scene.add_entity(visualize_contact=False, options=options)
+        scene.add_entity(vis_mode="collision", options=rigid.options)
     with pytest.raises(gs.GenesisException, match="entity family"):
         scene.add_entity(options=gs.options.EntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid()))
     with pytest.raises(gs.GenesisException, match="requires a morph"):
         scene.add_entity()
-    with pytest.raises(gs.GenesisException, match="gs.options.KinematicEntityOptions"):
-        scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Kinematic())
-    with pytest.raises(gs.GenesisException, match="gs.options.FEMEntityOptions"):
-        scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.FEM.Elastic())
-    # The two parts of the hybrid entity are entities of their own
-    assert len(scene.entities) == 16
+
+    # The class of the options picks the solver, which entities ignoring gravity tell apart from the others
+    scene.build(n_envs=2)
+    for _ in range(N_STEPS):
+        scene.step()
+    for entity in entities:
+        if isinstance(entity, gs.engine.entities.HybridEntity):
+            assert type(entity.part_rigid) is gs.engine.entities.RigidEntity
+            assert type(entity.part_soft) is gs.engine.entities.MPMEntity
+            continue
+        if isinstance(entity, gs.engine.entities.KinematicEntity):
+            pos = entity.get_pos()
+        elif isinstance(entity, gs.engine.entities.particle_entity.ParticleEntity):
+            pos = entity.get_particles_pos().mean(dim=-2)
+        elif isinstance(entity, gs.engine.entities.FEMEntity):
+            pos = entity.get_state().pos.mean(dim=-2)
+        else:
+            pos = entity.get_state().pos
+        drop = entity.options.morph.pos[2] - pos[..., 2]
+        if isinstance(entity.options, (gs.options.KinematicEntityOptions, gs.options.ToolEntityOptions)):
+            assert_allclose(drop, 0.0, tol=tol)
+        else:
+            # The mean of the particles or vertices stands in for the center of mass, so it falls at gravity approximately
+            assert_allclose(drop, 0.5 * GRAVITY * (N_STEPS * DT) ** 2, rtol=5e-2)
 
 
 @pytest.mark.required

@@ -287,7 +287,6 @@ class InteractiveScene:
                             material=options.material,
                             surface=options.surface,
                             visualize_contact=options.visualize_contact,
-                            vis_mode=options.vis_mode,
                         )
                     else:
                         scene.add_entity(options=options.model_copy(update={"name": name}))
