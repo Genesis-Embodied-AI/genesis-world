@@ -1,0 +1,21 @@
+genesis/engine/entities/rigid_entity/description.py
+  s_f8bb96e63e5f07::t_b3ee2dde683fcf 49,590,651,1511,1529,1537,1539-1540,1555-1564,1608
+genesis/engine/entities/rigid_entity/inertial.py
+  s_f8bb96e63e5f07::t_7e73d4c12711e3 21-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cb92440e88399d74f95a154cf612e5aa03b3e923",
+  "prompts": {},
+  "sessions": {
+    "s_f8bb96e63e5f07": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8476bcac-d5d8-4320-89aa-f4a4ff5f8a18",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
