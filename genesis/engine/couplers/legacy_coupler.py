@@ -41,23 +41,10 @@ class LegacyCoupler(RBC):
         self.sf_solver = self.sim.sf_solver
 
     def build(self) -> None:
-        self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
         self._rigid_sph = self.rigid_solver.is_active and self.sph_solver.is_active and self.options.rigid_sph
         self._rigid_pbd = self.rigid_solver.is_active and self.pbd_solver.is_active and self.options.rigid_pbd
         self._rigid_fem = self.rigid_solver.is_active and self.fem_solver.is_active and self.options.rigid_fem
-        self._mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
-        self._mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
-        self._fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
         self._fem_sph = self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph
-
-        if self._rigid_mpm and self.mpm_solver.enable_CPIC:
-            # this field stores the geom index of the thin shell rigid object (if any) that separates particle and its surrounding grid cell
-            self.cpic_flag = qd.field(gs.qd_int, shape=(self.mpm_solver.n_particles, 3, 3, 3, self.mpm_solver._B))
-            self.mpm_rigid_normal = qd.Vector.field(
-                3,
-                dtype=gs.qd_float,
-                shape=(self.mpm_solver.n_particles, self.rigid_solver.n_geoms_, self.mpm_solver._B),
-            )
 
         if self._rigid_sph:
             self.sph_rigid_normal = qd.Vector.field(
@@ -84,12 +71,6 @@ class LegacyCoupler(RBC):
             self.particle_attach_info.link_idx.fill(-1)
             self.particle_attach_info.local_pos.fill(0.0)
 
-        if self._mpm_sph:
-            self.mpm_sph_stencil_size = int(np.floor(self.mpm_solver.dx / self.sph_solver.hash_grid_cell_size) + 2)
-
-        if self._mpm_pbd:
-            self.mpm_pbd_stencil_size = int(np.floor(self.mpm_solver.dx / self.pbd_solver.hash_grid_cell_size) + 2)
-
         ## DEBUG
         self._dx = 1 / 1024
         self._stencil_size = int(np.floor(self._dx / self.sph_solver.hash_grid_cell_size) + 2)
@@ -97,22 +78,11 @@ class LegacyCoupler(RBC):
         self.reset(envs_idx=self.sim.scene._envs_idx)
 
     def reset(self, envs_idx=None) -> None:
-        if self._rigid_mpm and self.mpm_solver.enable_CPIC:
-            if envs_idx is None:
-                self.mpm_rigid_normal.fill(0)
-            else:
-                self._kernel_reset_mpm(envs_idx)
-
         if self._rigid_sph:
             if envs_idx is None:
                 self.sph_rigid_normal.fill(0)
             else:
                 self._kernel_reset_sph(envs_idx)
-
-    @qd.kernel
-    def _kernel_reset_mpm(self, envs_idx: qd.types.ndarray()):
-        for i_p, i_g, i_b_ in qd.ndrange(self.mpm_solver.n_particles, self.rigid_solver.n_geoms, envs_idx.shape[0]):
-            self.mpm_rigid_normal[i_p, i_g, envs_idx[i_b_]] = 0.0
 
     @qd.kernel
     def _kernel_reset_sph(self, envs_idx: qd.types.ndarray()):
@@ -304,188 +274,6 @@ class LegacyCoupler(RBC):
 
         return vel
 
-    @qd.func
-    def _func_mpm_tool(self, f, pos_world, vel, i_b):
-        for entity in qd.static(self.tool_solver.entities):
-            if qd.static(entity.material.collision):
-                vel = entity.collide(f, pos_world, vel, i_b)
-        return vel
-
-    @qd.kernel
-    def mpm_grid_op(
-        self,
-        f: qd.i32,
-        t: qd.f32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        links_state: array_class.LinksState,
-        rigid_info: array_class.RigidInfo,
-        sdf_info: array_class.SDFInfo,
-        collider_static_config: qd.template(),
-    ):
-        for ii, jj, kk, i_b in qd.ndrange(*self.mpm_solver.grid_res, self.mpm_solver._B):
-            I = (ii, jj, kk)
-            if self.mpm_solver.grid[f, I, i_b].mass > gs.EPS:
-                #################### MPM grid op ####################
-                # Momentum to velocity
-                vel_mpm = (1 / self.mpm_solver.grid[f, I, i_b].mass) * self.mpm_solver.grid[f, I, i_b].vel_in
-
-                # gravity
-                vel_mpm += self.mpm_solver.substep_dt * self.mpm_solver._gravity[i_b]
-
-                pos = (I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
-                mass_mpm = self.mpm_solver.grid[f, I, i_b].mass / self.mpm_solver._particle_volume_scale
-
-                # external force fields
-                for i_ff in qd.static(range(len(self.mpm_solver._ffs))):
-                    vel_mpm += self.mpm_solver._ffs[i_ff].get_acc(pos, vel_mpm, t, -1) * self.mpm_solver.substep_dt
-
-                #################### MPM <-> Tool ####################
-                if qd.static(self.tool_solver.is_active):
-                    vel_mpm = self._func_mpm_tool(f, pos, vel_mpm, i_b)
-
-                #################### MPM <-> Rigid ####################
-                if qd.static(self._rigid_mpm):
-                    vel_mpm = self._func_collide_with_rigid(
-                        f,
-                        pos,
-                        vel_mpm,
-                        mass_mpm,
-                        i_b,
-                        geoms_state=geoms_state,
-                        geoms_info=geoms_info,
-                        links_state=links_state,
-                        rigid_info=rigid_info,
-                        sdf_info=sdf_info,
-                        collider_static_config=collider_static_config,
-                    )
-
-                #################### MPM <-> SPH ####################
-                if qd.static(self._mpm_sph):
-                    # using the lower corner of MPM cell to find the corresponding SPH base cell
-                    base = self.sph_solver.sh.pos_to_grid(pos - 0.5 * self.mpm_solver.dx)
-
-                    # ---------- SPH -> MPM ----------
-                    sph_vel = qd.Vector([0.0, 0.0, 0.0])
-                    colliding_particles = 0
-                    for offset in qd.grouped(
-                        qd.ndrange(self.mpm_sph_stencil_size, self.mpm_sph_stencil_size, self.mpm_sph_stencil_size)
-                    ):
-                        slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
-                        for i in range(
-                            self.sph_solver.sh.slot_start[slot_idx, i_b],
-                            self.sph_solver.sh.slot_start[slot_idx, i_b] + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                        ):
-                            if (
-                                qd.abs(pos - self.sph_solver.particles_reordered.pos[i, i_b]).max()
-                                < self.mpm_solver.dx * 0.5
-                            ):
-                                sph_vel += self.sph_solver.particles_reordered.vel[i, i_b]
-                                colliding_particles += 1
-                    if colliding_particles > 0:
-                        vel_old = vel_mpm
-                        vel_mpm = sph_vel / colliding_particles
-
-                        # ---------- MPM -> SPH ----------
-                        delta_mv = mass_mpm * (vel_mpm - vel_old)
-
-                        for offset in qd.grouped(
-                            qd.ndrange(self.mpm_sph_stencil_size, self.mpm_sph_stencil_size, self.mpm_sph_stencil_size)
-                        ):
-                            slot_idx = self.sph_solver.sh.grid_to_slot(base + offset)
-                            for i in range(
-                                self.sph_solver.sh.slot_start[slot_idx, i_b],
-                                self.sph_solver.sh.slot_start[slot_idx, i_b]
-                                + self.sph_solver.sh.slot_size[slot_idx, i_b],
-                            ):
-                                if (
-                                    qd.abs(pos - self.sph_solver.particles_reordered.pos[i, i_b]).max()
-                                    < self.mpm_solver.dx * 0.5
-                                ):
-                                    self.sph_solver.particles_reordered[i, i_b].vel = (
-                                        self.sph_solver.particles_reordered[i, i_b].vel
-                                        - delta_mv / self.sph_solver.particles_info_reordered[i, i_b].mass
-                                    )
-
-                #################### MPM <-> PBD ####################
-                if qd.static(self._mpm_pbd):
-                    # using the lower corner of MPM cell to find the corresponding PBD base cell
-                    base = self.pbd_solver.sh.pos_to_grid(pos - 0.5 * self.mpm_solver.dx)
-
-                    # ---------- PBD -> MPM ----------
-                    pbd_vel = qd.Vector([0.0, 0.0, 0.0])
-                    colliding_particles = 0
-                    for offset in qd.grouped(
-                        qd.ndrange(self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size)
-                    ):
-                        slot_idx = self.pbd_solver.sh.grid_to_slot(base + offset)
-                        for i in range(
-                            self.pbd_solver.sh.slot_start[slot_idx, i_b],
-                            self.pbd_solver.sh.slot_start[slot_idx, i_b] + self.pbd_solver.sh.slot_size[slot_idx, i_b],
-                        ):
-                            if (
-                                qd.abs(pos - self.pbd_solver.particles_reordered.pos[i, i_b]).max()
-                                < self.mpm_solver.dx * 0.5
-                            ):
-                                pbd_vel += self.pbd_solver.particles_reordered.vel[i, i_b]
-                                colliding_particles += 1
-                    if colliding_particles > 0:
-                        vel_old = vel_mpm
-                        vel_mpm = pbd_vel / colliding_particles
-
-                        # ---------- MPM -> PBD ----------
-                        delta_mv = mass_mpm * (vel_mpm - vel_old)
-
-                        for offset in qd.grouped(
-                            qd.ndrange(self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size, self.mpm_pbd_stencil_size)
-                        ):
-                            slot_idx = self.pbd_solver.sh.grid_to_slot(base + offset)
-                            for i in range(
-                                self.pbd_solver.sh.slot_start[slot_idx, i_b],
-                                self.pbd_solver.sh.slot_start[slot_idx, i_b]
-                                + self.pbd_solver.sh.slot_size[slot_idx, i_b],
-                            ):
-                                if (
-                                    qd.abs(pos - self.pbd_solver.particles_reordered.pos[i, i_b]).max()
-                                    < self.mpm_solver.dx * 0.5
-                                ):
-                                    if self.pbd_solver.particles_reordered[i, i_b].free:
-                                        self.pbd_solver.particles_reordered[i, i_b].vel = (
-                                            self.pbd_solver.particles_reordered[i, i_b].vel
-                                            - delta_mv / self.pbd_solver.particles_info_reordered[i, i_b].mass
-                                        )
-
-                #################### MPM boundary ####################
-                _, self.mpm_solver.grid[f, I, i_b].vel_out = self.mpm_solver.boundary.impose_pos_vel(pos, vel_mpm)
-
-    @qd.kernel
-    def mpm_surface_to_particle(
-        self,
-        f: qd.i32,
-        geoms_state: array_class.GeomsState,
-        geoms_info: array_class.GeomsInfo,
-        sdf_info: array_class.SDFInfo,
-        rigid_info: array_class.RigidInfo,
-        collider_static_config: qd.template(),
-    ):
-        for i_p, i_b in qd.ndrange(self.mpm_solver.n_particles, self.mpm_solver._B):
-            if self.mpm_solver.particles_ng[f, i_p, i_b].active:
-                for i_g in range(self.rigid_solver.n_geoms):
-                    if geoms_info.needs_coup[i_g]:
-                        sdf_normal = sdf.sdf_func_normal_world(
-                            i_g,
-                            i_b,
-                            self.mpm_solver.particles[f, i_p, i_b].pos,
-                            geoms_state,
-                            geoms_info,
-                            rigid_info,
-                            sdf_info,
-                            collider_static_config,
-                        )
-                        # we only update the normal if the particle does not the object
-                        if sdf_normal.dot(self.mpm_rigid_normal[i_p, i_g, i_b]) >= 0:
-                            self.mpm_rigid_normal[i_p, i_g, i_b] = sdf_normal
-
     def fem_rigid_link_constraints(self):
         if self.fem_solver._constraints_initialized and self.rigid_solver.is_active:
             self.fem_solver._kernel_update_linked_vertex_constraints(self.rigid_solver.dyn_state.links)
@@ -535,62 +323,6 @@ class LegacyCoupler(RBC):
                             collider_static_config,
                         )
                         self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
-
-                # FEM <-> MPM (interact with MPM grid instead of particles)
-                # NOTE: not doing this in mpm_grid_op otherwise we need to search for fem surface for each particles
-                #       however, this function is called after mpm boundary conditions.
-                if qd.static(self._fem_mpm):
-                    for j in qd.static(range(3)):
-                        iv = self.fem_solver.surface[i_s].tri2v[j]
-                        pos = self.fem_solver.elements_v[f, iv, i_b].pos
-                        vel_fem_sv = self.fem_solver.elements_v[f + 1, iv, i_b].vel
-                        mass_fem_sv = mass / 4.0  # assume element mass uniformly distributed
-
-                        # follow MPM p2g scheme
-                        vel_mpm = qd.Vector([0.0, 0.0, 0.0])
-                        mass_mpm = 0.0
-                        mpm_base = qd.floor(pos * self.mpm_solver.inv_dx - 0.5).cast(gs.qd_int)
-                        mpm_fx = pos * self.mpm_solver.inv_dx - mpm_base.cast(gs.qd_float)
-                        mpm_w = [0.5 * (1.5 - mpm_fx) ** 2, 0.75 - (mpm_fx - 1.0) ** 2, 0.5 * (mpm_fx - 0.5) ** 2]
-                        new_vel_fem_sv = vel_fem_sv
-                        for mpm_offset in qd.static(qd.grouped(self.mpm_solver.stencil_range())):
-                            mpm_grid_I = mpm_base - self.mpm_solver.grid_offset + mpm_offset
-                            mpm_grid_mass = (
-                                self.mpm_solver.grid[f, mpm_grid_I, i_b].mass / self.mpm_solver.particle_volume_scale
-                            )
-
-                            mpm_weight = gs.qd_float(1.0)
-                            for d in qd.static(range(3)):
-                                mpm_weight *= mpm_w[mpm_offset[d]][d]
-
-                            # FEM -> MPM
-                            mpm_grid_pos = (mpm_grid_I + self.mpm_solver.grid_offset) * self.mpm_solver.dx
-                            signed_dist = (mpm_grid_pos - pos).dot(surface_normal)
-                            if signed_dist <= self.mpm_solver.dx:  # NOTE: use dx as minimal unit for collision
-                                vel_mpm_at_cell = mpm_weight * self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
-                                mass_mpm_at_cell = mpm_weight * mpm_grid_mass
-
-                                vel_mpm += vel_mpm_at_cell
-                                mass_mpm += mass_mpm_at_cell
-
-                                if mass_mpm_at_cell > gs.EPS:
-                                    delta_mpm_vel_at_cell_unmul = (
-                                        vel_fem_sv * mpm_weight - self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out
-                                    )
-                                    mass_mul_at_cell = (
-                                        mpm_grid_mass / mass_fem_sv
-                                    )  # NOTE: use un-reweighted mass instead of mass_mpm_at_cell
-                                    delta_mpm_vel_at_cell = delta_mpm_vel_at_cell_unmul * mass_mul_at_cell
-                                    self.mpm_solver.grid[f, mpm_grid_I, i_b].vel_out += delta_mpm_vel_at_cell
-
-                                    new_vel_fem_sv -= delta_mpm_vel_at_cell * mass_mpm_at_cell / mass_fem_sv
-
-                        # MPM -> FEM
-                        if mass_mpm > gs.EPS:
-                            # delta_mv = (vel_mpm - vel_fem_sv) * mass_mpm
-                            # delta_vel_fem_sv = delta_mv / mass_fem_sv
-                            # self.fem_solver.elements_v[f + 1, iv].vel += delta_vel_fem_sv
-                            self.fem_solver.elements_v[f + 1, iv, i_b].vel = new_vel_fem_sv
 
                 # FEM <-> SPH TODO: this doesn't work well
                 if qd.static(self._fem_sph):
@@ -867,31 +599,9 @@ class LegacyCoupler(RBC):
         return new_pos, new_vel, contact_normal
 
     def preprocess(self, f):
-        # preprocess for MPM CPIC
-        if self._rigid_mpm and self.mpm_solver.enable_CPIC:
-            self.mpm_surface_to_particle(
-                f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.collider.sdf.sdf_info,
-                self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.collider_config,
-            )
+        pass
 
     def couple(self, f):
-        # MPM <-> all others
-        if self.mpm_solver.is_active:
-            self.mpm_grid_op(
-                f,
-                self.sim.cur_t,
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
-                rigid_info=self.rigid_solver.rigid_info,
-                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
-                collider_static_config=self.rigid_solver.collider.collider_config,
-            )
-
         # SPH <-> Rigid
         if self._rigid_sph:
             self.sph_rigid(
@@ -943,17 +653,6 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.collider.collider_config,
-            )
-        if self.mpm_solver.is_active:
-            self.mpm_grid_op.grad(
-                f,
-                self.sim.cur_t,
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
-                rigid_info=self.rigid_solver.rigid_info,
-                sdf_info=self.rigid_solver.collider.sdf.sdf_info,
-                collider_static_config=self.rigid_solver.collider.collider_config,
             )
 
     @property
