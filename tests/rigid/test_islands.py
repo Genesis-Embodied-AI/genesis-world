@@ -873,13 +873,16 @@ def test_hibernation_wakes_on_user_input(show_viewer, n_envs, tol):
         solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
     ).all()
 
-    # A body a weld held in the air falls once the weld is deleted
-    solver.delete_weld_constraint(box_weld.base_link_idx, plane.base_link_idx)
-    assert not qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_weld.idx).any()
+    # A body a weld held in the air falls once the weld is deleted, in the selected environment only
+    solver.delete_weld_constraint(box_weld.base_link_idx, plane.base_link_idx, envs_idx=0 if n_envs else None)
+    is_weld_hibernated = qd_to_numpy(solver.dyn_state.entities.is_hibernated, box_weld.idx, keepdim=False)
     z0 = box_weld.get_pos()[..., 2]
     for _ in range(n_fall):
         scene.step()
-    assert_allclose(z0 - box_weld.get_pos()[..., 2], free_fall_drop, rtol=0.2)
+    weld_drops = np.atleast_1d(tensor_to_array(z0 - box_weld.get_pos()[..., 2]))
+    assert not is_weld_hibernated[0] and is_weld_hibernated[1:].all()
+    assert_allclose(weld_drops[0], free_fall_drop, rtol=0.2)
+    assert_allclose(weld_drops[1:], 0.0, tol=gs.EPS)
     assert qd_to_numpy(
         solver.dyn_state.entities.is_hibernated, [box.idx for box in (box_cforce, box_cvel, box_cpos)]
     ).all()
