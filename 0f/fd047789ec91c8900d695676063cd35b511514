@@ -1,0 +1,19 @@
+genesis/engine/system_data/articulated.py
+  s_df26fd223e058c::t_45e331da9b29f9 68,81-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ffd047789ec91c8900d695676063cd35b511514",
+  "prompts": {},
+  "sessions": {
+    "s_df26fd223e058c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87095b5f-d34a-48f1-b21f-22ff61ec5855",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

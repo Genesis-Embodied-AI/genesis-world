@@ -1,0 +1,49 @@
+tests/particles/test_pbd.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 2,6,8,19,57-65,69,87-91,97
+genesis/engine/entities/mpm_entity.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 64
+genesis/engine/couplers/legacy_coupler.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 11,46,56-57,443,446,465,468-471,723,728-729,733-735,763,767,779,796,815-816,819,868
+genesis/engine/simulator.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 143-146
+genesis/engine/solvers/pbd_solver.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 4,10-11,14,109-110,121-122,132-180,184,205-207,209-210,219-222,226,234,238,246,248,250,252
+  s_917d10d40fc190::t_feb000ad4cda83 12,208,211-218
+genesis/engine/entities/particle_entity.py
+  s_c8d7cbda7564fe::t_4db28889b54d2d 206
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 34,58,76,170-171,183,185-188,190,193,200-205,207-208,261
+  s_917d10d40fc190::t_cc0e42a945ddc2 55,59-60
+genesis/engine/entities/pbd_entity.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 1-2,12-38,44-104,106,114-117,265-266,280,282,284-292,351-354,370-374,387-388,407,415,456-460,473-474,493,501,550-551,610-611
+  s_917d10d40fc190::t_feb000ad4cda83 39-43,105
+.github/contributing/ARCHITECTURE.md
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 140
+genesis/engine/system_data/pbd.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 1-121
+genesis/engine/entities/sph_entity.py
+  s_c8d7cbda7564fe::t_4ad725237b2cd7 37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a9de20818839f1c31db1e482e2217af8b0dde1f",
+  "prompts": {},
+  "sessions": {
+    "s_917d10d40fc190": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a1d595c-8377-490e-b2ca-361d69c2e084",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    },
+    "s_c8d7cbda7564fe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9ce42b86-b899-4650-b4da-3a8070dd912b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

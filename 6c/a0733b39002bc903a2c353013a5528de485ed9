@@ -1,0 +1,22 @@
+genesis/engine/solvers/sf_solver.py
+  s_df26fd223e058c::t_5820053ef88666 80-82
+tests/particles/test_sf.py
+  s_df26fd223e058c::t_49183bbc933bae 4
+  s_df26fd223e058c::t_5c938aa7c492b9 113-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6ca0733b39002bc903a2c353013a5528de485ed9",
+  "prompts": {},
+  "sessions": {
+    "s_df26fd223e058c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87095b5f-d34a-48f1-b21f-22ff61ec5855",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
