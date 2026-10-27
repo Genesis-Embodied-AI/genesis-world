@@ -32,35 +32,33 @@ def linear_to_lower_tri(i_pair: qd.i32, strict: qd.template() = False):
 
 
 @qd.func
-def func_joint_link(i_joint: int, i_b: int, n_links: int, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
-    # JointsInfo carries no link mapping, so locate the link whose dof range owns the joint's first dof. Joint
-    # equalities are rare and link counts are small, so the linear scan is cheap.
-    I_j = [i_joint, i_b] if qd.static(rigid_config.batch_joints_info) else i_joint
-    i_dof = dyn_info.joints.dof_start[I_j]
-    link = -1
-    for i_l in range(n_links):
-        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-        if dyn_info.links.dof_start[I_l] <= i_dof < dyn_info.links.dof_end[I_l]:
-            link = i_l
-            break
-    return link
-
-
-@qd.func
 def func_equality_links(i_eq: int, i_b: int, n_links: int, dyn_info: array_class.DynInfo, rigid_config: qd.template()):
-    # Map an equality constraint to the pair of links it couples. CONNECT/WELD reference links; JOINT references joints.
-    obj1 = dyn_info.equalities.eq_obj1id[i_eq, i_b]
-    obj2 = dyn_info.equalities.eq_obj2id[i_eq, i_b]
-    eq_type = dyn_info.equalities.eq_type[i_eq, i_b]
-    i_l_a = -1
-    i_l_b = -1
-    if eq_type == gs.EQUALITY_TYPE.JOINT:
-        i_l_a = func_joint_link(obj1, i_b, n_links, dyn_info, rigid_config)
-        if obj2 >= 0:
-            i_l_b = func_joint_link(obj2, i_b, n_links, dyn_info, rigid_config)
-    else:
-        i_l_a = obj1
-        i_l_b = obj2
+    """Return the pair of links coupled by equality constraint i_eq of env i_b, -1 standing for a missing link.
+
+    CONNECT, WELD and SCREW equalities reference links. JOINT equalities reference joints, each mapped to the link whose
+    dof range owns its first dof. The linear scan this takes stays cheap, since joint equalities are rare and link
+    counts are small.
+    """
+    i_l_a = dyn_info.equalities.eq_obj1id[i_eq, i_b]
+    i_l_b = dyn_info.equalities.eq_obj2id[i_eq, i_b]
+    if dyn_info.equalities.eq_type[i_eq, i_b] == gs.EQUALITY_TYPE.JOINT:
+        for i_side in range(2):
+            i_j = i_l_a
+            if i_side == 1:
+                i_j = i_l_b
+            i_l_joint = -1
+            if i_j >= 0:
+                I_j = [i_j, i_b] if qd.static(rigid_config.batch_joints_info) else i_j
+                i_d = dyn_info.joints.dof_start[I_j]
+                for i_l in range(n_links):
+                    I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+                    if dyn_info.links.dof_start[I_l] <= i_d < dyn_info.links.dof_end[I_l]:
+                        i_l_joint = i_l
+                        break
+            if i_side == 0:
+                i_l_a = i_l_joint
+            else:
+                i_l_b = i_l_joint
     return i_l_a, i_l_b
 
 
