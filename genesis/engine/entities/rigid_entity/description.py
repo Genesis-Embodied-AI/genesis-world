@@ -1536,9 +1536,11 @@ class KinematicEntityDescription(EntityDescription):
         is_inertial_explicit = not any(value is None for value in (explicit_mass, explicit_com, explicit_inertia))
         if from_visual and not is_inertial_explicit and vg_inertia_infos:
             # An asset may state a density on the collision copy of a geom alone, so volumes are composed without them
-            cg_volume = compose_inertial_from_g_infos(
-                [{**g_info, "density": None} for g_info in cg_infos], rho=1.0
-            ).mass
+            cg_volume = None
+            if cg_infos:
+                cg_volume = compose_inertial_from_g_infos(
+                    [{**g_info, "density": None} for g_info in cg_infos], rho=1.0
+                ).mass
             # An open visual mesh encloses no well-defined volume, and its convex hull would fill every concavity, so
             # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
             cg_infos = []
@@ -1557,7 +1559,7 @@ class KinematicEntityDescription(EntityDescription):
             ).mass
             # A visual mesh this far from the collision volume is usually a hollow shell, overlapping parts or a stray
             # decoration, which the collision geometry estimates better
-            if cg_volume > gs.EPS and not (
+            if cg_volume is not None and not (
                 cg_volume / VISUAL_VOLUME_RATIO_MAX <= vg_volume <= VISUAL_VOLUME_RATIO_MAX * cg_volume
             ):
                 gs.logger.warning(
