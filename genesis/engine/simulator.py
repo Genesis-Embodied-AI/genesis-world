@@ -158,7 +158,7 @@ class Simulator(RBC):
         if desc is not None:
             material = desc.material
             options = desc.options
-        if isinstance(material, gs.materials.Hybrid):
+        if isinstance(options, gs.options.HybridEntityOptions):
             # A hybrid entity has no solver of its own, since its parts are entities of their own. The hybrid entity
             # adds its parts to the scene itself.
             entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name, options=options)

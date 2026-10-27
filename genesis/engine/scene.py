@@ -409,9 +409,11 @@ class Scene(RBC):
                 "EntityOptions selects no entity family. Use one of its subclasses, such as RigidEntityOptions."
             )
         # Revalidated, since 'model_copy(update=...)' bypasses validation. The entity owns the authored copy, while
-        # the resolution below modifies the morph, the material and the surface it is given.
+        # the resolution below modifies the morph and the surface it is given. It keeps the material given instead,
+        # since a solver recognizes a material by identity to simulate the entities sharing it as one.
+        material = options.material
         options = type(options).model_validate(options).model_copy(deep=True)
-        resolved_options = options.model_copy(deep=True)
+        resolved_options = options.model_copy(deep=True, update={"material": material})
         morph = resolved_options.morph
         material = resolved_options.material
         surface = resolved_options.surface

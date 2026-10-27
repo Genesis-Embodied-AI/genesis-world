@@ -123,8 +123,8 @@ class Entity(RBC):
         """The options this entity was constructed from, as authored.
 
         Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it
-        is. The options passed to 'Scene.add_entity' may change or construct other entities afterwards. What the scene
-        resolved from them lives in 'desc'.
+        is. The options passed to 'Scene.add_entity' may change or construct other entities afterwards, except for
+        their material, which the entity shares. What the scene resolved from them lives in 'desc'.
         """
         desc = self.desc
         options = self._options if desc is None else desc.options

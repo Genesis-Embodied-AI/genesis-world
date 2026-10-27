@@ -1,8 +1,8 @@
 import copy
 from typing import ClassVar
-from typing_extensions import Self
 
 from pydantic import StrictBool
+from typing_extensions import Self
 
 from genesis.options.options import Options
 
