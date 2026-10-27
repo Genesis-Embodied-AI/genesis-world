@@ -705,6 +705,7 @@ def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
             file="urdf/shadow_hand/shadow_hand.urdf",
             pos=(0.0, 0.0, 0.5),
             euler=(-90, 0, 0),
+            inertia_from_visual=False,
             fixed=True,
         ),
     )
