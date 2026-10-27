@@ -1,0 +1,19 @@
+genesis/engine/simulator.py
+  s_df26fd223e058c::t_f8055fcf30fccd 511-514
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aa2e982072606bee8a9917b631517df689b75178",
+  "prompts": {},
+  "sessions": {
+    "s_df26fd223e058c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87095b5f-d34a-48f1-b21f-22ff61ec5855",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

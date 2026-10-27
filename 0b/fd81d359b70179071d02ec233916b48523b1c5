@@ -1,0 +1,175 @@
+examples/sensors/depth_camera_custom_vverts.py
+  s_917d10d40fc190::t_f6b495dda46f71 75,93
+examples/ipc/ipc_objects_falling.py
+  s_917d10d40fc190::t_f6b495dda46f71 62-68,75-88,102-109
+tests/rendering/test_offscreen.py
+  s_917d10d40fc190::t_f6b495dda46f71 178,249-250,846,850-853,856,859,865-868,870-886,902-905,907,952
+tests/rigid/test_asset_loading.py
+  s_917d10d40fc190::t_f6b495dda46f71 389-390,400-401,1212-1213,1244-1245,1709-1710,1732-1733,1883
+examples/coupling/sph_rigid.py
+  s_917d10d40fc190::t_f6b495dda46f71 47-49,54-63
+examples/viewer_plugin/keyboard_teleop.py
+  s_917d10d40fc190::t_f6b495dda46f71 58-62,72-73
+examples/tutorials/advanced_muscle.py
+  s_917d10d40fc190::t_f6b495dda46f71 51-54,65-70
+.github/contributing/CODING_CONVENTIONS.md
+  s_917d10d40fc190::t_f6b495dda46f71 92
+examples/rigid/screw_constraint.py
+  s_917d10d40fc190::t_f6b495dda46f71 46
+examples/deformable/differentiable_push.py
+  s_917d10d40fc190::t_f6b495dda46f71 50-52,65-67,82-84
+examples/rigid/torsional_grasp.py
+  s_917d10d40fc190::t_f6b495dda46f71 74,83
+examples/sap_coupling/franka_grasp_rigid_cube.py
+  s_917d10d40fc190::t_f6b495dda46f71 41-50,54-64
+tests/benchmarks/test_rigid.py
+  s_917d10d40fc190::t_f6b495dda46f71 541
+examples/tutorials/mpm.py
+  s_917d10d40fc190::t_f6b495dda46f71 40,54,68
+examples/sap_coupling/franka_grasp_fem_sphere.py
+  s_917d10d40fc190::t_f6b495dda46f71 46-55,64-69
+tests/core/test_recorders.py
+  s_917d10d40fc190::t_f6b495dda46f71 146-147
+tests/deformable/test_fem.py
+  s_917d10d40fc190::t_f6b495dda46f71 34,111,145,158,181,190,198,244-248,259,344-349,360-365,506-509,561-564,577-582,642-647,658-659
+tests/ipc/test_rigid.py
+  s_917d10d40fc190::t_f6b495dda46f71 80-86,91-104,117-124,231-238,245-257,307-312,319-327,369-373,377-386,390-399,403-412,421-427,448,451-452,491-496,512-518,523-537,550-558,637-643,650-664,686,792-797,802-810,926-933
+tests/particles/test_sph.py
+  s_917d10d40fc190::t_f6b495dda46f71 318
+examples/ipc/ipc_momentum.py
+  s_917d10d40fc190::t_f6b495dda46f71 44-49,58-73,87
+tests/rendering/test_dynamic_meshes.py
+  s_917d10d40fc190::t_f6b495dda46f71 65-71,75-84,108-113,129-131,240-243
+tests/rendering/test_interactive_viewer.py
+  s_917d10d40fc190::t_f6b495dda46f71 454-461,475-481,492,495
+tests/rigid/test_serialization.py
+  s_917d10d40fc190::t_f6b495dda46f71 107,383,590-592
+tests/grad/test_hybrid_push.py
+  s_917d10d40fc190::t_f6b495dda46f71 47,58-59,127-132,206-207
+examples/deformable/elastic_dragon.py
+  s_917d10d40fc190::t_f6b495dda46f71 37
+tests/particles/test_pbd.py
+  s_917d10d40fc190::t_f6b495dda46f71 12,53,76-79,82,97,121,135,221-225,230-237
+examples/coupling/sph_mpm.py
+  s_917d10d40fc190::t_f6b495dda46f71 64-65
+examples/rigid/grasp_bottle.py
+  s_917d10d40fc190::t_f6b495dda46f71 35-36
+examples/ipc/ipc_robot_cloth_teleop.py
+  s_917d10d40fc190::t_f6b495dda46f71 75-83,106-113,127-134,147-162
+examples/coupling/cloth_attached_to_rigid.py
+  s_917d10d40fc190::t_f6b495dda46f71 48-50,53-58,61-66,71,77
+tests/core/test_misc.py
+  s_917d10d40fc190::t_f6b495dda46f71 44-45,51,54,86,95-96,118,126,132,143,157,166,173-176,182-183,188,190,192,197,199-216,218-262,268,271-272,274,889
+tests/parsers/test_mesh.py
+  s_917d10d40fc190::t_f6b495dda46f71 771-772
+tests/parsers/conftest.py
+  s_917d10d40fc190::t_f6b495dda46f71 405-406,441-442,482-483
+tests/rigid/test_collision.py
+  s_917d10d40fc190::t_f6b495dda46f71 1529-1530,1549-1550,1566-1567,2046-2047,2060-2061,2071-2072
+examples/rigid/authored_decomp.py
+  s_917d10d40fc190::t_f6b495dda46f71 58-59,77-78,92-93
+tests/coupling/test_sph_rigid.py
+  s_917d10d40fc190::t_f6b495dda46f71 55-56,64-65,74-75,137-138,148-149
+tests/integration/test_integration.py
+  s_917d10d40fc190::t_f6b495dda46f71 253-262,277-282,296-299
+tests/parsers/test_usd.py
+  s_917d10d40fc190::t_f6b495dda46f71 393,475,485-486,625-626,665-666
+examples/rigid/bolt_nut_self_screw.py
+  s_917d10d40fc190::t_f6b495dda46f71 57
+examples/coupling/flush_cubes.py
+  s_917d10d40fc190::t_f6b495dda46f71 49-51,65-67,82-84,88-98,102-112
+examples/deformable/fem_hard_and_soft_constraint.py
+  s_917d10d40fc190::t_f6b495dda46f71 50-55,67-72
+examples/rigid/friction_breakaway.py
+  s_917d10d40fc190::t_f6b495dda46f71 88,97
+examples/tutorials/advanced_hybrid_robot.py
+  s_917d10d40fc190::t_f6b495dda46f71 55-59,61-63,72-73
+tests/coupling/test_hybrid.py
+  s_917d10d40fc190::t_f6b495dda46f71 57-60,62-64,72-73,127-128,150,203,212-214,230,233-238,275-279,315-317,326-331,367,369-377,380,417-424,539-543
+.github/contributing/ARCHITECTURE.md
+  s_917d10d40fc190::t_f6b495dda46f71 20,86,89-92,95-96,101,106-107,149
+tests/rigid/test_friction.py
+  s_917d10d40fc190::t_f6b495dda46f71 194-195,365,375,384,393,466,475,563,576,651,665,771,790,804,987,998
+examples/coupling/sand_wheel.py
+  s_917d10d40fc190::t_f6b495dda46f71 39-46,49,53-62,67-76,81-90,95-104,109-116
+examples/coupling/water_wheel.py
+  s_917d10d40fc190::t_f6b495dda46f71 57-60,62-73
+examples/tutorials/advanced_worm.py
+  s_917d10d40fc190::t_f6b495dda46f71 34-38,55-62,69,72
+examples/coupling/rigid_mpm_attachment.py
+  s_917d10d40fc190::t_f6b495dda46f71 52-55
+examples/deformable/pbd_liquid.py
+  s_917d10d40fc190::t_f6b495dda46f71 39-42
+examples/sensors/temperature_grid.py
+  s_917d10d40fc190::t_f6b495dda46f71 87,102
+tests/rendering/test_debug_draw.py
+  s_917d10d40fc190::t_f6b495dda46f71 146-147
+examples/coupling/fem_cube_linked_with_arm.py
+  s_917d10d40fc190::t_f6b495dda46f71 49-54
+tests/sensors/test_tactile.py
+  s_917d10d40fc190::t_f6b495dda46f71 1735
+examples/viewer_plugin/mouse_interaction.py
+  s_917d10d40fc190::t_f6b495dda46f71 39-45,49-56,63-69
+examples/viewer_plugin/mesh_point_selector.py
+  s_917d10d40fc190::t_f6b495dda46f71 264-274,278-286
+examples/sap_coupling/fem_sphere_and_cube.py
+  s_917d10d40fc190::t_f6b495dda46f71 43-47,66-67
+tests/sensors/test_contact.py
+  s_917d10d40fc190::t_f6b495dda46f71 60-61,72-73
+examples/sensors/tactile_sandbox.py
+  s_917d10d40fc190::t_f6b495dda46f71 305,358
+tests/deformable/test_muscle.py
+  s_917d10d40fc190::t_f6b495dda46f71 13-17,19,44-48,64-71,79,82
+tests/rigid/test_dynamics.py
+  s_917d10d40fc190::t_f6b495dda46f71 716-717
+examples/ipc/ipc_robot_grasp_cube.py
+  s_917d10d40fc190::t_f6b495dda46f71 46-52,54-58,72-79
+tests/rigid/test_sparse.py
+  s_917d10d40fc190::t_f6b495dda46f71 52
+examples/sensors/tactile_franka.py
+  s_917d10d40fc190::t_f6b495dda46f71 227-228,240-241
+examples/coupling/cloth_on_rigid.py
+  s_917d10d40fc190::t_f6b495dda46f71 34,39-42,46-52
+tests/sensors/test_raycaster.py
+  s_917d10d40fc190::t_f6b495dda46f71 147-151,321,325-330,535,672-677,692,784-790
+examples/sap_coupling/fem_fixed_constraint.py
+  s_917d10d40fc190::t_f6b495dda46f71 58-60
+tests/rigid/test_collision_nonconvex.py
+  s_917d10d40fc190::t_f6b495dda46f71 461
+tests/rigid/test_islands.py
+  s_917d10d40fc190::t_f6b495dda46f71 382-383
+tests/rendering/test_imgui_overlay.py
+  s_917d10d40fc190::t_f6b495dda46f71 430-431,437-438
+examples/coupling/cut_dragon.py
+  s_917d10d40fc190::t_f6b495dda46f71 40,65-67
+examples/coupling/grasp_soft_cube.py
+  s_917d10d40fc190::t_f6b495dda46f71 49,53-59
+examples/rigid/gravity_compensation.py
+  s_917d10d40fc190::t_f6b495dda46f71 30-34,39-43
+tests/ipc/test_deformable.py
+  s_917d10d40fc190::t_f6b495dda46f71 3,59-64,69-77,90-98,213-217,228-239,322-326,338-355
+tests/particles/test_mpm.py
+  s_917d10d40fc190::t_f6b495dda46f71 46-49,64-65,71-73,79,127-128,131,154-159,170-171
+examples/sensors/surface_distance_shadowhand.py
+  s_917d10d40fc190::t_f6b495dda46f71 66,78
+tests/ipc/test_api.py
+  s_917d10d40fc190::t_f6b495dda46f71 31-35,39-46,109-118,166-171,176-185,230-234,240-247,253-260,264-266,270-277,282-289,354-363
+examples/rigid/rolling_coast.py
+  s_917d10d40fc190::t_f6b495dda46f71 70,81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0bfd81d359b70179071d02ec233916b48523b1c5",
+  "prompts": {},
+  "sessions": {
+    "s_917d10d40fc190": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1a1d595c-8377-490e-b2ca-361d69c2e084",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

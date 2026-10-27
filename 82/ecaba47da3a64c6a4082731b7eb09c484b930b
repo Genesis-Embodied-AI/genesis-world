@@ -1,0 +1,40 @@
+genesis/engine/system_data/__init__.py
+  s_df26fd223e058c::t_9acc3b69f2539b 13,15-16
+genesis/engine/system_data/mpm.py
+  s_df26fd223e058c::t_9acc3b69f2539b 4,14-16,37
+genesis/engine/system_data/articulated.py
+  s_df26fd223e058c::t_9acc3b69f2539b 4,10-12,94
+genesis/engine/system_data/sf.py
+  s_df26fd223e058c::t_9acc3b69f2539b 4,12-14,28
+tests/coupling/test_hybrid.py
+  s_df26fd223e058c::t_9acc3b69f2539b 233
+genesis/engine/system_data/sph.py
+  s_df26fd223e058c::t_9acc3b69f2539b 4,12-14,33
+genesis/engine/system_data/pbd.py
+  s_df26fd223e058c::t_9acc3b69f2539b 4,13-15,52
+genesis/engine/system_data/tool.py
+  s_df26fd223e058c::t_9acc3b69f2539b 49
+  s_df26fd223e058c::t_2beeddfdbed549 14
+genesis/engine/system_data/fem.py
+  s_df26fd223e058c::t_9acc3b69f2539b 4,14-16,57
+.github/contributing/ARCHITECTURE.md
+  s_df26fd223e058c::t_9acc3b69f2539b 124
+tests/particles/test_pbd.py
+  s_df26fd223e058c::t_012ad37fb2bfa2 61
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "82ecaba47da3a64c6a4082731b7eb09c484b930b",
+  "prompts": {},
+  "sessions": {
+    "s_df26fd223e058c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87095b5f-d34a-48f1-b21f-22ff61ec5855",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}

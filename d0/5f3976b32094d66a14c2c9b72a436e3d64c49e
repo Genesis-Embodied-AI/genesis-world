@@ -1,0 +1,20 @@
+genesis/engine/solvers/mpm_solver.py
+  s_df26fd223e058c::t_43d67080a40268 13,38-39,211-218,620-622
+  s_df26fd223e058c::t_8279558bb38a54 623
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d05f3976b32094d66a14c2c9b72a436e3d64c49e",
+  "prompts": {},
+  "sessions": {
+    "s_df26fd223e058c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87095b5f-d34a-48f1-b21f-22ff61ec5855",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Trinity Chung <trinity.chung@genesis-ai.company>"
+    }
+  }
+}
