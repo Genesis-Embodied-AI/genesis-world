@@ -18,7 +18,7 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
 from .forward_dynamics import func_refresh_links_invweight_and_meaninertia
-from .misc import func_apply_link_external_wrench, func_wakeup_island
+from .misc import func_apply_link_external_wrench, func_equality_links, func_wakeup_island
 
 
 class ConstraintType(IntEnum):
@@ -278,8 +278,9 @@ def kernel_wake_up_entities_held_by_links(
 
     A fixed link never sleeps, so moving it wakes nothing by itself, while the links it holds would stay asleep where
     it was. They are found through the contacts a sleeper keeps (see n_contacts_hibernated in array_class.py) and the
-    equality constraints. JOINT equalities are skipped, since a fixed link carries no joint they could reference.
+    equality constraints.
     """
+    n_links = rigid_info.links_tree_idx.shape[0]
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
@@ -292,10 +293,7 @@ def kernel_wake_up_entities_held_by_links(
                 i_la = collider_state.contact_data.link_a[i_c, i_b]
                 i_lb = collider_state.contact_data.link_b[i_c, i_b]
             else:
-                i_eq = i_e - n_contacts_hibernated
-                if dyn_info.equalities.eq_type[i_eq, i_b] != gs.EQUALITY_TYPE.JOINT:
-                    i_la = dyn_info.equalities.eq_obj1id[i_eq, i_b]
-                    i_lb = dyn_info.equalities.eq_obj2id[i_eq, i_b]
+                i_la, i_lb = func_equality_links(i_e - n_contacts_hibernated, i_b, n_links, dyn_info, rigid_config)
             for i_l_ in range(links_idx.shape[0]):
                 i_l = links_idx[i_l_]
                 i_sleeper = -1
