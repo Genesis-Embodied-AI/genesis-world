@@ -443,11 +443,12 @@ def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
 
 
 def unique_rows(rows, *, return_index=False, return_inverse=False, return_counts=False):
-    """Same as 'np.unique(rows, axis=0, ...)', but several times faster on a 2D array of integers.
+    """Find the unique rows of an array, as 'np.unique' along the first axis does, but faster for integers.
 
-    Each row is packed into one integer key, since 'np.unique' along an axis sorts rows far slower than integers. The
-    keys sort in the lexicographic order of the rows, so the result is identical. Rows that are not integers, or whose
-    columns span too wide a range for the key to fit in int64, go through 'np.unique' along the axis.
+    Returns the same as 'np.unique(rows, axis=0, ...)' with the same flags. Each row is packed into one integer key,
+    since 'np.unique' along an axis sorts rows far slower than integers. The keys sort in the lexicographic order of the
+    rows, so the result is identical. Rows that are not integers, or whose columns span too wide a range for the key to
+    fit in int64, go through 'np.unique' along the axis.
     """
     rows = np.asarray(rows)
     if rows.ndim == 2 and len(rows) and np.issubdtype(rows.dtype, np.integer):
