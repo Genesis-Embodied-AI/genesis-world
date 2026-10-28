@@ -15,9 +15,8 @@ from .utils import make_diff_scene_pair
 @pytest.mark.parametrize(
     "model_name", ["grad_free", "grad_revolute", pytest.param("grad_free_with_revolute", marks=pytest.mark.required)]
 )
-def test_horizon_truncation_matches_independent_scenes(model_name, request, show_viewer):
+def test_horizon_truncation_matches_independent_scenes(model_name, request, tol, show_viewer):
     mjcf = request.getfixturevalue(model_name)
-    tol = dict(atol=1e-5, rtol=1e-4)
     horizon = 5
     B = 2
 
@@ -62,7 +61,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
 
     assert_equal(qpos_mid_a, qpos_mid_b)
     assert_equal(loss_h1_a, loss_h1_b)
-    assert_allclose(grad1_a, grad1_b, **tol)
+    assert_allclose(grad1_a, grad1_b, tol=tol)
 
     # Scene C: fresh scene resumed from B's mid-trajectory snapshot.
     scene_c, robot_c = build()
@@ -75,7 +74,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
 
     assert_equal(qpos_end_a, qpos_end_c)
     assert_equal(loss_h2_a, loss_h2_c)
-    assert_allclose(grad2_a, grad2_c, **tol)
+    assert_allclose(grad2_a, grad2_c, tol=tol)
 
 
 @pytest.mark.required
