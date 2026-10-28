@@ -1020,12 +1020,6 @@ def func_write_and_read_field_if(I, value, field: qd.Tensor, cond: qd.template()
     return field[I] if qd.static(cond) else value
 
 
-@qd.func
-def func_check_index_range(idx: qd.i32, min: qd.i32, max: qd.i32, cond: qd.template()):
-    # Conditionally check if the index is in the range [min, max) to save computational cost
-    return (idx >= min and idx < max) if qd.static(cond) else True
-
-
 @qd.kernel(fastcache=True)
 def kernel_clear_external_force(
     dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()

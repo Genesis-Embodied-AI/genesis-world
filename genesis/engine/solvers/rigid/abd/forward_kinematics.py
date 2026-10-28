@@ -27,7 +27,6 @@ from .manual_bw import kernel_manual_forward_kinematics_bw, kernel_manual_forwar
 from .misc import (
     func_add_safe_backward,
     func_atomic_add_if,
-    func_check_index_range,
     func_is_awake_link,
     func_is_awake_tree,
     func_read_field_if,
@@ -560,7 +559,6 @@ def func_update_geoms_link(
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
-    is_backward: qd.template(),
 ):
     """Place the movable geoms of the variant of link i_l active in env i_b on the link.
 
@@ -568,7 +566,6 @@ def func_update_geoms_link(
     env holds inactive included, for the link poses imposed from outside the step (build, setters). The verts follow
     lazily (see verts_updated).
     """
-    BW = qd.static(is_backward)
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     i_g_start = dyn_info.links.geom_start[I_l]
     i_g_end = dyn_info.links.geom_end[I_l]
@@ -582,7 +579,7 @@ def func_update_geoms_link(
         is_link_geom = True
         if qd.static(force_update_all_geoms):
             is_link_geom = dyn_info.geoms.link_idx[i_g] == i_l
-        if is_link_geom and func_check_index_range(i_g, i_g_start, i_g_end, BW):
+        if is_link_geom:
             if force_update_all_geoms or not dyn_info.geoms.is_fixed[i_g]:
                 dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
                     dyn_info.geoms.pos[i_g],
@@ -602,7 +599,6 @@ def func_update_geoms_root(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     force_update_all_geoms: qd.template(),
-    is_backward: qd.template(),
 ):
     """Place the geoms of every awake link of kinematic root i_l_root of env i_b on their link.
 
@@ -612,7 +608,7 @@ def func_update_geoms_root(
     for i_l in range(i_l_root, i_l_end):
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
-            func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms, is_backward)
+            func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms)
 
 
 @qd.func
@@ -659,9 +655,7 @@ def kernel_update_geoms(
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_r, i_b_ in qd.ndrange(rigid_info.roots_link_idx.shape[0], envs_idx.shape[0]):
         i_b = qd.cast(envs_idx[i_b_], qd.i32)
-        func_update_geoms_root(
-            i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms, is_backward=False
-        )
+        func_update_geoms_root(i_r, i_b, dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms)
 
 
 @qd.func
@@ -1066,7 +1060,7 @@ def func_update_cartesian_space_root(
         I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
         if dyn_info.links.root_idx[I_l] == i_l_root and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
             func_forward_kinematics_link(i_l, i_b, qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
-            func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms, is_backward)
+            func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms)
     func_COM_root(i_l_root, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
 
@@ -1246,9 +1240,7 @@ def func_update_cartesian_space(
                     func_forward_kinematics_link(
                         i_l, i_b, rigid_info.qpos, dyn_state, dyn_info, rigid_info, rigid_config, is_backward
                     )
-                    func_update_geoms_link(
-                        i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms, is_backward
-                    )
+                    func_update_geoms_link(i_l, i_b, dyn_state, dyn_info, rigid_config, force_update_all_geoms)
     elif qd.static(rigid_config.enable_level_sweep):
         func_sweep_links_by_level(
             dyn_state,
