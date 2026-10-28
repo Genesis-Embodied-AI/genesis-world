@@ -25,8 +25,9 @@ class StateChange(enum.Enum):
 
     Solver-agnostic: it names what kind of state changed, never an index space (links, dofs, particles, ...), which
     differs from one solver to the next. GEOMETRY is the kinematic configuration that places or deforms the world
-    surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is the model parameters (mass,
-    inertia, friction, gains, limits, gravity).
+    surface (link poses, qpos, vertices). DYNAMICS is the velocity state. MODEL is what every later step reads besides
+    the state: the model parameters (mass, inertia, friction, gains, limits, gravity) and the constraints attached to
+    the state (particle and vertex constraints).
     """
 
     GEOMETRY = enum.auto()

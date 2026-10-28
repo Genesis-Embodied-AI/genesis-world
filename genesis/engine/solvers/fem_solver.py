@@ -1246,6 +1246,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         return el2v
 
     @gs.assert_built
+    @mutates(StateChange.MODEL)
     def set_vertex_constraints(
         self, verts_idx=None, target_poss=None, link_idx=-1, is_soft_constraint=False, stiffness=0.0, envs_idx=None
     ):
@@ -1306,6 +1307,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             0, verts_idx, envs_idx, link_idx, is_soft_constraint, stiffness, target_poss, link_init_pos, link_init_quat
         )
 
+    @mutates(StateChange.MODEL)
     def update_constraint_targets(self, target_poss, verts_idx=None, envs_idx=None):
         """Update the target position of some constrained vertices (see 'set_vertex_constraints')."""
         if target_poss is None:
@@ -1318,6 +1320,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
         self._kernel_update_constraint_targets(verts_idx, envs_idx, target_poss)
 
+    @mutates(StateChange.MODEL)
     def remove_vertex_constraints(self, verts_idx=None, envs_idx=None):
         """Remove the constraints of some vertices (see 'set_vertex_constraints'), of all of them if None."""
         if not self._constraints_initialized:

@@ -1011,6 +1011,7 @@ class MPMSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
+    @mutates(StateChange.MODEL)
     def set_particle_constraints(self, particles_mask, link_idx, stiffness, *, particles_start=0):
         """
         Attach some particles to a rigid link with critically damped springs.
@@ -1047,6 +1048,7 @@ class MPMSolver(ParticleSolver):
         self._kernel_set_particle_constraints(particles_start, link_idx, stiffness, particles_mask, link_pos, link_quat)
 
     @gs.assert_built
+    @mutates(StateChange.MODEL)
     def remove_particle_constraints(self, particles_mask=None, *, particles_start=0):
         """
         Detach some particles from the rigid link they are attached to (see 'set_particle_constraints').
