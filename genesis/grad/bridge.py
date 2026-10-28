@@ -21,6 +21,7 @@ the gradients it receives, which is then the thread issuing the torch operations
 
 import contextlib
 import dataclasses
+import inspect
 import warnings
 import weakref
 from collections.abc import Callable, Iterator
@@ -251,6 +252,30 @@ def register_custom_backward(backward: Callable[..., None]) -> Callable[[Callabl
     """
 
     def decorator(kernel: Callable) -> Callable:
+        _KERNELS_BACKWARD[kernel.fn] = backward
+        return kernel
+
+    return decorator
+
+
+def reversed_with(**overwrites: bool | int | float) -> Callable[[Callable], Callable]:
+    """
+    Declare that the launches of a kernel are reversed by its own autodiff, with some of their arguments overwritten.
+
+    The arguments `overwrites` names select a variant of the kernel computing the same values from the same arrays,
+    which autodiff can reverse where the variant the launch runs syncs the lanes of a block. The reverse reads the
+    values the launch left (see LaunchRecorder), so the variant must write no array the launch leaves untouched. The
+    values are native Python scalars, as static arguments take. The tag goes above the kernel decorator.
+    """
+    assert all(isinstance(value, (bool, int, float)) for value in overwrites.values())
+
+    def decorator(kernel: Callable) -> Callable:
+        names = list(inspect.signature(kernel.fn).parameters)
+        overwrites_by_position = {names.index(name): value for name, value in overwrites.items()}
+
+        def backward(*args):
+            kernel.grad(*[overwrites_by_position.get(i, arg) for i, arg in enumerate(args)])
+
         _KERNELS_BACKWARD[kernel.fn] = backward
         return kernel
 

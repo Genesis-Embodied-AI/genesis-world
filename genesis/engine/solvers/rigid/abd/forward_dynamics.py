@@ -20,7 +20,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
-from genesis.grad.bridge import no_grad
+from genesis.grad.bridge import no_grad, reversed_with
 
 from .forward_kinematics import (
     LINK_SWEEP_PASS,
@@ -452,7 +452,9 @@ def func_compute_mass_matrix_and_link_force(
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
         func_mass_mat_force(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+    # The cooperative assembly syncs the lanes of a block, which autodiff cannot reverse, so its reverse goes through the
+    # rows of one thread each (see kernel_forward_dynamics_without_qacc)
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels and not is_backward):
         BLOCK_DIM = qd.static(32)
         n_trees = rigid_info.trees_root_idx.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
@@ -505,7 +507,8 @@ def func_compute_mass_matrix_masked(
     for i_l, i_b_ in qd.ndrange(dyn_state.links.pos.shape[0], envs_idx.shape[0]):
         func_mass_mat_force(i_l, envs_idx[i_b_], dyn_state, dyn_info, rigid_info, rigid_config)
 
-    if qd.static(rigid_config.enable_cooperative_constraint_kernels):
+    # See func_compute_mass_matrix_and_link_force
+    if qd.static(rigid_config.enable_cooperative_constraint_kernels and not is_backward):
         BLOCK_DIM = qd.static(32)
         n_trees = rigid_info.trees_root_idx.shape[0]
         qd.loop_config(name="mass_mat_assemble", block_dim=BLOCK_DIM)
@@ -2397,6 +2400,7 @@ def kernel_solve_midpoint_free_bodies(
     func_midpoint_free_bodies(dyn_state, dyn_info, rigid_info, rigid_config, is_reversed=False, is_backward=True)
 
 
+@reversed_with(is_backward=True)
 @qd.kernel(fastcache=True)
 def kernel_forward_dynamics_without_qacc(
     dyn_state: array_class.DynState,
