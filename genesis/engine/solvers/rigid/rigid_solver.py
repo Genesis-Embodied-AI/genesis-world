@@ -88,16 +88,16 @@ from .abd.diff import (
     kernel_copy_next_to_curr_clear_coupling,
 )
 from .abd.forward_dynamics import (
+    func_clear_coupling_wrench,
     func_forward_dynamics,
-    func_implicit_damping,
     func_integrate,
     func_update_acc,
     func_vel_at_point,
     kernel_compute_smooth_qacc,
     kernel_forward_dynamics,
     kernel_forward_dynamics_without_qacc,
+    kernel_integrate,
     kernel_refresh_invweight_and_meaninertia,
-    kernel_solve_midpoint_free_bodies,
     kernel_update_acc,
     update_qacc_from_qvel_delta,
     update_qvel,
@@ -1335,17 +1335,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
                 self._func_constraint_force()
             kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-            kernel_solve_midpoint_free_bodies(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-            kernel_step_2(
-                self.dyn_state,
-                self.constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                is_reversed=True,
-                is_backward=True,
-                errno=self._errno,
-            )
+            kernel_integrate(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
             kernel_copy_next_to_curr_clear_coupling(
                 self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
             )
@@ -1374,9 +1364,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.dyn_info,
                     self.rigid_info,
                     self.rigid_config,
-                    is_reversed=False,
-                    is_backward=False,
-                    errno=self._errno,
+                    self._errno,
                 )
         else:
             # The work before the constraint solve is captured as three graphs, since the compile time of a kernel grows
@@ -1677,9 +1665,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                is_reversed=False,
-                is_backward=False,
-                errno=self._errno,
+                self._errno,
             )
         elif isinstance(self.sim.coupler, IPCCoupler):
             # If any rigid entity is coupled to IPC, perform rigid simulation in post-coupling phase.
@@ -3519,8 +3505,6 @@ def func_step_2(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    is_reversed: qd.template(),
-    is_backward: qd.template(),
     errno: qd.Tensor,
 ):
     # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
@@ -3528,24 +3512,17 @@ def func_step_2(
     # because the acceleration at the end of the step is unknown for now as it may change discontinuous between
     # before and after integration under the effect of external forces and constraints. This means that
     # acceleration data will be shifted one timestep in the past, but there isn't really any way around.
-    # The midpoint integration overwrites the acceleration the link accelerations read, which a launch that autodiff
-    # reverses cannot do, so the backward pass reverses them as a launch of their own (see 'RigidSolver.substep').
-    if qd.static(not is_reversed):
-        func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=is_backward)
-
-    if qd.static(rigid_config.integrator != gs.integrator.approximate_implicitfast):
-        func_implicit_damping(dyn_state, dyn_info, rigid_info, rigid_config)
-
-    func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_reversed, is_backward)
-
-    if qd.static(not is_backward):
-        func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
-
-        if qd.static(not rigid_config.enable_mujoco_compatibility):
-            func_update_cartesian_space(
-                dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=is_backward
-            )
-            func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+    # A substep whose launches are recorded for its backward pass runs each of these calls as a launch of its own (see
+    # 'RigidSolver.substep').
+    func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
+    func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
+    func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
+    func_clear_coupling_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
+    if qd.static(not rigid_config.enable_mujoco_compatibility):
+        func_update_cartesian_space(
+            dyn_state, dyn_info, rigid_info, rigid_config, force_update_all_geoms=False, is_backward=False
+        )
+        func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
 @qd.kernel(fastcache=True)
@@ -3555,12 +3532,10 @@ def kernel_step_2(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
-    is_reversed: qd.template(),
-    is_backward: qd.template(),
     errno: qd.Tensor,
 ):
     """Run the second half of a substep on its own (see func_step_2)."""
-    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_reversed, is_backward, errno)
+    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, errno)
 
 
 @qd.kernel(graph=True, fastcache=True)
@@ -3630,13 +3605,4 @@ def kernel_substep_post(
         func_resolve_post(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, noslip, errno
         )
-    func_step_2(
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        is_reversed=False,
-        is_backward=False,
-        errno=errno,
-    )
+    func_step_2(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, errno)

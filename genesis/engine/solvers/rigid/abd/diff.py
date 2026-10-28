@@ -13,6 +13,8 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.utils.misc import qd_isfinite
 
+from .forward_dynamics import func_clear_coupling_wrench
+
 
 @qd.func
 def func_copy_next_to_curr(
@@ -51,12 +53,9 @@ def kernel_copy_next_to_curr_clear_coupling(
     rigid_config: qd.template(),
     errno: qd.Tensor,
 ):
-    """Copy the integrated state to the current one (see func_copy_next_to_curr), and clear the coupling wrench."""
+    """Copy the integrated state to the current one, then clear the coupling wrench (see func_clear_coupling_wrench)."""
     func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
-        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
+    func_clear_coupling_wrench(dyn_state, dyn_info, rigid_info, rigid_config)
 
 
 @qd.func

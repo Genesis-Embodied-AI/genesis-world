@@ -2461,8 +2461,8 @@ class LinksState:
     is_constrained: qd.Tensor
     # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
     # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
-    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated in differentiable
-    # mode only.
+    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated under the
+    # integrators using the midpoint rule only.
     midpoint_ang: qd.Tensor = of_kind(DataKind.SCRATCH)
     midpoint_res: qd.Tensor = of_kind(DataKind.SCRATCH)
     cd_ang_bw: qd.Tensor
@@ -2487,9 +2487,10 @@ class LinksState:
     awake_steps: qd.Tensor = of_kind(DataKind.STATE)
 
 
-def get_links_state(solver):
+def get_links_state(solver, kinematic_only):
     shape = (solver.n_links_, solver._B)
     requires_grad = solver._requires_grad
+    is_midpoint = not kinematic_only and solver.rigid_config.integrator != gs.integrator.Euler
     # The backward joint buffers hold one slot per joint of a link plus the link itself; collapsed when grad is off.
     n_joints_bw = (max(link.n_joints for link in solver.links) + 1) if requires_grad and solver.n_links else 1
     shape_bw = (solver.n_links_, n_joints_bw, solver._B)
@@ -2515,8 +2516,8 @@ def get_links_state(solver):
         cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_constrained=V(dtype=gs.qd_bool, shape=shape),
-        midpoint_ang=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, requires_grad)),
-        midpoint_res=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, requires_grad)),
+        midpoint_ang=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
+        midpoint_res=V(dtype=gs.qd_vec3, shape=maybe_shape(shape, is_midpoint)),
         cd_ang_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
         cd_vel_bw=V(dtype=gs.qd_vec3, shape=shape_bw, needs_grad=requires_grad),
         mass_sum=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
@@ -3259,7 +3260,7 @@ class DataManager:
         dofs_info = get_dofs_info(solver)
         dofs_state = get_dofs_state(solver)
         links_info = get_links_info(solver)
-        links_state = get_links_state(solver)
+        links_state = get_links_state(solver, kinematic_only)
         joints_info = get_joints_info(solver)
         joints_state = get_joints_state(solver)
 
