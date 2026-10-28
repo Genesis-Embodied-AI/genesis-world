@@ -97,13 +97,21 @@ def merge_errno(errno_out: np.ndarray, errno_in: np.ndarray) -> int:
 
 
 class BoundaryItems(NamedTuple):
-    """The items a boundary checkpoint holds, the zero-copy views of the arrays it copies at once with their names, and
-    the items it copies one by one: the scalars, and the arrays without a view."""
+    """The items a boundary checkpoint holds, listed once by the solver (see 'Solver.save_checkpoint')."""
 
+    # Every item the checkpoint holds
     items: list[array_class.DataItem]
+    # The names of the arrays copied at once, in the order of their views
     names: list[str]
+    # The zero-copy views of the arrays copied at once
     views: list[torch.Tensor]
+    # The items copied one by one: the scalars, and the arrays without a view
     items_copied: list[array_class.DataItem]
+    # The zero-copy views of the gradients of the arrays, which a backward pass checks at every step, the environment
+    # first with a trailing axis that gives every view one to reduce over
+    grads: list[torch.Tensor]
+    # The items whose gradient has no view, copied at every check
+    items_grad_copied: list[array_class.ArrayItem]
 
 
 class GravityMixin:
@@ -241,6 +249,8 @@ class Solver(RBC):
         # landed (see 'check_errno')
         self._errno_host: torch.Tensor | None = None
         self._errno_event: "torch.cuda.Event | None" = None
+        # The context of the check that enqueued the copy 'check_errno' reads next
+        self._errno_host_context: str | None = None
 
     def _add_force_field(self, force_field):
         self._ffs.append(force_field)
@@ -290,7 +300,12 @@ class Solver(RBC):
 
     def flag_errno(self, code: int, envs_idx=None) -> None:
         """Flag the given error for the given envs, all of them if None, which 'check_errno' then raises."""
-        self._errno_latched[indices_to_mask(envs_idx)] |= code
+        envs_mask = torch.zeros_like(self._errno_latched, dtype=torch.bool)
+        envs_mask[indices_to_mask(envs_idx)] = True
+        # The flags of every env are updated through a mask, rather than those of the selected envs alone: indexing by a
+        # boolean mask makes torch count the envs it selects to size the result, which waits for the device, and the
+        # backward pass flags envs after reversing every step (see 'StepOperation.backward')
+        self._errno_latched |= torch.where(envs_mask, code, 0)
 
     def clear_errno(self, envs_idx=None) -> None:
         """Clear the errors the solver flagged for the given envs, all of them if None (see 'register_errors')."""
@@ -312,15 +327,17 @@ class Solver(RBC):
         Raise on the first error the solver flagged since the last reset of each env (see 'register_errors').
 
         Without `blocking` on CUDA, the flags are copied to page-locked host memory without waiting for the device, and
-        the copy the previous call enqueued is checked instead: an error raises one call later, and the host only waits
-        for the device when it runs ahead of it by more than the interval between two calls. `context` says where the
-        check runs, ahead of the message.
+        the copy the previous call enqueued is checked instead: an error raises one call later, with the context of the
+        call that enqueued it, and the host only waits for the device when it runs ahead of it by more than the interval
+        between two calls. A blocking check raises what no copy has reported yet with the context of the last one.
+        `context` says where the check runs, ahead of the message.
         """
         if not self._error_messages:
             return
         if not blocking and self._errno_host is not None:
             self._errno_event.synchronize()
             errno = np.bitwise_or.reduce(self._errno_host.numpy())
+            context, self._errno_host_context = self._errno_host_context, context
             # The flags stay raised on the device until a reset, so a copy that raises is cleared rather than renewed,
             # which spares raising it again once a valid state is set
             if errno:
@@ -330,6 +347,9 @@ class Solver(RBC):
                 self._errno_event.record()
         else:
             errno = np.bitwise_or.reduce(tensor_to_array(self._errno_latched))
+            if context is None:
+                context = self._errno_host_context
+            self._errno_host_context = None
         if not errno:
             return
         for code, message in self._error_messages.items():
@@ -551,7 +571,9 @@ class Solver(RBC):
             if self._boundary_items is None:
                 # The gradients ('iter_data' names each one after its array) and the placeholders of the features
                 # switched off (see 'ArrayItem') hold nothing a replay reads
-                self._boundary_items = BoundaryItems(items=[], names=[], views=[], items_copied=[])
+                self._boundary_items = BoundaryItems(
+                    items=[], names=[], views=[], items_copied=[], grads=[], items_grad_copied=[]
+                )
                 grad_names = set()
                 for item in self.data:
                     if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
@@ -562,6 +584,17 @@ class Solver(RBC):
                             continue
                         if not isinstance(item.array, torch.Tensor) and item.array.has_grad():
                             grad_names.add(f"{item.name}.grad")
+                            grad = None
+                            if gs.use_zerocopy.is_supported:
+                                try:
+                                    grad = qd_to_torch(item.array.grad, transpose=True, copy=False)
+                                except ValueError:
+                                    # See 'fill_data'
+                                    pass
+                            if grad is None:
+                                self._boundary_items.items_grad_copied.append(item)
+                            else:
+                                self._boundary_items.grads.append(grad[..., None])
                     self._boundary_items.items.append(item)
                     if isinstance(item, array_class.ScalarItem) or not gs.use_zerocopy.is_supported:
                         self._boundary_items.items_copied.append(item)
@@ -619,14 +652,24 @@ class Solver(RBC):
         'DataKind'). On Metal, the caller synchronizes the torch stream before the next kernel (see 'fill_data').
         """
         if boundary_only:
-            items = self._boundary_items.items
+            # The arrays with a view are written back in one fused copy, from the copies 'save_checkpoint' made of them
+            # in this process, which spares checking them against the scene
+            if self._boundary_items.views:
+                # The writes wait for the last kernel to be done with the arrays (see qd_to_torch)
+                if gs.backend == gs.metal:
+                    qd.sync()
+                values = [checkpoint.arrays[name] for name in self._boundary_items.names]
+                torch._foreach_copy_(self._boundary_items.views, values)
+            items = self._boundary_items.items_copied
+            arrays = {item.name: checkpoint.arrays[item.name] for item in items}
         else:
             items = [
                 item
                 for item in self.data
                 if not isinstance(item, array_class.ConfigItem) and item.kind in checkpoint.kinds
             ]
-        array_class.fill_data(items, checkpoint.arrays, frame_only=boundary_only and self.has_frames)
+            arrays = checkpoint.arrays
+        array_class.fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
 
     def __getstate__(self) -> SolverCheckpoint:
         """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""

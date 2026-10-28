@@ -207,8 +207,8 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
     arms_ana[0].set_dofs_kv(arms_ana[0].get_dofs_kv())
     with pytest.raises(gs.GenesisException, match="changed since this operation"):
         torch.autograd.grad(loss, params_ana)
-    # A gradient that is not finite raises while the step it reaches first is reversed, which the error names, and so
-    # does an error the last steps of the rollout flagged
+    # A gradient that is not finite raises during the backward pass, naming the step it reaches first, and so does an
+    # error the last steps of the rollout flagged
     loss = rollout(scene_ana, arms_ana, params_ana)
     with pytest.raises(gs.GenesisException, match=f"Backward pass of step {HORIZON - 1}: .*'inf' gradient"):
         torch.autograd.grad(loss * float("nan"), params_ana)

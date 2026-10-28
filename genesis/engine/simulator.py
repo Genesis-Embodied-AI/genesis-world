@@ -10,7 +10,7 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ArrayItem, DataItem, DataKind, ErrorCode, iter_data
+from genesis.utils.array_class import DataItem, DataKind, ErrorCode, iter_data
 from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
@@ -647,22 +647,26 @@ class StepOperation(Operation):
 
     def backward(self) -> tuple[torch.Tensor | None, ...]:
         self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints)
-        # The adjoint of every earlier step derives from this one, so an adjoint that is not finite raises at once,
-        # naming the step a shorter horizon would have to stop before. It is read from every array of the state that
-        # carries one, so every differentiable solver is covered. The arrays are those the boundary checkpoint of the
-        # step holds, listed once by the solver, which spares walking its structs at every step.
+        # The adjoint of every earlier step derives from this one, so an adjoint that is not finite raises during the
+        # pass, naming the step a shorter horizon would have to stop before. It is read from every array of the state
+        # that carries one, so every differentiable solver is covered. The arrays are those the boundary checkpoint of
+        # the step holds, whose gradients the solver lists once (see 'BoundaryItems'). The check does not block where
+        # the device allows it, so an error raises one step later, and at the end of the pass for the first step.
         for solver in self._sim._active_solvers:
             if not solver.requires_grad:
                 continue
-            envs_finite = []
-            for item in solver._boundary_items.items:
-                if not isinstance(item, ArrayItem) or isinstance(item.array, torch.Tensor) or not item.array.has_grad():
-                    continue
-                # The environment is the last index of every array of the state, which the transpose moves first
-                grad = qd_to_torch(item.array.grad, transpose=True)
-                envs_finite.append(torch.isfinite(grad).reshape(grad.shape[0], -1).all(dim=1))
-            if envs_finite:
-                solver.flag_errno(ErrorCode.INVALID_GRAD_NAN, ~torch.stack(envs_finite).all(dim=0))
+            grads = [
+                *solver._boundary_items.grads,
+                *[
+                    qd_to_torch(item.array.grad, transpose=True)[..., None]
+                    for item in solver._boundary_items.items_grad_copied
+                ],
+            ]
+            if grads:
+                envs_finite = torch.stack([grad.isfinite().all(dim=tuple(range(1, grad.ndim))) for grad in grads])
+                solver.flag_errno(ErrorCode.INVALID_GRAD_NAN, ~envs_finite.all(dim=0))
             solver.update_errno()
-            solver.check_errno(context=f"Backward pass of step {self._substep_start // self._sim._substeps}")
+            solver.check_errno(
+                blocking=False, context=f"Backward pass of step {self._substep_start // self._sim._substeps}"
+            )
         return ()
