@@ -84,7 +84,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "black",
-    "pytest",
+    # FIXME: Remove this cap once pytest-forked can serialize pytest 9.2's NodeId reports. Version 1.7.5 cannot marshal
+    # them and exits with status 3 even for passing tests.
+    "pytest<9.2",
     "pytest-xdist",
     "pytest-forked",
     "pytest-timeout",
