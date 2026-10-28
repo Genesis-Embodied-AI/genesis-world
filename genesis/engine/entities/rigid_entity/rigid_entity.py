@@ -50,7 +50,9 @@ class KinematicEntity(Entity):
         self._morph_heterogeneous = desc.morphs[1:]
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
 
-        super().__init__(idx, scene, desc.morphs[0], solver, desc.material, desc.surface, name=desc.name)
+        super().__init__(
+            idx, scene, desc.morphs[0], solver, desc.material, desc.surface, name=desc.name, options=desc.options
+        )
         # The scene names an entity as it is added, so the description takes the name the entity received
         desc.name = self._name
 

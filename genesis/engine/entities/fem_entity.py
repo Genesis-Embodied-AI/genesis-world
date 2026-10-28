@@ -167,7 +167,8 @@ class FEMEntity(Entity):
         vvert_start=0,
         vface_start=0,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 

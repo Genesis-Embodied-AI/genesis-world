@@ -137,7 +137,8 @@ class PBDTetEntity(PBDBaseEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(
             scene,
@@ -271,7 +272,8 @@ class PBD2DEntity(PBDTetEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(
             scene,
@@ -388,7 +390,8 @@ class PBD3DEntity(PBDTetEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(
             scene,
@@ -509,7 +512,8 @@ class PBDParticleEntity(PBDBaseEntity):
         idx,
         particle_start,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(
             scene,
@@ -583,7 +587,8 @@ class PBDFreeParticleEntity(PBDBaseEntity):
         idx,
         particle_start,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(
             scene,
