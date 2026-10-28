@@ -1315,9 +1315,10 @@ def test_contact_forces(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("gjk_collision", [True, False])
-def test_contact_pruning(gjk_collision, show_viewer):
+def test_contact_pruning(gjk_collision, show_viewer, tol):
     GEOM_HALF_SIZE = 0.1
     MARGIN = 1e-4
+    N_STEPS = 200
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -1404,6 +1405,8 @@ def test_contact_pruning(gjk_collision, show_viewer):
         quat = gu.xyz_to_quat(np.array((0.0, 0.0, angle)))
         mesh.apply_transform(gu.trans_quat_to_T(trans=np.zeros(3), quat=quat))
         meshes.append(mesh)
+    # A deeper interior support adds a constraint even when its projected position lies inside the support polygon
+    meshes.append(trimesh.creation.box(extents=(0.1, 0.1, 0.2002)))
     prism = scene.add_entity(
         morph=gs.morphs.MeshSet(
             files=meshes,
@@ -1415,19 +1418,41 @@ def test_contact_pruning(gjk_collision, show_viewer):
         ),
         vis_mode="collision",
     )
+    prism_boundary = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=meshes[:-1],
+            pos=(0.0, -1.0, 2.0),
+            decimate=False,
+        ),
+        surface=gs.surfaces.Default(
+            smooth=False,
+        ),
+        vis_mode="collision",
+    )
+    prism_support = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.4, 0.4, 0.1),
+            pos=(0.0, 0.0, 1.95),
+            fixed=True,
+            batch_fixed_verts=True,
+        ),
+    )
     scene.build(n_envs=2)
     # The box sits in the corner of the three walls in the first environment, and on the edge of the two walls after it
     # in the second one, where its only contacts come from the two link pairs of closest indices
     box.set_pos(((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)))
 
-    for step_idx in range(200):
+    positions_init = tensor_to_array(box.get_pos())
+    corners_sign = np.array(tuple(product((-1.0, 1.0), repeat=3)))
+    faces_offset = GEOM_HALF_SIZE * np.stack([corners_sign[corners_sign[:, axis] < 0] for axis in range(3)])
+    for step_idx in range(N_STEPS):
         scene.step()
         # Within each contact-normal bucket, every surviving contact must be a vertex of the 2D convex hull of
         # contacts' positions projected onto the plane perpendicular to that shared normal. The bucket key is the
         # contact's dominant axial direction (this scene's normals are nearly axial, so axis + sign is enough; we
         # don't need to be fully generic). Redundant (interior or hull-edge-midpoint) contacts and >2-collinear
         # contacts both indicate the pruning kernel left work undone.
-        contacts = scene.rigid_solver.collider.get_contacts(to_torch=False)
+        contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
         for i_b in range(scene.n_envs):
             positions = contacts["position"][i_b]
             normals = contacts["normal"][i_b]
@@ -1436,7 +1461,31 @@ def test_contact_pruning(gjk_collision, show_viewer):
                 axis = int(np.argmax(np.abs(normals[i])))
                 sign = 1 if normals[i][axis] > 0 else -1
                 buckets.setdefault((axis, sign), []).append(i)
+            if step_idx == 0:
+                faces_ref = np.clip(positions_init[i_b] + faces_offset, -0.5, 0.5)
+                faces_ref[np.arange(3), :, np.arange(3)] = (0.5 * (positions_init[i_b] + MARGIN - 2 * GEOM_HALF_SIZE))[
+                    :, None
+                ]
+                corners_ref = faces_ref[positions_init[i_b] < MARGIN].reshape(-1, 3)
+                origin = corners_ref.mean(axis=0)
+                radius = np.linalg.norm(corners_ref - origin, axis=-1).max()
             for key, idxs in buckets.items():
+                if step_idx == 0:
+                    # Bound lost force and torque support across the patches sharing the movable link
+                    assert_allclose(np.abs(normals[idxs]), np.eye(3)[key[0]], tol=tol)
+                    positions_ref = faces_ref[key[0]]
+                    arms = (positions_ref - origin) / radius
+                    force_maps = np.tile(np.eye(6), (len(positions_ref), 1, 1))
+                    force_maps[:, 3:, :3] = np.cross(arms[:, None], np.eye(3)[None]).transpose(0, 2, 1)
+                    force_norms = np.linalg.svd(force_maps, compute_uv=False)[:, 0]
+                    donors = positions[idxs]
+                    edges = donors[None] - donors[:, None]
+                    offsets = positions_ref[:, None, None] - donors[None, :, None]
+                    weights = np.clip(
+                        (offsets * edges).sum(axis=-1) / np.maximum((edges**2).sum(axis=-1), gs.EPS**2), 0.0, 1.0
+                    )
+                    distances = np.linalg.norm(offsets - weights[..., None] * edges, axis=-1).min(axis=(1, 2))
+                    assert (distances / (radius * force_norms) <= 0.05 + tol).all()
                 if len(idxs) < 3:
                     continue
                 other_axes = [a for a in range(3) if a != key[0]]
@@ -1465,26 +1514,49 @@ def test_contact_pruning(gjk_collision, show_viewer):
                     f"{n_hull_vertices} are vertices of the bucket's 2D convex hull. The pruning kernel should have "
                     f"dropped these {len(idxs) - n_hull_vertices} redundant contact(s):\n{details}"
                 )
+
     assert_allclose(box.get_pos(), ((0.0, 0.0, 0.0), (0.55, 0.0, 0.0)), atol=2e-3)
 
-    # Micrometre translations preserve the supporting area even when several boundary reductions have equal cost.
+    # Small pose changes preserve support when several boundary reductions have equal cost
     areas_reference = None
+    positions_previous = [None] * scene.n_envs
     for i_step in range(8):
         positions = np.array(((0.8, 0.0, -0.2001), (1.8, 0.0, -0.2001)))
-        positions[:, 0] += 1e-6 * np.sin(0.3 * i_step)
-        positions[:, 1] += 1e-6 * np.cos(0.7 * i_step)
+        displacement = np.array((1e-6 * np.sin(0.3 * i_step), 1e-6 * np.cos(0.7 * i_step), 0.0))
+        positions += displacement
         prism.set_pos(positions)
+        quat = gu.xyz_to_quat(displacement)
         prism.set_quat((1.0, 0.0, 0.0, 0.0))
+        positions_support = np.array(((0.0, 0.0, 2.0), (20.0, 0.0, 2.0))) + displacement
+        prism_support.set_pos(positions_support + gu.transform_by_quat(np.array((0.0, 0.0, -0.05)), quat))
+        prism_support.set_quat(quat)
+        positions_boundary = positions_support + gu.transform_by_quat(np.array((0.0, 0.0, 0.0999)), quat)
+        prism_boundary.set_pos(positions_boundary)
+        prism_boundary.set_quat(quat)
         scene.step()
         contacts = prism.get_contacts()
         contact_positions = tensor_to_array(contacts["position"])
         contact_mask = tensor_to_array(contacts["valid_mask"])
+        penetrations = tensor_to_array(contacts["penetration"])
+        penetration_max = np.where(contact_mask, penetrations, 0.0).max(axis=-1)
+        assert_allclose(penetration_max, 0.0002, atol=tol * GEOM_HALF_SIZE)
         areas = np.array(
             [ConvexHull(contact_positions[i_b, contact_mask[i_b], :2]).volume for i_b in range(scene.n_envs)]
         )
         if areas_reference is None:
             areas_reference = areas
         assert_allclose(areas / areas_reference, 1.0, tol=1e-4)
+        contacts_boundary = prism_boundary.get_contacts()
+        positions_contact_boundary = tensor_to_array(contacts_boundary["position"])
+        mask_contact_boundary = tensor_to_array(contacts_boundary["valid_mask"])
+        for i_b in range(scene.n_envs):
+            positions_local = positions_contact_boundary[i_b, mask_contact_boundary[i_b]] - positions_boundary[i_b]
+            positions_local = gu.inv_transform_by_quat(positions_local, quat)
+            if positions_previous[i_b] is not None:
+                distances = np.linalg.norm(positions_local[:, None] - positions_previous[i_b][None], axis=-1)
+                assert_allclose(distances.min(axis=0), 0.0, atol=1e-5)
+                assert_allclose(distances.min(axis=1), 0.0, atol=1e-5)
+            positions_previous[i_b] = positions_local
 
 
 @pytest.mark.required

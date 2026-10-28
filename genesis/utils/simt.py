@@ -50,6 +50,17 @@ def qd_block_max(value):
 
 
 @qd.func
+def qd_block_argmax(i_value, value):
+    """Maximum of a value over the 32 lanes of a block, with the smallest index any lane holding it pairs with it.
+
+    Every lane of the block receives both. See qd_block_sum for the blocks and the source lane.
+    """
+    value_max = qd_block_max(value)
+    # The lanes holding the maximum hold the very bits the reduction returns
+    return value_max, qd_block_min(i_value if value >= value_max else gs.qd_int(2**31 - 1))
+
+
+@qd.func
 def qd_block_shuffle(value, i_lane):
     """Read a value from lane i_lane of the 32 lanes of a block, every lane of the block receiving it.
 
@@ -302,3 +313,30 @@ def qd_segment_min(tid, i_slot, i_slot_prev, i_slot_next, i_row, value, sh_min):
     total, is_tail = qd_segmented_min(tid, i_slot, i_slot_prev, i_slot_next, value)
     if is_tail:
         sh_min[i_row + i_slot] = qd.min(sh_min[i_row + i_slot], total)
+
+
+@qd.func
+def qd_bitonic_n_levels(n: int):
+    """Number of levels of a bitonic sorting network over a number of slots, its base-2 logarithm rounded up."""
+    n_levels = 0
+    for i_bit in range(31):
+        if (1 << i_bit) < n:
+            n_levels = i_bit + 1
+    return n_levels
+
+
+@qd.func
+def qd_bitonic_pair(i_pair: int, i_level: int, i_step: int):
+    """Slots of a pair compared at a step of a bitonic sorting network, the lower slot first.
+
+    Level 'i_level' sorts the blocks of 2**(i_level + 1) slots. Its first step compares the slots mirrored about the
+    middle of each block and the next ones the slots 2**(i_level - i_step) apart, so that every comparison puts the
+    earlier key in the lower slot. The pairs of a step are numbered by 'i_pair' from 0 on. The lower slot of a pair has
+    the bit of the pair distance cleared, which inserting a cleared bit at that position into 'i_pair' yields.
+    """
+    i_bit_pair = i_level - i_step
+    slot_mask = 1 << i_bit_pair
+    if i_step == 0:
+        slot_mask = (2 << i_level) - 1
+    i_s = ((i_pair >> i_bit_pair) << (i_bit_pair + 1)) | (i_pair & ((1 << i_bit_pair) - 1))
+    return i_s, i_s ^ slot_mask

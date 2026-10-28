@@ -39,8 +39,6 @@ from .constants import CCD_ALGORITHM_CODE
 from .contact import (
     collider_kernel_get_contacts,
     collider_kernel_reset,
-    func_clamp_prune_contacts,
-    func_clamp_prune_contacts_coop,
     func_set_upstream_grad,
     kernel_collider_clear,
     kernel_masked_collider_clear,
@@ -54,6 +52,13 @@ from .narrowphase import (
     func_narrow_phase_nonconvex_vs_nonterrain,
     func_narrowphase_contact0,
     func_narrowphase_multicontact,
+)
+from .pruning import (
+    func_clamp_prune_contacts,
+    func_clamp_prune_contacts_coop,
+    func_clamp_prune_contacts_warp,
+    func_reduce_contact_wrenches,
+    func_sort_contact_tiles_coop,
 )
 
 if TYPE_CHECKING:
@@ -93,7 +98,8 @@ class Collider:
             and not self._solver._requires_grad
         )
 
-        # Two threads per core fill the warp slots the register use of the terrain pass leaves
+        # The terrain pass shares its work items over a pool of threads, each owning its scratch (prism, MPR state). Its
+        # size matches the threads the multiprocessors keep resident given their register use: extra threads only queue.
         self._n_terrain_threads = 1
         if self.collider_config.has_terrain and gs.backend != gs.cpu:
             self._n_terrain_threads = 2 * self.collider_config.gpu_cores
@@ -288,6 +294,18 @@ class Collider:
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)
 
+        # Every parent precedes its children, so that the group of a link is known by the time the link is reached
+        n_support_groups = 0
+        if self.collider_config.has_prunable_contacts and not self._solver.rigid_config.requires_grad:
+            links_support_group_idx = np.zeros(self._solver.n_links_, dtype=gs.np_int)
+            for link in self._solver.links:
+                if link.parent_idx >= 0 and all(joint.n_dofs <= 1 for joint in link.joints):
+                    links_support_group_idx[link.idx] = links_support_group_idx[link.parent_idx]
+                else:
+                    links_support_group_idx[link.idx] = n_support_groups
+                    n_support_groups += 1
+            self.collider_info.links_support_group_idx.from_numpy(links_support_group_idx)
+
         # The box of every link in its own frame, bounding the boxes of its geoms, whose pose in the link is fixed
         if self._solver.n_geoms > 0:
             geoms_corners = gu.transform_by_trans_quat(
@@ -315,6 +333,7 @@ class Collider:
             self._solver.rigid_config,
             n_possible_pairs_,
             self._n_terrain_threads,
+            n_support_groups,
             self.collider_info,
             self.collider_config,
             split_narrowphase=self._use_split_narrowphase,
@@ -332,6 +351,9 @@ class Collider:
             and (self._solver._options.contact_pruning_tolerance or 0.0) > 0.0
             and self._solver._B <= 0.5 * self.collider_config.gpu_cores
         )
+        # Contact buffers beyond 1024 contacts are sorted by tiles, one block per tile, then pruned with one block per
+        # environment. The other ones are pruned with one warp per environment (see func_clamp_prune_contacts_warp).
+        self._is_contact_sort_tiled = self._use_coop_dedup and self.collider_info.max_candidate_contacts[None] > 1024
 
     def _compute_collision_pair_idx(self):
         """
@@ -863,6 +885,7 @@ class Collider:
             self._n_possible_pairs > 0,
             self._use_split_narrowphase,
             self._use_coop_dedup,
+            self._is_contact_sort_tiled,
             self._solver._errno,
         )
         self._contact_data_cache.clear()
@@ -1096,13 +1119,15 @@ def func_detection(
     has_possible_pairs: qd.template(),
     split_narrowphase: qd.template(),
     coop_dedup: qd.template(),
+    tile_contact_sort: qd.template(),
     errno: qd.Tensor,
 ):
     """Update the geom bounding boxes, then run the broad phase, the narrow phase and the contact pruning.
 
     has_possible_pairs is False when no geom pair can collide, in which case only the bounding boxes are updated.
     split_narrowphase runs the convex narrow phase as a contact 0 pass followed by a multi-contact pass, on their own
-    scratch states. coop_dedup prunes the contacts cooperatively.
+    scratch states. coop_dedup prunes the contacts cooperatively, with one warp per environment, or with one block per
+    environment after sorting them by tiles where tile_contact_sort is set.
     """
     func_update_geom_aabbs(geoms_init_AABB, dyn_state, dyn_info, rigid_config)
     if qd.static(has_possible_pairs):
@@ -1199,11 +1224,44 @@ def func_detection(
                 collider_static_config,
                 errno,
             )
-        if qd.static(coop_dedup):
-            func_clamp_prune_contacts_coop(dyn_state, collider_state, dyn_info, rigid_info, collider_info, errno)
+        if qd.static(coop_dedup and not tile_contact_sort):
+            func_clamp_prune_contacts_warp(
+                dyn_state,
+                collider_state,
+                dyn_info,
+                rigid_info,
+                collider_info,
+                collider_static_config,
+                gjk_static_config,
+                errno,
+            )
+        elif qd.static(coop_dedup):
+            func_sort_contact_tiles_coop(dyn_state, collider_state, dyn_info, collider_info)
+            func_clamp_prune_contacts_coop(
+                dyn_state,
+                collider_state,
+                dyn_info,
+                rigid_info,
+                collider_info,
+                collider_static_config,
+                gjk_static_config,
+                errno,
+            )
         else:
             func_clamp_prune_contacts(
-                dyn_state, collider_state, rigid_info, collider_info, rigid_config, collider_static_config, errno
+                dyn_state,
+                collider_state,
+                dyn_info,
+                rigid_info,
+                collider_info,
+                rigid_config,
+                collider_static_config,
+                gjk_static_config,
+                errno,
+            )
+        if qd.static(collider_static_config.has_prunable_contacts and not rigid_config.requires_grad):
+            func_reduce_contact_wrenches(
+                dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, use_coop=coop_dedup
             )
         # Plane-convex and sphere-sphere contacts come from analytic paths that leave diff_contact_input unfilled, so
         # it is filled here for the differentiable narrow-phase reverse (see func_fill_diff_contact_input_analytic)
@@ -1233,6 +1291,7 @@ def kernel_detection(
     has_possible_pairs: qd.template(),
     split_narrowphase: qd.template(),
     coop_dedup: qd.template(),
+    tile_contact_sort: qd.template(),
     errno: qd.Tensor,
 ):
     """Detect the collisions of every environment, captured as one graph."""
@@ -1257,6 +1316,7 @@ def kernel_detection(
         has_possible_pairs=has_possible_pairs,
         split_narrowphase=split_narrowphase,
         coop_dedup=coop_dedup,
+        tile_contact_sort=tile_contact_sort,
         errno=errno,
     )
 
@@ -1283,6 +1343,7 @@ def kernel_detection_without_graph(
     has_possible_pairs: qd.template(),
     split_narrowphase: qd.template(),
     coop_dedup: qd.template(),
+    tile_contact_sort: qd.template(),
     errno: qd.Tensor,
 ):
     """Detect the collisions of every environment without a graph (see Collider.detection)."""
@@ -1307,6 +1368,7 @@ def kernel_detection_without_graph(
         has_possible_pairs=has_possible_pairs,
         split_narrowphase=split_narrowphase,
         coop_dedup=coop_dedup,
+        tile_contact_sort=tile_contact_sort,
         errno=errno,
     )
 
