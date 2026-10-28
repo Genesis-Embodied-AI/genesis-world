@@ -2461,8 +2461,8 @@ class LinksState:
     is_constrained: qd.Tensor
     # Midpoint angular velocity a free body eligible for midpoint integration converged to this substep, in its inertial
     # frame, and the residual of the midpoint equation there. The integration the backward pass reverses resumes from
-    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated under the
-    # integrators using the midpoint rule only.
+    # them, since autodiff cannot reverse the Newton iteration (see func_midpoint_free_body). Allocated for the dynamic
+    # solvers integrating with the midpoint rule only.
     midpoint_ang: qd.Tensor = of_kind(DataKind.SCRATCH)
     midpoint_res: qd.Tensor = of_kind(DataKind.SCRATCH)
     cd_ang_bw: qd.Tensor
