@@ -55,22 +55,22 @@ if __name__ == "__main__":
     )
 
     robot = scene.add_entity(
-        material=gs.materials.Rigid(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                euler=(0, 0, 0),
+            ),
             gravity_compensation=1,
-        ),
-        morph=gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            euler=(0, 0, 0),
         ),
     )
 
     cube = scene.add_entity(
-        material=gs.materials.Rigid(
-            rho=300,
-        ),
         morph=gs.morphs.Box(
             pos=(0.5, 0.0, 0.07),
             size=(0.04, 0.04, 0.04),
+        ),
+        material=gs.materials.Material(
+            density=300,
         ),
         surface=gs.surfaces.Default(
             color=(0.5, 1, 0.5),

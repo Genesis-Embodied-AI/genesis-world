@@ -768,8 +768,8 @@ def test_mjcf_parse_material(material_mjcf, tol):
             scale=1.0,
             convexify=False,
         ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        material=gs.materials.Material(
+            density=1000.0,
         ),
     )
     scene.build()

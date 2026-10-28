@@ -10,10 +10,13 @@ from genesis.utils.misc import tensor_to_array
 @pytest.mark.slow("cpu")  # cpu ~500s
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize(
-    "options_cls, muscle_material",
-    [(gs.options.MPMEntityOptions, gs.materials.MPM.Muscle), (gs.options.FEMEntityOptions, gs.materials.FEM.Muscle)],
+    "options_cls, solver_options_cls",
+    [
+        (gs.options.MPMEntityOptions, gs.options.MPMEntitySolverOptions),
+        (gs.options.FEMEntityOptions, gs.options.FEMEntitySolverOptions),
+    ],
 )
-def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
+def test_muscle(n_envs, options_cls, solver_options_cls, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=5e-4,
@@ -38,9 +41,11 @@ def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
     )
 
     scene.add_entity(
-        morph=gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=5.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=5.0,
+            ),
         ),
     )
     worm = scene.add_entity(
@@ -51,16 +56,18 @@ def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
                 scale=0.1,
                 euler=(90, 0, 0),
             ),
-            material=muscle_material(
-                E=5e5,
-                nu=0.45,
-                rho=10000.0,
-                n_groups=4,
-            ),
             surface=gs.surfaces.Default(
                 diffuse_texture=gs.textures.ImageTexture(
                     image_path="meshes/worm/bdy_Base_Color.png",
                 ),
+            ),
+            material=gs.materials.Muscle(
+                density=10000.0,
+                youngs_modulus=5e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=solver_options_cls(
+                n_groups=4,
             ),
         ),
     )
@@ -69,10 +76,10 @@ def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
     else:
         scene.build()
 
-    if isinstance(worm.material, gs.materials.MPM.Muscle):
+    if isinstance(worm.options, gs.options.MPMEntityOptions):
         pos = worm.get_state().pos[0]
         n_units = worm.n_particles
-    else:  # isinstance(worm.material, gs.materials.FEM.Muscle):
+    else:
         pos = worm.get_state().pos[0, worm.get_el2v()].mean(1)
         n_units = worm.n_elements
 

@@ -6,7 +6,8 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
-from genesis.utils.misc import broadcast_tensor
+from genesis.options.materials import Liquid, Muscle, Sand, Snow
+from genesis.utils.misc import to_gs_tensor
 
 from .particle_entity import ParticleEntity, assert_active
 
@@ -14,8 +15,8 @@ from .particle_entity import ParticleEntity, assert_active
 def assert_muscle(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        if not isinstance(self.material, gs.materials.MPM.Muscle):
-            gs.raise_exception("This method is only supported by entities with 'MPM.Muscle' material.")
+        if not isinstance(self.material, Muscle):
+            gs.raise_exception("This method is only supported by entities with a 'Muscle' material.")
         return method(self, *args, **kwargs)
 
     return wrapper
@@ -42,6 +43,8 @@ class MPMEntity(ParticleEntity):
         Particle size for discretization.
     idx : int
         Unique index of the entity.
+    model_idx : int
+        Index of the constitutive model of the entity in the solver.
     particle_start : int
         Starting particle index.
     vvert_start : int
@@ -59,6 +62,7 @@ class MPMEntity(ParticleEntity):
         surface,
         particle_size,
         idx,
+        model_idx,
         particle_start,
         vvert_start,
         vface_start,
@@ -66,9 +70,7 @@ class MPMEntity(ParticleEntity):
         *,
         options,
     ):
-        need_skinning = not isinstance(
-            material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
-        )
+        need_skinning = not isinstance(material, (Liquid, Sand, Snow))
         super().__init__(
             scene,
             solver,
@@ -84,10 +86,25 @@ class MPMEntity(ParticleEntity):
             name=name,
             options=options,
         )
+        self._model_idx = model_idx
+        # The number of muscle groups, which the hybrid entity owning this one as its skin sets to its number of links
+        self._n_groups = options.solver_options.n_groups
+
+    def init_tgt_keys(self):
+        """
+        Initialize target keys used for buffer-based state tracking.
+
+        Sets up the list of keys for target states, including velocity, position, activeness, and finally actuation (for
+        muscle only).
+        """
+        if isinstance(self.material, Muscle):
+            self._tgt_keys = ("pos", "vel", "act", "actu")
+        else:
+            self._tgt_keys = ("pos", "vel", "act")
 
     def _add_to_solver(self):
         super()._add_to_solver()
-        if isinstance(self.material, gs.materials.MPM.Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
+        if isinstance(self.material, Muscle) and isinstance(self._morph, gs.options.morphs.MeshSet):
             self.set_muscle_group(self.mesh_set_group_ids)
 
     def _add_particles_to_solver(self):
@@ -96,11 +113,171 @@ class MPMEntity(ParticleEntity):
             self.active,
             self._particle_start,
             self._n_particles,
-            self._material.idx,
-            self._material._default_Jp,
-            self._material.rho,
+            self._model_idx,
+            self._solver._models[self._model_idx].default_Jp,
+            self._material.density,
             self._particles,
         )
+
+    def _reset_grad(self):
+        """
+        Clear all gradients for particle properties.
+        """
+        self._reset_frame_grad(self._sim.cur_substep_local)
+
+    @qd.kernel
+    def _reset_frame_grad(self, f: qd.i32):
+        """
+        Clear all gradients for particle properties at the given substep.
+
+        Parameters
+        ----------
+        f : int
+            The current substep index.
+        """
+        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_global = i_p + self._particle_start
+            self._solver.particles.grad[f, i_global, i_b].pos = 0
+            self._solver.particles.grad[f, i_global, i_b].vel = 0
+            self._solver.particles.grad[f, i_global, i_b].C = 0
+            self._solver.particles.grad[f, i_global, i_b].F = 0
+            self._solver.particles.grad[f, i_global, i_b].F_tmp = 0
+            self._solver.particles.grad[f, i_global, i_b].Jp = 0
+            self._solver.particles.grad[f, i_global, i_b].U = 0
+            self._solver.particles.grad[f, i_global, i_b].V = 0
+            self._solver.particles.grad[f, i_global, i_b].S = 0
+            self._solver.particles.grad[f, i_global, i_b].actu = 0
+
+    def add_grad_from_state(self, state):
+        """
+        Accumulate gradients from a recorded state back into the solver.
+
+        Parameters
+        ----------
+        state : MPMEntityState
+            The state object containing gradients for physical quantities.
+        """
+        if state.pos.grad is not None:
+            assert state.pos.grad.is_contiguous()
+            self._kernel_add_frame_particles_pos_grad(self._sim.cur_substep_local, state.pos.grad)
+
+        if state.vel.grad is not None:
+            assert state.vel.grad.is_contiguous()
+            self._kernel_add_frame_particles_vel_grad(self._sim.cur_substep_local, state.vel.grad)
+
+        if state.C.grad is not None:
+            assert state.C.grad.is_contiguous()
+            self._kernel_add_frame_particles_C_grad(self._sim.cur_substep_local, state.C.grad)
+
+        if state.F.grad is not None:
+            assert state.F.grad.is_contiguous()
+            self._kernel_add_frame_particles_F_grad(self._sim.cur_substep_local, state.F.grad)
+
+        if state.Jp.grad is not None:
+            assert state.Jp.grad.is_contiguous()
+            self._kernel_add_frame_particles_Jp_grad(self._sim.cur_substep_local, state.Jp.grad)
+
+    @qd.kernel
+    def _kernel_add_frame_particles_pos_grad(self, f: qd.i32, poss_grad: qd.types.ndarray()):
+        """
+        Accumulate gradients to particle positions at the given substep.
+
+        Parameters
+        ----------
+        f : int
+            Local substep index to update.
+        poss_grad : ndarray
+            Gradient of particle positions, shape (B, n_particles, 3).
+        """
+        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_global = i_p + self._particle_start
+            for j in qd.static(range(3)):
+                self._solver.particles.grad[f, i_global, i_b].pos[j] += poss_grad[i_b, i_p, j]
+
+    @qd.kernel
+    def _kernel_add_frame_particles_vel_grad(self, f: qd.i32, vels_grad: qd.types.ndarray()):
+        """
+        Accumulate gradients to particle velocities at the given substep.
+
+        Parameters
+        ----------
+        f : int
+            Local substep index to update.
+        vels_grad : ndarray
+            Gradient of particle velocities, shape (B, n_particles, 3).
+        """
+        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_global = i_p + self._particle_start
+            for j in qd.static(range(3)):
+                self._solver.particles.grad[f, i_global, i_b].vel[j] += vels_grad[i_b, i_p, j]
+
+    @qd.kernel
+    def _kernel_add_frame_particles_C_grad(self, f: qd.i32, C_grad: qd.types.ndarray()):
+        """
+        Accumulate gradients to affine matrices C at the given substep.
+
+        Parameters
+        ----------
+        f : int
+            Local substep index to update.
+        C_grad : ndarray
+            Gradient of C matrices, shape (B, n_particles, 3, 3).
+        """
+        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_global = i_p + self._particle_start
+            for j in qd.static(range(3)):
+                for k in qd.static(range(3)):
+                    self._solver.particles.grad[f, i_global, i_b].C[j, k] += C_grad[i_b, i_p, j, k]
+
+    @qd.kernel
+    def _kernel_add_frame_particles_F_grad(self, f: qd.i32, F_grad: qd.types.ndarray()):
+        """
+        Accumulate gradients to deformation gradients F at the given substep.
+
+        Parameters
+        ----------
+        f : int
+            Local substep index to update.
+        F_grad : ndarray
+            Gradient of F matrices, shape (B, n_particles, 3, 3).
+        """
+        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_global = i_p + self._particle_start
+            for j in qd.static(range(3)):
+                for k in qd.static(range(3)):
+                    self._solver.particles.grad[f, i_global, i_b].F[j, k] += F_grad[i_b, i_p, j, k]
+
+    @qd.kernel
+    def _kernel_add_frame_particles_Jp_grad(self, f: qd.i32, Jp_grad: qd.types.ndarray()):
+        """
+        Accumulate gradients to plastic volume ratios Jp at the given substep.
+
+        Parameters
+        ----------
+        f : int
+            Local substep index to query.
+        Jp_grad : ndarray
+            Gradient of Jp values, shape (B, n_particles).
+        """
+        for i_p, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_global = i_p + self._particle_start
+            self._solver.particles.grad[f, i_global, i_b].Jp += Jp_grad[i_b, i_p]
+
+    def process_input_grad(self):
+        """
+        Process gradients for buffered inputs and backpropagate using custom kernels.
+
+        Returns the pairs (input, gradient) of the inputs applied at this step that track gradients.
+        """
+        inputs_grad = []
+        if isinstance(self.material, Muscle):
+            _tgt_actu = self._tgt_buffer["actu"].pop()
+            if _tgt_actu is not None and _tgt_actu.requires_grad:
+                actu_grad = torch.zeros_like(_tgt_actu)
+                self._set_particles_actu_grad(actu_grad)
+                inputs_grad.append((_tgt_actu, actu_grad))
+
+        return inputs_grad + super().process_input_grad()
 
     @gs.assert_built
     def get_state(self):
@@ -141,7 +318,10 @@ class MPMEntity(ParticleEntity):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        self.set_particles_actu(actus, envs_idx=envs_idx)
+        actus = to_gs_tensor(actus)
+        if actus.ndim == 0:
+            actus = actus.reshape((1,)).expand((self._n_groups,))
+        self._set_particles_target_state("actu", "actuation", (self._n_groups,), gs.tc_float, actus, envs_idx)
 
     @assert_muscle
     @gs.assert_built
@@ -158,8 +338,26 @@ class MPMEntity(ParticleEntity):
         envs_idx : torch.Tensor, shape (M,)
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
-        particles_idx = self._get_global_idx(
-            particles_idx_local, self._n_particles, self._particle_start, unsafe=True, batched_idx=True
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
+        particles_idx = particles_idx_local + self._particle_start
+        actus = self._sanitize_particles_tensor(actus, gs.tc_float, particles_idx, envs_idx, (self._n_groups,))
+        self.solver._kernel_set_particles_actu(
+            self._sim.cur_substep_local, self._n_groups, particles_idx, envs_idx, actus
+        )
+
+    @gs.assert_built
+    def _set_particles_actu_grad(self, actu_grad):
+        """
+        Set gradients for particle actuation values.
+
+        Parameters
+        ----------
+        actu_grad : torch.Tensor
+            A tensor containing gradients for actuation inputs.
+        """
+        self.solver._kernel_set_particles_actu_grad(
+            self._sim.cur_substep_local, self._particle_start, self._n_particles, actu_grad
         )
         self._solver.set_particles_actu(actus, particles_idx, envs_idx, n_groups=self.material.n_groups)
 
@@ -177,8 +375,15 @@ class MPMEntity(ParticleEntity):
         muscle_group : torch.Tensor, shape ([n_particles,])
             A tensor with integer group IDs.
         """
-        particles_idx = self._get_global_idx(None, self._n_particles, self._particle_start, unsafe=True)
-        self._solver.set_particles_muscle_group(muscle_group, particles_idx)
+        particles_idx_local = self._sanitize_particles_idx_local(None)
+        particles_idx = particles_idx_local + self._particle_start
+        muscle_group = self._sanitize_particles_tensor(muscle_group, gs.tc_int, particles_idx, batched=False)
+
+        # FIXME: This check is too expensive
+        # if not (0 <= muscle_group & muscle_group < self._n_groups).all():
+        #     gs.raise_exception("Elements of `muscle_group' are out-of-range.")
+
+        self.solver._kernel_set_particles_muscle_group(particles_idx, muscle_group)
 
     @assert_muscle
     @assert_active

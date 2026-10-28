@@ -497,6 +497,7 @@ def test_morph_property_raises():
     )
 
     assert single_obj.morph == single_morph
+    assert single_obj.morph is not single_morph
     assert rigid_obj.main_morph == rigid_morphs_heterogeneous[0]
     assert list(rigid_obj.morphs) == list(rigid_morphs_heterogeneous)
     with pytest.raises(gs.GenesisException, match=r"Heterogeneous.*\.morphs") as exc_info:

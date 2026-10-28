@@ -26,8 +26,6 @@ def main():
         show_viewer=args.vis,
     )
 
-    mat_elastic = gs.materials.PBD.Elastic()
-
     bunny = scene.add_entity(
         options=gs.options.PBDElasticEntityOptions(
             morph=gs.morphs.Mesh(
@@ -35,8 +33,8 @@ def main():
                 scale=0.003,
                 pos=(0, 0, 0.8),
             ),
-            material=mat_elastic,
             surface=gs.surfaces.Default(),
+            material=gs.materials.Elastic(),
         ),
     )
     scene.build()

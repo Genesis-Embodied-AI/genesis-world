@@ -84,7 +84,7 @@ def main():
             fixed=True,
             visualization=False,  # sensor debug_draw will be shown
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=0.01,
         ),
     )
@@ -99,7 +99,7 @@ def main():
         surface=gs.surfaces.Default(
             color=(1.0, 0.2, 0.2, 1.0),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=0.01,
         ),
     )

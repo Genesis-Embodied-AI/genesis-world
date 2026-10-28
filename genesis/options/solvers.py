@@ -220,9 +220,9 @@ class IPCCouplerOptions(BaseCouplerOptions):
         Whether to enable friction in contact. Defaults to None (use libuipc default: True).
     contact_resistance : float, optional
         Ground/default contact resistance/stiffness. It is used for ground contact pairs and
-        as the per-entity fallback when a material does not define ``contact_resistance``.
-        For ground pairs, it is combined with entity ``material.contact_resistance`` via
-        geometric mean. Defaults to 1e9.
+        as the per-entity fallback when the solver options of an entity leave ``contact_resistance`` None.
+        For ground pairs, it is combined with the ``contact_resistance`` of the entity via
+        harmonic mean. Defaults to 1e9.
     contact_eps_velocity : float, optional
         Epsilon velocity for contact. Defaults to None (use libuipc default: 0.01).
     contact_constitution : str, optional
@@ -485,13 +485,13 @@ class RigidOptions(GravityMixin, TimeBasedMixin):
         solver does not reach the fixed point. Always 'convex' when 'enable_mujoco_compatibility' is set.
     enable_torsional_friction : bool, optional
         Whether contacts also resist relative spin about their normal, with strength set per geometry by the material
-        option 'friction_torsional' (see 'gs.materials.Rigid'). Enable it when spin resistance matters - a grasped
+        option 'friction_torsional' (see 'gs.materials.Material'). Enable it when spin resistance matters - a grasped
         object twisting in a gripper, a top spinning in place - motions a point contact transmits no torque against,
         so they persist indefinitely otherwise. The extra spin resistance slows down the constraint solve on every
         contact, including those where spin is irrelevant. Defaults to False.
     enable_rolling_friction : bool, optional
         Whether contacts also resist rolling, with strength set per geometry by the material option 'friction_rolling'
-        (see 'gs.materials.Rigid'). Enable it when rolling resistance matters - a ball or wheel coasting to rest, a
+        (see 'gs.materials.Material'). Enable it when rolling resistance matters - a ball or wheel coasting to rest, a
         cylinder settling on a slope - motions a point contact otherwise never slows down. The extra rolling
         resistance slows down the constraint solve on every contact, more so than torsional friction (two extra axes),
         and requires 'enable_torsional_friction'. Defaults to False.
@@ -879,7 +879,8 @@ class FEMOptions(GravityMixin, TimeBasedMixin):
     damping_beta : float, optional
         Rayleigh Damping factor for the implicit solver. Defaults to 5e-4. Only used when `use_implicit_solver` is True.
     enable_vertex_constraints : bool, optional
-        Whether to enable vertex constraints. Defaults to False.
+        Whether to enable vertex constraints. The implicit solver enables them where the vertex options of an entity fix
+        vertices, unless given False explicitly. Defaults to False.
     """
 
     damping: NonNegativeFloat = 0.0

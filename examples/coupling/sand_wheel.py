@@ -36,72 +36,84 @@ def main():
     )
 
     plane = scene.add_entity(
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.2,
-        ),
-        morph=gs.morphs.URDF(
-            file="urdf/plane/plane.urdf",
-            fixed=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/plane/plane.urdf",
+                fixed=True,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.2,
+            ),
         ),
     )
-    mat_wheel = gs.materials.Rigid(
-        needs_coup=True,
+    wheel_solver_options = gs.options.RigidEntitySolverOptions(
         coup_softness=0.0,
     )
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, -0.2, 1.6),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, -0.2, 1.6),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            solver_options=wheel_solver_options,
         ),
     )
 
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, 0.3, 1.2),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, 0.3, 1.2),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            solver_options=wheel_solver_options,
         ),
     )
 
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, -0.3, 0.8),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, -0.3, 0.8),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            solver_options=wheel_solver_options,
         ),
     )
 
     wheel_0 = scene.add_entity(
-        material=mat_wheel,
-        morph=gs.morphs.URDF(
-            file="urdf/wheel/wheel.urdf",
-            pos=(0.5, 0.4, 0.4),
-            euler=(0, 0, 90),
-            scale=0.6,
-            convexify=False,
-            fixed=True,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/wheel/wheel.urdf",
+                pos=(0.5, 0.4, 0.4),
+                euler=(0, 0, 90),
+                scale=0.6,
+                convexify=False,
+                fixed=True,
+            ),
+            solver_options=wheel_solver_options,
         ),
     )
 
     emitter = scene.add_emitter(
-        material=gs.materials.MPM.Sand(),
-        max_particles=200000,
-        surface=gs.surfaces.Rough(
-            color=(1.0, 0.9, 0.6, 1.0),
+        gs.options.MPMEntityOptions(
+            morph=gs.morphs.Nowhere(
+                n_particles=200000,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 0.9, 0.6, 1.0),
+            ),
+            material=gs.materials.Sand(),
         ),
     )
     scene.build(n_envs=0)

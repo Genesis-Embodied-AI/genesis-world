@@ -53,19 +53,14 @@ def test_rigid_mpm_muscle(show_viewer):
                 scale=0.2,
                 fixed=True,
             ),
-            material=gs.materials.Hybrid(
-                material_rigid=gs.materials.Rigid(
-                    gravity_compensation=1.0,
-                ),
-                material_soft=gs.materials.MPM.Muscle(
-                    E=1e4,
-                    nu=0.45,
-                    rho=1000.0,
-                    model="neohooken",
-                ),
-                damping=1000.0,
-                thickness=0.05,
+            material_soft=gs.materials.Muscle(
+                density=1000.0,
+                youngs_modulus=1e4,
+                poisson_ratio=0.45,
             ),
+            gravity_compensation=1.0,
+            damping=1000.0,
+            thickness=0.05,
         ),
     )
     ball = scene.add_entity(
@@ -73,8 +68,8 @@ def test_rigid_mpm_muscle(show_viewer):
             pos=BALL_POS_INIT,
             radius=0.12,
         ),
-        material=gs.materials.Rigid(
-            rho=1000,
+        material=gs.materials.Material(
+            density=1000,
             friction=0.5,
         ),
     )
@@ -123,8 +118,8 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     obj_rigid = scene.add_entity(
-        material=gs.materials.Rigid(
-            rho=1.0,
+        material=gs.materials.Material(
+            density=1.0,
         ),
         morph=gs.morphs.Box(
             pos=(0.0, -0.25, 0.1),
@@ -142,11 +137,11 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
                 pos=(0.0, 0.0, 0.2),
                 size=(0.3, 0.3, 0.3),
             ),
-            material=gs.materials.MPM.Liquid(),
             surface=gs.surfaces.Default(
                 color=(0.3, 0.3, 1.0),
                 vis_mode="particle",
             ),
+            material=gs.materials.Liquid(),
         ),
     )
 
@@ -184,19 +179,22 @@ def test_mesh_mpm_build(show_viewer):
         show_viewer=show_viewer,
         show_FPS=False,
     )
-    scene.add_entity(
+    hybrid = scene.add_entity(
         options=gs.options.HybridEntityOptions(
             morph=gs.morphs.Mesh(
                 file="meshes/duck.obj",
                 scale=0.15,
             ),
-            material=gs.materials.Hybrid(
-                material_rigid=gs.materials.Rigid(),
-                material_soft=gs.materials.MPM.Muscle(),
-            ),
+            material_soft=gs.materials.Muscle(),
         ),
     )
     scene.build()
+
+    # The skin holds one muscle group per link of the skeleton, each actuated on its own
+    muscle_group = hybrid.part_soft.get_muscle_group()
+    hybrid.part_soft.set_actuation(torch.arange(1, hybrid.part_rigid.n_links + 1, dtype=gs.tc_float, device=gs.device))
+    scene.step()
+    assert_allclose(hybrid.part_soft.get_particles_actu(), muscle_group + 1, tol=gs.EPS)
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup
@@ -234,10 +232,11 @@ def test_deformable_parallel(show_viewer):
     )
 
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.0,
+            ),
         ),
     )
     cloth = scene.add_entity(
@@ -270,11 +269,11 @@ def test_deformable_parallel(show_viewer):
                 pos=(0.6, 0, 0.1),
                 size=(0.1, 0.1, 0.1),
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=200,
-            ),
             surface=gs.surfaces.Default(
                 color=(0.9, 0.8, 0.2, 1.0),
+            ),
+            material=gs.materials.Elastic(
+                density=200,
             ),
         ),
     )
@@ -284,10 +283,12 @@ def test_deformable_parallel(show_viewer):
                 pos=(0.8, 0.8, 0.1),
                 size=(0.1, 0.1, 0.1),
             ),
-            material=gs.materials.FEM.Elastic(
-                E=3.0e4,
-                nu=0.45,
-                rho=1000.0,
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=3.0e4,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
                 model="stable_neohookean",
             ),
         ),
@@ -323,19 +324,20 @@ def test_deformable_parallel(show_viewer):
 
 
 @pytest.mark.parametrize(
-    "n_envs, material_type",
+    "n_envs, options_cls, material_type",
     [
-        pytest.param(0, gs.materials.SPH.Liquid, marks=pytest.mark.required),
-        (1, gs.materials.SPH.Liquid),
-        (2, gs.materials.SPH.Liquid),
-        pytest.param(2, gs.materials.PBD.Liquid, marks=pytest.mark.required),
-        pytest.param(2, gs.materials.MPM.Liquid, marks=pytest.mark.required),
-        (2, gs.materials.MPM.Sand),
-        (2, gs.materials.MPM.Snow),
-        (2, gs.materials.MPM.Elastic),  # This makes little sense but nothing prevents doing this
+        pytest.param(0, gs.options.SPHEntityOptions, gs.materials.Liquid, marks=pytest.mark.required),
+        (1, gs.options.SPHEntityOptions, gs.materials.Liquid),
+        (2, gs.options.SPHEntityOptions, gs.materials.Liquid),
+        pytest.param(2, gs.options.PBDLiquidEntityOptions, gs.materials.Liquid, marks=pytest.mark.required),
+        pytest.param(2, gs.options.MPMEntityOptions, gs.materials.Liquid, marks=pytest.mark.required),
+        (2, gs.options.MPMEntityOptions, gs.materials.Sand),
+        (2, gs.options.MPMEntityOptions, gs.materials.Snow),
+        # This makes little sense but nothing prevents doing this
+        (2, gs.options.MPMEntityOptions, gs.materials.Elastic),
     ],
 )
-def test_fluid_emitter(n_envs, material_type, show_viewer):
+def test_fluid_emitter(n_envs, options_cls, material_type, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
@@ -372,10 +374,14 @@ def test_fluid_emitter(n_envs, material_type, show_viewer):
         ),
     )
     emitter = scene.add_emitter(
-        material=material_type(),
-        max_particles=5000,
-        surface=gs.surfaces.Glass(
-            color=(0.7, 0.85, 1.0, 0.7),
+        options_cls(
+            morph=gs.morphs.Nowhere(
+                n_particles=5000,
+            ),
+            surface=gs.surfaces.Glass(
+                color=(0.7, 0.85, 1.0, 0.7),
+            ),
+            material=material_type(),
         ),
     )
     scene.build(n_envs=n_envs)
@@ -417,7 +423,6 @@ def test_sap_rigid_rigid_hydroelastic_contact(show_viewer):
             size=(0.5, 0.5, 2 * BOX_HALFHEIGHT),
             pos=(0.0, 0.0, BOX_HALFHEIGHT),
         ),
-        material=gs.materials.Rigid(),
     )
     asset_path = get_hf_dataset(pattern="heavy_three_joint_link.xml")
     robot_1 = scene.add_entity(
@@ -491,9 +496,11 @@ def test_sap_fem_vs_robot(show_viewer):
                 pos=(0.0, 0.0, SPHERE_RADIUS),
                 radius=SPHERE_RADIUS,
             ),
-            material=gs.materials.FEM.Elastic(
-                E=1e5,
-                nu=0.4,
+            material=gs.materials.Elastic(
+                youngs_modulus=1e5,
+                poisson_ratio=0.4,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
                 model="linear_corotated",
             ),
         ),

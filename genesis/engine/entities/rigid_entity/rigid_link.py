@@ -327,9 +327,11 @@ class KinematicLink(RBC):
     @property
     def aligned(self) -> bool:
         """
-        Whether the build anchored the link frame on the center of mass and principal axes of its body (the 'align'
-        option, on a free body that opts in or is a primitive). Only a single rigid body gets the anchor: a free root
-        with an inertia and no DOF-bearing descendant. Its joint-space mass block is then exactly diagonal.
+        Whether the link frame stands at the center of mass and on the principal axes of its body, which the build
+        anchors it on (the 'align' option, on a free body that opts in or is a primitive). Only a single rigid body
+        gets the anchor: a free root with an inertia and no DOF-bearing descendant. Its joint-space mass block is then
+        exactly diagonal. A density the link or geom options give, or an attach extending the body, leaves the frame
+        anchored and the body unaligned.
         """
         return self.desc.is_aligned
 
@@ -695,14 +697,14 @@ class RigidLink(KinematicLink):
 
     def set_friction_torsional(self, friction_torsional):
         """
-        Set the torsional friction of all the link's geoms (see 'gs.materials.Rigid').
+        Set the torsional friction of all the link's geoms.
         """
         for geom in self._geoms:
             geom.set_friction_torsional(friction_torsional)
 
     def set_friction_rolling(self, friction_rolling):
         """
-        Set the rolling friction of all the link's geoms (see 'gs.materials.Rigid').
+        Set the rolling friction of all the link's geoms.
         """
         for geom in self._geoms:
             geom.set_friction_rolling(friction_rolling)

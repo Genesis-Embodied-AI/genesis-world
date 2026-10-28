@@ -2199,7 +2199,7 @@ def get_sdf_info(n_geoms, n_cells, n_coarse_cells):
     if not _is_tensor_addressable((n_cells, 3), gs.np_float):
         gs.raise_exception(
             f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', or a "
-            "smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
+            "smaller 'sdf_max_res', in 'gs.options.RigidEntitySolverOptions'."
         )
 
     return SDFInfo(

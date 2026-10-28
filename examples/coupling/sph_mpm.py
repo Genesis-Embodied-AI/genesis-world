@@ -57,12 +57,12 @@ def main():
                 scale=0.07,
                 euler=(90.0, 0.0, 90.0),
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=200,
-            ),
             surface=gs.surfaces.Default(
                 color=(0.9, 0.8, 0.2, 1.0),
                 vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=200,
             ),
         ),
     )

@@ -45,9 +45,8 @@ class HybridEntity(Entity):
         The index of the entity within the scene.
     scene : genesis.Scene
         The simulation scene where the entity is added.
-    material : genesis.materials.Hybrid
-        The hybrid material that includes both rigid and soft sub-materials,
-        and defines coupling behavior.
+    material : None
+        A hybrid entity holds no material of its own, its options holding the material of each part.
     morph : genesis.morphs.Morph
         The shape/morphology of the entity. Must be either a `URDF` or `Mesh`.
     surface : genesis.surfaces.Surface
@@ -57,92 +56,79 @@ class HybridEntity(Entity):
     def __init__(self, idx, scene, material, morph, surface, name: str | None = None, *, options):
         super().__init__(idx, scene, morph, None, material, surface, name=name, options=options)
 
-        material_rigid = material.material_rigid
-        material_soft = material.material_soft
-
         surface_rigid = gs.surfaces.Smooth(roughness=0.4)  # HACK hardcoded
 
-        assert isinstance(material_soft, gs.materials.MPM.Base)  # TODO: need FEM and PBD
-
+        rigid_options = RigidEntityOptions(
+            morph=morph,
+            material=options.material_rigid,
+            solver_options=options.rigid_solver_options,
+            surface=surface_rigid,
+            gravity_compensation=options.gravity_compensation,
+        )
         if isinstance(morph, gs.morphs.URDF):
-            # set up rigid part
-            if material.use_default_coupling:
-                gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to True")
-                material_rigid.needs_coup = True
-            else:
-                gs.logger.info("Use default coupling in hybrid. Overwrite `needs_coup` in rigid material to False")
-                material_rigid.needs_coup = False
-
-            part_rigid = scene.add_entity(
-                options=RigidEntityOptions(morph=morph, material=material_rigid, surface=surface_rigid)
-            )
+            part_rigid = scene.add_entity(options=rigid_options)
 
             # get rigid part in world coords
             augment_link_world_coords(part_rigid)
 
             # set soft parts based on rigid links
             func_instantiate_soft_from_rigid = (
-                material.func_instantiate_soft_from_rigid or default_func_instantiate_soft_from_rigid
+                options.func_instantiate_soft_from_rigid or default_func_instantiate_soft_from_rigid
             )
             part_soft = func_instantiate_soft_from_rigid(
-                scene=scene,
-                part_rigid=part_rigid,
-                material_soft=material_soft,
-                material_hybrid=material,
-                surface=surface,
+                scene=scene, part_rigid=part_rigid, options=options, surface=surface
             )
 
         elif isinstance(morph, gs.morphs.Mesh):
-            # instantiate soft part
-            part_soft = scene.add_entity(options=MPMEntityOptions(morph=morph, material=material_soft, surface=surface))
+            part_soft = scene.add_entity(
+                options=MPMEntityOptions(
+                    morph=morph,
+                    material=options.material_soft,
+                    solver_options=options.solver_options.soft,
+                    surface=surface,
+                )
+            )
 
             # load mesh in the same way as the soft entity
             mesh = load_mesh(morph.file)
 
-            # instantiate rigid part
-            if material.func_instantiate_rigid_from_soft is None:
-                func_instantiate_rigid_from_soft = default_func_instantiate_rigid_from_soft
-            else:
-                func_instantiate_rigid_from_soft = material.func_instantiate_rigid_from_soft
+            func_instantiate_rigid_from_soft = (
+                options.func_instantiate_rigid_from_soft or default_func_instantiate_rigid_from_soft
+            )
             part_rigid = func_instantiate_rigid_from_soft(
-                scene=scene,
-                mesh=mesh,
-                morph=morph,
-                material_rigid=material_rigid,
-                material_hybrid=material,
-                surface=surface_rigid,
+                scene=scene, mesh=mesh, morph=morph, rigid_options=rigid_options, surface=surface_rigid
             )
 
         else:
             raise ValueError("`morph` in hybrid entity should be either URDF or Mesh")
 
-        if not material.use_default_coupling:
+        if not options.use_default_coupling:
             # get rigid-soft association function
-            if material.func_instantiate_rigid_soft_association is None:
+            if options.func_instantiate_rigid_soft_association is None:
                 if isinstance(morph, gs.morphs.URDF):
                     func_instantiate_rigid_soft_association = default_func_instantiate_rigid_soft_association_from_rigid
                 elif isinstance(morph, gs.morphs.Mesh):
                     func_instantiate_rigid_soft_association = default_func_instantiate_rigid_soft_association_from_soft
             else:
-                func_instantiate_rigid_soft_association = material.func_instantiate_rigid_soft_association
+                func_instantiate_rigid_soft_association = options.func_instantiate_rigid_soft_association
             muscle_group, link_idcs, geom_idcs, trans_local_to_global, quat_local_to_global = (
                 func_instantiate_rigid_soft_association(part_rigid=part_rigid, part_soft=part_soft)
             )
             if muscle_group is not None:
                 muscle_group = muscle_group.astype(gs.np_int, copy=False)
 
-            # set muscle group
-            material_soft.n_groups = len(link_idcs)
+            # The skin has one muscle group per link it follows (see 'MPMEntity._n_groups')
+            part_soft._n_groups = len(link_idcs)
             self._muscle_group_cache = muscle_group
 
             # set up info in Quadrants field
-            if isinstance(material_soft, gs.materials.MPM.Base):
+            if isinstance(part_soft, MPMEntity):
                 part_soft_info = qd.types.struct(
                     link_idx=gs.qd_int,
                     geom_idx=gs.qd_int,
                     trans_local_to_global=gs.qd_vec3,
                     quat_local_to_global=gs.qd_vec4,
-                ).field(shape=(material_soft.n_groups,), needs_grad=False, layout=qd.Layout.SOA)
+                ).field(shape=(len(link_idcs),), needs_grad=False, layout=qd.Layout.SOA)
                 part_soft_info.link_idx.from_numpy(np.asarray(link_idcs, dtype=gs.np_int))
                 part_soft_info.geom_idx.from_numpy(np.asarray(geom_idcs, dtype=gs.np_int))
                 part_soft_info.trans_local_to_global.from_numpy(np.asarray(trans_local_to_global, dtype=gs.np_float))
@@ -154,7 +140,7 @@ class HybridEntity(Entity):
                 self._part_soft_info = part_soft_info
                 self._part_soft_init_positions = part_soft_init_positions
             else:
-                raise ValueError(f"Cannot handle soft material {material_soft}")
+                raise ValueError(f"Cannot handle soft entity {part_soft}")
 
             # set coupling func
             def wrap_func(func, before=False):
@@ -167,7 +153,7 @@ class HybridEntity(Entity):
 
                 return wrapper
 
-            if isinstance(material_soft, gs.materials.MPM.Base):
+            if isinstance(part_soft, MPMEntity):
                 # NOTE: coupling operating at particle level and here we modify post_coupling, i.e., update particle state after g2p
                 self._update_soft_part_at_pre_coupling = False
                 if self._update_soft_part_at_pre_coupling:
@@ -179,13 +165,11 @@ class HybridEntity(Entity):
                         part_soft.solver.substep_post_coupling, before=False
                     )
             else:
-                raise ValueError(f"Cannot handle soft material {material_soft}")
+                raise ValueError(f"Cannot handle soft entity {part_soft}")
 
         # set members
-        self._material_rigid = material_rigid
         self._part_rigid = part_rigid
         self._solver_rigid = part_rigid.solver
-        self._material_soft = material_soft
         self._part_soft = part_soft
         self._solver_soft = part_soft.solver
 
@@ -374,7 +358,7 @@ class HybridEntity(Entity):
         Finalize the hybrid entity setup during simulation build.
         """
         # can only be called here (at sim build)
-        if not self.material.use_default_coupling and self._muscle_group_cache is not None:
+        if not self._options.use_default_coupling and self._muscle_group_cache is not None:
             self._part_soft.set_muscle(
                 muscle_group=torch.tensor(self._muscle_group_cache, dtype=gs.tc_int, device=gs.device)
                 # no muscle direction as the soft body is actuated by rigid parts
@@ -439,7 +423,7 @@ class HybridEntity(Entity):
                 xd_vel *= dt_scale  # assume linear scaling between the timestep difference of soft/rigid solver
 
                 vel_d = xd_vel - self._solver_soft.particles.vel[f_, i_global, i_b]
-                vel_d *= qd.exp(-self._solver_soft.dt * self.material.damping)
+                vel_d *= qd.exp(-self._solver_soft.dt * self._options.damping)
 
                 # soft-to-rigid coupling
                 dt_for_rigid_acc = (
@@ -453,7 +437,7 @@ class HybridEntity(Entity):
                 links_state.cfrc_coupling_ang[link_idx, i_b] += frc_ang
 
                 # rigid-to-soft coupling # NOTE: this may lead to unstable feedback loop
-                self._solver_soft.particles.vel[f_, i_global, i_b] += vel_d * self.material.soft_dv_coef
+                self._solver_soft.particles.vel[f_, i_global, i_b] += vel_d * self._options.soft_dv_coef
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -542,7 +526,7 @@ def _visualize_muscle_group(positions, muscle_group):
 # ------------------------------------------------------------------------------------
 
 
-def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, material_hybrid, surface):
+def default_func_instantiate_soft_from_rigid(scene, part_rigid, options, surface):
     meshes = []
     trans_local_to_global = []
     euler_local_to_global = []
@@ -564,7 +548,7 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
             faces=geom.init_faces,
             vertex_normals=geom.init_normals,
         )
-        outer_verts = verts + inner_mesh.vertex_normals * material_hybrid.thickness
+        outer_verts = verts + inner_mesh.vertex_normals * options.thickness
         outer_mesh = trimesh.Trimesh(vertices=outer_verts, faces=geom.init_faces)
         # mesh = trimesh.boolean.difference([outer_mesh, inner_mesh]) # wrap around the rigid link
         mesh = outer_mesh  # FIXME: hack to avoid `ValueError: No backends available for boolean operations!`
@@ -586,7 +570,8 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
                 eulers=euler_local_to_global,
                 scale=1,  # scale is already handled in geom.init_verts
             ),
-            material=material_soft,
+            material=options.material_soft,
+            solver_options=options.solver_options.soft,
             surface=surface,
         )
     )
@@ -594,7 +579,7 @@ def default_func_instantiate_soft_from_rigid(scene, part_rigid, material_soft, m
     return part_soft
 
 
-def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid, material_hybrid, surface):
+def default_func_instantiate_rigid_from_soft(scene, mesh, morph, rigid_options, surface):
     # skeletonization
     gelmesh = trimesh_to_gelmesh(mesh)
     graph_gel = skeletonization(gelmesh)
@@ -623,9 +608,7 @@ def default_func_instantiate_rigid_from_soft(scene, mesh, morph, material_rigid,
     quat_rigid = morph.quat
     scale_rigid = morph.scale
     morph_rigid = gs.morphs.URDF(file=urdf, pos=pos_rigid, quat=quat_rigid, scale=scale_rigid, fixed=morph.fixed)
-    part_rigid = scene.add_entity(
-        options=RigidEntityOptions(morph=morph_rigid, material=material_rigid, surface=surface)
-    )
+    part_rigid = scene.add_entity(options=rigid_options.model_copy(update={"morph": morph_rigid, "surface": surface}))
 
     return part_rigid
 

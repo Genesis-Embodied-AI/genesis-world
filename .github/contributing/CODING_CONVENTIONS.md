@@ -87,10 +87,7 @@ gs.init(backend=gs.gpu)
 scene = gs.Scene(show_viewer=True)
 
 plane = scene.add_entity(gs.morphs.Plane())
-robot = scene.add_entity(
-    gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
-    material=gs.materials.Rigid(),
-)
+robot = scene.add_entity(gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"))
 
 scene.build()
 

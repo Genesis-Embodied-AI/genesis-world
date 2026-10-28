@@ -40,9 +40,11 @@ def main():
                 pos=(0.0, 0.0, 0.1),
                 radius=0.1,
             ),
-            material=gs.materials.FEM.Elastic(
-                E=1e5,
-                nu=0.4,
+            material=gs.materials.Elastic(
+                youngs_modulus=1e5,
+                poisson_ratio=0.4,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
                 model="linear_corotated",
             ),
         ),
@@ -61,7 +63,8 @@ def main():
                 pos=(0.0, 0.0, 0.4),
                 scale=0.1,
             ),
-            material=gs.materials.FEM.Elastic(
+            material=gs.materials.Elastic(),
+            solver_options=gs.options.FEMEntitySolverOptions(
                 model="linear_corotated",
             ),
         ),

@@ -15,6 +15,13 @@ from genesis.engine.entities import (
 )
 from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.engine.states.solvers import PBDSolverState
+from genesis.options.entities import (
+    PBDClothEntityOptions,
+    PBDElasticEntityOptions,
+    PBDLiquidEntityOptions,
+    PBDParticleEntityOptions,
+)
+from genesis.utils.array_class import LinksState
 from genesis.utils.geom import SpatialHasher
 
 from .particle_solver import ParticleSolver
@@ -348,7 +355,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
-        if isinstance(material, gs.materials.PBD.Cloth):
+        if isinstance(options, PBDClothEntityOptions):
             entity = PBD2DEntity(
                 scene=self.scene,
                 solver=self,
@@ -366,7 +373,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 options=options,
             )
 
-        elif isinstance(material, gs.materials.PBD.Elastic):
+        elif isinstance(options, PBDElasticEntityOptions):
             entity = PBD3DEntity(
                 scene=self.scene,
                 solver=self,
@@ -384,7 +391,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 options=options,
             )
 
-        elif isinstance(material, gs.materials.PBD.Liquid):
+        elif isinstance(options, PBDLiquidEntityOptions):
             entity = PBDParticleEntity(
                 scene=self.scene,
                 solver=self,
@@ -398,7 +405,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 options=options,
             )
 
-        elif isinstance(material, gs.materials.PBD.Particle):
+        elif isinstance(options, PBDParticleEntityOptions):
             entity = PBDFreeParticleEntity(
                 scene=self.scene,
                 solver=self,

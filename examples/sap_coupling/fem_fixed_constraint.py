@@ -25,10 +25,6 @@ def main():
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision="64")
 
-    fem_material_linear_corotated = gs.materials.FEM.Elastic(
-        model="linear_corotated",
-    )
-
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1 / 60,
@@ -59,7 +55,10 @@ def main():
                 pos=(0.0, 0.0, 0.7),
                 scale=0.1,
             ),
-            material=fem_material_linear_corotated,
+            material=gs.materials.Elastic(),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="linear_corotated",
+            ),
         ),
     )
     scene.build()

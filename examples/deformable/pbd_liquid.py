@@ -36,8 +36,10 @@ def main():
                 lower=(0.2, 0.1, 0.1),
                 upper=(0.4, 0.3, 0.5),
             ),
-            material=gs.materials.PBD.Liquid(
-                rho=1.0,
+            material=gs.materials.Liquid(
+                density=1.0,
+            ),
+            solver_options=gs.options.PBDLiquidEntitySolverOptions(
                 sampler="regular",
                 density_relaxation=1.0,
                 viscosity_relaxation=0.0,

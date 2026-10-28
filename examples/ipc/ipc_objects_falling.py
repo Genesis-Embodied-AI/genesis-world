@@ -56,15 +56,15 @@ def main():
                 pos=(0.0, 0.0, 1.0),
                 euler=(120, -30, 0),
             ),
-            material=gs.materials.FEM.Cloth(
-                E=1e5,  # Young's modulus (Pa) - soft cloth (100 kPa)
-                nu=0.499,  # Poisson's ratio - nearly incompressible
-                rho=200,  # Density (kg/m^3)
-                thickness=0.001,  # Shell thickness (m) - 1mm
-                bending_stiffness=50.0,  # Bending resistance
-            ),
             surface=gs.surfaces.Plastic(
                 color=(0.3, 0.5, 0.8, 1.0),
+            ),
+            material=gs.materials.Cloth(
+                density=200,
+                youngs_modulus=1e5,  # Soft cloth (100 kPa)
+                poisson_ratio=0.499,  # Nearly incompressible
+                thickness=0.001,  # Shell thickness (m) - 1mm
+                bending_stiffness=50.0,  # Bending resistance
             ),
         ),
     )
@@ -72,16 +72,20 @@ def main():
     cube_size = 0.2
     cube_height = 0.3  # Height below cloth
     box = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.25, 0, cube_height),
-            size=(cube_size, cube_size, cube_size),
-        ),
-        material=gs.materials.Rigid(
-            rho=500,
-            coup_type="ipc_only",
-        ),
-        surface=gs.surfaces.Plastic(
-            color=(0.8, 0.3, 0.2, 0.8),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-0.25, 0, cube_height),
+                size=(cube_size, cube_size, cube_size),
+            ),
+            surface=gs.surfaces.Plastic(
+                color=(0.8, 0.3, 0.2, 0.8),
+            ),
+            material=gs.materials.Material(
+                density=500,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="ipc_only",
+            ),
         ),
     )
 
@@ -92,14 +96,16 @@ def main():
                 radius=0.08,
                 pos=(0.25, 0.0, 0.1),
             ),
-            material=gs.materials.FEM.Elastic(
-                E=1.0e3,
-                nu=0.3,
-                rho=1000.0,
-                model="stable_neohookean",
-            ),
             surface=gs.surfaces.Plastic(
                 color=(0.2, 0.8, 0.3, 0.8),
+            ),
+            material=gs.materials.Elastic(
+                density=1000.0,
+                youngs_modulus=1.0e3,
+                poisson_ratio=0.3,
+            ),
+            solver_options=gs.options.FEMEntitySolverOptions(
+                model="stable_neohookean",
             ),
         ),
     )

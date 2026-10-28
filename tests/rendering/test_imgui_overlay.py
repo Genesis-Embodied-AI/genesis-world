@@ -427,9 +427,13 @@ def test_capture_pending_entities_preserves_heterogeneous_morphs():
     single_options = plugin._pending_entities_options[single_entity.name]
     assert isinstance(single_options, gs.options.RigidEntityOptions)
     assert single_options.morph == single_morph
+    assert single_options.material is single_entity.material
+    assert single_options.surface == single_entity.options.surface
     assert single_options.visualize_contact is True
 
     heterogeneous_options = plugin._pending_entities_options[heterogeneous_entity.name]
     assert isinstance(heterogeneous_options, gs.options.RigidEntityOptions)
     assert heterogeneous_options.morph == heterogeneous_morphs
+    assert heterogeneous_options.material is heterogeneous_entity.material
+    assert heterogeneous_options.surface == heterogeneous_entity.options.surface
     assert heterogeneous_options.visualize_contact is True

@@ -143,8 +143,8 @@ def test_sensors_draw_debug(n_envs, renderer_type, renderer, png_snapshot):
             size=(0.4, 0.2, 0.1),
             pos=(-0.25, 0.0, 0.05),
         ),
-        material=gs.materials.Rigid(
-            rho=200.0,
+        material=gs.materials.Material(
+            density=200.0,
         ),
     )
     scene.add_sensor(

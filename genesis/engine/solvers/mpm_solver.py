@@ -11,6 +11,7 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.solvers.mpm_models import MPMModel, MPMModelKey, build_mpm_model, get_mpm_model_key
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
@@ -62,11 +63,11 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 "boundaries via 'lower_bound' / 'upper_bound'."
             )
 
-        # materials
-        self._materials = list()
-        self._materials_idx = list()
-        self._materials_update_F_S_Jp = list()
-        self._materials_update_stress = list()
+        # The constitutive models of the entities, one per distinct key (see 'get_mpm_model_key'), dispatched
+        # statically. They are bound once the substep is settled, which a viscous liquid depends on (see
+        # 'MPMLiquidModel').
+        self._models: list[MPMModel] = []
+        self._models_key: list[MPMModelKey] = []
 
         # boundary
         self.setup_boundary()
@@ -216,11 +217,14 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         self._coupler = self.sim._coupler
 
+        self._models.clear()
+        self._models.extend(build_mpm_model(model_key, self.substep_dt) for model_key in self._models_key)
+
         # Aggregate SVD requirement across registered materials. If no material reads U/V/S, the solver can skip the SVD
         # kernel entirely on the forward pass and derive J from det(F_tmp) directly. Compile-time constant consumed by
         # p2g via qd.static. Forced True under requires_grad so the backward path stays exactly as upstream.
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
-        self.needs_svd = self._sim.requires_grad or any(m.needs_svd for m in self._materials)
+        self.needs_svd = self._sim.requires_grad or any(model.needs_svd for model in self._models)
 
         if self.is_active:
             if self._enable_CPIC and self._sim.requires_grad:
@@ -257,7 +261,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "MPMEntity":
-        self.add_material(material)
+        model_key = get_mpm_model_key(options)
+        if model_key not in self._models_key:
+            self._models_key.append(model_key)
 
         # create entity
         entity = MPMEntity(
@@ -268,6 +274,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             surface=surface,
             particle_size=self._particle_size,
             idx=idx,
+            model_idx=self._models_key.index(model_key),
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
@@ -277,19 +284,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._entities.append(entity)
 
         return entity
-
-    def add_material(self, material):
-        # Register material update methods if and only if the provided material is not already registered
-        for material_i in self._materials:
-            if material == material_i:
-                material.idx = material_i.idx
-                break
-        else:
-            material.idx = len(self._materials_idx)
-            self._materials_idx.append(material.idx)
-            self._materials_update_F_S_Jp.append(material.update_F_S_Jp)
-            self._materials_update_stress.append(material.update_stress)
-        self._materials.append(material)
 
     @qd.func
     def stencil_range(self):
@@ -385,9 +379,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 F_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 S_new = qd.Matrix.zero(gs.qd_float, 3, 3)
                 Jp_new = gs.qd_float(1.0)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        F_new, S_new, Jp_new = self._materials_update_F_S_Jp[material_idx](
+                for model_idx in qd.static(range(len(self._models))):
+                    if self.particles_info[i_p].material_idx == model_idx:
+                        F_new, S_new, Jp_new = self._models[model_idx].update_F_S_Jp(
                             J=J,
                             F_tmp=self.particles[f, i_p, i_b].F_tmp,
                             U=self.particles[f, i_p, i_b].U,
@@ -409,9 +403,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 # to identity).
                 # 2. Jp is only used by Snow material, and it uses Jp from the previous frame, not the updated one.
                 stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-                for material_idx in qd.static(self._materials_idx):
-                    if self.particles_info[i_p].material_idx == material_idx:
-                        stress = self._materials_update_stress[material_idx](
+                for model_idx in qd.static(range(len(self._models))):
+                    if self.particles_info[i_p].material_idx == model_idx:
+                        stress = self._models[model_idx].update_stress(
                             U=self.particles[f, i_p, i_b].U,
                             S=S_new,
                             V=self.particles[f, i_p, i_b].V,
