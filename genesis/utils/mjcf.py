@@ -800,7 +800,7 @@ def parse_geoms(mj, scale, surface, xml_path):
                     invalid_set.add(frozenset((geom_1, geom_2)))
 
         # Compute updated contype and conaffinity from the complete list of invalid collision pairs
-        masks = solve_contype_conaffinity(len(cg_infos), invalid_set)
+        masks = solve_contype_conaffinity(len(cg_infos), frozenset(invalid_set))
         if masks is None:
             gs.logger.warning(
                 "Compatible collision geometries cannot be described using bitmasks 'contype' and 'conaffinity'. "
