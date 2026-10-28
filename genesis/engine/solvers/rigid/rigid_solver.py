@@ -3512,7 +3512,7 @@ def func_step_2(
     # because the acceleration at the end of the step is unknown for now as it may change discontinuous between
     # before and after integration under the effect of external forces and constraints. This means that
     # acceleration data will be shifted one timestep in the past, but there isn't really any way around.
-    # A substep whose launches are recorded for its backward pass runs each of these calls as a launch of its own (see
+    # A substep whose launches are recorded for its backward pass runs these steps as one launch each (see
     # 'RigidSolver.substep').
     func_update_acc(dyn_state, dyn_info, rigid_info, rigid_config, update_cacc=True, is_backward=False)
     func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward=False)

@@ -2214,7 +2214,7 @@ def func_integrate(
     rigid_config: qd.template(),
     is_backward: qd.template(),
 ):
-    """Integrate the velocities and positions of every awake DOF over one substep, from the accelerations in dofs.acc.
+    """Integrate the velocities and positions of the awake degrees of freedom over one substep, from dofs.acc.
 
     The damping is made implicit first (see func_implicit_damping), and the integrated state lands in vel_next and
     qpos_next (see func_copy_next_to_curr). `is_backward` selects the variant of the midpoint integration that autodiff
