@@ -271,6 +271,10 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
         ),
     )
     scene.build(n_envs=2)
+    # The trailing end of the block follows the box through springs, so the gradient also flows from the box pose to it
+    block.set_particle_constraints(
+        block.get_particles_in_bbox((-0.2, -0.05, -0.05), (-0.15, 0.05, 0.05)), box.links[0].idx, stiffness=10.0
+    )
 
     def rollout(vel):
         scene.reset()
@@ -289,7 +293,7 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     loss.backward()
     # The finite differences run on the same scene without gradients, which simulates the same physics. A rollout after
     # a reset starts free of the coupling wrench the previous one left.
-    eps = 1e-5 if precision == "64" else 1e-2
+    eps = 1e-6 if precision == "64" else 1e-2
     fd_grad = np.zeros_like(vel)
     with torch.no_grad():
         for i, j in np.ndindex(vel.shape):

@@ -1038,8 +1038,10 @@ class MPMSolver(ParticleSolver):
         if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
             gs.raise_exception("The particle mask overruns the particles of the solver.")
         rigid_solver = self._sim.rigid_solver
-        link_pos = rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
-        link_quat = rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
+        # The attachment is a configuration of the constraint, which carries no gradient
+        with torch.no_grad():
+            link_pos = rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
+            link_quat = rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
         link_pos = broadcast_tensor(link_pos, gs.tc_float, (self._B, 3)).contiguous()
         link_quat = broadcast_tensor(link_quat, gs.tc_float, (self._B, 4)).contiguous()
         self._kernel_set_particle_constraints(particles_start, link_idx, stiffness, particles_mask, link_pos, link_quat)
@@ -1114,22 +1116,21 @@ class MPMSolver(ParticleSolver):
                 self.particle_constraints[i_p, i_b].is_constrained = False
                 self.particle_constraints[i_p, i_b].link_idx = -1
 
-    @no_grad
     @qd.kernel
     def apply_particle_constraints(self, f: qd.i32, links_state: array_class.LinksState):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particle_constraints[i_p, i_b].is_constrained:
-                # Update target position from link pose
+                # The target of a particle attached to a link follows the link. It stays a local, since autodiff cannot
+                # reverse a field read back after it is overwritten in the same kernel.
+                target_pos = self.particle_constraints[i_p, i_b].target_pos
                 i_l = self.particle_constraints[i_p, i_b].link_idx
                 if i_l >= 0:
                     link_pos = links_state.pos[i_l, i_b]
                     link_quat = links_state.quat[i_l, i_b]
                     local_pos = self.particle_constraints[i_p, i_b].link_local_pos
-                    target = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
-                    self.particle_constraints[i_p, i_b].target_pos = target
+                    target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
 
                 # Apply spring force to velocity
-                target_pos = self.particle_constraints[i_p, i_b].target_pos
                 stiffness = self.particle_constraints[i_p, i_b].stiffness
                 mass = self.particles_info[i_p].mass / self._particle_volume_scale
 
@@ -1140,8 +1141,8 @@ class MPMSolver(ParticleSolver):
                 spring_force = -stiffness * pos_error
                 damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * vel
 
-                dv = self.substep_dt * (spring_force + damping_force) / mass
-                self.particles[f + 1, i_p, i_b].vel = vel + dv
+                # An accumulation, which autodiff reverses, where an overwrite of the velocity it reads is not
+                self.particles[f + 1, i_p, i_b].vel += self.substep_dt * (spring_force + damping_force) / mass
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
