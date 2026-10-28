@@ -120,7 +120,7 @@ def apply_collision_filtering(context, cg_infos: list[dict]):
                         invalid_pairs.add(frozenset((i, j)))
 
     if invalid_pairs:
-        masks = solve_contype_conaffinity(n, invalid_pairs)
+        masks = solve_contype_conaffinity(n, frozenset(invalid_pairs))
         if masks is None:
             gs.logger.warning(
                 "USD collision filtering cannot be expressed with 'contype'/'conaffinity' bitmasks. "
