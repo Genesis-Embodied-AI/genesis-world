@@ -587,7 +587,7 @@ class MPMEntity(ParticleEntity):
         free : torch.Tensor, shape (n_particles,)
             A tensor indicating free (1) or fixed (0) status.
         """
-        free = self._sanitize_particles_tensor(None, gs.tc_bool)
+        free = self._sanitize_particles_tensor(None, gs.tc_bool, batched=False)
         self.solver._kernel_get_particles_free(self._particle_start, self._n_particles, free)
         return free
 
