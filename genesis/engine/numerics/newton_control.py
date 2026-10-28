@@ -22,6 +22,8 @@ class NewtonControl:
         self.newton_cond = scalar(qd.i32, 0, np.int32)
         self.ls_cond = scalar(qd.i32, 0, np.int32)
         self.converged = scalar(qd.i32, 0, np.int32)
+        # Always zero: the yield flag of the graph checkpoints that only gate a resume, never pause
+        self.never_yield = scalar(qd.i32, 0, np.int32)
         self.failed = scalar(qd.i32, 0, np.int32)
         self.newton_iter = scalar(qd.i32, 0, np.int32)
         self.ls_iter = scalar(qd.i32, 0, np.int32)

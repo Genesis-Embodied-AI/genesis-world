@@ -18,6 +18,7 @@ from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM, write_block_p
 from genesis.engine.numerics.dynamic_exclusive_sum import func_dynamic_exclusive_sum
 from genesis.engine.numerics.dynamic_radix_sort import func_dynamic_radix_sort
 from genesis.engine.numerics.fsr_reduce import head_segmented_reduce_add
+from genesis.engine.numerics.linear_pcg import func_linear_pcg_direction_update, func_linear_pcg_matvec_update
 from genesis.engine.numerics.open_addressing_hash import EMPTY_KEY, func_reset_hash
 
 from .mpm_data import (
@@ -1381,6 +1382,18 @@ def func_apply_brick(
             for q in qd.static(range(3)):
                 acc += linear.brick[block_base + p * 3 + q] * rs[local * BRICK_DIM + a * 3 + q]
         linear.pcg.z[3 * (linear.row_offset + s) + p] = acc
+
+
+@qd.func(requires_top_level=True)
+def func_solve_brick_pcg(
+    grid: qd.template(),  # MpmGrid
+    linear: qd.template(),  # MpmLinearSystem
+):
+    """The PCG iteration loop with the brick preconditioner, after func_init_linear_pcg_direction armed it."""
+    while qd.graph.do_while(linear.pcg.cond):
+        func_linear_pcg_matvec_update(linear.pcg, linear.matrix, linear.solution)
+        func_apply_brick(grid, linear)
+        func_linear_pcg_direction_update(linear.pcg)
 
 
 @qd.func(requires_top_level=True)

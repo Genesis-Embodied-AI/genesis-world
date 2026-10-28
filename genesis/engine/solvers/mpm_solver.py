@@ -1,3 +1,4 @@
+from enum import IntEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -383,50 +384,31 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def substep_post_coupling(self, f):
         if not self._mpm_sized:
             self._size_to_particles(f)
-        particles, info, materials = self.particles, self.particles_info, self._mpm_materials
-        grid, newton, linear, control, config = (
+        args = (
+            self.particles,
+            self.particles_ng,
+            self.particles_info,
+            self._mpm_materials,
             self._mpm_grid,
             self._mpm_newton,
             self._mpm_linear,
             self._mpm_control,
-            self._mpm_config,
-        )
-        while True:
-            kernel_build_grid(particles, self.particles_ng, grid, config, f)
-            if not grid.grid_overflow.to_numpy():
-                break
-            self._grow_grid()
-        kernel_p2g(
-            particles,
-            info,
-            grid,
-            newton,
-            control,
             self._mpm_force_fields,
             self.boundary,
-            config,
+            self._mpm_config,
             self._gravity,
             f,
             self._sim.cur_t,
         )
-        kernel_start_energy(particles, info, materials, grid, newton, control, config, f)
-        while True:
-            while True:
-                kernel_assemble(particles, info, materials, grid, newton, linear, control, config, f)
-                if not linear.matrix.triplet_overflow.to_numpy():
-                    break
+        status = kernel_substep(*args)
+        while status.yielded:
+            if status.checkpoint == MpmCheckpoint.GRID:
+                self._grow_grid()
+            elif status.checkpoint == MpmCheckpoint.ASSEMBLE:
                 self._grow_triplets()
-            kernel_sort_reduce(linear)
-            kernel_solve_linear(grid, linear)
-            kernel_start_line_search(grid, newton, linear, control)
-            while True:
-                kernel_line_search_trial(particles, info, materials, grid, newton, control, config, f)
-                if not control.ls_cond.to_numpy():
-                    break
-            kernel_update_convergence(control)
-            if not control.newton_cond.to_numpy():
-                break
-        kernel_g2p(particles, self.particles_ng, grid, newton, config, f)
+            else:
+                gs.raise_exception(f"The implicit MPM substep yielded at an unexpected checkpoint: {status.checkpoint}")
+            status = kernel_substep.resume(*args, from_checkpoint=status.checkpoint)
 
         # Apply particle constraints after g2p
         if self._constraints_initialized:
@@ -1110,6 +1092,100 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         return self._enable_particle_constraints
 
 
+class MpmCheckpoint(IntEnum):
+    """Checkpoints of the substep graph. GRID and ASSEMBLE pause on a capacity overflow; the others only gate a
+    resume, so that a resumed launch skips every stage before its checkpoint."""
+
+    GRID = 0
+    PREDICT = 1
+    ASSEMBLE = 2
+    SOLVE = 3
+    PCG = 4
+    SOLVE_POST = 5
+    LINE_SEARCH_TRIAL = 6
+    NEWTON_POST = 7
+    FINALIZE = 8
+
+
+@qd.kernel(graph=True, checkpoints=True)
+def kernel_substep(
+    particles: qd.template(),
+    particles_ng: qd.template(),
+    particles_info: qd.template(),
+    materials: MpmMaterialTable,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    control: qd.template(),
+    force_fields: qd.template(),
+    boundary: qd.template(),
+    config: qd.template(),
+    gravity: qd.Tensor,
+    f: qd.i32,
+    t: qd.f32,
+):
+    """One implicit MPM substep, from frame f to frame f + 1, as one graph.
+
+    Every stage sits under a checkpoint: a launch resumed after a capacity yield must not run any stage before the
+    resume point (Quadrants #956 may otherwise run a top-level func after a yielding checkpoint once). Checkpoint
+    bodies wrap their calls in a static branch, as checkpoint lowering rejects bare top-level func calls.
+    """
+    dt = qd.static(config.substep_dt)
+    with qd.checkpoint(MpmCheckpoint.GRID, yield_on=grid.grid_overflow):
+        if qd.static(True):
+            mpm_func.func_build_grid(particles, particles_ng, grid, config, f)
+    with qd.checkpoint(MpmCheckpoint.PREDICT, yield_on=control.never_yield):
+        if qd.static(True):
+            mpm_func.func_p2g(particles, particles_info, grid, config, gravity, f, dt)
+            mpm_func.func_apply_force_fields(grid, force_fields, config, t, dt)
+            mpm_func.func_constrain_walls(grid, boundary, config)
+            mpm_func.func_newton_reset(grid, newton)
+            func_reset_newton_control(control)
+            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, config, f, dt, False)
+
+    while qd.graph.do_while(control.newton_cond):
+        with qd.checkpoint(MpmCheckpoint.ASSEMBLE, yield_on=linear.matrix.triplet_overflow):
+            if qd.static(True):
+                func_reset_newton_measures(control)
+                mpm_func.func_report_extent(grid, linear)
+                mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, config, f, dt)
+        with qd.checkpoint(MpmCheckpoint.SOLVE, yield_on=control.never_yield):
+            if qd.static(True):
+                func_sort_reduce_bcoo(linear.matrix)
+                mpm_func.func_reset_brick(grid, linear)
+                mpm_func.func_gather_brick(linear)
+                mpm_func.func_invert_brick(grid, linear)
+                func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
+                mpm_func.func_apply_brick(grid, linear)
+                func_init_linear_pcg_direction(linear.pcg)
+        with qd.checkpoint(MpmCheckpoint.PCG, yield_on=control.never_yield):
+            if qd.static(True):
+                mpm_func.func_solve_brick_pcg(grid, linear)
+        with qd.checkpoint(MpmCheckpoint.SOLVE_POST, yield_on=control.never_yield):
+            if qd.static(True):
+                mpm_func.func_negate_du(grid, newton, linear)
+                mpm_func.func_record_start_point(grid, newton)
+                mpm_func.func_contribute_newton_max_disp(grid, newton, control)
+                func_check_convergence(control)
+                func_init_line_search(control)
+        while qd.graph.do_while(control.ls_cond):
+            with qd.checkpoint(MpmCheckpoint.LINE_SEARCH_TRIAL, yield_on=control.never_yield):
+                if qd.static(True):
+                    mpm_func.func_step_forward(grid, newton, control)
+                    mpm_func.func_energy(
+                        particles, particles_info, materials, grid, newton, control, config, f, dt, True
+                    )
+                    func_accept_or_backtrack(control)
+        with qd.checkpoint(MpmCheckpoint.NEWTON_POST, yield_on=control.never_yield):
+            if qd.static(True):
+                func_update_convergence(control)
+
+    with qd.checkpoint(MpmCheckpoint.FINALIZE, yield_on=control.never_yield):
+        if qd.static(True):
+            mpm_func.func_grid_velocity(grid, newton, dt)
+            mpm_func.func_g2p_advect(particles, particles_ng, grid, config, f, dt)
+
+
 @qd.kernel
 def kernel_build_grid(
     particles: qd.template(),
@@ -1193,10 +1269,7 @@ def kernel_solve_linear(
     func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
     mpm_func.func_apply_brick(grid, linear)
     func_init_linear_pcg_direction(linear.pcg)
-    while qd.graph.do_while(linear.pcg.cond):
-        func_linear_pcg_matvec_update(linear.pcg, linear.matrix, linear.solution)
-        mpm_func.func_apply_brick(grid, linear)
-        func_linear_pcg_direction_update(linear.pcg)
+    mpm_func.func_solve_brick_pcg(grid, linear)
 
 
 @qd.kernel
