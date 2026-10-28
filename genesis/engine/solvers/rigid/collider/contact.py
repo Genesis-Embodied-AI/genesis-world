@@ -741,6 +741,52 @@ def func_rotate_frame(
 
 
 @qd.func
+def func_perturb_geom_pair(
+    i_detection: int,
+    axis_0: qd.types.vector(3),
+    axis_1: qd.types.vector(3),
+    overlap_axes: qd.types.matrix(4, 3),
+    contact_pos_0: qd.types.vector(3),
+    ga_pos: qd.types.vector(3),
+    ga_quat: qd.types.vector(4),
+    gb_pos: qd.types.vector(3),
+    gb_quat: qd.types.vector(4),
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    rigid_config: qd.template(),
+):
+    """Rotate both geoms of a pair about contact 0 for one perturbed detection of multi-contact.
+
+    Geom A turns by the rotation 'qrot' about the contact 0 position 'contact_pos_0', and geom B by its inverse. Under
+    MuJoCo compatibility, the detections 'i_detection' 1 to 4 turn about 'axis_0' then 'axis_1', by a negative then a
+    positive angle. Otherwise detection i turns about row i - 1 of 'overlap_axes', which aims at a corner of the contact
+    patch (see func_contact_overlap_axes), and a zero row leaves the detection without corner to target.
+
+    Returns 'qrot', whether the detection has a corner to target, and the perturbed poses of geom A and geom B.
+    """
+    EPS = rigid_info.EPS[None]
+
+    qrot = qd.Vector.zero(gs.qd_float, 4)
+    has_target_corner = True
+    if qd.static(rigid_config.enable_mujoco_compatibility):
+        axis_idx = (i_detection - 1) // 2
+        angle_sign = 2 * ((i_detection - 1) % 2) - 1
+        axis = axis_0 if axis_idx == 0 else axis_1
+        qrot = gu.qd_rotvec_to_quat(angle_sign * collider_info.mc_perturbation[None] * axis, EPS)
+    else:
+        axis = qd.Vector.zero(gs.qd_float, 3)
+        for i_t in qd.static(range(4)):
+            if i_detection == i_t + 1:
+                axis = qd.Vector([overlap_axes[i_t, 0], overlap_axes[i_t, 1], overlap_axes[i_t, 2]])
+        has_target_corner = axis.norm_sqr() > 0.0
+        qrot = gu.qd_rotvec_to_quat(collider_info.mc_perturbation[None] * axis, EPS)
+
+    ga_pos_perturbed, ga_quat_perturbed = func_rotate_frame(ga_pos, ga_quat, contact_pos_0, qrot)
+    gb_pos_perturbed, gb_quat_perturbed = func_rotate_frame(gb_pos, gb_quat, contact_pos_0, gu.qd_inv_quat(qrot))
+    return qrot, has_target_corner, ga_pos_perturbed, ga_quat_perturbed, gb_pos_perturbed, gb_quat_perturbed
+
+
+@qd.func
 def func_contact_order_key(pos: qd.types.vector(3)):
     """Order a contact position along one generic direction, as a single scalar.
 

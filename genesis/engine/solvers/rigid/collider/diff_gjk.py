@@ -856,45 +856,6 @@ def func_plane_contact_frame(
 
 
 @qd.func
-def func_differentiable_sphere_contact(
-    i_ga: int,
-    i_gb: int,
-    i_b: int,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-):
-    """Differentiable sphere-sphere contact reconstruction.
-
-    The contact is a smooth closed form of the two geom centers, so gradients flow directly through
-    [dyn_state.geoms.pos]; the Minkowski-triangle reconstruction of func_differentiable_contact is degenerate for two
-    smoothly-curved surfaces, on which EPA never converges. Must match func_sphere_sphere_contact in
-    capsule_contact.py.
-
-    At coincident centers the distance is a non-differentiable cusp: the normal (delta / dist) and the distance's own
-    gradient (also delta / dist) are both 0/0 there, which reverse-mode turns into NaN. The sqrt only runs when the
-    centers are separated; otherwise the same arbitrary direction and constant penetration as the forward hold (the
-    contact is degenerate there anyway).
-    """
-    EPS = rigid_info.EPS[None]
-
-    radius_a = dyn_info.geoms.data[i_ga][0]
-    radius_b = dyn_info.geoms.data[i_gb][0]
-    delta = dyn_state.geoms.pos[i_ga, i_b] - dyn_state.geoms.pos[i_gb, i_b]
-    dist_sq = delta.dot(delta)
-
-    contact_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
-    penetration = radius_a + radius_b
-    if dist_sq > EPS * EPS:
-        dist = qd.sqrt(dist_sq)
-        contact_normal = delta / dist
-        penetration = radius_a + radius_b - dist
-
-    contact_pos = dyn_state.geoms.pos[i_ga, i_b] - (radius_a - 0.5 * penetration) * contact_normal
-    return contact_pos, contact_normal, penetration, gs.qd_float(1.0)
-
-
-@qd.func
 def func_differentiable_plane_contact(
     i_ga: int,
     i_gb: int,
@@ -914,7 +875,7 @@ def func_differentiable_plane_contact(
 
     [i_ga] is the plane geom and [i_gb] the convex geom. [core_local] (box vertex / sphere center / capsule nearest
     endpoint, in the convex geom's local frame) is the pose-independent witness stored by
-    func_fill_diff_contact_input_analytic; [radius] and the plane direction come from the geoms info. Gradients flow to
+    func_fill_diff_contact_input_plane; [radius] and the plane direction come from the geoms info. Gradients flow to
     both geom poses through the geoms state pos / quat. For a sphere, [core_local] is the local origin, so the
     orientation gradient is zero, matching the rotation-invariant forward contact.
     """

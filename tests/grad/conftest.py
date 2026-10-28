@@ -81,6 +81,14 @@ def grad_capsule():
 
 
 @pytest.fixture(scope="session")
+def grad_capsule_ground():
+    mjcf = ET.Element("mujoco", model="capsule_ground")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "geom", type="capsule", fromto="1.3 0 -0.1 1.7 0 -0.1", size="0.1")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
 def grad_free_with_revolute():
     mjcf = ET.Element("mujoco", model="free_with_child")
     worldbody = ET.SubElement(mjcf, "worldbody")

@@ -1302,6 +1302,8 @@ class DiffContactInput:
     core_local: qd.Tensor
     # Reference id of the contact point, which is needed for the backward pass
     ref_id: qd.Tensor
+    # Analytic contacts only: the multi-contact detection that found the contact, 0 for the unperturbed one
+    detection_idx: qd.Tensor
     # Flag whether the contact data can be computed in numerically stable way in both the forward and backward passes
     valid: qd.Tensor
     ### Differentiable input data
@@ -1324,6 +1326,7 @@ def get_diff_contact_input(_B, max_contacts_per_pair, is_active, requires_grad=F
         w_local_pos2=V_VEC(3, dtype=gs.qd_float, shape=shape),
         core_local=V_VEC(3, dtype=gs.qd_float, shape=shape),
         ref_id=V(dtype=gs.qd_int, shape=shape),
+        detection_idx=V(dtype=gs.qd_int, shape=shape),
         valid=V(dtype=gs.qd_int, shape=shape),
         ref_penetration=V(dtype=gs.qd_float, shape=shape, needs_grad=True),
     )
