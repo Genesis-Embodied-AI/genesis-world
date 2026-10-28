@@ -376,7 +376,7 @@ def test_nested_collision_joint_targets(usd_scene):
 @pytest.mark.required
 @pytest.mark.parametrize("model_name", ["physics_material_usd"])
 def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
-    assert len(usd_scene.entities) == 3
+    assert len(usd_scene.entities) == 4
     entities = {entity.links[0].name: entity for entity in usd_scene.entities}
 
     # Dynamic friction (0.6) is preferred over static (0.8); restitution (0.4) is dropped.
@@ -408,7 +408,7 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
             recompute_inertia=True,
         ),
     )
-    # These links are drawn with their collision geometry alone, whose authored densities the visual estimate keeps
+    # The visual estimate keeps the authored densities, those of collision geoms drawn by the asset included
     entities_from_visual = scene.add_stage(
         morph=gs.morphs.USD(
             file=physics_material_usd,
@@ -422,6 +422,8 @@ def test_physics_material_friction_and_density(usd_scene, physics_material_usd):
     for entities_ in (entities, entities_from_visual):
         assert_allclose(entities_["/root/material_body"].get_mass(), 300.0, tol=gs.EPS)
         assert_allclose(entities_["/root/density_body"].get_mass(), 500.0, tol=gs.EPS)
+        # The visual cube takes the average density of the collision cubes, (300 + 100) / 2
+        assert_allclose(entities_["/root/split_body"].get_mass(), 200.0 * 1.25**3, tol=gs.EPS)
     # This entity material leaves density unset, so each geom keeps its authored value. A link freed from the
     # world then recomputes its inertial at that value rather than at the entity default.
     assert_allclose(entities["/root/material_body"].geoms[0].desc.density, 300.0, tol=gs.EPS)

@@ -1529,22 +1529,30 @@ class KinematicEntityDescription(EntityDescription):
         by '_describe_link' uses the resolved material density as fallback instead, and falls back to the visual
         geoms for a link without collision geometry. With 'from_visual', the visual geoms replace the collision ones in
         both estimates of a link whose asset leaves part of its inertial out, open ones closed first, unless the link has
-        no visual geometry. A warning names the link if its visual and collision volumes differ widely.
+        no visual geometry. The visual geoms stating no density then take the average density of the collision geoms
+        if every one of them states a density. A warning names a link whose visual and collision volumes differ widely.
         """
         # The estimate only fills what the asset leaves out, so a link stating its whole inertial keeps the collision
         # geometry, which spares closing its visual meshes
         is_inertial_explicit = not any(value is None for value in (explicit_mass, explicit_com, explicit_inertia))
         if from_visual and not is_inertial_explicit and vg_infos:
-            # An asset may state a density on the collision copy of a geom alone, so volumes are composed without them
+            # Volumes are composed without the densities, which an asset may state on part of the geoms alone
             cg_volume = None
             if cg_infos:
                 cg_volume = compose_inertial_from_g_infos(
                     [{**g_info, "density": None} for g_info in cg_infos], rho=1.0
                 ).mass
+            # An asset may state densities on collision geoms separate from the visual ones. The average density keeps
+            # the authored mass of the link wherever both geometries enclose the same volume.
+            density_mean = None
+            if cg_infos and all(g_info.get("density") is not None for g_info in cg_infos) and cg_volume > gs.EPS:
+                density_mean = compose_inertial_from_g_infos(cg_infos, rho=1.0).mass / cg_volume
             # An open visual mesh encloses no well-defined volume, and its convex hull would fill every concavity, so
             # it is closed by a wrap that follows its surface, at the default aggressiveness of 'watertighten'
             cg_infos = []
             for g_info in vg_infos:
+                if density_mean is not None and g_info.get("density") is None:
+                    g_info = {**g_info, "density": density_mean}
                 # A primitive is integrated analytically (see 'compose_inertial_from_g_infos'), and a mesh splits its
                 # vertices along normal and texture seams, so its closure is checked once merged
                 if g_info.get("type", gs.GEOM_TYPE.MESH) == gs.GEOM_TYPE.MESH:

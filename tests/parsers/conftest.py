@@ -1526,9 +1526,9 @@ def nested_collision_joint_usd(asset_tmp_path):
 
 @pytest.fixture(scope="session")
 def physics_material_usd(asset_tmp_path):
-    """Three rigid bodies covering UsdPhysicsMaterialAPI parsing: full material (frictions,
-    restitution, and density), explicitly authored zero dynamic friction, and MassAPI density with
-    no explicit mass."""
+    """Four rigid bodies covering UsdPhysicsMaterialAPI parsing: full material (frictions,
+    restitution, and density), explicitly authored zero dynamic friction, MassAPI density with
+    no explicit mass, and densities 300/100 on two unit collision cubes beside a visual cube of size 1.25."""
     usd_file = str(asset_tmp_path / "physics_material.usda")
     stage = Usd.Stage.CreateNew(usd_file)
     UsdGeom.SetStageUpAxis(stage, "Z")
@@ -1560,6 +1560,20 @@ def physics_material_usd(asset_tmp_path):
     )
 
     UsdPhysics.MassAPI.Apply(stage.GetPrimAtPath("/root/density_body")).CreateDensityAttr(500.0)
+
+    split_body = stage.DefinePrim("/root/split_body", "Xform")
+    UsdPhysics.RigidBodyAPI.Apply(split_body)
+    UsdGeom.Cube.Define(stage, "/root/split_body/visual").GetSizeAttr().Set(1.25)
+    light_material = UsdShade.Material.Define(stage, "/root/LightMaterial")
+    UsdPhysics.MaterialAPI.Apply(light_material.GetPrim()).CreateDensityAttr(100.0)
+    for i_cube, (x, physics_material) in enumerate(zip((-0.5, 0.5), (material, light_material))):
+        cube = UsdGeom.Cube.Define(stage, f"/root/split_body/collision_{i_cube}")
+        cube.GetSizeAttr().Set(1.0)
+        cube.AddTranslateOp().Set(Gf.Vec3d(x, 0.0, 0.0))
+        UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+        UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(
+            physics_material, bindingStrength=UsdShade.Tokens.weakerThanDescendants, materialPurpose="physics"
+        )
 
     stage.Save()
     return usd_file
