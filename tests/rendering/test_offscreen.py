@@ -845,7 +845,6 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         materials = (
             *materials,
-            (gs.materials.Tool(), "visual"),
             (gs.materials.FEM.Elastic(), "visual"),
             (gs.materials.MPM.Elastic(), particle_mode),
             (gs.materials.PBD.Cloth(), particle_mode),

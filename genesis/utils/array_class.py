@@ -179,16 +179,11 @@ class ArrayItem(NamedTuple):
     It lives on the device of the backend, and a restore fills it in place (see 'iter_data'). It is a quadrants array,
     or a torch tensor such as the step counts of the simulator. An unused quadrants array is the 0-d placeholder of a
     feature switched off (see 'maybe_shape'), which a restore leaves as built (see 'check_data').
-
-    `is_grad` marks the gradient of another item. `is_framed` marks an array whose first axis indexes the frames of
-    the substeps a solver holds, frame 0 holding the state between two steps (see 'Solver.roll_frame_window').
     """
 
     name: str
     kind: DataKind
     array: qd.Tensor | qd.Field | qd.Ndarray | torch.Tensor
-    is_grad: bool = False
-    is_framed: bool = False
 
 
 class ScalarItem(NamedTuple):
@@ -236,7 +231,7 @@ def iter_data(owner: object, attr: str, kind: DataKind | None = None) -> Iterato
             gs.raise_exception(f"'{attr}' holds an array that no struct or annotation gives a kind.")
         yield ArrayItem(attr, kind, value)
         if not isinstance(value, torch.Tensor) and value.has_grad():
-            yield ArrayItem(f"{attr}.grad", kind, value.grad, is_grad=True)
+            yield ArrayItem(f"{attr}.grad", kind, value.grad)
     elif dataclasses.is_dataclass(value) or isinstance(value, tuple):
         if dataclasses.is_dataclass(value):
             members = [(field.name, field.metadata.get(KIND)) for field in dataclasses.fields(value)]
@@ -276,7 +271,7 @@ def iter_state_arrays(
 
 
 def check_data(
-    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, boundary_only: bool = False
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
 ) -> list[DataItem]:
     """Return the items 'fill_data' writes, rejecting a record made for another scene.
 
@@ -284,7 +279,7 @@ def check_data(
     differ otherwise, as it is cast when written: a one-byte boolean fills an int32 flag. Any other mismatch raises,
     and so does a name on one side only, since the record comes from another build or version. 'maybe_shape' shapes an
     unused array as (), so an array with that shape on either side stays as built, and is left out. With
-    `boundary_only`, an array holding frames is recorded for its frame 0 alone (see 'ArrayItem').
+    `frame_only`, every array holds frames and is recorded for its frame 0 alone (see 'Solver.has_frames').
     """
     items = tuple(items)
     unshared = sorted({item.name for item in items} ^ set(values))
@@ -307,7 +302,7 @@ def check_data(
             if tuple(array.shape) == () or tuple(value.shape) == element_shape:
                 continue
             shape, dtype = (*array.shape, *element_shape), array.dtype
-            if boundary_only and item.is_framed:
+            if frame_only:
                 shape = shape[1:]
             is_item_real = dtype in qd.types.primitive_types.real_types
         else:
@@ -327,7 +322,7 @@ def check_data(
 
 
 def fill_data(
-    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, boundary_only: bool = False
+    items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch.Tensor], *, frame_only: bool = False
 ) -> None:
     """Write back into each item the value recorded under its name, once every value passed 'check_data', so that a
     record made for another scene leaves the scene as it was.
@@ -335,15 +330,14 @@ def fill_data(
     An array is filled in place, through its zero-copy view where one exists, so that a device-resident record stays on
     the device. On Metal these writes stay on the torch stream, so the caller must call 'torch.mps.synchronize' once
     before the next kernel. A scalar is set back as the Python native the host code reading it expects. With
-    `boundary_only`, the frame 0 alone of an array holding frames is written (see 'check_data').
+    `frame_only`, the frame 0 alone of each array is written (see 'check_data').
     """
-    for item in check_data(items, values, boundary_only=boundary_only):
+    for item in check_data(items, values, frame_only=frame_only):
         value = values[item.name]
         if isinstance(item, ScalarItem):
             # 'check_data' admits a boolean record for an integer, so the value takes the native type of the attribute
             setattr(item.owner, item.attr, type(getattr(item.owner, item.attr))(value.item()))
             continue
-        is_frame_only = boundary_only and item.is_framed
         view = None
         if isinstance(item.array, torch.Tensor):
             view = item.array
@@ -355,8 +349,8 @@ def fill_data(
                 pass
         if view is not None:
             # A value is cast to the dtype of its array as it reaches the device, which may support no other precision
-            (view[0] if is_frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
-        elif is_frame_only:
+            (view[0] if frame_only else view).copy_(torch.as_tensor(value, dtype=view.dtype, device=view.device))
+        elif frame_only:
             # Without zero-copy views, the array is written whole, its other frames as they are
             frames = data_to_array(item.array, to_torch=True, copy=True)
             frames[0] = value
@@ -380,6 +374,7 @@ class ErrorCode(IntEnum):
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
     INVALID_GRAD_NAN = 0b00000000000000000000000010000000
+    INVALID_PARTICLE_NAN = 0b00000000000000000000000100000000
 
 
 # =========================================== RigidInfo ===========================================

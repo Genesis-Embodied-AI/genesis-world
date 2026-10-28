@@ -38,7 +38,6 @@ from genesis.options import (
     SFOptions,
     SimOptions,
     SPHOptions,
-    ToolOptions,
     ViewerOptions,
     VisOptions,
 )
@@ -148,8 +147,6 @@ class Scene(RBC):
     ----------
     sim_options : gs.options.SimOptions
         The options configuring the overarching `simulator`, which in turn manages all the solvers.
-    tool_options : gs.options.ToolOptions
-        The options configuring the tool_solver (``scene.sim.ToolSolver``).
     rigid_options : gs.options.RigidOptions
         The options configuring the rigid_solver (``scene.sim.RigidSolver``).
     mpm_options : gs.options.MPMOptions
@@ -182,7 +179,6 @@ class Scene(RBC):
     def __init__(
         self,
         sim_options: SimOptions | None = None,
-        tool_options: ToolOptions | None = None,
         rigid_options: RigidOptions | None = None,
         kinematic_options: KinematicOptions | None = None,
         mpm_options: MPMOptions | None = None,
@@ -204,7 +200,6 @@ class Scene(RBC):
 
         individual_options = (
             sim_options,
-            tool_options,
             rigid_options,
             kinematic_options,
             mpm_options,
@@ -225,7 +220,6 @@ class Scene(RBC):
         else:
             self.options = SceneOptions(
                 sim=sim_options,
-                tool=tool_options,
                 rigid=rigid_options,
                 kinematic=kinematic_options,
                 mpm=mpm_options,
@@ -395,7 +389,7 @@ class Scene(RBC):
         if vis_mode is not None:
             surface.vis_mode = vis_mode
         # validate and populate default surface.vis_mode considering morph type
-        if isinstance(material, (gs.materials.Kinematic, gs.materials.Tool)):
+        if isinstance(material, gs.materials.Kinematic):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
@@ -889,15 +883,14 @@ class Scene(RBC):
 
         with gs.logger.timer("Compiling simulation kernels..."):
             self._sim.step()
-            if self._sim.rigid_solver.is_active:
-                try:
-                    self._sim.rigid_solver.check_errno()
-                except gs.GenesisException as e:
-                    gs.logger.warning(
-                        "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
-                        "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
-                        f"with: {e}"
-                    )
+            try:
+                self._sim.check_errno()
+            except gs.GenesisException as e:
+                gs.logger.warning(
+                    "The initial state is invalid. Register a valid one with 'scene.reset(state)', or overwrite it "
+                    "manually following 'scene.build' and every call to 'scene.reset()', otherwise stepping will fail "
+                    f"with: {e}"
+                )
             self._reset()
 
         # visualizer
@@ -1054,12 +1047,14 @@ class Scene(RBC):
         """
         Returns the current state of the scene.
 
+        In a differentiable scene, the state tracks gradients, as the getters of the entities do.
+
         Returns
         -------
         state : genesis.SimState
             The state of the scene at the current time step.
         """
-        return self._get_state()
+        return self._sim.get_state()
 
     def register_pre_step_callback(self, callback):
         """Register a callback invoked at the start of each ``step()``, on the stepping thread. A callback
@@ -1085,8 +1080,8 @@ class Scene(RBC):
                 gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
             # The recorders read the state a step starts from, with the inputs the step consumes: 'Simulator.step'
             # zeroes the applied forces at its end. The pre-step callbacks ran, so their inputs are read as well.
-            # See 'Simulator.read_context'
-            with step_timer.phase("recorders"), self._sim.read_context:
+            # The recorders read the state for themselves, outside of the autograd graph of a differentiable rollout
+            with step_timer.phase("recorders"), torch.no_grad():
                 self._recorder_manager.step(self._sim.cur_step_global)
             self._sim.step()
 
@@ -1119,6 +1114,21 @@ class Scene(RBC):
                     )
                 else:
                     gs.logger.info(f"Running at ~<{rate:.2f}>~ FPS.")
+
+    @gs.assert_built
+    def get_error_envs_mask(self) -> torch.Tensor:
+        """
+        Return whether each environment flagged an error since its last reset, such as an overflow of contacts or a 'nan'.
+
+        A flagged error raises at the beginning of the next step, before anything else, until it is cleared: by resetting
+        the state of the environment, or with 'clear_errno'.
+        """
+        return self._sim.get_error_envs_mask()
+
+    @gs.assert_built
+    def clear_errno(self, envs_idx=None):
+        """Clear the errors flagged for the given environments, all of them if None (see 'get_error_envs_mask')."""
+        self._sim.clear_errno(envs_idx)
 
     def stop_recording(self):
         # The recorders read before each step, so the state the last step left is recorded here, whatever the
@@ -2031,11 +2041,6 @@ class Scene(RBC):
     def emitters(self):
         """All the emitters in the scene."""
         return self._emitters
-
-    @property
-    def tool_solver(self):
-        """The scene's `tool_solver`, managing all the `ToolEntity` in the scene."""
-        return self._sim.tool_solver
 
     @property
     def rigid_solver(self):

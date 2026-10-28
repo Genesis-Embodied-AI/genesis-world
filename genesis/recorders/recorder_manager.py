@@ -115,7 +115,6 @@ class RecorderManager:
         for recorder in self._recorders:
             recorder.step(global_step)
 
-    # See 'Simulator.read_context'
     @gs.assert_built
     @torch.no_grad()
     def record(self, global_step: int):

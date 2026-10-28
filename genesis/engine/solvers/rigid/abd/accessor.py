@@ -93,45 +93,6 @@ def kernel_set_kinematic_state(
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_state(
-    qpos: qd.types.ndarray(),
-    vel: qd.types.ndarray(),
-    acc: qd.types.ndarray(),
-    links_pos: qd.types.ndarray(),
-    links_quat: qd.types.ndarray(),
-    friction_ratio: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-):
-    n_qs = qpos.shape[1]
-    n_dofs = vel.shape[1]
-    n_links = links_pos.shape[1]
-    n_geoms = friction_ratio.shape[1]
-    _B = qpos.shape[0]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_q, i_b in qd.ndrange(n_qs, _B):
-        qpos[i_b, i_q] = rigid_info.qpos[i_q, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_d, i_b in qd.ndrange(n_dofs, _B):
-        vel[i_b, i_d] = dyn_state.dofs.vel[i_d, i_b]
-        acc[i_b, i_d] = dyn_state.dofs.acc[i_d, i_b]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(n_links, _B):
-        for j in qd.static(range(3)):
-            links_pos[i_b, i_l, j] = dyn_state.links.pos[i_l, i_b][j]
-        for j in qd.static(range(4)):
-            links_quat[i_b, i_l, j] = dyn_state.links.quat[i_l, i_b][j]
-
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(n_geoms, _B):
-        friction_ratio[i_b, i_l] = dyn_state.geoms.friction_ratio[i_l, i_b]
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_state(
     envs_idx: qd.types.ndarray(),
     qpos: qd.types.ndarray(),

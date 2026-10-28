@@ -25,7 +25,6 @@ from genesis.utils.misc import (
     get_gpu_core_count,
     get_gpu_shared_tile_sizes,
     indices_to_mask,
-    qd_from_torch,
     qd_to_numpy,
     qd_to_torch,
     qd_zero_grad,
@@ -38,9 +37,7 @@ from ..kinematic_solver import (
     _balanced_variant_mapping,
     _fill_base_link_geom_offsets,
     _offset_world_shift,
-    _read_state_fields,
     _select_links_offset,
-    _write_dofs_position,
 )
 from .abd.accessor import (
     ConstraintType,
@@ -51,7 +48,6 @@ from .abd.accessor import (
     kernel_get_dofs_control_force,
     kernel_get_links_acc,
     kernel_get_links_vel,
-    kernel_get_state,
     kernel_set_dofs_act_bias,
     kernel_set_dofs_act_gain,
     kernel_set_dofs_armature,
@@ -61,6 +57,7 @@ from .abd.accessor import (
     kernel_set_dofs_kp,
     kernel_set_dofs_kv,
     kernel_set_dofs_limit,
+    kernel_set_dofs_position,
     kernel_set_dofs_stiffness,
     kernel_set_drone_rpm,
     kernel_set_geom_friction,
@@ -88,9 +85,7 @@ from .abd.accessor import (
 from .abd.diff import (
     func_copy_next_to_curr,
     func_integrate_dq_entity,
-    kernel_copy_finite_next_to_curr,
-    kernel_flag_non_finite_grad,
-    kernel_flag_non_finite_next,
+    kernel_copy_next_to_curr_clear_coupling,
 )
 from .abd.forward_dynamics import (
     func_forward_dynamics,
@@ -98,7 +93,6 @@ from .abd.forward_dynamics import (
     func_integrate,
     func_update_acc,
     func_vel_at_point,
-    kernel_clear_coupling_wrench,
     kernel_compute_smooth_qacc,
     kernel_forward_dynamics,
     kernel_forward_dynamics_without_qacc,
@@ -121,7 +115,6 @@ from .abd.misc import (
     func_apply_coupling_force,
     kernel_apply_links_external_wrench,
     kernel_apply_links_external_wrench_at_pos,
-    kernel_bit_reduction,
     kernel_clear_external_force,
     kernel_init_entity_fields,
     kernel_init_equality_fields,
@@ -129,7 +122,6 @@ from .abd.misc import (
     kernel_init_link_dynamics,
     kernel_init_vert_fields,
     kernel_reset_hibernation,
-    kernel_set_zero,
     kernel_update_heterogeneous_link_info,
     kernel_wakeup_coupled_links,
 )
@@ -297,10 +289,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self.qpos: qd.Tensor | qd.Field | qd.Ndarray | None = None
 
-        # The errors a backward pass flagged so far, kept aside since restoring the state a step started from rewinds
-        # the error flags with it
-        self._errno_backward: torch.Tensor | None = None
-
     def build(self):
         self._n_geoms = self.n_geoms
         self._n_verts = self.n_verts
@@ -352,6 +340,41 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self._init_collider()
         self._init_constraint_solver()
+        collider_info = self.collider.collider_info
+        self.register_errors(
+            self._errno,
+            {
+                array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS: (
+                    "Exceeding max number of broad phase candidate contact pairs "
+                    f"({collider_info.max_collision_pairs_broad[None]}). Please increase the value of RigidSolver's "
+                    "option 'multiplier_collision_broad_phase'."
+                ),
+                array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS: (
+                    f"Exceeding max number of candidate contact points ({collider_info.max_candidate_contacts[None]}). "
+                    "Please increase the value of RigidSolver's option 'max_collision_pairs'."
+                ),
+                array_class.ErrorCode.OVERFLOW_CONTACTS: (
+                    f"Exceeding max number of post-pruning contact points ({collider_info.max_contacts[None]}) "
+                    "supported by the constraint solver. Please increase the value of RigidSolver's option "
+                    "'max_contacts'."
+                ),
+                array_class.ErrorCode.UNSUPPORTED_COLLISION_PAIR: (
+                    "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or "
+                    "filter this pair out via 'contype'/'conaffinity'."
+                ),
+                array_class.ErrorCode.INVALID_CONTACT_NAN: (
+                    "Collision detection reported a contact whose position, normal or penetration is not finite. This "
+                    "is a solver-internal error, please report it."
+                ),
+                array_class.ErrorCode.INVALID_FORCE_NAN: (
+                    "Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep."
+                ),
+                array_class.ErrorCode.INVALID_ACC_NAN: (
+                    "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check "
+                    "the controls given to the dofs."
+                ),
+            },
+        )
         self._refresh_invweight_and_meaninertia(force_update=False, in_place=True)
 
         # Fill in the default rotor inertia (see 'KinematicVariantDescription'), one variant per environment. It is
@@ -762,8 +785,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # rigid_solver.dyn_state.links, etc. regardless of the solver is active or not.
         self.data_manager = array_class.DataManager(self, kinematic_only=False)
         self._errno = self.data_manager.errno
-        if self._requires_grad:
-            self._errno_backward = torch.zeros_like(qd_to_torch(self._errno))
 
         self.rigid_info = self.data_manager.rigid_info
         self.dyn_info = self.data_manager.dyn_info
@@ -1303,7 +1324,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.rigid_config,
             )
 
-        if is_recording and not isinstance(self.sim.coupler, SAPCoupler):
+        # A differentiable scene has no SAP coupler, which a scene with 'requires_grad' refuses at build
+        if is_recording:
             envs_idx = self._scene._sanitize_envs_idx(None)
             self._update_forward_kinematics(envs_idx)
             kernel_forward_dynamics_without_qacc(
@@ -1331,9 +1353,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 is_backward=True,
                 errno=self._errno,
             )
-            kernel_flag_non_finite_next(self.dyn_state, self.rigid_info, self.rigid_config, self._errno)
-            kernel_copy_finite_next_to_curr(self.dyn_state, self.rigid_info, self.rigid_config, self._errno)
-            kernel_clear_coupling_wrench(self.dyn_state, self.dyn_info, self.rigid_config)
+            kernel_copy_next_to_curr_clear_coupling(
+                self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
+            )
             if not self._enable_mujoco_compatibility:
                 self._update_forward_kinematics(envs_idx)
         elif isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
@@ -1419,58 +1441,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
             self._is_forward_vel_updated = not self._enable_mujoco_compatibility
 
-    def get_error_envs_mask(self):
-        return qd_to_torch(self._errno) > 0
-
-    def check_errno(self):
-        if gs.use_zerocopy:
-            errno = np.bitwise_or.reduce(qd_to_numpy(self._errno))
-        else:
-            errno = kernel_bit_reduction(self._errno)
-
-        if errno & array_class.ErrorCode.INVALID_GRAD_NAN:
-            gs.raise_exception(
-                "The backward pass produced a 'nan' or 'inf' gradient of the positions or velocities of the dofs. The "
-                "rollout is likely too stiff to differentiate over this horizon: shorten it, or decrease the Rigid "
-                "simulation timestep."
-            )
-
-        if errno & array_class.ErrorCode.OVERFLOW_CANDIDATE_CONTACTS:
-            max_collision_pairs_broad = self.collider.collider_info.max_collision_pairs_broad[None]
-            gs.raise_exception(
-                f"Exceeding max number of broad phase candidate contact pairs ({max_collision_pairs_broad}). "
-                f"Please increase the value of RigidSolver's option 'multiplier_collision_broad_phase'."
-            )
-        if errno & array_class.ErrorCode.OVERFLOW_COLLISION_PAIRS:
-            max_candidate_contacts = self.collider.collider_info.max_candidate_contacts[None]
-            gs.raise_exception(
-                f"Exceeding max number of candidate contact points ({max_candidate_contacts}). Please increase the "
-                "value of RigidSolver's option 'max_collision_pairs'."
-            )
-        if errno & array_class.ErrorCode.OVERFLOW_CONTACTS:
-            max_contacts = self.collider.collider_info.max_contacts[None]
-            gs.raise_exception(
-                f"Exceeding max number of post-pruning contact points ({max_contacts}) supported by the constraint "
-                "solver. Please increase the value of RigidSolver's option 'max_contacts'."
-            )
-        if errno & array_class.ErrorCode.UNSUPPORTED_COLLISION_PAIR:
-            gs.raise_exception(
-                "Collision between a non-convex geom and a terrain is not supported. Set 'convexify=True' or filter this "
-                "pair out via 'contype'/'conaffinity'."
-            )
-        if errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
-            gs.raise_exception(
-                "Collision detection reported a contact whose position, normal or penetration is not finite. This is a "
-                "solver-internal error, please report it."
-            )
-        if errno & array_class.ErrorCode.INVALID_FORCE_NAN:
-            gs.raise_exception("Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep.")
-        if errno & array_class.ErrorCode.INVALID_ACC_NAN:
-            gs.raise_exception(
-                "Invalid accelerations causing 'nan' or 'inf'. Please decrease Rigid simulation timestep, or check the "
-                "controls given to the dofs."
-            )
-
     def _kernel_detect_collision(self):
         self.collider.clear()
         self.collider.detection()
@@ -1508,6 +1478,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self._disable_constraint:
             kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)
             return
+
         constraint_state = self.constraint_solver.constraint_state
         # Pure grad shuffles: in-place through zero-copy views when supported, kernel dispatch otherwise (see
         # "Pure read-write data accessors on the hot path" in CLAUDE.md). gs.use_zerocopy encodes every zero-copy
@@ -1698,25 +1669,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             # One flush for the zeroing batch; see qd_zero_grad in misc.py.
             if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
                 torch.mps.synchronize()
-            self._errno_backward.zero_()
-
-    def end_step(self):
-        self.clear_external_force()
-
-    def flag_non_finite_grad(self):
-        kernel_flag_non_finite_grad(self.dyn_state, self.rigid_info, self.rigid_config, self._errno)
-
-    def keep_errors(self):
-        # See '_errno_backward'
-        self._errno_backward |= qd_to_torch(self._errno)
-
-    def check_errors(self):
-        errno = qd_to_torch(self._errno, copy=True)
-        errno |= self._errno_backward
-        qd_from_torch(self._errno, errno)
-        if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-            torch.mps.synchronize()
-        self.check_errno()
 
     def substep_post_coupling(self, f):
         from genesis.engine.couplers import SAPCoupler, IPCCoupler
@@ -1748,32 +1700,24 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def get_state(self, f=None):
         if self.is_active:
-            state = RigidSolverState(self._scene, self.sim.cur_step_global)
-
             # A captured state must be self-consistent: links_pos / links_quat have to be the Cartesian pose implied by
             # the qpos captured alongside them, otherwise restoring it does not reproduce the configuration it was taken
             # from. The step loop leaves that pose one integration behind qpos whenever it defers the post-integrate
             # refresh, so catch up here - a no-op when the pose is already current, which is the common case.
             self.update_forward_pos()
 
-            kernel_get_state(
-                state.qpos,
-                state.dofs_vel,
-                state.dofs_acc,
-                state.links_pos,
-                state.links_quat,
-                state.friction_ratio,
-                self.dyn_state,
-                self.rigid_info,
-                self.rigid_config,
+            qpos, dofs_vel, links_pos, links_quat = self._read_data(
+                (self.rigid_info.qpos, self.dyn_state.dofs.vel, self.dyn_state.links.pos, self.dyn_state.links.quat),
+                None,
+                None,
+                copy=True,
             )
-            fields = (
-                self.rigid_info.qpos,
-                self.dyn_state.dofs.vel,
-                self.dyn_state.links.pos,
-                self.dyn_state.links.quat,
+            # The accelerations and the friction ratios carry no gradient back
+            dofs_acc = qd_to_torch(self.dyn_state.dofs.acc, transpose=True, copy=True)
+            friction_ratio = qd_to_torch(self.dyn_state.geoms.friction_ratio, transpose=True, copy=True)
+            state = RigidSolverState(
+                self._scene, self.sim.cur_step_global, qpos, dofs_vel, dofs_acc, links_pos, links_quat, friction_ratio
             )
-            self.record_read(state.grad_tensors, fields)
         else:
             state = None
         return state
@@ -1795,7 +1739,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             and gs.use_zerocopy
             and (not isinstance(envs_idx, torch.Tensor) or (not IS_OLD_TORCH or envs_idx.dtype == torch.bool))
         ):
-            errno = qd_to_torch(self._errno, copy=False)
             qpos_dst = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
             vel_dst = qd_to_torch(self.dyn_state.dofs.vel, transpose=True, copy=False)
             acc_dst = qd_to_torch(self.dyn_state.dofs.acc, transpose=True, copy=False)
@@ -1833,7 +1776,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     envs_mask = torch.zeros(self._B, dtype=torch.bool, device=gs.device)
                     envs_mask[envs_idx] = True
 
-                errno.masked_fill_(envs_mask, 0)
                 if self.n_qs:
                     torch.where(envs_mask[:, None], state.qpos, qpos_dst, out=qpos_dst)
                     torch.where(envs_mask[:, None], state.dofs_vel, vel_dst, out=vel_dst)
@@ -1859,7 +1801,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     n_awake_dofs_dst.masked_fill_(envs_mask, self.n_dofs)
             else:
                 if self.n_qs:
-                    errno[envs_idx] = 0
                     qpos_dst[envs_idx] = state.qpos[envs_idx]
                     vel_dst[envs_idx] = state.dofs_vel[envs_idx]
                     acc_dst[envs_idx] = state.dofs_acc[envs_idx]
@@ -1886,7 +1827,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-            kernel_set_zero(envs_idx, self._errno)
             kernel_set_state(
                 envs_idx,
                 state.qpos,
@@ -1908,6 +1848,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_info,
                     self.rigid_config,
                 )
+        self.clear_errno(envs_idx)
 
         if not partial:
             self._update_forward_kinematics(envs_idx)
@@ -2020,7 +1961,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if relative:
                 # Compose the body-frame offset onto the authored position, keeping the current orientation, then set
                 # the resulting world position absolutely.
-                (cur_quat,) = _read_state_fields(self, (self.dyn_state.links.quat,), envs_idx, links_idx)
+                cur_quat = self._read_data(self.dyn_state.links.quat, envs_idx, links_idx)
                 offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                 offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
                 pos = pos + _offset_world_shift(offset_pos, offset_quat, cur_quat)
@@ -2159,8 +2100,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 if not relative_pos_passthrough:
                     # The offset position rotates with the orientation, so keep the authored-frame position fixed by
                     # rewriting the world position from the current authored position and the new authored orientation.
-                    cur_pos, cur_quat = _read_state_fields(
-                        self, (self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, links_idx
+                    cur_pos, cur_quat = self._read_data(
+                        (self.dyn_state.links.pos, self.dyn_state.links.quat), envs_idx, links_idx
                     )
                     offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                     authored_pos = cur_pos - _offset_world_shift(offset_pos, offset_quat, cur_quat)
@@ -2413,7 +2354,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if gs.use_zerocopy:
             data = qd_to_torch(self.rigid_info.qpos, transpose=True, copy=False)
-            errno = qd_to_torch(self._errno, copy=False)
             qs_mask = indices_to_mask(qs_idx)
             if (
                 (not qs_mask or isinstance(qs_mask[0], slice))
@@ -2431,11 +2371,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 else:
                     qpos = broadcast_tensor(qpos, gs.tc_float, qs_data.shape)
                     torch.where(envs_idx[:, None], qpos, qs_data, out=qs_data)
-                errno.masked_fill_(envs_idx, 0.0)
             else:
                 mask = (0, *qs_mask) if self.n_envs == 0 else indices_to_mask(envs_idx, *qs_mask, boolean_mask=False)
                 assign_indexed_tensor(data, mask, qpos)
-                errno[envs_idx] = 0
                 if mask and isinstance(mask[0], torch.Tensor):
                     envs_idx = mask[0].reshape((-1,))
             if gs.backend == gs.metal:
@@ -2461,7 +2399,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 )
 
             kernel_set_qpos(qs_idx, envs_idx, qpos, self.rigid_info, self.rigid_config)
-            kernel_set_zero(envs_idx, self._errno)
+        self.clear_errno(envs_idx)
 
         if not skip_forward:
             self._update_forward_kinematics(envs_idx)
@@ -2665,15 +2603,14 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         self._wake_dofs(dofs_idx, envs_idx)
 
-        _write_dofs_position(self, position, dofs_idx, envs_idx)
+        # See 'KinematicSolver.set_dofs_position'
+        positions = self._read_data(self.dyn_state.dofs.pos, envs_idx, None, copy=True)
+        positions[:, dofs_idx] = position
+        is_dof_set = torch.zeros((self.n_dofs,), dtype=gs.tc_bool, device=gs.device)
+        is_dof_set[dofs_idx] = True
+        kernel_set_dofs_position(is_dof_set, envs_idx, positions, self.dyn_info, self.rigid_info, self.rigid_config)
 
-        if gs.use_zerocopy:
-            errno = qd_to_torch(self._errno, copy=False)
-            errno[envs_idx] = 0
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-        else:
-            kernel_set_zero(envs_idx, self._errno)
+        self.clear_errno(envs_idx)
 
         self._update_forward_kinematics(envs_idx)
 
@@ -2854,16 +2791,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         ref_frame = self._sanitize_ref_frame(ref)
         links_state = self.dyn_state.links
         if ref_frame == link_ref_frame.root_COM:
-            (tensor,) = _read_state_fields(self, (links_state.root_COM,), envs_idx, links_idx)
+            tensor = self._read_data(links_state.root_COM, envs_idx, links_idx, copy=True)
         elif ref_frame == link_ref_frame.link_COM:
-            i_pos, root_COM = _read_state_fields(self, (links_state.i_pos, links_state.root_COM), envs_idx, links_idx)
+            i_pos, root_COM = self._read_data((links_state.i_pos, links_state.root_COM), envs_idx, links_idx)
             tensor = i_pos + root_COM
         else:
-            (tensor,) = _read_state_fields(self, (links_state.pos,), envs_idx, links_idx)
+            tensor = self._read_data(links_state.pos, envs_idx, links_idx, copy=True)
 
         # The pose offset is defined on the link origin, so it is only stripped for the 'link_origin' reference.
         if relative and ref_frame == link_ref_frame.link_origin and not self._links_offset_pos_is_identity[idx].all():
-            (quat,) = _read_state_fields(self, (links_state.quat,), envs_idx, links_idx)
+            quat = self._read_data(links_state.quat, envs_idx, links_idx)
             offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
             offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
             tensor = tensor - _offset_world_shift(offset_pos, offset_quat, quat)
@@ -2883,19 +2820,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if gs.use_zerocopy or self.is_recording:
             links_state = self.dyn_state.links
             if ref_frame == link_ref_frame.link_COM:
-                cd_vel, cd_ang, delta = _read_state_fields(
-                    self, (links_state.cd_vel, links_state.cd_ang, links_state.i_pos), envs_idx, links_idx
+                cd_vel, cd_ang, delta = self._read_data(
+                    (links_state.cd_vel, links_state.cd_ang, links_state.i_pos), envs_idx, links_idx
                 )
             else:
-                cd_vel, cd_ang, pos, root_COM = _read_state_fields(
-                    self,
-                    (links_state.cd_vel, links_state.cd_ang, links_state.pos, links_state.root_COM),
-                    envs_idx,
-                    links_idx,
+                cd_vel, cd_ang, pos, root_COM = self._read_data(
+                    (links_state.cd_vel, links_state.cd_ang, links_state.pos, links_state.root_COM), envs_idx, links_idx
                 )
                 delta = pos - root_COM
                 if is_relative:
-                    (quat,) = _read_state_fields(self, (links_state.quat,), envs_idx, links_idx)
+                    quat = self._read_data(links_state.quat, envs_idx, links_idx)
                     offset_pos = _select_links_offset(self._links_offset_pos, links_idx, envs_idx)
                     offset_quat = _select_links_offset(self._links_offset_quat, links_idx, envs_idx)
                     delta = delta - _offset_world_shift(offset_pos, offset_quat, quat)

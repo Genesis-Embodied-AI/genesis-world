@@ -24,7 +24,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
         pytest.param("grad_hopper", marks=pytest.mark.required),
     ],
 )
-def test_fk_grad_matches_fd(model_name, request, precision, step_overwrites, show_viewer):
+def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
     is_tall = model_name in ("grad_cartpole", "grad_hopper")
     B = 2
     pair = make_diff_scene_pair(
@@ -131,7 +131,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, step_overwrites, sho
             poses.append(read_pose(entity))
 
         def loss_fn(scene, entity, tgt=target):
-            return sum(((pose.reshape(-1) - tgt) ** 2).sum() for pose in (*poses, read_pose(entity)))
+            return sum([((pose.reshape(-1) - tgt) ** 2).sum() for pose in (*poses, read_pose(entity))])
 
         # The normalization of a quaternion makes its setter the most curved input, which bounds its step by the
         # truncation error. Every other step is bounded by the rounding error alone.
@@ -163,7 +163,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, step_overwrites, sho
     ],
 )
 @pytest.mark.debug(False)
-def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, step_overwrites, show_viewer):
+def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show_viewer):
     # Distinct control forces over the unroll, each of which must receive an independent adjoint.
     # (output kind: entity state pos / quat or rigid-solver links, per-link output shape, target seed, fp32
     # tolerance). Anchored single-joint topologies (revolute, spherical) read the quaternion: their base link
@@ -204,7 +204,7 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, step
         elif output == "state_quat":
             pose = entity.get_state().quat
         else:
-            pose = scene.rigid_solver.get_state().links_pos
+            pose = entity.get_links_pos()
         return ((pose.reshape(-1) - target) ** 2).sum()
 
     def apply_force(entity, force):
@@ -236,7 +236,7 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, step
 
 @pytest.mark.required
 @pytest.mark.parametrize("control_mode", ["position", "velocity"])
-def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precision, step_overwrites, show_viewer):
+def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precision, show_viewer):
     # Per-step-varying PD targets are scenario commands, replayed by the backward unroll; the gradient of a tracked
     # initial velocity through the controlled rollout must match finite differences.
     pair = make_diff_scene_pair(
@@ -259,7 +259,7 @@ def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precisi
         pair,
         [np.array([1.5])],
         lambda e, x: e.set_dofs_velocity(x),
-        lambda scene, entity: scene.rigid_solver.get_state().qpos[0, 0] ** 2,
+        lambda scene, entity: entity.get_qpos()[0] ** 2,
         n_steps=10,
         step_fn=step_fn,
         rtol=1e-10 if precision == "64" else 5e-5,
@@ -299,12 +299,13 @@ def test_requires_grad_parity(grad_free, grad_hopper, grad_chain3, tol, show_vie
         scene.build(n_envs=2)
         scenes.append(scene)
 
-    dofs_vel = np.random.uniform(-2.0, 2.0, (2, scenes[0].rigid_solver.n_dofs))
-    for scene in scenes:
-        scene.rigid_solver.set_dofs_velocity(dofs_vel)
+    for entities in zip(*[scene.entities for scene in scenes]):
+        dofs_vel = np.random.uniform(-2.0, 2.0, (2, entities[0].n_dofs))
+        for entity in entities:
+            entity.set_dofs_velocity(dofs_vel)
     for _ in range(30):
         for scene in scenes:
             scene.step()
-        states = [scene.rigid_solver.get_state() for scene in scenes]
-        assert_allclose(states[0].qpos, states[1].qpos, tol=tol)
-        assert_allclose(states[0].dofs_vel, states[1].dofs_vel, tol=tol)
+        for entity_grad, entity in zip(*[scene.entities for scene in scenes]):
+            assert_allclose(entity_grad.get_qpos(), entity.get_qpos(), tol=tol)
+            assert_allclose(entity_grad.get_dofs_velocity(), entity.get_dofs_velocity(), tol=tol)

@@ -142,7 +142,7 @@ def init(
     else:
         if _use_zerocopy:
             raise_exception(f"Zero-copy not supported on {backend} backend.")
-    use_zerocopy = ZeroCopyMode(bool(_use_zerocopy))
+    use_zerocopy = ZeroCopyMode(_use_zerocopy)
 
     # Reproducing a rollout means settling the runtime-measured choices the simulation would otherwise keep revisiting
     # (see prefer_decomposed_solver in rigid_solver.py), at the cost of the throughput they were buying. If None, it is

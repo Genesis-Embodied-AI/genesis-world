@@ -358,7 +358,7 @@ class LaunchRecorder:
         arrays_used, arrays_written = launch_arrays
         self._is_saving = True
         for array in arrays_written:
-            if id(array) in self._arrays_used and all(array is not saved for saved, _ in entry.arrays_saved):
+            if id(array) in self._arrays_used and all([array is not saved for saved, _ in entry.arrays_saved]):
                 entry.arrays_saved.append((array, qd_to_torch(array, copy=True)))
         self._is_saving = False
         self._arrays_used_by_entry |= arrays_used
@@ -501,7 +501,7 @@ class SegmentOperation(Operation):
 
     def backward(self) -> tuple[torch.Tensor | None, ...]:
         tensors_grad = self._recorder.reverse(self._start, self._stop)
-        return tuple(tensors_grad.get(id(tensor)) for tensor in self.inputs)
+        return tuple([tensors_grad.get(id(tensor)) for tensor in self.inputs])
 
 
 class ReadOperation(Operation):
@@ -515,7 +515,7 @@ class ReadOperation(Operation):
 
     def __init__(self, solver: "Solver", tensors: tuple[torch.Tensor, ...], selection):
         # See OperationNode for the weak reference
-        self._solver = weakref.ref(solver)
+        self._solver = weakref.proxy(solver)
         self._tensors = tensors
         self._selection = selection
 
@@ -526,8 +526,8 @@ class ReadOperation(Operation):
         return tensors
 
     def backward(self, *outputs_grad: torch.Tensor | None) -> tuple[torch.Tensor | None, ...]:
-        if all(grad is None for grad in outputs_grad):
+        if all([grad is None for grad in outputs_grad]):
             return ()
-        grads = tuple(None if grad is None else grad.contiguous() for grad in outputs_grad)
-        self._solver().add_grad_from_state(grads, self._selection)
+        grads = tuple([None if grad is None else grad.contiguous() for grad in outputs_grad])
+        self._solver.add_grad_from_state(grads, self._selection)
         return ()

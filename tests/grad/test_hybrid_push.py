@@ -8,11 +8,11 @@ from genesis.utils.misc import tensor_to_array
 from ..utils.assertions import assert_allclose
 
 
-@pytest.mark.slow  # ~350s
+@pytest.mark.slow  # ~75s
 @pytest.mark.required
 @pytest.mark.debug(False)
-def test_mpm_tool_push_grad(show_viewer):
-    HORIZON = 10
+def test_mpm_rigid_push_grad(show_viewer):
+    HORIZON = 8
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -43,8 +43,11 @@ def test_mpm_tool_push_grad(show_viewer):
             pos=(0.5, 0.5, 0.05),
             euler=(90.0, 0.0, 0.0),
         ),
-        material=gs.materials.Tool(
-            friction=8.0,
+        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+        material=gs.materials.Rigid(
+            rho=1e6,
+            coup_friction=8.0,
+            gravity_compensation=1.0,
         ),
     )
     obj = scene.add_entity(
@@ -56,27 +59,43 @@ def test_mpm_tool_push_grad(show_viewer):
             rho=500,
         ),
     )
+    # A second stick, far from the object, whose position the loss reads: it moves by its velocity times the step
+    stick_far = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/stirrer.obj",
+            scale=0.6,
+            pos=(0.8, -0.8, 0.4),
+            euler=(90.0, 0.0, 0.0),
+        ),
+    )
     scene.build(n_envs=2)
 
-    stick.set_position(
-        torch.tensor([[0.3, 0.1, 0.28], [0.3, 0.1, 0.5]], dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    # The stick stands in the way of the object in the first env, and above it in the second
+    stick.set_pos(
+        torch.tensor([[0.3, 0.19, 0.1], [0.3, 0.19, 0.5]], dtype=gs.tc_float, device=gs.device, requires_grad=True)
     )
     obj.set_position(torch.tensor([0.3, 0.3, 0.1], dtype=gs.tc_float, device=gs.device, requires_grad=True))
     obj.set_velocity(torch.tensor([0.0, -1.0, 0.0], dtype=gs.tc_float, device=gs.device, requires_grad=True))
     goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
 
     loss = 0.0
-    v_list = []
+    v_list, v_far_list = [], []
     for i in range(HORIZON):
         v_i = torch.tensor([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]], dtype=gs.tc_float, device=gs.device, requires_grad=True)
-        stick.set_velocity(vel=v_i)
+        stick.set_dofs_velocity(v_i, dofs_idx_local=slice(0, 3))
         v_list.append(v_i)
+        v_far_i = torch.tensor(
+            [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]], dtype=gs.tc_float, device=gs.device, requires_grad=True
+        )
+        stick_far.set_dofs_velocity(v_far_i, dofs_idx_local=slice(0, 3))
+        v_far_list.append(v_far_i)
         scene.step()
         if i == HORIZON // 2:
             mpm_particles = scene.get_state().solvers_state[scene.solvers.index(scene.mpm_solver)]
             loss += torch.pow(mpm_particles.pos[mpm_particles.active == 1] - goal, 2).sum()
         if i == HORIZON - 2:
             loss += torch.pow(obj.get_state().pos - goal, 2).sum()
+            loss += stick_far.get_state().pos.sum()
     loss.backward()
 
     # Every step but the last must move the object (non-zero velocity gradient). The last step comes after every state
@@ -84,10 +103,13 @@ def test_mpm_tool_push_grad(show_viewer):
     for v_i in v_list[:-1]:
         assert (v_i.grad.abs() > gs.EPS).any()
     assert v_list[-1].grad is None
+    for v_far_i in v_far_list[:-1]:
+        assert_allclose(v_far_i.grad, scene.dt, tol=gs.EPS)
+    assert v_far_list[-1].grad is None
 
 
 @pytest.mark.required
-def test_deformable_inputs_grad_matches_fd(precision, step_overwrites, show_viewer):
+def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
     # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
     scenes, boxes_by_scene = [], []
@@ -175,8 +197,9 @@ def test_deformable_inputs_grad_matches_fd(precision, step_overwrites, show_view
         assert_allclose(boxes[0].get_particles_actu(), actus[0, 2][mpm_muscle_group], tol=gs.EPS)
 
     # A particle given several times takes the value of its last occurrence, which alone gets a gradient, whether the
-    # particles are given once for every environment or row by row
-    for particles_idx_local in ([0, 0], [[0, 0], [1, 1]]):
+    # particles are given once for every environment or row by row, and whether they count from the start or the end
+    n_particles = boxes_by_scene[0][0].n_particles
+    for particles_idx_local in ([0, 0], [[0, 0], [1, 1]], [n_particles - 1, -1]):
         scenes[0].reset()
         vels_repeated = torch.tensor(
             [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]] * 2, dtype=gs.tc_float, device=gs.device, requires_grad=True
@@ -213,7 +236,7 @@ def test_deformable_inputs_grad_matches_fd(precision, step_overwrites, show_view
 
 
 @pytest.mark.required
-def test_coupling_wrench_grad_matches_fd(precision, step_overwrites, show_viewer):
+def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,

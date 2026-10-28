@@ -2313,7 +2313,7 @@ def func_integrate(
 
     # The coupling wrench of this substep is consumed: the bias force read it during forward dynamics and the midpoint
     # pass above read it last, and the coupler accumulates the next one after the substep. A differentiable scene clears
-    # it in a launch of its own (see kernel_clear_coupling_wrench), so that the reversal of this one reads it.
+    # it in a later launch (see kernel_copy_next_to_curr_clear_coupling), so that the reversal of this one reads it.
     if qd.static(not is_backward):
         qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
         for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
@@ -2392,17 +2392,6 @@ def kernel_solve_midpoint_free_bodies(
     func_midpoint_free_body).
     """
     func_midpoint_free_bodies(dyn_state, dyn_info, rigid_info, rigid_config, is_reversed=False, is_backward=True)
-
-
-@qd.kernel(fastcache=True)
-def kernel_clear_coupling_wrench(
-    dyn_state: array_class.DynState, dyn_info: array_class.DynInfo, rigid_config: qd.template()
-):
-    """Clear the coupling wrench the substep consumed (see func_integrate)."""
-    qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_l, i_b in qd.ndrange(dyn_info.links.root_idx.shape[0], dyn_state.dofs.ctrl_mode.shape[1]):
-        dyn_state.links.cfrc_coupling_ang[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        dyn_state.links.cfrc_coupling_vel[i_l, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)

@@ -11,6 +11,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
+from genesis.utils.misc import qd_isfinite
 
 from .constants import CONTACT_ORDER
 
@@ -537,11 +538,9 @@ def func_set_contact(
 
     # Every contact the solver sees is written here, so a non-finite position, normal or penetration is flagged here
     # rather than several stages later as a force gone wrong. Flagged rather than dropped: a missing contact lets
-    # bodies pass through each other just as silently. The magnitude test catches 'inf' and 'nan' at once, where the
-    # bit-pattern intrinsics ('qd.math.isnan' / 'qd.math.isinf') are assumed away under fast math for the infinities
-    # and have no reverse-mode adjoint - this write is shared with the differentiated narrowphase.
+    # bodies pass through each other just as silently.
     residual = contact_pos[0] + contact_pos[1] + contact_pos[2] + normal[0] + normal[1] + normal[2] + penetration
-    if not (qd.abs(residual) < qd.math.inf):
+    if not qd_isfinite(residual):
         errno[i_b] = errno[i_b] | array_class.ErrorCode.INVALID_CONTACT_NAN
 
     # b to a

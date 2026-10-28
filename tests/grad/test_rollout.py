@@ -29,10 +29,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
         entity.set_dofs_velocity(velocity)
         for _ in range(horizon):
             scene.step()
-        return (scene.rigid_solver.get_state().qpos ** 2).sum()
-
-    def read_qpos(scene):
-        return tensor_to_array(scene.rigid_solver.get_state().qpos)
+        return (entity.get_qpos() ** 2).sum()
 
     # Scene A: one scene, snapshot + reset between two horizons.
     scene_a, robot_a = build(show_viewer=show_viewer)
@@ -41,7 +38,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
     scene_a.reset()
     v1_a = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_a = run_segment(scene_a, robot_a, v1_a)
-    qpos_mid_a = read_qpos(scene_a)
+    qpos_mid_a = tensor_to_array(robot_a.get_qpos())
     time_mid_a = scene_a.get_time().clone()
     scene_a.backward(loss_h1_a)
     # backward restores the physics state it snapshotted, so the clocks describing it come back too
@@ -50,7 +47,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
 
     v2_a = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h2_a = run_segment(scene_a, robot_a, v2_a)
-    qpos_end_a = read_qpos(scene_a)
+    qpos_end_a = tensor_to_array(robot_a.get_qpos())
     scene_a.backward(loss_h2_a)
     grad2_a = tensor_to_array(v2_a.grad).copy()
 
@@ -59,7 +56,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
     scene_b.reset()
     v1_b = torch.tensor(v1, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h1_b = run_segment(scene_b, robot_b, v1_b)
-    qpos_mid_b = read_qpos(scene_b)
+    qpos_mid_b = tensor_to_array(robot_b.get_qpos())
     snapshot_b = scene_b.backward(loss_h1_b)
     grad1_b = tensor_to_array(v1_b.grad).copy()
 
@@ -72,7 +69,7 @@ def test_horizon_truncation_matches_independent_scenes(model_name, request, show
     scene_c.reset(snapshot_b)
     v2_c = torch.tensor(v2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss_h2_c = run_segment(scene_c, robot_c, v2_c)
-    qpos_end_c = read_qpos(scene_c)
+    qpos_end_c = tensor_to_array(robot_c.get_qpos())
     scene_c.backward(loss_h2_c)
     grad2_c = tensor_to_array(v2_c.grad).copy()
 
@@ -112,7 +109,8 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
         robot.set_dofs_velocity(ctrl)
         scene.step()
         if is_sim_state_source:
-            chassis_pos = scene.rigid_solver.get_state().links_pos[:, 0].squeeze()
+            sim_state = scene.get_state()
+            chassis_pos = sim_state.solvers_state[scene.solvers.index(scene.rigid_solver)].links_pos[:, 0].squeeze()
         else:
             chassis_pos = robot.get_state().pos.squeeze()
         loss = torch.linalg.norm(chassis_pos)
@@ -129,9 +127,9 @@ def test_sim_vs_solver_state_grad_parity(show_viewer):
 
     # A state queried after a setter reflects it, even within the step of an earlier query
     scene.reset()
-    scene.rigid_solver.get_state()
+    robot.get_state()
     robot.set_pos((0.1, -0.2, 0.3))
-    assert_allclose(scene.rigid_solver.get_state().links_pos[0, 0], (0.1, -0.2, 0.3), tol=gs.EPS)
+    assert_allclose(robot.get_state().pos[0], (0.1, -0.2, 0.3), tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -182,15 +180,14 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
         for i_step in range(HORIZON):
             # A query without gradient recording, as for logging, leaves the next query of the step differentiable
             with torch.no_grad():
-                scene.rigid_solver.get_state()
-            state = scene.rigid_solver.get_state()
-            force = amplitude * torch.sin(frequency * i_step * DT) + kp * (target - state.qpos[:, :1])
-            force = force - kd * state.dofs_vel[:, :1]
+                arms[0].get_qpos()
+            force = amplitude * torch.sin(frequency * i_step * DT) + kp * (target - arms[0].get_qpos())
+            force = force - kd * arms[0].get_dofs_velocity()
             for arm in arms:
                 arm.control_dofs_force(force)
             effort = effort + (force**2).sum()
             scene.step()
-        return ((scene.rigid_solver.get_state().qpos - target) ** 2).sum() + 1e-4 * effort
+        return sum([((arm.get_qpos() - target) ** 2).sum() for arm in arms]) + 1e-4 * effort
 
     params_ana = torch.tensor(params, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     rollout(scene_ana, arms_ana, params_ana).backward()
@@ -210,11 +207,21 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
     arms_ana[0].set_dofs_kv(arms_ana[0].get_dofs_kv())
     with pytest.raises(gs.GenesisException, match="changed since this operation"):
         torch.autograd.grad(loss, params_ana)
-    # A gradient that is not finite raises once the backward pass is over, and so does an error the last steps of the
-    # rollout flagged
+    # A gradient that is not finite raises while the step it reaches first is reversed, which the error names, and so
+    # does an error the last steps of the rollout flagged
     loss = rollout(scene_ana, arms_ana, params_ana)
-    with pytest.raises(gs.GenesisException, match="'inf' gradient"):
+    with pytest.raises(gs.GenesisException, match=f"Backward pass of step {HORIZON - 1}: .*'inf' gradient"):
         torch.autograd.grad(loss * float("nan"), params_ana)
+    # So does one that a later write of the state cuts from the start of the rollout, where the gradient stays finite
+    loss = rollout(scene_ana, arms_ana, params_ana)
+    for arm in arms_ana:
+        arm.set_dofs_position(0.0)
+        arm.set_dofs_velocity(0.0)
+        arm.control_dofs_force(0.0)
+    scene_ana.step()
+    loss = loss + float("nan") * arms_ana[0].get_dofs_position().sum()
+    with pytest.raises(gs.GenesisException, match=f"Backward pass of step {HORIZON}: .*'inf' gradient"):
+        torch.autograd.grad(loss, params_ana)
     loss = rollout(scene_ana, arms_ana, params_ana)
     arms_ana[0].set_dofs_velocity(float("nan"))
     scene_ana.step()
@@ -274,8 +281,7 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
 
 
 @pytest.mark.required
-@pytest.mark.precision("64")
-def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_viewer):
+def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, precision, show_viewer):
     # A proportional-derivative (PD) controller written with the getters feeds the configuration and velocity it reads
     # back into the control forces, and the loss reads link poses and dof positions: the gradient of its gains follows
     # both. The dof positions are derived from the configuration as forward kinematics does, for every joint type.
@@ -333,7 +339,7 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_vie
     params_ana = torch.tensor(params, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     rollout(pair.scene_ana, pair.entity_ana, params_ana).backward()
 
-    eps = 1e-5
+    eps = 1e-5 if precision == "64" else 1e-2
     fd_grad = np.zeros_like(params)
     for i in range(len(params)):
         losses = []
@@ -343,10 +349,11 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, show_vie
             losses.append(float(rollout(pair.scene_fd, pair.entity_fd, perturbed)))
         fd_grad[i] = (losses[0] - losses[1]) / (2.0 * eps)
     assert (np.abs(fd_grad) > 1e-4).all()
-    assert_allclose(params_ana.grad, fd_grad, tol=2e-10)
+    assert_allclose(params_ana.grad, fd_grad, tol=2e-10 if precision == "64" else 1e-4)
 
 
 @pytest.mark.required
+# The SAP coupler, one of the couplings refused, supports 64 bits precision alone
 @pytest.mark.precision("64")
 def test_reject_non_differentiable_solvers():
     box = gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1))

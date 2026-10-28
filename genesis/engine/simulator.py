@@ -1,4 +1,3 @@
-import contextlib
 import functools
 import weakref
 from collections.abc import Iterable, Iterator
@@ -11,8 +10,8 @@ from genesis.grad.bridge import LaunchRecorder, Operation, RolloutGraph
 from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
-from genesis.utils.array_class import ArrayItem, DataItem, DataKind, iter_data
-from genesis.utils.misc import indices_to_mask
+from genesis.utils.array_class import ArrayItem, DataItem, DataKind, ErrorCode, iter_data
+from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
@@ -26,9 +25,9 @@ from .solvers import (
     RigidSolver,
     SFSolver,
     SPHSolver,
-    ToolSolver,
 )
-from .solvers.base_solver import GravityMixin, StateChange, Subscriber, TimeBasedMixin
+from .solvers.base_solver import GravityMixin, TimeBasedMixin, merge_errno
+from .state_change import StateChange, Subscriber
 from .states.solvers import SimState, SimulatorCheckpoint, SolverCheckpoint
 
 if TYPE_CHECKING:
@@ -39,15 +38,15 @@ if TYPE_CHECKING:
     from .solvers.base_solver import Solver
 
 
-RATE_CHECK_ERRNO = 10
 # The kinds of the state a step or a substep starts from, from which its backward pass replays it
 STATE_KINDS = frozenset((DataKind.STATE,))
 
 
 def restore_checkpoints(solvers_checkpoints: Iterable[tuple["Solver", SolverCheckpoint]]) -> None:
-    """Write back the checkpoint of every given solver, then flush the zero-copy writes of the restore on Metal."""
+    """Write back the boundary checkpoint of every given solver, then flush the zero-copy writes of the restore on
+    Metal."""
     for solver, checkpoint in solvers_checkpoints:
-        solver.set_checkpoint(checkpoint)
+        solver.load_checkpoint(checkpoint, boundary_only=True)
     if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
         torch.mps.synchronize()
 
@@ -77,9 +76,6 @@ class Simulator(RBC):
         self._substep_dt: float = self.options.dt / self.options.substeps
         self._substeps: int = self.options.substeps
         self._requires_grad: bool = self.options.requires_grad
-        # The sensors and the recorders read the state for themselves, outside of the autograd graph of a differentiable
-        # rollout. One context serves every step, which spares building one per step on the hot path.
-        self._read_context = torch.no_grad() if self._requires_grad else contextlib.nullcontext()
 
         self._cur_substep_global = 0
 
@@ -90,12 +86,13 @@ class Simulator(RBC):
             # even after a pass that raises. The adjoints start from zero.
             self._is_forward_ready = False
             for solver in self._active_solvers:
+                solver.update_errno()
                 solver.reset_grad()
 
         def end_backward_pass():
-            # The errors the solvers flagged during the pass are raised once it is over
+            # The errors the solvers flagged while replaying the rollout are raised once the pass is over
             for solver in self._active_solvers:
-                solver.check_errors()
+                solver.check_errno()
 
         self._rollout_graph = RolloutGraph(
             self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
@@ -103,7 +100,6 @@ class Simulator(RBC):
         self._is_forward_ready = True
 
         # solvers
-        self.tool_solver = ToolSolver(self.scene, self, options.tool)
         self.rigid_solver = RigidSolver(self.scene, self, options.rigid)
         self.kinematic_solver = KinematicSolver(self.scene, self, options.kinematic)
         self.mpm_solver = MPMSolver(self.scene, self, options.mpm)
@@ -114,7 +110,6 @@ class Simulator(RBC):
 
         self._solvers: list["Solver"] = gs.List(
             [
-                self.tool_solver,
                 self.rigid_solver,
                 self.kinematic_solver,
                 self.mpm_solver,
@@ -126,10 +121,6 @@ class Simulator(RBC):
         )
 
         self._active_solvers: list["Solver"] = gs.List()
-        # The active solvers whose state tracks gradients, which a recorded step checkpoints
-        self._differentiable_solvers: list["Solver"] = gs.List()
-        # The differentiable solvers holding their state outside of frames, whose backward pass saves it per substep
-        self._unframed_solvers: list["Solver"] = gs.List()
 
         # coupler
         if isinstance(options.coupler, SAPCouplerOptions):
@@ -241,7 +232,6 @@ class Simulator(RBC):
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
         for solver in self._solvers:
-            solver.set_rollout_graph(self._rollout_graph)
             solver.build()
             if solver.is_active:
                 self._active_solvers.append(solver)
@@ -277,10 +267,18 @@ class Simulator(RBC):
         # stays outside the graph.
         for solver in self._active_solvers:
             if solver.requires_grad:
-                self._differentiable_solvers.append(solver)
-                if not any(isinstance(item, ArrayItem) and item.is_framed for item in solver.data):
-                    self._unframed_solvers.append(solver)
                 solver.subscribe(Subscriber(frozenset((StateChange.MODEL,)), callback=self._rollout_graph.invalidate))
+
+        # On CPU, the flags of the solvers are merged straight from their numpy views (see 'merge_errno'), and whether
+        # any env is flagged spares the calls of 'check_errno' at every step but those that raise
+        self._errno_views = None
+        self._has_errno_flags = False
+        if gs.backend == gs.cpu and gs.use_zerocopy.is_supported:
+            self._errno_views = [
+                (solver._errno_latched.numpy(), qd_to_numpy(solver._errno, copy=False))
+                for solver in self._active_solvers
+                if solver._errno is not None
+            ]
 
         self._step_timer.add_phases("physics", "sensors")
         self._sensor_manager.build()
@@ -303,7 +301,11 @@ class Simulator(RBC):
         """Restart the coupler, the autograd graph of the rollout and the sensors."""
         self._coupler.reset(envs_idx=envs_idx)
 
-        self.reset_grad()
+        # The adjoints of the state start from zero, and a new rollout of the autograd graph begins
+        for solver in self._active_solvers:
+            solver.reset_grad()
+        self._rollout_graph.restart()
+        self._is_forward_ready = True
         # The cursor is a position in the frames the solvers hold, not a clock, so it rewinds whole.
         self._cur_substep_global = 0
 
@@ -358,24 +360,33 @@ class Simulator(RBC):
         if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
             torch.mps.synchronize()
 
-    def reset_grad(self):
-        """Zero the adjoint of the state of every solver, and begin a new rollout of the autograd graph."""
+    def check_errno(self, blocking: bool = True):
+        """Raise on the first error a solver flagged since the last reset of each env (see 'Solver.check_errno')."""
         for solver in self._active_solvers:
-            solver.reset_grad()
-        self._rollout_graph.restart()
-        self._is_forward_ready = True
+            solver.check_errno(blocking)
+
+    def get_error_envs_mask(self) -> torch.Tensor:
+        """Return whether each env flagged an error in any solver since its last reset."""
+        return torch.stack([solver.get_error_envs_mask() for solver in self._active_solvers]).any(dim=0)
+
+    def clear_errno(self, envs_idx=None):
+        """Clear the errors every solver flagged for the given envs, all of them if None."""
+        for solver in self._active_solvers:
+            solver.clear_errno(envs_idx)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
     def step(self):
-        # Check errno at the very beginning of the step.
-        # This will trigger GPU sync, but it is not a big deal at the point, since we are going to enqueue very large
-        # kernel right away. Moreover, if computations are still not done at this point, then the queue will just
-        # continue growing endlessly, which will not make the simulation faster either.
-        if self.rigid_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
-            self.rigid_solver.check_errno()
+        # The errors the solvers flagged are raised at the beginning of a step, never between substeps, so that the envs
+        # reset between two steps carry on (see 'Scene.get_error_envs_mask'). The check does not block where the device
+        # allows it (see 'Solver.check_errno').
+        if self._errno_views is None:
+            self.check_errno(blocking=False)
+        elif self._has_errno_flags:
+            self.check_errno()
+            self._has_errno_flags = False
 
         with self._step_timer.phase("physics"):
             if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
@@ -383,19 +394,29 @@ class Simulator(RBC):
                 for _ in range(self._substeps):
                     self.rigid_solver.substep(self.cur_substep_local)
                     self._cur_substep_global += 1
-                self.rigid_solver.end_step()
+                self.rigid_solver.clear_external_force()
             elif self._rollout_graph.is_recording:
                 self._rollout_graph.record_step(StepOperation(self))
             else:
                 # A step the graph does not record overwrites the state the last recorded operation returned
                 self._rollout_graph.mark_state_changed()
-                self._advance()
+                self._step()
 
-        # See 'read_context'
-        with self._step_timer.phase("sensors"), self._read_context:
+        # The flags of the step are merged once, as it is over, which leaves the checks and the mask of the flagged envs
+        # mere reads of them (see 'Solver.update_errno')
+        if self._errno_views is not None:
+            for errno_out, errno_in in self._errno_views:
+                if merge_errno(errno_out, errno_in):
+                    self._has_errno_flags = True
+        else:
+            for solver in self._active_solvers:
+                solver.update_errno()
+
+        # The sensors read the state for themselves, outside of the autograd graph of a differentiable rollout
+        with self._step_timer.phase("sensors"), torch.no_grad():
             self._sensor_manager.step()
 
-    def _advance(self):
+    def _step(self):
         """Run the substeps of a step, rolling the frames the solvers hold over at the end of each window of them."""
         self._steps += 1
         for _ in range(self._substeps):
@@ -403,9 +424,10 @@ class Simulator(RBC):
             self._cur_substep_global += 1
             if self.cur_substep_local == 0:
                 for solver in self._active_solvers:
-                    solver.roll_frame_window()
-        for solver in self._active_solvers:
-            solver.end_step()
+                    if solver.has_frames:
+                        solver.copy_frame(solver.n_frames - 1, 0)
+        if self.rigid_solver.is_active:
+            self.rigid_solver.clear_external_force()
 
     def _reverse(self, substep_start: int, steps_start: torch.Tensor, checkpoints: list[SolverCheckpoint]) -> None:
         """
@@ -417,11 +439,10 @@ class Simulator(RBC):
         once beforehand, to rebuild the frames of the step and save the start of each of them. The clocks of the
         environments go back to `steps_start`, the steps they counted before it.
         """
-        for solver in self._differentiable_solvers:
-            solver.keep_errors()
         # A solver holding its state in frames keeps the state of every substep of the step. The state of the others is
         # saved at the start of every substep but the first, whose start the boundary checkpoints hold.
-        boundary_checkpoints = list(zip(self._differentiable_solvers, checkpoints))
+        differentiable_solvers = [solver for solver in self._active_solvers if solver.requires_grad]
+        boundary_checkpoints = list(zip(differentiable_solvers, checkpoints))
         substeps_checkpoints = [boundary_checkpoints]
         self._cur_substep_global = substep_start
         restore_checkpoints(boundary_checkpoints)
@@ -429,13 +450,15 @@ class Simulator(RBC):
             self.substep(self.cur_substep_local)
             self._cur_substep_global += 1
             substeps_checkpoints.append(
-                [(solver, solver.get_checkpoint(STATE_KINDS, boundary_only=True)) for solver in self._unframed_solvers]
+                [
+                    (solver, solver.save_checkpoint(STATE_KINDS, boundary_only=True))
+                    for solver in differentiable_solvers
+                    if not solver.has_frames
+                ]
             )
         # The roll of the frames overwrites frame 0 in arrays the recorder cannot see, which the boundary checkpoints of
         # the solvers holding their state in frames restore
-        framed_checkpoints = [
-            (solver, checkpoint) for solver, checkpoint in boundary_checkpoints if solver not in self._unframed_solvers
-        ]
+        framed_checkpoints = [(solver, checkpoint) for solver, checkpoint in boundary_checkpoints if solver.has_frames]
         restore_frames = functools.partial(restore_checkpoints, framed_checkpoints)
         for i_substep in reversed(range(self._substeps)):
             self._cur_substep_global = substep_start + i_substep
@@ -447,12 +470,11 @@ class Simulator(RBC):
                 if is_last_substep:
                     with recorder.entry(restore=restore_frames, autodiff=True):
                         for solver in self._active_solvers:
-                            solver.roll_frame_window()
-                    for solver in self._active_solvers:
-                        solver.end_step()
+                            if solver.has_frames:
+                                solver.copy_frame(solver.n_frames - 1, 0)
+                    if self.rigid_solver.is_active:
+                        self.rigid_solver.clear_external_force()
             recorder.reverse()
-            for solver in self._differentiable_solvers:
-                solver.flag_non_finite_grad()
         self._cur_substep_global = substep_start
         self._steps.copy_(steps_start)
 
@@ -526,11 +548,6 @@ class Simulator(RBC):
         return self._requires_grad
 
     @property
-    def read_context(self):
-        """The context under which the sensors and the recorders read the state, outside of the autograd graph."""
-        return self._read_context
-
-    @property
     def is_forward_ready(self) -> bool:
         """Whether the simulation may step forward, which a backward pass rewinding it forbids until the next reset."""
         return self._is_forward_ready
@@ -556,7 +573,7 @@ class Simulator(RBC):
         The frame the current substep starts from, among those the solvers hold.
 
         The solvers of a differentiable scene hold the frames of the substeps of one step, those of any other scene the
-        frames of one substep (see 'Solver.roll_frame_window').
+        frames of one substep (see 'Solver.has_frames').
         """
         return self._cur_substep_global % (self._substeps if self._requires_grad else 1)
 
@@ -613,20 +630,41 @@ class StepOperation(Operation):
 
     def __init__(self, sim: Simulator):
         # See OperationNode in genesis.grad.bridge for the weak reference
-        self._sim = weakref.ref(sim)
+        self._sim = weakref.proxy(sim)
         self._substep_start = sim.cur_substep_global
         self._steps_start = sim.steps.clone()
         # The state each differentiable solver holds at the start of the step, from which its backward pass replays it
         self._checkpoints = None
 
     def forward(self) -> tuple[torch.Tensor, ...]:
-        sim = self._sim()
         self._checkpoints = [
-            solver.get_checkpoint(STATE_KINDS, boundary_only=True) for solver in sim._differentiable_solvers
+            solver.save_checkpoint(STATE_KINDS, boundary_only=True)
+            for solver in self._sim._active_solvers
+            if solver.requires_grad
         ]
-        sim._advance()
+        self._sim._step()
         return ()
 
     def backward(self) -> tuple[torch.Tensor | None, ...]:
-        self._sim()._reverse(self._substep_start, self._steps_start, self._checkpoints)
+        self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints)
+        # The adjoint of every earlier step derives from this one, so an adjoint that is not finite raises at once,
+        # naming the step a shorter horizon would have to stop before. It is read from every array of the state that
+        # carries one, so every differentiable solver is covered.
+        for solver in self._sim._active_solvers:
+            if not solver.requires_grad:
+                continue
+            envs_finite = []
+            for item in solver.data:
+                if not isinstance(item, ArrayItem) or item.kind != DataKind.STATE:
+                    continue
+                # The unused arrays of a feature switched off are 0-d placeholders (see 'maybe_shape')
+                if isinstance(item.array, torch.Tensor) or not item.array.shape or not item.array.has_grad():
+                    continue
+                # The environment is the last index of every array of the state, which the transpose moves first
+                grad = qd_to_torch(item.array.grad, transpose=True)
+                envs_finite.append(torch.isfinite(grad).reshape(grad.shape[0], -1).all(dim=1))
+            if envs_finite:
+                solver.flag_errno(ErrorCode.INVALID_GRAD_NAN, ~torch.stack(envs_finite).all(dim=0))
+            solver.update_errno()
+            solver.check_errno(context=f"Backward pass of step {self._substep_start // self._sim._substeps}")
         return ()

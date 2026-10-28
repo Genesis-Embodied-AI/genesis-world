@@ -131,8 +131,8 @@ class ZeroCopyMode:
     torch operation whichever path the accessors take.
     """
 
-    def __init__(self, is_supported: bool):
-        self.is_supported = is_supported
+    def __init__(self, is_supported: bool | None):
+        self.is_supported = bool(is_supported)
         self._is_disabled = False
 
     def __bool__(self) -> bool:
@@ -430,18 +430,6 @@ def harmonic_mean(a, b):
     if a == 0 or b == 0:
         return 0.0
     return 2 * (a * b) / (a + b)
-
-
-def to_gs_tensor(x, dtype: torch.dtype | None = None):
-    if isinstance(x, torch.Tensor):
-        return x.to(dtype=dtype, device=gs.device)
-    x = np.asarray(x)
-    # See broadcast_tensor for arrays with negative strides
-    if any(stride < 0 for stride in x.strides):
-        x = x.copy()
-    if dtype is None and x.dtype != np.bool_:
-        dtype = gs.tc_float if np.issubdtype(x.dtype, np.floating) else gs.tc_int
-    return torch.tensor(x, dtype=dtype, device=gs.device)
 
 
 def tensor_to_cpu(x):
@@ -887,7 +875,8 @@ def qd_to_torch(
         # advanced masking, which would spare computation later on if expected from the user.
         if copy is False:
             gs.raise_exception("Specifying 'copy=False' is not supported by this method if 'gs.use_zerocopy=False'.")
-        tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
+        # See the copy of a zero-copy view below
+        tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose).contiguous()
         is_copy = True
     else:
         try:
@@ -899,7 +888,7 @@ def qd_to_torch(
             except (ValueError, RuntimeError, TypeError):
                 if copy is False:
                     raise
-                tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
+                tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose).contiguous()
                 is_copy = True
             else:
                 value._tc = tc
@@ -912,7 +901,8 @@ def qd_to_torch(
         if gs.backend == gs.metal:
             qd.sync()
         if copy:
-            tensor = tensor.clone()
+            # A copy of a transposed view is laid out contiguously, which a kernel taking it requires
+            tensor = tensor.clone(memory_format=torch.contiguous_format)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
 
@@ -1041,21 +1031,43 @@ def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor
         value.from_torch(tensor)
 
 
-def qd_add_grad(value: qd.Tensor, grad: torch.Tensor) -> None:
+@qd.func
+def qd_isfinite(x):
+    """
+    Whether a scalar, or every entry of a vector or a matrix, is neither 'inf' nor 'nan'.
+
+    The magnitude test catches both at once. It holds under fast math, which assumes away the infinities that the bit
+    patterns of 'qd.math.isinf' and 'qd.math.isnan' read, and it has a reverse-mode adjoint, which their bit cast lacks.
+    """
+    # A vector built in the kernel is an expression of tensor type rather than a Matrix
+    if qd.static(isinstance(x, qd.Matrix) or (isinstance(x, qd.lang.expr.Expr) and x.is_tensor())):
+        return (qd.abs(x) < qd.math.inf).all()
+    else:
+        return qd.abs(x) < qd.math.inf
+
+
+def qd_add_grad(value: qd.Tensor, grad: torch.Tensor, row: int | None = None) -> None:
     """Add a gradient to the adjoint of a Quadrants tensor, given in the layout of its getters (see 'qd_to_torch').
 
-    On Metal, call `torch.mps.synchronize()` once after a batch of additions, before the next quadrants kernel reads the
-    adjoint.
+    `row` selects one entry of the first axis, such as a frame of a solver holding its state in frames, the gradient
+    then covering that entry alone. On Metal, call `torch.mps.synchronize()` once after a batch of additions, before the
+    next quadrants kernel reads the adjoint.
     """
     value_grad = value.grad
     if gs.use_zerocopy.is_supported:
-        view = qd_to_torch(value_grad, transpose=True, copy=False)
+        if row is None:
+            view = qd_to_torch(value_grad, transpose=True, copy=False)
+        else:
+            view = qd_to_torch(value_grad, row_mask=row, keepdim=False, copy=False)
         view += grad
     else:
         # Without zero-copy views, the adjoint is read and written back whole, in its native layout
         n_dims = len(value_grad.shape)
         data = qd_to_torch(value_grad, copy=True)
-        data += grad.movedim(0, n_dims - 1) if n_dims > 1 else grad
+        if row is not None:
+            data[row] += grad
+        else:
+            data += grad.movedim(0, n_dims - 1) if n_dims > 1 else grad
         qd_from_torch(value_grad, data)
 
 
@@ -1205,11 +1217,11 @@ def drop_repeated_index(
 
     `index_input` is the index as given, and `index` its sanitized form, whose entries count `max_size` at most and
     whose last axis holds the entries of `index_input`. An index given as a sequence is compacted along that axis, and
-    so are the tensors given along `axis`, the repeats being found on the host for an index given as a list, a tuple or
-    an array, and on the device for a torch tensor, whose compaction then synchronizes the device. An index given one
-    row per environment cannot be compacted, its rows differing: the earlier occurrences of a row become -1 instead,
-    which the kernels skip. A range, a slice, an integer or a boolean mask holds no repeated entry, and the index is
-    returned as it is.
+    so are the tensors given along `axis`, the repeats being found where the index was given: on the host for a list, a
+    tuple or an array, and on the device for a torch tensor, whose compaction then synchronizes the device. An index
+    given one row per environment cannot be compacted, its rows differing: the earlier occurrences of a row become -1
+    instead, which the kernels skip. A range, a slice, an integer or a boolean mask holds no repeated entry, and the
+    index is returned as it is.
     """
     tensors = tuple(tensors)
     if isinstance(index_input, torch.Tensor):
@@ -1225,15 +1237,14 @@ def drop_repeated_index(
         return torch.where(is_last, index, -1), tensors
     if isinstance(index_input, torch.Tensor):
         index_row = index[(0,) * (index.ndim - 1)]
-        is_last = get_last_occurrence(index_row) == torch.arange(index.shape[-1], device=index.device)
-        positions = is_last.nonzero()[:, 0]
     else:
-        entries = np.mod(index_input, max_size)
-        if len(np.unique(entries)) == len(entries):
-            return index, tensors
-        _, first_reversed = np.unique(entries[::-1], return_index=True)
-        positions = torch.tensor(np.sort(len(entries) - 1 - first_reversed), dtype=gs.tc_int, device=gs.device)
-    tensors_kept = tuple(None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors)
+        index_row = torch.from_numpy(np.mod(index_input, max_size))
+    is_last = get_last_occurrence(index_row) == torch.arange(index_row.shape[-1], device=index_row.device)
+    positions = is_last.nonzero()[:, 0]
+    if len(positions) == len(is_last):
+        return index, tensors
+    positions = positions.to(device=index.device)
+    tensors_kept = tuple([None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors])
     return index.index_select(-1, positions), tensors_kept
 
 
@@ -1431,14 +1442,15 @@ def assign_indexed_tensor(
             value = broadcast_tensor(value, tensor.dtype, indexed_shape, dim_names)
             is_advanced_axes_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
             block_start = advanced_axes[0] if is_advanced_axes_contiguous else 0
-            block_ndim = max(indices[axis].ndim for axis in repeatable_axes)
+            block_ndim = max([indices[axis].ndim for axis in repeatable_axes])
             for axis in repeatable_axes:
                 index = indices[axis]
                 index_shape = (1,) * (block_ndim - index.ndim) + tuple(index.shape)
-                block_axis = next(i for i, size in enumerate(index_shape) if size > 1)
+                block_axis = [i for i, size in enumerate(index_shape) if size > 1][0]
                 # An index may live on another device than the values, which a scatter accepts and a gather does not
                 positions = get_last_occurrence(index.squeeze().to(device=value.device))
                 value = value.index_select(block_start + block_axis, positions)
+
     try:
         tensor[indices] = value
     except (TypeError, RuntimeError):

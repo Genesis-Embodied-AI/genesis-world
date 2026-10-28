@@ -391,23 +391,6 @@ class KinematicOptions(Options):
     IK_max_targets: PositiveInt = 6
 
 
-class ToolOptions(TimeBasedMixin):
-    """
-    Options configuring the ToolSolver.
-
-    Note
-    ----
-    ToolEntity is a simplified form of RigidEntity. It supports one way tool->other coupling, but has *no* internal dynamics and can only be created from a single mesh. This is a temporal workaround for differentiable rigid-soft interaction. This solver will be removed once differentiable mode is supported by the RigidSolver.
-
-    Parameters
-    ----------
-    floor_height : float, optional
-        Height of the floor in meters. Defaults to 0.0.
-    """
-
-    floor_height: float | None = None
-
-
 class RigidOptions(GravityMixin, TimeBasedMixin):
     """
     Options configuring the RigidSolver.

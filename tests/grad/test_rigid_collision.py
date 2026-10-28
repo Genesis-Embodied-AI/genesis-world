@@ -25,7 +25,7 @@ from ..utils.assertions import assert_allclose
         pytest.param("capsule", gs.gpu, marks=pytest.mark.required),
     ],
 )
-def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, step_overwrites, show_viewer):
+def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, show_viewer):
     def _build_contact_scene(shape, mjcf_capsule, *, requires_grad, show_viewer=False):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
@@ -89,8 +89,8 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
         scene.build(n_envs=0)
         return scene, obj
 
-    def _n_contacts(scene):
-        return qd_to_numpy(scene.rigid_solver.collider.collider_state.n_contacts)[0]
+    def _n_contacts(entity):
+        return len(entity.get_contacts()["geom_a"])
 
     # Rest z puts the body's lowest point on its support: box / sphere half extent 0.2, upright capsule
     # radius 0.1 + half length 0.2 = 0.3, box-on-ground centered at 0.40.
@@ -120,7 +120,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
     scene_ana, obj_ana = _build_contact_scene(shape, grad_capsule, requires_grad=True, show_viewer=show_viewer)
     scene_ana.reset()
     settle(scene_ana, obj_ana)
-    nc = _n_contacts(scene_ana)
+    nc = _n_contacts(obj_ana)
     assert nc > 0, f"setup error: {shape} not in contact after settle (n_contacts={nc})"
     forces = [
         torch.tensor(init_force[t], dtype=gs.tc_float, device=gs.device, requires_grad=True) for t in range(n_steps)
@@ -128,8 +128,8 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
     for t in range(n_steps):
         obj_ana.control_dofs_force(forces[t])
         scene_ana.step()
-        assert _n_contacts(scene_ana) == nc, "contact set changed during grad window - FD invalid"
-    loss = (scene_ana.rigid_solver.get_state().qpos[0, :3] ** 2).sum()
+        assert _n_contacts(obj_ana) == nc, "contact set changed during grad window - FD invalid"
+    loss = (obj_ana.get_qpos()[:3] ** 2).sum()
     scene_ana.backward(loss)
     ana = np.stack([tensor_to_array(f.grad) for f in forces])
 
@@ -138,14 +138,16 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
     # measure that forward gap instead of the gradient.
     scene_fd, obj_fd = _build_contact_scene(shape, grad_capsule, requires_grad=True)
 
+    # The finite differences need no autograd graph of the rollout, so it is left unrecorded
+    @torch.no_grad()
     def loss_at(perturbed):
         scene_fd.reset()
         settle(scene_fd, obj_fd)
         for t in range(n_steps):
             obj_fd.control_dofs_force(perturbed[t])
             scene_fd.step()
-            assert _n_contacts(scene_fd) == nc, "contact set changed under FD perturbation"
-        return float((scene_fd.rigid_solver.get_state().qpos[0, :3] ** 2).sum().detach())
+            assert _n_contacts(obj_fd) == nc, "contact set changed under FD perturbation"
+        return (obj_fd.get_qpos()[:3] ** 2).sum()
 
     # Both the normal (z) and a tangential (x) force component: the tangential adjoint flows through the friction
     # rows and their contact-frame chains, which the normal component alone leaves untested.
@@ -254,7 +256,7 @@ def test_diff_unsupported_configuration_raises():
     with pytest.raises(gs.GenesisException):
         scene.build()
 
-    # Box-box contact detection records nothing the differentiable narrowphase reconstructs its contacts from
+    # An opt-in algorithm that diff sim does not support yet raises before build, here accelerated box-box collision
     with pytest.raises(gs.GenesisException):
         gs.Scene(
             sim_options=gs.options.SimOptions(requires_grad=True),
@@ -350,6 +352,8 @@ def test_contact_detection_jacobian_matches_fd():
     dL_dpos = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.pos.grad)
     dL_dquat = qd_to_torch(scene.sim.rigid_solver.dyn_state.geoms.quat.grad)
 
+    # fp64 is required: in fp32 the finite differences of the contacts stay off by more than 1e-2 at every step size,
+    # rounding dominating the small steps and contact changes the large ones
     fd_eps = 1e-5
     trials = 100
 

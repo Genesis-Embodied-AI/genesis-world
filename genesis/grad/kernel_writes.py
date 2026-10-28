@@ -117,7 +117,7 @@ def get_written_paths(fn: Callable, owner: object | None = None) -> frozenset[tu
                     for callee_path in callee_paths_written:
                         if callee_path[0] == callee_param:
                             paths_written |= {(*path, *callee_path[1:]) for path in arg_paths}
-    params_paths_written = frozenset(path for path in paths_written if path[0] in params)
+    params_paths_written = frozenset([path for path in paths_written if path[0] in params])
     return _WRITTEN_PATHS_CACHE.own(fn if owner is None else owner, cache_key, params_paths_written)
 
 
@@ -135,10 +135,10 @@ def _resolve(node: ast.expr, aliases: dict[str, set[tuple[str, ...]]]) -> set[tu
 def _resolve_store(target: ast.expr, aliases: dict[str, set[tuple[str, ...]]]) -> set[tuple[str, ...]]:
     """Return the paths of the arrays an assignment target writes, the element of an array or a field of one."""
     if isinstance(target, (ast.Tuple, ast.List)):
-        return set().union(*(_resolve_store(elt, aliases) for elt in target.elts))
+        return set().union(*[_resolve_store(elt, aliases) for elt in target.elts])
     if isinstance(target, ast.Subscript):
         return _resolve(target.value, aliases)
-    if isinstance(target, ast.Attribute) and any(isinstance(node, ast.Subscript) for node in ast.walk(target.value)):
+    if isinstance(target, ast.Attribute) and any([isinstance(node, ast.Subscript) for node in ast.walk(target.value)]):
         return _resolve(target.value, aliases)
     return set()
 
@@ -172,7 +172,7 @@ def _find_callee(
             # A func the object holds as an attribute of its own, unbound
             value, callee_owner, owner_path = getattr(callee_owner, names[-1], None), None, ()
     else:
-        closure = zip(fn.__code__.co_freevars, (cell.cell_contents for cell in fn.__closure__ or ()))
+        closure = zip(fn.__code__.co_freevars, [cell.cell_contents for cell in fn.__closure__ or ()])
         scope = {**fn.__globals__, **dict(closure)}
         if node.id not in scope:
             return None

@@ -8,7 +8,7 @@ import torch
 from typing_extensions import TypeVar as TypeVarWithDefault
 
 import genesis as gs
-from genesis.engine.solvers.base_solver import StateChange
+from genesis.engine.state_change import StateChange
 from genesis.repr_base import RBC
 from genesis.typing import NumArrayType, NumericType
 from genesis.utils.geom import euler_to_quat

@@ -983,21 +983,6 @@ def func_clear_external_force(
 # --------------------------------------------------------------------------------------
 
 
-@qd.kernel(fastcache=True)
-def kernel_bit_reduction(tensor: qd.Tensor) -> qd.i32:
-    flag = qd.i32(0)
-    for i in range(tensor.shape[0]):
-        qd.atomic_or(flag, tensor[i])
-    return flag
-
-
-@qd.kernel(fastcache=True)
-def kernel_set_zero(envs_idx: qd.types.ndarray(), tensor: qd.Tensor):
-    for i_b_ in range(envs_idx.shape[0]):
-        i_b = envs_idx[i_b_]
-        tensor[i_b] = 0
-
-
 @qd.func
 def func_atomic_add_if(I, value, field: qd.Tensor, cond: qd.template()):
     if qd.static(cond):

@@ -1,7 +1,7 @@
 """
 Changes of the state of the solvers: their categories, and the tag of the methods making them.
 
-A tagged method notifies the subscribers of its solver (see 'Subscriber' in base_solver.py), and is a call the autograd
+A tagged method notifies the subscribers of its solver (see 'Subscriber'), and is a call the autograd
 graph of a differentiable rollout records (see 'RolloutGraph.run_call'). The module stands outside of the solvers, so
 that the entities tag their own methods.
 """
@@ -47,21 +47,45 @@ class MutatedLinks(enum.Enum):
     ARTICULATED = enum.auto()
 
 
-def _expand_links_subtree(links_idx: np.ndarray, links_parent_idx: np.ndarray) -> np.ndarray:
-    """Close a set of global link indices over their kinematic subtrees: every descendant of a member is a member.
+class Subscriber:
+    """A unique handle for the solver state changes whose category is in `to`.
 
-    Iterates one tree level per pass (a link joins when its parent is a member), so it terminates after at most the
-    tree depth.
+    A consumer constructs a Subscriber and registers it with a solver via Solver.subscribe. The mode is fixed at
+    construction by whether a callback is given:
+      - eager (callback given): each matching change immediately calls callback(change, envs_idx);
+      - lazy (no callback): matching changes accumulate into `pending` until the owner calls clear() - e.g. a sensor
+        that rebuilds a cache on its next update rather than on every set_pos.
+
+    `links_filter` (global link indices, normalized by Solver.subscribe) restricts the subscription to changes that
+    can affect those links: a notification whose mutated links (see mutates) are disjoint from the filter is dropped;
+    a notification with an unbounded reach always passes.
     """
-    is_affected = np.zeros(links_parent_idx.shape[0], dtype=bool)
-    is_affected[links_idx] = True
-    has_parent = links_parent_idx >= 0
-    while True:
-        is_expanded = is_affected.copy()
-        is_expanded[has_parent] |= is_affected[links_parent_idx[has_parent]]
-        if (is_expanded == is_affected).all():
-            return np.flatnonzero(is_affected)
-        is_affected = is_expanded
+
+    def __init__(
+        self,
+        to: frozenset[StateChange],
+        callback: Callable[[StateChange, object], None] | None = None,
+        links_filter: "np.typing.ArrayLike | None" = None,
+    ):
+        self.to = to
+        self.callback = callback
+        self.links_filter = links_filter
+        self._pending: set[StateChange] = set()
+
+    def is_watching(self, links_idx: np.ndarray | None) -> bool:
+        """Whether a change affecting `links_idx` (None meaning possibly any link) concerns this subscriber."""
+        if self.links_filter is None or links_idx is None:
+            return True
+        return bool(np.isin(links_idx, self.links_filter).any())
+
+    @property
+    def pending(self) -> frozenset[StateChange]:
+        """Categories accumulated since the last clear() (always empty in eager mode)."""
+        return frozenset(self._pending)
+
+    def clear(self):
+        """Drop the accumulated changes, once they have been handled."""
+        self._pending.clear()
 
 
 def mutates(
@@ -73,13 +97,8 @@ def mutates(
     """Tag a state-mutating method of a solver or of one of its entities with the StateChange categories it produces.
 
     One method may produce several (set_state changes both GEOMETRY and DYNAMICS), and an input of the next step such as
-    a control target produces none.
-
-    Every tagged method writing the state, all but those changing the model, is a call the autograd graph of a
-    differentiable rollout records and replays (see 'RolloutGraph.run_call'), so a differentiable scene takes no
-    shortcut around it. Its inputs are its tensors tracking gradients, which an input that is not `differentiable`
-    refuses. A call the graph does not record overwrites the output of the last operation recorded, unless it only
-    refreshes quantities `derived` from the state, which it leaves consistent with it.
+    a control target produces none. `differentiable=False` declares a method whose inputs carry no gradient, and
+    `derived=True` one that only refreshes quantities derived from the state.
 
     Notification is deferred to the outermost tagged call: a setter that internally calls other tagged setters fires a
     single notification per StateChange that occurred, when the outermost call returns, rather than one per nested
@@ -111,7 +130,17 @@ def mutates(
             # sanitize_index covers every index form the setters accept (int, sequence, slice, bool mask, tensor). The
             # reach set lives host-side, where the subscriber filters compare.
             links_idx = tensor_to_array(sanitize_index(links_idx, -1, self.n_links, 0, links))
-            return _expand_links_subtree(links_idx, self._links_parent_idx)
+            # Close the selection over the kinematic subtrees, one tree level per pass (a link joins when its parent is
+            # a member), which terminates after at most the tree depth
+            is_affected = np.zeros(self._links_parent_idx.shape[0], dtype=bool)
+            is_affected[links_idx] = True
+            has_parent = self._links_parent_idx >= 0
+            while True:
+                is_expanded = is_affected.copy()
+                is_expanded[has_parent] |= is_affected[self._links_parent_idx[has_parent]]
+                if (is_expanded == is_affected).all():
+                    return np.flatnonzero(is_affected)
+                is_affected = is_expanded
 
         def run_notifying(self: "Solver", *args: Any, **kwargs: Any) -> Any:
             if not triggered or not self._subscribers:
@@ -155,9 +184,13 @@ def mutates(
             run = run_notifying if solver is self else method
             if not is_recorded:
                 return run(self, *args, **kwargs)
+            # A differentiable rollout records every call writing the state as one operation of its graph, so a
+            # differentiable scene takes no shortcut around it. Its inputs are the tensors tracking gradients it takes.
             if solver.is_recording:
                 return solver._rollout_graph.run_call(self, run, args, kwargs, differentiable=differentiable)
             result = run(self, *args, **kwargs)
+            # A call left unrecorded overwrites the output of the last recorded operation, except a refresh of derived
+            # quantities, which leaves them consistent with the state
             if solver.requires_grad and not derived:
                 solver._rollout_graph.mark_state_changed()
             return result

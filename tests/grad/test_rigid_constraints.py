@@ -13,7 +13,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
 
 @pytest.mark.required
 @pytest.mark.debug(False)
-def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrites, show_viewer):
+def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     # Forward: the slider limit must actually bound the cart (it drifts freely when the constraint is off).
     off = make_diff_scene_pair(
         grad_slider_limit,
@@ -29,7 +29,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrit
     off.entity_fd.set_dofs_velocity(100.0)
     for _ in range(60):
         off.scene_fd.step()
-    assert (off.scene_fd.rigid_solver.get_state().qpos[:, 0].abs() > 50.0).all()
+    assert (off.entity_fd.get_qpos()[:, 0].abs() > 50.0).all()
 
     on = make_diff_scene_pair(
         grad_slider_limit,
@@ -45,7 +45,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrit
     on.entity_fd.set_dofs_velocity(100.0)
     for _ in range(60):
         on.scene_fd.step()
-    assert (on.scene_fd.rigid_solver.get_state().qpos[:, 0].abs() <= 1.5).all()
+    assert (on.entity_fd.get_qpos()[:, 0].abs() <= 1.5).all()
 
     # Backward, with mixed per-environment activity: env 0 drives past the active |x|=0.5 limit while env 1 stays
     # inside it, so the adjoint solve faces different constraint counts in the same batch. Sanity-check the split.
@@ -53,7 +53,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrit
     on.entity_fd.set_dofs_velocity([[100.0], [2.0]])
     for _ in range(5):
         on.scene_fd.step()
-    qpos_end = on.scene_fd.rigid_solver.get_state().qpos
+    qpos_end = on.entity_fd.get_qpos()
     assert abs(qpos_end[0, 0]) > 0.5
     assert abs(qpos_end[1, 0]) < 0.5
 
@@ -61,7 +61,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrit
         on,
         [np.array([[100.0], [2.0]])],
         lambda e, x: e.set_dofs_velocity(x),
-        lambda scene, entity: (scene.rigid_solver.get_state().qpos[:, 0] ** 2).sum(),
+        lambda scene, entity: (entity.get_qpos()[:, 0] ** 2).sum(),
         n_steps=5,
         rtol=1e-10 if precision == "64" else 5e-4,
         atol=1e-10 if precision == "64" else 5e-4,
@@ -86,7 +86,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrit
         v = torch.tensor([[0.5], [0.3]], dtype=gs.tc_float, device=gs.device, requires_grad=True)
         pair.entity_ana.set_dofs_velocity(v)
         pair.scene_ana.step()
-        loss = (pair.scene_ana.rigid_solver.get_state().qpos[:, 0] ** 2).sum()
+        loss = (pair.entity_ana.get_qpos()[:, 0] ** 2).sum()
         loss.backward()
         grads[key] = tensor_to_array(v.grad)
     assert_allclose(
@@ -106,7 +106,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, step_overwrit
     ],
 )
 @pytest.mark.debug(False)
-def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precision, step_overwrites, show_viewer):
+def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precision, show_viewer):
     # Per-step control-force adjoint driving a joint into its limit, across three topologies. A constant force over
     # the horizon pushes the tracked dof into the active band; the setup-sanity assert guards against a vacuous run.
     # (gravity, n_steps, per-step force, loss reads links_pos, sanity dof, sanity threshold, initial dof pose,
@@ -133,15 +133,14 @@ def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precisio
             entity.set_dofs_position(init_pos)
 
     def loss_fn(scene, entity):
-        state = scene.rigid_solver.get_state()
-        return (state.links_pos.reshape(-1) ** 2).sum() if is_links_loss else state.qpos[0, 0] ** 2
+        return (entity.get_links_pos() ** 2).sum() if is_links_loss else entity.get_qpos()[0] ** 2
 
     pair.scene_fd.reset()
     setup_fn(pair.scene_fd, pair.entity_fd)
     for force in forces:
         pair.entity_fd.control_dofs_force(force)
         pair.scene_fd.step()
-    reached = abs(pair.scene_fd.rigid_solver.get_state().qpos[0, sanity_dof])
+    reached = abs(pair.entity_fd.get_qpos()[sanity_dof])
     assert reached > sanity_thresh, f"setup error: {model_name} did not reach its limit band (q={reached})"
 
     assert_grad_matches_fd(
@@ -157,7 +156,7 @@ def test_per_step_force_into_limit_grad_matches_fd(model_name, request, precisio
 
 
 @pytest.mark.required
-def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, step_overwrites, show_viewer):
+def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, show_viewer):
     pair = make_diff_scene_pair(
         grad_revolute_frictionloss,
         n_envs=2,
@@ -177,7 +176,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, ste
         pair,
         [np.array([[2.0], [1.2]])],
         lambda e, x: e.set_dofs_velocity(x),
-        lambda scene, entity: (scene.rigid_solver.get_state().qpos[:, 0] ** 2).sum(),
+        lambda scene, entity: (entity.get_qpos()[:, 0] ** 2).sum(),
         n_steps=10,
         rtol=1e-10 if precision == "64" else 5e-5,
         atol=1e-10 if precision == "64" else 5e-5,
@@ -196,7 +195,7 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, ste
         ("grad_weld_pair", 6),
     ],
 )
-def test_equality_grad_matches_fd(model_name, n_rows, request, precision, step_overwrites, show_viewer):
+def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_viewer):
     pair = make_diff_scene_pair(
         request.getfixturevalue(model_name),
         n_envs=2,
@@ -217,7 +216,7 @@ def test_equality_grad_matches_fd(model_name, n_rows, request, precision, step_o
     # Large initial velocities: the anchor velocity-product bias entering aref is quadratic in velocity, so its
     # adjoint contribution only clears the fp64 tolerance band when the joints spin fast.
     def loss_fn(scene, entity):
-        qpos = scene.rigid_solver.get_state().qpos
+        qpos = entity.get_qpos()
         return (qpos[:, 0] ** 2 + 0.7 * qpos[:, 1] ** 2).sum()
 
     assert_grad_matches_fd(
@@ -233,7 +232,7 @@ def test_equality_grad_matches_fd(model_name, n_rows, request, precision, step_o
 
 
 @pytest.mark.required
-def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, step_overwrites, show_viewer):
+def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, show_viewer):
     # Integration scene: frictionloss + equality joint + connect + weld on disjoint link pairs. Guards row-offset
     # bookkeeping across every differentiated constraint group at once; per-group formulas are pinned elsewhere.
     pair = make_diff_scene_pair(
@@ -254,7 +253,7 @@ def test_all_constraint_groups_grad_matches_fd(grad_all_eq_fric, precision, step
     weights = np.array([1.0, 0.7, 1.3, 0.5, 0.9, 1.1, 0.6])
 
     def loss_fn(scene, entity):
-        qpos = scene.rigid_solver.get_state().qpos[0]
+        qpos = entity.get_qpos()
         return sum(weights[d] * qpos[d] ** 2 for d in range(7))
 
     assert_grad_matches_fd(

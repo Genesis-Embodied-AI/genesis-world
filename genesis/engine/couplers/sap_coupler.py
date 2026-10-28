@@ -179,6 +179,9 @@ class SAPCoupler(RBC):
     Code reference: https://github.com/RobotLocomotion/drake/blob/d7a5096c6d0f131705c374390202ad95d0607fd4/multibody/plant/sap_driver.cc
     """
 
+    # Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')
+    is_differentiable = False
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -707,11 +710,6 @@ class SAPCoupler(RBC):
         if self.has_contact:
             self.sap_solve(i_step)
             self.update_vel(i_step, dofs_state=self.rigid_solver.dyn_state.dofs)
-
-    @property
-    def is_differentiable(self) -> bool:
-        """Whether the coupler supports a scene with `requires_grad` (see 'Solver.is_differentiable')."""
-        return False
 
     @qd.kernel
     def update_vel(self, i_step: qd.i32, dofs_state: array_class.DofsState):
