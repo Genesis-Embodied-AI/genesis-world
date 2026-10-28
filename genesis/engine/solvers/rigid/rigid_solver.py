@@ -523,10 +523,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
         is_generic = gs.use_ndarray
         enable_tiled_island_seed = (
-            gs.backend != gs.cpu
-            and not self.sim.options.requires_grad
-            and not sparse_solve
-            and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
+            gs.backend != gs.cpu and not sparse_solve and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
         )
         enable_cooperative_constraint_kernels = enable_tiled_island_seed and (
             is_generic or self._sim._B <= get_gpu_core_count()
@@ -596,11 +593,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             solver_type=self._options.constraint_solver,
             broadphase_traversal=self._resolve_broadphase_traversal(),
             # Parallelize init over (constraints, envs) when envs alone don't saturate the GPU.
-            parallel_init=(
-                gs.backend != gs.cpu
-                and not self.sim.options.requires_grad
-                and (is_generic or self.n_envs <= get_gpu_core_count())
-            ),
+            parallel_init=(gs.backend != gs.cpu and (is_generic or self.n_envs <= get_gpu_core_count())),
             enable_level_sweep=enable_level_sweep,
             enable_tiled_island_seed=enable_tiled_island_seed,
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
@@ -1334,7 +1327,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_info,
                 self.rigid_config,
-                is_backward=True,
+                is_backward=False,
             )
             # The smooth acceleration and the constraint solve are reversed together, through the implicit function
             # theorem, which spares reversing the factor of the mass matrix
