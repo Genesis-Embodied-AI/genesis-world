@@ -394,6 +394,9 @@ class Solver(RBC):
         if batched and batched_idx and np.ndim(inputs_idx) == 2:
             dim_names = ("envs_idx", idx_name, *["" for _ in element_shape])
             inputs_idx_ = broadcast_tensor(inputs_idx, gs.tc_int, (len(envs_idx_), -1), dim_names[:2]).contiguous()
+            # Negative indices wrap as in sanitize_index, before the repeated ones are dropped
+            is_valid_negative = (-input_size <= inputs_idx_) & (inputs_idx_ < 0)
+            inputs_idx_ = torch.where(is_valid_negative, inputs_idx_ + input_size, inputs_idx_)
             tensor_ = None
             if tensor is not None or not skip_allocation:
                 tensor_shape = (*inputs_idx_.shape, *element_shape)
