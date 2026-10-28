@@ -228,8 +228,8 @@ class Viewer(RBC):
         if force or is_refresh_due:
             self._last_refresh_time = now
             with self.lock:
-                # Only the rigid and kinematic setters notify the visualizer (see 'Visualizer.build'), so every solver
-                # is synced at each refresh for the setters of the other solvers to be drawn too
+                # A step changes the state of every solver, so every solver is synced at each refresh. A setter syncs
+                # its own solver right away (see 'Visualizer.build').
                 self.context.update(force_render=True)
 
                 # Refresh viewer by default if and if this is possible
