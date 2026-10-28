@@ -385,25 +385,28 @@ def func_mass_mat_assemble_tree_cooperative(
 
 
 @qd.func
-def func_mass_mat_assemble_tree(
-    i_t: int, i_b: int, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
+def func_mass_mat_assemble_dof(
+    i_d: int, i_b: int, dyn_state: array_class.DynState, rigid_info: array_class.RigidInfo, rigid_config: qd.template()
 ):
-    """Write the mass blocks of one kinematic tree, then mirror them onto their upper triangle."""
-    if func_is_awake_tree(i_t, i_b, dyn_state, rigid_info, rigid_config):
-        # The blocks partition the dof range of the tree (see dofs_mass_block_start in array_class.py), iterated flat
-        # with per-DOF block bounds since the mass matrix couples nothing across blocks.
-        blocks_dof_start = rigid_info.trees_dof_start[i_t]
-        blocks_dof_end = blocks_dof_start + rigid_info.trees_n_dofs[i_t]
-        for i_d in range(blocks_dof_start, blocks_dof_end):
-            for j_d in range(rigid_info.dofs_mass_block_start[i_d], rigid_info.dofs_mass_block_end[i_d]):
-                rigid_info.mass_mat[i_d, j_d, i_b] = (
-                    dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
-                    + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
-                ) * rigid_info.mass_parent_mask[i_d, j_d]
+    """Write the row of one dof in its mass block up to the diagonal, mirroring each entry onto its column.
 
-        for i_d in range(blocks_dof_start, blocks_dof_end):
-            for j_d in range(i_d + 1, rigid_info.dofs_mass_block_end[i_d]):
-                rigid_info.mass_mat[i_d, j_d, i_b] = rigid_info.mass_mat[j_d, i_d, i_b]
+    Each entry is written by one thread alone, the row of its lower triangle, and none is read back, so the rows of a
+    tree run in parallel and so does their reverse. The blocks partition the dof range of the trees (see
+    dofs_mass_block_start in array_class.py), so the padding slot of a scene without dofs gets an empty row. A
+    hibernated dof is skipped (see func_mass_mat_add_diag).
+    """
+    is_awake = True
+    if qd.static(rigid_config.use_hibernation):
+        is_awake = not dyn_state.dofs.is_hibernated[i_d, i_b]
+    if is_awake:
+        for j_d in range(rigid_info.dofs_mass_block_start[i_d], qd.min(i_d + 1, rigid_info.dofs_mass_block_end[i_d])):
+            val = (
+                dyn_state.dofs.f_ang[i_d, i_b].dot(dyn_state.dofs.cdof_ang[j_d, i_b])
+                + dyn_state.dofs.f_vel[i_d, i_b].dot(dyn_state.dofs.cdof_vel[j_d, i_b])
+            ) * rigid_info.mass_parent_mask[i_d, j_d]
+            rigid_info.mass_mat[i_d, j_d, i_b] = val
+            if j_d != i_d:
+                rigid_info.mass_mat[j_d, i_d, i_b] = val
 
 
 @qd.func
@@ -462,8 +465,8 @@ def func_compute_mass_matrix_and_link_force(
                 func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, rigid_config, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_t, i_b in qd.ndrange(rigid_info.trees_root_idx.shape[0], dyn_state.links.pos.shape[1]):
-            func_mass_mat_assemble_tree(i_t, i_b, dyn_state, rigid_info, rigid_config)
+        for i_d, i_b in qd.ndrange(dyn_state.dofs.f_ang.shape[0], dyn_state.dofs.f_ang.shape[1]):
+            func_mass_mat_assemble_dof(i_d, i_b, dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="armature", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b in qd.ndrange(dyn_state.dofs.f_ang.shape[0], dyn_state.dofs.f_ang.shape[1]):
@@ -515,8 +518,8 @@ def func_compute_mass_matrix_masked(
                 func_mass_mat_assemble_tree_cooperative(tid, i_t, i_b, dyn_state, rigid_info, rigid_config, BLOCK_DIM)
     else:
         qd.loop_config(name="mass_mat_assemble", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-        for i_t, i_b_ in qd.ndrange(rigid_info.trees_root_idx.shape[0], envs_idx.shape[0]):
-            func_mass_mat_assemble_tree(i_t, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
+        for i_d, i_b_ in qd.ndrange(dyn_state.dofs.f_ang.shape[0], envs_idx.shape[0]):
+            func_mass_mat_assemble_dof(i_d, envs_idx[i_b_], dyn_state, rigid_info, rigid_config)
 
     qd.loop_config(name="armature", serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     for i_d, i_b_ in qd.ndrange(dyn_state.dofs.f_ang.shape[0], envs_idx.shape[0]):
