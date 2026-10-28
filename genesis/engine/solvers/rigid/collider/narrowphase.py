@@ -4574,86 +4574,94 @@ def func_narrow_phase_diff_convex_vs_convex(
     rigid_config: qd.template(),
     errno: qd.Tensor,
 ):
+    # The reverse is the only launch of this kernel, and it costs a thread of the grid whether it holds a contact or
+    # not, so the lanes of an env stride over its contacts rather than over the capacity of the contact buffer
+    N_LANES = qd.static(32)
+
     # Compute reference contacts
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], collider_state.active_buffer.shape[1]):
-        if i_c < collider_state.n_contacts[i_b]:
-            ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
-            is_ref = i_c == ref_id
-            i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-            i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+    for i_b, i_lane in qd.ndrange(collider_state.active_buffer.shape[1], N_LANES):
+        for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
+            i_c = i_chunk_ * N_LANES + i_lane
+            if i_c < collider_state.n_contacts[i_b]:
+                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                is_ref = i_c == ref_id
+                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
+                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
 
-            if is_ref:
-                ref_penetration = -1.0
-                contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)
-                contact_normal = gs.qd_vec3(0.0, 0.0, 0.0)
-                penetration = gs.qd_float(0.0)
-                weight = gs.qd_float(0.0)
-                if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
-                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_plane_contact(
-                        i_ga, i_gb, i_b, i_c, dyn_state, diff_contact_input, dyn_info
-                    )
-                elif (
-                    dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE
-                    and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
-                ):
-                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_sphere_contact(
-                        i_ga, i_gb, i_b, dyn_state, dyn_info, rigid_info
-                    )
-                else:
-                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
-                        i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
-                    )
-                collider_state.diff_contact_input.ref_penetration[i_b, i_c] = penetration
+                if is_ref:
+                    ref_penetration = -1.0
+                    contact_pos = gs.qd_vec3(0.0, 0.0, 0.0)
+                    contact_normal = gs.qd_vec3(0.0, 0.0, 0.0)
+                    penetration = gs.qd_float(0.0)
+                    weight = gs.qd_float(0.0)
+                    if dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.PLANE:
+                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_plane_contact(
+                            i_ga, i_gb, i_b, i_c, dyn_state, diff_contact_input, dyn_info
+                        )
+                    elif (
+                        dyn_info.geoms.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                        and dyn_info.geoms.type[i_gb] == gs.GEOM_TYPE.SPHERE
+                    ):
+                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_sphere_contact(
+                            i_ga, i_gb, i_b, dyn_state, dyn_info, rigid_info
+                        )
+                    else:
+                        contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
+                            i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
+                        )
+                    collider_state.diff_contact_input.ref_penetration[i_b, i_c] = penetration
 
-                func_set_contact(
-                    i_ga,
-                    i_gb,
-                    i_b,
-                    i_c,
-                    collider_state.contact_data.pair_idx[i_c, i_b],
-                    contact_normal,
-                    contact_pos,
-                    penetration * weight,
-                    dyn_state,
-                    collider_state,
-                    dyn_info,
-                    rigid_info,
-                    collider_info,
-                    errno,
-                )
+                    func_set_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_c,
+                        collider_state.contact_data.pair_idx[i_c, i_b],
+                        contact_normal,
+                        contact_pos,
+                        penetration * weight,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        errno,
+                    )
 
     # Compute other contacts
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
-    for i_c, i_b in qd.ndrange(collider_state.contact_data.pos.shape[0], collider_state.active_buffer.shape[1]):
-        if i_c < collider_state.n_contacts[i_b]:
-            ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
-            is_ref = i_c == ref_id
-            i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
-            i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
+    for i_b, i_lane in qd.ndrange(collider_state.active_buffer.shape[1], N_LANES):
+        for i_chunk_ in range((collider_state.n_contacts[i_b] + N_LANES - 1) // N_LANES):
+            i_c = i_chunk_ * N_LANES + i_lane
+            if i_c < collider_state.n_contacts[i_b]:
+                ref_id = collider_state.diff_contact_input.ref_id[i_b, i_c]
+                is_ref = i_c == ref_id
+                i_ga = collider_state.diff_contact_input.geom_a[i_b, i_c]
+                i_gb = collider_state.diff_contact_input.geom_b[i_b, i_c]
 
-            if not is_ref:
-                ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
-                contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
-                    i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
-                )
+                if not is_ref:
+                    ref_penetration = collider_state.diff_contact_input.ref_penetration[i_b, ref_id]
+                    contact_pos, contact_normal, penetration, weight = diff_gjk.func_differentiable_contact(
+                        i_ga, i_gb, i_b, i_c, ref_penetration, dyn_state, diff_contact_input, collider_info
+                    )
 
-                func_set_contact(
-                    i_ga,
-                    i_gb,
-                    i_b,
-                    i_c,
-                    collider_state.contact_data.pair_idx[i_c, i_b],
-                    contact_normal,
-                    contact_pos,
-                    penetration * weight,
-                    dyn_state,
-                    collider_state,
-                    dyn_info,
-                    rigid_info,
-                    collider_info,
-                    errno,
-                )
+                    func_set_contact(
+                        i_ga,
+                        i_gb,
+                        i_b,
+                        i_c,
+                        collider_state.contact_data.pair_idx[i_c, i_b],
+                        contact_normal,
+                        contact_pos,
+                        penetration * weight,
+                        dyn_state,
+                        collider_state,
+                        dyn_info,
+                        rigid_info,
+                        collider_info,
+                        errno,
+                    )
 
 
 @qd.func
