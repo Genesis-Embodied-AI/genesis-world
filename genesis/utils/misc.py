@@ -216,12 +216,14 @@ def get_device(backend: gs.constants.backend, device_idx: Optional[int] = None):
         device_name = device_property.name
         total_mem = device_property.total_memory / 1024**3
     elif backend == gs.metal:
-        if not torch.backends.mps.is_available():
-            gs.raise_exception("Torch device 'mps' not available.")
         # on mac, cpu and gpu are in the same physical hardware and sharing memory
-        _, device_name, total_mem, _ = get_device(gs.cpu)
+        device, device_name, total_mem, _ = get_device(gs.cpu)
         assert not device_idx, "Specifying device index other than 0 is not support for Torch Metal device."
-        device = torch.device("mps")
+        # Quadrants Metal backend runs regardless of Torch MPS support, which virtualized Apple GPUs may lack
+        if os.environ.get("GS_TORCH_FORCE_CPU_DEVICE") != "1":
+            if not torch.backends.mps.is_available():
+                gs.raise_exception("Torch device 'mps' not available.")
+            device = torch.device("mps")
     else:
         cpu_info = cpuinfo.get_cpu_info()
         device_name = next(filter(None, map(cpu_info.get, ("brand_raw", "hardware_raw", "vendor_id_raw"))))

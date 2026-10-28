@@ -530,7 +530,6 @@ def pytest_runtest_setup(item):
         "default", message=r".*not currently supported on the MPS backend and will fall back to run on the CPU.*"
     )
     warnings.filterwarnings("default", message=r"\s*.*cuda capability.*")
-    warnings.filterwarnings("default", message=r".*does not support Metal 2\.0.*")
     warnings.filterwarnings("error", category=UserWarning, module="quadrants")
     warnings.filterwarnings("default", message=r".*cannot create weak reference to 'tuple' object.*")
 
