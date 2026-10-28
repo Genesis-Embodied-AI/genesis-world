@@ -43,7 +43,8 @@ class Entity(RBC):
         material,
         surface,
         name: str | None = None,
-        options: EntityOptions | None = None,
+        *,
+        options: EntityOptions,
     ):
         # An entity is created from one morph. A kind of entity built from several passes the primary one here.
         if not isinstance(morph, Morph):
@@ -126,9 +127,7 @@ class Entity(RBC):
         is. The options passed to 'Scene.add_entity' may change or construct other entities afterwards, except for
         their material, which the entity shares. What the scene resolved from them lives in 'desc'.
         """
-        desc = self.desc
-        options = self._options if desc is None else desc.options
-        return options.model_copy(deep=True)
+        return self._options.model_copy(deep=True)
 
     @property
     def material(self):

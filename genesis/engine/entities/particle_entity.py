@@ -76,7 +76,8 @@ class ParticleEntity(Entity):
         vface_start=None,
         need_skinning=True,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         super().__init__(idx, scene, morph, solver, material, surface, name=name, options=options)
 

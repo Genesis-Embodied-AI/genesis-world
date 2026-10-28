@@ -63,7 +63,8 @@ class MPMEntity(ParticleEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
-        options=None,
+        *,
+        options,
     ):
         need_skinning = not isinstance(
             material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
