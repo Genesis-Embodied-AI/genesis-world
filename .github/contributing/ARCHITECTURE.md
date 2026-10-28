@@ -83,7 +83,7 @@ Location: `genesis/options/morphs.py`
 
 ## Materials
 
-Materials define physical properties. Each entity options class admits the materials of its own family.
+Materials define physical properties. Each entity is bound to one solver, which supports a subset of the materials.
 
 ```python
 gs.materials.Rigid(rho=1000)
@@ -96,7 +96,7 @@ Location: `genesis/engine/materials/`
 
 ## Entity options
 
-An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`EntityOptions._solver_options_cls`). The flattened arguments of `Scene.add_entity` are a shorthand for `RigidEntityOptions`, so the material never changes the kind of entity.
+An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`EntityOptions._solver_options_cls`). The flattened arguments of `Scene.add_entity` are a shorthand for `RigidEntityOptions`.
 
 ```python
 scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))  # rigid
