@@ -174,8 +174,8 @@ jobs:
               || context.payload.pull_request?.head.sha
               || context.sha;
 
-            // Standalone check runs cannot select their workflow's check suite and can appear under an unrelated
-            // workflow. Keep the report on this run and publish only a commit status on the revision under test.
+            // Write the detailed report to this job's summary and publish a commit status on the tested commit.
+            // Link the status to this workflow run.
             await core.summary
               .addHeading(process.env.CHECK_NAME)
               .addRaw(summary, true)
