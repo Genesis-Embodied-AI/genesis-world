@@ -1011,7 +1011,7 @@ class MPMSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
 
     @gs.assert_built
-    def set_particle_constraints(self, particles_mask, link_idx, stiffness):
+    def set_particle_constraints(self, particles_mask, link_idx, stiffness, *, particles_start=0):
         """
         Attach some particles to a rigid link with critically damped springs.
 
@@ -1020,57 +1020,69 @@ class MPMSolver(ParticleSolver):
         Parameters
         ----------
         particles_mask : array_like, shape ([n_envs,] n_particles)
-            Boolean mask over all the particles of the solver, selecting those to attach.
+            Boolean mask over consecutive particles of the solver, selecting those to attach.
         link_idx : int
             Global index of the rigid link.
         stiffness : float
             Stiffness of the springs.
+        particles_start : int, optional
+            Global index of the particle the mask starts at. Defaults to 0.
         """
         if not isinstance(link_idx, int):
             gs.raise_exception("link_idx must be an integer.")
         if not self._constraints_initialized:
             self.init_constraints()
         particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._B, self.n_particles), ("envs_idx", "particles_idx")
+            particles_mask, gs.tc_bool, (self._B, -1), ("envs_idx", "particles_idx")
         ).contiguous()
+        if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
+            gs.raise_exception("The particle mask overruns the particles of the solver.")
         rigid_solver = self._sim.rigid_solver
         link_pos = rigid_solver.get_links_pos(links_idx=link_idx)[..., 0, :]
         link_quat = rigid_solver.get_links_quat(links_idx=link_idx)[..., 0, :]
         link_pos = broadcast_tensor(link_pos, gs.tc_float, (self._B, 3)).contiguous()
         link_quat = broadcast_tensor(link_quat, gs.tc_float, (self._B, 4)).contiguous()
-        self._kernel_set_particle_constraints(link_idx, stiffness, particles_mask, link_pos, link_quat)
+        self._kernel_set_particle_constraints(particles_start, link_idx, stiffness, particles_mask, link_pos, link_quat)
 
     @gs.assert_built
-    def remove_particle_constraints(self, particles_mask=None):
+    def remove_particle_constraints(self, particles_mask=None, *, particles_start=0):
         """
         Detach some particles from the rigid link they are attached to (see 'set_particle_constraints').
 
         Parameters
         ----------
         particles_mask : None | array_like, shape ([n_envs,] n_particles), optional
-            Boolean mask over all the particles of the solver, selecting those to detach. If None, all particles will be
-            detached. Defaults to None.
+            Boolean mask over consecutive particles of the solver, selecting those to detach. If None, all particles
+            from `particles_start` on will be detached. Defaults to None.
+        particles_start : int, optional
+            Global index of the particle the mask starts at. Defaults to 0.
         """
         if not self._constraints_initialized:
             return
+        n_particles = -1
         if particles_mask is None:
             particles_mask = True
+            n_particles = self.n_particles - particles_start
         particles_mask = broadcast_tensor(
-            particles_mask, gs.tc_bool, (self._B, self.n_particles), ("envs_idx", "particles_idx")
+            particles_mask, gs.tc_bool, (self._B, n_particles), ("envs_idx", "particles_idx")
         ).contiguous()
-        self._kernel_remove_particle_constraints(particles_mask)
+        if particles_start < 0 or particles_start + particles_mask.shape[1] > self.n_particles:
+            gs.raise_exception("The particle mask overruns the particles of the solver.")
+        self._kernel_remove_particle_constraints(particles_start, particles_mask)
 
     @qd.kernel
     def _kernel_set_particle_constraints(
         self,
+        particles_start: int,
         link_idx: int,
         stiffness: float,
         particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
         link_pos: qd.types.ndarray(),  # shape [n_envs, 3]
         link_quat: qd.types.ndarray(),  # shape [n_envs, 4]
     ):
-        for i_p, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
-            if particles_mask[i_b, i_p]:
+        for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
+            if particles_mask[i_b, i_p_]:
+                i_p = i_p_ + particles_start
                 # Get current particle position. Between two steps, the state sits in frame 0 (see 'Solver.has_frames')
                 pos = self.particles[0, i_p, i_b].pos
 
@@ -1093,10 +1105,12 @@ class MPMSolver(ParticleSolver):
     @qd.kernel
     def _kernel_remove_particle_constraints(
         self,
+        particles_start: int,
         particles_mask: qd.types.ndarray(),  # shape [n_envs, n_particles] boolean mask
     ):
-        for i_p, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
-            if particles_mask[i_b, i_p]:
+        for i_p_, i_b in qd.ndrange(particles_mask.shape[1], particles_mask.shape[0]):
+            if particles_mask[i_b, i_p_]:
+                i_p = i_p_ + particles_start
                 self.particle_constraints[i_p, i_b].is_constrained = False
                 self.particle_constraints[i_p, i_b].link_idx = -1
 

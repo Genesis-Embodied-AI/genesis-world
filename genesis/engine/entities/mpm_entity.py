@@ -6,6 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
+from genesis.utils.misc import broadcast_tensor
 
 from .particle_entity import ParticleEntity, assert_active
 
@@ -296,11 +297,10 @@ class MPMEntity(ParticleEntity):
         stiffness : float
             Spring stiffness for the constraint.
         """
-        solver_particles_mask = torch.zeros(
-            (self._sim._B, self._solver.n_particles), dtype=gs.tc_bool, device=gs.device
+        particles_mask = broadcast_tensor(
+            particles_mask, gs.tc_bool, (self._sim._B, self._n_particles), ("envs_idx", "particles_idx")
         )
-        solver_particles_mask[:, self.particle_start : self.particle_end] = particles_mask
-        self._solver.set_particle_constraints(solver_particles_mask, link_idx, stiffness)
+        self._solver.set_particle_constraints(particles_mask, link_idx, stiffness, particles_start=self._particle_start)
 
     @gs.assert_built
     def remove_particle_constraints(self, particles_mask=None):
@@ -312,13 +312,13 @@ class MPMEntity(ParticleEntity):
         particles_mask : None | array_like, shape ([n_envs,] n_particles), optional
             Boolean mask indicating which particles to unconstrain. If None, removes all constraints for this entity.
         """
-        solver_particles_mask = torch.zeros(
-            (self._sim._B, self._solver.n_particles), dtype=gs.tc_bool, device=gs.device
+        particles_mask = broadcast_tensor(
+            True if particles_mask is None else particles_mask,
+            gs.tc_bool,
+            (self._sim._B, self._n_particles),
+            ("envs_idx", "particles_idx"),
         )
-        solver_particles_mask[:, self.particle_start : self.particle_end] = (
-            True if particles_mask is None else particles_mask
-        )
-        self._solver.remove_particle_constraints(solver_particles_mask)
+        self._solver.remove_particle_constraints(particles_mask, particles_start=self._particle_start)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
