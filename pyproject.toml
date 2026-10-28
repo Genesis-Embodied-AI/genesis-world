@@ -86,7 +86,6 @@ dev = [
     "black",
     # FIXME: Remove this cap once pytest-forked can serialize pytest 9.2's NodeId reports. Version 1.7.5 cannot marshal
     # them and exits with status 3 even for passing tests.
-    # Failure: https://github.com/Genesis-Embodied-AI/quadrants/actions/runs/40604988127/job/122546377605
     "pytest<9.2",
     "pytest-xdist",
     "pytest-forked",
