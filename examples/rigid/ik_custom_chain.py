@@ -22,24 +22,26 @@ def main():
     )
 
     target_1 = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/axis.obj",
-            scale=0.05,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(1, 0.5, 0.5, 1),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/axis.obj",
+                scale=0.05,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0.5, 0.5, 1),
+            ),
         ),
     )
 
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            scale=1.0,
-            file="urdf/shadow_hand/shadow_hand.urdf",
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Reflective(
-            color=(0.4, 0.4, 0.4),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.URDF(
+                scale=1.0,
+                file="urdf/shadow_hand/shadow_hand.urdf",
+            ),
+            surface=gs.surfaces.Reflective(
+                color=(0.4, 0.4, 0.4),
+            ),
         ),
     )
 

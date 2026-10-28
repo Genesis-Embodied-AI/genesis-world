@@ -1,82 +1,28 @@
 import quadrants as qd
-import numpy as np
-import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.mesh import compute_sdf_data, load_mesh
 
 
 @qd.data_oriented
 class Mesh:
-    def __init__(self, entity, material, morph):
+    def __init__(self, entity, desc):
         self.entity = entity
-        self.material = material
-        self.collision = material.collision
-        self.sdf_res = material.sdf_res
-        self.scale = morph.scale
-        self.raw_file = morph.file
+        self.material = desc.material
+        self.collision = desc.material.collision
+        self.friction = desc.material.friction
+        self.sdf_res = desc.material.sdf_res if desc.sdf_voxels is None else desc.sdf_voxels.shape[0]
+        self.raw_vertices = desc.init_positions
+        self.raw_vertex_normals = desc.normals
+        self.faces_np = desc.faces
 
-        self.load_file()
-        self.init_fields()
+    @property
+    def sdf_voxels(self) -> qd.Field | None:
+        return self.entity._entity_data.sdf_voxels
 
-    def load_file(self):
-        self.process_mesh()
-        self.raw_vertices = np.asarray(self.mesh.vertices, dtype=gs.np_float, order="C")
-        self.raw_vertex_normals = np.asarray(self.mesh.vertex_normals, dtype=gs.np_float, order="C")
-        self.faces_np = np.asarray(self.mesh.faces, dtype=gs.np_int, order="C").reshape((-1))
-
-        # apply initial transforms (scale then quat then pos)
-        scale = np.array(self.scale, dtype=gs.np_float)
-        T_init = gu.scale_to_T(scale)
-        self.raw_vertices = gu.transform_by_T(self.raw_vertices, T_init)
-        if self.collision:
-            self.T_mesh_to_sdf_np = self.T_mesh_to_sdf_np @ gu.inv_T(T_init)
-
-        self.n_vertices = len(self.raw_vertices)
-        self.n_faces = len(self.faces_np)
-
-    def process_mesh(self):
-        # Normalize mesh
-        gs.logger.debug(f"Processing mesh: {self.raw_file}.")
-        mesh_orig = load_mesh(self.raw_file)
-        scale = np.linalg.norm(mesh_orig.extents, ord=float("inf"))
-        center = np.mean(mesh_orig.bounds, axis=0)
-        normalized_vertices = (mesh_orig.vertices - center) / scale
-        self.mesh = trimesh.Trimesh(
-            vertices=normalized_vertices,
-            faces=mesh_orig.faces,
-            vertex_normals=mesh_orig.vertex_normals,
-            face_normals=mesh_orig.face_normals,
-        )
-
-        # generate sdf
-        if self.collision:
-            sdf_data = compute_sdf_data(self.mesh, self.sdf_res)
-            self.friction = self.material.friction
-            self.sdf_voxels_np = sdf_data["voxels"].astype(gs.np_float, order="C", copy=False)
-            self.sdf_res = self.sdf_voxels_np.shape[0]
-            self.T_mesh_to_sdf_np = sdf_data["T_mesh_to_sdf"].astype(gs.np_float, order="C", copy=False)
-
-    def init_fields(self):
-        # init qd fields
-        self.init_vertices = qd.Vector.field(3, dtype=gs.qd_float, shape=(self.n_vertices))
-        self.init_vertex_normals = qd.Vector.field(3, dtype=gs.qd_float, shape=(self.n_vertices))
-        self.faces = qd.field(dtype=gs.qd_int, shape=(self.n_faces,))
-
-        self.init_vertices.from_numpy(self.raw_vertices)
-        self.init_vertex_normals.from_numpy(self.raw_vertex_normals)
-        self.faces.from_numpy(self.faces_np)
-
-        if self.collision:
-            self.sdf_voxels = qd.field(dtype=gs.qd_float, shape=self.sdf_voxels_np.shape)
-            self.T_mesh_to_sdf = qd.Matrix.field(4, 4, dtype=gs.qd_float, shape=())
-
-            self.sdf_voxels.from_numpy(self.sdf_voxels_np)
-            self.T_mesh_to_sdf.from_numpy(self.T_mesh_to_sdf_np)
-
-        self.vertices = qd.Vector.field(3, dtype=gs.qd_float, shape=(self.n_vertices))
-        self.vertex_normals = qd.Vector.field(3, dtype=gs.qd_float, shape=(self.n_vertices))
+    @property
+    def T_mesh_to_sdf(self) -> qd.Field | None:
+        return self.entity._entity_data.T_mesh_to_sdf
 
     @qd.func
     def sdf(self, f, pos_world, i_b):

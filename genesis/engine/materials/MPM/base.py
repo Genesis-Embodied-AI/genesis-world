@@ -1,7 +1,7 @@
 import platform
 import re
 import sys
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar
 
 import quadrants as qd
 from pydantic import BeforeValidator, Field, PrivateAttr
@@ -12,8 +12,6 @@ from genesis.typing import PositiveFloat, StrictInt, ValidFloat
 
 from ..base import Material
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.mpm_entity import MPMEntity
 
 _SAMPLER_PATTERN = re.compile(r"^pbs(-\d+)?$|^random$|^regular$")
 
@@ -33,7 +31,7 @@ DEFAULT_SAMPLER = "pbs" if (sys.platform == "linux" and platform.machine() == "x
 
 
 @qd.data_oriented
-class Base(Material["MPMEntity"]):
+class Base(Material):
     """
     The base class of MPM materials.
 
@@ -67,6 +65,7 @@ class Base(Material["MPMEntity"]):
     # Dispatch fields - set by subclass model_post_init, not user-specified. needs_svd flips the solver's forward-mode
     # SVD kernel off when no material in the scene reads U/V/S from SVD(F_tmp) (e.g. non-viscous liquid, neohooken
     # elastic).
+    _dispatch_fields: ClassVar[tuple[str, ...]] = ("update_F_S_Jp", "update_stress")
     update_F_S_Jp: Any = Field(default=None, exclude=True, repr=False)
     update_stress: Any = Field(default=None, exclude=True, repr=False)
     needs_svd: bool = Field(default=True, exclude=True, repr=False)

@@ -1,9 +1,17 @@
+from dataclasses import dataclass
+
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.materials import SPH
 from genesis.engine.states.entities import SPHEntityState
 
-from .particle_entity import ParticleEntity
+from .particle_entity import ParticleEntity, ParticleEntityDescription
+
+
+@dataclass(kw_only=True)
+class SPHEntityDescription(ParticleEntityDescription):
+    material: SPH.Base
 
 
 @qd.data_oriented
@@ -17,53 +25,20 @@ class SPHEntity(ParticleEntity):
         The simulation scene.
     solver : Solver
         The solver handling the simulation logic.
-    material : Material
-        Material properties (e.g., density, stiffness).
-    morph : Morph
-        Morphological configuration.
-    surface : Surface
-        Surface constraints or geometry.
-    particle_size : float
-        The size of each particle.
+    desc : SPHEntityDescription
+        The resolved particles, with the material, morph and surface they are resolved from.
     idx : int
         Index of this entity in the scene.
     particle_start : int
         Start index for the particles belonging to this entity.
     """
 
-    def __init__(
-        self, scene, solver, material, morph, surface, particle_size, idx, particle_start, name: str | None = None
-    ):
-        super().__init__(
-            scene, solver, material, morph, surface, particle_size, idx, particle_start, need_skinning=False, name=name
-        )
+    def __init__(self, scene, solver, desc: SPHEntityDescription, idx, particle_start):
+        super().__init__(scene, solver, desc, idx, particle_start)
 
-    def init_sampler(self):
-        """
-        Initialize the particle sampler based on the material's sampling method.
-
-        Raises
-        ------
-        GenesisException
-            If the sampler is not one of the supported types: 'regular', 'pbs', or 'pbs-sdf_res'.
-        """
-        self.sampler = self._material.sampler
-
-        match self.sampler.split("-"):
-            case ["regular"]:
-                pass
-            case ["random"]:
-                pass
-            case ["pbs"]:
-                # using default sdf_res=32
-                self.sampler += "-32"
-            case ["pbs", num] if num.isnumeric():
-                pass
-            case _:
-                gs.raise_exception(
-                    "Only one of the following samplers is supported: [`regular`, `random`, `pbs`, `pbs-sdf_res`]. "
-                    f"Got: {self.sampler}."
-                )
+    @property
+    def desc(self) -> SPHEntityDescription:
+        return self._desc
 
     def _add_particles_to_solver(self):
         self._solver._kernel_add_particles(

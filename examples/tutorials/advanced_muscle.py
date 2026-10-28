@@ -43,28 +43,32 @@ E, nu = 3.0e4, 0.45
 rho = 1000.0
 
 robot_mpm = scene.add_entity(
-    morph=gs.morphs.Sphere(
-        pos=(0.5, 0.2, 0.3),
-        radius=0.1,
-    ),
-    material=gs.materials.MPM.Muscle(
-        E=E,
-        nu=nu,
-        rho=rho,
-        model="neohooken",
+    options=gs.options.MPMEntityOptions(
+        morph=gs.morphs.Sphere(
+            pos=(0.5, 0.2, 0.3),
+            radius=0.1,
+        ),
+        material=gs.materials.MPM.Muscle(
+            E=E,
+            nu=nu,
+            rho=rho,
+            model="neohooken",
+        ),
     ),
 )
 
 robot_fem = scene.add_entity(
-    morph=gs.morphs.Sphere(
-        pos=(0.5, -0.2, 0.3),
-        radius=0.1,
-    ),
-    material=gs.materials.FEM.Muscle(
-        E=E,
-        nu=nu,
-        rho=rho,
-        model="stable_neohookean",
+    options=gs.options.FEMEntityOptions(
+        morph=gs.morphs.Sphere(
+            pos=(0.5, -0.2, 0.3),
+            radius=0.1,
+        ),
+        material=gs.materials.FEM.Muscle(
+            E=E,
+            nu=nu,
+            rho=rho,
+            model="stable_neohookean",
+        ),
     ),
 )
 

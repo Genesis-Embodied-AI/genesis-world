@@ -13,6 +13,7 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
+from genesis.engine.system_data.fem import FEMData
 from genesis.options.solvers import SAPCouplerOptions
 from genesis.repr_base import RBC
 
@@ -188,6 +189,7 @@ class SAPCoupler(RBC):
         self.options = options
         self.rigid_solver = self.sim.rigid_solver
         self.fem_solver = self.sim.fem_solver
+        self._fem_data: FEMData | None = None
         self._n_sap_iterations = options.n_sap_iterations
         self._n_pcg_iterations = options.n_pcg_iterations
         self._n_linesearch_iterations = options.n_linesearch_iterations
@@ -246,6 +248,8 @@ class SAPCoupler(RBC):
     # ------------------------------------------------------------------------------------
 
     def build(self) -> None:
+        if self.fem_solver.is_active:
+            self._fem_data = self.sim._system_data.get(FEMData, self.fem_solver)
         self._B = self.sim._B
         self.contact_handlers = []
         self._enable_rigid_fem_contact &= self.rigid_solver.is_active and self.fem_solver.is_active
@@ -721,7 +725,7 @@ class SAPCoupler(RBC):
     @qd.func
     def update_fem_vel(self, i_step: qd.i32):
         for i_b, i_v in qd.ndrange(self.fem_solver._B, self.fem_solver.n_vertices):
-            self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel = self.fem_state_v.v[i_b, i_v]
+            self._fem_data.elements_v[i_step + 1, i_v, i_b].vel = self.fem_state_v.v[i_b, i_v]
 
     @qd.func
     def update_rigid_vel(self, dofs_state: array_class.DofsState):
@@ -734,14 +738,14 @@ class SAPCoupler(RBC):
             self.fem_pressure_gradient[i_b, i_e].fill(0.0)
 
             for i in qd.static(range(4)):
-                i_v0 = self.fem_solver.elements_i[i_e].el2v[i]
-                i_v1 = self.fem_solver.elements_i[i_e].el2v[(i + 1) % 4]
-                i_v2 = self.fem_solver.elements_i[i_e].el2v[(i + 2) % 4]
-                i_v3 = self.fem_solver.elements_i[i_e].el2v[(i + 3) % 4]
-                pos_v0 = self.fem_solver.elements_v[i_step, i_v0, i_b].pos
-                pos_v1 = self.fem_solver.elements_v[i_step, i_v1, i_b].pos
-                pos_v2 = self.fem_solver.elements_v[i_step, i_v2, i_b].pos
-                pos_v3 = self.fem_solver.elements_v[i_step, i_v3, i_b].pos
+                i_v0 = self._fem_data.elements_i[i_e].el2v[i]
+                i_v1 = self._fem_data.elements_i[i_e].el2v[(i + 1) % 4]
+                i_v2 = self._fem_data.elements_i[i_e].el2v[(i + 2) % 4]
+                i_v3 = self._fem_data.elements_i[i_e].el2v[(i + 3) % 4]
+                pos_v0 = self._fem_data.elements_v[i_step, i_v0, i_b].pos
+                pos_v1 = self._fem_data.elements_v[i_step, i_v1, i_b].pos
+                pos_v2 = self._fem_data.elements_v[i_step, i_v2, i_b].pos
+                pos_v3 = self._fem_data.elements_v[i_step, i_v3, i_b].pos
 
                 e10 = pos_v0 - pos_v1
                 e12 = pos_v2 - pos_v1
@@ -785,13 +789,13 @@ class SAPCoupler(RBC):
     @qd.kernel
     def compute_fem_surface_tet_aabb(self, i_step: qd.i32):
         for i_b, i_se in qd.ndrange(self.fem_solver._B, self.fem_solver.n_surface_elements):
-            i_e = self.fem_solver.surface_elements[i_se]
-            i_vs = self.fem_solver.elements_i[i_e].el2v
+            i_e = self._fem_data.surface_elements[i_se]
+            i_vs = self._fem_data.elements_i[i_e].el2v
 
             leaf_min = qd.Vector([np.inf, np.inf, np.inf], dt=gs.qd_float)
             leaf_max = -leaf_min
             for i in qd.static(range(4)):
-                pos_v = self.fem_solver.elements_v[i_step, i_vs[i], i_b].pos
+                pos_v = self._fem_data.elements_v[i_step, i_vs[i], i_b].pos
                 leaf_min = qd.min(leaf_min, pos_v)
                 leaf_max = qd.max(leaf_max, pos_v)
             self.fem_surface_tet_bvh_state.leaves.aabbs_min[i_b, i_se] = leaf_min
@@ -876,13 +880,13 @@ class SAPCoupler(RBC):
             if not self.batch_active[i_b]:
                 continue
             self.sap_state[i_b].gradient_norm += (
-                self.fem_state_v.gradient[i_b, i_v].norm_sqr() / self.fem_solver.elements_v_info[i_v].mass
+                self.fem_state_v.gradient[i_b, i_v].norm_sqr() / self._fem_data.elements_v_info[i_v].mass
             )
             self.sap_state[i_b].momentum_norm += (
-                self.fem_state_v.v[i_b, i_v].norm_sqr() * self.fem_solver.elements_v_info[i_v].mass
+                self.fem_state_v.v[i_b, i_v].norm_sqr() * self._fem_data.elements_v_info[i_v].mass
             )
             self.sap_state[i_b].impulse_norm += (
-                self.fem_state_v.impulse[i_b, i_v].norm_sqr() / self.fem_solver.elements_v_info[i_v].mass
+                self.fem_state_v.impulse[i_b, i_v].norm_sqr() / self._fem_data.elements_v_info[i_v].mass
             )
 
     @qd.func
@@ -937,7 +941,7 @@ class SAPCoupler(RBC):
     @qd.func
     def _init_v_fem(self, i_step: qd.i32):
         for i_b, i_v in qd.ndrange(self._B, self.fem_solver.n_vertices):
-            self.fem_state_v.v[i_b, i_v] = self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel
+            self.fem_state_v.v[i_b, i_v] = self._fem_data.elements_v[i_step + 1, i_v, i_b].vel
 
     @qd.func
     def _init_v_rigid(self, i_step: qd.i32, dofs_state: array_class.DofsState):
@@ -964,7 +968,7 @@ class SAPCoupler(RBC):
             # was using position now using velocity, need to multiply dt^2
             self.pcg_fem_state_v[i_b, i_v].diag3x3 = self.fem_solver.pcg_state_v[i_b, i_v].diag3x3 * dt2
             self.fem_state_v.v_diff[i_b, i_v] = (
-                self.fem_state_v.v[i_b, i_v] - self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel
+                self.fem_state_v.v[i_b, i_v] - self._fem_data.elements_v[i_step + 1, i_v, i_b].vel
             )
 
     @qd.kernel
@@ -1073,19 +1077,19 @@ class SAPCoupler(RBC):
             if not active[i_b]:
                 continue
             dst[i_b, i_v] = (
-                self.fem_solver.elements_v_info[i_v].mass_over_dt2 * src[i_b, i_v] * dt2 * damping_alpha_factor
+                self._fem_data.elements_v_info[i_v].mass_over_dt2 * src[i_b, i_v] * dt2 * damping_alpha_factor
             )
 
         # Elasticity
         for i_b, i_e in qd.ndrange(self.fem_solver._B, self.fem_solver.n_elements):
             if not active[i_b]:
                 continue
-            V_dt2 = self.fem_solver.elements_i[i_e].V * dt2
-            B = self.fem_solver.elements_i[i_e].B
+            V_dt2 = self._fem_data.elements_i[i_e].V * dt2
+            B = self._fem_data.elements_i[i_e].B
             S = qd.Matrix.zero(gs.qd_float, 4, 3)
             S[:3, :] = B
             S[3, :] = -B[0, :] - B[1, :] - B[2, :]
-            i_vs = self.fem_solver.elements_i[i_e].el2v
+            i_vs = self._fem_data.elements_i[i_e].el2v
 
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 for i in qd.static(range(4)):
@@ -1432,11 +1436,11 @@ class SAPCoupler(RBC):
             if not self.batch_linesearch_active[i_b]:
                 continue
             self.fem_state_v.v_diff[i_b, i_v] = (
-                self.fem_state_v.v[i_b, i_v] - self.fem_solver.elements_v[i_step + 1, i_v, i_b].vel
+                self.fem_state_v.v[i_b, i_v] - self._fem_data.elements_v[i_step + 1, i_v, i_b].vel
             )
             energy[i_b] += (
                 0.5
-                * self.fem_solver.elements_v_info[i_v].mass_over_dt2
+                * self._fem_data.elements_v_info[i_v].mass_over_dt2
                 * self.fem_state_v.v_diff[i_b, i_v].norm_sqr()
                 * dt2
                 * damping_alpha_factor
@@ -1447,12 +1451,12 @@ class SAPCoupler(RBC):
             if not self.batch_linesearch_active[i_b]:
                 continue
 
-            V_dt2 = self.fem_solver.elements_i[i_e].V * dt2
-            B = self.fem_solver.elements_i[i_e].B
+            V_dt2 = self._fem_data.elements_i[i_e].V * dt2
+            B = self._fem_data.elements_i[i_e].B
             S = qd.Matrix.zero(gs.qd_float, 4, 3)
             S[:3, :] = B
             S[3, :] = -B[0, :] - B[1, :] - B[2, :]
-            i_vs = self.fem_solver.elements_i[i_e].el2v
+            i_vs = self._fem_data.elements_i[i_e].el2v
 
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 for i in qd.static(range(4)):
@@ -1566,7 +1570,7 @@ class SAPCoupler(RBC):
     def compute_fem_gradient_alpha(self, i_step: qd.i32):
         dp = qd.static(self.linesearch_fem_state_v.dp)
         v = qd.static(self.fem_state_v.v)
-        v_star = qd.static(self.fem_solver.elements_v.vel)
+        v_star = qd.static(self._fem_data.elements_v.vel)
         for i_b, i_v in qd.ndrange(self._B, self.fem_solver.n_vertices):
             if not self.batch_linesearch_active[i_b]:
                 continue
@@ -1587,7 +1591,7 @@ class SAPCoupler(RBC):
         alpha = qd.static(self.linesearch_state.step_size)
         dp = qd.static(self.linesearch_fem_state_v.dp)
         v = qd.static(self.fem_state_v.v)
-        v_star = qd.static(self.fem_solver.elements_v.vel)
+        v_star = qd.static(self._fem_data.elements_v.vel)
         for i_b, i_v in qd.ndrange(self._B, self.fem_solver.n_vertices):
             if not self.batch_linesearch_active[i_b]:
                 continue
@@ -2447,6 +2451,7 @@ class FEMContactHandler(BaseContactHandler):
     def __init__(self, simulator: "Simulator") -> None:
         super().__init__(simulator)
         self.fem_solver = simulator.fem_solver
+        self._fem_data = self.coupler._fem_data
 
     @qd.func
     def compute_gradient_hessian_diag(self):
@@ -2488,6 +2493,7 @@ class RigidFEMContactHandler(RigidContactHandler):
     def __init__(self, simulator: "Simulator") -> None:
         super().__init__(simulator)
         self.fem_solver = simulator.fem_solver
+        self._fem_data = self.coupler._fem_data
 
     @qd.func
     def compute_gradient_hessian_diag(self):
@@ -2599,8 +2605,8 @@ class FEMFloorTetContactHandler(FEMContactHandler):
             intersection_code = qd.int32(0)
             distance = qd.Vector.zero(gs.qd_float, 4)
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_e].el2v[i]
-                pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_e].el2v[i]
+                pos_v = self._fem_data.elements_v[f, i_v, i_b].pos
                 distance[i] = pos_v.z - self.fem_solver.floor_height
                 if distance[i] > 0.0:
                     intersection_code |= 1 << i
@@ -2630,8 +2636,8 @@ class FEMFloorTetContactHandler(FEMContactHandler):
             tet_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)  # 4 vertices
             tet_pressures = qd.Vector.zero(gs.qd_float, 4)  # pressures at the vertices
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_e].el2v[i]
-                tet_vertices[:, i] = self.fem_solver.elements_v[f, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_e].el2v[i]
+                tet_vertices[:, i] = self._fem_data.elements_v[f, i_v, i_b].pos
                 tet_pressures[i] = self.coupler.fem_pressure[i_v]
 
             polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 4)  # 3 or 4 vertices
@@ -2674,7 +2680,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
                 self.contact_pairs[i_p].barycentric = barycentric
                 sap_info[i_p].k = rigid_k
                 sap_info[i_p].phi0 = rigid_phi0
-                sap_info[i_p].mu = self.fem_solver.elements_i[i_e].friction_mu
+                sap_info[i_p].mu = self._fem_data.elements_i[i_e].friction_mu
             else:
                 overflow = True
 
@@ -2689,7 +2695,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         i_g = self.contact_pairs[i_p].geom_idx
         Jx = qd.Vector.zero(gs.qd_float, 3)
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g].el2v[i]
+            i_v = self._fem_data.elements_i[i_g].el2v[i]
             Jx += self.contact_pairs[i_p].barycentric[i] * x[i_b, i_v]
         return Jx
 
@@ -2698,7 +2704,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         i_b = self.contact_pairs[i_p].batch_idx
         i_g = self.contact_pairs[i_p].geom_idx
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g].el2v[i]
+            i_v = self._fem_data.elements_i[i_g].el2v[i]
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 if not self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
                     y[i_b, i_v] += self.contact_pairs[i_p].barycentric[i] * x
@@ -2710,7 +2716,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         i_b = self.contact_pairs[i_p].batch_idx
         i_g = self.contact_pairs[i_p].geom_idx
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g].el2v[i]
+            i_v = self._fem_data.elements_i[i_g].el2v[i]
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 if not self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
                     y[i_b, i_v] += self.contact_pairs[i_p].barycentric[i] ** 2 * A
@@ -2726,7 +2732,7 @@ class FEMFloorTetContactHandler(FEMContactHandler):
         # W = sum (JA^-1J^T)
         # With floor, J is Identity times the barycentric coordinates
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g].el2v[i]
+            i_v = self._fem_data.elements_i[i_g].el2v[i]
             W += self.contact_pairs[i_p].barycentric[i] ** 2 * dt2_inv * self.fem_solver.pcg_state_v[i_b, i_v].prec
         return W
 
@@ -2779,12 +2785,12 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
         for i_r in range(result_count):
             i_b, i_sa, i_sq = query_results.triplets[i_r]
-            i_a = self.fem_solver.surface_elements[i_sa]
-            i_q = self.fem_solver.surface_elements[i_sq]
-            i_v0 = self.fem_solver.elements_i[i_a].el2v[0]
-            i_v1 = self.fem_solver.elements_i[i_q].el2v[0]
-            x0 = self.fem_solver.elements_v[f, i_v0, i_b].pos
-            x1 = self.fem_solver.elements_v[f, i_v1, i_b].pos
+            i_a = self._fem_data.surface_elements[i_sa]
+            i_q = self._fem_data.surface_elements[i_sq]
+            i_v0 = self._fem_data.elements_i[i_a].el2v[0]
+            i_v1 = self._fem_data.elements_i[i_q].el2v[0]
+            x0 = self._fem_data.elements_v[f, i_v0, i_b].pos
+            x1 = self._fem_data.elements_v[f, i_v1, i_b].pos
             p0 = self.coupler.fem_pressure[i_v0]
             p1 = self.coupler.fem_pressure[i_v1]
             g0 = self.coupler.fem_pressure_gradient[i_b, i_a]
@@ -2811,14 +2817,14 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             intersection_code1 = qd.int32(0)
             distance1 = qd.Vector.zero(gs.qd_float, 4)
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_a].el2v[i]
-                pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_a].el2v[i]
+                pos_v = self._fem_data.elements_v[f, i_v, i_b].pos
                 distance0[i] = (pos_v - x).dot(normal)  # signed distance
                 if distance0[i] > 0.0:
                     intersection_code0 |= 1 << i
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_q].el2v[i]
-                pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_q].el2v[i]
+                pos_v = self._fem_data.elements_v[f, i_v, i_b].pos
                 distance1[i] = (pos_v - x).dot(normal)
                 if distance1[i] > 0.0:
                     intersection_code1 |= 1 << i
@@ -2868,12 +2874,12 @@ class FEMSelfTetContactHandler(FEMContactHandler):
             tet_pressures0 = qd.Vector.zero(gs.qd_float, 4)  # pressures at the vertices of tet 0
             tet_vertices1 = qd.Matrix.zero(gs.qd_float, 3, 4)  # 4 vertices of tet 1
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_e0].el2v[i]
-                tet_vertices0[:, i] = self.fem_solver.elements_v[i_step, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_e0].el2v[i]
+                tet_vertices0[:, i] = self._fem_data.elements_v[i_step, i_v, i_b].pos
                 tet_pressures0[i] = self.coupler.fem_pressure[i_v]
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_e1].el2v[i]
-                tet_vertices1[:, i] = self.fem_solver.elements_v[i_step, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_e1].el2v[i]
+                tet_vertices1[:, i] = self._fem_data.elements_v[i_step, i_v, i_b].pos
 
             polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 8)  # maximum 8 vertices
             polygon_n_vertices = gs.qd_int(0)
@@ -2972,7 +2978,7 @@ class FEMSelfTetContactHandler(FEMContactHandler):
                 sap_info[i_p].k = deformable_k
                 sap_info[i_p].phi0 = deformable_phi0
                 sap_info[i_p].mu = qd.sqrt(
-                    self.fem_solver.elements_i[i_e0].friction_mu * self.fem_solver.elements_i[i_e1].friction_mu
+                    self._fem_data.elements_i[i_e0].friction_mu * self._fem_data.elements_i[i_e1].friction_mu
                 )
             else:
                 overflow = True
@@ -3010,10 +3016,10 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         i_g1 = self.contact_pairs[i_p].geom_idx1
         Jx = qd.Vector.zero(gs.qd_float, 3)
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             Jx += self.contact_pairs[i_p].barycentric0[i] * x[i_b, i_v]
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g1].el2v[i]
+            i_v = self._fem_data.elements_i[i_g1].el2v[i]
             Jx -= self.contact_pairs[i_p].barycentric1[i] * x[i_b, i_v]
         return qd.Vector(
             [
@@ -3033,14 +3039,14 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         )
         x_ = world @ x
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 if not self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
                     y[i_b, i_v] += self.contact_pairs[i_p].barycentric0[i] * x_
             else:
                 y[i_b, i_v] += self.contact_pairs[i_p].barycentric0[i] * x_
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g1].el2v[i]
+            i_v = self._fem_data.elements_i[i_g1].el2v[i]
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 if not self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
                     y[i_b, i_v] -= self.contact_pairs[i_p].barycentric1[i] * x_
@@ -3057,14 +3063,14 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         )
         B_ = world @ A @ world.transpose()
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 if not self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
                     y[i_b, i_v] += self.contact_pairs[i_p].barycentric0[i] ** 2 * B_
             else:
                 y[i_b, i_v] += self.contact_pairs[i_p].barycentric0[i] ** 2 * B_
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g1].el2v[i]
+            i_v = self._fem_data.elements_i[i_g1].el2v[i]
             if qd.static(self.fem_solver._enable_vertex_constraints):
                 if not self.fem_solver.vertex_constraints.is_constrained[i_v, i_b]:
                     y[i_b, i_v] += self.contact_pairs[i_p].barycentric1[i] ** 2 * B_
@@ -3084,10 +3090,10 @@ class FEMSelfTetContactHandler(FEMContactHandler):
         # W = sum (JA^-1J^T)
         # With floor, J is Identity times the barycentric coordinates
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             W += self.contact_pairs[i_p].barycentric0[i] ** 2 * dt2_inv * self.fem_solver.pcg_state_v[i_b, i_v].prec
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g1].el2v[i]
+            i_v = self._fem_data.elements_i[i_g1].el2v[i]
             W += self.contact_pairs[i_p].barycentric1[i] ** 2 * dt2_inv * self.fem_solver.pcg_state_v[i_b, i_v].prec
         W = world.transpose() @ W @ world
         return W
@@ -3134,8 +3140,8 @@ class FEMFloorVertContactHandler(FEMContactHandler):
         # Compute contact pairs
         self.n_contact_pairs[None] = 0
         for i_b, i_sv in qd.ndrange(self.fem_solver._B, self.fem_solver.n_surface_vertices):
-            i_v = self.fem_solver.surface_vertices[i_sv]
-            pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
+            i_v = self._fem_data.surface_vertices[i_sv]
+            pos_v = self._fem_data.elements_v[f, i_v, i_b].pos
             distance = pos_v.z - self.fem_solver.floor_height
             if distance > 0.0:
                 continue
@@ -3143,9 +3149,9 @@ class FEMFloorVertContactHandler(FEMContactHandler):
             if i_p < self.max_contact_pairs:
                 self.contact_pairs[i_p].batch_idx = i_b
                 self.contact_pairs[i_p].geom_idx = i_v
-                sap_info[i_p].k = self.coupler._point_contact_stiffness * self.fem_solver.surface_vert_mass[i_v]
+                sap_info[i_p].k = self.coupler._point_contact_stiffness * self._fem_data.surface_vert_mass[i_sv]
                 sap_info[i_p].phi0 = distance
-                sap_info[i_p].mu = self.fem_solver.elements_v_info[i_v].friction_mu
+                sap_info[i_p].mu = self._fem_data.elements_v_info[i_v].friction_mu
             else:
                 overflow = True
         return overflow
@@ -3456,7 +3462,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         result_count = qd.min(query_results.count[0], query_results.triplets.shape[0])
         for i_r in range(result_count):
             i_b, i_a, i_sq = query_results.triplets[i_r]
-            i_q = self.fem_solver.surface_elements[i_sq]
+            i_q = self._fem_data.surface_elements[i_sq]
 
             vert_idx1 = qd.Vector.zero(gs.qd_int, 3)
             tri_vertices = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -3481,8 +3487,8 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
 
             intersection_code = qd.int32(0)
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_q].el2v[i]
-                pos_v = self.fem_solver.elements_v[f, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_q].el2v[i]
+                pos_v = self._fem_data.elements_v[f, i_v, i_b].pos
                 distance = (pos_v - pos_v0).dot(normal)  # signed distance
                 if distance > 0.0:
                     intersection_code |= 1 << i
@@ -3536,8 +3542,8 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
                 else:
                     tri_vertices[:, i] = free_verts_state.pos[i_fv, i_b]
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_e].el2v[i]
-                tet_vertices[:, i] = self.fem_solver.elements_v[f, i_v, i_b].pos
+                i_v = self._fem_data.elements_i[i_e].el2v[i]
+                tet_vertices[:, i] = self._fem_data.elements_v[f, i_v, i_b].pos
                 tet_pressures[i] = self.coupler.fem_pressure[i_v]
 
             polygon_vertices = qd.Matrix.zero(gs.qd_float, 3, 7)  # maximum 7 vertices
@@ -3617,7 +3623,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
                 self.contact_pairs[i_p].contact_pos = centroid
                 sap_info[i_p].k = rigid_k
                 sap_info[i_p].phi0 = rigid_phi0
-                sap_info[i_p].mu = qd.sqrt(self.fem_solver.elements_i[i_e].friction_mu * geoms_info.coup_friction[i_g])
+                sap_info[i_p].mu = qd.sqrt(self._fem_data.elements_i[i_e].friction_mu * geoms_info.coup_friction[i_g])
             else:
                 overflow = True
 
@@ -3670,7 +3676,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
             i_g0 = self.contact_pairs[i_p].geom_idx0
             i_b = self.contact_pairs[i_p].batch_idx
             for i in qd.static(range(4)):
-                i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+                i_v = self._fem_data.elements_i[i_g0].el2v[i]
                 self.W[i_p] += barycentric0[i_p][i] ** 2 * dt2_inv * self.fem_solver.pcg_state_v[i_b, i_v].prec
 
     @qd.func
@@ -3691,7 +3697,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
 
         # fem
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             Jx = Jx + self.contact_pairs[i_p].barycentric0[i] * x0[i_b, i_v]
 
         # rigid
@@ -3716,7 +3722,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
 
         # fem
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             y0[i_b, i_v] += self.contact_pairs[i_p].barycentric0[i] * x_
 
         # rigid
@@ -3732,7 +3738,7 @@ class RigidFemTriTetContactHandler(RigidFEMContactHandler):
         )
         B_ = world @ A @ world.transpose()
         for i in qd.static(range(4)):
-            i_v = self.fem_solver.elements_i[i_g0].el2v[i]
+            i_v = self._fem_data.elements_i[i_g0].el2v[i]
             if i_v < self.fem_solver.n_vertices:
                 y[i_b, i_v] += self.contact_pairs[i_p].barycentric0[i] ** 2 * B_
 

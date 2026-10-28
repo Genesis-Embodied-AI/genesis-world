@@ -1,14 +1,9 @@
-from typing import TYPE_CHECKING
-
 from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
 
 from .base import Base
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.pbd_entity import PBD2DEntity
 
-
-class Cloth(Base["PBD2DEntity"]):
+class Cloth(Base):
     """
     The cloth material class for PBD.
 

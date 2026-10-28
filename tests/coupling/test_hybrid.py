@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
@@ -14,7 +15,7 @@ from ..utils.assets import get_hf_dataset
 
 @pytest.mark.slow  # ~300s
 @pytest.mark.required
-def test_rigid_mpm_muscle(show_viewer):
+def test_rigid_mpm_muscle(tmp_path, show_viewer):
     BALL_POS_INIT = (0.8, 0.6, 0.12)
 
     scene = gs.Scene(
@@ -45,25 +46,27 @@ def test_rigid_mpm_muscle(show_viewer):
         morph=gs.morphs.Plane(),
     )
     robot = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file="urdf/simple/two_link_arm.urdf",
-            pos=(0.45, 0.45, 0.2),
-            euler=(0.0, 0.0, 0.0),
-            scale=0.2,
-            fixed=True,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(
-                gravity_compensation=1.0,
+        options=gs.options.HybridEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                pos=(0.45, 0.45, 0.2),
+                euler=(0.0, 0.0, 0.0),
+                scale=0.2,
+                fixed=True,
             ),
-            material_soft=gs.materials.MPM.Muscle(
-                E=1e4,
-                nu=0.45,
-                rho=1000.0,
-                model="neohooken",
+            material=gs.materials.Hybrid(
+                material_rigid=gs.materials.Rigid(
+                    gravity_compensation=1.0,
+                ),
+                material_soft=gs.materials.MPM.Muscle(
+                    E=1e4,
+                    nu=0.45,
+                    rho=1000.0,
+                    model="neohooken",
+                ),
+                damping=1000.0,
+                thickness=0.05,
             ),
-            damping=1000.0,
-            thickness=0.05,
         ),
     )
     ball = scene.add_entity(
@@ -76,6 +79,11 @@ def test_rigid_mpm_muscle(show_viewer):
             friction=0.5,
         ),
     )
+    exported = tmp_path / f"hybrid_robot{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    robot = scene.get_entity(robot.name)
+    ball = scene.get_entity(ball.name)
     scene.build()
 
     scene.reset()
@@ -135,14 +143,16 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     )
 
     obj_sand = scene.add_entity(
-        material=gs.materials.MPM.Liquid(),
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.2),
-            size=(0.3, 0.3, 0.3),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.3, 0.3, 1.0),
-            vis_mode="particle",
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.2),
+                size=(0.3, 0.3, 0.3),
+            ),
+            material=gs.materials.MPM.Liquid(),
+            surface=gs.surfaces.Default(
+                color=(0.3, 0.3, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
 
@@ -169,28 +179,61 @@ def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     sys.platform == "linux" and platform.machine() == "aarch64",
     reason="pygel3d is not supported on Linux ARM (aarch64)",
 )
-def test_mesh_mpm_build(show_viewer):
+# The closed-form soft velocity holds up to the rounding of the elastic stress, which single precision leaves above tol
+@pytest.mark.precision("64")
+def test_mesh_association(tmp_path, show_viewer, tol):
     # FIXME: This test is crashing on Linux (x86 & aarch64) Github-hosted runners
 
     scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(-0.5, -0.5, -0.5),
             upper_bound=(0.5, 0.5, 0.5),
         ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.6),
+            camera_lookat=(0.1, 0.0, 0.0),
+        ),
         show_viewer=show_viewer,
         show_FPS=False,
     )
+    # Offsets the soft particles so that they do not start at index 0
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.15,
-        ),
-        material=gs.materials.Hybrid(
-            material_rigid=gs.materials.Rigid(),
-            material_soft=gs.materials.MPM.Muscle(),
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Nowhere(
+                n_particles=1,
+            ),
+            material=gs.materials.MPM.Liquid(),
         ),
     )
-    scene.build()
+    hybrid = scene.add_entity(
+        options=gs.options.HybridEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.15,
+            ),
+            material=gs.materials.Hybrid(
+                material_rigid=gs.materials.Rigid(
+                    needs_coup=False,
+                ),
+                material_soft=gs.materials.MPM.Muscle(),
+            ),
+        ),
+    )
+    exported = tmp_path / f"hybrid_mesh{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    hybrid = scene.get_entity(hybrid.name)
+    scene.build(n_envs=2)
+
+    pos = hybrid.part_rigid.get_pos()
+    pos[..., 0] += 0.2
+    hybrid.part_rigid.set_pos(pos)
+    scene.step()
+    expected_vel = 0.2 * hybrid.material.soft_dv_coef / hybrid.solver_rigid.dt
+    assert_allclose(hybrid.part_soft.get_particles_vel()[..., 0, 0], expected_vel, rtol=tol)
 
 
 @pytest.mark.debug(False)  # Disable debug for speedup
@@ -235,49 +278,55 @@ def test_deformable_parallel(show_viewer):
         ),
     )
     cloth = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            scale=0.6,
-            pos=(0.0, 0.8, 0.3),
-            euler=(180.0, 0.0, 0.0),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                scale=0.6,
+                pos=(0.0, 0.8, 0.3),
+                euler=(180.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
         ),
     )
     water = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.15, 0.22),
-            size=(0.25, 0.25, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.6, 1.0, 1.0),
+        options=gs.options.SPHEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.15, 0.22),
+                size=(0.25, 0.25, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.6, 1.0, 1.0),
+            ),
         ),
     )
     mpm_cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.6, 0, 0.1),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.MPM.Elastic(
-            rho=200,
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.9, 0.8, 0.2, 1.0),
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.6, 0, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.MPM.Elastic(
+                rho=200,
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.9, 0.8, 0.2, 1.0),
+            ),
         ),
     )
     entity_fem = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.8, 0.8, 0.1),
-            size=(0.1, 0.1, 0.1),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=3.0e4,
-            nu=0.45,
-            rho=1000.0,
-            model="stable_neohookean",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.8, 0.8, 0.1),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=3.0e4,
+                nu=0.45,
+                rho=1000.0,
+                model="stable_neohookean",
+            ),
         ),
     )
     scene.build(n_envs=2)
@@ -474,14 +523,16 @@ def test_sap_fem_vs_robot(show_viewer):
         ),
     )
     sphere = scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(0.0, 0.0, SPHERE_RADIUS),
-            radius=SPHERE_RADIUS,
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-            model="linear_corotated",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(0.0, 0.0, SPHERE_RADIUS),
+                radius=SPHERE_RADIUS,
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.4,
+                model="linear_corotated",
+            ),
         ),
     )
     asset_path = get_hf_dataset(pattern="cross.xml")

@@ -4,12 +4,13 @@ import torch
 import trimesh
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 
 from ..utils.assertions import assert_allclose
 
 
 @pytest.mark.required
-def test_particle_constraints(show_viewer, tol):
+def test_particle_constraints(tmp_path, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=2e-3,
@@ -37,14 +38,16 @@ def test_particle_constraints(show_viewer, tol):
         ),
     )
     mpm_cube = scene.add_entity(
-        material=gs.materials.MPM.Elastic(
-            E=5e4,
-            nu=0.3,
-            rho=1000,
-        ),
-        morph=gs.morphs.Box(
-            pos=(0, 0, 0.35),
-            size=(0.15, 0.15, 0.15),
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0, 0, 0.35),
+                size=(0.15, 0.15, 0.15),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=5e4,
+                nu=0.3,
+                rho=1000,
+            ),
         ),
     )
     # Two copies of one box offset along its local y axis, each placed with its own member pose
@@ -52,15 +55,25 @@ def test_particle_constraints(show_viewer, tol):
         extents=(0.04, 0.12, 0.04), transform=trimesh.transformations.translation_matrix((0.0, 0.1, 0.0))
     )
     mpm_mesh_set = scene.add_entity(
-        morph=gs.morphs.MeshSet(
-            files=(box, box),
-            poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
-            eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
-        ),
-        material=gs.materials.MPM.Elastic(
-            sampler="regular",
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.MeshSet(
+                files=(box, box),
+                poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
+                eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
+            ),
+            material=gs.materials.MPM.Elastic(
+                sampler="regular",
+            ),
         ),
     )
+    with pytest.raises(gs.GenesisException):
+        scene.add_entity(morph=gs.morphs.MeshSet(files=()), material=gs.materials.MPM.Elastic())
+    # The sampled particles and the member poses are resolved into the descriptions that the scene file holds
+    exported = tmp_path / f"particle_constraints{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    rigid_box, mpm_cube, mpm_mesh_set = scene.entities[1:]
+    assert isinstance(mpm_cube.material, gs.materials.MPM.Elastic)
     scene.build(n_envs=2)
 
     # Each member is rotated about its own position: the box offset lands at -x for the member rotated about z and at
@@ -129,24 +142,28 @@ def test_perf_dispatch(variant, show_viewer):
         morph=gs.morphs.Plane(),
     )
     elastic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-0.1, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.MPM.Elastic(
-            E=3e5,
-            nu=0.2,
-            rho=200.0,
-            model=elastic_model,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(-0.1, 0.0, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Elastic(
+                E=3e5,
+                nu=0.2,
+                rho=200.0,
+                model=elastic_model,
+            ),
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.15, 0.0, 0.2),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.MPM.Liquid(
-            viscous=liquid_viscous,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.15, 0.0, 0.2),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.MPM.Liquid(
+                viscous=liquid_viscous,
+            ),
         ),
     )
     scene.build(n_envs=2)

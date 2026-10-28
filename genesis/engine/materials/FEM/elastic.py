@@ -52,8 +52,9 @@ class Elastic(Base):
 
     @model_validator(mode="before")
     @classmethod
-    def _resolve_deprecated_model(cls, data: dict) -> dict:
-        if data.get("model") == "stable_neohooken":
+    def _resolve_deprecated_model(cls, data: Any) -> Any:
+        # See 'Morph._resolve_orientation' for an input other than field values
+        if isinstance(data, dict) and data.get("model") == "stable_neohooken":
             gs.logger.warning("The 'stable_neohooken' model is deprecated. Use 'stable_neohookean' instead.")
             data["model"] = "stable_neohookean"
         return data

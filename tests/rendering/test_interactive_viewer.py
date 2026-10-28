@@ -482,12 +482,14 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
     )
     # A kinematic entity carries visual meshes only, in a separate solver from the rigid entities above.
     kinematic = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, KINEMATIC_LANE_Y, BOX_LENGTH / 2),
-            size=(BOX_LENGTH,) * 3,
-        ),
-        material=gs.materials.Kinematic(
-            use_visual_raycasting=True,
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, KINEMATIC_LANE_Y, BOX_LENGTH / 2),
+                size=(BOX_LENGTH,) * 3,
+            ),
+            material=gs.materials.Kinematic(
+                use_visual_raycasting=True,
+            ),
         ),
     )
     # Without the opt-in material, an entity stays unpickable.

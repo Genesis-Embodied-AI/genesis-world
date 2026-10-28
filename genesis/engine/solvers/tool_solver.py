@@ -1,18 +1,11 @@
-from typing import TYPE_CHECKING
-
 import quadrants as qd
 
-import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
-from genesis.engine.entities.tool_entity.tool_entity import ToolEntity
-from genesis.engine.materials import Tool
+from genesis.engine.entities.tool_entity.tool_entity import ToolEntity, ToolEntityDescription
 from genesis.engine.states.solvers import ToolSolverState
-from genesis.utils.misc import *
+from genesis.engine.system_data.tool import ToolData, ToolDescription
 
 from .base_solver import Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import ToolEntity
 
 
 @qd.data_oriented
@@ -22,8 +15,6 @@ class ToolSolver(TimeBasedMixin, Solver):
     ----
     !! This class will be removed once we added differntiability to the RigidSolver. This is just a temporary solution to obtain rigid->soft one-way differeitable coupling.
     """
-
-    material_cls = Tool
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -38,6 +29,22 @@ class ToolSolver(TimeBasedMixin, Solver):
         # boundary
         self.setup_boundary()
 
+    def describe(self) -> ToolDescription | None:
+        super().describe()
+        if not self.is_active:
+            return None
+        return ToolDescription(
+            _B=self._B,
+            substeps_local=self._sim.substeps_local,
+            entities_idx=tuple(entity.idx for entity in self._entities),
+            entities=tuple(entity.desc for entity in self._entities),
+        )
+
+    def register_data(self):
+        assert isinstance(self._data_record, ToolData)
+        for entity_data in self._data_record.entities:
+            self.sim._system_data.add(entity_data)
+
     def build(self):
         super().build()
         for entity in self._entities:
@@ -51,17 +58,12 @@ class ToolSolver(TimeBasedMixin, Solver):
         self.boundary = FloorBoundary(height=self.floor_height)
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
-    ) -> "ToolEntity":
-        entity = ToolEntity(
-            scene=self._scene,
-            idx=idx,
-            solver=self,
-            material=material,
-            morph=morph,
-            surface=surface,
-            name=name,
-        )
+        self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
+    ) -> ToolEntity:
+        if desc is None:
+            desc = ToolEntityDescription.resolve(material, morph, surface, name, options)
+        assert isinstance(desc, ToolEntityDescription)
+        entity = ToolEntity(scene=self._scene, idx=idx, solver=self, desc=desc)
         self._entities.append(entity)
         return entity
 

@@ -1,56 +1,114 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
 
+import trimesh
+
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
+from genesis.engine.materials import Tool
 from genesis.engine.states.entities import ToolEntityState
-from genesis.utils.geom import (
-    qd_rotvec_to_quat,
-    qd_transform_quat_by_quat,
-    transform_pos_quat_by_trans_quat,
-)
+from genesis.engine.system_data.tool import ToolEntityData
+from genesis.options.morphs import Morph
+from genesis.options.surfaces import Surface
+from genesis.utils.mesh import compute_sdf_data, load_mesh
 from genesis.utils.misc import to_gs_tensor
 
-from ..base_entity import Entity
+from ..base_entity import Entity, EntityDescription, VerticesDescription
 from .mesh import Mesh
 
 
-@qd.data_oriented
-class ToolEntity(Entity):
-    # Mesh-based tool body entity
-    def __init__(
-        self,
-        scene,
-        idx,
-        solver,
-        material,
-        morph,
-        surface,
-        name: str | None = None,
-    ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
+@dataclass(kw_only=True)
+class ToolEntityDescription(VerticesDescription, EntityDescription):
+    """The mesh of a tool, normalized and scaled, with its vertex normals, its faces and its signed distance field.
 
-        # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
-        self._init_pos, self._init_quat = transform_pos_quat_by_trans_quat(
+    The signed distance field and its transform from the mesh frame are None when the material disables collision.
+    """
+
+    material: Tool
+    morph: Morph
+    surface: Surface
+    name: str | None
+    init_pos: np.ndarray
+    init_quat: np.ndarray
+    normals: np.ndarray
+    faces: np.ndarray
+    sdf_voxels: np.ndarray | None
+    T_mesh_to_sdf: np.ndarray | None
+
+    @classmethod
+    def resolve(cls, material, morph, surface, name, options):
+        """Load the mesh of a tool from its morph, fit it in a unit box centered at the origin, and scale it.
+
+        The signed distance field is sampled on the normalized mesh at the resolution of the material, and its
+        transform from the mesh frame accounts for the scale of the morph. 'options' are the entity options the other
+        arguments were taken from, kept as authored in the description.
+        """
+        mesh_orig = load_mesh(morph.file)
+        scale = np.linalg.norm(mesh_orig.extents, ord=np.inf)
+        center = np.mean(mesh_orig.bounds, axis=0)
+        mesh = trimesh.Trimesh(
+            vertices=(mesh_orig.vertices - center) / scale,
+            faces=mesh_orig.faces,
+            vertex_normals=mesh_orig.vertex_normals,
+            face_normals=mesh_orig.face_normals,
+        )
+        T_init = gu.scale_to_T(np.array(morph.scale, dtype=gs.np_float))
+        sdf_voxels = T_mesh_to_sdf = None
+        if material.collision:
+            sdf_data = compute_sdf_data(mesh, material.sdf_res)
+            sdf_voxels = sdf_data["voxels"].astype(gs.np_float, order="C", copy=False)
+            T_mesh_to_sdf = sdf_data["T_mesh_to_sdf"].astype(gs.np_float, order="C", copy=False) @ gu.inv_T(T_init)
+        # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose
+        init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
             np.array(morph.offset_pos, dtype=gs.np_float),
             np.array(morph.offset_quat, dtype=gs.np_float),
             np.array(morph.pos, dtype=gs.np_float),
             np.array(morph.quat, dtype=gs.np_float),
         )
-
-        self.mesh = Mesh(
-            entity=self,
+        return cls(
             material=material,
             morph=morph,
+            surface=surface,
+            name=name,
+            init_pos=init_pos,
+            init_quat=init_quat,
+            init_positions=gu.transform_by_T(mesh.vertices.astype(gs.np_float, order="C", copy=False), T_init),
+            normals=mesh.vertex_normals.astype(gs.np_float, order="C", copy=False),
+            faces=mesh.faces.astype(gs.np_int, order="C", copy=False),
+            sdf_voxels=sdf_voxels,
+            T_mesh_to_sdf=T_mesh_to_sdf,
+            options=options,
         )
+
+
+@qd.data_oriented
+class ToolEntity(Entity):
+    """A mesh-based tool whose pose is driven by the user, and which the soft entities collide with.
+
+    Parameters
+    ----------
+    scene : Scene
+        The simulation scene.
+    idx : int
+        Index of this entity in the scene.
+    solver : ToolSolver
+        The solver handling the simulation logic.
+    desc : ToolEntityDescription
+        The resolved mesh and signed distance field, with the material, morph and surface they are resolved from.
+    """
+
+    def __init__(self, scene, idx, solver, desc: ToolEntityDescription):
+        super().__init__(idx, scene, solver, desc, desc.morph)
+        self._entity_data: ToolEntityData | None = None
+
+        self.mesh = Mesh(entity=self, desc=desc)
         self.init_tgt_vars()
         self.init_ckpt()
-
-        # for rendering purpose only
-        self.latest_pos = qd.Vector.field(3, dtype=gs.qd_float, shape=(1))
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -178,7 +236,7 @@ class ToolEntity(Entity):
         self.advect.grad(f)
 
     def substep_post_coupling(self, f):
-        self.update_latest_pos(f)
+        pass
 
     def substep_post_coupling_grad(self, f):
         pass
@@ -192,18 +250,14 @@ class ToolEntity(Entity):
         return self.mesh.pbd_collide(f, pos_world, thickness, dt)
 
     @qd.kernel
-    def update_latest_pos(self, f: qd.i32):
-        self.latest_pos[0] = self.pos[f, 0]
-
-    @qd.kernel
     def advect(self, f: qd.i32):
         for i_b in range(self._sim._B):
             self.pos[f + 1, i_b] = self._solver.boundary.impose_pos(
                 self.pos[f, i_b] + self.vel[f, i_b] * self._solver.substep_dt
             )
             # rotate in world coordinates about itself.
-            self.quat[f + 1, i_b] = qd_transform_quat_by_quat(
-                self.quat[f, i_b], qd_rotvec_to_quat(self.ang[f, i_b] * self._solver.substep_dt, gs.EPS)
+            self.quat[f + 1, i_b] = gu.qd_transform_quat_by_quat(
+                self.quat[f, i_b], gu.qd_rotvec_to_quat(self.ang[f, i_b] * self._solver.substep_dt, gs.EPS)
             )
 
             self.vel[f + 1, i_b] = self.vel[f, i_b]
@@ -314,16 +368,9 @@ class ToolEntity(Entity):
         self.set_frame(f, state.pos, state.quat, state.vel, state.ang)
 
     def build(self):
-        self.pos = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # positon
-        self.quat = qd.Vector.field(4, gs.qd_float, needs_grad=True)  # quaternion wxyz
-        self.vel = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # velocity
-        self.ang = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # angular velocity
-
-        qd.root.dense(qd.ij, (self._sim.substeps_local + 1, self._sim._B)).place(
-            self.pos, self.pos.grad, self.quat, self.quat.grad, self.vel, self.vel.grad, self.ang, self.ang.grad
-        )
+        self._entity_data = self._sim._system_data.get(ToolEntityData, self._solver, self._idx)
         self.init_state = ToolEntityState(self, 0)
-        self.set_init_state(self._init_pos, self._init_quat)
+        self.set_init_state(self._desc.init_pos, self._desc.init_quat)
 
     @qd.kernel
     def set_init_state(self, pos: qd.types.ndarray(), quat: qd.types.ndarray()):
@@ -512,9 +559,33 @@ class ToolEntity(Entity):
         return self._surface
 
     @property
+    def desc(self) -> ToolEntityDescription:
+        return self._desc
+
+    @property
+    def pos(self) -> qd.Field:
+        """The position of this entity at each local substep and in each environment."""
+        return self._entity_data.pos
+
+    @property
+    def quat(self) -> qd.Field:
+        """The orientation quaternion (w, x, y, z) of this entity at each local substep and in each environment."""
+        return self._entity_data.quat
+
+    @property
+    def vel(self) -> qd.Field:
+        """The linear velocity of this entity at each local substep and in each environment."""
+        return self._entity_data.vel
+
+    @property
+    def ang(self) -> qd.Field:
+        """The angular velocity of this entity at each local substep and in each environment."""
+        return self._entity_data.ang
+
+    @property
     def init_pos(self):
-        return self._init_pos
+        return self._desc.init_pos
 
     @property
     def init_quat(self):
-        return self._init_quat
+        return self._desc.init_quat

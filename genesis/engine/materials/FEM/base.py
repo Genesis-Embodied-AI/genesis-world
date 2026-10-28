@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any, ClassVar
 
 import quadrants as qd
 from pydantic import Field, PrivateAttr, StrictBool
@@ -8,12 +8,9 @@ from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, ValidFloa
 
 from ..base import Material
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.fem_entity import FEMEntity
-
 
 @qd.data_oriented
-class Base(Material["FEMEntity"]):
+class Base(Material):
     """
     The base class of FEM materials.
 
@@ -49,6 +46,14 @@ class Base(Material["FEMEntity"]):
     hessian_invariant: StrictBool = False
 
     # Dispatch fields — set by subclass model_post_init, not user-specified.
+    _dispatch_fields: ClassVar[tuple[str, ...]] = (
+        "build",
+        "pre_compute",
+        "update_stress",
+        "compute_energy_gradient_hessian",
+        "compute_energy_gradient",
+        "compute_energy",
+    )
     build: Any = Field(default=None, exclude=True, repr=False)
     pre_compute: Any = Field(default=None, exclude=True, repr=False)
     update_stress: Any = Field(default=None, exclude=True, repr=False)

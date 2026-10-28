@@ -1,16 +1,11 @@
-from typing import TYPE_CHECKING
-
 from pydantic import StrictBool
 
 from genesis.typing import NonNegativeFloat, PositiveInt
 
 from .base import Material
 
-if TYPE_CHECKING:
-    from genesis.engine.entities.tool_entity import ToolEntity
 
-
-class Tool(Material["ToolEntity"]):
+class Tool(Material):
     """
     Material for tool entities.
 

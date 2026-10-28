@@ -484,15 +484,15 @@ def test_batched_info(batch_links_info, batch_joints_info, batch_dofs_info, tol)
     scene.build(n_envs=2)
     gs_s = scene.rigid_solver
 
-    links_info = gs_s.data_manager.dyn_info.links
+    links_info = gs_s.dyn_info.links
     entity_idx = links_info.entity_idx.to_numpy()
     assert entity_idx.shape == ((12, 2) if batch_links_info else (12,))
 
-    joints_info = gs_s.data_manager.dyn_info.joints
+    joints_info = gs_s.dyn_info.joints
     pos = joints_info.pos.to_numpy()
     assert pos.shape == ((10, 2, 3) if batch_joints_info else (10, 3))
 
-    dofs_info = gs_s.data_manager.dyn_info.dofs
+    dofs_info = gs_s.dyn_info.dofs
     act_gain = dofs_info.act_gain.to_numpy()
     assert act_gain.shape == ((9, 2) if batch_dofs_info else (9,))
 
@@ -1383,11 +1383,12 @@ def test_object_repr():
         ),
     )
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Sphere(radius=0.1),
+        options=gs.options.KinematicEntityOptions(
+            morph=(
+                gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+                gs.morphs.Sphere(radius=0.1),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     cam = scene.add_camera(
         res=(64, 64),

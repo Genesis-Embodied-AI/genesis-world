@@ -1,6 +1,7 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.system_data.sf import SFData, SFDescription
 
 from .base_solver import Solver, TimeBasedMixin
 
@@ -32,19 +33,7 @@ class SFSolver(TimeBasedMixin, Solver):
 
         self.jets = ()
 
-    def setup_fields(self):
-        assert self.jets
-
-        cell_state = qd.types.struct(
-            v=gs.qd_vec3,
-            v_tmp=gs.qd_vec3,
-            div=gs.qd_float,
-            p=gs.qd_float,
-            q=qd.types.vector(len(self.jets), gs.qd_float),
-        )
-
-        self.grid = cell_state.field(shape=self.res, layout=qd.Layout.SOA)
-
+    def setup_pressure_fields(self):
         # swap area for pressure projection solver
         self.p_swap = TexPair(
             cur=qd.field(dtype=gs.qd_float, shape=self.res),
@@ -60,12 +49,22 @@ class SFSolver(TimeBasedMixin, Solver):
     def reset_grad(self):
         pass
 
+    def describe(self) -> SFDescription | None:
+        super().describe()
+        if not self.is_active:
+            return None
+        return SFDescription(res=self.res, n_jets=len(self.jets))
+
+    def register_data(self):
+        assert isinstance(self._data_record, SFData)
+        self.grid = self._data_record.grid
+
     def build(self):
         super().build()
 
         if self.is_active:
             self.t = 0.0
-            self.setup_fields()
+            self.setup_pressure_fields()
             self.init_fields()
 
     # ------------------------------------------------------------------------------------
@@ -78,6 +77,9 @@ class SFSolver(TimeBasedMixin, Solver):
 
     def set_jets(self, jets):
         assert isinstance(jets, (list, tuple))
+        # The jets size the grid allocated at build
+        if self._scene.is_built:
+            gs.raise_exception("Jets must be set before the scene is built.")
         self.jets = tuple(jets)
 
     def reset_swap(self):

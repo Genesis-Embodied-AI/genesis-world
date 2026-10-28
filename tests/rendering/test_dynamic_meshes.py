@@ -83,44 +83,49 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/cloth.obj",
-            scale=1.0,
-            pos=(0.5, 0.5, 0.5),
-            euler=(180.0, 0.0, 0.0),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            color=(0.2, 0.4, 0.8, 1.0),
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/cloth.obj",
+                scale=1.0,
+                pos=(0.5, 0.5, 0.5),
+                euler=(180.0, 0.0, 0.0),
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.2, 0.4, 0.8, 1.0),
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/worm/worm.obj",
-            pos=(0.3, 0.3, 0.001),
-            scale=0.1,
-            euler=(90, 0, 0),
-        ),
-        material=gs.materials.MPM.Muscle(
-            E=5e5,
-            nu=0.45,
-            rho=10000.0,
-            sampler="random",
-            model="neohooken",
-            n_groups=4,
+        options=gs.options.MPMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/worm/worm.obj",
+                pos=(0.3, 0.3, 0.001),
+                scale=0.1,
+                euler=(90, 0, 0),
+            ),
+            material=gs.materials.MPM.Muscle(
+                E=5e5,
+                nu=0.45,
+                rho=10000.0,
+                sampler="random",
+                model="neohooken",
+                n_groups=4,
+            ),
         ),
     )
     liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.65),
-            size=(0.4, 0.4, 0.4),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="random",
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.4, 0.8, 1.0),
-            vis_mode="particle",
+        options=gs.options.SPHEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.65),
+                size=(0.4, 0.4, 0.4),
+            ),
+            material=gs.materials.SPH.Liquid(
+                sampler="random",
+            ),
+            surface=gs.surfaces.Default(
+                color=(0.4, 0.8, 1.0),
+                vis_mode="particle",
+            ),
         ),
     )
     scene.build(n_envs=4, env_spacing=(2.0, 2.0))
@@ -200,35 +205,38 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
     # Add PBD cloth with checker texture
     asset_path = get_hf_dataset(pattern="uv_plane.obj")
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=f"{asset_path}/uv_plane.obj",
-            scale=0.4,
-            pos=(-0.2, 0.0, 0.4),
-        ),
-        material=gs.materials.PBD.Cloth(),
-        surface=gs.surfaces.Default(
-            vis_mode="visual",
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+        options=gs.options.PBDClothEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=f"{asset_path}/uv_plane.obj",
+                scale=0.4,
+                pos=(-0.2, 0.0, 0.4),
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="visual",
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                ),
             ),
         ),
     )
 
     # Add FEM elastic object with checker texture
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck.obj",
-            scale=0.1,
-            pos=(0.2, 0.0, 0.2),
-        ),
-        material=gs.materials.FEM.Elastic(
-            E=1e5,
-            nu=0.4,
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode="visual",
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck.obj",
+                scale=0.1,
+                pos=(0.2, 0.0, 0.2),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=1e5,
+                nu=0.4,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode="visual",
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                ),
             ),
         ),
     )

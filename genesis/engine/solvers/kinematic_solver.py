@@ -9,7 +9,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
-from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -18,6 +17,13 @@ from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_set_ik_targets,
 )
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
+from genesis.engine.system_data.articulated import (
+    ArticulatedData,
+    ArticulatedDescription,
+    JointsData,
+    LinksData,
+    VisualGeomData,
+)
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
 from genesis.utils.misc import (
@@ -167,7 +173,6 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
-    material_cls = Kinematic
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 
@@ -184,6 +189,8 @@ class KinematicSolver(Solver):
 
         self.qpos = None
 
+        self._data_description: ArticulatedDescription | None = None
+
         self._is_forward_pos_updated: bool = False
         self._is_forward_vel_updated: bool = False
 
@@ -194,19 +201,27 @@ class KinematicSolver(Solver):
     # ------------------------------------------------------------------------------------
 
     def add_entity(
-        self, idx, material, morph, surface, visualize_contact=False, name=None, desc=None
+        self, idx, material, morph, surface, visualize_contact=False, name=None, *, options, desc=None
     ) -> "KinematicEntity":
         """Create an entity from its description.
 
         Given no description, one is resolved from the other arguments (see 'KinematicEntityDescription'), the morph
-        deciding the kind of entity among those the solver builds ('_entity_classes'). The class of a given description
+        deciding the kind of entity among those the solver builds ('_entity_classes'). The entity options the other
+        arguments were taken from are kept in the description as authored. The class of a given description
         says which kind it holds. Creation from a description reads no asset.
         """
         if desc is None:
             morphs = (morph,) if isinstance(morph, Morph) else tuple(morph)
             entity_cls = next(cls for morph_cls, cls in self._entity_classes if isinstance(morphs[0], morph_cls))
             desc = entity_cls._description_cls.resolve(
-                morphs, material, surface, self._options, self._enable_mujoco_compatibility, visualize_contact, name
+                morphs,
+                material,
+                surface,
+                self._options,
+                self._enable_mujoco_compatibility,
+                visualize_contact,
+                name,
+                options=options,
             )
         else:
             for _, entity_cls in self._entity_classes:
@@ -226,11 +241,10 @@ class KinematicSolver(Solver):
     # ------------------------------------ build -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
-        super().build()
+    def describe(self) -> ArticulatedDescription:
+        super().describe()
 
         self.n_envs = self.sim.n_envs
-        self._B = self.sim._B
         self._para_level = self.sim._para_level
 
         for entity in self._entities:
@@ -372,6 +386,69 @@ class KinematicSolver(Solver):
             self._options.batch_dofs_info = True
 
         self._build_static_config()
+
+        self._data_description = ArticulatedDescription(
+            _B=self._B,
+            n_dofs_=self.n_dofs_,
+            n_qs_=self.n_qs_,
+            n_links_=self.n_links_,
+            n_joints_=self.n_joints_,
+            n_entities_=self.n_entities_,
+            n_vverts_=self.n_vverts_,
+            n_custom_vverts_=self.n_custom_vverts_,
+            n_vfaces_=self.n_vfaces_,
+            n_vgeoms_=self.n_vgeoms_,
+            n_joints_per_link_max=max((link.n_joints for link in self.links), default=0),
+            requires_grad=self._requires_grad,
+            is_batch_links_info=self.rigid_config.batch_links_info,
+            is_batch_dofs_info=self.rigid_config.batch_dofs_info,
+            is_batch_joints_info=self.rigid_config.batch_joints_info,
+        )
+        return self._data_description
+
+    def register_data(self):
+        assert isinstance(self._data_record, ArticulatedData)
+        self.dyn_info = self._data_record.info
+        self.dyn_state = self._data_record.state
+        for entity in self.entities:
+            self.sim._system_data.add(
+                LinksData(
+                    owner=self,
+                    idx=entity.idx,
+                    data=self._data_record,
+                    link_start=entity.link_start,
+                    link_end=entity.link_end,
+                )
+            )
+            self.sim._system_data.add(
+                JointsData(
+                    owner=self,
+                    idx=entity.idx,
+                    data=self._data_record,
+                    joint_start=entity.joint_start,
+                    joint_end=entity.joint_end,
+                    dof_start=entity.dof_start,
+                    dof_end=entity.dof_end,
+                    q_start=entity.q_start,
+                    q_end=entity.q_end,
+                )
+            )
+            for link in entity.links:
+                for geom in link.vgeoms:
+                    self.sim._system_data.add(
+                        VisualGeomData(
+                            owner=self,
+                            idx=geom.idx,
+                            data=self._data_record,
+                            link_idx=link.idx,
+                            vert_start=geom.vvert_start,
+                            vert_end=geom.vvert_end,
+                            face_start=geom.vface_start,
+                            face_end=geom.vface_end,
+                        )
+                    )
+
+    def build(self):
         self._create_data_manager()
 
         self._init_dof_fields()
@@ -424,19 +501,18 @@ class KinematicSolver(Solver):
         self.data_manager = array_class.DataManager(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
         self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
 
     @property
     def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
         yield from array_class.iter_data(self, "rigid_config")
         yield from array_class.iter_data(self.data_manager, "errno", array_class.DataKind.STATE)
-        structs = ["rigid_info", "dyn_info", "dyn_state", "rigid_adjoint_cache"]
+        yield from array_class.iter_data(self.data_manager, "rigid_info")
+        yield from array_class.iter_data(self, "dyn_info")
+        yield from array_class.iter_data(self, "dyn_state")
+        yield from array_class.iter_data(self.data_manager, "rigid_adjoint_cache")
         if self.rigid_config.requires_grad:
-            structs.append("dyn_state_adjoint_cache")
-        for name in structs:
-            yield from array_class.iter_data(self.data_manager, name)
+            yield from array_class.iter_data(self.data_manager, "dyn_state_adjoint_cache")
         # The flags describe the derived poses and velocities, so they travel with them
         yield from array_class.iter_data(self, "_is_forward_pos_updated", array_class.DataKind.DERIVED)
         yield from array_class.iter_data(self, "_is_forward_vel_updated", array_class.DataKind.DERIVED)

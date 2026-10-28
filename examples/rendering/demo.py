@@ -27,122 +27,132 @@ def main():
 
     # floor
     plane = scene.add_entity(
-        morph=gs.morphs.Plane(
-            pos=(0.0, 0.0, -0.5),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Aluminium(
-            ior=10.0,
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Plane(
+                pos=(0.0, 0.0, -0.5),
+            ),
+            surface=gs.surfaces.Aluminium(
+                ior=10.0,
+            ),
         ),
     )
 
     # user specified external color texture
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(0.0, -3, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Rough(
-            diffuse_texture=gs.textures.ColorTexture(
-                color=(1.0, 0.5, 0.5),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(0.0, -3, 0.0),
+            ),
+            surface=gs.surfaces.Rough(
+                diffuse_texture=gs.textures.ColorTexture(
+                    color=(1.0, 0.5, 0.5),
+                ),
             ),
         ),
     )
     # user specified color (using color shortcut)
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(0.0, -1.8, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Rough(
-            color=(1.0, 1.0, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(0.0, -1.8, 0.0),
+            ),
+            surface=gs.surfaces.Rough(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
     )
     # smooth shortcut
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(0.0, -0.6, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Smooth(
-            color=(0.6, 0.8, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(0.0, -0.6, 0.0),
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(0.6, 0.8, 1.0),
+            ),
         ),
     )
     # Iron
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(0.0, 0.6, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Iron(
-            color=(1.0, 1.0, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(0.0, 0.6, 0.0),
+            ),
+            surface=gs.surfaces.Iron(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
     )
     # Gold
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(0.0, 1.8, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Gold(
-            color=(1.0, 1.0, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(0.0, 1.8, 0.0),
+            ),
+            surface=gs.surfaces.Gold(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
     )
     # Glass
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(0.0, 3.0, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Glass(
-            color=(1.0, 1.0, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(0.0, 3.0, 0.0),
+            ),
+            surface=gs.surfaces.Glass(
+                color=(1.0, 1.0, 1.0),
+            ),
         ),
     )
     # Opacity
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/sphere.obj",
-            scale=0.5,
-            pos=(2.0, -3, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Smooth(
-            color=(1.0, 1.0, 1.0, 0.5),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/sphere.obj",
+                scale=0.5,
+                pos=(2.0, -3, 0.0),
+            ),
+            surface=gs.surfaces.Smooth(
+                color=(1.0, 1.0, 1.0, 0.5),
+            ),
         ),
     )
     # asset's own attributes
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
-            scale=0.15,
-            pos=(2.2, -2.3, 0.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
+                scale=0.15,
+                pos=(2.2, -2.3, 0.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     # override asset's attributes
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
-            scale=0.15,
-            pos=(2.2, -1.0, 0.0),
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Rough(
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="textures/checker.png",
-            )
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/wooden_sphere_OBJ/wooden_sphere.obj",
+                scale=0.15,
+                pos=(2.2, -1.0, 0.0),
+            ),
+            surface=gs.surfaces.Rough(
+                diffuse_texture=gs.textures.ImageTexture(
+                    image_path="textures/checker.png",
+                )
+            ),
         ),
     )
     cam_0 = scene.add_camera(

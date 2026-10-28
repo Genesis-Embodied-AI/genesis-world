@@ -12,8 +12,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
-from genesis.engine.materials.base import Material
 from genesis.engine.states import SolverCheckpoint
+from genesis.engine.system_data import SystemData, SystemDataDescription
 from genesis.grad.bridge import QueriedStates
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
@@ -315,14 +315,12 @@ class GravityMixin:
 
 
 class Solver(RBC):
-    # The material of the entities this solver simulates, None for a solver holding no entity of its own
-    material_cls: type[Material] | None = None
-
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
         self._sim = sim
         self._scene = scene
         self._options = options
+        self._data_record: SystemData | None = None
         self._entities: list[Entity] = gs.List()
 
         # The solver states queried during the current rollout, registered by 'get_state' (see QueriedStates)
@@ -356,8 +354,16 @@ class Solver(RBC):
             )
         self._subscribers.add(subscriber)
 
-    def build(self):
+    def describe(self) -> SystemDataDescription | None:
+        """Resolve the static configuration, and return what the simulator allocates as this solver's record."""
         self._B = self._sim._B
+        return None
+
+    def register_data(self):
+        """Bind the allocated record and register the range records that index into it."""
+
+    def build(self):
+        pass
 
     def process_input(self, in_backward=False):
         """

@@ -68,13 +68,15 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
     )
     # A kinematic entity, whose solver holds state of its own. The runtime crashes when it builds one with gradients
     # after another scene in the same process, so a gradient scene holds a rigid box there.
+    options_cls = gs.options.RigidEntityOptions if requires_grad else gs.options.KinematicEntityOptions
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, -0.6, 0.5),
-            quat=(1.0, 0.0, 0.0, 1.0),
-            size=(0.1, 0.1, 0.1),
+        options=options_cls(
+            morph=gs.morphs.Box(
+                pos=(0.0, -0.6, 0.5),
+                quat=(1.0, 0.0, 0.0, 1.0),
+                size=(0.1, 0.1, 0.1),
+            ),
         ),
-        material=gs.materials.Rigid() if requires_grad else gs.materials.Kinematic(),
     )
     return scene
 
@@ -150,6 +152,9 @@ def test_export_and_load_rigid(
             files=pieces,
             pos=(0.0, 0.5, 0.5),
         ),
+        surface=gs.surfaces.Default(
+            color=(0.8, 0.2, 0.2),
+        ),
     )
     # A link whose frame is anchored on the geometry it holds, given a pose offset as well
     anchored = scene.add_entity(
@@ -195,11 +200,12 @@ def test_export_and_load_rigid(
         ),
     )
     kinematic_arm = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=ET.tostring(mimic_hinges, encoding="unicode"),
-            pos=(40.0, 40.0, 1.0),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MJCF(
+                file=ET.tostring(mimic_hinges, encoding="unicode"),
+                pos=(40.0, 40.0, 1.0),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     # A second entity from the same asset as 'anchored', so both share its geometry in the written file
     twin = scene.add_entity(
@@ -341,6 +347,8 @@ def test_export_and_load_rigid(
     assert restored.entities[1].surface.diffuse_texture.image_path == "checker.png"
     # A batch holds textures of its own, and each keeps the name of the image it was read from
     assert restored.entities[2].surface.diffuse_texture.textures[0].image_path == "indoor_bright.png"
+    # A color shortcut stays out of the file, and the texture it resolved to stands in its place
+    assert_allclose(restored.entities[5].surface.diffuse_texture.color, (0.8, 0.2, 0.2), tol=gs.EPS)
     # A texture holding a path rather than pixels stands for nothing, in the surface and in the meshes drawn with it
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None
@@ -602,12 +610,9 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
 @pytest.mark.required
 def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
     # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
-    # other physics. No description carries a particle entity either.
-    checkpoint_scene.add_entity(
-        morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
-    )
+    # other physics.
     checkpoint_scene.add_force_field(gs.force_fields.Wind(direction=(1.0, 0.0, 0.0)))
-    with pytest.raises(gs.GenesisException, match="1 MPMEntity, 1 Wind cannot be exported"):
+    with pytest.raises(gs.GenesisException, match="1 Wind cannot be exported"):
         checkpoint_scene.export(tmp_path / f"wind{SCENE_FORMAT}")
 
 

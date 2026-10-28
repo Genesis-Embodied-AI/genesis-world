@@ -1,14 +1,21 @@
 import functools
+from dataclasses import dataclass
 
 import torch
 
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.materials import MPM
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import to_gs_tensor
 
-from .particle_entity import ParticleEntity, assert_active
+from .particle_entity import ParticleEntity, ParticleEntityDescription, assert_active
+
+
+@dataclass(kw_only=True)
+class MPMEntityDescription(ParticleEntityDescription):
+    material: MPM.Base
 
 
 def assert_muscle(method):
@@ -32,14 +39,8 @@ class MPMEntity(ParticleEntity):
         Scene object this entity belongs to.
     solver : Solver
         The solver responsible for simulating this entity.
-    material : Material
-        Material used to determine physical behavior (e.g., Snow, Sand, Muscle).
-    morph : Morph
-        Shape description used for particle sampling.
-    surface : Surface
-        Surface or texture representation.
-    particle_size : float
-        Particle size for discretization.
+    desc : MPMEntityDescription
+        The resolved particles and visual mesh, with the material, morph and surface they are resolved from.
     idx : int
         Unique index of the entity.
     particle_start : int
@@ -54,33 +55,17 @@ class MPMEntity(ParticleEntity):
         self,
         scene,
         solver,
-        material,
-        morph,
-        surface,
-        particle_size,
+        desc: MPMEntityDescription,
         idx,
         particle_start,
         vvert_start,
         vface_start,
-        name: str | None = None,
     ):
-        need_skinning = not isinstance(
-            material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
-        )
-        super().__init__(
-            scene,
-            solver,
-            material,
-            morph,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            vvert_start,
-            vface_start,
-            need_skinning=need_skinning,
-            name=name,
-        )
+        super().__init__(scene, solver, desc, idx, particle_start, vvert_start, vface_start)
+
+    @property
+    def desc(self) -> MPMEntityDescription:
+        return self._desc
 
     def init_tgt_keys(self):
         """

@@ -31,29 +31,32 @@ def main():
     )
 
     plane = scene.add_entity(
-        gs.morphs.Plane(),
-        material=gs.materials.Kinematic(),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Plane(),
+        ),
     )
 
     robot_config = config[args.robot]
     mjcf_file = robot_config["mjcf_file"]
     robot = scene.add_entity(
-        gs.morphs.MJCF(
-            file=mjcf_file,
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MJCF(
+                file=mjcf_file,
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
 
     print("links=", robot.links)
 
     target_entity = scene.add_entity(
-        gs.morphs.Mesh(
-            file="meshes/axis.obj",
-            scale=0.10,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(1, 0.5, 0.5, 1),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/axis.obj",
+                scale=0.10,
+            ),
+            surface=gs.surfaces.Default(
+                color=(1, 0.5, 0.5, 1),
+            ),
         ),
     )
     scene.build()

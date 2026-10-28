@@ -31,15 +31,17 @@ def main():
     )
 
     liquid = scene.add_entity(
-        material=gs.materials.PBD.Liquid(
-            rho=1.0,
-            sampler="regular",
-            density_relaxation=1.0,
-            viscosity_relaxation=0.0,
-        ),
-        morph=gs.morphs.Box(
-            lower=(0.2, 0.1, 0.1),
-            upper=(0.4, 0.3, 0.5),
+        options=gs.options.PBDLiquidEntityOptions(
+            morph=gs.morphs.Box(
+                lower=(0.2, 0.1, 0.1),
+                upper=(0.4, 0.3, 0.5),
+            ),
+            material=gs.materials.PBD.Liquid(
+                rho=1.0,
+                sampler="regular",
+                density_relaxation=1.0,
+                viscosity_relaxation=0.0,
+            ),
         ),
     )
     scene.build(n_envs=0)

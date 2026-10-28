@@ -166,14 +166,16 @@ def test_emissive_composites(base_plus_emissive_glb, show_viewer, renderer):
         ),
     )
     fem_quad = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(2.0, 2.0, 0.5),
-            pos=(4.5, 0.0, 0.0),
-        ),
-        material=gs.materials.FEM.Elastic(),
-        surface=gs.surfaces.BSDF(
-            color=(0.9, 0.0, 0.0),
-            emissive=(0.0, 0.0, 0.6),
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                size=(2.0, 2.0, 0.5),
+                pos=(4.5, 0.0, 0.0),
+            ),
+            material=gs.materials.FEM.Elastic(),
+            surface=gs.surfaces.BSDF(
+                color=(0.9, 0.0, 0.0),
+                emissive=(0.0, 0.0, 0.6),
+            ),
         ),
     )
     camera = scene.add_camera(
@@ -841,32 +843,38 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     )
 
     # We don't test "recon" for vis_mode because it is hard to install.
-    materials = ((gs.materials.Rigid(), "visual"),)
+    entities_config = ((gs.options.RigidEntityOptions, gs.materials.Rigid(), "visual"),)
     if renderer_type == RENDERER_TYPE.RASTERIZER:
-        materials = (
-            *materials,
-            (gs.materials.Tool(), "visual"),
-            (gs.materials.FEM.Elastic(), "visual"),
-            (gs.materials.MPM.Elastic(), particle_mode),
-            (gs.materials.PBD.Cloth(), particle_mode),
-            (gs.materials.SPH.Liquid(), "particle" if particle_mode == "visual" else particle_mode),
-            (gs.materials.Kinematic(), "visual"),
+        entities_config = (
+            *entities_config,
+            (gs.options.ToolEntityOptions, gs.materials.Tool(), "visual"),
+            (gs.options.FEMEntityOptions, gs.materials.FEM.Elastic(), "visual"),
+            (gs.options.MPMEntityOptions, gs.materials.MPM.Elastic(), particle_mode),
+            (gs.options.PBDClothEntityOptions, gs.materials.PBD.Cloth(), particle_mode),
+            (
+                gs.options.SPHEntityOptions,
+                gs.materials.SPH.Liquid(),
+                "particle" if particle_mode == "visual" else particle_mode,
+            ),
+            (gs.options.KinematicEntityOptions, gs.materials.Kinematic(), "visual"),
         )
 
     ducks = []
-    for i, (material, vis_mode) in enumerate(materials):
+    for i, (options_cls, material, vis_mode) in enumerate(entities_config):
         col_idx, row_idx = i // 3 - 1, i % 3 - 1
         ducks.append(
             scene.add_entity(
-                material=material,
-                morph=gs.morphs.Mesh(
-                    file="meshes/duck.obj",
-                    scale=0.1,
-                    pos=(col_idx * 0.5, row_idx * 0.5, 0.5),
-                ),
-                surface=gs.surfaces.Default(
-                    color=np.random.rand(3),
-                    vis_mode=vis_mode,
+                options=options_cls(
+                    morph=gs.morphs.Mesh(
+                        file="meshes/duck.obj",
+                        scale=0.1,
+                        pos=(col_idx * 0.5, row_idx * 0.5, 0.5),
+                    ),
+                    material=material,
+                    surface=gs.surfaces.Default(
+                        color=np.random.rand(3),
+                        vis_mode=vis_mode,
+                    ),
                 ),
             )
         )
@@ -885,11 +893,13 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     # add_rigid_node (tuple keys at link/geom level), other ducks use add_static_node (int keys). The URDF has
     # 2 visual links. FEM entities use per-visual-geom tuple keys (entity.idx, i_g) only at "geom" level; at "link"
     # and "entity" levels they fall back to a plain int entity.idx.
-    n_rigid_like = sum(isinstance(m, gs.materials.Kinematic) for m, _ in materials)
+    n_rigid_like = sum(isinstance(m, gs.materials.Kinematic) for _, m, _ in entities_config)
     n_fem_geom = (
-        sum(isinstance(m, gs.materials.FEM.Elastic) for m, _ in materials) if segmentation_level == "geom" else 0
+        sum(isinstance(m, gs.materials.FEM.Elastic) for _, m, _ in entities_config)
+        if segmentation_level == "geom"
+        else 0
     )
-    seg_num = len(materials) + (2 if segmentation_level == "entity" else 3)
+    seg_num = len(entities_config) + (2 if segmentation_level == "entity" else 3)
     idx_dict = scene.segmentation_idx_dict
     assert len(idx_dict) == seg_num
     comp_key = 0
@@ -925,11 +935,13 @@ def test_multi_submesh_fem_render(renderer_type, renderer, show_viewer, png_snap
     # Every vertex of the scene must stay inside the camera frustum: the Apple Software Renderer misrasterizes
     # out-of-frustum geometry.
     fem = scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/trashbag_rope.glb",
-            group_by_material=True,
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/trashbag_rope.glb",
+                group_by_material=True,
+            ),
+            material=gs.materials.FEM.Cloth(),
         ),
-        material=gs.materials.FEM.Cloth(),
     )
     camera = scene.add_camera(
         res=CAM_RES,
