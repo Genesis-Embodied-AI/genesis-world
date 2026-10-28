@@ -370,7 +370,10 @@ class Simulator(RBC):
 
     def get_error_envs_mask(self) -> torch.Tensor:
         """Return whether each env flagged an error in any solver since its last reset."""
-        return torch.stack([solver.get_error_envs_mask() for solver in self._active_solvers]).any(dim=0)
+        envs_mask = torch.zeros((self._B,), dtype=torch.bool, device=gs.device)
+        for solver in self._active_solvers:
+            envs_mask |= solver.get_error_envs_mask()
+        return envs_mask
 
     def clear_errno(self, envs_idx=None):
         """Clear the errors every solver flagged for the given envs, all of them if None."""

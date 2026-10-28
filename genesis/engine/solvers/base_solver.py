@@ -440,7 +440,7 @@ class Solver(RBC):
     def build(self):
         self._B = self._sim._B
         self._errno_latched = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
-        if gs.use_zerocopy.is_supported and gs.device.type == "cuda":
+        if gs.device.type == "cuda":
             self._errno_host = torch.zeros((self._B,), dtype=gs.tc_int, pin_memory=True)
             self._errno_event = torch.cuda.Event()
         if self._requires_grad:

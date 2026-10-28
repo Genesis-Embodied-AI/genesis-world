@@ -864,6 +864,9 @@ def test_derived_substeps(show_viewer, tol):
     scene_inactive.build()
     assert_equal(scene_inactive.sim.substeps, 1)
     assert_allclose(scene_inactive.sim.substep_dt, 0.01, tol=gs.EPS)
+    # A scene holding no active solver steps and reports no env in error
+    scene_inactive.step()
+    assert_equal(scene_inactive.get_error_envs_mask(), False)
 
     for interval in (0.003, 0.02):
         with pytest.raises(gs.GenesisException, match="does not divide the step dt"):
