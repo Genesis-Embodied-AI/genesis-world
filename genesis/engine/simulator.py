@@ -83,10 +83,13 @@ class Simulator(RBC):
         # the steps a backward pass forbids)
         def begin_backward_pass():
             # The pass rewinds the state of the simulation, so stepping forward stays forbidden until the next reset,
-            # even after a pass that raises. The adjoints start from zero.
+            # even after a pass that raises. The errors the rollout flagged raise before any step is reversed, rather
+            # than with the context of the step being reversed when a deferred check reads them. The adjoints start
+            # from zero.
             self._is_forward_ready = False
             for solver in self._active_solvers:
                 solver.update_errno()
+                solver.check_errno()
                 solver.reset_grad()
 
         def end_backward_pass():

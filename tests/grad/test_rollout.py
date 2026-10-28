@@ -225,13 +225,13 @@ def test_closed_loop_rollout_follows_torch_semantics(grad_revolute, precision, s
     loss = rollout(scene_ana, arms_ana, params_ana)
     arms_ana[0].set_dofs_velocity(float("nan"))
     scene_ana.step()
-    with pytest.raises(gs.GenesisException, match="Invalid accelerations"):
+    with pytest.raises(gs.GenesisException, match="^Invalid accelerations"):
         torch.autograd.grad(loss, params_ana)
     # A 'nan' control force, unbounded by the force range of the dofs, drives the state to infinity
     loss = rollout(scene_ana, arms_ana, params_ana)
     arms_ana[0].control_dofs_force(float("nan"))
     scene_ana.step()
-    with pytest.raises(gs.GenesisException, match="Invalid accelerations"):
+    with pytest.raises(gs.GenesisException, match="^Invalid accelerations"):
         torch.autograd.grad(loss, params_ana)
 
     # A write given an index several times leaves the value of its last occurrence, which alone gets a gradient, whether
