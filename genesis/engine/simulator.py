@@ -649,16 +649,14 @@ class StepOperation(Operation):
         self._sim._reverse(self._substep_start, self._steps_start, self._checkpoints)
         # The adjoint of every earlier step derives from this one, so an adjoint that is not finite raises at once,
         # naming the step a shorter horizon would have to stop before. It is read from every array of the state that
-        # carries one, so every differentiable solver is covered.
+        # carries one, so every differentiable solver is covered. The arrays are those the boundary checkpoint of the
+        # step holds, listed once by the solver, which spares walking its structs at every step.
         for solver in self._sim._active_solvers:
             if not solver.requires_grad:
                 continue
             envs_finite = []
-            for item in solver.data:
-                if not isinstance(item, ArrayItem) or item.kind != DataKind.STATE:
-                    continue
-                # The unused arrays of a feature switched off are 0-d placeholders (see 'maybe_shape')
-                if isinstance(item.array, torch.Tensor) or not item.array.shape or not item.array.has_grad():
+            for item in solver._boundary_items.items:
+                if not isinstance(item, ArrayItem) or isinstance(item.array, torch.Tensor) or not item.array.has_grad():
                     continue
                 # The environment is the last index of every array of the state, which the transpose moves first
                 grad = qd_to_torch(item.array.grad, transpose=True)
