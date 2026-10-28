@@ -415,10 +415,17 @@ def parse_urdf(morph, surface):
         j_info["dofs_act_bias"] = np.column_stack([np.zeros_like(kp), -kp, -kv])
 
         j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (j_info["n_dofs"], 1))
-        # urdfpy reads an unset effort as 0, and a zero effort leaves the actuation force unbounded, as in MuJoCo
-        if joint.limit is not None and abs(joint.limit.effort) > 0.0:
-            effort = abs(joint.limit.effort)
-            j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
+        if joint.limit is not None:
+            # urdfpy reads an unset effort as 0. The URDF spec reads a zero effort as a joint that cannot be actuated,
+            # but in common practice, it means no limit (this behavior matches MuJoCo and Isaac Sim).
+            effort = joint.limit.effort
+            if abs(effort) < gs.EPS:
+                gs.logger.warning(f"(URDF) Joint '{joint.name}' has unset or zero effort. Leaving force unbounded.")
+            else:
+                if effort < 0.0:
+                    gs.logger.warning(f"(URDF) Joint '{joint.name}' has negative effort. Using its absolute value.")
+                    effort = -effort
+                j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
 
     # Apply scaling factor
     for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
