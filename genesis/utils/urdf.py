@@ -309,6 +309,7 @@ def parse_urdf(morph, surface):
                 link_g_infos.append(g_info)
 
     #########################  non-base joints and links #########################
+    joints_name_unactuated = []
     for joint in robot.joints:
         idx = link_name_to_idx[joint.child]
         l_info = l_infos[idx]
@@ -415,17 +416,22 @@ def parse_urdf(morph, surface):
         j_info["dofs_act_bias"] = np.column_stack([np.zeros_like(kp), -kp, -kv])
 
         j_info["dofs_force_range"] = np.tile([-np.inf, np.inf], (j_info["n_dofs"], 1))
-        if joint.limit is not None:
-            # urdfpy reads an unset effort as 0. The URDF spec reads a zero effort as a joint that cannot be actuated,
-            # but in common practice, it means no limit (this behavior matches MuJoCo and Isaac Sim).
+        if joint.limit is not None and joint.limit.effort is not None:
             effort = joint.limit.effort
-            if abs(effort) < gs.EPS:
-                gs.logger.warning(f"(URDF) Joint '{joint.name}' has unset or zero effort. Leaving force unbounded.")
-            else:
-                if effort < 0.0:
-                    gs.logger.warning(f"(URDF) Joint '{joint.name}' has negative effort. Using its absolute value.")
-                    effort = -effort
-                j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
+            if effort < 0.0:
+                gs.logger.warning(f"(URDF) Joint '{joint.name}' has negative effort. Using its absolute value.")
+                effort = -effort
+            if effort < gs.EPS:
+                joints_name_unactuated.append(joint.name)
+            j_info["dofs_force_range"] = np.tile([-effort, effort], (j_info["n_dofs"], 1))
+
+    # The URDF spec reads a zero effort as a joint that cannot be actuated, whereas MuJoCo and Isaac Sim leave its force
+    # unbounded. Exporters write it as a placeholder, so the user is told why such a joint ignores control.
+    if joints_name_unactuated:
+        gs.logger.info(
+            f'(URDF) Joints {joints_name_unactuated} have effort="0", so they cannot be actuated and ignore control. '
+            "Remove the attribute to leave their force unbounded, or call 'set_dofs_force_range' after loading."
+        )
 
     # Apply scaling factor
     for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
