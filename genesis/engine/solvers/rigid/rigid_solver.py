@@ -522,8 +522,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # paying once the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray kernels
         # serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
         is_generic = gs.use_ndarray
+        # FIXME: The adjoint of the constraint solve reuses the factor the forward left in nt_H, which the tiled seed
+        # does not keep consistent with the final iterate on CUDA, so a differentiable scene keeps the per-env seed.
         enable_tiled_island_seed = (
-            gs.backend != gs.cpu and not sparse_solve and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
+            gs.backend != gs.cpu
+            and not self.sim.options.requires_grad
+            and not sparse_solve
+            and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
         )
         enable_cooperative_constraint_kernels = enable_tiled_island_seed and (
             is_generic or self._sim._B <= get_gpu_core_count()
