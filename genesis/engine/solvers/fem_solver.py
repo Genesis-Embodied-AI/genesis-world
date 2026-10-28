@@ -1294,8 +1294,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         else:
             rigid_solver = self._sim.rigid_solver
             links_envs_idx = envs_idx if self._scene.n_envs > 0 else None
-            link_init_pos = rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
-            link_init_quat = rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+            # The attachment is a configuration of the constraint, which carries no gradient
+            with torch.no_grad():
+                link_init_pos = rigid_solver.get_links_pos(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
+                link_init_quat = rigid_solver.get_links_quat(links_idx=link_idx, envs_idx=links_envs_idx)[..., 0, :]
             link_init_pos = broadcast_tensor(link_init_pos, gs.tc_float, (len(envs_idx), 3)).contiguous()
             link_init_quat = broadcast_tensor(link_init_quat, gs.tc_float, (len(envs_idx), 4)).contiguous()
 
@@ -1306,6 +1308,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def update_constraint_targets(self, target_poss, verts_idx=None, envs_idx=None):
         """Update the target position of some constrained vertices (see 'set_vertex_constraints')."""
+        if target_poss is None:
+            gs.raise_exception("The target positions of the constraints must be specified.")
         if not self._constraints_initialized:
             gs.logger.warning("Ignoring update_constraint_targets; constraints have not been initialized.")
             return
