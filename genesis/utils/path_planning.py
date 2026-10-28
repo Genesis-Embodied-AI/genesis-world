@@ -459,7 +459,6 @@ class RRT(PathPlanner):
                             rigid_info,
                             self._solver.rigid_config,
                             force_update_all_geoms=False,
-                            is_backward=False,
                         )
 
     @qd.kernel
@@ -825,7 +824,6 @@ class RRTConnect(PathPlanner):
                             rigid_info,
                             self._solver.rigid_config,
                             force_update_all_geoms=False,
-                            is_backward=False,
                         )
 
     @qd.kernel
