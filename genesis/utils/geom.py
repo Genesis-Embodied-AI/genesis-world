@@ -2631,6 +2631,8 @@ def cubic_spline_1d(x, y, xv):
     assert len(x) == len(y)
     y_2d = y[:, None] if y.ndim == 1 else y
     n, m = y_2d.shape
+    if n < 2:
+        raise ValueError("At least two knots are required for spline interpolation.")
     h = np.diff(x)
 
     # Band storage: only store the non-zero diagonals
@@ -2642,9 +2644,15 @@ def cubic_spline_1d(x, y, xv):
     band = np.zeros((5, n), dtype=gs.np_float)
     rhs = np.zeros((n, m), dtype=gs.np_float)
 
-    # Not-a-knot boundary conditions
-    band[2, 0], band[3, 0], band[4, 0] = h[1], -(h[0] + h[1]), h[0]
-    band[0, n - 1], band[1, n - 1], band[2, n - 1] = h[-1], -(h[-2] + h[-1]), h[-2]
+    # Not-a-knot interpolation reduces to a line or parabola for small inputs.
+    if n == 2:
+        band[2, 0], band[2, 1] = 1.0, 1.0
+    elif n == 3:
+        band[2, 0], band[3, 0] = 1.0, -1.0
+        band[1, -1], band[2, -1] = -1.0, 1.0
+    else:
+        band[2, 0], band[3, 0], band[4, 0] = h[1], -(h[0] + h[1]), h[0]
+        band[0, n - 1], band[1, n - 1], band[2, n - 1] = h[-1], -(h[-2] + h[-1]), h[-2]
 
     # Interior points
     for i in range(1, n - 1):
