@@ -84,7 +84,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "black",
-    "pytest",
+    # - 9.2 stores a 'NodeId' object in test reports, which 'pytest-forked' fails to serialize (pytest-forked#112)
+    "pytest<9.2.0",
     "pytest-xdist",
     "pytest-forked",
     "pytest-timeout",
