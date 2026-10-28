@@ -430,7 +430,12 @@ class LaunchRecorder:
         the torch tensors tracking gradients the launches take, by identity of the tensor.
         """
         tensors_grad = {}
+        # The zero-copy restores of consecutive entries flush once, before the next launch reading them
+        is_sync_pending = False
         for launches, is_autodiff, backward, backward_args, arrays_saved, restore in reversed(self.entries[start:stop]):
+            if is_sync_pending and (is_autodiff or backward is not None):
+                torch.mps.synchronize()
+                is_sync_pending = False
             if is_autodiff:
                 for kernel, args in reversed(launches):
                     # A torch tensor tracking gradients is reversed through a leaf standing for it, which collects its
@@ -452,8 +457,9 @@ class LaunchRecorder:
                 qd_from_torch(array, value)
             if restore is not None:
                 restore()
-            if arrays_saved and gs.use_zerocopy.is_supported and gs.backend == gs.metal:
-                torch.mps.synchronize()
+            is_sync_pending |= bool(arrays_saved) and gs.use_zerocopy.is_supported and gs.backend == gs.metal
+        if is_sync_pending:
+            torch.mps.synchronize()
         return tensors_grad
 
 
