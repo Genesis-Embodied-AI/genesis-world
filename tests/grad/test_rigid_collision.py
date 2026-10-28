@@ -43,7 +43,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             show_viewer=show_viewer,
         )
         if shape == "ground_box":
-            scene.add_entity(
+            ground = scene.add_entity(
                 gs.morphs.Box(
                     size=(2.0, 2.0, 0.2),
                     pos=(0.0, 0.0, 0.1),
@@ -59,7 +59,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
                 vis_mode="collision",
             )
         else:
-            scene.add_entity(gs.morphs.Plane())
+            ground = scene.add_entity(gs.morphs.Plane())
             if shape == "box":
                 obj = scene.add_entity(
                     gs.morphs.Box(
@@ -87,7 +87,7 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             else:
                 raise ValueError(shape)
         scene.build(n_envs=0)
-        return scene, obj
+        return scene, obj, ground
 
     def _n_contacts(entity):
         return len(entity.get_contacts()["geom_a"])
@@ -117,11 +117,18 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             obj.control_dofs_force(base_force)
             scene.step()
 
-    scene_ana, obj_ana = _build_contact_scene(shape, grad_capsule, requires_grad=True, show_viewer=show_viewer)
+    scene_ana, obj_ana, ground_ana = _build_contact_scene(
+        shape, grad_capsule, requires_grad=True, show_viewer=show_viewer
+    )
     scene_ana.reset()
     settle(scene_ana, obj_ana)
     nc = _n_contacts(obj_ana)
     assert nc > 0, f"setup error: {shape} not in contact after settle (n_contacts={nc})"
+    # The fixed ground box is set back at its height through a tensor tracking gradients, which reaches the contact
+    # through the poses of its fixed geoms
+    ground_pos = torch.tensor((0.0, 0.0, 0.1), dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    if shape == "ground_box":
+        ground_ana.set_pos(ground_pos, relative=False)
     forces = [
         torch.tensor(init_force[t], dtype=gs.tc_float, device=gs.device, requires_grad=True) for t in range(n_steps)
     ]
@@ -136,13 +143,15 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
     # The FD reference must also run in diff mode: differentiable scenes route contacts through diff_gjk, whose
     # contact set and forces differ slightly from the production narrowphase, so a production-mode reference would
     # measure that forward gap instead of the gradient.
-    scene_fd, obj_fd = _build_contact_scene(shape, grad_capsule, requires_grad=True)
+    scene_fd, obj_fd, ground_fd = _build_contact_scene(shape, grad_capsule, requires_grad=True)
 
     # The finite differences need no autograd graph of the rollout, so it is left unrecorded
     @torch.no_grad()
-    def loss_at(perturbed):
+    def loss_at(perturbed, ground_height=0.1):
         scene_fd.reset()
         settle(scene_fd, obj_fd)
+        if shape == "ground_box":
+            ground_fd.set_pos((0.0, 0.0, ground_height), relative=False)
         for t in range(n_steps):
             obj_fd.control_dofs_force(perturbed[t])
             scene_fd.step()
@@ -161,6 +170,12 @@ def test_contact_per_step_force_grad_matches_fd(shape, grad_capsule, precision, 
             assert_allclose(
                 ana[t, i_d], fd, rtol=fd_rtol, atol=fd_atol, err_msg=f"contact force.grad mismatch at t={t} dof={i_d}"
             )
+    # The box-box manifold gains or loses a contact within 1e-5 of ground height, a step fp32 finite differences cannot
+    # go below
+    if shape == "ground_box" and precision == "64":
+        eps_height = 1e-6
+        fd = (loss_at(init_force, 0.1 + eps_height) - loss_at(init_force, 0.1 - eps_height)) / (2 * eps_height)
+        assert_allclose(ground_pos.grad[2], fd, rtol=fd_rtol, atol=fd_atol, err_msg="ground height grad mismatch")
 
 
 @pytest.mark.required

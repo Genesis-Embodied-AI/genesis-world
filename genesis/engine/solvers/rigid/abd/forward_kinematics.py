@@ -616,31 +616,38 @@ def func_update_geoms(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_config: qd.template(),
+    force_update_all_geoms: qd.template(),
 ):
     """Place the movable geoms of every awake link of every env on their link, one thread per geom.
 
-    The geoms take one thread each rather than following their link, so that a link carrying many geoms does not
-    serialize their placement, and so that the reverse of the sweep runs as wide. The loop is the outermost one of its
-    kernel (see func_update_cartesian_space).
+    Under force_update_all_geoms every geom of an awake link is placed instead, the fixed ones and those of the variants
+    the env holds inactive included, as func_update_geoms_link does. The geoms take one thread each rather than
+    following their link, so that a link carrying many geoms does not serialize their placement, and so that the
+    reverse of the sweep runs as wide. The loop is the outermost one of its kernel (see func_update_cartesian_space).
     """
     qd.loop_config(
         name="update_cartesian_space_geoms", serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL)
     )
     for i_g, i_b in qd.ndrange(dyn_state.geoms.pos.shape[0], dyn_state.geoms.pos.shape[1]):
-        if not dyn_info.geoms.is_fixed[i_g]:
-            i_l = dyn_info.geoms.link_idx[i_g]
-            I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-            # A geom outside the range of its link is none the env carries: one of a variant the env holds inactive,
-            # or the padding slot of a scene without geoms (see n_geoms_), whose null frame holds no rotation
-            is_carried = dyn_info.links.geom_start[I_l] <= i_g < dyn_info.links.geom_end[I_l]
-            if is_carried and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
-                dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
-                    dyn_info.geoms.pos[i_g],
-                    dyn_info.geoms.quat[i_g],
-                    dyn_state.links.pos[i_l, i_b],
-                    dyn_state.links.quat[i_l, i_b],
-                )
-                dyn_state.geoms.verts_updated[i_g, i_b] = False
+        i_l = dyn_info.geoms.link_idx[i_g]
+        I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
+        # A geom outside the range of its link, or of its entity once forced, is of a variant the env holds inactive, or
+        # the padding slot of a scene without geoms (see n_geoms_), whose null frame holds no rotation
+        is_placed = False
+        if qd.static(force_update_all_geoms):
+            i_e = dyn_info.links.entity_idx[I_l]
+            is_placed = dyn_info.entities.geom_start[i_e] <= i_g < dyn_info.entities.geom_end[i_e]
+        else:
+            is_placed = not dyn_info.geoms.is_fixed[i_g]
+            is_placed = is_placed and dyn_info.links.geom_start[I_l] <= i_g < dyn_info.links.geom_end[I_l]
+        if is_placed and func_is_awake_link(i_l, i_b, dyn_state, rigid_config):
+            dyn_state.geoms.pos[i_g, i_b], dyn_state.geoms.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
+                dyn_info.geoms.pos[i_g],
+                dyn_info.geoms.quat[i_g],
+                dyn_state.links.pos[i_l, i_b],
+                dyn_state.links.quat[i_l, i_b],
+            )
+            dyn_state.geoms.verts_updated[i_g, i_b] = False
 
 
 @qd.kernel(fastcache=True)
@@ -1265,7 +1272,7 @@ def func_update_cartesian_space(
                         )
 
     if qd.static(not (force_update_all_geoms or is_backward)):
-        func_update_geoms(dyn_state, dyn_info, rigid_config)
+        func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=False)
 
     func_COM_links(dyn_state, dyn_info, rigid_info, rigid_config)
 
@@ -1314,7 +1321,8 @@ def kernel_update_geoms_replay(
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
 ):
-    func_update_geoms(dyn_state, dyn_info, rigid_config)
+    # The reversed kernels place every geom (see reverse_cartesian_space)
+    func_update_geoms(dyn_state, dyn_info, rigid_config, force_update_all_geoms=True)
 
 
 @qd.kernel(fastcache=True)
