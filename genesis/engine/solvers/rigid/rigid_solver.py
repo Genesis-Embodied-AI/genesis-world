@@ -548,13 +548,13 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             enable_cooperative_constraint_kernels or self.sim._para_level < gs.PARA_LEVEL.ALL
         )
 
-        # The level sweep (see func_sweep_links_by_level) syncs the lanes of a block, which neither the CPU nor the
-        # differentiable runs offer. The serial walks run one thread per tree or root and env through all the links of
-        # its group, so they take as long as the longest group. The lanes of an env step through a level in chunks of
-        # their count, so the sweep stays within that time while its lane steps over all the levels and envs fit in the
-        # cores times the longest group. Past that bound it only adds instructions to a busy GPU, whether the links are
-        # grouped by tree or by root.
-        enable_level_sweep = gs.backend != gs.cpu and not self.sim.options.requires_grad
+        # The level sweep (see func_sweep_links_by_level) syncs the lanes of a block, which the CPU does not offer, and
+        # which a reversed launch replaces by the serial walk (see reversed_with). The serial walks run one thread per
+        # tree or root and env through all the links of its group, so they take as long as the longest group. The lanes
+        # of an env step through a level in chunks of their count, so the sweep stays within that time while its lane
+        # steps over all the levels and envs fit in the cores times the longest group. Past that bound it only adds
+        # instructions to a busy GPU, whether the links are grouped by tree or by root.
+        enable_level_sweep = gs.backend != gs.cpu
         if enable_level_sweep and not is_generic:
             n_lanes_per_env = array_class.RigidSimStaticConfig.level_sweep_n_lanes_per_env
             for links_group_idx, links_level in (
@@ -1334,7 +1334,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             with custom_backward(self._constraint_force_grad):
                 kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
                 self._func_constraint_force()
-            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=True)
+            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
             kernel_solve_midpoint_free_bodies(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
             kernel_step_2(
                 self.dyn_state,

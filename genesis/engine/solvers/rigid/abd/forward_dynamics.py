@@ -137,6 +137,7 @@ def kernel_forward_dynamics(
     func_forward_dynamics(dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, is_backward=False)
 
 
+@reversed_with(is_backward=True)
 @qd.kernel(fastcache=True)
 def kernel_update_acc(
     dyn_state: array_class.DynState,
@@ -432,7 +433,9 @@ def func_compute_mass_matrix_and_link_force(
         func_crb_initialize(i_l, i_b, dyn_state, rigid_info, rigid_config)
         func_link_force_initialize(i_l, i_b, dyn_state, rigid_config)
 
-    if qd.static(rigid_config.enable_level_sweep):
+    # The level sweep syncs the lanes of a block, which autodiff cannot reverse, so its reverse goes through the walk of
+    # one thread per root (see kernel_forward_dynamics_without_qacc)
+    if qd.static(rigid_config.enable_level_sweep and not is_backward):
         func_sweep_links_by_level(
             dyn_state,
             dyn_info,
@@ -452,8 +455,8 @@ def func_compute_mass_matrix_and_link_force(
     for i_l, i_b in qd.ndrange(dyn_state.links.pos.shape[0], dyn_state.links.pos.shape[1]):
         func_mass_mat_force(i_l, i_b, dyn_state, dyn_info, rigid_info, rigid_config)
 
-    # The cooperative assembly syncs the lanes of a block, which autodiff cannot reverse, so its reverse goes through the
-    # rows of one thread each (see kernel_forward_dynamics_without_qacc)
+    # The cooperative assembly syncs the lanes of a block, which autodiff cannot reverse, so its reverse goes through
+    # the rows of one thread each (see kernel_forward_dynamics_without_qacc)
     if qd.static(rigid_config.enable_cooperative_constraint_kernels and not is_backward):
         BLOCK_DIM = qd.static(32)
         n_trees = rigid_info.trees_root_idx.shape[0]
@@ -1778,7 +1781,8 @@ def func_update_acc(
     links of the root ahead of its trees: one walk keeps the link body inlined once in the kernel, where a static pass
     and a tree pass would inline it twice. Differentiability wants the loop outermost in its kernel, which it is.
     """
-    if qd.static(rigid_config.enable_level_sweep):
+    # See func_compute_mass_matrix_and_link_force
+    if qd.static(rigid_config.enable_level_sweep and not is_backward):
         func_sweep_links_by_level(
             dyn_state,
             dyn_info,
