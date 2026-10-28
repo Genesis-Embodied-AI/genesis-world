@@ -745,6 +745,129 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 
 @pytest.fixture(scope="session")
+def authored_geom_density_mjcf():
+    """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
+    mjcf = ET.Element("mujoco", model="authored_geom_density")
+    default = ET.SubElement(mjcf, "default")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for name, attrib in (
+        ("on_geom", dict(density="250")),
+        ("on_class", {"class": "water"}),
+        ("on_default", dict(density="1000")),
+        ("unstated", {}),
+    ):
+        body = ET.SubElement(worldbody, "body", name=name, pos="0.0 0.0 1.0")
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
+
+    mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
+    ET.SubElement(mixed, "freejoint")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
+
+    fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
+    ET.SubElement(fused, "freejoint")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
+
+    # A zero-density geom is a massless marker carried by a link with nonzero inertia
+    weightless = ET.SubElement(fused, "body", name="weightless")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_geom_density_defaults():
+    models = []
+    for root_density, discard_visual, material_density in (
+        (None, False, None),
+        (None, True, None),
+        (700.0, False, None),
+        (700.0, True, None),
+        (None, True, 2000.0),
+    ):
+        mjcf = ET.Element("mujoco")
+        ET.SubElement(mjcf, "compiler", inertiafromgeom="false", discardvisual=str(discard_visual).lower())
+        default = ET.SubElement(mjcf, "default")
+        if root_density is not None:
+            ET.SubElement(default, "geom", density=str(root_density))
+        ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="mounted")
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
+        for i_g, attrib in enumerate(
+            ({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(density="500"))
+        ):
+            ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
+        replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
+        ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")
+        models.append((ET.tostring(mjcf, encoding="unicode"), root_density, material_density))
+    return models
+
+
+@pytest.fixture(scope="session")
+def mjcf_shell_inertia():
+    mjcf = ET.Element("mujoco", model="shell_inertia")
+    asset = ET.SubElement(mjcf, "asset")
+    mesh = trimesh.creation.box(extents=(0.2, 0.2, 0.2))
+    ET.SubElement(
+        asset,
+        "mesh",
+        name="shell_cube",
+        inertia="shell",
+        vertex=" ".join(map(str, mesh.vertices.reshape(-1))),
+        face=" ".join(map(str, mesh.faces.reshape(-1))),
+    )
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    sphere_link = ET.SubElement(worldbody, "body", name="sphere", pos="0 0 1")
+    ET.SubElement(sphere_link, "freejoint")
+    ET.SubElement(sphere_link, "geom", type="sphere", size="0.1", density="250", shellinertia="true")
+    mesh_link = ET.SubElement(worldbody, "body", name="mesh", pos="1 0 1")
+    ET.SubElement(mesh_link, "freejoint")
+    ET.SubElement(mesh_link, "geom", type="mesh", mesh="shell_cube", density="250")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_solid_and_shell_primitives():
+    models = []
+    for is_shell in (False, True):
+        mjcf = ET.Element("mujoco", model="primitives")
+        asset = ET.SubElement(mjcf, "asset")
+        mesh = trimesh.creation.annulus(r_min=0.05, r_max=0.1, height=0.05)
+        ET.SubElement(
+            asset,
+            "mesh",
+            name="annulus",
+            inertia="shell" if is_shell else "exact",
+            vertex=" ".join(map(str, mesh.vertices.reshape(-1))),
+            face=" ".join(map(str, mesh.faces.reshape(-1))),
+        )
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        for i_g, (name, attrib) in enumerate(
+            (
+                ("sphere", dict(type="sphere", size="0.1")),
+                ("capsule", dict(type="capsule", size="0.1 0.2")),
+                ("cylinder", dict(type="cylinder", size="0.1 0.2")),
+                ("box", dict(type="box", size="0.1 0.2 0.3")),
+                ("ellipsoid", dict(type="ellipsoid", size="0.1 0.2 0.3")),
+                ("annulus", dict(type="mesh", mesh="annulus")),
+            )
+        ):
+            body = ET.SubElement(worldbody, "body", name=name, pos=f"{i_g} 0 1")
+            ET.SubElement(body, "freejoint")
+            # MuJoCo takes the inertia type of a mesh from its asset
+            if is_shell and attrib["type"] != "mesh":
+                attrib["shellinertia"] = "true"
+            ET.SubElement(body, "geom", density="250", **attrib)
+        models.append(ET.tostring(mjcf, encoding="unicode"))
+    return models
+
+
+@pytest.fixture(scope="session")
 def undefined_inertia():
     """Generate a URDF with a single link that has no inertial element."""
     urdf = ET.Element("robot", name="undefined_inertia")
