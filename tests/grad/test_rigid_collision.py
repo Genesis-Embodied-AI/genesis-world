@@ -545,6 +545,19 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
     dL_defc_D = qd_to_numpy(constraint_solver.constraint_state.dL_defc_D)
     dL_dforce = qd_to_numpy(constraint_solver.constraint_state.dL_dforce)
 
+    # The solver relies on the structural zeros of the Jacobian (outside row supports) and mass matrix (outside blocks):
+    # some paths read rows whole rather than through the support lists. The adjoint differentiates the structurally
+    # nonzero entries alone, so the perturbations stay on them.
+    jac_n_dofs = qd_to_numpy(constraint_solver.constraint_state.jac_n_dofs)
+    jac_dofs_idx = qd_to_numpy(constraint_solver.constraint_state.jac_dofs_idx)
+    rows_idx, slots_idx, envs_idx = np.nonzero(np.arange(jac_dofs_idx.shape[1])[:, None] < jac_n_dofs[:, None, :])
+    jac_mask = np.zeros(init_input_jac.shape, dtype=bool)
+    jac_mask[rows_idx, jac_dofs_idx[rows_idx, slots_idx, envs_idx], envs_idx] = True
+    dofs_idx = np.arange(init_input_mass.shape[0])
+    dofs_mass_block_start = qd_to_numpy(rigid_solver.rigid_info.dofs_mass_block_start)
+    dofs_mass_block_end = qd_to_numpy(rigid_solver.rigid_info.dofs_mass_block_end)
+    mass_mask = (dofs_idx >= dofs_mass_block_start[:, None]) & (dofs_idx < dofs_mass_block_end[:, None])
+
     fd_eps = 1e-3
     trials = 200
     for dL_dx, x_type in (
@@ -557,6 +570,10 @@ def test_constraint_solver_backward_matches_fd(monkeypatch):
         error = 0.0
         for _ in range(trials):
             rand_dx = np.random.randn(*dL_dx.shape)
+            if x_type == "jac":
+                rand_dx = rand_dx * jac_mask
+            elif x_type == "mass":
+                rand_dx = rand_dx * mass_mask[..., None]
             rand_dx = rand_dx / max(
                 np.linalg.norm(rand_dx, axis=0 if x_type in ("force", "aref", "efc_D") else (0, 1)), gs.EPS
             )
