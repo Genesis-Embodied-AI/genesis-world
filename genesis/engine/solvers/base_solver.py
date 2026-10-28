@@ -300,11 +300,11 @@ class Solver(RBC):
 
     def flag_errno(self, code: int, envs_idx=None) -> None:
         """Flag the given error for the given envs, all of them if None, which 'check_errno' then raises."""
-        envs_mask = torch.zeros_like(self._errno_latched, dtype=torch.bool)
-        envs_mask[indices_to_mask(envs_idx)] = True
         # The flags of every env are updated through a mask, rather than those of the selected envs alone: indexing by a
         # boolean mask makes torch count the envs it selects to size the result, which waits for the device, and the
         # backward pass flags envs after reversing every step (see 'StepOperation.backward')
+        envs_mask = torch.zeros_like(self._errno_latched, dtype=torch.bool)
+        envs_mask[indices_to_mask(envs_idx)] = True
         self._errno_latched |= torch.where(envs_mask, code, 0)
 
     def clear_errno(self, envs_idx=None) -> None:
