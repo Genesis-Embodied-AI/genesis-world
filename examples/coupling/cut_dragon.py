@@ -37,7 +37,7 @@ def main():
             file="urdf/plane/plane.urdf",
             fixed=True,
         ),
-        material=gs.materials.Rigid(),
+        material=gs.materials.Material(),
     )
     cutter = scene.add_entity(
         morph=gs.morphs.Mesh(
@@ -58,12 +58,13 @@ def main():
                 euler=(0, 0, 90),
                 pos=(0.3, -0.0, 1.3),
             ),
-            material=gs.materials.MPM.Elastic(
-                sampler="pbs-64",
-            ),
             surface=gs.surfaces.Rough(
                 color=(0.6, 1.0, 0.8, 1.0),
                 vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(),
+            solver_options=gs.options.MPMEntitySolverOptions(
+                sampler="pbs-64",
             ),
         ),
     )

@@ -5,9 +5,9 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.engine.materials.base import Material
 from genesis.grad.bridge import QueriedStates
-from genesis.options.entities import EntityOptions
+from genesis.options.entities import EntityOptions, HybridEntityOptions, KinematicEntityOptions
+from genesis.options.materials import BaseMaterial
 from genesis.options.morphs import Morph
 from genesis.repr_base import RBC
 
@@ -25,8 +25,17 @@ class EntityDescription:
     solver simulating it (see 'EntityOptions._solver_options_cls').
     """
 
-    material: Material
     options: EntityOptions = field(kw_only=True)
+
+    @property
+    def material(self) -> BaseMaterial | None:
+        """The material of the entity, or None for an entity holding none.
+
+        A kinematic entity takes no part in physics, and each part of a hybrid entity holds a material of its own.
+        """
+        if isinstance(self.options, (KinematicEntityOptions, HybridEntityOptions)):
+            return None
+        return self.options.material
 
 
 class Entity(RBC):
@@ -124,8 +133,8 @@ class Entity(RBC):
         """The options this entity was constructed from, as authored.
 
         Each access returns a copy of its own, so changing the morph or the material it holds leaves the entity as it
-        is. The options passed to 'Scene.add_entity' may change or construct other entities afterwards, except for
-        their material, which the entity shares. What the scene resolved from them lives in 'desc'.
+        is. The entity holds a copy of the options passed to 'Scene.add_entity', which may change or construct other
+        entities afterwards. What the scene resolved from them lives in 'desc'.
         """
         return self._options.model_copy(deep=True)
 

@@ -17,9 +17,9 @@ Genesis/
 │   │   │   ├── fem_solver.py  # Finite Element Method
 │   │   │   ├── pbd_solver.py  # Position Based Dynamics
 │   │   │   └── sf_solver.py   # Stable Fluid
-│   │   ├── materials/         # Material definitions per solver
 │   │   └── couplers/          # Inter-solver coupling
 │   ├── options/               # Configuration classes (Pydantic models)
+│   │   ├── materials.py       # Physical laws, independent of the solver
 │   │   ├── morphs.py          # Shape definitions (Box, Mesh, URDF, MJCF)
 │   │   ├── solvers.py         # Solver configuration options
 │   │   └── surfaces.py        # Surface properties
@@ -83,28 +83,40 @@ Location: `genesis/options/morphs.py`
 
 ## Materials
 
-Materials define physical properties. Each entity is bound to one solver, which supports a subset of the materials.
+A material states a physical law and its parameters, whichever solver simulates it. Each entity options class admits the materials its solver simulates, and the numerical choices of that solver for the entity go in its `solver_options`. A material field left to None takes the default of the solver, which each entity options class states once (such as `FEMEntityOptions.material_params`), and the entity options raise on a field their solver cannot honour.
 
 ```python
-gs.materials.Rigid(rho=1000)
-gs.materials.MPM.Elastic(E=1e5, nu=0.3)
-gs.materials.SPH.Liquid(sampler="pbs")
-gs.materials.PBD.Cloth(stretch_compliance=0.0)
+gs.materials.Material(density=1000)
+gs.materials.Elastic(youngs_modulus=1e5, poisson_ratio=0.3)
+gs.materials.Liquid(viscosity=0.01)
+gs.materials.Cloth(thickness=0.001)
 ```
 
-Location: `genesis/engine/materials/`
+Location: `genesis/options/materials.py`
 
 ## Entity options
 
-An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`EntityOptions._solver_options_cls`). The flattened arguments of `Scene.add_entity` are a shorthand for `RigidEntityOptions`.
+An entity is constructed from typed options, whose class decides the kind of entity and the solver simulating it: each class names the options class of its solver (`EntityOptions._solver_options_cls`), and holds the options of that solver specific to the entity (`solver_options`, such as `gs.options.MPMEntitySolverOptions`). `HybridEntityOptions` names no solver, since a hybrid entity adds a rigid entity and an MPM entity of their own. The flattened arguments of `Scene.add_entity` are a shorthand for `RigidEntityOptions`, so the material never changes the kind of entity.
 
 ```python
 scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1)))  # rigid
 scene.add_entity(options=gs.options.KinematicEntityOptions(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1))))
-scene.add_entity(options=gs.options.MPMEntityOptions(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()))
+scene.add_entity(options=gs.options.MPMEntityOptions(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.Elastic()))
+scene.add_entity(options=gs.options.SPHEntityOptions(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), solver_options=gs.options.SPHEntitySolverOptions(sampler="pbs")))
 ```
 
-Location: `genesis/options/entities.py`
+Rigid and kinematic entity options hold `links`, rigid ones `geoms` as well, and FEM entity options hold `vertices`: mappings from a selection (`gs.LinkIndex`, `gs.GeomIndex`, `gs.VertexIndex`) to `LinkOptions`, `GeomOptions` or `VertexOptions`. They carry only the settings the solver already holds at that granularity: the density and friction of a geom, the coupling and the visual raycasting of a link, and the fixed vertices of an FEM entity. A geom option overrides a link option, which overrides the entity, and two selections of equal specificity giving one field of one target raise an error. A `GeomIndex` counts the collision geoms of a link as the asset states them, so the rigid description applies the options before post-processing splits or fuses the geoms.
+
+```python
+scene.add_entity(
+    options=gs.options.RigidEntityOptions(
+        morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
+        links={"arm2": gs.options.LinkOptions(material=gs.materials.Material(friction=1.2))},
+    )
+)
+```
+
+Location: `genesis/options/entities.py`, `genesis/options/indices.py`
 
 ## Solvers
 

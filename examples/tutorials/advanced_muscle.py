@@ -2,7 +2,6 @@ import os
 import numpy as np
 import genesis as gs
 
-
 gs.init(backend=gs.cpu, precision="32", logging_level="info")
 
 dt = 5e-4
@@ -48,11 +47,10 @@ robot_mpm = scene.add_entity(
             pos=(0.5, 0.2, 0.3),
             radius=0.1,
         ),
-        material=gs.materials.MPM.Muscle(
-            E=E,
-            nu=nu,
-            rho=rho,
-            model="neohooken",
+        material=gs.materials.Muscle(
+            density=rho,
+            youngs_modulus=E,
+            poisson_ratio=nu,
         ),
     ),
 )
@@ -63,10 +61,12 @@ robot_fem = scene.add_entity(
             pos=(0.5, -0.2, 0.3),
             radius=0.1,
         ),
-        material=gs.materials.FEM.Muscle(
-            E=E,
-            nu=nu,
-            rho=rho,
+        material=gs.materials.Muscle(
+            density=rho,
+            youngs_modulus=E,
+            poisson_ratio=nu,
+        ),
+        solver_options=gs.options.FEMEntitySolverOptions(
             model="stable_neohookean",
         ),
     ),

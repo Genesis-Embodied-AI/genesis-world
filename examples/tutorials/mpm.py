@@ -33,11 +33,11 @@ obj_elastic = scene.add_entity(
             pos=(0.0, -0.5, 0.25),
             size=(0.2, 0.2, 0.2),
         ),
-        material=gs.materials.MPM.Elastic(),
         surface=gs.surfaces.Default(
             color=(1.0, 0.4, 0.4),
             vis_mode="visual",
         ),
+        material=gs.materials.Elastic(),
     ),
 )
 
@@ -47,11 +47,11 @@ obj_sand = scene.add_entity(
             pos=(0.0, 0.0, 0.25),
             size=(0.3, 0.3, 0.3),
         ),
-        material=gs.materials.MPM.Liquid(),
         surface=gs.surfaces.Default(
             color=(0.3, 0.3, 1.0),
             vis_mode="particle",
         ),
+        material=gs.materials.Liquid(),
     ),
 )
 
@@ -61,11 +61,11 @@ obj_plastic = scene.add_entity(
             pos=(0.0, 0.5, 0.35),
             radius=0.1,
         ),
-        material=gs.materials.MPM.ElastoPlastic(),
         surface=gs.surfaces.Default(
             color=(0.4, 1.0, 0.4),
             vis_mode="particle",
         ),
+        material=gs.materials.ElastoPlastic(),
     ),
 )
 

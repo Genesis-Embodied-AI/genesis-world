@@ -62,24 +62,26 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
 
     # The planes of the environments tile the ground and stay within the camera frustum
     scene.add_entity(
-        morph=gs.morphs.Plane(
-            plane_size=(2.0, 2.0),
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(
+                plane_size=(2.0, 2.0),
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.0,
+            ),
         ),
     )
     scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.5, 0.5, 0.2),
-            size=(0.2, 0.2, 0.2),
-            euler=(30, 40, 0),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=True,
-            coup_friction=0.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(0.5, 0.5, 0.2),
+                size=(0.2, 0.2, 0.2),
+                euler=(30, 40, 0),
+                fixed=True,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=0.0,
+            ),
         ),
     )
     scene.add_entity(
@@ -103,12 +105,13 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
                 scale=0.1,
                 euler=(90, 0, 0),
             ),
-            material=gs.materials.MPM.Muscle(
-                E=5e5,
-                nu=0.45,
-                rho=10000.0,
+            material=gs.materials.Muscle(
+                density=10000.0,
+                youngs_modulus=5e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=gs.options.MPMEntitySolverOptions(
                 sampler="random",
-                model="neohooken",
                 n_groups=4,
             ),
         ),
@@ -119,12 +122,12 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
                 pos=(0.0, 0.0, 0.65),
                 size=(0.4, 0.4, 0.4),
             ),
-            material=gs.materials.SPH.Liquid(
-                sampler="random",
-            ),
             surface=gs.surfaces.Default(
                 color=(0.4, 0.8, 1.0),
                 vis_mode="particle",
+            ),
+            solver_options=gs.options.SPHEntitySolverOptions(
+                sampler="random",
             ),
         ),
     )
@@ -228,15 +231,15 @@ def test_deformable_uv_textures(renderer_type, renderer, show_viewer, png_snapsh
                 scale=0.1,
                 pos=(0.2, 0.0, 0.2),
             ),
-            material=gs.materials.FEM.Elastic(
-                E=1e5,
-                nu=0.4,
-            ),
             surface=gs.surfaces.Default(
                 vis_mode="visual",
                 diffuse_texture=gs.textures.ImageTexture(
                     image_path="textures/checker.png",
                 ),
+            ),
+            material=gs.materials.Elastic(
+                youngs_modulus=1e5,
+                poisson_ratio=0.4,
             ),
         ),
     )

@@ -97,7 +97,7 @@ class RaycastContext(SharedSensorContext):
 
     Holds one ``BVHContext`` per (active solver, mesh type): one or two collision BVHs over a rigid solver's faces
     (see ``activate`` for the static/dynamic face split) and a visual BVH over the vfaces opted into
-    ``material.use_visual_raycasting``.
+    the ``use_visual_raycasting`` entity option.
     """
 
     def __init__(self, sim):
@@ -245,8 +245,8 @@ class RaycastContext(SharedSensorContext):
         consumers (tactile probes) fold both trees the same way. A solver whose faces are all static or all movable
         keeps a single tree.
 
-        Any solver with entities opting in via ``material.use_visual_raycasting`` gets a visual BVH masked to those
-        vfaces. Collision and visual entries coexist (the cast kernels merge in place).
+        Any solver with entities opting in via the ``use_visual_raycasting`` entity option gets a visual BVH masked to
+        those vfaces. Collision and visual entries coexist (the cast kernels merge in place).
         """
         if self._active:
             return
@@ -536,7 +536,7 @@ class RaycasterSensor(
         if not self._shared_context.bvh_contexts:
             gs.raise_exception(
                 "Raycaster sensor has no geometry to raycast against: rigid_solver is inactive and no entity "
-                "has material.use_visual_raycasting=True."
+                "has use_visual_raycasting=True in its entity options."
             )
 
         self._shared_metadata.patterns.append(self._options.pattern)

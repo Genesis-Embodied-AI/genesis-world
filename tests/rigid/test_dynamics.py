@@ -3,7 +3,6 @@ import math
 import numpy as np
 import pytest
 import torch
-
 from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
@@ -713,8 +712,8 @@ def test_dofs_force_balance_advanced(contact_resolution, show_viewer, tol):
             size=(0.05, 0.05, 0.05),
             pos=(0.03, 0.33, 0.57),
         ),
-        material=gs.materials.Rigid(
-            rho=400.0,
+        material=gs.materials.Material(
+            density=400.0,
         ),
     )
     scene.build()

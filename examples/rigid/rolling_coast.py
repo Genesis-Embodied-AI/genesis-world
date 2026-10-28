@@ -12,7 +12,6 @@ import xml.etree.ElementTree as ET
 import genesis as gs
 from genesis.utils.misc import get_assets_dir
 
-
 RADIUS = 0.1
 # Half-extent of the wooden sphere asset, whose origin sits at the bottom of its y-up frame.
 WOODEN_SPHERE_MESH_RADIUS = 3.486346
@@ -67,7 +66,7 @@ def main():
     # at its own rate.
     scene.add_entity(
         gs.morphs.Plane(),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction_torsional=0.0,
             friction_rolling=0.0,
         ),
@@ -78,7 +77,7 @@ def main():
                 file=checkered_ball_mjcf(),
                 pos=(0.0, 0.6 * i_ball, RADIUS),
             ),
-            material=gs.materials.Rigid(
+            material=gs.materials.Material(
                 friction_rolling=friction_rolling,
             ),
         )

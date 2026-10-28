@@ -6,10 +6,13 @@ import genesis as gs
 
 @pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 @pytest.mark.parametrize(
-    "options_cls, muscle_material",
-    [(gs.options.MPMEntityOptions, gs.materials.MPM.Muscle), (gs.options.FEMEntityOptions, gs.materials.FEM.Muscle)],
+    "options_cls, solver_options_cls",
+    [
+        (gs.options.MPMEntityOptions, gs.options.MPMEntitySolverOptions),
+        (gs.options.FEMEntityOptions, gs.options.FEMEntitySolverOptions),
+    ],
 )
-def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
+def test_muscle(n_envs, options_cls, solver_options_cls, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=5e-4,
@@ -27,9 +30,11 @@ def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
         show_viewer=show_viewer,
     )
     scene.add_entity(
-        morph=gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_friction=5.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Plane(),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=5.0,
+            ),
         ),
     )
     # The tetrahedralization is refined, surface included, so that every muscle group spans many tetrahedra. Its
@@ -42,19 +47,21 @@ def test_muscle(n_envs, options_cls, muscle_material, show_viewer):
                 nobisect=False,
                 maxvolume=2e-5,
             ),
-            material=muscle_material(
-                E=5e5,
-                nu=0.45,
-                rho=10000.0,
+            material=gs.materials.Muscle(
+                density=10000.0,
+                youngs_modulus=5e5,
+                poisson_ratio=0.45,
+            ),
+            solver_options=solver_options_cls(
                 n_groups=4,
             ),
         ),
     )
     scene.build(n_envs=n_envs)
 
-    if isinstance(box.material, gs.materials.MPM.Muscle):
+    if isinstance(box.options, gs.options.MPMEntityOptions):
         pos = box.get_state().pos[0]
-    else:  # isinstance(box.material, gs.materials.FEM.Muscle):
+    else:
         pos = box.get_state().pos[0, box.get_el2v()].mean(1)
 
     # Four groups: upper or lower part of the body, fore or hind part

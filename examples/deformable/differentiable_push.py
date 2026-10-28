@@ -44,11 +44,11 @@ def main():
                 pos=(0.5, 0.5, 0.05),
                 euler=(90.0, 0.0, 0.0),
             ),
-            material=gs.materials.Tool(
-                friction=8.0,
-            ),
             surface=gs.surfaces.Default(
                 color=(1.0, 1.0, 1.0, 1.0),
+            ),
+            material=gs.materials.Material(
+                friction=8.0,
             ),
         ),
     )
@@ -58,12 +58,12 @@ def main():
                 lower=(0.2, 0.1, 0.05),
                 upper=(0.4, 0.3, 0.15),
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=500,
-            ),
             surface=gs.surfaces.Default(
                 color=(0.9, 0.9, 0.9, 1.0),
                 vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=500,
             ),
         ),
     )
@@ -75,12 +75,12 @@ def main():
                 scale=0.07,
                 euler=(90.0, 0.0, 90.0),
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=500,
-            ),
             surface=gs.surfaces.Default(
                 color=(0.9, 0.8, 0.2, 1.0),
                 vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=500,
             ),
         ),
     )

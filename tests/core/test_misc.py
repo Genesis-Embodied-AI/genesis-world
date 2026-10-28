@@ -14,14 +14,27 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
+from genesis.engine.scene import SCENE_FORMAT
+from genesis.utils import serialization
 from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release
 from genesis.utils.misc import indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
 
 
+@pytest.fixture
+def two_box_free_mjcf():
+    mjcf = ET.Element("mujoco", model="two_box_free")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    body = ET.SubElement(worldbody, "body", name="body", pos="0 0 0")
+    ET.SubElement(body, "freejoint")
+    for x in (-0.2, 0.2):
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{x} 0 0")
+    return ET.tostring(mjcf, encoding="unicode")
+
+
 @pytest.mark.required
-def test_entity_options(show_viewer, tol):
+def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf):
     DT = 1e-2
     SUBSTEPS = 10
     N_STEPS = 10
@@ -32,6 +45,9 @@ def test_entity_options(show_viewer, tol):
             dt=DT,
             substeps=SUBSTEPS,
             gravity=(0.0, 0.0, -GRAVITY),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
         ),
         mpm_options=gs.options.MPMOptions(
             grid_density=16,
@@ -83,29 +99,30 @@ def test_entity_options(show_viewer, tol):
             )
         if issubclass(options_cls, gs.options.FEMEntityOptions):
             options_kwargs.update(
-                material=gs.materials.FEM.Elastic(),
+                material=gs.materials.Elastic(),
             )
         if issubclass(options_cls, gs.options.MPMEntityOptions):
             options_kwargs.update(
-                material=gs.materials.MPM.Elastic(
+                material=gs.materials.Elastic(),
+                solver_options=gs.options.MPMEntitySolverOptions(
                     sampler="regular",
                 ),
             )
         if issubclass(options_cls, gs.options.SPHEntityOptions):
             options_kwargs.update(
-                material=gs.materials.SPH.Liquid(
+                solver_options=gs.options.SPHEntitySolverOptions(
                     sampler="regular",
                 ),
             )
         if issubclass(options_cls, gs.options.PBDLiquidEntityOptions):
             options_kwargs.update(
-                material=gs.materials.PBD.Liquid(
+                solver_options=gs.options.PBDLiquidEntitySolverOptions(
                     sampler="regular",
                 ),
             )
         if issubclass(options_cls, gs.options.PBDParticleEntityOptions):
             options_kwargs.update(
-                material=gs.materials.PBD.Particle(
+                solver_options=gs.options.PBDParticleEntitySolverOptions(
                     sampler="regular",
                 ),
             )
@@ -116,10 +133,7 @@ def test_entity_options(show_viewer, tol):
                     pos=pos,
                     scale=0.2,
                 ),
-                material=gs.materials.Hybrid(
-                    material_rigid=gs.materials.Rigid(),
-                    material_soft=gs.materials.MPM.Muscle(),
-                ),
+                material_soft=gs.materials.Muscle(),
             )
         entities.append(scene.add_entity(options=options_cls(**options_kwargs)))
 
@@ -127,7 +141,9 @@ def test_entity_options(show_viewer, tol):
     rigid = entities[options_classes.index(gs.options.RigidEntityOptions)]
     assert rigid.options.surface is None
     assert rigid.desc.surface.vis_mode == "visual"
-    material = gs.materials.Rigid()
+    material = gs.materials.Material(
+        density=500.0,
+    )
     surface = gs.surfaces.Default()
     flattened = scene.add_entity(
         gs.morphs.Box(
@@ -142,7 +158,7 @@ def test_entity_options(show_viewer, tol):
         options=flattened.options,
     )
     assert type(flattened) is gs.engine.entities.RigidEntity
-    assert flattened.material is material
+    assert flattened.material == material
     assert flattened.options.surface.vis_mode == "collision"
     assert surface.vis_mode is None
     assert twin.options == flattened.options
@@ -152,17 +168,32 @@ def test_entity_options(show_viewer, tol):
     flattened.options.morph.pos = (0.0, 0.0, 0.0)
     assert flattened.options == twin.options
 
-    # A class admits the materials of its own family alone, and the shorthand names the class admitting a material
-    for options_cls, entity in zip(options_classes, entities):
-        for other in entities:
-            if other is not entity:
-                with pytest.raises(gs.GenesisException, match="material"):
-                    options_cls(morph=gs.morphs.Sphere(), material=other.material)
-        if not isinstance(entity.material, gs.materials.Rigid):
-            with pytest.raises(gs.GenesisException, match=f"gs.options.{options_cls.__name__}"):
-                scene.add_entity(morph=gs.morphs.Sphere(), material=entity.material)
+    # A field left to None takes the default of the solver simulating the entity
+    fem = entities[options_classes.index(gs.options.FEMEntityOptions)]
+    mpm = entities[options_classes.index(gs.options.MPMEntityOptions)]
+    assert_allclose(fem.options.material_params.youngs_modulus, 1e6, tol=gs.EPS)
+    assert_allclose(mpm.options.material_params.youngs_modulus, 3e5, tol=gs.EPS)
+
+    # A class admits the materials of the physical laws its solver simulates, and the shorthand names the classes
+    # admitting a material of another law
+    for options_cls, material in (
+        (gs.options.RigidEntityOptions, gs.materials.Elastic()),
+        (gs.options.FEMEntityOptions, gs.materials.Material()),
+        (gs.options.MPMEntityOptions, gs.materials.Cloth()),
+        (gs.options.SPHEntityOptions, gs.materials.Elastic()),
+        (gs.options.PBDClothEntityOptions, gs.materials.Liquid()),
+        (gs.options.ToolEntityOptions, gs.materials.Elastic()),
+    ):
+        with pytest.raises(gs.GenesisException, match="material"):
+            options_cls(morph=gs.morphs.Sphere(), material=material)
+    with pytest.raises(gs.GenesisException, match="gs.options.FEMEntityOptions or gs.options.MPMEntityOptions"):
+        scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Elastic())
     with pytest.raises(gs.GenesisException, match="material"):
-        scene.add_entity(options=rigid.options.model_copy(update={"material": gs.materials.Kinematic()}))
+        scene.add_entity(options=rigid.options.model_copy(update={"material": gs.materials.Elastic()}))
+    with pytest.raises(gs.GenesisException, match="material"):
+        gs.options.KinematicEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Material())
+    with pytest.raises(gs.GenesisException, match="youngs_modulus"):
+        gs.options.PBDElasticEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Elastic(youngs_modulus=1e6))
     with pytest.raises(gs.GenesisException, match="visualize_contact"):
         gs.options.KinematicEntityOptions(morph=gs.morphs.Sphere(), visualize_contact=True)
     with pytest.raises(gs.GenesisException, match="either entity options"):
@@ -170,12 +201,236 @@ def test_entity_options(show_viewer, tol):
     with pytest.raises(gs.GenesisException, match="either entity options"):
         scene.add_entity(vis_mode="collision", options=rigid.options)
     with pytest.raises(gs.GenesisException, match="entity family"):
-        scene.add_entity(options=gs.options.EntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Rigid()))
+        scene.add_entity(options=gs.options.EntityOptions(morph=gs.morphs.Sphere()))
     with pytest.raises(gs.GenesisException, match="requires a morph"):
         scene.add_entity()
 
+    # Link and geom options override the material of the entity on the geoms they select, the geom options winning
+    arm = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_link_arm.urdf",
+                pos=(0.0, -1.0, 0.6),
+                fixed=True,
+                recompute_inertia=True,
+            ),
+            material=gs.materials.Material(
+                density=500.0,
+                friction=0.5,
+            ),
+            links={
+                "arm2": gs.options.LinkOptions(
+                    material=gs.materials.Material(
+                        density=2000.0,
+                        friction=0.8,
+                    ),
+                    geoms={
+                        gs.GeomIndex.at(0): gs.options.GeomOptions(
+                            material=gs.materials.Material(
+                                friction=1.5,
+                            ),
+                        ),
+                    },
+                ),
+            },
+            geoms={
+                gs.GeomIndex.all(): gs.options.GeomOptions(
+                    material=gs.materials.Material(
+                        friction_torsional=0.02,
+                    ),
+                ),
+            },
+        ),
+    )
+    # Vertex options fix the vertices they select at their initial positions
+    pinned_box = scene.add_entity(
+        options=gs.options.FEMEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(1.5, -1.0, 0.6),
+                size=(0.2, 0.2, 0.2),
+            ),
+            material=gs.materials.Elastic(),
+            vertices={
+                gs.VertexIndex.in_box(lower=(-0.1, -0.1, 0.1), upper=(0.1, 0.1, 0.1)): gs.options.VertexOptions(
+                    solver_options=gs.options.FEMVertexSolverOptions(
+                        is_fixed=True,
+                    ),
+                ),
+            },
+        ),
+    )
+    # Entities sharing one collision mesh keep the geom options each of them gives
+    spheres = [
+        scene.add_entity(
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Mesh(
+                    file="meshes/sphere.obj",
+                    pos=(3.0 + i, -1.0, 0.6),
+                    scale=0.1,
+                    fixed=True,
+                ),
+                geoms={
+                    gs.GeomIndex.all(): gs.options.GeomOptions(
+                        material=gs.materials.Material(
+                            friction=friction,
+                        ),
+                    ),
+                },
+            ),
+        )
+        for i, friction in enumerate((0.5, 1.5))
+    ]
+    # Every kind of selection travels through a scene file
+    exported = tmp_path / f"selections{SCENE_FORMAT}"
+    rigid_options = gs.options.RigidEntityOptions(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+        ),
+        links={
+            gs.LinkIndex.named("box_baselink"): gs.options.LinkOptions(
+                geoms={
+                    gs.GeomIndex.at([0]): gs.options.GeomOptions(),
+                    gs.GeomIndex.at([True]): gs.options.GeomOptions(),
+                    gs.GeomIndex.at(slice(0, 1)): gs.options.GeomOptions(),
+                },
+            ),
+        },
+        geoms={
+            gs.GeomIndex.all(): gs.options.GeomOptions(),
+        },
+    )
+    fem_options = gs.options.FEMEntityOptions(
+        morph=gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.Elastic(),
+        vertices={
+            gs.VertexIndex.at(0) | gs.VertexIndex.closest_to(pos=(0.05, 0.05, 0.05), max_distance=0.01): (
+                gs.options.VertexOptions()
+            ),
+            gs.VertexIndex.in_box(lower=(0.0, 0.0, 0.0), upper=(0.1, 0.1, 0.1)): gs.options.VertexOptions(),
+        },
+    )
+    serialization.export(exported, {"rigid": rigid_options, "fem": fem_options})
+    loaded = serialization.load(exported, {"rigid": gs.options.RigidEntityOptions, "fem": gs.options.FEMEntityOptions})
+    assert loaded["rigid"].links == rigid_options.links
+    assert loaded["rigid"].geoms == rigid_options.geoms
+    assert loaded["fem"].vertices == fem_options.vertices
+
+    # Geom densities weigh in the mass of an aligned body alone, whose frame stays where its kinematic ghost puts it
+    dense_body = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file=two_box_free_mjcf,
+                pos=(3.0, 1.0, 0.6),
+                align=True,
+                recompute_inertia=True,
+            ),
+            links={
+                "body": gs.options.LinkOptions(
+                    geoms={
+                        gs.GeomIndex.at(0): gs.options.GeomOptions(
+                            material=gs.materials.Material(
+                                density=8000.0,
+                            ),
+                        ),
+                        gs.GeomIndex.at(1): gs.options.GeomOptions(
+                            material=gs.materials.Material(
+                                density=1000.0,
+                            ),
+                        ),
+                    },
+                ),
+            },
+        ),
+    )
+    dense_body_ghost = scene.add_entity(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.MJCF(
+                file=two_box_free_mjcf,
+                pos=(3.0, 1.0, 0.6),
+                align=True,
+            ),
+        ),
+    )
+    with pytest.raises(gs.GenesisException, match="material"):
+        gs.options.LinkOptions(material=gs.materials.Elastic())
+    with pytest.raises(gs.GenesisException, match="vertices"):
+        gs.options.FEMEntityOptions(
+            morph=gs.morphs.Sphere(),
+            material=gs.materials.Cloth(),
+            vertices={gs.VertexIndex.at(0): gs.options.VertexOptions()},
+        )
+    with pytest.raises(gs.GenesisException, match="VertexIndex.at"):
+        gs.VertexIndex()
+    with pytest.raises(gs.GenesisException, match="two_way_soft_constraint"):
+        gs.options.RigidEntityOptions(
+            morph=gs.morphs.Sphere(),
+            solver_options=gs.options.RigidEntitySolverOptions(coup_type="ipc_only"),
+            links={"base": gs.options.LinkOptions(solver_options=gs.options.RigidLinkSolverOptions(needs_coup=False))},
+        )
+    with pytest.raises(gs.GenesisException, match="enable_coup_collision"):
+        gs.options.RigidEntityOptions(
+            morph=gs.morphs.Sphere(),
+            solver_options=gs.options.RigidEntitySolverOptions(enable_coup_collision=False),
+            links={
+                "base": gs.options.LinkOptions(
+                    solver_options=gs.options.RigidLinkSolverOptions(enable_coup_collision=True)
+                )
+            },
+        )
+    with pytest.raises(gs.GenesisException, match="coupled link"):
+        gs.options.HybridEntityOptions(
+            morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
+            material_soft=gs.materials.Muscle(),
+            solver_options=gs.options.HybridEntitySolverOptions(
+                rigid=gs.options.RigidEntitySolverOptions(coup_type="two_way_soft_constraint")
+            ),
+        )
+    with pytest.raises(gs.GenesisException, match="enable_vertex_constraints"):
+        gs.Scene(
+            fem_options=gs.options.FEMOptions(use_implicit_solver=True, enable_vertex_constraints=False)
+        ).add_entity(options=pinned_box.options)
+    with pytest.raises(gs.GenesisException, match="links"):
+        gs.options.FEMEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Elastic(), links={})
+    with pytest.raises(gs.GenesisException, match="equal specificity"):
+        scene.add_entity(
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
+                geoms={
+                    gs.GeomIndex.all(): gs.options.GeomOptions(material=gs.materials.Material(friction=1.0)),
+                    gs.GeomIndex.at(0): gs.options.GeomOptions(material=gs.materials.Material(friction=2.0)),
+                },
+            )
+        )
+    with pytest.raises(gs.GenesisException, match="selects no valid geom"):
+        scene.add_entity(
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
+                geoms={gs.GeomIndex.at(1): gs.options.GeomOptions(material=gs.materials.Material(friction=1.0))},
+            )
+        )
+    with pytest.raises(gs.GenesisException, match="links_to_keep"):
+        scene.add_entity(
+            options=arm.options.model_copy(update={"links": {gs.LinkIndex.named("arm3"): gs.options.LinkOptions()}})
+        )
+    with pytest.raises(gs.GenesisException, match="mesh or a primitive"):
+        scene.add_entity(
+            options=arm.options.model_copy(
+                update={
+                    "geoms": {gs.GeomIndex.at(0): gs.options.GeomOptions(material=gs.materials.Material(friction=1.0))}
+                }
+            )
+        )
+
     # The class of the options picks the solver, which entities ignoring gravity tell apart from the others
     scene.build(n_envs=2)
+    # The mass of each box is its volume, 0.2^3 m^3, times the density its geom options give
+    assert_allclose(dense_body.get_mass(), (8000.0 + 1000.0) * 0.2**3, tol=tol)
+    assert_allclose(dense_body.get_qpos(), dense_body_ghost.get_qpos(), tol=tol)
+    # A force on the translation of the body acts at its frame, off its center of mass, so it spins the body
+    PUSH_FORCE = 50.0
+    dense_body.control_dofs_force([0.0, 0.0, PUSH_FORCE, 0.0, 0.0, 0.0])
     for _ in range(N_STEPS):
         scene.step()
     for entity in entities:
@@ -197,6 +452,32 @@ def test_entity_options(show_viewer, tol):
         else:
             # The mean of the particles or vertices stands in for the center of mass, so it falls at gravity approximately
             assert_allclose(drop, 0.5 * GRAVITY * (N_STEPS * DT) ** 2, rtol=5e-2)
+
+    # The mass of each link is the volume of its box, 1 x 0.1 x 0.1 m^3, times the density its options resolve to
+    assert_allclose(arm.get_link("arm1").get_mass(), 500.0 * 0.01, tol=tol)
+    assert_allclose(arm.get_link("arm2").get_mass(), 2000.0 * 0.01, tol=tol)
+    assert_allclose(arm.get_link("arm1").geoms[0].get_friction(), 0.5, tol=gs.EPS)
+    assert_allclose(arm.get_link("arm2").geoms[0].get_friction(), 1.5, tol=gs.EPS)
+    for geom in arm.geoms:
+        assert_allclose(geom.get_friction_torsional(), 0.02, tol=gs.EPS)
+    for sphere, friction in zip(spheres, (0.5, 1.5)):
+        for geom in sphere.geoms:
+            assert_allclose(geom.get_friction(), friction, tol=gs.EPS)
+    # The frame of the body sits at the centroid of its two boxes, 0.2 m on either side, and its center of mass towards
+    # the denser one
+    boxes_mass, boxes_x = np.array([8000.0, 1000.0]) * 0.2**3, np.array([-0.2, 0.2])
+    com_x = boxes_mass @ boxes_x / boxes_mass.sum()
+    inertia_yy = boxes_mass @ ((boxes_x - com_x) ** 2 + 2.0 * 0.2**2 / 12.0)
+    assert_allclose(dense_body.get_dofs_velocity()[..., 4], com_x * PUSH_FORCE / inertia_yy * N_STEPS * DT, tol=5e-2)
+    # The fixed vertices of the top face hold the box, which would otherwise have fallen with the others
+    verts_pos = pinned_box.get_state().pos
+    init_verts_pos = pinned_box.init_positions
+    is_pinned = init_verts_pos[:, 2] > 0.6 + 0.09
+    assert is_pinned.any()
+    assert_allclose(verts_pos[:, is_pinned], init_verts_pos[is_pinned], tol=tol)
+    assert (
+        init_verts_pos[:, 2].mean() - verts_pos[..., 2].mean(dim=-1) < 0.1 * 0.5 * GRAVITY * (N_STEPS * DT) ** 2
+    ).all()
 
 
 @pytest.mark.required
@@ -801,7 +1082,7 @@ def test_per_solver_gravity():
                     pos=(0.0, 0.0, 0.5),
                     radius=0.1,
                 ),
-                material=gs.materials.MPM.Liquid(),
+                material=gs.materials.Liquid(),
             ),
         )
         scene.build(n_envs=2)

@@ -224,8 +224,8 @@ def main() -> None:
             size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
             pos=(*CUBE_INIT_XY, OBJ_SIZE / 2),
         ),
-        material=gs.materials.Rigid(
-            rho=OBJ_DENSITY,
+        material=gs.materials.Material(
+            density=OBJ_DENSITY,
         ),
         surface=gs.surfaces.Default(
             color=(0.5, 1.0, 0.5),
@@ -237,8 +237,8 @@ def main() -> None:
             radius=OBJ_SIZE / 2,
             pos=(*SPHERE_INIT_XY, OBJ_SIZE / 2),
         ),
-        material=gs.materials.Rigid(
-            rho=OBJ_DENSITY,
+        material=gs.materials.Material(
+            density=OBJ_DENSITY,
         ),
         surface=gs.surfaces.Default(
             color=(1.0, 0.5, 0.5),

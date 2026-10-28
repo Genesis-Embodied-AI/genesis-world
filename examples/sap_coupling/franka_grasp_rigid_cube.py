@@ -38,22 +38,30 @@ def main():
     )
 
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        ),
-        material=gs.materials.Rigid(
-            friction=1.0,
-            coup_friction=1.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            material=gs.materials.Material(
+                friction=1.0,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=1.0,
+            ),
         ),
     )
     cube = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.04, 0.04, 0.04),
-            pos=(0.65, 0.0, 0.02),
-        ),
-        material=gs.materials.Rigid(
-            friction=1.0,
-            coup_friction=1.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.04, 0.04, 0.04),
+                pos=(0.65, 0.0, 0.02),
+            ),
+            material=gs.materials.Material(
+                friction=1.0,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=1.0,
+            ),
         ),
     )
 

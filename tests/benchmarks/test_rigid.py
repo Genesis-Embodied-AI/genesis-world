@@ -538,7 +538,7 @@ def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=None, **s
         x = -0.10 + 0.05 * (i % 5)
         y = -0.05 + 0.05 * (i // 5)
         scene.add_entity(
-            material=gs.materials.Rigid(
+            material=gs.materials.Material(
                 friction=0.8,
             ),
             morph=gs.morphs.Box(

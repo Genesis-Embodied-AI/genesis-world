@@ -33,38 +33,47 @@ def main():
     )
 
     # Only entities opting into visual raycasting can be grabbed with --use-visual-geom.
-    raycastable = gs.materials.Rigid(
-        use_visual_raycasting=True,
-    )
     vis_mode = "visual" if args.use_visual_geom else "collision"
 
     scene.add_entity(
-        morph=gs.morphs.Sphere(
-            pos=(-0.3, -0.3, 0),
-            radius=0.1,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Sphere(
+                pos=(-0.3, -0.3, 0),
+                radius=0.1,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode=vis_mode,
+            ),
+            use_visual_raycasting=True,
         ),
-        material=raycastable,
-        vis_mode=vis_mode,
     )
     scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file="meshes/duck/duck.obj",
-            pos=(0.0, 0.0, 0.5),
-            scale=0.001,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck/duck.obj",
+                pos=(0.0, 0.0, 0.5),
+                scale=0.001,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode=vis_mode,
+            ),
+            use_visual_raycasting=True,
         ),
-        material=raycastable,
-        vis_mode=vis_mode,
     )
     for i in range(6):
         angle = i * (2 * math.pi / 6)
         radius = 0.5 + i * 0.1
         scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(radius * math.cos(angle), radius * math.sin(angle), 0.1 + i * 0.1),
-                size=(0.2, 0.2, 0.2),
+            options=gs.options.RigidEntityOptions(
+                morph=gs.morphs.Box(
+                    pos=(radius * math.cos(angle), radius * math.sin(angle), 0.1 + i * 0.1),
+                    size=(0.2, 0.2, 0.2),
+                ),
+                surface=gs.surfaces.Default(
+                    vis_mode=vis_mode,
+                ),
+                use_visual_raycasting=True,
             ),
-            material=raycastable,
-            vis_mode=vis_mode,
         )
 
     scene.viewer.add_plugin(

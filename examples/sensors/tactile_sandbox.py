@@ -302,7 +302,7 @@ def main() -> None:
         surface=gs.surfaces.Default(
             color=(0.8, 0.8, 0.8, 1.0),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=0.6,
         ),
     )
@@ -355,7 +355,7 @@ def main() -> None:
         surface=gs.surfaces.Default(
             color=(1.0, 1.0, 1.0, 1.0),
         ),
-        material=gs.materials.Rigid(
+        material=gs.materials.Material(
             friction=0.5,
         ),
     )

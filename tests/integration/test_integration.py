@@ -250,12 +250,16 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
     )
 
     franka = scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-        ),
-        material=gs.materials.Rigid(
-            friction=1.0,
-            coup_friction=1.0,
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+            ),
+            material=gs.materials.Material(
+                friction=1.0,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=1.0,
+            ),
         ),
     )
     # Only allow finger contact to accelerate
@@ -270,10 +274,12 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
                     pos=(0.65, 0.0, 0.02),
                     radius=0.02,
                 ),
-                material=gs.materials.FEM.Elastic(
-                    E=1e5,
-                    nu=0.4,
-                    friction_mu=1.0,
+                material=gs.materials.Elastic(
+                    friction=1.0,
+                    youngs_modulus=1e5,
+                    poisson_ratio=0.4,
+                ),
+                solver_options=gs.options.FEMEntitySolverOptions(
                     model="linear_corotated",
                 ),
             ),
@@ -287,8 +293,10 @@ def test_franka_panda_grasp_fem_entity(primitive_type, show_viewer):
                     pos=(0.65, 0.0, 0.02),
                     scale=0.02,
                 ),
-                material=gs.materials.FEM.Elastic(
-                    friction_mu=1.0,
+                material=gs.materials.Elastic(
+                    friction=1.0,
+                ),
+                solver_options=gs.options.FEMEntitySolverOptions(
                     model="linear_corotated",
                 ),
             ),

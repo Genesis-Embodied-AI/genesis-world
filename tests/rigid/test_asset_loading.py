@@ -386,8 +386,8 @@ def test_parsing_inertia_defaults(
             fixed=True,
             batch_fixed_verts=True,
         ),
-        material=gs.materials.Rigid(
-            rho=2000.0,
+        material=gs.materials.Material(
+            density=2000.0,
         ),
     )
     stacked_tip = scene.add_entity(
@@ -397,8 +397,8 @@ def test_parsing_inertia_defaults(
             fixed=True,
             batch_fixed_verts=True,
         ),
-        material=gs.materials.Rigid(
-            rho=8000.0,
+        material=gs.materials.Material(
+            density=8000.0,
         ),
     )
     stacked_tip.attach(stacked_middle, parent_link_name=stacked_middle.base_link.name, pos=(0.0, 0.0, 0.2))
@@ -1209,8 +1209,8 @@ def test_align_mesh(show_viewer, tol):
     )
     mango = scene.add_entity(
         mango_morph,
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        material=gs.materials.Material(
+            density=1000.0,
         ),
         vis_mode="collision",
         visualize_contact=True,
@@ -1241,8 +1241,8 @@ def test_align_mesh(show_viewer, tol):
                 align=True,
             ),
         ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
+        material=gs.materials.Material(
+            density=1000.0,
         ),
     )
     scene.build(n_envs=2)
@@ -1706,8 +1706,8 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     )
     het_obj = scene.add_entity(
         morph=het_morph,
-        material=gs.materials.Rigid(
-            rho=200.0,
+        material=gs.materials.Material(
+            density=200.0,
             friction=1e-2,
         ),
     )
@@ -1729,8 +1729,8 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     )
     free_het = scene.add_entity(
         morph=free_morph,
-        material=gs.materials.Rigid(
-            rho=200.0,
+        material=gs.materials.Material(
+            density=200.0,
         ),
     )
     # Kinematic counterpart of the aligned free bodies. The COM/principal anchoring is applied in the base entity, so
@@ -1749,7 +1749,6 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     )
     free_dup = scene.add_entity(
         morph=dup_morph,
-        material=gs.materials.Rigid(),
     )
     # Free bodies whose root link is empty and whose mass lives on a fixed child (merge_fixed_links=False keeps the
     # wrapper). The empty root reads the gs.EPS placeholder and the child its authored mass.
@@ -1881,7 +1880,7 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     assert_allclose(inertial_i[[0, 1], 0], np.eye(3) * sphere_base_inertia_diag, tol=tol)
     assert_allclose(inertial_i[[0, 1], 1], np.eye(3) * sphere_moving_inertia_diag, tol=tol)
     # Variant B: Recomputed inertia from geometry
-    assert_allclose(inertial_i[[2, 3]], np.eye(3) * ((0.04**5 / 6.0) * het_obj.material.rho), tol=tol)
+    assert_allclose(inertial_i[[2, 3]], np.eye(3) * ((0.04**5 / 6.0) * het_obj.material.density), tol=tol)
     # Same-variant consistency
     assert_allclose(inertial_i[2], inertial_i[3], tol=tol)
     # Variants differ

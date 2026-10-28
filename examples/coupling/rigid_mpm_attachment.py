@@ -49,10 +49,10 @@ def main():
                 pos=(0.0, 0.0, 0.35),
                 size=(0.15, 0.15, 0.15),
             ),
-            material=gs.materials.MPM.Elastic(
-                E=5e4,
-                nu=0.3,
-                rho=1000,
+            material=gs.materials.Elastic(
+                density=1000,
+                youngs_modulus=5e4,
+                poisson_ratio=0.3,
             ),
         ),
     )

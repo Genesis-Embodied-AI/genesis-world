@@ -54,14 +54,23 @@ def main():
         ),
     )
 
+    if args.solver == "sph":
+        options_cls, solver_options_cls = gs.options.SPHEntityOptions, gs.options.SPHEntitySolverOptions
+    else:
+        options_cls, solver_options_cls = gs.options.MPMEntityOptions, gs.options.MPMEntitySolverOptions
     emitter = scene.add_emitter(
-        material=getattr(gs.materials, args.solver.upper()).Liquid(
-            sampler="regular",
-        ),
-        max_particles=100000,
-        surface=gs.surfaces.Glass(
-            color=(0.7, 0.85, 1.0, 0.7),
-            vis_mode="recon" if args.recon else "particle",
+        options_cls(
+            morph=gs.morphs.Nowhere(
+                n_particles=100000,
+            ),
+            surface=gs.surfaces.Glass(
+                color=(0.7, 0.85, 1.0, 0.7),
+                vis_mode="recon" if args.recon else "particle",
+            ),
+            material=gs.materials.Liquid(),
+            solver_options=solver_options_cls(
+                sampler="regular",
+            ),
         ),
     )
     scene.build(n_envs=0)

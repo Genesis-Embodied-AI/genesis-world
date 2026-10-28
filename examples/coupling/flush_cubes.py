@@ -42,12 +42,12 @@ def main():
                 pos=(0.0, 0.25, 0.4),
                 size=(0.12, 0.12, 0.12),
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=400,
-            ),
             surface=gs.surfaces.Rough(
                 color=(1.0, 0.5, 0.5, 1.0),
                 vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=400,
             ),
         ),
     )
@@ -58,12 +58,12 @@ def main():
                 pos=(0.15, 0.45, 0.5),
                 radius=0.06,
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=400,
-            ),
             surface=gs.surfaces.Rough(
                 color=(1.0, 1.0, 0.5, 1.0),
                 vis_mode="particle",
+            ),
+            material=gs.materials.Elastic(
+                density=400,
             ),
         ),
     )
@@ -75,31 +75,41 @@ def main():
                 radius=0.05,
                 height=0.14,
             ),
-            material=gs.materials.MPM.Elastic(
-                rho=400,
-            ),
             surface=gs.surfaces.Rough(
                 color=(0.5, 1.0, 1.0, 1.0),
                 vis_mode="particle",
             ),
+            material=gs.materials.Elastic(
+                density=400,
+            ),
         ),
     )
     emitter1 = scene.add_emitter(
-        material=gs.materials.MPM.Liquid(
-            sampler="random",
-        ),
-        max_particles=800000,
-        surface=gs.surfaces.Rough(
-            color=(0.0, 0.9, 0.4, 1.0),
+        gs.options.MPMEntityOptions(
+            morph=gs.morphs.Nowhere(
+                n_particles=800000,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.0, 0.9, 0.4, 1.0),
+            ),
+            material=gs.materials.Liquid(),
+            solver_options=gs.options.MPMEntitySolverOptions(
+                sampler="random",
+            ),
         ),
     )
     emitter2 = scene.add_emitter(
-        material=gs.materials.MPM.Liquid(
-            sampler="random",
-        ),
-        max_particles=800000,
-        surface=gs.surfaces.Rough(
-            color=(0.0, 0.4, 0.9, 1.0),
+        gs.options.MPMEntityOptions(
+            morph=gs.morphs.Nowhere(
+                n_particles=800000,
+            ),
+            surface=gs.surfaces.Rough(
+                color=(0.0, 0.4, 0.9, 1.0),
+            ),
+            material=gs.materials.Liquid(),
+            solver_options=gs.options.MPMEntitySolverOptions(
+                sampler="random",
+            ),
         ),
     )
     scene.build(n_envs=0)

@@ -10,6 +10,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
+from genesis.engine.solvers.fem_models import FEMModel, FEMModelKey, build_fem_model, get_fem_model_key
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.utils.array_class import ErrorCode, LinksState
 from genesis.utils.data import ArrayItem, DataKind
@@ -46,12 +47,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # use scaled volume for better numerical stability, similar to p_vol_scale in mpm
         self._vol_scale = float(1e4)
 
-        # materials
-        self._mats = list()
-        self._mats_idx = list()
-        self._mats_update_stress = list()
-        self._mats_compute_energy_gradient_hessian = list()
-        self._mats_compute_energy = list()
+        # The constitutive models of the entities, one per distinct key (see 'get_fem_model_key'), dispatched statically
+        self._models: list[FEMModel] = []
+        self._models_key: list[FEMModelKey] = []
 
         # boundary
         self.setup_boundary()
@@ -349,8 +347,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             for entity in self._entities:
                 entity._add_to_solver()
 
-        for mat in self._mats:
-            mat.build(self)
+        for model in self._models:
+            model.build(self)
 
         if self.n_elements_max > 0:
             self._init_surface_info()
@@ -366,6 +364,11 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
         self._build_gravity()
 
+        # The vertices the vertex options fix are held at their initial positions from the first substep on
+        for entity in self._entities:
+            if entity._fixed_verts_idx_local.size > 0:
+                entity.set_vertex_constraints(entity._fixed_verts_idx_local)
+
     @property
     def is_active(self):
         # Counted from the entities rather than from what build recorded, so the answer stands before it: the rate
@@ -375,20 +378,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, *, options, desc=None
     ) -> "FEMEntity":
-        # add material's update methods if not matching any existing material
-        exist = False
-        for mat in self._mats:
-            if material == mat:
-                material.idx = mat.idx
-                exist = True
-                break
-        self._mats.append(material)
-        if not exist:
-            material.idx = len(self._mats_idx)
-            self._mats_idx.append(material.idx)
-            self._mats_update_stress.append(material.update_stress)
-            self._mats_compute_energy_gradient_hessian.append(material.compute_energy_gradient_hessian)
-            self._mats_compute_energy.append(material.compute_energy)
+        model_key = get_fem_model_key(options)
+        if model_key not in self._models_key:
+            self._models_key.append(model_key)
+            self._models.append(build_fem_model(model_key))
 
         # create entity
         entity = FEMEntity(
@@ -398,6 +391,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             morph=morph,
             surface=surface,
             idx=idx,
+            model_idx=self._models_key.index(model_key),
             v_start=self.n_vertices,
             el_start=self.n_elements,
             s_start=self.n_surfaces,
@@ -406,6 +400,14 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             name=name,
             options=options,
         )
+        # The implicit solver simulates fixed vertices with vertex constraints enabled, which the vertex options imply
+        if entity._fixed_verts_idx_local.size > 0 and self._use_implicit_solver and not self._enable_vertex_constraints:
+            if "enable_vertex_constraints" in self._options.model_fields_set:
+                gs.raise_exception(
+                    f"The vertex options of entity '{entity.name}' fix vertices, which requires "
+                    "'enable_vertex_constraints=True' of the implicit FEM solver."
+                )
+            self._enable_vertex_constraints = True
 
         self._entities.append(entity)
         return entity
@@ -436,9 +438,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             J = F.determinant()
 
             stress = qd.Matrix.zero(gs.qd_float, 3, 3)
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    stress = self._mats_update_stress[mat_idx](
+            for model_idx in qd.static(range(len(self._models))):
+                if self.elements_i[i_e].mat_idx == model_idx:
+                    stress = self._models[model_idx].update_stress(
                         mu=self.elements_i[i_e].mu,
                         lam=self.elements_i[i_e].lam,
                         J=J,
@@ -490,9 +492,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def precompute_material_data(self, f: qd.i32):
         for i_b, i_e in qd.ndrange(self._B, self.n_elements):
             J, F = self._compute_ele_J_F(f, i_e, i_b)  # use last time step's pos to compute
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    self._mats[mat_idx].pre_compute(J=J, F=F, i_e=i_e, i_b=i_b)
+            for model_idx in qd.static(range(len(self._models))):
+                if self.elements_i[i_e].mat_idx == model_idx:
+                    self._models[model_idx].pre_compute(J=J, F=F, i_e=i_e, i_b=i_b)
 
     @qd.kernel
     def init_pos_and_inertia(self, f: qd.i32, links_state: LinksState):
@@ -544,13 +546,13 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
 
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    if self._mats[mat_idx]._hessian_ready:
+            for model_idx in qd.static(range(len(self._models))):
+                if self.elements_i[i_e].mat_idx == model_idx:
+                    if self._models[model_idx].is_hessian_ready:
                         (
                             self.elements_el_energy[i_b, i_e].energy,
                             self.elements_el_energy[i_b, i_e].gradient,
-                        ) = self._mats[mat_idx].compute_energy_gradient(
+                        ) = self._models[model_idx].compute_energy_gradient(
                             mu=self.elements_i[i_e].mu,
                             lam=self.elements_i[i_e].lam,
                             J=J,
@@ -564,7 +566,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                         (
                             self.elements_el_energy[i_b, i_e].energy,
                             self.elements_el_energy[i_b, i_e].gradient,
-                        ) = self._mats[mat_idx].compute_energy_gradient_hessian(
+                        ) = self._models[model_idx].compute_energy_gradient_hessian(
                             mu=self.elements_i[i_e].mu,
                             lam=self.elements_i[i_e].lam,
                             J=J,
@@ -602,9 +604,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
 
             J, F = self._compute_ele_J_F(f + 1, i_e, i_b)
 
-            for mat_idx in qd.static(self._mats_idx):
-                if self.elements_i[i_e].mat_idx == mat_idx:
-                    self.elements_el_energy[i_b, i_e].energy = self._mats[mat_idx].compute_energy(
+            for model_idx in qd.static(range(len(self._models))):
+                if self.elements_i[i_e].mat_idx == model_idx:
+                    self.elements_el_energy[i_b, i_e].energy = self._models[model_idx].compute_energy(
                         mu=self.elements_i[i_e].mu,
                         lam=self.elements_i[i_e].lam,
                         J=J,
@@ -940,9 +942,9 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.compute_ele_hessian_gradient(f)
 
             # If the hessian is invariant, we only need to compute it once
-            for mat_idx in self._mats_idx:
-                if self._mats[mat_idx].hessian_invariant:
-                    self._mats[mat_idx]._hessian_ready = True
+            for model in self._models:
+                if model.hessian_invariant:
+                    model.is_hessian_ready = True
 
             # accumulate vertex force and preconditioner
             self.accumulate_vertex_force_preconditioner(f)

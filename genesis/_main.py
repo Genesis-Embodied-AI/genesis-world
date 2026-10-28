@@ -43,7 +43,7 @@ def launch(
         entities = []
         if filename is not None:
             filename_lower = filename.lower()
-            material = gs.materials.Rigid()
+            material = gs.materials.Material()
             # Morphs load collision geometry by default, so the overlay's collision vis-mode has something to show; the
             # -c flag only selects which representation is displayed first.
             surface = gs.surfaces.Default(vis_mode="visual" if not collision else "collision")

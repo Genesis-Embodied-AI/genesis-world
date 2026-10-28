@@ -27,20 +27,20 @@ def main():
         gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, 0.0, 0.0)),
     )
     scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0.0, 1.0, 0.0),
-        ),
-        material=gs.materials.Rigid(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0.0, 1.0, 0.0),
+            ),
             gravity_compensation=0.5,
         ),
     )
     scene.add_entity(
-        gs.morphs.MJCF(
-            file="xml/franka_emika_panda/panda.xml",
-            pos=(0.0, 2.0, 0.0),
-        ),
-        material=gs.materials.Rigid(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.MJCF(
+                file="xml/franka_emika_panda/panda.xml",
+                pos=(0.0, 2.0, 0.0),
+            ),
             gravity_compensation=1.0,
         ),
     )
