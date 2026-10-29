@@ -850,9 +850,8 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
         which keeps the summed corrections stable and leaves the converged solution unchanged, so that the relaxation
         factors of the materials are not used. Defaults to False.
     position_tolerance : float, optional
-        Largest particle correction of a constraint iteration in meters under which the constraint loop, and the
-        projection after a coupling, stop before `solver_iterations`; 0 runs all of them. Every check syncs the GPU.
-        Defaults to 0.
+        Largest particle correction of a constraint iteration in meters under which the constraint loop stops before
+        `solver_iterations`; 0 runs all of them. Defaults to 0.
     particle_size : float, optional
         Particle diameter in meters. Defaults to 1e-2.
     hash_grid_res : tuple, optional

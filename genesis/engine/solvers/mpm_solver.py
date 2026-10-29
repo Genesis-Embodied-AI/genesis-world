@@ -26,9 +26,6 @@ from genesis.engine.couplers.mpm_pbd_func import (
     PbdNewtonHost,
     PbdNewtonParticipant,
     PbdParticleQuery,
-    PbdProxyTransfer,
-    kernel_pbd_proxy_g2p,
-    kernel_pbd_proxy_p2g,
 )
 from genesis.engine.couplers.mpm_rigid_func import RigidGeomQuery, func_build_rigid_rows
 from genesis.engine.couplers.mpm_rigid_newton import (
@@ -99,13 +96,6 @@ NEWTON_VELOCITY_TOL = 5e-2
 # FIXME: The single graph takes several minutes to compile cold, against a fraction of that for the separate launches,
 # whose kernels each compile once and are shared by every call site; the host-driven substep is the default meanwhile.
 USE_SUBSTEP_GRAPH = False
-
-# Couple PBD by the proxy transfer of its particles through the MPM grid, or by its particles as Newton unknowns with
-# MPM-PBD contact rows and the MPM particles as obstacles of PBD's loop (see mpm_pbd_func)
-PBD_PROXY_TRANSFER = True
-# Couple every PBD particle of the proxy transfer with each MPM body it comes into contact with, or with its nearest
-# MPM particle alone
-PBD_PROXY_PER_BODY = True
 
 
 @qd.data_oriented
@@ -349,14 +339,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             query = FemTriangleQuery(fem, self._mpm_newton, self._mpm_params, self._B)
             contact = MpmFemContact(self._newton_participant, fem_participant, query)
             newton_solver.register_coupling(MpmFemContactHost(contact), contact)
-        # PBD's particles either add their mass and momentum to the MPM nodes around the solve, or join it with their
-        # inertia around PBD's own projection (see mpm_pbd_func)
-        self._pbd_transfer = self._pbd_coupled and PBD_PROXY_TRANSFER
-        if self._pbd_transfer:
-            pbd = self._sim.pbd_solver
-            self._pbd_proxy = PbdProxyTransfer(self, pbd, self._mpm_params, self._B, PBD_PROXY_PER_BODY)
-            pbd.set_post_coupling_projection(True)
-        if self._pbd_coupled and not self._pbd_transfer:
+        # PBD's particles join the solve with their inertia around PBD's own projection (see mpm_pbd_func)
+        if self._pbd_coupled:
             pbd = self._sim.pbd_solver
             pbd_participant = PbdNewtonParticipant(PbdNewtonData(pbd, self._B))
             newton_solver.register_secondary(PbdNewtonHost(pbd_participant.pd, self._mpm_params), pbd_participant)
@@ -660,9 +644,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self._sim.cur_t,
         )
         self._exchange_momentum(f)
-        if self._pbd_transfer:
-            self._pbd_proxy.build(f)
-            kernel_pbd_proxy_p2g(grid, self._pbd_proxy, params, f)
         # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights. It
         # also sizes the triplet storage for the substep's fixed grid topology, which every assembly of the Newton
         # loop shares.
@@ -692,8 +673,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def newton_finish(self, f):
         """G2P from the solved grid displacement."""
         kernel_finalize(self.particles, self.particles_ng, self._mpm_grid, self._mpm_newton, self._mpm_params, f)
-        if self._pbd_transfer:
-            kernel_pbd_proxy_g2p(self._mpm_grid, self._pbd_proxy, self._mpm_params, f)
 
     def newton_after(self, f):
         pass

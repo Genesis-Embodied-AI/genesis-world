@@ -61,17 +61,15 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         self._sleep_threshold = options.sleep_threshold
         self._use_xpbd = options.use_xpbd
         self._position_tolerance = options.position_tolerance
-        # Device state of the constraint loop: its condition, its iteration, the largest correction of the iteration,
-        # and the iterations the constraint loop and the projection after the coupling ran in the last substep
+        # Device state of the constraint loop: its condition, its iteration count and the largest correction of the
+        # iteration
         self._loop_cond = qd.ndarray(qd.i32, shape=())
         self._loop_iter = qd.ndarray(qd.i32, shape=())
         self._max_correction = qd.ndarray(gs.qd_float, shape=())
-        self._loop_iterations = qd.ndarray(qd.i32, shape=(2,))
         # Particles of another solver the PBD particles collide with as immovable obstacles, set by that solver before
         # the first substep (see set_particle_obstacles)
         self._particle_obstacles = None
         self._has_particle_obstacles = False
-        self._post_coupling_projection = False
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
@@ -156,8 +154,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             ipos=gs.qd_vec3,  # initial position
             dpos=gs.qd_vec3,  # delta position
             dcount=gs.qd_float,  # number of constraints whose corrections dpos accumulates, for their average
-            # share of the particle a coupling moved over the substep, which the post-coupling projection holds
-            coupled=gs.qd_float,
             vel=gs.qd_vec3,  # velocity
             lam=gs.qd_float,
             rho=gs.qd_float,
@@ -246,13 +242,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         the corrections of the PBD particles in `dpos` and `dcount` of the reordered particles."""
         self._particle_obstacles = obstacles
         self._has_particle_obstacles = True
-
-    def set_post_coupling_projection(self, is_enabled):
-        """Project the topology constraints again after the coupling moved the particles, and take the velocities from
-        the projected positions, so that a coupling that moves every particle on its own does not strain the cloth.
-        The coupling sets the `coupled` share of every particle it moved, which scales its inverse mass down there, so
-        that the projection leaves the motion the coupling gave it."""
-        self._post_coupling_projection = is_enabled
 
     def init_ckpt(self):
         self._ckpt = dict()
@@ -444,7 +433,6 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     def _kernel_store_initial_pos(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             self.particles[i_p, i_b].ipos = self.particles[i_p, i_b].pos
-            self.particles[i_p, i_b].coupled = 0.0
 
     @qd.kernel
     def _kernel_reorder_particles(self, f: qd.i32):
@@ -502,11 +490,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
 
     @qd.func
     def _func_inv_mass(self, i_r, i_b):
-        return (
-            self.particles_reordered[i_r, i_b].free
-            * (1.0 - self.particles_reordered[i_r, i_b].coupled)
-            / self.particles_info_reordered[i_r, i_b].mass
-        )
+        return self.particles_reordered[i_r, i_b].free / self.particles_info_reordered[i_r, i_b].mass
 
     @qd.func
     def _func_within_budget(self, budget: qd.template()):
@@ -1050,7 +1034,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                     self._kernel_solve_obstacles(f, True)
                 self._kernel_apply_corrections(f, True, True)
 
-            self._kernel_constraint_loop(f, False)
+            self._kernel_constraint_loop(f)
 
             if self._n_fluid_particles > 0:
                 self._kernel_solve_viscosity(f)
@@ -1061,11 +1045,11 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 self._kernel_sleep(f)
 
     @qd.kernel(graph=True)
-    def _kernel_constraint_loop(self, f: qd.i32, is_post_coupling: qd.template()):
+    def _kernel_constraint_loop(self, f: qd.i32):
         """The constraint iterations of a substep as one graph: every iteration the topology constraints, every kind as
-        its own group within its own iteration budget, then, before the coupling, the density constraints and the
-        contact group. The loop runs `solver_iterations` iterations, or stops once the largest correction of one falls
-        below `position_tolerance`; the iteration count lands in `_loop_iterations` for the phase."""
+        its own group within its own iteration budget, then the density constraints and the contact group. The loop
+        runs `solver_iterations` iterations, or stops once the largest correction of one falls below
+        `position_tolerance`; `_loop_iter` holds the iterations it ran."""
         self._loop_iter[()] = 0
         self._loop_cond[()] = 1
         while qd.graph.do_while(self._loop_cond):
@@ -1080,21 +1064,19 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             if qd.static(self._n_elems > 0):
                 self._func_solve_volume(f)
                 self._func_apply_corrections(f, False, False)
-            if qd.static(not is_post_coupling):
-                if qd.static(self._n_fluid_particles > 0):
-                    self._func_solve_density(f)
-                self._func_solve_collision(f, False)
-                if qd.static(self._has_particle_obstacles):
-                    self._particle_obstacles.func_project(self, f)
-                self._func_apply_corrections(f, True, False)
-            self._func_end_iteration(is_post_coupling)
+            if qd.static(self._n_fluid_particles > 0):
+                self._func_solve_density(f)
+            self._func_solve_collision(f, False)
+            if qd.static(self._has_particle_obstacles):
+                self._particle_obstacles.func_project(self, f)
+            self._func_apply_corrections(f, True, False)
+            self._func_end_iteration()
 
     @qd.func(requires_top_level=True)
-    def _func_end_iteration(self, is_post_coupling: qd.template()):
+    def _func_end_iteration(self):
         for _ in range(1):
             n_iter = self._loop_iter[()] + 1
             self._loop_iter[()] = n_iter
-            self._loop_iterations[qd.static(1 if is_post_coupling else 0)] = n_iter
             is_done = n_iter >= self._solver_iterations
             if qd.static(self._position_tolerance > 0.0):
                 if self._max_correction[()] < self._position_tolerance:
@@ -1102,23 +1084,15 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             self._loop_cond[()] = 0 if is_done else 1
 
     @property
-    def n_iterations_pre(self):
+    def n_iterations(self):
         """Iterations the constraint loop ran in the last substep; a GPU sync."""
-        return int(self._loop_iterations.to_numpy()[0])
-
-    @property
-    def n_iterations_post(self):
-        """Iterations the projection after the coupling ran in the last substep; a GPU sync."""
-        return int(self._loop_iterations.to_numpy()[1])
+        return int(self._loop_iter.to_numpy())
 
     def substep_pre_coupling_grad(self, f):
         pass
 
     def substep_post_coupling(self, f):
         if self.is_active:
-            if self._post_coupling_projection:
-                self._kernel_constraint_loop(f, True)
-                self._kernel_compute_velocity(f)
             self._kernel_copy_from_reordered(f)
 
             # boundary collision
