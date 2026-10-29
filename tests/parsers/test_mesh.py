@@ -1035,7 +1035,8 @@ def test_decimate_mesh_with_duplicate_faces():
     faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
     tmesh = trimesh.Trimesh(verts, np.vstack((faces, faces)), process=False)
 
-    gmesh = gs.Mesh.from_trimesh(mesh=tmesh, decimate=True, decimate_face_num=5)
+    # A non-zero aggressiveness selects the lossy path, the only one on which the target face count is checked
+    gmesh = gs.Mesh.from_trimesh(mesh=tmesh, decimate=True, decimate_face_num=5, decimate_aggressiveness=2)
     assert "decimated" not in gmesh.metadata
     assert len(gmesh.trimesh.faces) == 4
     assert gmesh.trimesh.is_watertight
