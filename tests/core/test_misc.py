@@ -346,6 +346,24 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
             },
         ),
     )
+    # An OBJ material selects the visual geom it is assigned to by its name in the material library
+    boat = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Mesh(
+                file="meshes/boat/boat.obj",
+                pos=(5.0, 1.0, 0.6),
+                scale=0.1,
+                fixed=True,
+            ),
+            vgeoms={
+                gs.VGeomIndex.with_material("material_2"): gs.options.VGeomOptions(
+                    surface=gs.surfaces.Default(
+                        color=(0.0, 0.0, 1.0),
+                    ),
+                ),
+            },
+        ),
+    )
     # Every kind of selection travels through a scene file
     exported = tmp_path / f"selections{SCENE_FORMAT}"
     rigid_options = gs.options.RigidEntityOptions(
@@ -611,6 +629,14 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     }
     for vgeom in mixed_geoms_body.vgeoms:
         assert_allclose(vgeom.surface.get_rgba().color[:3], vgeoms_color[vgeom.metadata["name"]], tol=gs.EPS)
+    assert sorted(vgeom.metadata["material_name"] for vgeom in boat.vgeoms) == [
+        "material_0",
+        "material_1",
+        "material_2",
+    ]
+    for vgeom in boat.vgeoms:
+        is_selected = vgeom.metadata["material_name"] == "material_2"
+        assert isinstance(vgeom.surface.get_rgba(), gs.textures.ColorTexture) == is_selected
     # The fixed vertices, on the face at the top of each box in the frame of its morph, hold the box while the opposite
     # face sags under gravity
     for box in (rotated_box, hanging_box):
