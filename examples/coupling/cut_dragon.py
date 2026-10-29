@@ -62,7 +62,9 @@ def main():
                 color=(0.6, 1.0, 0.8, 1.0),
                 vis_mode="particle",
             ),
-            material=gs.materials.Elastic(),
+            material=gs.materials.Elastic(
+                youngs_modulus=3e5,
+            ),
             solver_options=gs.options.MPMEntitySolverOptions(
                 sampler="pbs-64",
             ),

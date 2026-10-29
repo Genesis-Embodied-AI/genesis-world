@@ -37,7 +37,9 @@ obj_elastic = scene.add_entity(
             color=(1.0, 0.4, 0.4),
             vis_mode="visual",
         ),
-        material=gs.materials.Elastic(),
+        material=gs.materials.Elastic(
+            youngs_modulus=3e5,
+        ),
     ),
 )
 

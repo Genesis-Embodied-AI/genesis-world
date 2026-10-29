@@ -274,6 +274,7 @@ def test_deformable_parallel(show_viewer):
             ),
             material=gs.materials.Elastic(
                 density=200,
+                youngs_modulus=3e5,
             ),
         ),
     )
