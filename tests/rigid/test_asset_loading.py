@@ -554,7 +554,7 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity.get_pos(), (0.0, 0.0, -0.03), atol=5e-4)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("urdf_path", ["chain.urdf", "dual_arms_glb/dual_arms_glb.urdf", "dual_arms_primitives.urdf"])
 @pytest.mark.parametrize("fixed", [False, True])
 def test_urdf_parsing_merge_fixed_links(urdf_path, fixed, show_viewer, tol):
@@ -2001,7 +2001,7 @@ def test_multi_root_offset(show_viewer, tol):
     assert_allclose(link_a.get_pos()[..., 2], link_b.get_pos()[..., 2], tol=tol)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("is_fixed", [False, True])
 @pytest.mark.parametrize("merge_fixed_links", [False, True])
 def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypatch):

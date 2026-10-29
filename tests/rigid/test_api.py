@@ -460,7 +460,7 @@ def test_extended_broadcasting():
     assert_allclose(entity.get_dofs_velocity(), np.array([(1.0,) * 6, (2.0,) * 6]), tol=gs.EPS)
 
 
-@pytest.mark.required("pairwise")
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("batch_links_info", [False, True])
 @pytest.mark.parametrize("batch_joints_info", [False, True])
 @pytest.mark.parametrize("batch_dofs_info", [False, True])

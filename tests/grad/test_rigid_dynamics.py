@@ -20,7 +20,7 @@ from .utils import assert_grad_matches_fd, make_diff_scene_pair
         pytest.param("grad_spherical", marks=pytest.mark.required),
         pytest.param("grad_free_with_revolute", marks=pytest.mark.required),
         "grad_chain3",
-        pytest.param("grad_cartpole", marks=pytest.mark.required),
+        "grad_cartpole",
         pytest.param("grad_hopper", marks=pytest.mark.required),
     ],
 )
@@ -158,7 +158,7 @@ def test_fk_grad_matches_fd(model_name, request, precision, show_viewer):
         pytest.param("grad_free_with_revolute", marks=pytest.mark.required),
         "grad_chain3",
         pytest.param("grad_spherical", marks=pytest.mark.required),
-        pytest.param("grad_cartpole", marks=pytest.mark.required),
+        "grad_cartpole",
         pytest.param("grad_hopper", marks=pytest.mark.required),
     ],
 )

@@ -160,7 +160,7 @@ jobs:
               summary = '❌ The comparison failed to run. See the job log.';
               state = 'failure';
             } else if ((process.env.HAS_REGRESSIONS || '0') === '1') {
-              summary = '🔴 Regressions detected. See tables below.';
+              summary = '❗ Regressions detected. See tables below.';
               state = 'failure';
             } else if ((process.env.HAS_ALERTS || '0') === '1') {
               summary = '⚠️ Large deviation detected. See tables below.';
@@ -224,7 +224,7 @@ jobs:
             }
 
             const title = (process.env.HAS_REGRESSIONS || '0') === '1'
-              ? '🔴 Benchmark Regression Detected' : '⚠️ Abnormal Benchmark Result Detected';
+              ? '❗ Benchmark Regression Detected' : '⚠️ Abnormal Benchmark Result Detected';
             const comment = `**${title} ➡️ [Report](${process.env.REPORT_URL})**`;
 
             await github.rest.issues.createComment({

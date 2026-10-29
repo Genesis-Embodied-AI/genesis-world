@@ -36,7 +36,7 @@ def _ellipsoid_mjcf_path(tmp_path, semi_axes):
     return str(path)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.mujoco_compatibility(False)
 @pytest.mark.parametrize("mode", range(9))
 @pytest.mark.parametrize("model_name", ["collision_edge_cases"])
@@ -1314,8 +1314,7 @@ def test_contact_forces(show_viewer):
     assert torch.quantile(torch.cat(all_errors), 0.95) < 2e-4
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("gjk_collision", [True, False])
+@pytest.mark.parametrize("gjk_collision", [True, pytest.param(False, marks=pytest.mark.required)])
 def test_contact_pruning(gjk_collision, show_viewer):
     GEOM_HALF_SIZE = 0.1
     MARGIN = 1e-4
@@ -1626,15 +1625,14 @@ def test_contact_pruning_authored_decomp(gjk_collision, show_viewer):
         assert is_vertical and is_pruned
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name",
     [
         "side_by_side_capsules",
-        "collinear_capsules",
-        "side_by_side_cylinders",
+        pytest.param("collinear_capsules", marks=pytest.mark.required),
+        pytest.param("side_by_side_cylinders", marks=pytest.mark.required),
         "collinear_cylinders",
-        "collinear_spheres",
+        pytest.param("collinear_spheres", marks=pytest.mark.required),
     ],
 )
 def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
@@ -2054,7 +2052,7 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
 @pytest.mark.required
 @pytest.mark.precision("32")
 @pytest.mark.parametrize("backend", [gs.gpu])
-@pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None], ids=["prune", "noprune"])
+@pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None])
 @pytest.mark.parametrize(
     "prefer_decomposed_solver",
     [
@@ -2062,7 +2060,6 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
         pytest.param(True, marks=pytest.mark.use_deterministic_algorithms(False)),
         None,
     ],
-    ids=["monolith", "decomposed", "deterministic"],
 )
 def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_tolerance, monkeypatch, show_viewer):
     # Run-to-run reproducibility on GPU: from an identical initial state, every trial must reproduce a bit-identical

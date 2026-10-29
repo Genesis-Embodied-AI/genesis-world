@@ -615,9 +615,15 @@ def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
     assert_allclose(w_runtime_start - spheres[0].get_dofs_velocity()[..., 5], spin_downs[-1], rtol=0.05, atol=1e-3)
 
 
-@pytest.mark.required("sparse")
-@pytest.mark.parametrize("friction_cone", [gs.friction_cone.pyramidal, gs.friction_cone.elliptic])
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize(
+    "n_envs, friction_cone",
+    [
+        (0, gs.friction_cone.pyramidal),
+        (0, gs.friction_cone.elliptic),
+        (2, gs.friction_cone.pyramidal),
+        pytest.param(2, gs.friction_cone.elliptic, marks=pytest.mark.required),
+    ],
+)
 def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
     # A sphere rolling without slipping decelerates only through the rolling resistance torque friction_rolling *
     # m * g: with the rolling constraint v = w * r and I = 2/5 m r^2, dv/dt = -(5/7) * friction_rolling * g / r,

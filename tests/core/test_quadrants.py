@@ -128,7 +128,7 @@ def gs_static_child(args: list[str]):
 @pytest.mark.parametrize(
     "enable_multicontact, expected_num_contacts, use_ndarray, test_backend",
     [
-        pytest.param(False, 1, False, "cpu", marks=pytest.mark.required),
+        (False, 1, False, "cpu"),
         pytest.param(True, 4, False, "cpu", marks=pytest.mark.required),
         (False, 1, True, "cpu"),
         pytest.param(True, 4, True, "cpu", marks=pytest.mark.required),
