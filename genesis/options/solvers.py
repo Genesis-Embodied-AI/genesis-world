@@ -756,10 +756,14 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
         Maximum number of iterations for the divergence solver. Defaults to 100.
     max_density_solver_iterations : int, optional
         Maximum number of iterations for the density solver. Defaults to 100.
+    n_subcycles : int, optional
+        Number of SPH integration steps per simulation substep, so that SPH can integrate at a shorter interval than
+        the solvers it couples with. The couplings act once per substep, at the last of them. Defaults to 1.
     """
 
     particle_size: PositiveFloat = 0.02
     pressure_solver: Literal["WCSPH", "DFSPH"] = "WCSPH"
+    n_subcycles: PositiveInt = 1
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)

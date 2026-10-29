@@ -30,6 +30,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         self._particle_size = options.particle_size
         self._support_radius = options._support_radius
         self._pressure_solver = options.pressure_solver
+        self._n_subcycles = options.n_subcycles
 
         # DFSPH parameters
         self._df_max_error_div = options.max_divergence_error
@@ -130,6 +131,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         super().build()
 
         self._B = self._sim._B
+        # The interval of one SPH integration step: the substep, or a fraction of it with subcycles
+        self._cycle_dt = self.substep_dt / self._n_subcycles
 
         # particles and entities
         self._n_particles = self.n_particles
@@ -150,9 +153,9 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             stable_dt = (
                 self._stable_dt_coef * (0.01 * self._support_radius**2) / self.particles_info.mu.to_numpy().max()
             )
-            if self.substep_dt > stable_dt:
+            if self._cycle_dt > stable_dt:
                 gs.logger.warning(
-                    f"Current timestep ({self.substep_dt:.4g}) is larger than the stable timestep "
+                    f"Current timestep ({self._cycle_dt:.4g}) is larger than the stable timestep "
                     f"({stable_dt:.4g}) for SPH solver. "
                     "Please consider reducing the timestep, liquid viscosity (mu), or increasing the particle size."
                 )
@@ -363,7 +366,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
     def _kernel_advect_velocity(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i_p, i_b].active:
-                self.particles_reordered[i_p, i_b].vel += self._substep_dt * self.particles_reordered[i_p, i_b].acc
+                self.particles_reordered[i_p, i_b].vel += self._cycle_dt * self.particles_reordered[i_p, i_b].acc
 
     @qd.kernel
     def _kernel_advect_position(self, f: qd.i32):
@@ -373,7 +376,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 new_vel = self.particles_reordered[i_p, i_b].vel
 
                 # advect
-                new_pos = pos + self._substep_dt * new_vel
+                new_pos = pos + self._cycle_dt * new_vel
 
                 # impose boundary (pass b if needed)
                 corrected_pos, corrected_vel = self.boundary.impose_pos_vel(new_pos, new_vel)
@@ -517,7 +520,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         # TODO: warm start
         # Compute velocity of density change
         self._kernel_compute_density_time_derivative()
-        inv_dt = 1 / self._substep_dt
+        inv_dt = 1 / self._cycle_dt
         # self._kernel_multiply_time_step(self.ps.dfsph_factor, inv_dt)
 
         # Start solver
@@ -548,7 +551,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         # compute new velocities only considering non-pressure forces
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i_p, i_b].active:
-                self.particles_reordered[i_p, i_b].vel += self._substep_dt * self.particles_reordered[i_p, i_b].acc
+                self.particles_reordered[i_p, i_b].vel += self._cycle_dt * self.particles_reordered[i_p, i_b].acc
 
     @qd.func
     def _task_compute_density_star(self, i, j, ret: qd.template(), i_b):
@@ -566,7 +569,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.sh.for_all_neighbors(
                     i_p, self.particles_reordered.pos, self._support_radius, delta, self._task_compute_density_star, i_b
                 )
-                drho = self.particles_reordered[i_p, i_b].rho / self._density0 + self._substep_dt * delta
+                drho = self.particles_reordered[i_p, i_b].rho / self._density0 + self._cycle_dt * delta
                 self.particles_reordered[i_p, i_b].drho = qd.max(drho, 1.0)  # - 1.0
 
     @qd.func
@@ -583,7 +586,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             )
             # Directly update velocities instead of storing pressure accelerations
             ret.dv -= (
-                self._substep_dt * k_sum * grad_p_j
+                self._cycle_dt * k_sum * grad_p_j
             )  # ki, kj already contain inverse density, i.e., density canceled if not mutiphase flow
 
     @qd.kernel
@@ -626,7 +629,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 field[i_p, i_b] *= time_step
 
     def _density_solve(self, f: qd.i32):
-        inv_dt2 = 1.0 / self._substep_dt**2
+        inv_dt2 = 1.0 / self._cycle_dt**2
 
         # Compute density star
         self._kernel_compute_density_star()
@@ -714,21 +717,31 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
     # ------------------------------------------------------------------------------------
 
     def substep_pre_coupling(self, f):
+        """The SPH integration steps of the substep but the advection of the last one, which follows the couplings in
+        substep_post_coupling."""
         if self.is_active:
-            self._kernel_reorder_particles(f)
-            if self._pressure_solver == "WCSPH":
-                self._kernel_compute_rho(f)
-                self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
-                self._kernel_compute_pressure_forces(f)
-                self._kernel_advect_velocity(f)
-            elif self._pressure_solver == "DFSPH":
-                self._kernel_compute_rho(f)
-                self._kernel_compute_DFSPH_factor(f)
-                self._divergence_solve(f)
-                self._kernel_advect_velocity(f)
-                self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
-                self._kernel_predict_velocity(f)
-                self._density_solve(f)
+            for _ in range(self._n_subcycles - 1):
+                self._advance_velocity(f)
+                self._kernel_advect_position(f)
+                self._kernel_copy_from_reordered(f)
+            self._advance_velocity(f)
+
+    def _advance_velocity(self, f):
+        """Velocity update of one SPH integration step, on the particles reordered by the spatial hash."""
+        self._kernel_reorder_particles(f)
+        if self._pressure_solver == "WCSPH":
+            self._kernel_compute_rho(f)
+            self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
+            self._kernel_compute_pressure_forces(f)
+            self._kernel_advect_velocity(f)
+        elif self._pressure_solver == "DFSPH":
+            self._kernel_compute_rho(f)
+            self._kernel_compute_DFSPH_factor(f)
+            self._divergence_solve(f)
+            self._kernel_advect_velocity(f)
+            self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
+            self._kernel_predict_velocity(f)
+            self._density_solve(f)
 
     def substep_pre_coupling_grad(self, f):
         pass

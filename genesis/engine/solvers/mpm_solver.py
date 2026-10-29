@@ -10,7 +10,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.couplers import mpm_rigid_func
+from genesis.engine.couplers import mpm_exchange_func, mpm_rigid_func
 from genesis.engine.couplers.mpm_rigid_func import func_build_rigid_rows
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
@@ -289,15 +289,17 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 gs.raise_exception(
                     "Coupling the implicit MPM solver with Rigid does not support hibernation or noslip iterations."
                 )
-        partners = {
-            "ToolSolver": (self._sim.tool_solver, is_legacy),
-            "SPHSolver": (self._sim.sph_solver, is_legacy and coupler_options.mpm_sph),
-            "PBDSolver": (self._sim.pbd_solver, is_legacy and coupler_options.mpm_pbd),
-            "FEMSolver": (self._sim.fem_solver, is_legacy and coupler_options.fem_mpm),
-        }
-        for name, (solver, is_coupled) in partners.items():
-            if solver.is_active and is_coupled:
-                gs.raise_exception(f"Coupling the implicit MPM solver with {name} is not supported yet.")
+        if self._sim.tool_solver.is_active and is_legacy:
+            gs.raise_exception("Coupling the implicit MPM solver with ToolSolver is not supported yet.")
+        # Momentum exchanges with the particle and FEM solvers, at the free node velocity before the Newton solve
+        self._sph_coupled = self._sim.sph_solver.is_active and is_legacy and coupler_options.mpm_sph
+        self._pbd_coupled = self._sim.pbd_solver.is_active and is_legacy and coupler_options.mpm_pbd
+        self._fem_coupled = self._sim.fem_solver.is_active and is_legacy and coupler_options.fem_mpm
+        if self._fem_coupled and not self._sim.fem_solver._use_implicit_solver:
+            gs.raise_exception(
+                "Coupling the implicit MPM solver with FEM requires FEM's implicit solver "
+                "(FEMOptions(use_implicit_solver=True)), or LegacyCouplerOptions(fem_mpm=False)."
+            )
 
     def build(self):
         super().build()
@@ -511,6 +513,19 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             if not int(control.newton_cond.to_numpy()):
                 break
 
+    def _exchange_momentum(self, f):
+        """The momentum exchanges with SPH, PBD and FEM, on the free node velocity of the substep."""
+        grid, params = self._mpm_grid, self._mpm_params
+        for solver, is_coupled, only_free in (
+            (self._sim.sph_solver, self._sph_coupled, False),
+            (self._sim.pbd_solver, self._pbd_coupled, True),
+        ):
+            if is_coupled:
+                stencil = int(np.floor(self._dx / solver.hash_grid_cell_size)) + 2
+                kernel_exchange_particles(grid, params, solver, stencil, only_free)
+        if self._fem_coupled:
+            kernel_exchange_fem(grid, params, self._sim.fem_solver, f)
+
     def _substep_launches(self, f):
         """The substep of `kernel_substep` as separate launches, with the Newton, line-search and PCG loops and the
         capacity growth driven from the host. When coupled with Rigid, the Newton solve is over the grid displacement
@@ -536,6 +551,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             f,
             self._sim.cur_t,
         )
+        self._exchange_momentum(f)
         # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights
         self._assemble(f)
         kernel_contact_rows(
@@ -582,6 +598,11 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         if self._rigid_coupled:
             gs.raise_exception(
                 "The implicit MPM substep graph does not support the coupling with Rigid dofs; use USE_NEWTON_GRAPH."
+            )
+        if self._sph_coupled or self._pbd_coupled or self._fem_coupled:
+            gs.raise_exception(
+                "The implicit MPM substep graph does not support the coupling with SPH, PBD or FEM; use "
+                "USE_NEWTON_GRAPH."
             )
         rigid = self._sim.rigid_solver
         args = (
@@ -1671,6 +1692,27 @@ def kernel_newton_loop(
             mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
             func_accept_or_backtrack(control)
         func_update_convergence(control)
+
+
+@qd.kernel
+def kernel_exchange_particles(
+    grid: qd.template(),
+    params: qd.template(),
+    partner: qd.template(),
+    stencil: qd.template(),
+    only_free: qd.template(),
+):
+    mpm_exchange_func.func_exchange_particles(grid, params, partner, stencil, only_free)
+
+
+@qd.kernel
+def kernel_exchange_fem(
+    grid: qd.template(),
+    params: qd.template(),
+    fem: qd.template(),
+    f: qd.i32,
+):
+    mpm_exchange_func.func_exchange_fem(grid, params, fem, f)
 
 
 @qd.kernel

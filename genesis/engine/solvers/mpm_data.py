@@ -264,6 +264,8 @@ class MpmGrid:
         self.node_diag = qd.ndarray(gs.qd_float, shape=(9 * max_nodes,))
         self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
+        # Velocity change of every node from the momentum exchanges with FEM, gathered before it is applied
+        self.node_dv = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_solved = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
 
     @property
