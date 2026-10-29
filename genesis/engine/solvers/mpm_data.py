@@ -183,20 +183,24 @@ def get_mpm_particles_info(n_particles: int) -> MpmParticlesInfo:
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class MpmMaterialTable:
-    """Parameter-major material table, `material_table[param * n_materials + slot]`, and the family of each slot."""
+    """Parameter-major material table, `material_table[param * n_materials + slot]`, and the energy family and the
+    return map of each slot."""
 
     kind: ClassVar[array_class.DataKind] = array_class.DataKind.CONSTANT
 
     material_table: qd.Tensor
     mat_family: qd.Tensor
+    mat_plastic: qd.Tensor
 
 
-def get_mpm_material_table(table: np.ndarray, family: np.ndarray) -> MpmMaterialTable:
+def get_mpm_material_table(table: np.ndarray, family: np.ndarray, plastic: np.ndarray) -> MpmMaterialTable:
     material_table = array_class.V(dtype=gs.qd_float, shape=(max(table.size, 1),))
     mat_family = array_class.V(dtype=gs.qd_int, shape=(max(family.size, 1),))
+    mat_plastic = array_class.V(dtype=gs.qd_int, shape=(max(plastic.size, 1),))
     material_table.from_numpy(np.resize(table.astype(gs.np_float), max(table.size, 1)))
     mat_family.from_numpy(np.resize(family.astype(gs.np_int), max(family.size, 1)))
-    return MpmMaterialTable(material_table=material_table, mat_family=mat_family)
+    mat_plastic.from_numpy(np.resize(plastic.astype(gs.np_int), max(plastic.size, 1)))
+    return MpmMaterialTable(material_table=material_table, mat_family=mat_family, mat_plastic=mat_plastic)
 
 
 def _padded(length: int, multiple: int = REDUCE_BLOCK_DIM) -> int:

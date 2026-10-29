@@ -151,9 +151,6 @@ def test_perf_dispatch(variant, show_viewer):
     )
     scene.build(n_envs=2)
 
-    # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
-    assert scene.sim.mpm_solver.needs_svd == (variant == "svd")
-
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()
 

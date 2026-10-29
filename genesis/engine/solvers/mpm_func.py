@@ -42,14 +42,39 @@ from .mpm_data import (
 # Biased signed range of block coordinates packed into 14 bits per axis
 COORD_BIAS = 8192
 
-# Material families of the material table
+# Energy families of the material table (design §6.1)
 FAMILY_FIXED_COROTATED = 0
-FAMILY_STVK_HENCKY = 1
+FAMILY_STABLE_NEOHOOKEAN = 1
+FAMILY_EXTENDED_HENCKY = 2
+FAMILY_LIQUID = 3
+
+# Return maps of the material table, applied in G2P
+PLASTIC_NONE = 0
+PLASTIC_VON_MISES = 1
+PLASTIC_CLAMP = 2
+PLASTIC_SNOW = 3
+PLASTIC_SAND = 4
+PLASTIC_LIQUID = 5
 
 # Columns of the parameter-major material table
 PARAM_MU = 0
 PARAM_LAM = 1
-N_MATERIAL_PARAMS = 2
+PARAM_FIBRE = 2  # stiffness of the muscle fibre term, zero for other materials
+PARAM_YIELD_LOWER = 3
+PARAM_YIELD_HIGHER = 4
+PARAM_YIELD_STRESS = 5
+PARAM_SAND_ALPHA = 6
+N_MATERIAL_PARAMS = 7
+
+# Singular value below which the extended Hencky energy continues log(sigma) by its tangent line
+HENCKY_SIGMA_MIN = 0.05
+# Singular values below which the return maps clamp before taking a log, those of the explicit materials
+VON_MISES_SIGMA_MIN = 0.05
+SAND_SIGMA_MIN = 1e-4
+# Range of the volume ratio the liquid return map keeps
+LIQUID_J_MIN = 0.2
+# Hardening exponent of snow, mu and lam scaled by exp(SNOW_HARDENING (1 - Jp))
+SNOW_HARDENING = 10.0
 
 # Pairs of principal axes, in the order of the twist and flip eigenvalues
 _PAIRS = ((0, 1), (0, 2), (1, 2))
@@ -245,37 +270,77 @@ def fixed_corotated_energy(sigma, mu, lam):
 
 
 @qd.func
-def stvk_hencky_energy(sigma, mu, lam):
-    """Energy density of StVK-Hencky, mu |eps|^2 + lam / 2 (tr eps)^2 with eps = log(sigma).
+def extended_hencky_principal(sigma, mu, lam):
+    """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of the extended Hencky energy.
 
-    Defined for positive singular values only: an inverted or degenerate state has infinite energy, the wall a line
-    search starting from a valid state backs away from.
+    psi = mu |l|^2 + lam / 2 (sum l)^2 with l_i = log(sigma_i), continued below HENCKY_SIGMA_MIN by its tangent line
+    log(s) + (sigma_i - s) / s, which keeps the energy C1 and defined for inverted states (sigma_i <= 0). With the
+    principal Kirchhoff stress tau = 2 mu l + lam (sum l) 1: g_i = tau_i l'_i and
+    A = diag(l') (2 mu I + lam 11^T) diag(l') + diag(tau l''), l'' = -1 / sigma^2 above s and 0 below.
     """
-    psi = gs.qd_float(float("inf"))
-    if sigma[2] > 0.0:
-        eps = qd.Vector([qd.log(sigma[i]) for i in qd.static(range(3))], dt=gs.qd_float)
-        trace = eps[0] + eps[1] + eps[2]
-        psi = mu * eps.dot(eps) + 0.5 * lam * trace * trace
-    return psi
+    s = qd.static(HENCKY_SIGMA_MIN)
+    l = qd.Vector.zero(gs.qd_float, 3)
+    dl = qd.Vector.zero(gs.qd_float, 3)
+    ddl = qd.Vector.zero(gs.qd_float, 3)
+    for i in qd.static(range(3)):
+        if sigma[i] >= s:
+            l[i] = qd.log(sigma[i])
+            dl[i] = 1.0 / sigma[i]
+            ddl[i] = -1.0 / (sigma[i] * sigma[i])
+        else:
+            l[i] = qd.log(s) + (sigma[i] - s) / s
+            dl[i] = 1.0 / s
+    trace = l[0] + l[1] + l[2]
+    psi = mu * l.dot(l) + 0.5 * lam * trace * trace
+    tau = 2.0 * mu * l + lam * trace
+    g = tau * dl
+    A = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        A[i, j] = dl[i] * (2.0 * mu * (1.0 if i == j else 0.0) + lam) * dl[j]
+        if qd.static(i == j):
+            A[i, j] += tau[i] * ddl[i]
+    return psi, g, A
 
 
 @qd.func
-def stvk_hencky_principal(sigma, mu, lam):
-    """Energy density, gradient g = dpsi/dsigma and Hessian A = d2psi/dsigma2 of StVK-Hencky at positive singular
-    values: g_i = tau_i / sigma_i with the principal Kirchhoff stress tau = 2 mu eps + lam tr(eps) 1, and
-    A = diag(1/sigma) (2 mu I + lam 11^T) diag(1/sigma) - diag(tau / sigma^2)."""
-    eps = qd.Vector([qd.log(sigma[i]) for i in qd.static(range(3))], dt=gs.qd_float)
-    trace = eps[0] + eps[1] + eps[2]
-    psi = mu * eps.dot(eps) + 0.5 * lam * trace * trace
-    tau = 2.0 * mu * eps + lam * trace
-    inv_sigma = 1.0 / sigma
-    g = tau * inv_sigma
+def stable_neohookean_principal(sigma, mu, lam):
+    """Energy density, gradient and Hessian of the Stable Neo-Hookean energy (Smith et al. 2018) in the signed singular
+    values, defined for inverted states.
+
+    psi = mu / 2 (|sigma|^2 - 3) + lam_s / 2 (J - alpha)^2 - mu^2 / (2 lam_s), with lam_s = lam + mu and
+    alpha = 1 + mu / lam_s, so that the rest state is stress-free with zero energy and the small-strain response has
+    the Lame parameters mu and lam.
+    """
+    lam_s = lam + mu
+    alpha = gs.qd_float(1.0)
+    rest = gs.qd_float(0.0)
+    if lam_s > 0.0:
+        alpha = 1.0 + mu / lam_s
+        rest = mu * mu / (2.0 * lam_s)
+    J = sigma[0] * sigma[1] * sigma[2]
+    cof = qd.Vector([sigma[1] * sigma[2], sigma[0] * sigma[2], sigma[0] * sigma[1]], dt=gs.qd_float)
+    psi = 0.5 * mu * (sigma.dot(sigma) - 3.0) + 0.5 * lam_s * (J - alpha) ** 2 - rest
+    g = mu * sigma + lam_s * (J - alpha) * cof
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for i, j in qd.static(qd.ndrange(3, 3)):
-        A[i, j] = inv_sigma[i] * (2.0 * mu * (1.0 if i == j else 0.0) + lam) * inv_sigma[j]
-        if qd.static(i == j):
-            A[i, j] -= tau[i] * inv_sigma[i] * inv_sigma[i]
+    for i in qd.static(range(3)):
+        A[i, i] = mu + lam_s * cof[i] * cof[i]
+    for k in qd.static(range(3)):
+        i, j = qd.static(_PAIRS[k])
+        other = qd.static(3 - _PAIRS[k][0] - _PAIRS[k][1])
+        A[i, j] = lam_s * (cof[i] * cof[j] + (J - alpha) * sigma[other])
+        A[j, i] = A[i, j]
     return psi, g, A
+
+
+@qd.func
+def liquid_principal(sigma, mu, lam):
+    """Energy density, gradient and Hessian of the liquid: the one-sided volume term lam / 2 (J - 1)^2 under
+    compression (J < 1) and zero under expansion, C1 at J = 1, plus the fixed corotated shear mu |sigma - 1|^2 of a
+    viscous liquid (mu is zero for a non-viscous one)."""
+    lam_compressed = gs.qd_float(0.0)
+    if sigma[0] * sigma[1] * sigma[2] < 1.0:
+        lam_compressed = lam
+    return fixed_corotated_principal(sigma, mu, lam_compressed)
 
 
 @qd.func
@@ -425,13 +490,30 @@ def brick_slot_entry(
 
 
 @qd.func
+def material_param(
+    materials: MpmMaterialTable,
+    params: qd.template(),  # MpmParams
+    param: qd.template(),  # int, a PARAM_* column
+    slot,
+):
+    return materials.material_table[param * params.n_materials[()] + slot]
+
+
+@qd.func
 def material_params(
     materials: MpmMaterialTable,
     params: qd.template(),  # MpmParams
     slot,
+    Jp,
 ):
-    mu = materials.material_table[PARAM_MU * params.n_materials[()] + slot]
-    lam = materials.material_table[PARAM_LAM * params.n_materials[()] + slot]
+    """The Lame parameters of a material slot for a particle of plastic state Jp at the substep start: snow hardens
+    them by exp(SNOW_HARDENING (1 - Jp)), which stays frozen over the Newton solve."""
+    mu = material_param(materials, params, PARAM_MU, slot)
+    lam = material_param(materials, params, PARAM_LAM, slot)
+    if materials.mat_plastic[slot] == PLASTIC_SNOW:
+        hardening = qd.exp(qd.static(SNOW_HARDENING) * (1.0 - Jp))
+        mu *= hardening
+        lam *= hardening
     return mu, lam
 
 
@@ -443,12 +525,17 @@ def elastic_principal(
     mu,
     lam,
 ):
-    """Energy density, principal gradient and Hessian of the elastic family of a material slot."""
+    """Energy density, principal gradient and Hessian of the energy family of a material slot."""
     psi = gs.qd_float(0.0)
     g = qd.Vector.zero(gs.qd_float, 3)
     A = qd.Matrix.zero(gs.qd_float, 3, 3)
-    if materials.mat_family[slot] == FAMILY_STVK_HENCKY:
-        psi, g, A = stvk_hencky_principal(sigma, mu, lam)
+    family = materials.mat_family[slot]
+    if family == FAMILY_STABLE_NEOHOOKEAN:
+        psi, g, A = stable_neohookean_principal(sigma, mu, lam)
+    elif family == FAMILY_EXTENDED_HENCKY:
+        psi, g, A = extended_hencky_principal(sigma, mu, lam)
+    elif family == FAMILY_LIQUID:
+        psi, g, A = liquid_principal(sigma, mu, lam)
     else:
         psi, g, A = fixed_corotated_principal(sigma, mu, lam)
     return psi, g, A
@@ -462,13 +549,92 @@ def elastic_energy(
     mu,
     lam,
 ):
-    """Energy density of the elastic family of a material slot, from the signed singular values."""
+    """Energy density of the energy family of a material slot, from the signed singular values."""
     psi = gs.qd_float(0.0)
-    if materials.mat_family[slot] == FAMILY_STVK_HENCKY:
-        psi = stvk_hencky_energy(sigma, mu, lam)
-    else:
+    family = materials.mat_family[slot]
+    if family == FAMILY_FIXED_COROTATED:
         psi = fixed_corotated_energy(sigma, mu, lam)
+    else:
+        psi, g, A = elastic_principal(materials, slot, sigma, mu, lam)
     return psi
+
+
+@qd.func
+def fibre_terms(
+    materials: MpmMaterialTable,
+    params: qd.template(),  # MpmParams
+    slot,
+    actu,
+    m,
+    F_tr,
+):
+    """The muscle fibre term 1/2 k a |F_trial m|^2 of a particle of actuation a and fibre direction m: its energy
+    density, its first Piola-Kirchhoff stress k a (F_trial m) m^T, and the curvature max(k a, 0) of its Hessian
+    k a (m m^T) (x) I, which an extension (k a < 0) would make concave. All zero without a fibre stiffness."""
+    ka = material_param(materials, params, PARAM_FIBRE, slot) * actu
+    Fm = F_tr @ m
+    return 0.5 * ka * Fm.dot(Fm), ka * Fm.outer_product(m), qd.max(ka, 0.0)
+
+
+@qd.func
+def return_map(
+    materials: MpmMaterialTable,
+    params: qd.template(),  # MpmParams
+    slot,
+    kind,
+    F,
+    Jp,
+):
+    """The plastic return map of a material slot on the deformation gradient F after G2P, and the plastic state Jp:
+    von Mises in log strain or the singular-value clamp (ElastoPlastic), the clamp with the volume ratio it removes
+    accumulated in Jp (Snow), Drucker-Prager with the log volume correction in Jp (Sand), or the dilation projection
+    to a volume ratio in [LIQUID_J_MIN, 1] (Liquid). The formulas are those of the explicit materials."""
+    F_new = F
+    Jp_new = Jp
+    if kind == PLASTIC_LIQUID:
+        J = qd.min(qd.max(F.determinant(), qd.static(LIQUID_J_MIN)), 1.0)
+        F_new = qd.pow(J, 1.0 / 3.0) * qd.Matrix.identity(gs.qd_float, 3)
+    elif kind != PLASTIC_NONE:
+        U, S, V = qd.svd(F, gs.qd_float)
+        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
+        sigma_new = sigma
+        is_changed = True
+        mu = material_param(materials, params, PARAM_MU, slot)
+        if kind == PLASTIC_VON_MISES:
+            eps = qd.log(qd.max(sigma, qd.static(VON_MISES_SIGMA_MIN)))
+            eps_hat = eps - eps.sum() / 3.0
+            eps_hat_norm = eps_hat.norm(gs.EPS)
+            delta_gamma = eps_hat_norm - material_param(materials, params, PARAM_YIELD_STRESS, slot) / (2.0 * mu)
+            is_changed = delta_gamma > 0.0
+            if is_changed:
+                sigma_new = qd.exp(eps - (delta_gamma / eps_hat_norm) * eps_hat)
+        elif kind == PLASTIC_SAND:
+            lam = material_param(materials, params, PARAM_LAM, slot)
+            eps = qd.log(qd.max(qd.abs(sigma), qd.static(SAND_SIGMA_MIN)))
+            trace = eps.sum() + Jp
+            eps_hat = eps - trace / 3.0
+            eps_hat_norm = eps_hat.norm(gs.EPS)
+            sigma_new = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+            if trace >= 0.0:
+                Jp_new = trace
+            else:
+                Jp_new = 0.0
+                delta_gamma = (
+                    eps_hat_norm
+                    + (3.0 * lam + 2.0 * mu) / (2.0 * mu) * trace * material_param(materials, params, PARAM_SAND_ALPHA, slot)
+                )
+                sigma_new = qd.exp(eps - qd.max(delta_gamma, 0.0) / eps_hat_norm * eps_hat)
+        else:
+            lower = 1.0 - material_param(materials, params, PARAM_YIELD_LOWER, slot)
+            higher = 1.0 + material_param(materials, params, PARAM_YIELD_HIGHER, slot)
+            sigma_new = qd.min(qd.max(sigma, lower), higher)
+            if kind == PLASTIC_SNOW:
+                Jp_new = Jp * (sigma[0] * sigma[1] * sigma[2]) / (sigma_new[0] * sigma_new[1] * sigma_new[2])
+        if is_changed:
+            F_new = U @ qd.Matrix(
+                [[sigma_new[0], 0.0, 0.0], [0.0, sigma_new[1], 0.0], [0.0, 0.0, sigma_new[2]]], dt=gs.qd_float
+            ) @ V.transpose()
+    return F_new, Jp_new
 
 
 @qd.func
@@ -1012,12 +1178,15 @@ def func_grid_velocity(
 def func_g2p_advect(
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     grid: qd.template(),  # MpmGrid
     params: qd.template(),  # MpmParams
     f,
     dt,
 ):
-    """Advance every particle to frame f + 1: PIC velocity, APIC velocity gradient, advection and F update.
+    """Advance every particle to frame f + 1: PIC velocity, APIC velocity gradient, advection, F update and the return
+    map of its material.
 
     Valid particles run in sorted order for locality; inactive ones carry their state over unchanged.
     """
@@ -1037,8 +1206,17 @@ def func_g2p_advect(
         particles.pos[f + 1, i_p, i_b] = pos + dt * vel
         particles.vel[f + 1, i_p, i_b] = vel
         particles.C[f + 1, i_p, i_b] = C
-        particles.F[f + 1, i_p, i_b] = (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ particles.F[f, i_p, i_b]
-        particles.Jp[f + 1, i_p, i_b] = particles.Jp[f, i_p, i_b]
+        slot = particles_info.material_idx[i_p]
+        F_new, Jp_new = return_map(
+            materials,
+            params,
+            slot,
+            materials.mat_plastic[slot],
+            (qd.Matrix.identity(gs.qd_float, 3) + dt * C) @ particles.F[f, i_p, i_b],
+            particles.Jp[f, i_p, i_b],
+        )
+        particles.F[f + 1, i_p, i_b] = F_new
+        particles.Jp[f + 1, i_p, i_b] = Jp_new
         particles.actu[f + 1, i_p, i_b] = particles.actu[f, i_p, i_b]
 
     qd.loop_config(name="mpm_carry_inactive")
@@ -1200,6 +1378,8 @@ def func_elastic_assemble(
         S_block = qd.Matrix.zero(gs.qd_float, 3, 3)
         alp = qd.Vector.zero(gs.qd_float, 3)
         bet = qd.Vector.zero(gs.qd_float, 3)
+        fibre_curvature = gs.qd_float(0.0)
+        fibre_frame = qd.Vector.zero(gs.qd_float, 3)  # V^T m
         scale = gs.qd_float(0.0)
         w = qd.Vector.zero(gs.qd_float, 8)
         hess_contact = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -1217,10 +1397,17 @@ def func_elastic_assemble(
             U = U_
             sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
             slot = particles_info.material_idx[i_p]
-            mu, lam = material_params(materials, params, slot)
+            mu, lam = material_params(materials, params, slot, particles.Jp[f, i_p, i_b])
             psi, g, A = elastic_principal(materials, slot, sigma, mu, lam)
             scale = params.particle_volume[()] * dt * dt
             P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
+            m = particles_info.muscle_direction[i_p]
+            psi_fibre, P_fibre, fibre_curvature_ = fibre_terms(
+                materials, params, slot, particles.actu[f, i_p, i_b], m, F_tr
+            )
+            P += P_fibre
+            fibre_curvature = fibre_curvature_
+            fibre_frame = V.transpose() @ m
             G = scale * P @ F.transpose()
             for i, j in qd.static(qd.ndrange(3, 3)):
                 newton.g_p[9 * s + 3 * i + j] = G[i, j]
@@ -1259,6 +1446,10 @@ def func_elastic_assemble(
                 r_a = qd.Vector([r_frame[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
                 r_b = qd.Vector([r_frame[b, d] for d in qd.static(range(3))], dt=gs.qd_float)
                 block = (scale * U) @ isotropic_pair_block(r_a, r_b, S_block, alp, bet) @ U.transpose()
+                # The fibre term in u: F_trial m moves by (grad w_a . F m) u_a, with grad w_a . F m = r_a . V^T m
+                block += (scale * fibre_curvature * r_a.dot(fibre_frame) * r_b.dot(fibre_frame)) * qd.Matrix.identity(
+                    gs.qd_float, 3
+                )
                 block += (w[a] * w[b]) * hess_contact
                 for i, j in qd.static(qd.ndrange(3, 3)):
                     block[i, j] *= movable[a, i] * movable[b, j]
@@ -1687,8 +1878,12 @@ def func_elastic_energy_partial(
             slots = stencil_node_slots(grid, env, cell)
             F_tr, grad_w, F = trial_deformation(particles, grid, newton, params, f, i_p, i_b, cell, slots)
             slot = particles_info.material_idx[i_p]
-            mu, lam = material_params(materials, params, slot)
+            mu, lam = material_params(materials, params, slot, particles.Jp[f, i_p, i_b])
             psi = elastic_energy(materials, slot, signed_singular_values(F_tr), mu, lam)
+            psi_fibre, P_fibre, fibre_curvature = fibre_terms(
+                materials, params, slot, particles.actu[f, i_p, i_b], particles_info.muscle_direction[i_p], F_tr
+            )
+            psi += psi_fibre
             dx, w = particle_trial_disp(particles, newton, params, f, i_p, i_b, cell, slots)
             dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
             energy_wall, grad_wall, hess_wall = contact_row_terms(newton, s, dx, 0, WALL_ROWS)

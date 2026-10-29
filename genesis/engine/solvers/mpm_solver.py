@@ -98,6 +98,32 @@ NEWTON_VELOCITY_TOL = 5e-2
 USE_SUBSTEP_GRAPH = False
 
 
+def material_table_column(material):
+    """The column of a material in the material table, its energy family and its return map (design §6.1)."""
+    column = np.zeros(mpm_func.N_MATERIAL_PARAMS, dtype=gs.np_float)
+    column[mpm_func.PARAM_MU] = material.mu
+    column[mpm_func.PARAM_LAM] = material.lam
+    if isinstance(material, MPM.Sand):
+        column[mpm_func.PARAM_SAND_ALPHA] = material.alpha
+        return column, mpm_func.FAMILY_EXTENDED_HENCKY, mpm_func.PLASTIC_SAND
+    if isinstance(material, MPM.Liquid):
+        return column, mpm_func.FAMILY_LIQUID, mpm_func.PLASTIC_LIQUID
+    if isinstance(material, MPM.ElastoPlastic):
+        column[mpm_func.PARAM_YIELD_LOWER] = material.yield_lower
+        column[mpm_func.PARAM_YIELD_HIGHER] = material.yield_higher
+        column[mpm_func.PARAM_YIELD_STRESS] = material.von_mises_yield_stress
+        if isinstance(material, MPM.Snow):
+            return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_SNOW
+        if material.use_von_mises:
+            return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_VON_MISES
+        return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_CLAMP
+    if isinstance(material, MPM.Muscle):
+        column[mpm_func.PARAM_FIBRE] = material.stiffness
+    if isinstance(material, MPM.Elastic) and material.model == "neohooken":
+        return column, mpm_func.FAMILY_STABLE_NEOHOOKEAN, mpm_func.PLASTIC_NONE
+    return column, mpm_func.FAMILY_FIXED_COROTATED, mpm_func.PLASTIC_NONE
+
+
 @qd.data_oriented
 class MpmNewtonParticipant:
     """The grid displacement as the primary participant of the NewtonSolver: it owns the BCOO matrix and the PCG
@@ -269,10 +295,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         n_materials = len(materials)
         table = np.zeros((mpm_func.N_MATERIAL_PARAMS, n_materials), dtype=gs.np_float)
         family = np.zeros(n_materials, dtype=gs.np_int)
+        plastic = np.zeros(n_materials, dtype=gs.np_int)
         for idx, material in materials.items():
-            table[mpm_func.PARAM_MU, idx] = material.mu
-            table[mpm_func.PARAM_LAM, idx] = material.lam
-            family[idx] = mpm_func.FAMILY_FIXED_COROTATED
+            table[:, idx], family[idx], plastic[idx] = material_table_column(material)
 
         rigid = self._sim.rigid_solver
         # A Rigid solver without any coupled geom gives no contact rows
@@ -303,7 +328,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             wall_lower=self.boundary.lower,
             wall_upper=self.boundary.upper,
         )
-        self._mpm_materials = get_mpm_material_table(table.reshape(-1), family)
+        self._mpm_materials = get_mpm_material_table(table.reshape(-1), family, plastic)
         self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks)
         self._mpm_newton = MpmNewton(n_sort, max_blocks * BLOCK_CELLS)
         self._rigid_query = RigidGeomQuery(rigid, self._mpm_newton, self._B, self._has_rigid)
@@ -418,10 +443,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         if self._enable_CPIC:
             gs.raise_exception("CPIC is not supported by the implicit MPM solver.")
         for material in self._materials:
-            if type(material) is not MPM.Elastic or material.model != "corotation":
+            if not isinstance(material, (MPM.Elastic, MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
                 gs.raise_exception(
-                    f"The implicit MPM solver supports 'MPM.Elastic(model=\"corotation\")' only for now, got "
-                    f"{type(material).__name__}."
+                    f"The implicit MPM solver has no energy for the material {type(material).__name__}; it supports "
+                    "the materials of genesis.materials.MPM."
                 )
         # Only the legacy coupler couples MPM with other solvers, each pair behind its own option
         coupler_options = self._sim.coupler.options
@@ -671,7 +696,16 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     def newton_finish(self, f):
         """G2P from the solved grid displacement."""
-        kernel_finalize(self.particles, self.particles_ng, self._mpm_grid, self._mpm_newton, self._mpm_params, f)
+        kernel_finalize(
+            self.particles,
+            self.particles_ng,
+            self.particles_info,
+            self._mpm_materials,
+            self._mpm_grid,
+            self._mpm_newton,
+            self._mpm_params,
+            f,
+        )
 
     def newton_after(self, f):
         pass
@@ -1512,7 +1546,7 @@ def kernel_substep(
     with qd.checkpoint(MpmCheckpoint.FINALIZE, yield_on=control.never_yield):
         if qd.static(True):
             mpm_func.func_grid_velocity(grid, newton, dt)
-            mpm_func.func_g2p_advect(particles, particles_ng, grid, params, f, dt)
+            mpm_func.func_g2p_advect(particles, particles_ng, particles_info, materials, grid, params, f, dt)
 
 
 @qd.kernel
@@ -1659,6 +1693,8 @@ def kernel_assemble(
 def kernel_finalize(
     particles: MpmParticles,
     particles_ng: MpmParticlesNG,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     params: qd.template(),
@@ -1666,4 +1702,4 @@ def kernel_finalize(
 ):
     dt = params.substep_dt[()]
     mpm_func.func_grid_velocity(grid, newton, dt)
-    mpm_func.func_g2p_advect(particles, particles_ng, grid, params, f, dt)
+    mpm_func.func_g2p_advect(particles, particles_ng, particles_info, materials, grid, params, f, dt)
