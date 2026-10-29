@@ -1051,6 +1051,7 @@ def test_kinetic_friction(n_envs, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("precision", ["64"])
 def test_unset_coup_friction_follows_sliding_friction(show_viewer):
     mjcf = ET.Element("mujoco", model="frictions")
     worldbody = ET.SubElement(mjcf, "worldbody")
@@ -1061,6 +1062,7 @@ def test_unset_coup_friction_follows_sliding_friction(show_viewer):
     ET.SubElement(plain, "geom", type="box", size="0.05 0.05 0.05")
 
     scene = gs.Scene(
+        coupler_options=gs.options.SAPCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.5, -2.0, 1.2),
             camera_lookat=(1.5, 0.0, 0.5),
@@ -1101,3 +1103,7 @@ def test_unset_coup_friction_follows_sliding_friction(show_viewer):
     assert_allclose(authored.get_link("rough").geoms[0].coup_friction, 0.7, tol=1e-6)
     assert_allclose(authored.get_link("smooth").geoms[0].coup_friction, 0.25, tol=1e-6)
     assert_allclose(authored.get_link("plain").geoms[0].coup_friction, 1.0, tol=1e-6)
+
+    scene_legacy = gs.Scene(coupler_options=gs.options.LegacyCouplerOptions(), show_viewer=False)
+    box = scene_legacy.add_entity(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1)), material=gs.materials.Rigid(friction=0.4))
+    assert_allclose(box.geoms[0].coup_friction, 0.1, tol=1e-6)
