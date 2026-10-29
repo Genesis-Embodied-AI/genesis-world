@@ -1466,7 +1466,8 @@ class KinematicSolver(Solver):
         if n_links > n_tgts:
             gs.raise_exception(f"Cannot solve for {n_links} targets. Raise 'IK_max_targets' above {n_tgts}.")
 
-        ik_state, ik_fk, targets = self.data_manager.ik_scratch
+        ik_scratch = self.data_manager.ik_scratch
+        ik_state, ik_fk, targets = ik_scratch.state, ik_scratch.fk, ik_scratch.targets
 
         # Only the leading rows each buffer holds for this solve are written, and the kernel reads no further.
         if gs.use_zerocopy:

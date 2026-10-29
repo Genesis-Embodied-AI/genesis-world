@@ -1,5 +1,6 @@
 import dataclasses
 import math
+import types
 from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
 from typing import Any, ClassVar, NamedTuple
@@ -7,6 +8,7 @@ from typing import Any, ClassVar, NamedTuple
 import numpy as np
 import torch
 
+import pydantic
 from pydantic import TypeAdapter
 from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 
@@ -14,7 +16,7 @@ import quadrants as qd
 from quadrants.lang import impl
 
 import genesis as gs
-from genesis.typing import StrictBool, StrictInt
+from genesis.typing import StrictBool, StrictInt, ValidFloat
 from genesis.utils.misc import data_to_array
 
 
@@ -93,65 +95,84 @@ class StaticConfig(metaclass=_StaticConfigMeta):
     """
 
 
-class Axis(NamedTuple):
+class Axis:
     """
-    A dimension of solver data, sized when a struct reaching it is allocated (see Data).
+    A dimension of solver data, sized when a struct spanning it is allocated (see Data).
 
-    The size is given to the constructor under the name of the axis: an int, padded to 1, `()` to drop the dimension,
-    or None for an absent feature, every array spanning it then being the 0-d placeholder.
-    """
-
-    name: str
-
-
-class Switch(NamedTuple):
-    """
-    A feature some arrays of a struct exist for or are laid out for, decided when it is allocated (see Data).
-
-    It is given to the constructor as a bool under its name. An array gated by a switch turned off is the 0-d
-    placeholder.
+    Its size is given under its name in the `shape` of the constructor, padded to one, or `()` to drop the dimension.
     """
 
-    name: str
+    __slots__ = ("_name",)
+
+    def __init__(self, name: str):
+        self._name = name
+
+    def __str__(self):
+        return self._name
+
+    def __repr__(self):
+        return f"Axis({self._name!r})"
 
 
-# The arrays declared with `grad=True` carry gradients when it is on
-REQUIRES_GRAD = Switch("requires_grad")
+# The environments, the last axis of every per-environment array in canonical order
+ENVS = Axis("envs")
 
 
-class Element(NamedTuple):
+class Label:
     """
-    The element type of an array, a Genesis scalar type or a vector or matrix of it, resolved at allocation.
+    A family of arrays sharing runtime properties, which the constructor of a struct sets at once (see Data).
 
-    A timer counts in 64 bits where the backend supports it.
+    A label equals its name, so the property tables of a constructor take either.
     """
 
-    base: str
-    shape: tuple[int, ...] = ()
+    __slots__ = ("_value",)
 
-    @property
-    def dtype(self):
-        timer = qd.i32 if gs.backend == gs.metal else qd.i64
-        base = {"float": gs.qd_float, "int": gs.qd_int, "bool": gs.qd_bool, "timer": timer}.get(self.base)
-        base = base or getattr(qd, self.base)
-        if len(self.shape) == 2:
-            return qd.types.matrix(*self.shape, base)
-        if self.shape:
-            return qd.types.vector(*self.shape, base)
-        return base
+    def __init__(self, value: str):
+        self._value = value
+
+    def __eq__(self, other):
+        return str(self) == str(other) if isinstance(other, (Label, str)) else NotImplemented
+
+    def __hash__(self):
+        return hash(self._value)
+
+    def __str__(self):
+        return self._value
+
+    def __repr__(self):
+        return f"Label({self._value!r})"
 
 
-Float, Int, Bool = Element("float"), Element("int"), Element("bool")
-I32, U32, I64, U64, Timer = Element("i32"), Element("u32"), Element("i64"), Element("u64"), Element("timer")
-Vec2, Vec3, Vec4, Vec6, Vec7, Vec18 = [Element("float", (n,)) for n in (2, 3, 4, 6, 7, 18)]
-IVec2, IVec3, IVec4 = [Element("int", (n,)) for n in (2, 3, 4)]
-Mat3, Mat4 = Element("float", (3, 3)), Element("float", (4, 4))
+class FieldRef:
+    """
+    A reference to a field of a struct, through the class attribute of the same name (see Data).
+
+    A reference to a member reaches its fields as attributes in turn, `ConstraintState.island.link_id`, and selects
+    every array of the member in the property tables of the constructor.
+    """
+
+    __slots__ = ("_owner", "_path")
+
+    def __init__(self, owner: type, path: tuple[str, ...]):
+        self._owner, self._path = owner, path
+
+    def __getattr__(self, name):
+        member_cls = self._owner.__dataclass_fields__[self._path[-1]].type
+        if (
+            not (isinstance(member_cls, type) and issubclass(member_cls, Data))
+            or name not in member_cls.__dataclass_fields__
+        ):
+            raise AttributeError(f"'{'.'.join(self._path)}' has no field '{name}'.")
+        return FieldRef(member_cls, (*self._path, name))
+
+    def __repr__(self):
+        return f"FieldRef({'.'.join(self._path)})"
 
 
 class FieldSpec(NamedTuple):
+    dtype: Any = None
     shape: tuple | None = None
-    layout: "Switch | tuple[tuple[int, ...], Switch] | None" = None
-    when: Switch | None = None
+    labels: tuple[Label, ...] = ()
     grad: bool = False
     ndarray: bool = False
     lazy: bool = False
@@ -163,47 +184,74 @@ SPEC = "spec"
 
 
 def field(
+    dtype: Any = None,
     *,
     shape: "tuple[Axis | int, ...] | None" = None,
     kind: "DataKind | None" = None,
-    layout: "Switch | tuple[tuple[int, ...], Switch] | None" = None,
-    when: Switch | None = None,
+    labels: "Label | str | tuple[Label | str, ...]" = (),
     grad: bool = False,
     ndarray: bool = False,
     lazy: bool = False,
 ):
     """
-    Declare a struct field that departs from the defaults of its struct (see Data).
+    Declare a field of a struct (see Data).
 
-    `shape` replaces the shape of the struct, axes and fixed sizes. `kind` replaces its kind (see DataKind). `layout`
-    is the physical order of the axes: a permutation, or a switch alone for the environment axis, the last one, first,
-    or a permutation and the switch it holds under. `when` makes the array a placeholder unless its switch is on.
-    `grad` gives it gradients under REQUIRES_GRAD. An `ndarray` array is one whatever the backend of the solver data. A
-    `lazy` member is allocated the first time it is read.
+    `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
+    type, or such a type paired with an element shape, `(float, 3)` for a vector and `(float, (3, 3))` for a matrix.
+    `shape` lists the axes and the fixed sizes of the array, replacing the default shape of its struct, and a field of
+    shape () and kind CONSTANT or INFO is a constant the constructor fills. `kind` replaces the kind of its struct (see
+    DataKind). `labels` are the families of the array, or of every array of a member, for the property tables of the
+    constructor. `grad` gives it gradients when the constructor requires them. An
+    `ndarray` array is an ndarray whatever the backend of the solver data. A `lazy` member is allocated the first time
+    it is read, from the sizes and the gradients of its struct alone, for a scratch most scenes never need.
     """
-    spec = FieldSpec(shape, layout, when, grad, ndarray, lazy)
-    return dataclasses.field(metadata={KIND: kind, SPEC: spec})
+    labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
+    return dataclasses.field(metadata={KIND: kind, SPEC: FieldSpec(dtype, shape, labels, grad, ndarray, lazy)})
+
+
+def _resolve_dtype(dtype):
+    """Return the Quadrants type of an element type given to 'field'."""
+    if isinstance(dtype, tuple):
+        base, element_shape = dtype
+        if isinstance(element_shape, tuple):
+            return qd.types.matrix(*element_shape, _resolve_dtype(base))
+        return qd.types.vector(element_shape, _resolve_dtype(base))
+    if isinstance(dtype, types.FunctionType):
+        return dtype()
+    return {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
+
+
+class _Leaf(NamedTuple):
+    path: tuple[str, ...]
+    spec: FieldSpec
+    kind: "DataKind"
+    shape: tuple
+    labels: tuple[Label, ...]
 
 
 class Data:
     """
     Base of the structs of solver data, which kernels take as arguments.
 
-    A subclass declares its arrays as fields annotated with their element type (see Element), and its members as fields
-    annotated with another struct. The class keywords `kind` and `shape` set the defaults of its fields (see DataKind
-    and Axis), and 'field' overrides them for one field. A member takes the shape of its field, else the default shape
-    of its own class, else the shape of the struct holding it.
+    A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field'), and its members as fields annotated
+    with another struct. The class keywords `kind` and `shape` set the default kind and shape of its fields (see
+    DataKind), a member taking the shape of its field, else the default shape of its own class, else that of the
+    struct holding it.
 
-    The generated constructor allocates every array, in declaration order. Its keywords are the axes and switches the
-    struct reaches, and the value of each scalar constant: a field of shape () and kind CONSTANT or INFO, which a
-    switch turned off makes optional. `_binds` maps the path of a field, its name and those of the members reaching it,
-    to an array or a struct bound there in place of allocating one, an alias that no kernel may access along with its
-    original, since Quadrants assumes distinct kernel arguments never alias.
+    The constructor allocates every array of the tree in declaration order, once and for all. `shape` maps the name of
+    each axis to its size, the axes no array spans being ignored. `values` holds the constants nested like the struct,
+    validated strictly. `requires_grad` gives gradients to the arrays declared with `grad`. The property tables map a
+    selection of arrays to a value: `env_first` stores the environment axis first or last, `layout` stores the axes in
+    the given permutation of their canonical order, and `unused` leaves the arrays no kernel reads as 0-d placeholders,
+    to spare their memory. A selection is a label or its name, matching any number of arrays, a reference to a field of
+    the struct (see FieldRef), which must exist, a tuple of them, or None for every array, and no two keys may select
+    the same array. `_binds` maps the path of a field to an array or a struct allocated elsewhere,
+    bound in its place, an alias no kernel may access along with its original, since Quadrants assumes distinct kernel
+    arguments never alias.
     """
 
     kind: ClassVar["DataKind"]
     _shape: ClassVar[tuple | None] = None
-    _elements: ClassVar[dict[str, Element]] = {}
     _lazy: ClassVar[dict[str, tuple[type, FieldSpec]]] = {}
 
     def __init_subclass__(cls, kind: "DataKind | None" = None, shape: tuple | None = None, **kwargs):
@@ -212,132 +260,202 @@ class Data:
             cls.kind = kind
         if shape is not None:
             cls._shape = shape
-        cls._elements = dict(cls._elements)
         cls._lazy = dict(cls._lazy)
         annotations = cls.__dict__.get("__annotations__", {})
-        for name, annotation in list(annotations.items()):
-            spec = cls.__dict__[name].metadata[SPEC] if isinstance(cls.__dict__.get(name), dataclasses.Field) else None
-            if spec is not None and spec.lazy:
-                cls._lazy[name] = (annotation, spec)
-                del annotations[name]
+        for name in list(annotations):
+            default = cls.__dict__.get(name)
+            if isinstance(default, dataclasses.Field) and default.metadata[SPEC].lazy:
+                cls._lazy[name] = (annotations.pop(name), default.metadata[SPEC])
                 delattr(cls, name)
                 setattr(cls, name, property(lambda self, name=name: self._get_lazy(name)))
-            elif isinstance(annotation, Element):
-                # Quadrants types a struct field by its annotation, which must name a tensor
-                cls._elements[name] = annotation
-                annotations[name] = qd.Tensor
         dataclasses.dataclass(init=False, eq=True, frozen=True)(cls)
+        # An instance shadows them with its arrays and members
+        for data_field in dataclasses.fields(cls):
+            setattr(cls, data_field.name, FieldRef(cls, (data_field.name,)))
 
-    def __init__(self, *, _binds: "Mapping[tuple[str, ...], Data | qd.Tensor] | None" = None, **values):
+    def __init__(
+        self,
+        *,
+        shape: Mapping[str, Any] | None = None,
+        values: Mapping[str, Any] | None = None,
+        env_first: Mapping[Any, bool] | None = None,
+        layout: Mapping[Any, "tuple[int, ...] | None"] | None = None,
+        unused: Mapping[Any, bool] | None = None,
+        requires_grad: bool = False,
+        _binds: "Mapping[tuple[str, ...], Data | qd.Tensor] | None" = None,
+    ):
         cls = type(self)
-        for path in _binds or {}:
-            struct_cls = cls
-            for name in path:
-                struct_field = struct_cls.__dataclass_fields__.get(name) if struct_cls is not None else None
-                if struct_field is None:
-                    raise TypeError(f"{cls.__name__}() binds {path}, which names no field.")
-                struct_cls = struct_field.type if isinstance(struct_field.type, type) else None
-        names, optional_names = cls._parameters(cls._shape or ())
-        unexpected, missing = values.keys() - names - optional_names, names - values.keys()
-        if unexpected or missing:
-            raise TypeError(f"{cls.__name__}() got unexpected {sorted(unexpected)} and misses {sorted(missing)}.")
-        object.__setattr__(self, "_values", values)
-        cls._allocate(self, cls._shape or (), values, binds=_binds or {})
+        context = (shape or {}, values or {}, env_first or {}, layout or {}, unused or {}, requires_grad)
+        object.__setattr__(self, "_context", context)
+        cls._build(self, cls._shape or (), (), (), None, context, _binds or {})
 
     @classmethod
-    def _members(cls, shape):
-        """Yield each field with its spec, its kind and the shape it takes within a struct of the given shape."""
+    def _leaves(cls, shape, labels, path, kind):
+        """Yield the arrays of the struct, with the shape, the kind and the labels they take within it."""
         for data_field in dataclasses.fields(cls):
             spec = data_field.metadata.get(SPEC, FieldSpec())
+            field_kind = data_field.metadata.get(KIND)
+            field_kind = kind if field_kind is None else field_kind
+            field_labels = labels + spec.labels
             if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                field_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+                member_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+                yield from data_field.type._leaves(member_shape, field_labels, (*path, data_field.name), field_kind)
             else:
                 field_shape = spec.shape if spec.shape is not None else shape
-            field_kind = data_field.metadata.get(KIND)
-            yield data_field, spec, cls.kind if field_kind is None else field_kind, field_shape
+                field_kind = cls.kind if field_kind is None else field_kind
+                yield _Leaf((*path, data_field.name), spec, field_kind, field_shape, field_labels)
 
     @classmethod
-    def _parameters(cls, shape) -> tuple[set[str], set[str]]:
-        """Return the names of the keywords of the constructor, required and optional."""
-        names, optional_names = set(), set()
-        for data_field, spec, kind, field_shape in cls._members(shape):
-            # What a switch turns off is optional, and required once it is on (see '_allocate')
-            if spec.when is not None:
-                names.add(spec.when.name)
-            field_names = names if spec.when is None else optional_names
-            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                member_names, member_optional_names = data_field.type._parameters(field_shape)
-                field_names |= member_names
-                optional_names |= member_optional_names
-                continue
-            field_names |= {dim.name for dim in field_shape if isinstance(dim, Axis)}
-            if isinstance(spec.layout, Switch) or (spec.layout and isinstance(spec.layout[-1], Switch)):
-                field_names.add((spec.layout if isinstance(spec.layout, Switch) else spec.layout[-1]).name)
-            if spec.grad:
-                field_names.add(REQUIRES_GRAD.name)
-            if field_shape == () and kind in (DataKind.CONSTANT, DataKind.INFO):
-                field_names.add(data_field.name)
-        for member_cls, spec in cls._lazy.values():
-            member_names, member_optional_names = member_cls._parameters(
-                spec.shape if spec.shape is not None else member_cls._shape or shape
-            )
-            names |= member_names
-            optional_names |= member_optional_names
-        return names, optional_names - names
+    def _properties(cls, leaves, context):
+        """Return the runtime properties of the arrays, by path, from the property tables of the constructor."""
+        _, _, env_first, layout, unused, _ = context
+        properties = {leaf.path: {} for leaf in leaves}
+        for name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
+            selected = {}
+            for key, value in table.items():
+                for ref in [item for item in (key if isinstance(key, tuple) else (key,)) if isinstance(item, FieldRef)]:
+                    if not any(_is_selected(ref, leaf) for leaf in leaves):
+                        raise TypeError(f"{cls.__name__}() '{name}' selects {ref}, which is no field of it.")
+                for leaf in leaves:
+                    if _is_selected(key, leaf):
+                        if leaf.path in selected:
+                            raise TypeError(f"{cls.__name__}() '{name}' selects {'.'.join(leaf.path)} twice.")
+                        selected[leaf.path] = value
+            for path, value in selected.items():
+                if name == "layout" and "env_first" in properties[path]:
+                    raise TypeError(f"{cls.__name__}() sets both 'env_first' and 'layout' of {'.'.join(path)}.")
+                properties[path][name] = value
+        return properties
 
     @classmethod
-    def _allocate(cls, self, shape, values, is_member_on=True, binds=None):
-        for data_field, spec, kind, field_shape in cls._members(shape):
-            if (data_field.name,) in binds:
-                object.__setattr__(self, data_field.name, binds[(data_field.name,)])
+    def _build(cls, self, shape, labels, path, kind, context, binds, leaves=None):
+        """Allocate the arrays of the struct in declaration order, then bind them and its members to it."""
+        sizes, values, _, _, _, requires_grad = context
+        if leaves is None:
+            leaves = list(cls._leaves(shape, labels, path, kind))
+            properties = cls._properties(leaves, context)
+            unused_paths = frozenset([leaf.path for leaf in leaves if properties[leaf.path].get("unused")])
+            values = _values_model(cls, shape, path, kind, unused_paths).model_validate(values).model_dump()
+            context = (sizes, values, *context[2:])
+            object.__setattr__(self, "_properties", properties)
+        properties = self._properties
+        for data_field in dataclasses.fields(cls):
+            field_path = (*path, data_field.name)
+            spec = data_field.metadata.get(SPEC, FieldSpec())
+            if field_path in binds:
+                object.__setattr__(self, data_field.name, binds[field_path])
                 continue
-            is_on = is_member_on and (spec.when is None or values[spec.when.name])
             if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
                 member = object.__new__(data_field.type)
-                object.__setattr__(member, "_values", values)
-                member_binds = {path[1:]: value for path, value in binds.items() if path[0] == data_field.name}
-                data_field.type._allocate(member, field_shape, values, is_on, member_binds)
+                object.__setattr__(member, "_properties", properties)
+                object.__setattr__(member, "_context", context)
+                member_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+                field_kind = data_field.metadata.get(KIND)
+                field_kind = kind if field_kind is None else field_kind
+                data_field.type._build(
+                    member, member_shape, labels + spec.labels, field_path, field_kind, context, binds, leaves=()
+                )
                 object.__setattr__(self, data_field.name, member)
                 continue
-            dtype = cls._elements[data_field.name].dtype
-            is_constant = field_shape == () and kind in (DataKind.CONSTANT, DataKind.INFO)
-            needed = [dim.name for dim in field_shape if isinstance(dim, Axis)] + (
-                [data_field.name] if is_constant else []
-            )
-            if is_on and not values.keys() >= set(needed):
-                raise TypeError(f"{cls.__name__}.{data_field.name} needs {needed} once its switches are on.")
-            if is_on and is_constant:
-                object.__setattr__(self, data_field.name, V_SCALAR_FROM(dtype=dtype, value=values[data_field.name]))
-                continue
-            sizes = [values[dim.name] if isinstance(dim, Axis) else dim for dim in field_shape] if is_on else [None]
-            dims = (
-                None if None in sizes else tuple([max(int(size), 1) for size in sizes if not isinstance(size, tuple)])
-            )
-            layout = None
-            if dims and spec.layout is not None:
-                if isinstance(spec.layout, Switch):
-                    layout = (len(dims) - 1, *range(len(dims) - 1)) if values[spec.layout.name] else None
-                elif isinstance(spec.layout[-1], Switch):
-                    layout = spec.layout[0] if values[spec.layout[-1].name] else None
-                else:
-                    layout = spec.layout
-            if spec.ndarray:
-                array = qd.ndarray(dtype, shape=dims or ())
+            leaf_properties = properties[field_path]
+            field_shape = spec.shape if spec.shape is not None else shape
+            field_kind = data_field.metadata.get(KIND)
+            field_kind = (cls.kind if kind is None else kind) if field_kind is None else field_kind
+            dtype = _resolve_dtype(spec.dtype)
+            if leaf_properties.get("unused"):
+                array = V(dtype=dtype, shape=())
+            elif field_shape == () and field_kind in (DataKind.CONSTANT, DataKind.INFO):
+                value = values
+                for name in field_path:
+                    value = value[name]
+                array = V_SCALAR_FROM(dtype=dtype, value=value)
             else:
-                needs_grad = spec.grad and values.get(REQUIRES_GRAD.name, False)
-                array = V(dtype=dtype, shape=dims or (), layout=layout, needs_grad=needs_grad)
+                dims, axes = [], []
+                for dim in field_shape:
+                    if isinstance(dim, Axis):
+                        if str(dim) not in sizes:
+                            raise TypeError(f"{cls.__name__}.{data_field.name} needs the size of axis '{dim}'.")
+                        size = sizes[str(dim)]
+                        if isinstance(size, tuple):
+                            continue
+                        dims.append(max(int(size), 1))
+                    else:
+                        dims.append(dim)
+                    axes.append(dim)
+                array_layout = leaf_properties.get("layout")
+                if leaf_properties.get("env_first") is not None:
+                    if ENVS not in axes:
+                        raise TypeError(f"'env_first' selects {'.'.join(field_path)}, which spans no environment axis.")
+                    order = [i for i, dim in enumerate(axes) if dim != ENVS]
+                    i_env = axes.index(ENVS)
+                    order = [i_env, *order] if leaf_properties["env_first"] else [*order, i_env]
+                    array_layout = tuple(order) if order != list(range(len(axes))) else None
+                if spec.ndarray:
+                    array = qd.tensor(dtype, shape=tuple(dims), backend=qd.Backend.NDARRAY)
+                else:
+                    array = V(
+                        dtype=dtype, shape=tuple(dims), layout=array_layout, needs_grad=spec.grad and requires_grad
+                    )
             object.__setattr__(self, data_field.name, array)
 
     def _get_lazy(self, name):
         member = self.__dict__.get(f"_lazy_{name}")
         if member is None:
             member_cls, spec = type(self)._lazy[name]
-            member = object.__new__(member_cls)
-            member_shape = spec.shape if spec.shape is not None else member_cls._shape or type(self)._shape or ()
-            object.__setattr__(member, "_values", self._values)
-            member_cls._allocate(member, member_shape, self._values, binds={})
+            sizes, *_, requires_grad = self._context
+            member = member_cls(shape=sizes, requires_grad=requires_grad)
             object.__setattr__(self, f"_lazy_{name}", member)
         return member
+
+
+def _is_selected(key, leaf) -> bool:
+    """Whether a key of a property table of a struct constructor selects an array (see Data)."""
+    if key is None:
+        return True
+    if isinstance(key, tuple):
+        return any(_is_selected(item, leaf) for item in key)
+    if isinstance(key, FieldRef):
+        return leaf.path[: len(key._path)] == key._path
+    return Label(str(key)) in leaf.labels
+
+
+_VALUES_MODELS = {}
+
+
+def _values_model(cls, shape, path, kind, unused_paths):
+    """Return the pydantic model validating the constants of a struct, nested like it, those left unused optional."""
+    model_key = (cls, unused_paths)
+    model = _VALUES_MODELS.get(model_key)
+    if model is not None:
+        return model
+    fields = {}
+    for data_field in dataclasses.fields(cls):
+        spec = data_field.metadata.get(SPEC, FieldSpec())
+        field_path = (*path, data_field.name)
+        field_kind = data_field.metadata.get(KIND)
+        field_kind = kind if field_kind is None else field_kind
+        if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
+            member_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+            member_model = _values_model(data_field.type, member_shape, field_path, field_kind, unused_paths)
+            if member_model.model_fields:
+                is_required = any(info.is_required() for info in member_model.model_fields.values())
+                fields[data_field.name] = (member_model, ...) if is_required else (member_model, member_model())
+            continue
+        field_shape = spec.shape if spec.shape is not None else shape
+        field_kind = cls.kind if field_kind is None else field_kind
+        if field_shape != () or field_kind not in (DataKind.CONSTANT, DataKind.INFO):
+            continue
+        base = spec.dtype if not isinstance(spec.dtype, tuple) else spec.dtype[0]
+        if base is bool or base == qd.u1:
+            value_type = StrictBool
+        elif base is int or (not isinstance(base, type) and base in qd.types.primitive_types.integer_types):
+            value_type = StrictInt
+        else:
+            value_type = ValidFloat
+        fields[data_field.name] = (value_type | None, None) if field_path in unused_paths else (value_type, ...)
+    model = pydantic.create_model(f"{cls.__name__}Values", __config__=pydantic.ConfigDict(extra="forbid"), **fields)
+    _VALUES_MODELS[model_key] = model
+    return model
 
 
 # FIXME: quadrants#941 - a Python-scope fill of a field still being declared closes its SNode tree, one tree per filled
@@ -379,6 +497,11 @@ def V_SCALAR_FROM(dtype, value):
     else:
         data.fill(value)
     return data
+
+
+def _timer_dtype():
+    """Return the type of the profiling timers, 64-bit where the backend supports it."""
+    return qd.i32 if gs.backend == gs.metal else qd.i64
 
 
 class DataKind(IntEnum):
@@ -636,17 +759,17 @@ TREES_LEVELS_LINKS = Axis("trees_levels_links")
 CHILD_LINKS = Axis("child_links")
 LINKS_BOUNDS = Axis("links_bounds")
 
-# The arrays of the dynamics, absent from a kinematic-only solver
-DYNAMIC = Switch("dynamic")
-LEVEL_SWEEP = Switch("level_sweep")
-TILED_MASS = Switch("tiled_mass")
-# The cooperative constraint kernels, whose block serves one env
-COOPERATIVE = Switch("cooperative")
+# The arrays of the dynamics, which a kinematic-only solver never reads
+DYNAMICS = Label("dynamics")
+# The tables of the level sweep (see trees_levels_links_idx)
+LEVEL_SWEEP = Label("level_sweep")
+# The scratch of the register-tiled mass factor (see mass_mat_tiled_scratch)
+TILED_MASS = Label("tiled_mass")
 
 
 class RigidInfo(Data, kind=DataKind.CONSTANT):
-    gravity: Vec3 = field(shape=(ENVS,), kind=DataKind.INFO, when=DYNAMIC)
-    meaninertia: Float = field(shape=(ENVS,), kind=DataKind.INFO, when=DYNAMIC)
+    gravity: qd.Tensor = field((float, 3), shape=(ENVS,), kind=DataKind.INFO, labels=DYNAMICS)
+    meaninertia: qd.Tensor = field(float, shape=(ENVS,), kind=DataKind.INFO, labels=DYNAMICS)
     # *_bw: Cache for backward pass
     # Awake dofs per env under hibernation, counted down where an island sleeps and up where one wakes. An env whose
     # count is zero has every body asleep and skips the passes that gate on it whole. An env whose count is the dof
@@ -654,90 +777,88 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     # build, the pair filter of the broad phase, the contact advection, the inert rows), so hibernation costs it one
     # read per pass until something sleeps in it. A dof-less scene pads its dof buffers to one slot and takes the slow
     # path.
-    n_awake_dofs: Int = field(shape=(ENVS,), kind=DataKind.STATE)
-    qpos0: Float = field(shape=(QS, ENVS), kind=DataKind.INFO)
-    qpos: Float = field(shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
-    qpos_next: Float = field(shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
-    links_T: Mat4 = field(shape=(LINKS,), kind=DataKind.DERIVED)
-    geoms_init_AABB: Vec3 = field(shape=(GEOMS, 8), when=DYNAMIC)
+    n_awake_dofs: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
+    qpos0: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.INFO)
+    qpos: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.STATE, grad=True)
+    qpos_next: qd.Tensor = field(float, shape=(QS, ENVS), kind=DataKind.SCRATCH, grad=True)
+    links_T: qd.Tensor = field((float, (4, 4)), shape=(LINKS,), kind=DataKind.DERIVED)
+    geoms_init_AABB: qd.Tensor = field((float, 3), shape=(GEOMS, 8), labels=DYNAMICS)
     # Flipped from canonical (n_dofs(i_d1), n_dofs(i_d2), _B) to physical (_B, n_dofs(i_d2), n_dofs(i_d1)) under the
     # cooperative constraint kernels: i_d1 becomes innermost / stride-1, which coalesces consumer
     # kernels whose lanes stride i_d1 with a serial inner i_d2 loop. The trade-off is regression on writer-side kernels
     # that pair with cooperative rewrites to recover under the same enable_cooperative_constraint_kernels flag.
-    mass_mat: Float = field(
-        shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, layout=((2, 1, 0), COOPERATIVE), when=DYNAMIC, grad=True
-    )
+    mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
     # Canonical. Its dominant consumer is a serial Cholesky-style back-substitution that is already coalesced under
     # (n_dofs, n_dofs, _B) with lanes varying i_b, so flipping L would regress that path more than the corresponding
     # writer-side win on the tiled factor_mass.
-    mass_mat_L: Float = field(shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, when=DYNAMIC, grad=True)
-    mass_mat_D_inv: Float = field(shape=(DOFS, ENVS), kind=DataKind.DERIVED, when=DYNAMIC, grad=True)
+    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, grad=True, labels=DYNAMICS)
+    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.DERIVED, grad=True, labels=DYNAMICS)
     # Batch-first scratch for the register-tiled mass factor (qd.simt tile ops are batch-first, so the factorization
     # cannot run in place on the batch-last mass_mat_L), with the constraint Hessian's shape so nt_H can alias it (see
     # ConstraintState) instead of allocating a second buffer. The factor only touches it before the constraint solve
     # repopulates it in the same step.
-    mass_mat_tiled_scratch: Float = field(shape=(ENVS, DOFS, DOFS), kind=DataKind.SCRATCH, when=TILED_MASS)
+    mass_mat_tiled_scratch: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), kind=DataKind.SCRATCH, labels=TILED_MASS)
     # Kinematic roots: the links sharing a root link (links.root_idx), static ones included. A root spans the links
     # [root, links_root_end[root]) whose root it is (a span may interleave links of other roots, so the walks gate each
     # link on its root). The composite inertia and the center of mass are per root.
-    roots_link_idx: Int = field(shape=(ROOTS,))
-    links_root_end: Int = field(shape=(LINKS,))
+    roots_link_idx: qd.Tensor = field(int, shape=(ROOTS,))
+    links_root_end: qd.Tensor = field(int, shape=(LINKS,))
     # Kinematic trees: the links a chain of moving joints connects, so a static link belongs to none (links_tree_idx
     # -1) and each branch of a fixed base is a tree. Tree i_t is rooted at trees_root_idx[i_t], spans the links
     # [trees_root_idx[i_t], trees_link_end[i_t]) mapped to it and the contiguous dofs [trees_dof_start[i_t],
     # trees_dof_start[i_t] + trees_n_dofs[i_t]), in ascending dof order. The islands are built on the trees. A scene
     # without any tree keeps one padded slot at root 0 and link end 0, so every tree walk is empty.
-    trees_root_idx: Int = field(shape=(TREES,))
-    trees_link_end: Int = field(shape=(TREES,))
-    trees_n_links: Int = field(shape=(TREES,))
-    trees_dof_start: Int = field(shape=(TREES,))
-    trees_n_dofs: Int = field(shape=(TREES,))
-    links_tree_idx: Int = field(shape=(LINKS,))
+    trees_root_idx: qd.Tensor = field(int, shape=(TREES,))
+    trees_link_end: qd.Tensor = field(int, shape=(TREES,))
+    trees_n_links: qd.Tensor = field(int, shape=(TREES,))
+    trees_dof_start: qd.Tensor = field(int, shape=(TREES,))
+    trees_n_dofs: qd.Tensor = field(int, shape=(TREES,))
+    links_tree_idx: qd.Tensor = field(int, shape=(LINKS,))
     # trees_levels_links_idx lists the links of every tree level by level for the level sweep (see
     # func_sweep_links_by_level and KinematicSolver._init_tree_fields). The levels of tree i_t start at entry
     # trees_level_start[i_t] and number trees_n_levels[i_t], and the level of entry i_k ends before entry
     # trees_levels_links_end[i_k]. The root tables list all the links of every root the same way, and the level of entry
     # i_k starts at entry roots_levels_links_start[i_k]. Empty where the level sweep does not run.
-    trees_level_start: Int = field(shape=(TREES,), when=LEVEL_SWEEP)
-    trees_n_levels: Int = field(shape=(TREES,), when=LEVEL_SWEEP)
-    trees_levels_links_idx: Int = field(shape=(TREES_LEVELS_LINKS,), when=LEVEL_SWEEP)
-    trees_levels_links_end: Int = field(shape=(TREES_LEVELS_LINKS,), when=LEVEL_SWEEP)
-    roots_level_start: Int = field(shape=(ROOTS,), when=LEVEL_SWEEP)
-    roots_n_levels: Int = field(shape=(ROOTS,), when=LEVEL_SWEEP)
-    roots_levels_links_idx: Int = field(shape=(LINKS,), when=LEVEL_SWEEP)
-    roots_levels_links_start: Int = field(shape=(LINKS,), when=LEVEL_SWEEP)
-    roots_levels_links_end: Int = field(shape=(LINKS,), when=LEVEL_SWEEP)
+    trees_level_start: qd.Tensor = field(int, shape=(TREES,), labels=LEVEL_SWEEP)
+    trees_n_levels: qd.Tensor = field(int, shape=(TREES,), labels=LEVEL_SWEEP)
+    trees_levels_links_idx: qd.Tensor = field(int, shape=(TREES_LEVELS_LINKS,), labels=LEVEL_SWEEP)
+    trees_levels_links_end: qd.Tensor = field(int, shape=(TREES_LEVELS_LINKS,), labels=LEVEL_SWEEP)
+    roots_level_start: qd.Tensor = field(int, shape=(ROOTS,), labels=LEVEL_SWEEP)
+    roots_n_levels: qd.Tensor = field(int, shape=(ROOTS,), labels=LEVEL_SWEEP)
+    roots_levels_links_idx: qd.Tensor = field(int, shape=(LINKS,), labels=LEVEL_SWEEP)
+    roots_levels_links_start: qd.Tensor = field(int, shape=(LINKS,), labels=LEVEL_SWEEP)
+    roots_levels_links_end: qd.Tensor = field(int, shape=(LINKS,), labels=LEVEL_SWEEP)
     # The children of link i_l are links_child_idx[links_child_start[i_l]:links_child_start[i_l + 1]], in descending
     # order: the leaf-to-root folds of the level sweep add them into their parent in the order of the serial folds.
-    links_child_start: Int = field(shape=(LINKS_BOUNDS,), when=LEVEL_SWEEP)
-    links_child_idx: Int = field(shape=(CHILD_LINKS,), when=LEVEL_SWEEP)
+    links_child_start: qd.Tensor = field(int, shape=(LINKS_BOUNDS,), labels=LEVEL_SWEEP)
+    links_child_idx: qd.Tensor = field(int, shape=(CHILD_LINKS,), labels=LEVEL_SWEEP)
     # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
     # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
     # kept contiguous by attach(). A block lies within one kinematic tree, whose dof range the blocks partition (an
     # aligned free body splits into one block per dof), so the assemble/factor/solve walk the blocks of a tree and
     # restrict to these bounds.
-    dofs_mass_block_start: Int = field(shape=(DOFS,), when=DYNAMIC)
-    dofs_mass_block_end: Int = field(shape=(DOFS,), when=DYNAMIC)
-    dofs_mass_envelope_start: Int = field(shape=(DOFS,), when=DYNAMIC)
+    dofs_mass_block_start: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
+    dofs_mass_block_end: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
+    dofs_mass_envelope_start: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
     # Mass parent of each dof, -1 for none: the previous dof of its link, else the last dof of its nearest ancestor link
     # holding one, when it lies in the same mass block.
-    dofs_mass_parent: Int = field(shape=(DOFS,), when=DYNAMIC)
+    dofs_mass_parent: qd.Tensor = field(int, shape=(DOFS,), labels=DYNAMICS)
     # Mask of the (dof, dof) pairs the mass matrix couples: a dof with its ancestors along the kinematic chain and
     # the dofs of its own link, within its mass block.
-    mass_parent_mask: Float = field(shape=(DOFS, DOFS), when=DYNAMIC)
+    mass_parent_mask: qd.Tensor = field(float, shape=(DOFS, DOFS), labels=DYNAMICS)
     # Runtime constants
-    substep_dt: Float = field(shape=(), when=DYNAMIC)
-    iterations: Int = field(shape=(), when=DYNAMIC)
-    tolerance: Float = field(shape=(), when=DYNAMIC)
-    ls_iterations: Int = field(shape=(), when=DYNAMIC)
-    ls_tolerance: Float = field(shape=(), when=DYNAMIC)
-    noslip_iterations: Int = field(shape=(), when=DYNAMIC)
-    noslip_tolerance: Float = field(shape=(), when=DYNAMIC)
-    impratio: Float = field(shape=(), when=DYNAMIC)
-    n_equalities: Int = field(shape=(), when=DYNAMIC)
-    n_candidate_equalities: Int = field(shape=(), when=DYNAMIC)
-    hibernation_thresh_vel: Float = field(shape=(), when=DYNAMIC)
-    EPS: Float = field(shape=())
+    substep_dt: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
+    iterations: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
+    tolerance: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
+    ls_iterations: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
+    ls_tolerance: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
+    noslip_iterations: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
+    noslip_tolerance: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
+    impratio: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
+    n_equalities: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
+    n_candidate_equalities: qd.Tensor = field(int, shape=(), labels=DYNAMICS)
+    hibernation_thresh_vel: qd.Tensor = field(float, shape=(), labels=DYNAMICS)
+    EPS: qd.Tensor = field(float, shape=())
 
 
 def is_tensor_addressable(shape, dtype) -> bool:
@@ -771,34 +892,36 @@ NOSLIP_COLUMNS = Axis("noslip_columns")
 WORKLIST = Axis("worklist")
 TILE_CLASSES = Axis("tile_classes")
 
-# Environment-first storage of the constraint state, under the cooperative kernels, whose block serves one env: the
-# lanes then read consecutive items of their env from consecutive addresses
-BATCH_FIRST = Switch("batch_first")
-# Environment-first storage of the Jacobian rows, under the cooperative kernels or serialized execution (see jac)
-JAC_ENV_FIRST = Switch("jac_env_first")
-# Serialized execution, which visits environments in the outermost loop of every constraint kernel
-SERIALIZED = Switch("serialized")
-NEWTON = Switch("newton")
-CONE_INCREMENTAL = Switch("cone_incremental")
-SIGNORINI = Switch("signorini")
-CONE_FREE_REUSE = Switch("cone_free_reuse")
-NOSLIP = Switch("noslip")
-NOSLIP_COOPERATIVE = Switch("noslip_cooperative")
-HIBERNATION = Switch("hibernation")
+# The rows of the constraint state and of the islands the cooperative kernels read, one env per block, which they
+# read from consecutive addresses once stored environment-first
+COOPERATIVE_ROWS = Label("cooperative_rows")
+# The Jacobian rows, which the cooperative kernels and serialized execution read whole for one env (see jac)
+JACOBIAN_ROWS = Label("jacobian_rows")
+# The rows serialized execution reads env by env, in the outermost loop of every constraint kernel
+SERIAL_ROWS = Label("serial_rows")
+NEWTON = Label("newton")
+CONE_INCREMENTAL = Label("cone_incremental")
+SIGNORINI = Label("signorini")
+CONE_FREE_REUSE = Label("cone_free_reuse")
+NOSLIP = Label("noslip")
+NOSLIP_COOPERATIVE = Label("noslip_cooperative")
+HIBERNATION = Label("hibernation")
 # The reverse Cuthill-McKee tree reorder of the CPU per-island skyline path (see rcm_tree_pos)
-RCM = Switch("rcm")
+RCM = Label("rcm")
 # The contact lists of the islands, of the skyline reorder or of the cooperative contact sort (see contact_id)
-ISLAND_CONTACTS = Switch("island_contacts")
-WORKLIST_ACTIVE = Switch("worklist_active")
+ISLAND_CONTACTS = Label("island_contacts")
+WORKLISTS = Label("worklists")
+# The buffers of the backward pass of the constraint solve
+BACKWARD = Label("backward")
 
 
 class IslandSlices(Data, kind=DataKind.SCRATCH, shape=(TREES, ENVS)):
     # Per-(island, env) slices into a packed id array: island i_island's items are id[start[i_island, i_b] : start +
     # n[i_island, i_b]]. curr is the write cursor the partition build advances while filling each slice; once built,
     # curr == start + n. Indexed [n_trees, B] since an island holds at least one tree (see trees_root_idx in RigidInfo).
-    curr: Int = field(layout=BATCH_FIRST)
-    n: Int = field(layout=BATCH_FIRST)
-    start: Int = field(layout=BATCH_FIRST)
+    curr: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
+    n: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
+    start: qd.Tensor = field(int, labels=COOPERATIVE_ROWS)
 
 
 class IslandState(Data, kind=DataKind.SCRATCH):
@@ -808,63 +931,63 @@ class IslandState(Data, kind=DataKind.SCRATCH):
     # links_island_idx that of each link, -1 for a static link and for a dof-less tree and its links. link_slices maps
     # an island to its slice of link_id, dof_slices to its slice of dof_id (island-local dof -> global dof, ascending
     # unless the CPU skyline path reorders it by contact adjacency).
-    trees_parent_idx: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST)
-    trees_island_idx: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST)
-    links_island_idx: Int = field(shape=(LINKS, ENVS), layout=BATCH_FIRST)
-    n_islands: Int = field(shape=(ENVS,))
-    link_slices: IslandSlices = field(when=HIBERNATION)
-    link_id: Int = field(shape=(LINKS, ENVS), layout=BATCH_FIRST, when=HIBERNATION)
+    trees_parent_idx: qd.Tensor = field(int, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
+    trees_island_idx: qd.Tensor = field(int, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
+    links_island_idx: qd.Tensor = field(int, shape=(LINKS, ENVS), labels=COOPERATIVE_ROWS)
+    n_islands: qd.Tensor = field(int, shape=(ENVS,))
+    link_slices: IslandSlices = field(labels=HIBERNATION)
+    link_id: qd.Tensor = field(int, shape=(LINKS, ENVS), labels=(COOPERATIVE_ROWS, HIBERNATION))
     dof_slices: IslandSlices
-    dof_id: Int = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
+    dof_id: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # Inverse of dof_id: dof_local_pos[d] is the island-local position of global dof d
-    dof_local_pos: Int = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    dofs_island_idx: Int = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
+    dof_local_pos: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    dofs_island_idx: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # First dof of an island whose dof list holds consecutive dofs in ascending order, -1 otherwise (see func_list_item
     # in linesearch.py).
-    dof_range_start: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST)
+    dof_range_start: qd.Tensor = field(int, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
     # Skyline envelope of the CPU per-island path: dof_env_start_local[dof_slices.start[i] + ld] is the smallest
     # island-local column structurally nonzero in local row ld of island i's Hessian block, 0 (dense) when uncomputed.
     # dof_env_col_end is its transpose, the largest local row whose envelope reaches column ld, which bounds the
     # column-oriented factor and solve sweeps to the band: a tall island of a few hundred dofs otherwise tests every
     # row below the diagonal against its envelope, an O(n^2) scan per sweep. It has no safe uncomputed default (0
     # truncates), so only the CPU per-island path reads it.
-    dof_env_start_local: Int = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    dof_env_col_end: Int = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
+    dof_env_start_local: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    dof_env_col_end: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # Per-island contact lists of the CPU per-island skyline reorder (see rcm_tree_pos below, empty otherwise).
     # contact_id also carries the input order of the cooperative contact sort (see func_sort_contacts_coop in
     # island.py).
-    contact_slices: IslandSlices = field(when=RCM)
-    contact_id: Int = field(shape=(CONTACTS, ENVS), layout=BATCH_FIRST, when=ISLAND_CONTACTS)
+    contact_slices: IslandSlices = field(labels=RCM)
+    contact_id: qd.Tensor = field(int, shape=(CONTACTS, ENVS), labels=(COOPERATIVE_ROWS, ISLAND_CONTACTS))
     constraint_slices: IslandSlices
-    constraint_id: Int = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
+    constraint_id: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Island of each constraint, -1 for one touching no island
-    constraint_island_idx: Int = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
+    constraint_island_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Hibernation (empty unless use_hibernation): is_hibernated marks an island whose every link is asleep, and
     # hibernated_next_link is the per-link daisy chain the partition build re-unions before labeling, which keeps a
     # sleeping component, whose bodies generate no live contacts, one island across steps.
-    is_hibernated: Int = field(shape=(TREES, ENVS), kind=DataKind.STATE, when=HIBERNATION)
-    hibernated_next_link: Int = field(shape=(LINKS, ENVS), kind=DataKind.STATE, when=HIBERNATION)
+    is_hibernated: qd.Tensor = field(int, shape=(TREES, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
+    hibernated_next_link: qd.Tensor = field(int, shape=(LINKS, ENVS), kind=DataKind.STATE, labels=HIBERNATION)
     # (env, island) work-lists of the cooperative per-island factor+solve, one per island size class (see
     # island_tile_caps): class c holds its factor_worklist_size[c] awake islands in its own region of the two index
     # lists, of n_trees * _B slots each, in the order of the atomic reservation of the partition pass. Read where an env
     # can hold several islands (see func_island_tiled_factor_solve_all in solver.py).
-    factor_worklist_i_b: Int = field(shape=(WORKLIST,), when=WORKLIST_ACTIVE)
-    factor_worklist_i_island: Int = field(shape=(WORKLIST,), when=WORKLIST_ACTIVE)
-    factor_worklist_size: Int = field(shape=(TILE_CLASSES,), when=WORKLIST_ACTIVE)
+    factor_worklist_i_b: qd.Tensor = field(int, shape=(WORKLIST,), labels=WORKLISTS)
+    factor_worklist_i_island: qd.Tensor = field(int, shape=(WORKLIST,), labels=WORKLISTS)
+    factor_worklist_size: qd.Tensor = field(int, shape=(TILE_CLASSES,), labels=WORKLISTS)
     # Scratch of the reverse Cuthill-McKee tree reorder of the CPU per-island skyline path: a tree's island-local slot,
     # contact degree and ordered flag, and the resulting visit order. Distinct buffers, since quadrants assumes
     # distinct kernel arguments never alias.
-    rcm_tree_pos: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST, when=RCM)
-    rcm_tree_degree: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST, when=RCM)
-    rcm_tree_is_ordered: Bool = field(shape=(TREES, ENVS), layout=BATCH_FIRST, when=RCM)
-    rcm_tree_order: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST, when=RCM)
+    rcm_tree_pos: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
+    rcm_tree_degree: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
+    rcm_tree_is_ordered: qd.Tensor = field(bool, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
+    rcm_tree_order: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, RCM))
     # Per-island Newton / CG iteration state (see linesearch.py), indexed [i_island, i_b]: inertia is the trace of the
     # mass matrix over the island's dofs, the scale of its convergence tests, and improved says whether the island
     # still iterates, every pass of an iteration being confined to the islands that do. ls_improvement carries
     # -cost(alpha_accepted) in shifted form, cost(alpha) - cost(0), which stays resolvable in float32 near convergence.
-    inertia: Float = field(shape=(TREES, ENVS), layout=BATCH_FIRST)
-    improved: Bool = field(shape=(TREES, ENVS), layout=BATCH_FIRST)
-    ls_improvement: Float = field(shape=(TREES, ENVS), layout=BATCH_FIRST)
+    inertia: qd.Tensor = field(float, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
+    improved: qd.Tensor = field(bool, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
+    ls_improvement: qd.Tensor = field(float, shape=(TREES, ENVS), labels=COOPERATIVE_ROWS)
 
 
 # =========================================== IKState ===========================================
@@ -887,24 +1010,24 @@ class IKState(Data, kind=DataKind.SCRATCH):
     """
 
     # Single-target spatial Jacobian (6 x n_dofs), rebuilt per target link and copied into the stacked block.
-    jacobian: Float = field(shape=(6, IK_DOFS, ENVS))
+    jacobian: qd.Tensor = field(float, shape=(6, IK_DOFS, ENVS))
     # Stacked multi-target Jacobian and its transpose, feeding the damped normal-equations solve.
-    jacobian_stacked: Float = field(shape=(IK_ERRORS, IK_DOFS, ENVS))
-    jacobian_stacked_t: Float = field(shape=(IK_DOFS, IK_ERRORS, ENVS))
+    jacobian_stacked: qd.Tensor = field(float, shape=(IK_ERRORS, IK_DOFS, ENVS))
+    jacobian_stacked_t: qd.Tensor = field(float, shape=(IK_DOFS, IK_ERRORS, ENVS))
     # Damped normal matrix J J^T + damping^2 I, its lower / upper LU factors and forward-substitution scratch, and
     # its inverse.
-    mat: Float = field(shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    lu_lower: Float = field(shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    lu_upper: Float = field(shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    lu_y: Float = field(shape=(IK_ERRORS, IK_ERRORS, ENVS))
-    inv: Float = field(shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    mat: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_lower: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_upper: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    lu_y: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
+    inv: qd.Tensor = field(float, shape=(IK_ERRORS, IK_ERRORS, ENVS))
     # Stacked pose residual, the best residual seen across restarts, and inv @ residual.
-    err_pose: Float = field(shape=(IK_ERRORS, ENVS))
-    err_pose_best: Float = field(shape=(IK_ERRORS, ENVS))
-    vec: Float = field(shape=(IK_ERRORS, ENVS))
+    err_pose: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    err_pose_best: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
+    vec: qd.Tensor = field(float, shape=(IK_ERRORS, ENVS))
     # Joint-space step and the best configuration found across restarts.
-    delta_qpos: Float = field(shape=(IK_DOFS, ENVS))
-    qpos_best: Float = field(shape=(IK_QS, ENVS))
+    delta_qpos: qd.Tensor = field(float, shape=(IK_DOFS, ENVS))
+    qpos_best: qd.Tensor = field(float, shape=(IK_QS, ENVS))
 
 
 class IKScratchFK(Data, kind=DataKind.SCRATCH):
@@ -915,12 +1038,12 @@ class IKScratchFK(Data, kind=DataKind.SCRATCH):
     """
 
     # Entity-local working configuration iterated by the solve.
-    qpos: Float = field(shape=(IK_QS, ENVS))
+    qpos: qd.Tensor = field(float, shape=(IK_QS, ENVS))
     # Link poses and joint frames placed by func_forward_kinematics_scratch, feeding the error and the Jacobian.
-    links_pos: Vec3 = field(shape=(IK_LINKS, ENVS))
-    links_quat: Vec4 = field(shape=(IK_LINKS, ENVS))
-    joints_xanchor: Vec3 = field(shape=(IK_JOINTS, ENVS))
-    joints_xaxis: Vec3 = field(shape=(IK_JOINTS, ENVS))
+    links_pos: qd.Tensor = field((float, 3), shape=(IK_LINKS, ENVS))
+    links_quat: qd.Tensor = field((float, 4), shape=(IK_LINKS, ENVS))
+    joints_xanchor: qd.Tensor = field((float, 3), shape=(IK_JOINTS, ENVS))
+    joints_xaxis: qd.Tensor = field((float, 3), shape=(IK_JOINTS, ENVS))
 
 
 class IKTargets(Data, kind=DataKind.SCRATCH):
@@ -932,20 +1055,20 @@ class IKTargets(Data, kind=DataKind.SCRATCH):
     """
 
     # Global indices of the target links, the effective DOFs to move, and the columns (solver envs) to solve.
-    links_idx: Int = field(shape=(IK_TARGETS,))
-    dofs_idx: Int = field(shape=(IK_DOFS,))
-    envs_idx: Int = field(shape=(ENVS,))
+    links_idx: qd.Tensor = field(int, shape=(IK_TARGETS,))
+    dofs_idx: qd.Tensor = field(int, shape=(IK_DOFS,))
+    envs_idx: qd.Tensor = field(int, shape=(ENVS,))
     # Target pose per (link, column) and the link-local point whose pose is driven, in the world frame.
-    pos: Vec3 = field(shape=(IK_TARGETS, ENVS))
-    quat: Vec4 = field(shape=(IK_TARGETS, ENVS))
-    local_point: Vec3 = field(shape=(IK_TARGETS,))
+    pos: qd.Tensor = field((float, 3), shape=(IK_TARGETS, ENVS))
+    quat: qd.Tensor = field((float, 4), shape=(IK_TARGETS, ENVS))
+    local_point: qd.Tensor = field((float, 3), shape=(IK_TARGETS,))
     # Optional custom initial configuration per (column, q); used only when custom_init_qpos is set.
-    init_qpos: Float = field(shape=(ENVS, IK_QS))
+    init_qpos: qd.Tensor = field(float, shape=(ENVS, IK_QS))
     # Which position / rotation axes to solve (shared across links), and per-link position / rotation enables.
-    pos_mask: Float = field(shape=(3,))
-    rot_mask: Float = field(shape=(3,))
-    link_pos_mask: Int = field(shape=(IK_TARGETS,))
-    link_rot_mask: Int = field(shape=(IK_TARGETS,))
+    pos_mask: qd.Tensor = field(float, shape=(3,))
+    rot_mask: qd.Tensor = field(float, shape=(3,))
+    link_pos_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
+    link_rot_mask: qd.Tensor = field(int, shape=(IK_TARGETS,))
 
 
 class IKScratch(Data, kind=DataKind.SCRATCH):
@@ -960,9 +1083,9 @@ class IKScratch(Data, kind=DataKind.SCRATCH):
     targets: IKTargets
 
 
-# The dofs of the widest entity of the solver, and whether it has any
+# The dofs of the widest entity of the solver, and the scratch of its kinematics queries
 ENTITY_DOFS = Axis("entity_dofs")
-HAS_ENTITY_DOFS = Switch("has_entity_dofs")
+KINEMATICS = Label("kinematics")
 
 
 class KinematicsScratch(Data, kind=DataKind.SCRATCH):
@@ -972,8 +1095,8 @@ class KinematicsScratch(Data, kind=DataKind.SCRATCH):
     configuration so the global q indices callers already work in index it directly.
     """
 
-    jacobian: Float = field(shape=(6, ENTITY_DOFS, ENVS), when=HAS_ENTITY_DOFS)
-    qpos_cache: Float = field(shape=(QS, ENVS), when=HAS_ENTITY_DOFS)
+    jacobian: qd.Tensor = field(float, shape=(6, ENTITY_DOFS, ENVS), labels=KINEMATICS)
+    qpos_cache: qd.Tensor = field(float, shape=(QS, ENVS), labels=KINEMATICS)
 
 
 class WeightScratch(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
@@ -982,51 +1105,51 @@ class WeightScratch(Data, kind=DataKind.SCRATCH, shape=(DOFS, ENVS)):
     One weight needs one row of a link Jacobian and the mass-matrix solve against that row.
     """
 
-    jac_row: Float
-    solve_out: Float
+    jac_row: qd.Tensor = field(float)
+    solve_out: qd.Tensor = field(float)
 
 
 class ConstraintState(Data, kind=DataKind.SCRATCH):
     # /!\ The declaration order is the allocation order, which changing may reduce runtime speed by >10% /!\
-    n_constraints: Int = field(shape=(ENVS,), kind=DataKind.DERIVED)
-    qd_n_equalities: Int = field(shape=(ENVS,), kind=DataKind.STATE)
-    n_constraints_equality: Int = field(shape=(ENVS,), kind=DataKind.DERIVED)
-    n_constraints_frictionloss: Int = field(shape=(ENVS,), kind=DataKind.DERIVED)
+    n_constraints: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
+    qd_n_equalities: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.STATE)
+    n_constraints_equality: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
+    n_constraints_frictionloss: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     # Number of elliptic-cone contact rows (rows_per_contact per contact), laid out contiguously at the start of the
     # collision segment. Zero for the pyramidal cone. The cone rows occupy
     # [ne + n_frictionloss, ne + n_frictionloss + n_cone).
-    n_constraints_cone: Int = field(shape=(ENVS,), kind=DataKind.DERIVED)
-    is_warmstart: Bool = field(shape=(ENVS,), kind=DataKind.STATE)
-    improved: Bool = field(shape=(ENVS,))
-    cost_ws: Float = field(shape=(ENVS,))
-    cost: Float = field(shape=(ENVS,))
+    n_constraints_cone: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
+    is_warmstart: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.STATE)
+    improved: qd.Tensor = field(bool, shape=(ENVS,))
+    cost_ws: qd.Tensor = field(float, shape=(ENVS,))
+    cost: qd.Tensor = field(float, shape=(ENVS,))
     # DOF-vec family flip: canonical (n_dofs_, _B) -> physical (_B, n_dofs_). Adjacent-lane reads striding i_d in
     # cooperative kernels become stride-1; the regression on 1T-per-(i_d, i_b) writers is patched on a per-consumer
     # basis under the same enable_cooperative_constraint_kernels flag.
-    Ma: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    Ma_ws: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    grad: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    Mgrad: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
+    Ma: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    Ma_ws: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    grad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    Mgrad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # Previous-iteration cone-row residuals, kept only for the CPU elliptic cone so the incremental factor can downdate
     # the prior coupled cone block by a per-iteration rank-3 update (Jaref is overwritten by the linesearch apply).
-    cone_prev_jaref: Float = field(shape=(CONE_ROWS, ENVS), layout=SERIALIZED, when=CONE_INCREMENTAL)
+    cone_prev_jaref: qd.Tensor = field(float, shape=(CONE_ROWS, ENVS), labels=(SERIAL_ROWS, CONE_INCREMENTAL))
     # Per contact under 'signorini': the latched normal force scaling its friction discs (negative until seeded, see
     # func_relatch_cone in solver.py), and the gap between the iterate's normal force and the latch at the last update.
-    cone_latch: Float = field(shape=(CONES, ENVS), when=SIGNORINI)
-    cone_latch_gap: Float = field(shape=(CONES, ENVS), when=SIGNORINI)
-    search: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    qfrc_constraint: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST, kind=DataKind.STATE)
-    qacc: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST, kind=DataKind.STATE)
-    qacc_ws: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST, kind=DataKind.STATE)
-    mv: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
+    cone_latch: qd.Tensor = field(float, shape=(CONES, ENVS), labels=SIGNORINI)
+    cone_latch_gap: qd.Tensor = field(float, shape=(CONES, ENVS), labels=SIGNORINI)
+    search: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    qfrc_constraint: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
+    qacc: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
+    qacc_ws: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
+    mv: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # Optional CG fields
-    cg_prev_grad: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
-    cg_prev_Mgrad: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST)
+    cg_prev_grad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
+    cg_prev_Mgrad: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     # Optional Newton fields
     # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one slot
     # per fused update of the per-island factor (func_rank_batch_update_island), a single slot for the whole-env factor
     # of a single-island scene (indexing then reduces to [i_d]). Flat 2D to keep the DOF-vec rank and layout everywhere.
-    nt_vec: Float = field(shape=(NT_VEC_ROWS, ENVS), layout=BATCH_FIRST, when=NEWTON)
+    nt_vec: qd.Tensor = field(float, shape=(NT_VEC_ROWS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
     # Hessian matrix of the optimization problem as a dense 2D tensor.
     # Note that only the lower triangular part is updated for efficiency because this matrix is symmetric by definition.
     # As a result, the values of the strictly upper triangular part is undefined - except under
@@ -1038,75 +1161,75 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     # In practice, this variable is re-purposed to store the Cholesky factor L st H = L @ L.T to spare memory resources.
     # Under the register-tiled mass factor it is the scratch of the factor (see the constraint solver build).
     # TODO: Optimize storage to only allocate memory half of the Hessian matrix to sparse memory resources.
-    nt_H: Float = field(shape=(ENVS, DOFS, DOFS), when=NEWTON)
+    nt_H: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), labels=NEWTON)
     # Per-DOF Jacobi scale s_i = 1/sqrt(diag(M + J^T D J)_i), at natural DOF id, refreshed ahead of every direct
     # rebuild (func_jacobi_scale, 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
     # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A
     # unit diagonal keeps the Hessian's mixed-unit spread within float32's conditioning capability at any geometry
     # scale and makes the bare-EPS pivot floor scale-relative. Only meaningful with enable_jacobi_equilibration.
-    nt_jacobi: Float = field(shape=(DOFS, ENVS), layout=BATCH_FIRST, when=NEWTON)
+    nt_jacobi: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
     # Compacted list of constraints whose active state changed, used by incremental Cholesky update
     # to reduce GPU thread divergence by iterating only over constraints that need processing.
-    incr_changed_idx: Int = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST, when=NEWTON)
-    incr_n_changed: Int = field(shape=(ENVS,))
+    incr_changed_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
+    incr_n_changed: qd.Tensor = field(int, shape=(ENVS,))
     # Layout-flippable constraint-state tensors: canonical shape (len_constraints_, _B), physically stored as
     # (_B, len_constraints_) under BATCH_FIRST, kernel-body indexing ``Jaref[i_c, i_b]`` being rewritten accordingly.
-    active: Bool = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST, kind=DataKind.DERIVED)
-    prev_active: Bool = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST, when=NEWTON)
-    diag: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
-    aref: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
-    Jaref: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
+    active: qd.Tensor = field(bool, shape=(CONSTRAINTS, ENVS), kind=DataKind.DERIVED, labels=COOPERATIVE_ROWS)
+    prev_active: qd.Tensor = field(bool, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
+    diag: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
+    aref: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
+    Jaref: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Frictionloss rows store their friction loss; elliptic-cone head (normal) rows reuse the field to carry the
     # contact sliding friction coefficient read by the cone solver, and with torsional friction the spin row carries
     # the torsional coefficient the same way (the tangent rows hold 0).
-    efc_frictionloss: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
-    efc_force: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST, kind=DataKind.DERIVED, grad=True)
-    efc_D: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
-    jv: Float = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
+    efc_frictionloss: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
+    efc_force: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), kind=DataKind.DERIVED, grad=True, labels=COOPERATIVE_ROWS)
+    efc_D: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
+    jv: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Canonical (len_constraints_, n_dofs_, _B), physical (_B, len_constraints_, n_dofs_) under JAC_ENV_FIRST, each row
     # of an env stored whole. The cooperative kernels then read the per-iteration J^T @ efc_force and the Hessian
     # staging with lanes on consecutive dofs of one row, and a row's support spans a cache line or two. Serialized
     # execution reads and writes the rows dof by dof for a fixed env.
-    jac: Float = field(shape=(CONSTRAINTS, DOFS, ENVS), layout=JAC_ENV_FIRST)
+    jac: qd.Tensor = field(float, shape=(CONSTRAINTS, DOFS, ENVS), labels=JACOBIAN_ROWS)
     # The support of each row: a row lists the dofs of the kinematic chains of the two links it couples, or at most two
     # dofs for a joint equality.
-    jac_dofs_idx: Int = field(shape=(CONSTRAINTS, JAC_DOFS, ENVS), layout=JAC_ENV_FIRST)
-    jac_n_dofs: Int = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST)
+    jac_dofs_idx: qd.Tensor = field(int, shape=(CONSTRAINTS, JAC_DOFS, ENVS), labels=JACOBIAN_ROWS)
+    jac_n_dofs: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Backward gradients
-    dL_dqacc: Float = field(shape=(DOFS, ENVS), when=REQUIRES_GRAD)
-    dL_dM: Float = field(shape=(DOFS, DOFS, ENVS), when=REQUIRES_GRAD)
-    dL_djac: Float = field(shape=(CONSTRAINTS, DOFS, ENVS), when=REQUIRES_GRAD)
-    dL_daref: Float = field(shape=(CONSTRAINTS, ENVS), when=REQUIRES_GRAD)
-    dL_defc_D: Float = field(shape=(CONSTRAINTS, ENVS), when=REQUIRES_GRAD)
-    dL_dforce: Float = field(shape=(DOFS, ENVS), when=REQUIRES_GRAD)
+    dL_dqacc: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
+    dL_dM: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), labels=BACKWARD)
+    dL_djac: qd.Tensor = field(float, shape=(CONSTRAINTS, DOFS, ENVS), labels=BACKWARD)
+    dL_daref: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
+    dL_defc_D: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
+    dL_dforce: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
     # Backward buffers for linear system solver
-    bw_u: Float = field(shape=(DOFS, ENVS), when=REQUIRES_GRAD)
-    bw_r: Float = field(shape=(DOFS, ENVS), when=REQUIRES_GRAD)
-    bw_p: Float = field(shape=(DOFS, ENVS), when=REQUIRES_GRAD)
-    bw_Ap: Float = field(shape=(DOFS, ENVS), when=REQUIRES_GRAD)
-    bw_Ju: Float = field(shape=(CONSTRAINTS, ENVS), when=REQUIRES_GRAD)
-    bw_y: Float = field(shape=(CONSTRAINTS, ENVS), when=REQUIRES_GRAD)
-    bw_w: Float = field(shape=(CONSTRAINTS, ENVS), when=REQUIRES_GRAD)
+    bw_u: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
+    bw_r: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
+    bw_p: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
+    bw_Ap: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=BACKWARD)
+    bw_Ju: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
+    bw_y: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
+    bw_w: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=BACKWARD)
     # Timers for profiling
-    timers: Timer = field(shape=(10, ENVS))
+    timers: qd.Tensor = field(_timer_dtype, shape=(10, ENVS))
     # Solver loop iteration counter (0-indexed, increments each iteration in the graph loop)
-    solver_iter_counter: I32 = field(shape=())
+    solver_iter_counter: qd.Tensor = field(qd.i32, shape=())
     # Always ndarray (not field): graph.do_while requires the same physical ndarray on every call.
-    graph_counter: I32 = field(shape=(), ndarray=True)
+    graph_counter: qd.Tensor = field(qd.i32, shape=(), ndarray=True)
     # Iterations left to the graph loop past the current one, which it resumes with once an env iterates on
-    graph_counter_next: I32 = field(shape=())
+    graph_counter_next: qd.Tensor = field(qd.i32, shape=())
     # Diagonal of the persisted cone-free Hessian packed in nt_H's mirror slots (see nt_H). Only meaningful with
     # enable_cone_free_hessian_reuse.
-    nt_H_cone_free_diag: Float = field(shape=(ENVS, DOFS), when=CONE_FREE_REUSE)
+    nt_H_cone_free_diag: qd.Tensor = field(float, shape=(ENVS, DOFS), labels=CONE_FREE_REUSE)
     # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the two rows of the pair being updated, in
     # the two columns of the env, or of the lane of the cooperative sweep at [i_d, 2 * (i_b * 32 + tid) + i_r] (see
     # func_noslip_update_row in noslip.py).
-    noslip_MinvJT: Float = field(shape=(DOFS, NOSLIP_COLUMNS), layout=BATCH_FIRST, when=NOSLIP)
+    noslip_MinvJT: qd.Tensor = field(float, shape=(DOFS, NOSLIP_COLUMNS), labels=NOSLIP)
     # Row coloring of the cooperative noslip sweep (empty otherwise, see func_color_rows_batch in noslip.py): the color
     # of each row, the color count of each island and the next free color of the mass block starting at each dof.
-    noslip_rows_color: Int = field(shape=(CONSTRAINTS, ENVS), layout=BATCH_FIRST, when=NOSLIP_COOPERATIVE)
-    noslip_islands_n_colors: Int = field(shape=(TREES, ENVS), layout=BATCH_FIRST, when=NOSLIP_COOPERATIVE)
-    noslip_blocks_n_colors: Int = field(shape=(DOFS, ENVS), layout=BATCH_FIRST, when=NOSLIP_COOPERATIVE)
+    noslip_rows_color: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
+    noslip_islands_n_colors: qd.Tensor = field(int, shape=(TREES, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
+    noslip_blocks_n_colors: qd.Tensor = field(int, shape=(DOFS, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
     # Union-find partition of links into contact islands, read by the per-island Newton solve and hibernation.
     island: IslandState
 
@@ -3083,41 +3206,48 @@ class DataManager:
             gs.raise_exception(
                 f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) is too large."
             )
-        options = solver._options
-        self.rigid_info = RigidInfo(
+        config, options = solver.rigid_config, solver._options
+        shape = dict(
             envs=solver._B,
             qs=solver.n_qs_,
             dofs=solver.n_dofs_,
             links=solver.n_links_,
             roots=solver.n_roots_,
             trees=solver.n_trees_,
-            dynamic=is_dynamic,
-            level_sweep=is_dynamic and solver.rigid_config.enable_level_sweep,
-            tiled_mass=is_dynamic and solver.rigid_config.enable_register_tiled_mass,
+        )
+        values = dict(EPS=gs.EPS)
+        if is_dynamic:
+            shape.update(
+                geoms=solver.n_geoms_,
+                trees_levels_links=np.count_nonzero(solver._links_tree_root_idx >= 0),
+                child_links=np.count_nonzero(solver._links_parent_idx >= 0),
+                links_bounds=solver.n_links_ + 1,
+            )
+            values.update(
+                substep_dt=solver._substep_dt,
+                iterations=options.iterations,
+                tolerance=options.tolerance,
+                ls_iterations=options.ls_iterations,
+                ls_tolerance=options.ls_tolerance,
+                noslip_iterations=options.noslip_iterations,
+                noslip_tolerance=options.noslip_tolerance,
+                impratio=options.impratio,
+                n_equalities=solver._n_equalities,
+                n_candidate_equalities=solver.n_candidate_equalities_,
+                hibernation_thresh_vel=solver._hibernation_thresh_vel,
+            )
+        self.rigid_info = RigidInfo(
+            shape=shape,
+            values=values,
+            layout={
+                RigidInfo.mass_mat: (2, 1, 0) if is_dynamic and config.enable_cooperative_constraint_kernels else None
+            },
+            unused={
+                DYNAMICS: kinematic_only,
+                LEVEL_SWEEP: not (is_dynamic and config.enable_level_sweep),
+                TILED_MASS: not (is_dynamic and config.enable_register_tiled_mass),
+            },
             requires_grad=is_dynamic and solver._requires_grad,
-            cooperative=is_dynamic and solver.rigid_config.enable_cooperative_constraint_kernels,
-            **(
-                dict(
-                    geoms=solver.n_geoms_,
-                    trees_levels_links=np.count_nonzero(solver._links_tree_root_idx >= 0),
-                    child_links=np.count_nonzero(solver._links_parent_idx >= 0),
-                    links_bounds=solver.n_links_ + 1,
-                    substep_dt=solver._substep_dt,
-                    iterations=options.iterations,
-                    tolerance=options.tolerance,
-                    ls_iterations=options.ls_iterations,
-                    ls_tolerance=options.ls_tolerance,
-                    noslip_iterations=options.noslip_iterations,
-                    noslip_tolerance=options.noslip_tolerance,
-                    impratio=options.impratio,
-                    n_equalities=solver._n_equalities,
-                    n_candidate_equalities=solver.n_candidate_equalities_,
-                    hibernation_thresh_vel=solver._hibernation_thresh_vel,
-                )
-                if is_dynamic
-                else {}
-            ),
-            EPS=gs.EPS,
         )
 
         # Leaf structs are allocated one by one before assembling the per-component aggregates, to control the
@@ -3154,7 +3284,7 @@ class DataManager:
 
         entity_dofs = max((entity.n_dofs for entity in solver.entities), default=0)
         self.kinematics_scratch = KinematicsScratch(
-            envs=solver._B, qs=solver.n_qs, entity_dofs=entity_dofs, has_entity_dofs=entity_dofs > 0
+            shape=dict(envs=solver._B, qs=solver.n_qs, entity_dofs=entity_dofs), unused={KINEMATICS: entity_dofs == 0}
         )
 
         self.dyn_info = DynInfo(
@@ -3197,7 +3327,7 @@ class DataManager:
         mass, a center of mass or an inertia allocates none of this.
         """
         if self._weight_scratch is None:
-            self._weight_scratch = WeightScratch(envs=self._solver._B, dofs=self._solver.n_dofs_)
+            self._weight_scratch = WeightScratch(shape=dict(envs=self._solver._B, dofs=self._solver.n_dofs_))
         return self._weight_scratch
 
     @property
@@ -3211,13 +3341,15 @@ class DataManager:
             entities = self._solver.entities
             n_targets = self._solver._options.IK_max_targets
             self._ik_scratch = IKScratch(
-                envs=self._solver._B,
-                ik_qs=max(entity.n_qs for entity in entities),
-                ik_dofs=max(entity.n_dofs for entity in entities),
-                ik_links=max(entity.n_links for entity in entities),
-                ik_joints=max(entity.n_joints for entity in entities),
-                ik_targets=n_targets,
-                ik_errors=6 * n_targets,
+                shape=dict(
+                    envs=self._solver._B,
+                    ik_qs=max([entity.n_qs for entity in entities]),
+                    ik_dofs=max([entity.n_dofs for entity in entities]),
+                    ik_links=max([entity.n_links for entity in entities]),
+                    ik_joints=max([entity.n_joints for entity in entities]),
+                    ik_targets=n_targets,
+                    ik_errors=6 * n_targets,
+                )
             )
         return self._ik_scratch
 
