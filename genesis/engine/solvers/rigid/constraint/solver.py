@@ -162,7 +162,60 @@ class ConstraintSolver:
         # frictionloss.
         self.n_cone_constraints_ = max(1, rows_per_contact * rigid_solver._options.max_contacts)
 
-        self.constraint_state = array_class.get_constraint_state(self, self._solver, self._collider)
+        solver, config = self._solver, rigid_solver.rigid_config
+        if not array_class.is_tensor_addressable((self.len_constraints_, solver.n_dofs_, solver._B), gs.np_float):
+            gs.raise_exception(
+                f"Jacobian shape (n_constraints={self.len_constraints_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) "
+                "is too large."
+            )
+        # A Jacobian row reaches the dofs of the kinematic chains of the two links it couples. Each pass of the walk
+        # moves every link one ancestor up, adding the dofs of the ancestor it passes to its chain.
+        links_n_dofs = np.array([link.n_dofs for link in solver.links], dtype=gs.np_int)
+        links_parent_idx = np.array([link.parent_idx for link in solver.links], dtype=gs.np_int)
+        links_chain_n_dofs = links_n_dofs.copy()
+        links_ancestor_idx = links_parent_idx
+        while (links_ancestor_idx >= 0).any():
+            has_ancestor = links_ancestor_idx >= 0
+            links_chain_n_dofs += np.where(has_ancestor, links_n_dofs[links_ancestor_idx], 0)
+            links_ancestor_idx = np.where(has_ancestor, links_parent_idx[links_ancestor_idx], -1)
+        # One update slot per fused update of the per-island factor, one for the whole-env factor of a single island
+        nt_vec_n_slots = config.hessian_rank_update_batch if self.sparse_solve or not config.is_single_island else 1
+        n_tile_classes = len(array_class.island_tile_caps(config.island_tile_cap_first, config.island_tile_cap_last))
+        is_serialized = config.para_level < gs.PARA_LEVEL.ALL
+        self.constraint_state = array_class.ConstraintState(
+            envs=solver._B,
+            dofs=solver.n_dofs_,
+            links=solver.n_links_,
+            trees=solver.n_trees_,
+            constraints=self.len_constraints_,
+            contacts=collider_info.max_contacts[None],
+            cone_rows=self.n_cone_constraints_,
+            cones=self.n_cone_constraints_ // rows_per_contact,
+            nt_vec_rows=solver.n_dofs_ * nt_vec_n_slots,
+            jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
+            noslip_columns=2 * (32 if config.enable_cooperative_noslip else 1) * solver._B,
+            worklist=n_tile_classes * solver.n_trees_ * solver._B,
+            tile_classes=n_tile_classes,
+            batch_first=config.constraint_layout_batch_first,
+            jac_env_first=config.enable_cooperative_constraint_kernels or is_serialized,
+            serialized=is_serialized,
+            newton=config.solver_type == gs.constraint_solver.Newton,
+            cone_incremental=config.enable_elliptic_friction and config.backend == gs.cpu,
+            signorini=config.enable_signorini_contact,
+            cone_free_reuse=config.enable_cone_free_hessian_reuse,
+            noslip=solver._options.noslip_iterations > 0,
+            noslip_cooperative=config.enable_cooperative_noslip,
+            hibernation=solver._use_hibernation,
+            rcm=config.sparse_solve,
+            island_contacts=config.sparse_solve or config.enable_cooperative_constraint_kernels,
+            worklist_active=config.enable_tiled_island_seed and not config.is_single_island,
+            requires_grad=solver._requires_grad,
+            # The Hessian is the largest array of the simulation, so it reuses the scratch of the register-tiled mass
+            # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
+            # solve repopulates it in the same step. Quadrants assumes distinct kernel arguments never alias, so no
+            # kernel may access both, the factor living in forward_dynamics.py alone.
+            _binds={("nt_H",): solver.rigid_info.mass_mat_tiled_scratch} if config.enable_register_tiled_mass else None,
+        )
         self.constraint_state.qd_n_equalities.from_numpy(
             np.full((self._solver._B,), self._solver.n_equalities, dtype=gs.np_int)
         )
