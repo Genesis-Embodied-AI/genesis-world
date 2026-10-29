@@ -12,6 +12,7 @@ from scipy.spatial.qhull import QhullError
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.utils.collision import solve_contype_conaffinity
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -1940,12 +1941,16 @@ def test_filter_neutral_self_collisions(show_viewer):
 
 
 @pytest.mark.required
-def test_contype_conaffinity(show_viewer, tol):
+def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, tol):
     GRAVITY = (0.0, 0.0, -10.0)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=GRAVITY,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -4.0, 2.0),
+            camera_lookat=(0.0, 1.0, 0.5),
         ),
         show_viewer=show_viewer,
     )
@@ -2001,6 +2006,12 @@ def test_contype_conaffinity(show_viewer, tol):
         ),
         visualize_contact=True,
     )
+    exclude_entity = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=boxes_dropped_with_contact_exclude,
+            pos=(0.0, 2.0, 0.0),
+        ),
+    )
     scene.build()
 
     for _ in range(80):
@@ -2010,6 +2021,32 @@ def test_contype_conaffinity(show_viewer, tol):
     assert_allclose(box2.get_pos(), (0.0, 0.0, 0.75), atol=2e-3)
     assert_allclose(box2.get_pos(), box3.get_pos(), atol=2e-3)
     assert_allclose(scene.rigid_solver.get_links_acc(slice(box4.link_start, box4.link_end)), GRAVITY, atol=tol)
+
+    # Both boxes of the MJCF model are dropped from the same height onto identical bases, and only one pair is excluded:
+    # the excluded box falls through its base down to the ground, while its twin rests on top of the other base.
+    assert_allclose(exclude_entity.get_link("passer_excluded").get_pos(), (-1.0, 2.0, 0.2), atol=1e-3)
+    assert_allclose(exclude_entity.get_link("passer_colliding").get_pos(), (1.0, 2.0, 0.6), atol=1e-3)
+
+    # Random matrices fit one bit per group of geoms excluding the same partners. A path of geoms, each one excluding
+    # its neighbours, needs more groups than bits, and so does excluding every pair with a single-bit budget.
+    rng = np.random.default_rng(0)
+    collision_matrices = [(np.eye(40, k=1, dtype=bool), 31), (np.triu(np.ones((5, 5), dtype=bool), k=1), 1)]
+    for density in (0.0, 0.05, 0.25, 0.5, 0.75, 1.0):
+        for _ in range(64):
+            num_geoms = rng.integers(1, 32)
+            collision_matrices.append((np.triu(rng.random((num_geoms, num_geoms)) < density, k=1), 31))
+    for is_excluded, max_bits in collision_matrices:
+        invalid_pairs = {frozenset(pair) for pair in zip(*np.nonzero(is_excluded))}
+        contype, conaffinity = np.array(solve_contype_conaffinity(len(is_excluded), invalid_pairs, max_bits)).T
+        is_colliding = ((contype[:, None] & conaffinity) | (conaffinity[:, None] & contype)) != 0
+        assert_equal(np.triu(is_colliding, k=1), np.triu(~is_excluded, k=1))
+        geoms_bits = contype | conaffinity
+        assert ((geoms_bits > 0) & (geoms_bits < (1 << max_bits))).all()
+
+    # A matrix that the bit budget cannot realize is reported as such, so that callers fall back on their default masks,
+    # whether the cliques or the geom allowed to collide with no other one run out of bits.
+    assert solve_contype_conaffinity(40, {frozenset((i_g, i_g + 1)) for i_g in range(39)}, max_bits=4) is None
+    assert solve_contype_conaffinity(3, {frozenset((0, 1)), frozenset((0, 2))}, max_bits=1) is None
 
 
 @pytest.mark.required
