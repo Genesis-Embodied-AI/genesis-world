@@ -750,6 +750,7 @@ def test_single_joint(n_envs, coup_type, joint_type, fixed, show_viewer):
             fixed=fixed,
         ),
         material=gs.materials.Rigid(
+            coup_friction=0.1,
             coup_type=coup_type,
         ),
     )
