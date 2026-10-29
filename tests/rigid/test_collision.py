@@ -2045,7 +2045,9 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
         geoms_bits = contype | conaffinity
         assert ((geoms_bits > 0) & (geoms_bits < (1 << max_bits))).all()
 
-    # A matrix that one bit cannot realize is reported as such, so that callers fall back on their default masks.
+    # A matrix that the bit budget cannot realize is reported as such, so that callers fall back on their default masks,
+    # whether the cliques or the geom allowed to collide with no other one run out of bits.
+    assert solve_contype_conaffinity(40, {frozenset((i_g, i_g + 1)) for i_g in range(39)}, max_bits=4) is None
     assert solve_contype_conaffinity(3, {frozenset((0, 1)), frozenset((0, 2))}, max_bits=1) is None
 
 
