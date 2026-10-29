@@ -382,16 +382,6 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
             solver_options=gs.options.RigidEntitySolverOptions(coup_type="ipc_only"),
             links={"base": gs.options.LinkOptions(solver_options=gs.options.RigidLinkSolverOptions(needs_coup=False))},
         )
-    with pytest.raises(gs.GenesisException, match="enable_coup_collision"):
-        gs.options.RigidEntityOptions(
-            morph=gs.morphs.Sphere(),
-            solver_options=gs.options.RigidEntitySolverOptions(enable_coup_collision=False),
-            links={
-                "base": gs.options.LinkOptions(
-                    solver_options=gs.options.RigidLinkSolverOptions(enable_coup_collision=True)
-                )
-            },
-        )
     with pytest.raises(gs.GenesisException, match="coupled link"):
         gs.options.HybridEntityOptions(
             morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf"),
@@ -428,6 +418,17 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
             options=gs.options.RigidEntityOptions(
                 morph=gs.morphs.Box(pos=(5.0, 0.0, 0.0), size=(0.1, 0.1, 0.1)),
                 geoms={gs.GeomIndex.at(1): gs.options.GeomOptions(material=gs.materials.Material(friction=1.0))},
+            )
+        )
+    with pytest.raises(gs.GenesisException, match="equal specificity"):
+        scene.add_entity(
+            options=arm.options.model_copy(
+                update={
+                    "links": {
+                        "arm*": gs.options.LinkOptions(material=gs.materials.Material(friction=1.0)),
+                        "arm2": gs.options.LinkOptions(material=gs.materials.Material(friction=2.0)),
+                    }
+                }
             )
         )
     with pytest.raises(gs.GenesisException, match="links_to_keep"):

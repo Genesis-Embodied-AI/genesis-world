@@ -1,5 +1,6 @@
 """Selections of the links, geoms and vertices of an entity, keying the options set on them."""
 
+from fnmatch import fnmatchcase
 from typing import Annotated
 
 import numpy as np
@@ -26,11 +27,11 @@ class Slice(Options):
 
 
 class LinkIndex(Options):
-    """Select the links of an entity by name.
+    """Select the links of an entity by name, each name being an exact link name or a glob pattern such as 'finger*'.
 
-    A name or a tuple of names keying the 'links' of entity options stands for ``LinkIndex.named(*names)``. A link
-    merged into its parent by the asset parser has no name of its own any more, so a selection naming it raises an
-    error (see 'links_to_keep' of the morph).
+    A name or a tuple of names keying the 'links' of entity options stands for ``LinkIndex.named(*names)``. A name that
+    matches no link raises an error. A link merged into its parent by the asset parser has no name of its own any more,
+    so a selection naming it raises an error too (see 'links_to_keep' of the morph).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -39,18 +40,22 @@ class LinkIndex(Options):
 
     @classmethod
     def named(cls, *names: str) -> Self:
-        """Select the links of the given names."""
+        """Select the links of the given names, each an exact link name or a glob pattern (see ``fnmatch``)."""
         return cls(names=names)
 
+    def matches(self, link_name: str) -> bool:
+        """Whether the selection holds the link of a given name."""
+        return any(fnmatchcase(link_name, name) for name in self.names)
+
     def resolve(self, links_name: list[str]) -> np.ndarray:
-        """Return the indices of the selected links among links of the given names, raising on an unknown name."""
-        unknown_names = [name for name in self.names if name not in links_name]
+        """Return the indices of the selected links among links of the given names, raising on a name matching none."""
+        unknown_names = [name for name in self.names if not any(fnmatchcase(l_name, name) for l_name in links_name)]
         if unknown_names:
             gs.raise_exception(
-                f"No link named {unknown_names}. Existing links: {links_name}. A link the asset parser merges into its "
-                "parent keeps its name with the 'links_to_keep' option of the morph."
+                f"No link matches {unknown_names}. Existing links: {links_name}. A link the asset parser merges into "
+                "its parent keeps its name with the 'links_to_keep' option of the morph."
             )
-        return np.array([links_name.index(name) for name in self.names], dtype=gs.np_int)
+        return np.flatnonzero([self.matches(link_name) for link_name in links_name]).astype(gs.np_int, copy=False)
 
 
 class _OrdinalIndex(Options):

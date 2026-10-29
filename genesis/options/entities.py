@@ -177,7 +177,8 @@ class RigidLinkSolverOptions(Options):
         Default is None.
     enable_coup_collision : bool | None, optional
         Whether the link collides in the IPC coupler. Disabling it keeps the coupling forces of the link while dropping
-        its contacts. Default is None.
+        its contacts, and enabling it on some links with ``enable_coup_collision=False`` for the entity limits the
+        contacts to these links. Default is None.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -271,7 +272,7 @@ class _ArticulatedEntityOptions(EntityOptions[EntityT]):
         values = [
             link_options.use_visual_raycasting
             for link_index, link_options in self.links.items()
-            if link_name in link_index.names and link_options.use_visual_raycasting is not None
+            if link_index.matches(link_name) and link_options.use_visual_raycasting is not None
         ]
         if len(values) > 1:
             gs.raise_exception(
@@ -357,20 +358,13 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
                 "Coupling links differently from their entity requires the 'two_way_soft_constraint' coupling, got "
                 f"coup_type={solver_options.coup_type!r}."
             )
-        if not solver_options.enable_coup_collision and any(
-            link_solver_options.enable_coup_collision is not None for link_solver_options in links_solver_options
-        ):
-            gs.raise_exception(
-                "The 'enable_coup_collision' of a link requires enable_coup_collision=True of its entity, which "
-                "otherwise disables the collision of every link."
-            )
         return self
 
     def has_link_density(self, link_name: str) -> bool:
         """Whether the link and geom options give a density to the link of a given name or to one of its geoms."""
         geoms_options = list(self.geoms.values())
         for link_index, link_options in self.links.items():
-            if link_name in link_index.names:
+            if link_index.matches(link_name):
                 if link_options.material is not None and link_options.material.density is not None:
                     return True
                 geoms_options.extend(link_options.geoms.values())
@@ -383,7 +377,7 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
         """Return the solver options of the link of a given name, the fields its link options leave unset inherited."""
         fields = {}
         for link_index, link_options in self.links.items():
-            if link_name in link_index.names and link_options.solver_options is not None:
+            if link_index.matches(link_name) and link_options.solver_options is not None:
                 _merge_fields(fields, link_options.solver_options, f"link '{link_name}'")
         return RigidLinkSolverOptions(
             needs_coup=fields.get("needs_coup", self.solver_options.needs_coup),
@@ -400,7 +394,7 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
         link_fields = {}
         geoms_options = list(self.geoms.items())
         for link_index, link_options in self.links.items():
-            if link_name in link_index.names:
+            if link_index.matches(link_name):
                 if link_options.material is not None:
                     _merge_fields(link_fields, link_options.material, f"link '{link_name}'")
                 geoms_options.extend(link_options.geoms.items())

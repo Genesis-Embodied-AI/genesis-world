@@ -381,19 +381,36 @@ def test_link_coup_collision():
             },
         ),
     )
+    # Collision disabled for the entity and enabled again for the links a glob pattern selects
+    robot_collision_on_links = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file="urdf/simple/two_cube_revolute.urdf",
+                pos=(1.0, 0, 0.2),
+                fixed=True,
+            ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_type="two_way_soft_constraint",
+                enable_coup_collision=False,
+            ),
+            links={
+                "mov*": gs.options.LinkOptions(
+                    solver_options=gs.options.RigidLinkSolverOptions(
+                        enable_coup_collision=True,
+                    ),
+                ),
+            },
+        ),
+    )
     scene.build()
     assert scene.sim is not None
 
-    # Verify the collision settings were applied
-    coupler = cast("IPCCoupler", scene.sim.coupler)
-    collision_settings = coupler._coupling_collision_settings[robot]
-    base_link = robot.get_link("base")
-    moving_link = robot.get_link("moving")
-
     # "base" should be disabled, "moving" should not be in the disabled dict
-    assert base_link in collision_settings
-    assert collision_settings[base_link] is False
-    assert moving_link not in collision_settings
+    coupler = cast("IPCCoupler", scene.sim.coupler)
+    for entity in (robot, robot_collision_on_links):
+        collision_settings = coupler._coupling_collision_settings[entity]
+        assert collision_settings[entity.get_link("base")] is False
+        assert entity.get_link("moving") not in collision_settings
 
     # A link density would weigh the link differently in the rigid solver and in IPC, which holds one per entity, even
     # on a link IPC merges into the affine body of its parent
