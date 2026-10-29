@@ -362,16 +362,18 @@ class Collider:
         ipc_only_link_idxs = set()
         if isinstance(self._solver.sim.coupler, IPCCoupler):
             for entity in self._solver._entities:
-                # A coupling type requires a coupled link (see 'RigidEntityOptions')
+                coup_links = [l for l in entity.links if entity._options.get_link_solver_options(l.name).needs_coup]
+                # A coupling type requires a coupled link (see 'RigidEntityOptions'), and coupling some links alone
+                # resolves to the two-way coupling, as the IPC coupler resolves it (see 'IPCCoupler')
                 mode = entity._options.solver_options.coup_type
+                if mode is None and 0 < len(coup_links) < entity.n_links:
+                    mode = "two_way_soft_constraint"
                 if mode is None:
                     continue
                 if mode == "ipc_only":
                     ipc_only_link_idxs.update(l.idx for l in entity.links)
                 if mode == "two_way_soft_constraint":
-                    ipc_delegated_link_idxs.update(
-                        l.idx for l in entity.links if entity._options.get_link_solver_options(l.name).needs_coup
-                    )
+                    ipc_delegated_link_idxs.update(l.idx for l in coup_links)
                 else:
                     ipc_delegated_link_idxs.update(l.idx for l in entity.links)
 
