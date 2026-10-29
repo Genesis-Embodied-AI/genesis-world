@@ -790,15 +790,18 @@ register_cache_clear(_load_trimesh_scene_cached.cache_clear)
 _FILE_TMESHES_CACHE = OwnedCache()
 
 
-def _load_trimesh_geometries(path, group_by_material, scale, is_mesh_zup, mtime) -> "tuple[trimesh.Trimesh, ...]":
-    """Load the meshes of a file, brought to the z-up frame and scaled.
+def _load_trimesh_geometries(
+    path, group_by_material, scale, is_mesh_zup, mtime
+) -> "tuple[tuple[str, trimesh.Trimesh], ...]":
+    """Load the meshes of a file with their names, brought to the z-up frame and scaled.
 
-    Their arrays are read-only, the meshes built from them sharing them (see 'Mesh.from_trimesh'), so that writing
-    into them raises rather than changing every one of those meshes.
+    A mesh is named after the object or group of the file it comes from, or after its material when grouped by
+    material. Their arrays are read-only, the meshes built from them sharing them (see 'Mesh.from_trimesh'), so that
+    writing into them raises rather than changing every one of those meshes.
     """
     scene = _load_trimesh_scene_cached(path, group_by_material, mtime)
-    tmeshes = []
-    for tmesh in scene.geometry.values():
+    named_tmeshes = []
+    for name, tmesh in scene.geometry.items():
         if not isinstance(tmesh, trimesh.Trimesh):
             gs.raise_exception(f"Mesh type not supported: {path}")
         tmesh = tmesh.copy(include_cache=True)
@@ -815,24 +818,24 @@ def _load_trimesh_geometries(path, group_by_material, scale, is_mesh_zup, mtime)
         for array in (tmesh.vertices, tmesh.faces, tmesh._cache["face_normals"], tmesh._cache["vertex_normals"]):
             if array is not None:
                 array.flags.writeable = False
-        tmeshes.append(tmesh)
-    return tuple(tmeshes)
+        named_tmeshes.append((name, tmesh))
+    return tuple(named_tmeshes)
 
 
 def parse_mesh_trimesh(path, group_by_material, scale, is_mesh_zup, surface) -> "list[gs.Mesh]":
     # The meshes of a file are processed once for all the entities instantiating it at one scale, which share them
     key = (path, group_by_material, scale, is_mesh_zup, os.path.getmtime(path))
-    tmeshes = _FILE_TMESHES_CACHE.find(key)
-    if tmeshes is None:
-        tmeshes = _load_trimesh_geometries(*key)
+    named_tmeshes = _FILE_TMESHES_CACHE.find(key)
+    if named_tmeshes is None:
+        named_tmeshes = _load_trimesh_geometries(*key)
     meshes = []
-    for tmesh in tmeshes:
-        metadata = {"mesh_path": path, "imported_as_zup": is_mesh_zup}
+    for name, tmesh in named_tmeshes:
+        metadata = {"mesh_path": path, "imported_as_zup": is_mesh_zup, "name": name}
         if isinstance(tmesh.visual, trimesh.visual.TextureVisuals) and tmesh.visual.material is not None:
             metadata["material_name"] = tmesh.visual.material.name or ""
         meshes.append(gs.Mesh.from_trimesh(mesh=tmesh, surface=surface, metadata=metadata, share_arrays=True))
     for mesh in meshes:
-        _FILE_TMESHES_CACHE.own(mesh, key, tmeshes)
+        _FILE_TMESHES_CACHE.own(mesh, key, named_tmeshes)
     return meshes
 
 
