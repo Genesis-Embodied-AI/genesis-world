@@ -77,10 +77,8 @@ class Collider:
         self._prune_max_contacts_per_link_pair = 32
         self._prune_max_contacts_floor = 512
 
-        # The narrowphase sub-components are built AND activated before the collision fields, whose collider info embeds
-        # their description structs: the activation of the support field reallocates its own at its final size, so it
-        # has to run before the embedding (see ColliderInfo). Their constructors also resolve the options the static
-        # configuration reads, so they run first.
+        # The narrowphase sub-components resolve the options the static configuration reads, and their data sizes the
+        # collider info, so they are built and activated first
         self.sdf = SDF(rigid_solver)
         self.mpr = mpr.MPR(rigid_solver)
         self.gjk = gjk.GJK(rigid_solver)
@@ -267,24 +265,44 @@ class Collider:
         link_pair_idx[valid_link_pairs[:, 0], valid_link_pairs[:, 1]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
         link_pair_idx[valid_link_pairs[:, 1], valid_link_pairs[:, 0]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
 
+        terrain_hf_shape = (1, 1)
+        for geom in self._solver.geoms:
+            if geom.type == gs.GEOM_TYPE.TERRAIN:
+                terrain_hf_shape = geom.entity.terrain_hf.shape
+                break
+
         # Initialize [info], which stores every data that must be considered mutable from Quadrants's perspective,
         # i.e. unknown at compile time, but IMMUTABLE from Genesis scene's perspective after build.
-        self.collider_info = array_class.get_collider_info(
-            self._solver,
-            n_vert_neighbors,
-            n_valid_link_pairs,
-            self.collider_config,
-            self.mpr._mpr_info,
-            self.gjk._gjk_info,
-            self._support_field.support_field_info,
-            self.sdf.sdf_info,
-            mc_perturbation=self._mc_perturbation,
-            mc_tolerance=self._mc_tolerance,
-            diff_pos_tolerance=self._diff_pos_tolerance,
-            diff_normal_tolerance=self._diff_normal_tolerance,
-            contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
-            prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
+        self.collider_info = array_class.ColliderInfo(
+            sizes=dict(
+                geoms=self._solver.n_geoms,
+                links=self._solver.n_links,
+                verts=self._solver.n_verts,
+                **self.sdf.sizes,
+                **self._support_field.sizes,
+                vert_neighbors=n_vert_neighbors,
+                valid_link_pairs=n_valid_link_pairs,
+                terrain_rows=terrain_hf_shape[0],
+                terrain_cols=terrain_hf_shape[1],
+            ),
+            values=dict(
+                mpr=self.mpr.values,
+                gjk=self.gjk.values,
+                support_field=self._support_field.values,
+                **self._compute_max_contacts(self._n_possible_pairs, self._large_contact_pair_mask),
+                n_valid_link_pairs=n_valid_link_pairs,
+                mc_perturbation=self._mc_perturbation,
+                mc_tolerance=self._mc_tolerance,
+                diff_pos_tolerance=self._diff_pos_tolerance,
+                diff_normal_tolerance=self._diff_normal_tolerance,
+                contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
+                prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
+            ),
+            unused={array_class.ColliderInfo.support_field: not self._support_field.is_active},
         )
+        self.sdf.fill(self.collider_info.sdf)
+        if self._support_field.is_active:
+            self._support_field.fill(self.collider_info.support_field)
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)
 
@@ -305,7 +323,6 @@ class Collider:
             self.collider_info.valid_link_pairs.from_numpy(valid_link_pairs)
         self._init_verts_connectivity(vert_neighbors, vert_neighbor_start, vert_n_neighbors)
         self._init_verts_spatial_grid()
-        self._init_max_contacts(self._n_possible_pairs, self._large_contact_pair_mask)
         self._init_terrain_state()
 
         # Initialize [state], which stores every data that are may be updated at every single simulation step
@@ -725,7 +742,8 @@ class Collider:
             self.collider_info.vert_neighbor_start.from_numpy(vert_neighbor_start)
             self.collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)
 
-    def _init_max_contacts(self, n_possible_pairs, large_contact_pair_mask):
+    def _compute_max_contacts(self, n_possible_pairs, large_contact_pair_mask):
+        """Return the contact and collision pair budgets of the collider info, resolving the option 'max_contacts'."""
         n_possible_nonconvex_pairs = int(np.count_nonzero(large_contact_pair_mask))
         max_collision_pairs = min(self._solver.max_collision_pairs, n_possible_pairs)
         # Size the contact buffer per regime: nonconvex pairs each emit up to n_contacts_per_nonconvex_pair, convex and
@@ -751,8 +769,7 @@ class Collider:
         # guarantee: conforming (non-coplanar) contact patches are not pruned and can exceed the cap, which clamps
         # the contact count and halts the simulation with a request to increase 'max_contacts'. Tightening only pays
         # off when the worst case is large, so the budget never goes below _prune_max_contacts_floor: under it, the
-        # halt risk buys no meaningful memory savings. The constraint solver overrides this budget at build time when
-        # 'max_contacts' is set.
+        # halt risk buys no meaningful memory savings.
         max_contacts = max_candidate_contacts
         if (
             self.collider_config.has_prunable_contacts
@@ -769,11 +786,20 @@ class Collider:
             max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._prune_max_contacts_floor)
             max_contacts = min(max_contacts, max_contacts_pruned_total)
 
-        self.collider_info.max_possible_pairs[None] = n_possible_pairs
-        self.collider_info.max_collision_pairs[None] = max_collision_pairs
-        self.collider_info.max_collision_pairs_broad[None] = max_collision_pairs_broad
-        self.collider_info.max_candidate_contacts[None] = max_candidate_contacts
-        self.collider_info.max_contacts[None] = max_contacts
+        # The option 'max_contacts' replaces the post-pruning budget, capped by the candidate budget. It is resolved in
+        # place, since the constraint solver reads it.
+        options = self._solver._options
+        if options.max_contacts is None:
+            options.max_contacts = max_contacts
+        else:
+            options.max_contacts = min(options.max_contacts, max_candidate_contacts)
+        return dict(
+            max_possible_pairs=n_possible_pairs,
+            max_collision_pairs=max_collision_pairs,
+            max_candidate_contacts=max_candidate_contacts,
+            max_collision_pairs_broad=max_collision_pairs_broad,
+            max_contacts=options.max_contacts,
+        )
 
     def _init_terrain_state(self):
         if self.collider_config.has_terrain:

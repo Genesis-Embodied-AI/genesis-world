@@ -16,12 +16,14 @@ class SDF:
     """Build the signed distance field (SDF) grids of the rigid geoms once, at their exact size.
 
     The geoms of one trimesh share one grid whenever their grids have the same resolution, cell size and gradient flag
-    (see 'Mesh.tmesh_hash'), as the instances of an asset do.
+    (see 'Mesh.tmesh_hash'), as the instances of an asset do. The grids are loaded at construction, which sizes the
+    SDF info (see 'sizes'), and written once it is allocated (see 'fill').
     """
 
     def __init__(self, rigid_solver):
+        self._solver = rigid_solver
         geoms = rigid_solver.geoms
-        geoms_grid_idx = np.empty((len(geoms),), dtype=gs.np_int)
+        self._geoms_grid_idx = np.empty((len(geoms),), dtype=gs.np_int)
         grids_idx_by_key: dict[tuple[str, "SignedDistanceFieldDescription"], int] = {}
         grids_desc = []
         for i_g, geom in enumerate(geoms):
@@ -30,13 +32,27 @@ class SDF:
             i_grid = grids_idx_by_key.setdefault(key, len(grids_desc))
             if i_grid == len(grids_desc):
                 grids_desc.append(geom.desc)
-            geoms_grid_idx[i_g] = i_grid
-        grids_sdf = [desc.mesh.get_sdf_grid(desc.sdf) for desc in grids_desc]
+            self._geoms_grid_idx[i_g] = i_grid
+        self._grids_sdf = [desc.mesh.get_sdf_grid(desc.sdf) for desc in grids_desc]
         grids_n_nodes = np.array([desc.sdf.n_nodes for desc in grids_desc], dtype=gs.np_int).reshape((-1, 3))
-        grids_n_cells = grids_n_nodes.prod(axis=-1, dtype=gs.np_int)
-        grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
-        grids_n_coarse_cells = grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
-        self.sdf_info = array_class.get_sdf_info(len(geoms), int(grids_n_cells.sum()), int(grids_n_coarse_cells.sum()))
+        self._grids_n_cells = grids_n_nodes.prod(axis=-1, dtype=gs.np_int)
+        self._grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
+        self._grids_n_coarse_cells = self._grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
+        n_cells = int(self._grids_n_cells.sum())
+        if not array_class.is_tensor_addressable((n_cells, 3), gs.np_float):
+            gs.raise_exception(
+                f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', "
+                "or a smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
+            )
+
+    @property
+    def sizes(self) -> dict[str, int]:
+        """The sizes of the SDF info (see SDFInfo)."""
+        return dict(sdf_cells=self._grids_n_cells.sum(), sdf_coarse_cells=self._grids_n_coarse_cells.sum())
+
+    def fill(self, sdf_info: array_class.SDFInfo) -> None:
+        """Write the grids into the SDF info once allocated."""
+        geoms = self._solver.geoms
         if not geoms:
             return
 
@@ -44,7 +60,7 @@ class SDF:
         # so that every interpolation cell's 8 nodes lie inside the block of its coarse cell. Derived from the loaded
         # grids, so the preprocessing cache is untouched.
         grids_sdf_coarse_val = []
-        for sdf_grid, coarse_res in zip(grids_sdf, grids_sdf_coarse_res):
+        for sdf_grid, coarse_res in zip(self._grids_sdf, self._grids_sdf_coarse_res):
             coarse_val = sdf_grid.value
             for axis in range(3):
                 windows = np.minimum(
@@ -52,21 +68,23 @@ class SDF:
                 )
                 coarse_val = np.take(coarse_val, windows, axis=axis).min(axis=axis + 1)
             grids_sdf_coarse_val.append(coarse_val.reshape((-1,)))
-        geoms_sdf = [grids_sdf[i_grid] for i_grid in geoms_grid_idx]
+        geoms_sdf = [self._grids_sdf[i_grid] for i_grid in self._geoms_grid_idx]
         sdf_kernel_init_geom_fields(
-            (np.cumsum(grids_n_cells, dtype=gs.np_int) - grids_n_cells)[geoms_grid_idx],
-            (np.cumsum(grids_n_coarse_cells, dtype=gs.np_int) - grids_n_coarse_cells)[geoms_grid_idx],
+            (np.cumsum(self._grids_n_cells, dtype=gs.np_int) - self._grids_n_cells)[self._geoms_grid_idx],
+            (np.cumsum(self._grids_n_coarse_cells, dtype=gs.np_int) - self._grids_n_coarse_cells)[self._geoms_grid_idx],
             np.array([sdf_grid.T_mesh_to_sdf for sdf_grid in geoms_sdf], dtype=gs.np_float),
             np.array([geom.desc.sdf.n_nodes for geom in geoms], dtype=gs.np_int),
-            np.concatenate([sdf_grid.value.reshape((-1,)) for sdf_grid in grids_sdf], dtype=gs.np_float),
-            np.concatenate([sdf_grid.grad.reshape((-1, 3)) for sdf_grid in grids_sdf], dtype=gs.np_float),
+            np.concatenate([sdf_grid.value.reshape((-1,)) for sdf_grid in self._grids_sdf], dtype=gs.np_float),
+            np.concatenate([sdf_grid.grad.reshape((-1, 3)) for sdf_grid in self._grids_sdf], dtype=gs.np_float),
             np.array([sdf_grid.max_value for sdf_grid in geoms_sdf], dtype=gs.np_float),
             np.array([geom.desc.sdf.cell_size for geom in geoms], dtype=gs.np_float),
-            np.concatenate([sdf_grid.closest_verts_idx.reshape((-1,)) for sdf_grid in grids_sdf], dtype=gs.np_int),
-            grids_sdf_coarse_res[geoms_grid_idx],
+            np.concatenate(
+                [sdf_grid.closest_verts_idx.reshape((-1,)) for sdf_grid in self._grids_sdf], dtype=gs.np_int
+            ),
+            self._grids_sdf_coarse_res[self._geoms_grid_idx],
             np.concatenate(grids_sdf_coarse_val, dtype=gs.np_float),
-            self.sdf_info,
-            rigid_solver.rigid_config,
+            sdf_info,
+            self._solver.rigid_config,
         )
 
 

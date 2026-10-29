@@ -282,6 +282,14 @@ def _resolve_dtype(dtype):
     return {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
 
 
+def _member_shape(spec, member_cls, shape):
+    """Return the default shape of the fields of a member: that of its field, else of its class, else of its holder."""
+    for member_shape in (spec.shape, member_cls._shape):
+        if member_shape is not None:
+            return member_shape
+    return shape
+
+
 class _Leaf(NamedTuple):
     path: tuple[str, ...]
     spec: FieldSpec
@@ -348,7 +356,7 @@ class Data:
         cls = type(self)
         context = (sizes or {}, values or {}, env_first or {}, layout or {}, unused or {}, requires_grad)
         object.__setattr__(self, "_context", context)
-        cls._build(self, cls._shape or (), (), (), None, context, _binds or {})
+        cls._build(self, () if cls._shape is None else cls._shape, (), (), None, context, _binds or {})
 
     @classmethod
     def _leaves(cls, shape, labels, path, kind):
@@ -359,7 +367,7 @@ class Data:
             field_kind = kind if field_kind is None else field_kind
             field_labels = labels + spec.labels
             if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                member_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+                member_shape = _member_shape(spec, data_field.type, shape)
                 yield from data_field.type._leaves(member_shape, field_labels, (*path, data_field.name), field_kind)
             else:
                 field_shape = spec.shape if spec.shape is not None else shape
@@ -410,7 +418,7 @@ class Data:
                 member = object.__new__(data_field.type)
                 object.__setattr__(member, "_properties", properties)
                 object.__setattr__(member, "_context", context)
-                member_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+                member_shape = _member_shape(spec, data_field.type, shape)
                 field_kind = data_field.metadata.get(KIND)
                 field_kind = kind if field_kind is None else field_kind
                 data_field.type._build(
@@ -498,7 +506,7 @@ def _values_model(cls, shape, path, kind, unused_paths):
         field_kind = data_field.metadata.get(KIND)
         field_kind = kind if field_kind is None else field_kind
         if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-            member_shape = spec.shape if spec.shape is not None else data_field.type._shape or shape
+            member_shape = _member_shape(spec, data_field.type, shape)
             member_model = _values_model(data_field.type, member_shape, field_path, field_kind, unused_paths)
             if member_model.model_fields:
                 is_required = any(info.is_required() for info in member_model.model_fields.values())
@@ -1451,29 +1459,16 @@ class ColliderState(Data, kind=DataKind.SCRATCH):
     contact_lex_idx: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class VertsSpatialGrid:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
+class VertsSpatialGrid(Data, kind=DataKind.CONSTANT):
     # Per-geom 8x8x8 grid over collision verts in the local AABB: a permutation of vert indices sorted by grid
     # cell (z fastest), the matching vert positions duplicated in that order for sequential streaming, and per-cell
     # vert ranges (8^3 + 1 entries per geom), so a scan visits only the cells overlapping a query box. The cell
     # mapping is anchored by geoms_origin / geoms_inv_cell_size in the geom frame.
-    verts_idx: qd.Tensor
-    verts_pos: qd.Tensor
-    cells_vert_start: qd.Tensor
-    geoms_origin: qd.Tensor
-    geoms_inv_cell_size: qd.Tensor
-
-
-def get_verts_spatial_grid(solver):
-    return VertsSpatialGrid(
-        verts_idx=V(dtype=gs.qd_int, shape=(solver.n_verts_,)),
-        verts_pos=V_VEC(3, dtype=gs.qd_float, shape=(solver.n_verts_,)),
-        cells_vert_start=V(dtype=gs.qd_int, shape=(max(solver.n_geoms * (8**3 + 1), 1),)),
-        geoms_origin=V_VEC(3, dtype=gs.qd_float, shape=(solver.n_geoms_,)),
-        geoms_inv_cell_size=V_VEC(3, dtype=gs.qd_float, shape=(solver.n_geoms_,)),
-    )
+    verts_idx: qd.Tensor = field(int, shape=(VERTS,))
+    verts_pos: qd.Tensor = field((float, 3), shape=(VERTS,))
+    cells_vert_start: qd.Tensor = field(int, shape=(GEOMS * (8**3 + 1),))
+    geoms_origin: qd.Tensor = field((float, 3), shape=(GEOMS,))
+    geoms_inv_cell_size: qd.Tensor = field((float, 3), shape=(GEOMS,))
 
 
 @qd.data_oriented
@@ -1502,57 +1497,24 @@ class ColliderStaticConfig(StaticConfig):
 # =========================================== MPR ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MPRSimplexSupport:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    v1: qd.Tensor
-    v2: qd.Tensor
-    v: qd.Tensor
+class MPRSimplexSupport(Data, kind=DataKind.SCRATCH, shape=(4, ENVS)):
+    v1: qd.Tensor = field((float, 3))
+    v2: qd.Tensor = field((float, 3))
+    v: qd.Tensor = field((float, 3))
 
 
-def get_mpr_simplex_support(B_):
-    return MPRSimplexSupport(
-        v1=V_VEC(3, dtype=gs.qd_float, shape=(4, B_)),
-        v2=V_VEC(3, dtype=gs.qd_float, shape=(4, B_)),
-        v=V_VEC(3, dtype=gs.qd_float, shape=(4, B_)),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MPRState:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
+class MPRState(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
     simplex_support: MPRSimplexSupport
-    simplex_size: qd.Tensor
+    simplex_size: qd.Tensor = field(int)
     # What the depth of the contact in simplex_support[1..3] is worth, a PORTAL_STATUS value. Zero means no portal.
     # Only VALID portals are reused (perturbation reconstruction, EPA seeding); INVALID forces a GJK refine.
-    portal_status: qd.Tensor
+    portal_status: qd.Tensor = field(int)
 
 
-def get_mpr_state(B_):
-    return MPRState(
-        simplex_support=get_mpr_simplex_support(B_),
-        simplex_size=V(dtype=gs.qd_int, shape=(B_,)),
-        portal_status=V(dtype=gs.qd_int, shape=(B_,)),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MPRInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    CCD_EPS: qd.Tensor
-    CCD_TOLERANCE: qd.Tensor
-    CCD_ITERATIONS: qd.Tensor
-
-
-def get_mpr_info(**kwargs):
-    return MPRInfo(
-        CCD_EPS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_EPS"]),
-        CCD_TOLERANCE=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_TOLERANCE"]),
-        CCD_ITERATIONS=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["CCD_ITERATIONS"]),
-    )
+class MPRInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    CCD_EPS: qd.Tensor = field(float)
+    CCD_TOLERANCE: qd.Tensor = field(float)
+    CCD_ITERATIONS: qd.Tensor = field(float)
 
 
 # =========================================== GJK ===========================================
@@ -1685,28 +1647,25 @@ class GJKState(Data, kind=DataKind.SCRATCH):
     diff_penetration: qd.Tensor = field(float, shape=(ENVS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class GJKInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
-    max_contacts_per_pair: qd.Tensor
-    max_contact_polygon_verts: qd.Tensor
+class GJKInfo(Data, kind=DataKind.CONSTANT, shape=()):
+    max_contacts_per_pair: qd.Tensor = field(int)
+    max_contact_polygon_verts: qd.Tensor = field(int)
     # Maximum number of iterations for GJK and EPA algorithms
-    gjk_max_iterations: qd.Tensor
-    epa_max_iterations: qd.Tensor
-    FLOAT_MIN: qd.Tensor
-    FLOAT_MIN_SQ: qd.Tensor
-    FLOAT_MAX: qd.Tensor
-    FLOAT_MAX_SQ: qd.Tensor
+    gjk_max_iterations: qd.Tensor = field(int)
+    epa_max_iterations: qd.Tensor = field(int)
+    FLOAT_MIN: qd.Tensor = field(float)
+    FLOAT_MIN_SQ: qd.Tensor = field(float)
+    FLOAT_MAX: qd.Tensor = field(float)
+    FLOAT_MAX_SQ: qd.Tensor = field(float)
     # Tolerance for stopping GJK and EPA algorithms when they converge (only for non-discrete geometries).
-    tolerance: qd.Tensor
+    tolerance: qd.Tensor = field(float)
     # If the distance between two objects is smaller than this value, we consider them colliding.
-    collision_eps: qd.Tensor
+    collision_eps: qd.Tensor = field(float)
     # In safe GJK, we do not allow degenerate simplex to happen, because it becomes the main reason of EPA errors.
     # To prevent degeneracy, we throw away the simplex that has smaller degeneracy measure (e.g. colinearity,
     # coplanarity) than this threshold.
-    simplex_max_degeneracy_sq: qd.Tensor
-    polytope_max_faces: qd.Tensor
+    simplex_max_degeneracy_sq: qd.Tensor = field(float)
+    polytope_max_faces: qd.Tensor = field(int)
     # Threshold for reprojection error when we compute the witness points from the polytope. In computing the
     # witness points, we project the origin onto the polytope faces and compute the barycentric coordinates of the
     # projected point. To confirm the projection is valid, we compute the projected point using the barycentric
@@ -1715,60 +1674,30 @@ class GJKInfo:
     # We check both relative and absolute errors: the relative error catches numerically degenerate faces,
     # while the absolute error prevents false rejections on smooth geometries (e.g. spheres) where
     # polytope faces become extremely small near convergence, amplifying the relative error.
-    polytope_max_rel_reprojection_error: qd.Tensor
-    polytope_max_abs_reprojection_error: qd.Tensor
+    polytope_max_rel_reprojection_error: qd.Tensor = field(float)
+    polytope_max_abs_reprojection_error: qd.Tensor = field(float)
     # Tolerance for normal alignment between (face-face) or (edge-face). The normals should align within this
     # tolerance to be considered as a valid parallel contact.
-    contact_face_tol: qd.Tensor
-    contact_edge_tol: qd.Tensor
+    contact_face_tol: qd.Tensor = field(float)
+    contact_edge_tol: qd.Tensor = field(float)
     # Epsilon values for differentiable contact. [eps_boundary] denotes the maximum distance between the face
     # and the support point in the direction of the face normal. If this distance is 0, the face is on the
     # boundary of the Minkowski difference. For [eps_distance], the distance between the origin and the face
     # should not exceed this eps value plus the default EPA depth. For [eps_affine], the affine coordinates
     # of the origin's projection onto the face should not violate [0, 1] range by this eps value.
     # FIXME: Adjust these values based on the case study.
-    diff_contact_eps_boundary: qd.Tensor
-    diff_contact_eps_distance: qd.Tensor
-    diff_contact_eps_affine: qd.Tensor
+    diff_contact_eps_boundary: qd.Tensor = field(float)
+    diff_contact_eps_distance: qd.Tensor = field(float)
+    diff_contact_eps_affine: qd.Tensor = field(float)
     # The minimum norm of the normal to be considered as a valid normal in the differentiable formulation.
-    diff_contact_min_normal_norm: qd.Tensor
+    diff_contact_min_normal_norm: qd.Tensor = field(float)
     # The minimum penetration depth to be considered as a valid contact in the differentiable formulation.
     # The contact with penetration depth smaller than this value is ignored in the differentiable formulation.
     # This should be large enough to be safe from numerical errors, because in the backward pass, the computed
     # penetration depth could be different from the forward pass due to the numerical errors. If this value is
     # too small, the non-zero penetration depth could be falsely computed to 0 in the backward pass and thus
     # produce nan values for the contact normal.
-    diff_contact_min_penetration: qd.Tensor
-
-
-def get_gjk_info(**kwargs):
-    return GJKInfo(
-        max_contacts_per_pair=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["max_contacts_per_pair"]),
-        max_contact_polygon_verts=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["max_contact_polygon_verts"]),
-        gjk_max_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["gjk_max_iterations"]),
-        epa_max_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["epa_max_iterations"]),
-        FLOAT_MIN=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"]),
-        FLOAT_MIN_SQ=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MIN"] ** 2),
-        FLOAT_MAX=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MAX"]),
-        FLOAT_MAX_SQ=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["FLOAT_MAX"] ** 2),
-        tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["tolerance"]),
-        collision_eps=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["collision_eps"]),
-        simplex_max_degeneracy_sq=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["simplex_max_degeneracy_sq"]),
-        polytope_max_faces=V_SCALAR_FROM(dtype=gs.qd_int, value=kwargs["polytope_max_faces"]),
-        polytope_max_rel_reprojection_error=V_SCALAR_FROM(
-            dtype=gs.qd_float, value=kwargs["polytope_max_rel_reprojection_error"]
-        ),
-        polytope_max_abs_reprojection_error=V_SCALAR_FROM(
-            dtype=gs.qd_float, value=kwargs["polytope_max_abs_reprojection_error"]
-        ),
-        contact_face_tol=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_face_tol"]),
-        contact_edge_tol=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_edge_tol"]),
-        diff_contact_eps_boundary=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_boundary"]),
-        diff_contact_eps_distance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_distance"]),
-        diff_contact_eps_affine=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_eps_affine"]),
-        diff_contact_min_normal_norm=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_min_normal_norm"]),
-        diff_contact_min_penetration=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_contact_min_penetration"]),
-    )
+    diff_contact_min_penetration: qd.Tensor = field(float)
 
 
 @qd.data_oriented
@@ -1779,188 +1708,100 @@ class GJKStaticConfig(StaticConfig):
 # =========================================== SupportField ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class SupportFieldInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
+# The cells of the support tables and their candidate vertices (see SupportFieldInfo)
+SUPPORT_CELLS = Size("support_cells")
+SUPPORT_CANDIDATES = Size("support_candidates")
 
+
+class SupportFieldInfo(Data, kind=DataKind.CONSTANT):
     # First cell of the table of each geom, the geoms of one trimesh sharing one table
-    support_cell_start: qd.Tensor
+    support_cell_start: qd.Tensor = field(int, shape=(GEOMS,))
     # First extra candidate of each cell, past those of its record, its extras ending where those of the next start
-    support_list_start: qd.Tensor
+    support_list_start: qd.Tensor = field(int, shape=(SUPPORT_CELLS + 1,))
     # Mesh-frame position and index of each candidate vertex, among the vertices of its geom: the record of every cell
     # at twice the index of the cell, holding the first two candidates of the cell (a single candidate twice), then the
     # extra candidates of all cells
-    support_v: qd.Tensor
-    support_vid: qd.Tensor
-    support_res: qd.Tensor
-
-
-def get_support_field_info(n_geoms, n_support_cells, n_support_candidates, support_res):
-    return SupportFieldInfo(
-        support_cell_start=V(dtype=gs.qd_int, shape=(max(n_geoms, 1),)),
-        support_list_start=V(dtype=gs.qd_int, shape=(n_support_cells + 1,)),
-        support_v=V_VEC(3, dtype=gs.qd_float, shape=(max(n_support_candidates, 1),)),
-        support_vid=V(dtype=gs.qd_int, shape=(max(n_support_candidates, 1),)),
-        support_res=V_SCALAR_FROM(dtype=gs.qd_int, value=support_res),
-    )
+    support_v: qd.Tensor = field((float, 3), shape=(SUPPORT_CANDIDATES,))
+    support_vid: qd.Tensor = field(int, shape=(SUPPORT_CANDIDATES,))
+    support_res: qd.Tensor = field(int, shape=())
 
 
 # =========================================== SDF ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class SDFGeomInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
+# The nodes of the signed distance field (SDF) grids and of their coarse min-grids, all geoms together
+SDF_CELLS = Size("sdf_cells")
+SDF_COARSE_CELLS = Size("sdf_coarse_cells")
 
-    T_mesh_to_sdf: qd.Tensor
-    sdf_res: qd.Tensor
-    sdf_max: qd.Tensor
-    sdf_cell_size: qd.Tensor
-    sdf_cell_start: qd.Tensor
+
+class SDFGeomInfo(Data, kind=DataKind.CONSTANT, shape=(GEOMS,)):
+    T_mesh_to_sdf: qd.Tensor = field((float, (4, 4)))
+    sdf_res: qd.Tensor = field((int, 3))
+    sdf_max: qd.Tensor = field(float)
+    sdf_cell_size: qd.Tensor = field((float, 3))
+    sdf_cell_start: qd.Tensor = field(int)
     # Coarse min-grid companion: per-block minima over grid nodes, a certified lower bound of the trilinear sd.
-    sdf_coarse_res: qd.Tensor
-    sdf_coarse_cell_start: qd.Tensor
+    sdf_coarse_res: qd.Tensor = field((int, 3))
+    sdf_coarse_cell_start: qd.Tensor = field(int)
 
 
-def get_sdf_geom_info(n_geoms):
-    return SDFGeomInfo(
-        T_mesh_to_sdf=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(n_geoms,)),
-        sdf_res=V_VEC(3, dtype=gs.qd_int, shape=(n_geoms,)),
-        sdf_max=V(dtype=gs.qd_float, shape=(n_geoms,)),
-        sdf_cell_size=V_VEC(3, dtype=gs.qd_float, shape=(n_geoms,)),
-        sdf_cell_start=V(dtype=gs.qd_int, shape=(n_geoms,)),
-        sdf_coarse_res=V_VEC(3, dtype=gs.qd_int, shape=(n_geoms,)),
-        sdf_coarse_cell_start=V(dtype=gs.qd_int, shape=(n_geoms,)),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class SDFInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
-
+class SDFInfo(Data, kind=DataKind.CONSTANT, shape=(SDF_CELLS,)):
     geoms_info: SDFGeomInfo
-    geoms_sdf_val: qd.Tensor
-    geoms_sdf_grad: qd.Tensor
-    geoms_sdf_closest_vert: qd.Tensor
-    geoms_sdf_coarse_val: qd.Tensor
-
-
-def get_sdf_info(n_geoms, n_cells, n_coarse_cells):
-    if not is_tensor_addressable((n_cells, 3), gs.np_float):
-        gs.raise_exception(
-            f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', or a "
-            "smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
-        )
-
-    return SDFInfo(
-        geoms_info=get_sdf_geom_info(max(n_geoms, 1)),
-        geoms_sdf_val=V(dtype=gs.qd_float, shape=(max(n_cells, 1),)),
-        geoms_sdf_grad=V_VEC(3, dtype=gs.qd_float, shape=(max(n_cells, 1),)),
-        geoms_sdf_closest_vert=V(dtype=gs.qd_int, shape=(max(n_cells, 1),)),
-        geoms_sdf_coarse_val=V(dtype=gs.qd_float, shape=(max(n_coarse_cells, 1),)),
-    )
+    geoms_sdf_val: qd.Tensor = field(float)
+    geoms_sdf_grad: qd.Tensor = field((float, 3))
+    geoms_sdf_closest_vert: qd.Tensor = field(int)
+    geoms_sdf_coarse_val: qd.Tensor = field(float, shape=(SDF_COARSE_CELLS,))
 
 
 # =========================================== ColliderInfo ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ColliderInfo:
-    kind: ClassVar[DataKind] = DataKind.CONSTANT
+VERT_NEIGHBORS = Size("vert_neighbors")
+# The samples of the height field of the terrain
+TERRAIN_ROWS = Size("terrain_rows")
+TERRAIN_COLS = Size("terrain_cols")
 
-    # Narrowphase sub-component descriptions, owned by their respective builders (MPR, GJK, SupportField, SDF) and
-    # embedded here so kernels receive the whole collider description as one argument. They are built at their final
-    # size before this struct is.
+
+class ColliderInfo(Data, kind=DataKind.CONSTANT):
+    # The narrowphase sub-components, filled by their builders (SDF, SupportField) once allocated
+    sdf: SDFInfo
     mpr: MPRInfo
     gjk: GJKInfo
     support_field: SupportFieldInfo
-    sdf: SDFInfo
-    vert_neighbors: qd.Tensor
-    vert_neighbor_start: qd.Tensor
-    vert_n_neighbors: qd.Tensor
+    vert_neighbors: qd.Tensor = field(int, shape=(VERT_NEIGHBORS,))
+    vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
+    vert_n_neighbors: qd.Tensor = field(int, shape=(VERTS,))
     verts_spatial_grid: VertsSpatialGrid
     # (i_ga, i_gb) -> dense pair index, or -1 if invalid. Used by the broadphase, the narrowphase and the contact cache.
-    collision_pair_idx: qd.Tensor
+    collision_pair_idx: qd.Tensor = field(int, shape=(GEOMS, GEOMS))
     # (i_la, i_lb) -> index into valid_link_pairs, or -1 if no geom pair between the two links is valid
-    link_pair_idx: qd.Tensor
+    link_pair_idx: qd.Tensor = field(int, shape=(LINKS, LINKS))
     # Lower and upper corners of the box of every link in its own frame, bounding the boxes of its geoms
-    links_init_aabb_min: qd.Tensor
-    links_init_aabb_max: qd.Tensor
-    max_possible_pairs: qd.Tensor
-    max_collision_pairs: qd.Tensor
-    max_candidate_contacts: qd.Tensor
-    max_collision_pairs_broad: qd.Tensor
+    links_init_aabb_min: qd.Tensor = field((float, 3), shape=(LINKS,))
+    links_init_aabb_max: qd.Tensor = field((float, 3), shape=(LINKS,))
+    max_possible_pairs: qd.Tensor = field(int, shape=())
+    max_collision_pairs: qd.Tensor = field(int, shape=())
+    max_candidate_contacts: qd.Tensor = field(int, shape=())
+    max_collision_pairs_broad: qd.Tensor = field(int, shape=())
     # Post-pruning contact-point budget per environment, which sizes the contact constraint buffers (4 constraints per
     # contact point). Smaller than max_candidate_contacts when contact pruning is enabled or 'max_contacts' is set.
-    max_contacts: qd.Tensor
+    max_contacts: qd.Tensor = field(int, shape=())
     # Link pairs holding at least one valid geom pair, the link carrying most geoms first (see func_broad_phase_geoms)
-    n_valid_link_pairs: qd.Tensor
-    valid_link_pairs: qd.Tensor
-    # Terrain fields
-    terrain_hf: qd.Tensor
-    terrain_rc: qd.Tensor
-    terrain_scale: qd.Tensor
-    terrain_xyz_maxmin: qd.Tensor
+    n_valid_link_pairs: qd.Tensor = field(int, shape=())
+    valid_link_pairs: qd.Tensor = field((int, 2), shape=(VALID_LINK_PAIRS,))
+    terrain_hf: qd.Tensor = field(float, shape=(TERRAIN_ROWS, TERRAIN_COLS))
+    terrain_rc: qd.Tensor = field(int, shape=(2,))
+    terrain_scale: qd.Tensor = field(float, shape=(2,))
+    terrain_xyz_maxmin: qd.Tensor = field(float, shape=(6,))
     # multi contact perturbation and tolerance
-    mc_perturbation: qd.Tensor
-    mc_tolerance: qd.Tensor
+    mc_perturbation: qd.Tensor = field(float, shape=())
+    mc_tolerance: qd.Tensor = field(float, shape=())
     # differentiable contact tolerance
-    diff_pos_tolerance: qd.Tensor
-    diff_normal_tolerance: qd.Tensor
+    diff_pos_tolerance: qd.Tensor = field(float, shape=())
+    diff_normal_tolerance: qd.Tensor = field(float, shape=())
     # link-pair contact pruning
-    contact_pruning_tolerance: qd.Tensor
-    prune_deep_penetration_ratio: qd.Tensor
-
-
-def get_collider_info(
-    solver,
-    n_vert_neighbors,
-    n_valid_link_pairs,
-    collider_static_config,
-    mpr_info,
-    gjk_info,
-    support_field_info,
-    sdf_info,
-    **kwargs,
-):
-    for geom in solver.geoms:
-        if geom.type == gs.GEOM_TYPE.TERRAIN:
-            terrain_hf_shape = geom.entity.terrain_hf.shape
-            break
-    else:
-        terrain_hf_shape = 1
-
-    return ColliderInfo(
-        mpr=mpr_info,
-        gjk=gjk_info,
-        support_field=support_field_info,
-        sdf=sdf_info,
-        vert_neighbors=V(dtype=gs.qd_int, shape=(max(n_vert_neighbors, 1),)),
-        vert_neighbor_start=V(dtype=gs.qd_int, shape=(solver.n_verts_,)),
-        vert_n_neighbors=V(dtype=gs.qd_int, shape=(solver.n_verts_,)),
-        verts_spatial_grid=get_verts_spatial_grid(solver),
-        collision_pair_idx=V(dtype=gs.qd_int, shape=(solver.n_geoms_, solver.n_geoms_)),
-        link_pair_idx=V(dtype=gs.qd_int, shape=(solver.n_links_, solver.n_links_)),
-        links_init_aabb_min=V(dtype=gs.qd_vec3, shape=(solver.n_links_,)),
-        links_init_aabb_max=V(dtype=gs.qd_vec3, shape=(solver.n_links_,)),
-        max_possible_pairs=V(dtype=gs.qd_int, shape=()),
-        max_collision_pairs=V(dtype=gs.qd_int, shape=()),
-        max_candidate_contacts=V(dtype=gs.qd_int, shape=()),
-        max_collision_pairs_broad=V(dtype=gs.qd_int, shape=()),
-        max_contacts=V(dtype=gs.qd_int, shape=()),
-        n_valid_link_pairs=V_SCALAR_FROM(dtype=gs.qd_int, value=n_valid_link_pairs),
-        valid_link_pairs=V(dtype=gs.qd_ivec2, shape=(max(n_valid_link_pairs, 1),)),
-        terrain_hf=V(dtype=gs.qd_float, shape=terrain_hf_shape),
-        terrain_rc=V(dtype=gs.qd_int, shape=(2,)),
-        terrain_scale=V(dtype=gs.qd_float, shape=(2,)),
-        terrain_xyz_maxmin=V(dtype=gs.qd_float, shape=(6,)),
-        mc_perturbation=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mc_perturbation"]),
-        mc_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["mc_tolerance"]),
-        diff_pos_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_pos_tolerance"]),
-        diff_normal_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_normal_tolerance"]),
-        contact_pruning_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_pruning_tolerance"]),
-        prune_deep_penetration_ratio=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["prune_deep_penetration_ratio"]),
-    )
+    contact_pruning_tolerance: qd.Tensor = field(float, shape=())
+    prune_deep_penetration_ratio: qd.Tensor = field(float, shape=())
 
 
 # =========================================== DofsInfo and DofsState ===========================================

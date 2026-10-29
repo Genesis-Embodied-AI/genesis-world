@@ -580,7 +580,7 @@ class MPMSolver(ParticleSolver):
             self.sim.coupler.rigid_solver.dyn_info.geoms,
             self.sim.coupler.rigid_solver.dyn_state.links,
             self.sim.coupler.rigid_solver.rigid_info,
-            self.sim.coupler.rigid_solver.collider.sdf.sdf_info,
+            self.sim.coupler.rigid_solver.collider.collider_info.sdf,
             self.sim.coupler.rigid_solver.collider.collider_config,
         )
 

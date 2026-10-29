@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
@@ -38,11 +38,17 @@ class SupportField:
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        # Allocated once, when activated or else empty when first read (see 'support_field_info')
-        self._support_field_info: array_class.SupportFieldInfo | None = None
-        self._is_active = False
+        # The sizes and the constants of the support field info (see ColliderInfo), and the writer of its tables
+        self.sizes: dict[str, int] = {}
+        self.values = dict(support_res=self._support_res)
+        self.fill: Callable[[array_class.SupportFieldInfo], None] | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self.fill is not None
 
     def activate(self) -> None:
+        """Build the support tables of the geoms, which sets the sizes of the support field info and its writer."""
         if self.is_active:
             return
 
@@ -82,34 +88,19 @@ class SupportField:
         np.cumsum(support_list_start, out=support_list_start)
         extras_vid = np.concatenate((np.zeros((0,), dtype=gs.np_int), *extras_vid), dtype=gs.np_int)
 
-        assert self._support_field_info is None
-        self._support_field_info = array_class.get_support_field_info(
-            self.solver.n_geoms, n_support_cells, 2 * n_support_cells + len(extras_vid), self._support_res
-        )
-        _kernel_init_support(
+        self.sizes = dict(support_cells=n_support_cells, support_candidates=2 * n_support_cells + len(extras_vid))
+        tables_vert_start = np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int)
+        self.fill = lambda support_field_info: _kernel_init_support(
             n_geom_cells * geoms_table_idx,
             support_list_start,
-            np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
+            tables_vert_start,
             records_vid,
             extras_vid,
             self.solver.dyn_info,
-            self._support_field_info,
+            support_field_info,
             self.solver.rigid_config,
             n_geom_cells,
         )
-
-        self._is_active = True
-
-    @property
-    def is_active(self):
-        return self._is_active
-
-    @property
-    def support_field_info(self) -> array_class.SupportFieldInfo:
-        """Support tables of the geoms, empty if the field was never activated."""
-        if self._support_field_info is None:
-            self._support_field_info = array_class.get_support_field_info(0, 0, 0, self._support_res)
-        return self._support_field_info
 
 
 @qd.kernel

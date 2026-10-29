@@ -12,7 +12,8 @@ class MPR:
     def __init__(self, rigid_solver):
         self._solver = rigid_solver
 
-        self._mpr_info = array_class.get_mpr_info(
+        # The constants of the MPR info (see ColliderInfo)
+        self.values = dict(
             # Dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
             # ignore the scene scale; it bounds when a triangle, a segment or a portal counts as degenerate, and the
             # support lookup scales it by its own factor for tie width.
@@ -24,12 +25,12 @@ class MPR:
             # Bounds that refinement, which is not otherwise guaranteed to terminate.
             CCD_ITERATIONS=50,
         )
-        self.mpr_state = array_class.get_mpr_state(self._solver._B)
+        self.mpr_state = array_class.MPRState(sizes=dict(envs=self._solver._B))
         # The scratch states of the split narrowphase and of the terrain pass, at the smallest size until 'activate'
         # sizes them
         # FIXME: quadrants#856 - see the scratch states of GJK in gjk.py.
-        self.contact0_mpr_state = array_class.get_mpr_state(1)
-        self.multicontact_mpr_state = array_class.get_mpr_state(1)
+        self.contact0_mpr_state = array_class.MPRState(sizes=dict(envs=1))
+        self.multicontact_mpr_state = array_class.MPRState(sizes=dict(envs=1))
 
     def activate(self, n_contact0_threads, n_multicontact_threads):
         """Allocate the scratch states the split narrowphase and the terrain pass run MPR on.
@@ -39,8 +40,8 @@ class MPR:
         two (n_multicontact_threads). The other passes run MPR on one state per env.
         """
         if n_contact0_threads is not None:
-            self.contact0_mpr_state = array_class.get_mpr_state(n_contact0_threads)
-        self.multicontact_mpr_state = array_class.get_mpr_state(n_multicontact_threads)
+            self.contact0_mpr_state = array_class.MPRState(sizes=dict(envs=n_contact0_threads))
+        self.multicontact_mpr_state = array_class.MPRState(sizes=dict(envs=n_multicontact_threads))
 
 
 @qd.kernel

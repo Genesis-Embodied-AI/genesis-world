@@ -137,17 +137,7 @@ class ConstraintSolver:
         # * 1 constraint per dof frictionloss
         # * up to 6 constraints per equality (weld)
         # * 1 more constraint per dynamic constraint (a screw adds a friction row and a limit row to its 5 equality rows)
-        # When 'max_contacts' is set, it overrides the post-pruning contact budget enforced by the collider.
-        # Resolve the max_contacts option in place: from the collider's post-pruning budget when unset, else clamped
-        # to the candidate budget and written back so the collider honors the user's cap. Downstream reads the option.
-        collider_info = rigid_solver.collider.collider_info
-        if rigid_solver._options.max_contacts is None:
-            rigid_solver._options.max_contacts = collider_info.max_contacts[None]
-        else:
-            rigid_solver._options.max_contacts = min(
-                rigid_solver._options.max_contacts, collider_info.max_candidate_contacts[None]
-            )
-            collider_info.max_contacts[None] = rigid_solver._options.max_contacts
+        # The collider resolves the option 'max_contacts' (see 'Collider._compute_max_contacts')
         rows_per_contact = rigid_solver.rigid_config.rows_per_contact
         self.len_constraints = (
             rows_per_contact * rigid_solver._options.max_contacts
@@ -189,7 +179,7 @@ class ConstraintSolver:
                 links=solver.n_links_,
                 trees=solver.n_trees_,
                 constraints=self.len_constraints_,
-                contacts=collider_info.max_contacts[None],
+                contacts=rigid_solver._options.max_contacts,
                 cone_rows=self.n_cone_constraints_,
                 rows_per_contact=rows_per_contact,
                 nt_vec_slots=nt_vec_n_slots,

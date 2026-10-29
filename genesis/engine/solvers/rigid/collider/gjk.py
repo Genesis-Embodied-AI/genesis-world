@@ -67,8 +67,9 @@ class GJK:
 
         self.gjk_config = array_class.GJKStaticConfig(enable_contact_patch=enable_contact_patch)
 
-        # Initialize GJK info
-        self._gjk_info = array_class.get_gjk_info(
+        # The constants of the GJK info (see ColliderInfo)
+        float_min, float_max = 1e-15, 1e15
+        self.values = dict(
             max_contacts_per_pair=max_contacts_per_pair,
             max_contact_polygon_verts=max_contact_polygon_verts,
             gjk_max_iterations=gjk_max_iterations,
@@ -76,8 +77,10 @@ class GJK:
             # When using larger minimum values (e.g. gs.EPS), unstability could occur for some examples (e.g. box
             # pyramid). Also, since different backends could have different precisions (e.g. computing vector norm),
             # we use a very small value, so that there is no discrepancy between backends.
-            FLOAT_MIN=1e-15,
-            FLOAT_MAX=1e15,
+            FLOAT_MIN=float_min,
+            FLOAT_MIN_SQ=float_min**2,
+            FLOAT_MAX=float_max,
+            FLOAT_MAX_SQ=float_max**2,
             tolerance=1e-6,
             collision_eps=1e-6,
             # This value has been experimentally determined based on the examples that we currently have (e.g. pyramid,
@@ -115,10 +118,12 @@ class GJK:
         # The scratch states GJK runs on, at the smallest size until 'activate' sizes those the narrowphase uses
         # FIXME: quadrants#856 - a kernel cannot take None for a struct argument, so every state is allocated at the
         # smallest size first, even one the scene never runs GJK on, and 'activate' allocates the used ones again.
-        sizes, unused = dict(self._state_sizes, envs=1), {("epa", "diff_contacts"): True}
-        self.gjk_state = array_class.GJKState(sizes=sizes, unused=unused)
-        self.contact0_gjk_state = array_class.GJKState(sizes=sizes, unused=unused)
-        self.multicontact_gjk_state = array_class.GJKState(sizes=sizes, unused=unused)
+        # A state detecting overlaps alone runs neither EPA nor differentiable contacts
+        self._unused_overlap_only = {("epa", "diff_contacts"): True}
+        sizes = dict(self._state_sizes, envs=1)
+        self.gjk_state = array_class.GJKState(sizes=sizes, unused=self._unused_overlap_only)
+        self.contact0_gjk_state = array_class.GJKState(sizes=sizes, unused=self._unused_overlap_only)
+        self.multicontact_gjk_state = array_class.GJKState(sizes=sizes, unused=self._unused_overlap_only)
 
     def activate(self, n_contact0_threads=0, n_multicontact_threads=0):
         """Allocate the scratch states GJK runs on, for the narrowphase that runs it.
@@ -128,22 +133,16 @@ class GJK:
         contact alone, and on one full state per thread of its multicontact pass (n_multicontact_threads).
         """
         requires_grad = self._solver.rigid_config.requires_grad
+        full = dict(unused={"diff_contacts": not requires_grad}, requires_grad=requires_grad)
         if n_contact0_threads > 0:
             self.contact0_gjk_state = array_class.GJKState(
-                sizes=dict(self._state_sizes, envs=n_contact0_threads), unused={("epa", "diff_contacts"): True}
+                sizes=dict(self._state_sizes, envs=n_contact0_threads), unused=self._unused_overlap_only
             )
-            n_envs = n_multicontact_threads
+            self.multicontact_gjk_state = array_class.GJKState(
+                sizes=dict(self._state_sizes, envs=n_multicontact_threads), **full
+            )
         else:
-            n_envs = self._solver._B
-        state = array_class.GJKState(
-            sizes=dict(self._state_sizes, envs=n_envs),
-            unused={"diff_contacts": not requires_grad},
-            requires_grad=requires_grad,
-        )
-        if n_contact0_threads > 0:
-            self.multicontact_gjk_state = state
-        else:
-            self.gjk_state = state
+            self.gjk_state = array_class.GJKState(sizes=dict(self._state_sizes, envs=self._solver._B), **full)
 
 
 @qd.func
