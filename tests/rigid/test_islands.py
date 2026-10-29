@@ -64,8 +64,7 @@ def test_constraint_capacity_covers_friction_rows(show_viewer):
     assert constraint_solver.constraint_state.island.constraint_id.shape[0] >= constraint_solver.len_constraints
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_partition_logics(show_viewer, n_envs, multi_free_body_path):
     # The welded pair never touches, so only the equality edge couples them: without it the partition would split them
     # and the weld would be solved across two islands. A fixed body carries no dofs and joins no island. The

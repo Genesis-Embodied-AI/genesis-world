@@ -315,7 +315,7 @@ def test_deformable_parallel(show_viewer):
     [
         pytest.param(0, gs.materials.SPH.Liquid, marks=pytest.mark.required),
         (1, gs.materials.SPH.Liquid),
-        pytest.param(2, gs.materials.SPH.Liquid, marks=pytest.mark.required),
+        (2, gs.materials.SPH.Liquid),
         pytest.param(2, gs.materials.PBD.Liquid, marks=pytest.mark.required),
         pytest.param(2, gs.materials.MPM.Liquid, marks=pytest.mark.required),
         (2, gs.materials.MPM.Sand),

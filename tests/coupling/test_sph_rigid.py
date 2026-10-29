@@ -6,11 +6,10 @@ import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "n_envs, pressure_solver",
     [
-        (0, "WCSPH"),
+        pytest.param(0, "WCSPH", marks=pytest.mark.required),
         (0, "DFSPH"),
         pytest.param(2, "WCSPH", marks=pytest.mark.slow),  # ~150s
         pytest.param(2, "DFSPH", marks=pytest.mark.slow),  # ~300s

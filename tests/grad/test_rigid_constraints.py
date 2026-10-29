@@ -101,7 +101,7 @@ def test_joint_limit_grad_matches_fd(grad_slider_limit, precision, show_viewer):
     "model_name",
     [
         "grad_slider_limit",
-        pytest.param("grad_cartpole", marks=pytest.mark.required),
+        "grad_cartpole",
         pytest.param("grad_hopper", marks=pytest.mark.required),
     ],
 )
@@ -184,15 +184,14 @@ def test_frictionloss_grad_matches_fd(grad_revolute_frictionloss, precision, sho
     )
 
 
-@pytest.mark.required
 @pytest.mark.parametrize(
     "model_name, n_rows",
     [
         ("grad_hinge_pair_joint_eq_linear", 1),
-        ("grad_hinge_pair_joint_eq_quadratic", 1),
-        ("grad_hinge_joint_eq_constant", 1),
-        ("grad_connect_loop", 3),
-        ("grad_weld_pair", 6),
+        pytest.param("grad_hinge_pair_joint_eq_quadratic", 1, marks=pytest.mark.required),
+        pytest.param("grad_hinge_joint_eq_constant", 1, marks=pytest.mark.required),
+        pytest.param("grad_connect_loop", 3, marks=pytest.mark.required),
+        pytest.param("grad_weld_pair", 6, marks=pytest.mark.required),
     ],
 )
 def test_equality_grad_matches_fd(model_name, n_rows, request, precision, show_viewer):
