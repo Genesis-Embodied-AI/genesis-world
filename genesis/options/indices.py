@@ -33,7 +33,7 @@ def get_links_path(links_name: list[str], links_parent_idx: list[int]) -> list[t
     preceding its children.
     """
     links_path = []
-    for link_name, parent_idx in zip(links_name, links_parent_idx):
+    for link_name, parent_idx in zip(links_name, links_parent_idx, strict=True):
         links_path.append((*links_path[parent_idx], link_name) if parent_idx >= 0 else (link_name,))
     return links_path
 
@@ -41,7 +41,7 @@ def get_links_path(links_name: list[str], links_parent_idx: list[int]) -> list[t
 class LinkIndex(Options):
     """Select the links of an entity by name, or the links of the subtrees under some links.
 
-    Each name is an exact link name or a glob pattern such as 'finger*', and a name that matches no link raises an error.
+    Each name is an exact link name or a glob pattern such as 'finger*', and a name matching no link raises an error.
     A glob metacharacter ('*', '?' or '[') in a link name is matched literally by enclosing it in brackets, so
     'arm[[]1]' selects the link 'arm[1]'. A name or a tuple of names keying the 'links' of entity options stands for
     ``LinkIndex.named(*names)``. A link merged into its parent by the asset parser has no name of its own any more, so a
@@ -66,7 +66,11 @@ class LinkIndex(Options):
 
     @classmethod
     def subtree(cls, *names: str) -> Self:
-        """Select the links of the given names and every link below them in the kinematic tree, such as a gripper."""
+        """Select the links of the given names and every link below them in the kinematic tree, such as a gripper.
+
+        A selection of links stands at one specificity whatever its kind, so a subtree and a link inside it giving
+        one field of one link raise an error.
+        """
         return cls(subtree_roots=names)
 
     def matches(self, link_path: tuple[str, ...]) -> bool:
@@ -152,8 +156,9 @@ class GeomIndex(_OrdinalIndex):
 
     Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
     so the ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is
-    split into. A name is matched against the names the asset gives its geoms, which MJCF and USD state and URDF does
-    not, as an exact name or a glob pattern (see ``LinkIndex``).
+    split into. A name is matched against the names the asset gives its geoms, as an exact name or a glob pattern (see
+    ``LinkIndex``). MJCF states the name of a geom and URDF states none, while USD names a geom by its full prim path,
+    so a pattern such as '*/collision' selects it.
     """
 
     names: Annotated[StrArrayType, Field(min_length=1)] | None = None
@@ -186,14 +191,12 @@ class GeomIndex(_OrdinalIndex):
     def resolve(self, geoms_name: list[str]) -> np.ndarray:
         """Return the ordinals of the selected geoms among the collision geoms of a link, given their names.
 
-        A selection by name raises when it matches no geom of the link.
+        A selection by name may match no geom of a link, so that it combines with a selection of several links. A
+        selection by name that matches no geom of the whole entity raises when the entity is added.
         """
         if self.names is None:
             return self._resolve_ordinals(len(geoms_name), "geom")
-        ordinals = np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
-        if ordinals.size == 0:
-            gs.raise_exception(f"No collision geom matches {list(self.names)}. Existing geoms: {geoms_name}.")
-        return ordinals
+        return np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
 
 
 class VertexIndex(Options):

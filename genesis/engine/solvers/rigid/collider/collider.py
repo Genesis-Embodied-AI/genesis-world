@@ -365,7 +365,7 @@ class Collider:
                 coup_links = [
                     l
                     for l in entity.links
-                    if entity._options.get_link_solver_options(entity._links_path[l.name]).needs_coup
+                    if entity._options.get_link_solver_options(entity._links_path[l.idx_local]).needs_coup
                 ]
                 # A coupling type requires a coupled link (see 'RigidEntityOptions'), and coupling some links alone
                 # resolves to the two-way coupling, as the IPC coupler resolves it (see 'IPCCoupler')
