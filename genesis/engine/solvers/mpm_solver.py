@@ -176,10 +176,13 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             has_rigid_rows=self._has_rigid and not rigid._disable_constraint,
             has_terrain=self._has_rigid and rigid.collider.collider_config.has_terrain,
         )
-        self._mpm_coupling = MpmRigidCoupling(rigid.n_dofs_ if self._has_rigid else 1, rigid.n_links, self._B)
+        # Rigid geoms give contact rows whenever Rigid is coupled, but its dofs join the Newton solve only if it has any:
+        # rows on static geoms (a plane, a terrain) act on the particle displacement alone, as wall rows do
+        self._rigid_coupled = self._has_rigid and rigid.n_dofs > 0
+        self._mpm_coupling = MpmRigidCoupling(rigid.n_dofs_ if self._rigid_coupled else 1, rigid.n_links, self._B)
         # Rigid stops its substep after assembling its constraint rows; the MPM substep solves them with its own
         # unknowns and finishes Rigid's substep
-        rigid._defer_constraint_solve = self._has_rigid
+        rigid._defer_constraint_solve = self._rigid_coupled
         self._mpm_params = MpmParams(
             n_envs=self._B,
             n_particles=self._n_particles,
@@ -478,7 +481,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def _newton_loop_launches(self, f):
         """The Newton iterations driven from the host, the PCG iterations of each as one graph."""
         grid, newton, linear, control = self._mpm_grid, self._mpm_newton, self._mpm_linear, self._mpm_control
-        coupling, has_rigid = self._mpm_coupling, self._has_rigid
+        coupling, has_rigid = self._mpm_coupling, self._rigid_coupled
         params = self._mpm_params
         energy_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, control, params, f)
         while True:
@@ -515,7 +518,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         rigid = self._sim.rigid_solver
         grid, newton, linear, control = self._mpm_grid, self._mpm_newton, self._mpm_linear, self._mpm_control
         params, config, coupling = self._mpm_params, self._mpm_config, self._mpm_coupling
-        has_rigid = self._has_rigid
+        has_rigid = self._rigid_coupled
         energy_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, control, params, f)
 
         build_grid(self.particles, self.particles_ng, grid, params, f)
@@ -571,12 +574,15 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
         kernel_finalize(self.particles, self.particles_ng, grid, newton, params, f)
         if has_rigid:
-            kernel_rigid_write_back(coupling, *self._rigid_args())
+            kernel_rigid_write_back(self.particles, grid, newton, coupling, *self._rigid_args(), f)
             rigid.finish_deferred_substep()
+            kernel_add_mpm_contact_force(coupling, rigid.dyn_state.links, params)
 
     def _substep_graph(self, f):
-        if self._has_rigid:
-            gs.raise_exception("The implicit MPM substep graph does not support the coupling with Rigid yet.")
+        if self._rigid_coupled:
+            gs.raise_exception(
+                "The implicit MPM substep graph does not support the coupling with Rigid dofs; use USE_NEWTON_GRAPH."
+            )
         rigid = self._sim.rigid_solver
         args = (
             self.particles,
@@ -1951,6 +1957,9 @@ def kernel_coupled_newton_loop(
 
 @qd.kernel
 def kernel_rigid_write_back(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
     coupling: qd.template(),
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
@@ -1959,8 +1968,19 @@ def kernel_rigid_write_back(
     rigid_config: qd.template(),
     config: qd.template(),
     params: qd.template(),
+    f: qd.i32,
 ):
     mpm_rigid_func.func_rigid_evaluate(
         coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
     )
     mpm_rigid_func.func_rigid_write_back(coupling, constraint_state, config)
+    mpm_rigid_func.func_mpm_reaction(particles, grid, newton, coupling, dyn_state, constraint_state, params, f)
+
+
+@qd.kernel
+def kernel_add_mpm_contact_force(
+    coupling: qd.template(),
+    links_state: array_class.LinksState,
+    params: qd.template(),
+):
+    mpm_rigid_func.func_add_mpm_contact_force(coupling, links_state, params)

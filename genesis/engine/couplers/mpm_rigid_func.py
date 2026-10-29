@@ -31,8 +31,10 @@ from genesis.engine.solvers.mpm_data import (
 from genesis.engine.solvers.mpm_func import (
     band_row,
     contact_band_width,
+    contact_row_terms,
     particle_inv_weight,
     particle_of_sorted,
+    particle_trial_disp,
     q1_stencil,
     stencil_node_slots,
 )
@@ -502,7 +504,9 @@ def func_rigid_precondition(
 ):
     """z = (M + J^T D J)^-1 r over the Rigid dofs by Rigid's island Cholesky factor, or z = M^-1 r by Rigid's mass
     factor in a scene without Rigid constraint rows. The MPM contact stiffness on the links is left to the iterations:
-    its coupling of the blocks is of the rank of the dofs of the contacting chains at most."""
+    its coupling of the blocks is of the rank of the dofs of the contacting chains at most. Adding it to the Rigid block
+    of the factor was tried and made the joint PCG and Newton slower: the material behind the contact is softer than the
+    rows, so the block-diagonal stiffness overstates what the link feels."""
     n_envs = coupling.x.shape[1]
     qd.loop_config(name="mpm_rigid_precondition")
     for i_b in range(n_envs):
@@ -721,3 +725,68 @@ def func_rigid_write_back(
         constraint_state.qacc[i_d, i_b] = coupling.qacc[i_d, i_b]
         if qd.static(not config.has_rigid_rows):
             constraint_state.qfrc_constraint[i_d, i_b] = 0.0
+
+
+@qd.func(requires_top_level=True)
+def func_mpm_reaction(
+    particles: MpmParticles,
+    grid: qd.template(),  # MpmGrid
+    newton: qd.template(),  # MpmNewton
+    coupling: qd.template(),  # MpmRigidCoupling
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    params: qd.template(),  # MpmParams
+    f,
+):
+    """The force of the MPM contact rows on Rigid at the converged solve, after func_rigid_write_back.
+
+    qfrc_constraint becomes M qacc - qf_smooth, Rigid's own and the MPM rows' generalized force together, so that
+    Rigid's dofs.force is M qacc of the converged qacc as after its own solve. The rows' spatial force on each link
+    stays in `link_F` (in units of dt^2 force) for func_add_mpm_contact_force: a link's contact force is not recoverable
+    from the generalized force of a chain.
+
+    A link the rows push is marked constrained, as Rigid's assembly marks the links of its own contacts: the midpoint
+    integration of a free body (see func_midpoint_is_eligible) replaces qacc by the solution of the unconstrained
+    body equation."""
+    n_links = coupling.link_V.shape[0]
+    n_envs = coupling.link_V.shape[1]
+    qd.loop_config(name="mpm_reaction_clear")
+    for i_l, i_b in qd.ndrange(n_links, n_envs):
+        for d in qd.static(range(6)):
+            coupling.link_F[i_l, i_b, d] = 0.0
+    qd.loop_config(name="mpm_reaction_rows")
+    for s in range(grid.n_valid[()]):
+        i_l = newton.contact_link[s]
+        if i_l >= 0:
+            i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+            slots = stencil_node_slots(grid, env, cell)
+            dx, w = particle_trial_disp(particles, newton, params, f, i_p, i_b, cell, slots)
+            dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+            energy, g, hess = contact_row_terms(newton, s, dx - dr, WALL_ROWS, CONTACT_ROWS)
+            if g.norm_sqr() > 0.0:
+                torque = particle_arm(particles, dyn_state.links, f, i_p, i_b, i_l).cross(g)
+                for d in qd.static(range(3)):
+                    qd.atomic_add(coupling.link_F[i_l, i_b, d], g[d])
+                    qd.atomic_add(coupling.link_F[i_l, i_b, 3 + d], torque[d])
+                dyn_state.links.is_constrained[i_l, i_b] = True
+    n_dofs = coupling.x.shape[0]
+    qd.loop_config(name="mpm_reaction_qfrc")
+    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
+        constraint_state.qfrc_constraint[i_d, i_b] = coupling.Ma[i_d, i_b] - dyn_state.dofs.qf_smooth[i_d, i_b]
+
+
+@qd.func(requires_top_level=True)
+def func_add_mpm_contact_force(
+    coupling: qd.template(),  # MpmRigidCoupling
+    links_state: array_class.LinksState,
+    params: qd.template(),  # MpmParams
+):
+    """Add the MPM rows' force on each link (func_mpm_reaction) to `links_state.contact_force`, after Rigid's own
+    contact forces were written by the post-solve stage of its substep."""
+    n_links = coupling.link_V.shape[0]
+    n_envs = coupling.link_V.shape[1]
+    dt = params.substep_dt[()]
+    qd.loop_config(name="mpm_add_contact_force")
+    for i_l, i_b in qd.ndrange(n_links, n_envs):
+        force = qd.Vector([coupling.link_F[i_l, i_b, d] for d in qd.static(range(3))], dt=gs.qd_float)
+        links_state.contact_force[i_l, i_b] = links_state.contact_force[i_l, i_b] + force / (dt * dt)
