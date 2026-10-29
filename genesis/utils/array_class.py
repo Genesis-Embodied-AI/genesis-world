@@ -1631,6 +1631,8 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     n_contacts_per_nonconvex_pair: int
     # ccd algorithm
     ccd_algorithm: int
+    # Whether the narrowphase reports the pairs separated by less than the contact gap (see contact_gap in ColliderInfo)
+    has_contact_gap: bool
     # GPU core count and cores per compute unit, sizing the split narrow phase launches and scratch states
     gpu_cores: int
     gpu_cores_per_unit: int
@@ -2260,6 +2262,11 @@ class ColliderInfo:
     # link-pair contact pruning
     contact_pruning_tolerance: qd.Tensor
     prune_deep_penetration_ratio: qd.Tensor
+    # Separation below which a pair is reported as a contact of negative penetration (see RigidSolver.contact_gap). The
+    # convex narrowphase measures it on both geoms grown by half of it, whose Minkowski difference is the original one
+    # grown by a sphere of this radius: their depth minus the gap is the signed separation of the original geoms, and
+    # their witness midpoint is the original one.
+    contact_gap: qd.Tensor
 
 
 def get_collider_info(
@@ -2310,6 +2317,7 @@ def get_collider_info(
         diff_normal_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["diff_normal_tolerance"]),
         contact_pruning_tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_pruning_tolerance"]),
         prune_deep_penetration_ratio=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["prune_deep_penetration_ratio"]),
+        contact_gap=V_SCALAR_FROM(dtype=gs.qd_float, value=kwargs["contact_gap"]),
     )
 
 

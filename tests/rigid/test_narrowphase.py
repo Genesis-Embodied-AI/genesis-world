@@ -46,6 +46,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.solvers.rigid.collider import gjk_support, support_field
+from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
@@ -1304,3 +1305,134 @@ def test_mesh_support_exactness(show_viewer, tol):
         scene.rigid_solver.collider.collider_info,
     )
     assert_equal(supports_count, np.repeat((2, 4), (N_RANDOM_DIRECTIONS, 6)))
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("detection", ["mpr", "gjk", "box_box"])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_contact_gap_reports_separated_pairs(detection, n_envs, monkeypatch, show_viewer, tol):
+    # A solver deriving from the rigid solver turns the gap on by overriding 'contact_gap'. Every pair is stacked along
+    # the vertical axis, so a contact lies midway between the top of its lower geom and the bottom of its upper one.
+    GAP = 0.05
+    monkeypatch.setattr(RigidSolver, "contact_gap", GAP)
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_gjk_collision=detection == "gjk",
+            box_box_detection=detection == "box_box",
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.5, -6.0, 2.0),
+            camera_lookat=(3.5, 0.0, 0.6),
+        ),
+        show_viewer=show_viewer,
+    )
+    ground = scene.add_entity(
+        morph=gs.morphs.Plane(),
+    )
+    box_on_ground = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.11),
+            size=(0.2, 0.2, 0.2),
+        ),
+    )
+    sphere_on_ground = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(1.0, 0.0, 0.12),
+            radius=0.1,
+        ),
+    )
+    sphere_beyond_gap = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(2.0, 0.0, 0.18),
+            radius=0.1,
+        ),
+    )
+    sphere_lower = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(3.0, 0.0, 1.0),
+            radius=0.1,
+        ),
+    )
+    sphere_upper = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(3.0, 0.0, 1.23),
+            radius=0.1,
+        ),
+    )
+    capsule_lower = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=ET.tostring(
+                create_capsule_mjcf("capsule_lower", (4.0, 0.0, 1.0), (0, 90, 0), 0.1, 0.2), encoding="unicode"
+            ),
+        ),
+    )
+    capsule_upper = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=ET.tostring(
+                create_capsule_mjcf("capsule_upper", (4.0, 0.0, 1.24), (90, 0, 0), 0.1, 0.2), encoding="unicode"
+            ),
+        ),
+    )
+    box_lower = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(5.0, 0.0, 1.0),
+            size=(0.2, 0.2, 0.2),
+        ),
+    )
+    box_upper = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(5.0, 0.0, 1.22),
+            size=(0.2, 0.2, 0.2),
+        ),
+    )
+    cylinder = scene.add_entity(
+        morph=gs.morphs.Cylinder(
+            pos=(6.0, 0.0, 1.0),
+            height=0.2,
+            radius=0.1,
+        ),
+    )
+    box_on_cylinder = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(6.0, 0.0, 1.23),
+            size=(0.2, 0.2, 0.2),
+        ),
+    )
+    sphere_under_box = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(7.0, 0.0, 1.0),
+            radius=0.1,
+        ),
+    )
+    box_on_sphere = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(7.0, 0.0, 1.21),
+            size=(0.2, 0.2, 0.2),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    scene.step()
+
+    contacts = scene.rigid_solver.collider.get_contacts(to_torch=False, keep_batch_dim=True)
+    contacts_geoms_idx = np.sort(np.stack((contacts["geom_a"], contacts["geom_b"]), axis=-1), axis=-1)
+    # Minkowski portal refinement (MPR), which measures the separation of the mesh of the cylinder, converges to 1e-6.
+    # Every other pair is measured exactly.
+    for entity_lower, entity_upper, top, separation, pair_tol in (
+        (ground, box_on_ground, 0.0, 0.01, tol),
+        (ground, sphere_on_ground, 0.0, 0.02, tol),
+        (sphere_lower, sphere_upper, 1.1, 0.03, tol),
+        (capsule_lower, capsule_upper, 1.1, 0.04, tol),
+        (box_lower, box_upper, 1.1, 0.02, tol),
+        (cylinder, box_on_cylinder, 1.1, 0.03, max(tol, 1e-6)),
+        (sphere_under_box, box_on_sphere, 1.1, 0.01, tol),
+    ):
+        geoms_idx = sorted((entity_lower.geoms[0].idx, entity_upper.geoms[0].idx))
+        is_pair = (contacts_geoms_idx == geoms_idx).all(axis=-1)
+        assert is_pair.any(axis=-1).all()
+        assert_allclose(contacts["penetration"][is_pair], -separation, tol=pair_tol)
+        assert_allclose(contacts["position"][is_pair][:, 2], top + 0.5 * separation, tol=pair_tol)
+    assert (contacts_geoms_idx != sphere_beyond_gap.geoms[0].idx).all()

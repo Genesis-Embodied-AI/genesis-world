@@ -96,6 +96,8 @@ def func_is_geom_boxes_overlap(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    collider_static_config: qd.template(),
 ):
     """Check whether the world-aligned boxes of two geoms overlap, and for two convex geoms their oriented boxes too.
 
@@ -103,10 +105,15 @@ def func_is_geom_boxes_overlap(
     world-aligned box of a rotated geom, so the separating axis test of both oriented boxes drops most of the pairs that
     the world-aligned boxes keep without any contact. Planes and terrains collide beyond their box, and non-convex geoms
     go through their own detection, so their pairs keep the world-aligned test alone.
+
+    Boxes closer than the contact gap count as overlapping when there is one.
     """
+    gap = gs.qd_float(0.0)
+    if qd.static(collider_static_config.has_contact_gap):
+        gap = collider_info.contact_gap[None]
     is_overlapping = not (
-        (dyn_state.geoms.aabb_max[i_ga, i_b] <= dyn_state.geoms.aabb_min[i_gb, i_b]).any()
-        or (dyn_state.geoms.aabb_min[i_ga, i_b] >= dyn_state.geoms.aabb_max[i_gb, i_b]).any()
+        (dyn_state.geoms.aabb_max[i_ga, i_b] <= dyn_state.geoms.aabb_min[i_gb, i_b] - gap).any()
+        or (dyn_state.geoms.aabb_min[i_ga, i_b] >= dyn_state.geoms.aabb_max[i_gb, i_b] + gap).any()
     )
     # The pair comes by increasing geom type (see func_broad_phase_geoms), the plane and the terrain being the first and
     # the last ones
@@ -131,8 +138,9 @@ def func_is_geom_boxes_overlap(
         offset = pos_ab + R_ab @ center_b - center_a
 
         # The detections report a contact within their tolerance of touching, a small fraction of the pair scale (see
-        # func_compute_geom_pair_scale), which this margin stays well above
-        margin = 1e-3 * qd.min(half_a.norm(), half_b.norm())
+        # func_compute_geom_pair_scale), which this margin stays well above. The contact gap is added as is: the
+        # unnormalized cross axes below shrink distances, so it keeps every pair within the gap on them too.
+        margin = 1e-3 * qd.min(half_a.norm(), half_b.norm()) + gap
 
         # The face axes of both boxes
         extent_a = R_ab_abs @ half_b + half_a

@@ -76,6 +76,8 @@ class Collider:
         self._prune_deep_penetration_ratio = 3.0
         self._prune_max_contacts_per_link_pair = 32
         self._prune_max_contacts_floor = 512
+        # Read once, so that the static configuration and the collider info agree (see RigidSolver.contact_gap)
+        self._contact_gap = self._solver.contact_gap
 
         # The narrowphase sub-components are built AND activated before the collision fields, whose collider info embeds
         # their description structs: the activation of the support field reallocates its own at its final size, so it
@@ -250,6 +252,7 @@ class Collider:
             n_contacts_per_convex_pair=n_contacts_per_convex_pair,
             n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
             ccd_algorithm=ccd_algorithm,
+            has_contact_gap=self._contact_gap > 0.0,
         )
 
     def _init_collision_fields(self) -> None:
@@ -284,6 +287,7 @@ class Collider:
             diff_normal_tolerance=self._diff_normal_tolerance,
             contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
             prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
+            contact_gap=self._contact_gap,
         )
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)

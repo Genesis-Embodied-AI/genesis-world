@@ -92,7 +92,17 @@ def func_collision_clear(
             for i_pair_ in range(i_chunk * n_pairs // n_chunks, (i_chunk + 1) * n_pairs // n_chunks):
                 i_ga = collider_state.broad_collision_pairs[i_pair_, i_b][0]
                 i_gb = collider_state.broad_collision_pairs[i_pair_, i_b][1]
-                if not func_is_geom_boxes_overlap(i_ga, i_gb, i_b, geoms_init_AABB, dyn_state, dyn_info, rigid_info):
+                if not func_is_geom_boxes_overlap(
+                    i_ga,
+                    i_gb,
+                    i_b,
+                    geoms_init_AABB,
+                    dyn_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    collider_static_config,
+                ):
                     i_pair = collider_info.collision_pair_idx[i_ga, i_gb]
                     collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)
                     collider_state.contact_cache.penetration[i_pair, i_b] = 0.0
@@ -112,6 +122,11 @@ def func_collision_clear(
                 half_size = qd.abs(gu.qd_quat_to_R(l_quat, rigid_info.EPS[None])) @ aabb_half_size
                 lower = center - half_size
                 upper = center + half_size
+                if qd.static(collider_static_config.has_contact_gap):
+                    # Links closer than the contact gap keep their geom pairs as candidates (see contact_gap in
+                    # ColliderInfo)
+                    lower = lower - collider_info.contact_gap[None]
+                    upper = upper + collider_info.contact_gap[None]
             collider_state.links_aabb_min[i_l, i_b] = lower
             collider_state.links_aabb_max[i_l, i_b] = upper
 
@@ -273,6 +288,7 @@ def func_broad_phase_geoms(
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     rigid_config: qd.template(),
+    collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
     """Find the geom pairs whose boxes overlap under the candidate link pairs of every environment.
@@ -306,7 +322,15 @@ def func_broad_phase_geoms(
                             if dyn_info.geoms.type[i_ga] > dyn_info.geoms.type[i_gb]:
                                 i_ga, i_gb = i_gb, i_ga
                             if func_is_geom_boxes_overlap(
-                                i_ga, i_gb, i_b, geoms_init_AABB, dyn_state, dyn_info, rigid_info
+                                i_ga,
+                                i_gb,
+                                i_b,
+                                geoms_init_AABB,
+                                dyn_state,
+                                dyn_info,
+                                rigid_info,
+                                collider_info,
+                                collider_static_config,
                             ):
                                 n_broad = qd.atomic_add(collider_state.n_broad_pairs[i_b], 1)
                                 if n_broad < collider_info.max_collision_pairs_broad[None]:
@@ -349,5 +373,13 @@ def func_broad_phase(
             dyn_state, collider_state, constraint_state, dyn_info, rigid_info, collider_info, rigid_config
         )
     func_broad_phase_geoms(
-        geoms_init_AABB, dyn_state, collider_state, dyn_info, rigid_info, collider_info, rigid_config, errno
+        geoms_init_AABB,
+        dyn_state,
+        collider_state,
+        dyn_info,
+        rigid_info,
+        collider_info,
+        rigid_config,
+        collider_static_config,
+        errno,
     )

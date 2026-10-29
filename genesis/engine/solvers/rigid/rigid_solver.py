@@ -3441,6 +3441,16 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return self._max_collision_pairs
 
     @property
+    def contact_gap(self):
+        """Separation below which the collider reports a pair of geoms as a contact of negative penetration.
+
+        The rigid solver solves the contacts of penetrating geoms only, so its gap is 0 and the collider reports no
+        separated pair. A solver deriving from it that solves speculative contacts, which keep fast or resting geoms
+        from jittering in and out of contact, returns its gap here, read once when the collider is built.
+        """
+        return 0.0
+
+    @property
     def n_equalities(self):
         if self.is_built:
             return self._n_equalities

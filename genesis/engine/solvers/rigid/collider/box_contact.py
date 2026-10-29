@@ -27,6 +27,8 @@ def func_sphere_box_contact(
     gb_quat: qd.types.vector(4),
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    collider_static_config: qd.template(),
 ):
     """
     Analytical sphere-box collision detection.
@@ -72,7 +74,11 @@ def func_sphere_box_contact(
     contact_pos = qd.Vector.zero(gs.qd_float, 3)
     penetration = gs.qd_float(0.0)
 
-    if dist_sq < sphere_radius * sphere_radius:
+    # A sphere closer to the box than the contact gap is reported with the negative penetration sphere_radius - dist
+    detection_radius = sphere_radius
+    if qd.static(collider_static_config.has_contact_gap):
+        detection_radius = sphere_radius + collider_info.contact_gap[None]
+    if dist_sq < detection_radius * detection_radius:
         is_col = True
         normal_local = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
         if dist_sq > EPS:
@@ -132,7 +138,11 @@ def func_plane_box_contact(
     v1, _, _ = support_field._func_support_box(i_gb, normal, gb_pos, gb_quat, dyn_info)
     penetration = normal.dot(v1 - ga_pos)
 
-    if penetration > 0.0:
+    # The corners closer to the plane than the contact gap are reported with a negative penetration
+    penetration_min = gs.qd_float(0.0)
+    if qd.static(collider_static_config.has_contact_gap):
+        penetration_min = -collider_info.contact_gap[None]
+    if penetration > penetration_min:
         contact_pos = v1 - 0.5 * penetration * normal
         func_add_contact(
             i_ga,
@@ -163,7 +173,21 @@ def func_plane_box_contact(
                 if n_con < qd.static(collider_static_config.n_contacts_per_convex_pair):
                     pos_corner = gu.qd_transform_by_trans_quat_fast(dyn_info.verts.init_pos[i_v], gb_pos, gb_quat)
                     penetration = normal.dot(pos_corner - ga_pos)
-                    if penetration > 0.0:
+                    is_candidate = penetration > penetration_min
+                    if qd.static(collider_static_config.has_contact_gap):
+                        # Only the four deepest corners are contacts, which hold the face the box rests on: a gap
+                        # exceeding the size of the box would otherwise add corners of the opposite face. Ties go to
+                        # the lowest vertex index.
+                        n_deeper = 0
+                        for j_v in range(dyn_info.geoms.vert_start[i_gb], dyn_info.geoms.vert_end[i_gb]):
+                            pos_other = gu.qd_transform_by_trans_quat_fast(
+                                dyn_info.verts.init_pos[j_v], gb_pos, gb_quat
+                            )
+                            penetration_other = normal.dot(pos_other - ga_pos)
+                            if penetration_other > penetration or (not penetration_other < penetration and j_v < i_v):
+                                n_deeper = n_deeper + 1
+                        is_candidate = is_candidate and n_deeper < 4
+                    if is_candidate:
                         contact_pos = pos_corner - 0.5 * penetration * normal
                         if (contact_pos - contact_pos_0).norm() > tolerance:
                             func_add_contact(
@@ -212,7 +236,10 @@ def func_box_box_contact(
 
     n = 0
     code = -1
+    # The reference engine reports the pairs separated by less than the margin, with a negative penetration
     margin = gs.qd_float(0.0)
+    if qd.static(collider_static_config.has_contact_gap):
+        margin = collider_info.contact_gap[None]
     is_return = False
     cle1, cle2 = 0, 0
     in_ = 0
