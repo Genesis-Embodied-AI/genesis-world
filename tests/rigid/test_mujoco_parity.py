@@ -91,13 +91,11 @@ def test_equality_link(gs_sim, mj_sim):
             gs.constraint_solver.CG,
             gs.integrator.implicitfast,
             marks=(pytest.mark.friction_cone(gs.friction_cone.elliptic), pytest.mark.required),
-            id="CG-implicitfast-elliptic",
         ),
         pytest.param(
             gs.constraint_solver.Newton,
             gs.integrator.implicitfast,
             marks=pytest.mark.friction_cone(gs.friction_cone.elliptic),
-            id="Newton-implicitfast-elliptic",
         ),
     ],
 )
@@ -160,10 +158,7 @@ def test_frictionloss(gs_sim, mj_sim, tol):
     [
         (gs.constraint_solver.Newton, gs.integrator.Euler),
         pytest.param(
-            gs.constraint_solver.Newton,
-            gs.integrator.Euler,
-            marks=pytest.mark.friction_cone(gs.friction_cone.elliptic),
-            id="Newton-Euler-elliptic",
+            gs.constraint_solver.Newton, gs.integrator.Euler, marks=pytest.mark.friction_cone(gs.friction_cone.elliptic)
         ),
     ],
 )

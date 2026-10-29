@@ -2015,7 +2015,7 @@ def test_contype_conaffinity(show_viewer, tol):
 @pytest.mark.required
 @pytest.mark.precision("32")
 @pytest.mark.parametrize("backend", [gs.gpu])
-@pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None], ids=["prune", "noprune"])
+@pytest.mark.parametrize("contact_pruning_tolerance", [0.02, None])
 @pytest.mark.parametrize(
     "prefer_decomposed_solver",
     [
@@ -2023,7 +2023,6 @@ def test_contype_conaffinity(show_viewer, tol):
         pytest.param(True, marks=pytest.mark.use_deterministic_algorithms(False)),
         None,
     ],
-    ids=["monolith", "decomposed", "deterministic"],
 )
 def test_gpu_simulation_determinism(prefer_decomposed_solver, contact_pruning_tolerance, monkeypatch, show_viewer):
     # Run-to-run reproducibility on GPU: from an identical initial state, every trial must reproduce a bit-identical

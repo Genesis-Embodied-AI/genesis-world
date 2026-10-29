@@ -54,9 +54,7 @@ def test_primitives_mjcf_vs_usd(xml_path, all_primitives_usd, scale, tol):
 
 @pytest.mark.parametrize("model_name", ["all_joints_mjcf"])
 @pytest.mark.parametrize("scale", [1.0, pytest.param(2.0, marks=pytest.mark.required)])
-@pytest.mark.parametrize(
-    "all_joints_usd", [True, False], indirect=True, ids=["with_articulation_root", "without_articulation_root"]
-)
+@pytest.mark.parametrize("all_joints_usd", [True, False], indirect=True)
 def test_joints_mjcf_vs_usd(xml_path, all_joints_usd, scale, tol):
     mjcf_scene = build_mjcf_scene(xml_path, scale=scale)
     usd_scene = build_usd_scene(all_joints_usd, scale=scale)
