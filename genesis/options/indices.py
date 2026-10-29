@@ -30,8 +30,9 @@ class LinkIndex(Options):
     """Select the links of an entity by name, each name being an exact link name or a glob pattern such as 'finger*'.
 
     A name or a tuple of names keying the 'links' of entity options stands for ``LinkIndex.named(*names)``. A name that
-    matches no link raises an error. A link merged into its parent by the asset parser has no name of its own any more,
-    so a selection naming it raises an error too (see 'links_to_keep' of the morph).
+    matches no link raises an error. A glob metacharacter ('*', '?' or '[') in a link name is matched literally by
+    enclosing it in brackets, so 'arm[[]1]' selects the link 'arm[1]'. A link merged into its parent by the asset parser
+    has no name of its own any more, so a selection naming it raises an error too (see 'links_to_keep' of the morph).
     """
 
     model_config = ConfigDict(frozen=True)
