@@ -47,10 +47,10 @@ class Rigid(Kinematic["RigidEntity"]):
         Whether the material participates in coupling with other solvers. Default is True.
     coup_friction : float, optional
         Friction used during coupling. Must be non-negative. If None, resolved depending on the coupler:
-          - ``SAPCouplerOptions`` and ``IPCCouplerOptions``: the sliding friction of each geom, i.e. the material
+          - ``SAPCouplerOptions`` and ``IPCCouplerOptions``: the ``friction`` of each geom, i.e. the material
             ``friction`` if set, otherwise the value from the asset file, otherwise 1. IPC keeps a single value per
-            entity, so if its geoms differ, the largest one is used and a warning is logged.
-          - ``LegacyCouplerOptions``: 0.1, as this coupler handles particles such as fluids and sand.
+            entity, so if its geoms differ, the largest one is used.
+          - ``LegacyCouplerOptions``: Defaults to 0.1.
         Default is None.
     coup_softness : float, optional
         Softness of coupling interaction. Must be non-negative. Default is 0.002.
