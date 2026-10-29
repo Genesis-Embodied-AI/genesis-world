@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.solvers.mpm_solver import NEWTON_VELOCITY_TOL
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
@@ -198,9 +199,10 @@ def test_mesh_mpm_build(show_viewer):
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_deformable_parallel(show_viewer):
     scene = gs.Scene(
+        # The implicit MPM runs one substep; SPH keeps the integration step of the explicit setup by its subcycles
         sim_options=gs.options.SimOptions(
             dt=2e-3,
-            substeps=10,
+            substeps=1,
         ),
         mpm_options=gs.options.MPMOptions(
             lower_bound=(0.5, -0.1, -0.05),
@@ -209,9 +211,13 @@ def test_deformable_parallel(show_viewer):
         sph_options=gs.options.SPHOptions(
             lower_bound=(-0.03, -0.03, -0.08),
             upper_bound=(0.33, 0.33, 1.0),
+            n_subcycles=10,
         ),
+        # The implicit MPM couples with the implicit FEM solver only; its mass-proportional Rayleigh damping is the
+        # explicit solver's velocity damping
         fem_options=gs.options.FEMOptions(
-            damping=45.0,
+            use_implicit_solver=True,
+            damping_alpha=45.0,
         ),
         pbd_options=gs.options.PBDOptions(
             particle_size=1e-2,
@@ -273,11 +279,12 @@ def test_deformable_parallel(show_viewer):
             pos=(0.8, 0.8, 0.1),
             size=(0.1, 0.1, 0.1),
         ),
+        # The implicit FEM solver has the energy Hessian of the linear models only
         material=gs.materials.FEM.Elastic(
             E=3.0e4,
             nu=0.45,
             rho=1000.0,
-            model="stable_neohookean",
+            model="linear_corotated",
         ),
     )
     scene.build(n_envs=2)
@@ -305,7 +312,9 @@ def test_deformable_parallel(show_viewer):
     assert final_water_pos[..., 2].min() > -1e-5
 
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
-    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=2e-4)
+    # The implicit MPM solve stops once its velocity update falls below the Newton tolerance, which bounds the velocity
+    # of the cube at rest
+    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=NEWTON_VELOCITY_TOL)
     assert_allclose(entity_fem._solver.get_state(0).vel, 0, atol=1e-3)
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 

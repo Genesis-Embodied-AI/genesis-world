@@ -601,8 +601,8 @@ class LegacyCoupler(RBC):
     def preprocess(self, f):
         pass
 
-    def couple(self, f):
-        # SPH <-> Rigid
+    def couple_sph_rigid(self, f):
+        """The collision of the SPH particles with Rigid, at the end of every SPH integration step."""
         if self._rigid_sph:
             self.sph_rigid(
                 f,
@@ -614,6 +614,10 @@ class LegacyCoupler(RBC):
                 self.rigid_solver.collider.sdf.sdf_info,
                 self.rigid_solver.collider.collider_config,
             )
+
+    def couple(self, f):
+        # SPH <-> Rigid
+        self.couple_sph_rigid(f)
 
         # PBD <-> Rigid
         if self._rigid_pbd:

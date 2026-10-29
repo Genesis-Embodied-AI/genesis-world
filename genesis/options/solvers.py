@@ -758,7 +758,8 @@ class SPHOptions(GravityMixin, TimeBasedMixin):
         Maximum number of iterations for the density solver. Defaults to 100.
     n_subcycles : int, optional
         Number of SPH integration steps per simulation substep, so that SPH can integrate at a shorter interval than
-        the solvers it couples with. The couplings act once per substep, at the last of them. Defaults to 1.
+        the solvers it couples with. The collision with Rigid and the MPM boundary act at every step, the other
+        couplings once per substep, at the last of them. Defaults to 1.
     """
 
     particle_size: PositiveFloat = 0.02

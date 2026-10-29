@@ -55,6 +55,11 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         # Coefficient for computing stable timestep
         self._stable_dt_coef = 1.0
 
+        # Particles of another solver as boundary particles of the fluid, set by that solver before the first substep
+        # (see set_boundary)
+        self._boundary = None
+        self._has_boundary = False
+
     def setup_boundary(self):
         self.boundary = CubeBoundary(
             lower=self._lower_bound,
@@ -120,6 +125,19 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         self.particles_render = struct_particle_state_render.field(
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
+
+    def set_boundary(self, boundary):
+        """Make the particles of another solver boundary particles of the fluid (Akinci et al. 2012). `boundary`
+        provides `build(f)`, called at the start of every substep, `gather()`, called once the particles are reordered
+        for an integration step, to fill its per-particle sums `b_rho`, `b_grad` (`b_grad_at(k)`), `b_vel_grad` and
+        `b_count` at k = i_b n + i_p, and `scatter()`, called at the end of the step, to hand the impulses of the
+        boundary velocity coefficients `s` that the step accumulates to the boundary particles."""
+        self._boundary = boundary
+        self._has_boundary = True
+
+    @qd.func
+    def _func_boundary_index(self, i_p, i_b):
+        return i_b * self._boundary.n + i_p
 
     def init_ckpt(self):
         self._ckpt = dict()
@@ -251,6 +269,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.sh.for_all_neighbors(
                     i_p, self.particles_reordered.pos, self._support_radius, den, self._task_compute_rho, i_b
                 )
+                if qd.static(self._has_boundary):
+                    den += self._boundary.b_rho[self._func_boundary_index(i_p, i_b)]
                 self.particles_reordered[i_p, i_b].rho += den
 
                 self.particles_reordered[i_p, i_b].rho *= self.particles_info_reordered[i_p, i_b].rho
@@ -360,6 +380,16 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                     self._task_compute_pressure_forces,
                     i_b,
                 )
+                if qd.static(self._has_boundary):
+                    # The boundary pressure mirrors the fluid's: -rho0 p_i / rho_i^2 sum_b V_b grad W_ib
+                    k = self._func_boundary_index(i_p, i_b)
+                    coef = (
+                        -self.particles_info_reordered[i_p, i_b].rho
+                        * self.particles_reordered[i_p, i_b].p
+                        / self.particles_reordered[i_p, i_b].rho ** 2
+                    )
+                    acc += coef * self._boundary.b_grad_at(k)
+                    self._boundary.s[k] += self._cycle_dt * coef
                 self.particles_reordered[i_p, i_b].acc += acc
 
     @qd.kernel
@@ -415,6 +445,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 sum_grad_p_k = ret[3]
                 for ii in qd.static(range(3)):
                     grad_p_i[ii] = ret[ii]
+                if qd.static(self._has_boundary):
+                    grad_p_i += self._boundary.b_grad_at(self._func_boundary_index(i_p, i_b))
                 sum_grad_p_k += grad_p_i.norm_sqr()
 
                 # Compute pressure stiffness denominator
@@ -454,6 +486,13 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                     self._task_compute_density_time_derivative,
                     i_b,
                 )
+                if qd.static(self._has_boundary):
+                    k = self._func_boundary_index(i_p, i_b)
+                    ret.drho += (
+                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.b_grad_at(k))
+                        - self._boundary.b_vel_grad[k]
+                    )
+                    ret.num_neighbors += self._boundary.b_count[k]
 
                 # only correct positive divergence
                 drho = qd.max(ret.drho, 0.0)
@@ -500,6 +539,12 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                     self._task_divergence_solver_iteration,
                     i_b,
                 )
+                if qd.static(self._has_boundary):
+                    # The boundary takes the fluid's stiffness alone: k_i sum_b V_b grad W_ib
+                    if qd.abs(k_i) > self._df_eps:
+                        k = self._func_boundary_index(i_p, i_b)
+                        ret.dv += k_i * self._boundary.b_grad_at(k)
+                        self._boundary.s[k] += k_i
                 self.particles_reordered.vel[i_p, i_b] = self.particles_reordered.vel[i_p, i_b] + ret.dv
 
     @qd.kernel
@@ -569,6 +614,12 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.sh.for_all_neighbors(
                     i_p, self.particles_reordered.pos, self._support_radius, delta, self._task_compute_density_star, i_b
                 )
+                if qd.static(self._has_boundary):
+                    k = self._func_boundary_index(i_p, i_b)
+                    delta += (
+                        self.particles_reordered[i_p, i_b].vel.dot(self._boundary.b_grad_at(k))
+                        - self._boundary.b_vel_grad[k]
+                    )
                 drho = self.particles_reordered[i_p, i_b].rho / self._density0 + self._cycle_dt * delta
                 self.particles_reordered[i_p, i_b].drho = qd.max(drho, 1.0)  # - 1.0
 
@@ -605,6 +656,11 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.sh.for_all_neighbors(
                     i_p, self.particles_reordered.pos, self._support_radius, ret, self.density_solve_iteration_task, i_b
                 )
+                if qd.static(self._has_boundary):
+                    if qd.abs(k_i) > self._df_eps:
+                        k = self._func_boundary_index(i_p, i_b)
+                        ret.dv += self._cycle_dt * k_i * self._boundary.b_grad_at(k)
+                        self._boundary.s[k] += self._cycle_dt * k_i
                 self.particles_reordered[i_p, i_b].vel = self.particles_reordered[i_p, i_b].vel + ret.dv
 
                 # The stiffness k_i is the pressure this Jacobi iteration applies to cancel the current density
@@ -720,8 +776,13 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
         """The SPH integration steps of the substep but the advection of the last one, which follows the couplings in
         substep_post_coupling."""
         if self.is_active:
+            if self._has_boundary:
+                self._boundary.build(f)
             for _ in range(self._n_subcycles - 1):
                 self._advance_velocity(f)
+                # The coupler collides the last step with Rigid itself
+                if hasattr(self._coupler, "couple_sph_rigid"):
+                    self._coupler.couple_sph_rigid(f)
                 self._kernel_advect_position(f)
                 self._kernel_copy_from_reordered(f)
             self._advance_velocity(f)
@@ -729,6 +790,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
     def _advance_velocity(self, f):
         """Velocity update of one SPH integration step, on the particles reordered by the spatial hash."""
         self._kernel_reorder_particles(f)
+        if self._has_boundary:
+            self._boundary.gather()
         if self._pressure_solver == "WCSPH":
             self._kernel_compute_rho(f)
             self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
@@ -742,6 +805,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             self._kernel_compute_non_pressure_forces(f, self._sim.cur_t)
             self._kernel_predict_velocity(f)
             self._density_solve(f)
+        if self._has_boundary:
+            self._boundary.scatter()
 
     def substep_pre_coupling_grad(self, f):
         pass

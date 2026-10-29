@@ -10,7 +10,6 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.couplers import mpm_exchange_func
 from genesis.engine.couplers.mpm_fem_func import FemTriangleQuery
 from genesis.engine.couplers.mpm_fem_newton import (
     FemNewtonHost,
@@ -28,6 +27,7 @@ from genesis.engine.couplers.mpm_pbd_func import (
     PbdParticleQuery,
 )
 from genesis.engine.couplers.mpm_rigid_func import RigidGeomQuery, func_build_rigid_rows
+from genesis.engine.couplers.mpm_sph_func import MpmSphBoundary, kernel_apply_boundary_impulse
 from genesis.engine.couplers.mpm_rigid_newton import (
     MpmRigidContact,
     MpmRigidContactHost,
@@ -339,6 +339,11 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             query = FemTriangleQuery(fem, self._mpm_newton, self._mpm_params, self._B)
             contact = MpmFemContact(self._newton_participant, fem_participant, query)
             newton_solver.register_coupling(MpmFemContactHost(contact), contact)
+        # The MPM particles are boundary particles of the SPH fluid, whose impulses enter the next P2G (see mpm_sph_func)
+        if self._sph_coupled:
+            sph = self._sim.sph_solver
+            self._sph_boundary = MpmSphBoundary(self, sph, self._mpm_params, self._B)
+            sph.set_boundary(self._sph_boundary)
         # PBD's particles join the solve with their inertia around PBD's own projection (see mpm_pbd_func)
         if self._pbd_coupled:
             pbd = self._sim.pbd_solver
@@ -437,7 +442,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 )
         if self._sim.tool_solver.is_active and is_legacy:
             gs.raise_exception("Coupling the implicit MPM solver with ToolSolver is not supported yet.")
-        # Momentum exchanges with the particle and FEM solvers, at the free node velocity before the Newton solve
+        # The couplings with the particle and FEM solvers
         self._sph_coupled = self._sim.sph_solver.is_active and is_legacy and coupler_options.mpm_sph
         self._pbd_coupled = self._sim.pbd_solver.is_active and is_legacy and coupler_options.mpm_pbd
         self._fem_coupled = self._sim.fem_solver.is_active and is_legacy and coupler_options.fem_mpm
@@ -606,13 +611,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_assemble(*args)
         sort_reduce_bcoo(self._mpm_linear.matrix)
 
-    def _exchange_momentum(self, f):
-        """The momentum exchange with SPH, on the free node velocity of the substep."""
-        if self._sph_coupled:
-            sph = self._sim.sph_solver
-            stencil = int(np.floor(self._dx / sph.hash_grid_cell_size)) + 2
-            kernel_exchange_particles(self._mpm_grid, self._mpm_params, sph, stencil)
-
     # ------------------------------------------------------------------------------------
     # --------------------------- Newton solver participant -----------------------------
     # ------------------------------------------------------------------------------------
@@ -622,10 +620,12 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         return USE_SUBSTEP_GRAPH
 
     def newton_prepare(self, f):
-        """The substep up to the Newton solve: the grid, P2G with the force fields, the momentum exchanges, the
+        """The substep up to the Newton solve: the impulses of the SPH fluid, the grid, P2G with the force fields, the
         physical Hessian at u = 0 and the contact rows from it, which arm the Newton loop."""
         if not self._mpm_sized:
             self._size_to_particles(f)
+        if self._sph_coupled:
+            kernel_apply_boundary_impulse(self._sph_boundary, f)
         rigid = self._sim.rigid_solver
         grid, params = self._mpm_grid, self._mpm_params
         build_grid(self.particles, self.particles_ng, grid, params, f)
@@ -643,7 +643,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             f,
             self._sim.cur_t,
         )
-        self._exchange_momentum(f)
         # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights. It
         # also sizes the triplet storage for the substep's fixed grid topology, which every assembly of the Newton
         # loop shares.
@@ -1654,16 +1653,6 @@ def kernel_assemble(
     func_reset_newton_measures(control)
     mpm_func.func_report_extent(grid, linear)
     mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
-
-
-@qd.kernel
-def kernel_exchange_particles(
-    grid: qd.template(),
-    params: qd.template(),
-    partner: qd.template(),
-    stencil: qd.template(),
-):
-    mpm_exchange_func.func_exchange_particles(grid, params, partner, stencil)
 
 
 @qd.kernel
