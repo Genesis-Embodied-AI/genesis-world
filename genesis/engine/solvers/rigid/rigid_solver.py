@@ -237,6 +237,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._enable_neutral_collision = options.enable_neutral_collision
         self._enable_adjacent_collision = options.enable_adjacent_collision
         self._disable_constraint = options.disable_constraint
+        # Set by a solver coupled strongly with Rigid, which solves the constraint rows jointly with its own unknowns
+        # and finishes the substep (see finish_deferred_substep)
+        self._defer_constraint_solve = False
         self._max_collision_pairs = options.max_collision_pairs
         self._integrator = options.integrator
         self._box_box_detection = options.box_box_detection
@@ -1360,30 +1363,42 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.rigid_config,
                     collider.collider_config,
                 )
-                func_solve_body(
-                    self.dyn_state,
-                    constraint_solver.constraint_state,
-                    self.dyn_info,
-                    self.rigid_info,
-                    self.rigid_config,
-                    constraint_solver._n_iterations,
-                )
-            kernel_substep_post(
-                self.dyn_state,
-                collider.collider_state,
-                constraint_solver.constraint_state,
-                self.dyn_info,
-                self.rigid_info,
-                self.rigid_config,
-                self._is_backward,
-                not self._disable_constraint,
-                self._options.noslip_iterations > 0,
-                self._errno,
-            )
+                if not self._defer_constraint_solve:
+                    func_solve_body(
+                        self.dyn_state,
+                        constraint_solver.constraint_state,
+                        self.dyn_info,
+                        self.rigid_info,
+                        self.rigid_config,
+                        constraint_solver._n_iterations,
+                    )
+            if not self._defer_constraint_solve:
+                self.finish_deferred_substep()
 
         if not isinstance(self.sim.coupler, SAPCoupler):
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
             self._is_forward_vel_updated = not self._enable_mujoco_compatibility
+
+    def finish_deferred_substep(self):
+        """Resolve the constraint forces and integrate the substep from `constraint_state.qacc`.
+
+        A solver coupled strongly with Rigid sets `_defer_constraint_solve`: the substep then stops after assembling the
+        constraint rows, the coupled solver solves them jointly with its own unknowns, writes the constraint solution
+        (qacc, Jaref, active, efc_force, qfrc_constraint), and calls this to finish the substep.
+        """
+        collider = self.collider
+        kernel_substep_post(
+            self.dyn_state,
+            collider.collider_state,
+            self.constraint_solver.constraint_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+            self._is_backward,
+            not self._disable_constraint,
+            self._options.noslip_iterations > 0,
+            self._errno,
+        )
 
     def get_error_envs_mask(self):
         return qd_to_torch(self._errno) > 0

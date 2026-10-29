@@ -333,15 +333,15 @@ class MPMEntity(ParticleEntity):
             i_global = i_p + self._particle_start
             # Copy pos, vel
             for j in qd.static(range(3)):
-                pos[i_b, i_p, j] = self._solver.particles[f, i_global, i_b].pos[j]
-                vel[i_b, i_p, j] = self._solver.particles[f, i_global, i_b].vel[j]
+                pos[i_b, i_p, j] = self._solver.particles.pos[f, i_global, i_b][j]
+                vel[i_b, i_p, j] = self._solver.particles.vel[f, i_global, i_b][j]
                 # Copy C, F
                 for k in qd.static(range(3)):
-                    C[i_b, i_p, j, k] = self._solver.particles[f, i_global, i_b].C[j, k]
-                    F[i_b, i_p, j, k] = self._solver.particles[f, i_global, i_b].F[j, k]
+                    C[i_b, i_p, j, k] = self._solver.particles.C[f, i_global, i_b][j, k]
+                    F[i_b, i_p, j, k] = self._solver.particles.F[f, i_global, i_b][j, k]
             # Copy Jp, active
-            Jp[i_b, i_p] = self._solver.particles[f, i_global, i_b].Jp
-            active[i_b, i_p] = self._solver.particles_ng[f, i_global, i_b].active
+            Jp[i_b, i_p] = self._solver.particles.Jp[f, i_global, i_b]
+            active[i_b, i_p] = self._solver.particles_ng.active[f, i_global, i_b]
 
     # ------------------------------------------------------------------------------------
     # ---------------------------------- io & control ------------------------------------

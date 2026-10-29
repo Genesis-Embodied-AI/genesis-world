@@ -10,7 +10,8 @@ class OpenAddressingHash:
 
     The capacity is a power of two at least twice the number of keys inserted per build. Keys inserted in one phase
     are unique, so an insert is a single compare-and-swap claim of the slot followed by the value write, and lookups
-    run in later phases only.
+    run in later phases only. Device code reads the capacity from the shape of the table, so that a table of another
+    capacity runs the same compiled kernels.
     """
 
     def __init__(self, max_keys: int) -> None:
@@ -27,7 +28,7 @@ class OpenAddressingHash:
         h = h ^ (h >> qd.u64(33))
         h = h * qd.u64(0xFF51AFD7ED558CCD)
         h = h ^ (h >> qd.u64(33))
-        return qd.i32(h & qd.u64(self.capacity - 1))
+        return qd.i32(h & qd.u64(self.keys.shape[0] - 1))
 
     @qd.func
     def insert(self, key, value):
@@ -40,7 +41,7 @@ class OpenAddressingHash:
                 self.vals[i] = value
                 done = True
             else:
-                i = (i + 1) & (self.capacity - 1)
+                i = (i + 1) & (self.keys.shape[0] - 1)
 
     @qd.func
     def lookup(self, key):
@@ -56,7 +57,7 @@ class OpenAddressingHash:
             elif stored == qd.u64(EMPTY_KEY):
                 searching = False
             else:
-                i = (i + 1) & (self.capacity - 1)
+                i = (i + 1) & (self.keys.shape[0] - 1)
         return result
 
 
@@ -65,6 +66,6 @@ def func_reset_hash(
     table: qd.template(),  # OpenAddressingHash
 ):
     qd.loop_config(name="hash_reset")
-    for i in range(table.capacity):
+    for i in range(table.keys.shape[0]):
         table.keys[i] = qd.u64(EMPTY_KEY)
         table.vals[i] = -1

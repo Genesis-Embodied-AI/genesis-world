@@ -1,8 +1,13 @@
 import numpy as np
 import quadrants as qd
 
-from .dynamic_exclusive_sum import DynamicExclusiveSum, func_dynamic_exclusive_sum
-from .dynamic_radix_sort import DynamicRadixSort, func_dynamic_radix_sort
+from .dynamic_exclusive_sum import DynamicExclusiveSum, func_dynamic_exclusive_sum, kernel_dynamic_exclusive_sum
+from .dynamic_radix_sort import (
+    DynamicRadixSort,
+    dynamic_radix_sort,
+    func_dynamic_radix_sort,
+    func_dynamic_radix_sort_graph,
+)
 from .fsr_reduce import func_fsr_reduce, head_segmented_reduce_add
 
 
@@ -265,6 +270,82 @@ def func_sort_reduce_bcoo(
         matrix.block_scalar_count,
     )
     func_extract_unique_bcoo_entries(matrix)
+
+
+@qd.func(requires_top_level=True)
+def func_sort_reduce_bcoo_graph(
+    matrix: qd.template(),  # BCOOMatrix
+):
+    """func_sort_reduce_bcoo for a graph kernel, with the radix passes in a device loop."""
+    func_compose_bcoo_sort_keys(matrix)
+    func_dynamic_radix_sort_graph(
+        matrix.triplet_sorter,
+        matrix.triplet_keys,
+        matrix.sort_keys_out,
+        matrix.triplet_perm,
+        matrix.sort_perm_out,
+        matrix.padded_triplets[()],
+    )
+    func_mark_bcoo_segment_flags(matrix)
+    func_dynamic_exclusive_sum(matrix.segment_scanner, matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets[()])
+    func_zero_bcoo_values(matrix)
+    func_fsr_reduce(
+        matrix.seg_ids,
+        matrix.triplet_perm,
+        matrix.triplet_keys,
+        matrix.triplet_val,
+        matrix.bcoo_val,
+        matrix.n_triplets,
+        matrix.padded_triplets,
+        matrix.triplet_keys.shape[0],
+        matrix.value_type,
+        matrix.block_scalar_count,
+    )
+    func_extract_unique_bcoo_entries(matrix)
+
+
+@qd.kernel
+def kernel_compose_bcoo_sort_keys(matrix: qd.template()):
+    func_compose_bcoo_sort_keys(matrix)
+
+
+@qd.kernel
+def kernel_mark_bcoo_segment_flags(matrix: qd.template()):
+    func_mark_bcoo_segment_flags(matrix)
+
+
+@qd.kernel
+def kernel_reduce_bcoo(matrix: qd.template()):
+    func_zero_bcoo_values(matrix)
+    func_fsr_reduce(
+        matrix.seg_ids,
+        matrix.triplet_perm,
+        matrix.triplet_keys,
+        matrix.triplet_val,
+        matrix.bcoo_val,
+        matrix.n_triplets,
+        matrix.padded_triplets,
+        matrix.triplet_keys.shape[0],
+        matrix.value_type,
+        matrix.block_scalar_count,
+    )
+    func_extract_unique_bcoo_entries(matrix)
+
+
+def sort_reduce_bcoo(matrix: BCOOMatrix) -> None:
+    """Host-driven func_sort_reduce_bcoo, sharing the compiled sort and scan launches with every other user."""
+    kernel_compose_bcoo_sort_keys(matrix)
+    dynamic_radix_sort(
+        matrix.triplet_sorter,
+        matrix.triplet_keys,
+        matrix.sort_keys_out,
+        matrix.triplet_perm,
+        matrix.sort_perm_out,
+        matrix.padded_triplets,
+    )
+    kernel_mark_bcoo_segment_flags(matrix)
+    kernel_dynamic_exclusive_sum(matrix.segment_scanner, matrix.seg_flags, matrix.seg_ids, matrix.padded_triplets)
+    kernel_reduce_bcoo(matrix)
 
 
 @qd.func(requires_top_level=True)

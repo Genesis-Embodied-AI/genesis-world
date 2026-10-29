@@ -131,3 +131,14 @@ def func_dynamic_exclusive_sum(
 ):
     """Write the exclusive prefix sum of the first n values to output."""
     scanner.scan(values, output, n)
+
+
+@qd.kernel
+def kernel_dynamic_exclusive_sum(
+    scanner: qd.template(),  # DynamicExclusiveSum
+    values: qd.types.ndarray(),
+    output: qd.types.ndarray(),
+    n: qd.types.ndarray(),  # i32 scalar
+):
+    """func_dynamic_exclusive_sum as its own launch, with the count a device scalar."""
+    scanner.scan(values, output, n[()])

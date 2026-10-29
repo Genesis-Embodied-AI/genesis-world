@@ -39,18 +39,153 @@ BRICK_DIM = BRICK_NODES * 3
 # Bricks inverted per block of the inversion, one warp each
 BRICK_INVERT_WARPS = 4
 
+# Soft contact rows of a particle: one domain-wall row per axis, then the pyramid rows of its deepest Rigid contact
+WALL_ROWS = 3
+PYRAMID_ROWS = 4
+CONTACT_ROWS = WALL_ROWS + PYRAMID_ROWS
+
 
 class MpmStaticConfig(metaclass=array_class.AutoInitMeta):
-    """Compile-time configuration of the implicit MPM kernels."""
+    """Compile-time switches of the implicit MPM kernels: the code paths a scene takes, never its sizes or values."""
 
-    n_envs: int
-    n_particles: int
-    substep_dt: float
-    dx: float
-    inv_dx: float
-    particle_volume: float
-    mass_scale: float
-    n_materials: int
+    # MPM is coupled with Rigid, in one Newton solve; Rigid's links info is batched over the environments; Rigid has
+    # constraint rows, which join the solve
+    has_rigid: bool
+    rigid_batch_links_info: bool
+    has_rigid_rows: bool
+    # The one switch of Rigid's collider configuration the SDF queries read: this config stands in for it there, so
+    # that a change of the rest of Rigid's collider configuration does not recompile MPM
+    has_terrain: bool
+
+
+def _scalar(dtype, value=0):
+    result = qd.ndarray(dtype, shape=())
+    np_dtype = {qd.i32: np.int32, qd.f32: np.float32, qd.f64: np.float64}[dtype]
+    result.from_numpy(np.array(value, dtype=np_dtype))
+    return result
+
+
+@qd.data_oriented
+class MpmParams:
+    """Scene values of the implicit MPM kernels, as device scalars, so that a scene of another size or resolution runs
+    the kernels compiled for the previous one."""
+
+    def __init__(
+        self,
+        n_envs: int,
+        n_particles: int,
+        substep_dt: float,
+        dx: float,
+        particle_volume: float,
+        mass_scale: float,
+        n_materials: int,
+        wall_sol_params,
+        wall_lower,
+        wall_upper,
+    ) -> None:
+        self.n_envs = _scalar(qd.i32, n_envs)
+        self.n_particles = _scalar(qd.i32, n_particles)
+        self.substep_dt = _scalar(gs.qd_float, substep_dt)
+        self.dx = _scalar(gs.qd_float, dx)
+        self.inv_dx = _scalar(gs.qd_float, 1.0 / dx)
+        self.particle_volume = _scalar(gs.qd_float, particle_volume)
+        self.mass_scale = _scalar(gs.qd_float, mass_scale)
+        self.n_materials = _scalar(qd.i32, n_materials)
+        # Freeze the active set of the soft contact rows at the substep start for the whole Newton solve (experimental,
+        # off: the active set follows the iterate, as in Rigid's Newton)
+        self.freeze_contact = _scalar(qd.i32, 0)
+        # Width, in metres of constraint value, of the band below c = 0 over which a contact row's curvature ramps from
+        # D down to 0, which makes the row energy C2 (experimental; 0 keeps the one-sided quadratic)
+        self.contact_smooth = _scalar(gs.qd_float, 0.0)
+        # Start each line search at the minimizer of the piecewise-quadratic model along the Newton direction (smooth
+        # terms by their Newton model, contact rows exact) instead of at alpha = 1 (experimental)
+        self.exact_line_search = _scalar(qd.i32, 0)
+        # Build contact rows for the particles the substep may bring into contact, not only those in contact at its
+        # start: a row outside its contact range lets the particle close the gap freely and resists past it
+        # (experimental)
+        self.contact_band = _scalar(qd.i32, 0)
+        # Linear corotational elasticity about the rotation of each particle at the substep start (Zong et al. 2024):
+        # the elastic energy of a substep is then quadratic and convex (experimental)
+        self.linear_corotated = _scalar(qd.i32, 0)
+        # Start the Newton solve from the inertial prediction u = dt v_free instead of u = 0: contact rows the substep
+        # will violate are then active at the first assembly, so that the first direction already sees them. A
+        # non-penetration barrier needs the non-penetrating start u = 0 for its continuous collision detection, so this
+        # stays a switch.
+        self.newton_start_inertial = _scalar(qd.i32, 0)
+        # Rigid's solref / solimp parameters of the domain-wall rows, (timeconst, dampratio, dmin, dmax, width, mid,
+        # power)
+        self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
+        self.wall_sol_params.from_numpy(np.asarray(wall_sol_params, dtype=gs.np_float))
+        # Planes of the domain walls, `CubeBoundary.lower` / `upper`
+        self.wall_lower = qd.ndarray(gs.qd_float, shape=(3,))
+        self.wall_upper = qd.ndarray(gs.qd_float, shape=(3,))
+        self.wall_lower.from_numpy(np.asarray(wall_lower, dtype=gs.np_float))
+        self.wall_upper.from_numpy(np.asarray(wall_upper, dtype=gs.np_float))
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class MpmParticles:
+    """Particle state of every frame of the substep window, shape (frames, n_particles, n_envs)."""
+
+    kind: ClassVar[array_class.DataKind] = array_class.DataKind.STATE
+
+    pos: qd.Tensor
+    vel: qd.Tensor
+    C: qd.Tensor
+    F: qd.Tensor
+    actu: qd.Tensor
+    Jp: qd.Tensor
+
+
+def get_mpm_particles(n_frames: int, n_particles: int, n_envs: int) -> MpmParticles:
+    shape = (n_frames, n_particles, n_envs)
+    return MpmParticles(
+        pos=array_class.V(dtype=gs.qd_vec3, shape=shape),
+        vel=array_class.V(dtype=gs.qd_vec3, shape=shape),
+        C=array_class.V(dtype=gs.qd_mat3, shape=shape),
+        F=array_class.V(dtype=gs.qd_mat3, shape=shape),
+        actu=array_class.V(dtype=gs.qd_float, shape=shape),
+        Jp=array_class.V(dtype=gs.qd_float, shape=shape),
+    )
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class MpmParticlesNG:
+    """Particle state without gradient, shape (frames, n_particles, n_envs)."""
+
+    kind: ClassVar[array_class.DataKind] = array_class.DataKind.STATE
+
+    active: qd.Tensor
+
+
+def get_mpm_particles_ng(n_frames: int, n_particles: int, n_envs: int) -> MpmParticlesNG:
+    return MpmParticlesNG(active=array_class.V(dtype=gs.qd_bool, shape=(n_frames, n_particles, n_envs)))
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class MpmParticlesInfo:
+    """Static per-particle data, shape (n_particles,)."""
+
+    kind: ClassVar[array_class.DataKind] = array_class.DataKind.INFO
+
+    material_idx: qd.Tensor
+    mass: qd.Tensor
+    default_Jp: qd.Tensor
+    free: qd.Tensor
+    muscle_group: qd.Tensor
+    muscle_direction: qd.Tensor
+
+
+def get_mpm_particles_info(n_particles: int) -> MpmParticlesInfo:
+    shape = (n_particles,)
+    return MpmParticlesInfo(
+        material_idx=array_class.V(dtype=gs.qd_int, shape=shape),
+        mass=array_class.V(dtype=gs.qd_float, shape=shape),
+        default_Jp=array_class.V(dtype=gs.qd_float, shape=shape),
+        free=array_class.V(dtype=gs.qd_bool, shape=shape),
+        muscle_group=array_class.V(dtype=gs.qd_int, shape=shape),
+        muscle_direction=array_class.V(dtype=gs.qd_vec3, shape=shape),
+    )
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -71,13 +206,6 @@ def get_mpm_material_table(table: np.ndarray, family: np.ndarray) -> MpmMaterial
     return MpmMaterialTable(material_table=material_table, mat_family=mat_family)
 
 
-def _scalar(dtype, value=0):
-    result = qd.ndarray(dtype, shape=())
-    np_dtype = {qd.i32: np.int32, qd.f32: np.float32, qd.f64: np.float64}[dtype]
-    result.from_numpy(np.array(value, dtype=np_dtype))
-    return result
-
-
 def _padded(length: int, multiple: int = REDUCE_BLOCK_DIM) -> int:
     return max(((max(length, 1) + multiple - 1) // multiple) * multiple, multiple)
 
@@ -93,6 +221,8 @@ class MpmGrid:
 
     def __init__(self, n_sort: int, max_blocks: int, max_particle_blocks: int) -> None:
         self.allocate(n_sort, max_blocks, max_particle_blocks)
+        # Number of particle keys sorted, n_envs * n_particles
+        self.n_sort_keys = _scalar(qd.i32)
         self.n_valid = _scalar(qd.i32)
         self.n_valid_chunks = _scalar(qd.i32)
         self.n_valid_reduce_blocks = _scalar(qd.i32)
@@ -143,8 +273,11 @@ class MpmGrid:
 
         self.node_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
         self.node_fixed = qd.ndarray(qd.i32, shape=(max_nodes,))
-        # Per displacement component: held at zero by the Newton solve (a fixed node, or a wall the node moves into)
+        # Per displacement component: held at zero by the Newton solve
         self.dof_fixed = qd.ndarray(qd.i32, shape=(3 * max_nodes,))
+        # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic) at the substep start, from
+        # which the contact rows take the effective inverse weight of the material they push
+        self.node_diag = qd.ndarray(gs.qd_float, shape=(9 * max_nodes,))
         self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_solved = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
@@ -156,20 +289,46 @@ class MpmGrid:
 
 @qd.data_oriented
 class MpmNewton:
-    """Newton state of the grid displacement `u`, and the per-particle staging of the elastic assembly."""
+    """Newton state of the grid displacement `u`, the per-particle staging of the assembly, and the soft contact rows
+    of the particles."""
 
     def __init__(self, n_sort: int, max_nodes: int) -> None:
         self.allocate(n_sort, max_nodes)
 
     def allocate(self, n_sort: int, max_nodes: int) -> None:
-        n_partials = _padded(n_sort) // REDUCE_BLOCK_DIM + _padded(max_nodes) // REDUCE_BLOCK_DIM
-        self.n_particle_partials = _padded(n_sort) // REDUCE_BLOCK_DIM
+        n_padded = _padded(n_sort)
+        n_partials = n_padded // REDUCE_BLOCK_DIM + _padded(max_nodes) // REDUCE_BLOCK_DIM
+        # Offset of the node partials of the energy, after the particle partials
+        self.n_particle_partials = _scalar(qd.i32, n_padded // REDUCE_BLOCK_DIM)
         self.u = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.u_temp = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.du = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
-        self.g_p = qd.ndarray(gs.qd_float, shape=(9 * _padded(n_sort),))
+        self.g_p = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
+        # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a
+        self.g_contact = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        # Per sorted particle: the gradient and Hessian of its Rigid contact rows alone, which couple it with the dofs of
+        # its link, and the displacement of its contact point on the link over the substep
+        self.g_rigid = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.h_rigid = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
+        self.contact_dr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        # Line search along the Newton direction: the displacement of each contact point along the Rigid direction, and
+        # per contact row its value c0 at the start point and its slope s along the direction
+        self.contact_ddr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.ls_c0 = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
+        self.ls_s = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
+        # [sol.b, sol.r, contact slope at 0, contact curvature at 0, contact slope at alpha, contact curvature at alpha]
+        # and [lo, hi, alpha, smooth slope, smooth curvature, done] of the one-dimensional search
+        self.ls_sums = qd.ndarray(gs.qd_float, shape=(6,))
+        self.ls_state = qd.ndarray(gs.qd_float, shape=(6,))
         self.energy_partials = qd.ndarray(gs.qd_float, shape=(n_partials,))
+        # Soft contact rows, CONTACT_ROWS per sorted particle on its trial displacement dx = sum_a w_a u_a: direction J,
+        # stiffness D (zero where there is no row) and target t of the row term 1/2 D min(0, J.dx - t)^2, and the
+        # Rigid link of the particle's pyramid rows (-1 if none)
+        self.contact_dir = qd.ndarray(gs.qd_float, shape=(3 * CONTACT_ROWS * n_padded,))
+        self.contact_D = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
+        self.contact_t = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
+        self.contact_link = qd.ndarray(qd.i32, shape=(n_padded,))
 
 
 @qd.data_oriented
@@ -200,6 +359,27 @@ class MpmLinearSystem:
         n_bricks = max(max_nodes // BRICK_NODES, 1)
         self.brick = qd.ndarray(gs.qd_float, shape=(n_bricks * BRICK_SCALARS,))
         self.brick_mask = qd.ndarray(qd.i32, shape=(n_bricks,))
+
+
+@qd.data_oriented
+class MpmRigidCoupling:
+    """Rigid unknowns of the joint Newton solve of MPM and Rigid, and the Rigid part of its PCG vectors.
+
+    The Rigid unknown is x = dt^2 qacc per dof and environment, with Rigid's own cost scaled by dt^4 to the
+    displacement units of the MPM energy. `qacc`, `Ma` and `cost` hold Rigid's evaluation of x. `r`, `z`, `p`, `ap`
+    and `sol` are the Rigid rows of the PCG residual, preconditioned residual, direction, operator image and solution.
+    Per link, `link_V` holds the spatial displacement of a dof vector and `link_F` accumulates a spatial force, linear
+    then angular about the root COM.
+    """
+
+    def __init__(self, n_dofs: int, n_links: int, n_envs: int) -> None:
+        shape = (max(n_dofs, 1), n_envs)
+        for name in ("x", "x_temp", "dx", "grad", "qacc", "Ma", "r", "z", "p", "ap", "sol"):
+            setattr(self, name, qd.ndarray(gs.qd_float, shape=shape))
+        self.cost = qd.ndarray(gs.qd_float, shape=(n_envs,))
+        link_shape = (max(n_links, 1), n_envs)
+        self.link_F = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
+        self.link_V = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
 
 
 def get_mpm_newton_control() -> NewtonControl:

@@ -10,14 +10,19 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
+from genesis.engine.couplers import mpm_rigid_func
+from genesis.engine.couplers.mpm_rigid_func import func_build_rigid_rows
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
-from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo
+from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo, func_sort_reduce_bcoo_graph, sort_reduce_bcoo
+from genesis.engine.numerics.dynamic_exclusive_sum import kernel_dynamic_exclusive_sum
+from genesis.engine.numerics.dynamic_radix_sort import dynamic_radix_sort
 from genesis.engine.numerics.linear_pcg import (
     func_init_linear_pcg_direction,
     func_init_linear_pcg_residual,
     func_linear_pcg_direction_update,
-    func_linear_pcg_matvec_update,
+    func_linear_pcg_spmv,
+    func_linear_pcg_update_xr,
 )
 from genesis.engine.numerics.newton_control import (
     func_accept_or_backtrack,
@@ -40,9 +45,17 @@ from .mpm_data import (
     MpmLinearSystem,
     MpmMaterialTable,
     MpmNewton,
+    MpmParams,
+    MpmParticles,
+    MpmParticlesInfo,
+    MpmParticlesNG,
+    MpmRigidCoupling,
     MpmStaticConfig,
     get_mpm_material_table,
     get_mpm_newton_control,
+    get_mpm_particles,
+    get_mpm_particles_info,
+    get_mpm_particles_ng,
     initial_capacities,
     triplet_capacity,
     CAPACITY_GROW_FACTOR,
@@ -57,6 +70,18 @@ if TYPE_CHECKING:
 # Largest grid node velocity update, in m/s, under which the Newton solve of a substep is converged
 NEWTON_VELOCITY_TOL = 5e-2
 
+# Run the substep as the single checkpointed graph `kernel_substep`, or as separate launches driven from the host with
+# the PCG iterations and the radix sorts as small graphs of their own.
+# FIXME: The single graph takes several minutes to compile cold, against a fraction of that for the separate launches,
+# whose kernels each compile once and are shared by every call site; the host-driven substep is the default meanwhile.
+USE_SUBSTEP_GRAPH = False
+
+# Run the Newton iterations of the host-driven substep as one graph (`kernel_newton_loop`), or drive them from the host
+# with only the PCG iterations as a graph. The graph runs faster, the host loop compiles faster.
+# FIXME: The Newton graph compiles cold in about 47 s against about 15 s for its stages as separate kernels (the
+# compile time of a graph grows faster than its size), and a change of any stage in it recompiles it whole.
+USE_NEWTON_GRAPH = False
+
 
 @qd.data_oriented
 class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
@@ -64,8 +89,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
 
     Every substep solves for the grid node displacement that minimizes the incremental potential of the grid inertia
     and the particle elastic energy, on a block-sparse grid rebuilt from the particles, by a Newton method whose linear
-    systems a preconditioned conjugate gradient solves. The whole substep is one graph; this class owns its data and
-    composes the stages of `mpm_func`.
+    systems a preconditioned conjugate gradient solves. The substep runs as separate launches driven from the host, or
+    as one graph (see `USE_SUBSTEP_GRAPH`); this class owns its data and composes the stages of `mpm_func`.
     """
 
     material_cls = MPM.Base
@@ -115,43 +140,15 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         )
 
     def init_particle_fields(self):
-        # dynamic particle state
-        struct_particle_state = qd.types.struct(
-            pos=gs.qd_vec3,  # position
-            vel=gs.qd_vec3,  # velocity
-            C=gs.qd_mat3,  # affine velocity field
-            F=gs.qd_mat3,  # deformation gradient
-            actu=gs.qd_float,  # actuation
-            Jp=gs.qd_float,  # volume ratio
-        )
-
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(active=gs.qd_bool)
-
-        # static particle info
-        struct_particle_info = qd.types.struct(
-            material_idx=gs.qd_int,
-            mass=gs.qd_float,
-            default_Jp=gs.qd_float,
-            free=gs.qd_bool,
-            # for muscle
-            muscle_group=gs.qd_int,
-            muscle_direction=gs.qd_vec3,
-        )
+        # Particle state of the substep window, its gradient-free part and the static info, as dynamic tensors in the
+        # default array mode, so that a scene with another particle count reuses the compiled kernels
+        n_frames = self._sim.substeps_local + 1
+        self.particles = get_mpm_particles(n_frames, self._n_particles, self._B)
+        self.particles_ng = get_mpm_particles_ng(n_frames, self._n_particles, self._B)
+        self.particles_info = get_mpm_particles_info(self._n_particles)
 
         # single frame particle state for rendering
         struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
-
-        # construct fields
-        self.particles = struct_particle_state.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
-        )
-        self.particles_ng = struct_particle_state_ng.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_info = struct_particle_info.field(
-            shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
-        )
         self.particles_render = struct_particle_state_render.field(
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
@@ -172,15 +169,28 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             table[mpm_func.PARAM_LAM, idx] = material.lam
             family[idx] = mpm_func.FAMILY_FIXED_COROTATED
 
+        rigid = self._sim.rigid_solver
         self._mpm_config = MpmStaticConfig(
+            has_rigid=self._has_rigid,
+            rigid_batch_links_info=rigid._options.batch_links_info,
+            has_rigid_rows=self._has_rigid and not rigid._disable_constraint,
+            has_terrain=self._has_rigid and rigid.collider.collider_config.has_terrain,
+        )
+        self._mpm_coupling = MpmRigidCoupling(rigid.n_dofs_ if self._has_rigid else 1, rigid.n_links, self._B)
+        # Rigid stops its substep after assembling its constraint rows; the MPM substep solves them with its own
+        # unknowns and finishes Rigid's substep
+        rigid._defer_constraint_solve = self._has_rigid
+        self._mpm_params = MpmParams(
             n_envs=self._B,
             n_particles=self._n_particles,
             substep_dt=self.substep_dt,
             dx=self._dx,
-            inv_dx=self._inv_dx,
             particle_volume=self._particle_volume_real,
             mass_scale=self._particle_volume_scale,
             n_materials=n_materials,
+            wall_sol_params=self._wall_sol_params(),
+            wall_lower=self.boundary.lower,
+            wall_upper=self.boundary.upper,
         )
         self._mpm_materials = get_mpm_material_table(table.reshape(-1), family)
         self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks)
@@ -189,6 +199,14 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._mpm_control = get_mpm_newton_control()
         self._mpm_control.disp_tol.from_numpy(np.array(NEWTON_VELOCITY_TOL * self.substep_dt, dtype=gs.np_float))
         self._mpm_force_fields = MpmForceFields(self._ffs)
+
+    def _wall_sol_params(self):
+        """Rigid's default solref / solimp parameters, with the Rigid constraint timeconst floored at twice the
+        substep as Rigid floors its contacts."""
+        params = gu.default_solver_params()
+        timeconst = self._sim.rigid_solver._options.constraint_timeconst
+        params[0] = max(timeconst if timeconst is not None else 0.0, 2.0 * self.substep_dt)
+        return tuple(float(p) for p in params)
 
     def init_vvert_fields(self):
         struct_vvert_info = qd.types.struct(
@@ -233,7 +251,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.particle_constraints.link_idx.fill(-1)
 
     def reset_grad(self):
-        self.particles.grad.fill(0.0)
+        # The implicit solver raises for differentiable simulation, so its particle data carries no gradient yet
         self._queried_states.clear()
 
         for entity in self._entities:
@@ -254,8 +272,21 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         # Only the legacy coupler couples MPM with other solvers, each pair behind its own option
         coupler_options = self._sim.coupler.options
         is_legacy = isinstance(coupler_options, LegacyCouplerOptions)
+        self._has_rigid = self._sim.rigid_solver.is_active and is_legacy and coupler_options.rigid_mpm
+        if self._has_rigid:
+            rigid_options = self._sim.rigid_solver._options
+            if rigid_options.friction_cone == gs.friction_cone.elliptic:
+                gs.raise_exception(
+                    "Coupling the implicit MPM solver with an elliptic Rigid friction cone is not supported."
+                )
+            # The joint solve uses Rigid's Newton Hessian factor as its preconditioner and integrates every Rigid dof
+            if rigid_options.constraint_solver != gs.constraint_solver.Newton:
+                gs.raise_exception("Coupling the implicit MPM solver with Rigid requires Rigid's Newton solver.")
+            if self._sim.rigid_solver._use_hibernation or rigid_options.noslip_iterations > 0:
+                gs.raise_exception(
+                    "Coupling the implicit MPM solver with Rigid does not support hibernation or noslip iterations."
+                )
         partners = {
-            "RigidSolver": (self._sim.rigid_solver, is_legacy and coupler_options.rigid_mpm),
             "ToolSolver": (self._sim.tool_solver, is_legacy),
             "SPHSolver": (self._sim.sph_solver, is_legacy and coupler_options.mpm_sph),
             "PBDSolver": (self._sim.pbd_solver, is_legacy and coupler_options.mpm_pbd),
@@ -340,7 +371,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def _is_state_valid(self, f: qd.i32) -> qd.i32:
         is_success = True
         for i_p, i_b, i_3 in qd.ndrange(self._n_particles, self._B, 3):
-            if qd.math.isnan(self.particles[f, i_p, i_b].pos[i_3]):
+            if qd.math.isnan(self.particles.pos[f, i_p, i_b][i_3]):
                 is_success = False
         return is_success
 
@@ -384,31 +415,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def substep_post_coupling(self, f):
         if not self._mpm_sized:
             self._size_to_particles(f)
-        args = (
-            self.particles,
-            self.particles_ng,
-            self.particles_info,
-            self._mpm_materials,
-            self._mpm_grid,
-            self._mpm_newton,
-            self._mpm_linear,
-            self._mpm_control,
-            self._mpm_force_fields,
-            self.boundary,
-            self._mpm_config,
-            self._gravity,
-            f,
-            self._sim.cur_t,
-        )
-        status = kernel_substep(*args)
-        while status.yielded:
-            if status.checkpoint == MpmCheckpoint.GRID:
-                self._grow_grid()
-            elif status.checkpoint == MpmCheckpoint.ASSEMBLE:
-                self._grow_triplets()
-            else:
-                gs.raise_exception(f"The implicit MPM substep yielded at an unexpected checkpoint: {status.checkpoint}")
-            status = kernel_substep.resume(*args, from_checkpoint=status.checkpoint)
+        if USE_SUBSTEP_GRAPH:
+            self._substep_graph(f)
+        else:
+            self._substep_launches(f)
 
         # Apply particle constraints after g2p
         if self._constraints_initialized:
@@ -426,20 +436,198 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             if int(self._mpm_control.failed.to_numpy()):
                 gs.logger.warning("The implicit MPM Newton solve stopped before converging.")
 
+    def _assemble(self, f):
+        """Assemble the Newton system, growing the triplet storage until it holds the assembly."""
+        args = (
+            self.particles,
+            self.particles_info,
+            self._mpm_materials,
+            self._mpm_grid,
+            self._mpm_newton,
+            self._mpm_linear,
+            self._mpm_control,
+            self._mpm_params,
+            f,
+        )
+        kernel_assemble(*args)
+        while int(self._mpm_linear.matrix.triplet_overflow.to_numpy()):
+            self._grow_triplets()
+            kernel_assemble(*args)
+        sort_reduce_bcoo(self._mpm_linear.matrix)
+
+    def _rigid_args(self):
+        rigid = self._sim.rigid_solver
+        return (
+            rigid.dyn_state,
+            rigid.constraint_solver.constraint_state,
+            rigid.dyn_info,
+            rigid.rigid_info,
+            rigid.rigid_config,
+            self._mpm_config,
+            self._mpm_params,
+        )
+
+    def _rigid_point_disp(self, f):
+        kernel_rigid_point_disp(
+            self.particles, self._mpm_grid, self._mpm_newton, self._mpm_coupling, *self._rigid_args(), f
+        )
+
+    def _rigid_energy(self, is_trial):
+        kernel_rigid_energy(self._mpm_coupling, self._mpm_control, *self._rigid_args(), is_trial)
+
+    def _newton_loop_launches(self, f):
+        """The Newton iterations driven from the host, the PCG iterations of each as one graph."""
+        grid, newton, linear, control = self._mpm_grid, self._mpm_newton, self._mpm_linear, self._mpm_control
+        coupling, has_rigid = self._mpm_coupling, self._has_rigid
+        params = self._mpm_params
+        energy_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, control, params, f)
+        while True:
+            self._assemble(f)
+            if has_rigid:
+                rigid_args = self._rigid_args()
+                kernel_rigid_newton_prepare(self.particles, grid, newton, coupling, *rigid_args, f)
+                kernel_coupled_pcg_start(grid, linear, coupling, *rigid_args)
+                kernel_coupled_pcg_loop(self.particles, grid, newton, linear, coupling, *rigid_args, f)
+                kernel_rigid_start_line_search(coupling, control)
+            else:
+                kernel_pcg_start(grid, linear)
+                kernel_pcg_loop(grid, linear)
+            kernel_start_line_search(self.particles, grid, newton, linear, control, params, f)
+            if has_rigid:
+                kernel_coupled_line_alpha(self.particles, grid, newton, linear, control, coupling, *rigid_args, f)
+            else:
+                kernel_line_alpha(self.particles, grid, newton, linear, control, params, f)
+            while True:
+                kernel_step_forward(grid, newton, control)
+                if has_rigid:
+                    kernel_rigid_step_forward(coupling, control)
+                    self._rigid_point_disp(f)
+                kernel_energy(*energy_args, 1)
+                if has_rigid:
+                    self._rigid_energy(1)
+                kernel_accept_or_backtrack(control)
+                if not int(control.ls_cond.to_numpy()):
+                    break
+            kernel_update_convergence(control)
+            if not int(control.newton_cond.to_numpy()):
+                break
+
+    def _substep_launches(self, f):
+        """The substep of `kernel_substep` as separate launches, with the Newton, line-search and PCG loops and the
+        capacity growth driven from the host. When coupled with Rigid, the Newton solve is over the grid displacement
+        and Rigid's dofs together, and finishes Rigid's substep."""
+        rigid = self._sim.rigid_solver
+        grid, newton, linear, control = self._mpm_grid, self._mpm_newton, self._mpm_linear, self._mpm_control
+        params, config, coupling = self._mpm_params, self._mpm_config, self._mpm_coupling
+        has_rigid = self._has_rigid
+        energy_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, control, params, f)
+
+        build_grid(self.particles, self.particles_ng, grid, params, f)
+        while int(grid.grid_overflow.to_numpy()):
+            self._grow_grid()
+            build_grid(self.particles, self.particles_ng, grid, params, f)
+        kernel_predict(
+            self.particles,
+            self.particles_info,
+            grid,
+            newton,
+            self._mpm_force_fields,
+            params,
+            self._gravity,
+            f,
+            self._sim.cur_t,
+        )
+        # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights
+        self._assemble(f)
+        kernel_contact_rows(
+            self.particles,
+            grid,
+            newton,
+            linear,
+            control,
+            config,
+            params,
+            rigid.dyn_state.geoms,
+            rigid.dyn_info.geoms,
+            rigid.dyn_state.links,
+            rigid.dyn_info.links,
+            rigid.rigid_info,
+            rigid.collider.sdf.sdf_info,
+            f,
+        )
+        if has_rigid:
+            kernel_rigid_begin(coupling, *self._rigid_args())
+            self._rigid_point_disp(f)
+        kernel_energy(*energy_args, 0)
+        if has_rigid:
+            self._rigid_energy(0)
+
+        if USE_NEWTON_GRAPH:
+            # The assembly above sized the triplet storage for the substep's fixed grid topology, which every assembly
+            # of the Newton loop shares
+            newton_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, linear, control)
+            if has_rigid:
+                kernel_coupled_newton_loop(*newton_args, coupling, *self._rigid_args(), f)
+            else:
+                kernel_newton_loop(*newton_args, params, f)
+        else:
+            self._newton_loop_launches(f)
+
+        kernel_finalize(self.particles, self.particles_ng, grid, newton, params, f)
+        if has_rigid:
+            kernel_rigid_write_back(coupling, *self._rigid_args())
+            rigid.finish_deferred_substep()
+
+    def _substep_graph(self, f):
+        if self._has_rigid:
+            gs.raise_exception("The implicit MPM substep graph does not support the coupling with Rigid yet.")
+        rigid = self._sim.rigid_solver
+        args = (
+            self.particles,
+            self.particles_ng,
+            self.particles_info,
+            self._mpm_materials,
+            self._mpm_grid,
+            self._mpm_newton,
+            self._mpm_linear,
+            self._mpm_control,
+            self._mpm_force_fields,
+            self._mpm_config,
+            self._mpm_params,
+            self._gravity,
+            rigid.dyn_state.geoms,
+            rigid.dyn_info.geoms,
+            rigid.dyn_state.links,
+            rigid.dyn_info.links,
+            rigid.rigid_info,
+            rigid.collider.sdf.sdf_info,
+            f,
+            self._sim.cur_t,
+        )
+        status = kernel_substep(*args)
+        while status.yielded:
+            if status.checkpoint == MpmCheckpoint.GRID:
+                self._grow_grid()
+            elif status.checkpoint == MpmCheckpoint.ASSEMBLE:
+                self._grow_triplets()
+            else:
+                gs.raise_exception(f"The implicit MPM substep yielded at an unexpected checkpoint: {status.checkpoint}")
+            status = kernel_substep.resume(*args, from_checkpoint=status.checkpoint)
+
     def substep_post_coupling_grad(self, f):
         gs.raise_exception("Differentiable simulation is not supported by the implicit MPM solver yet.")
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles[target, i_p, i_b].pos = self.particles[source, i_p, i_b].pos
-            self.particles[target, i_p, i_b].vel = self.particles[source, i_p, i_b].vel
-            self.particles[target, i_p, i_b].F = self.particles[source, i_p, i_b].F
-            self.particles[target, i_p, i_b].C = self.particles[source, i_p, i_b].C
-            self.particles[target, i_p, i_b].Jp = self.particles[source, i_p, i_b].Jp
-            self.particles[target, i_p, i_b].actu = self.particles[source, i_p, i_b].actu
+            self.particles.pos[target, i_p, i_b] = self.particles.pos[source, i_p, i_b]
+            self.particles.vel[target, i_p, i_b] = self.particles.vel[source, i_p, i_b]
+            self.particles.F[target, i_p, i_b] = self.particles.F[source, i_p, i_b]
+            self.particles.C[target, i_p, i_b] = self.particles.C[source, i_p, i_b]
+            self.particles.Jp[target, i_p, i_b] = self.particles.Jp[source, i_p, i_b]
+            self.particles.actu[target, i_p, i_b] = self.particles.actu[source, i_p, i_b]
 
-            self.particles_ng[target, i_p, i_b].active = self.particles_ng[source, i_p, i_b].active
+            self.particles_ng.active[target, i_p, i_b] = self.particles_ng.active[source, i_p, i_b]
 
     @qd.kernel
     def copy_grad(self, source: qd.i32, target: qd.i32):
@@ -450,7 +638,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.particles.grad[target, i_p, i_b].C = self.particles.grad[source, i_p, i_b].C
             self.particles.grad[target, i_p, i_b].Jp = self.particles.grad[source, i_p, i_b].Jp
             self.particles.grad[target, i_p, i_b].actu = self.particles.grad[source, i_p, i_b].actu
-            self.particles_ng[target, i_p, i_b].active = self.particles_ng[source, i_p, i_b].active
+            self.particles_ng.active[target, i_p, i_b] = self.particles_ng.active[source, i_p, i_b]
 
     @qd.kernel
     def reset_grad_till_frame(self, f: qd.i32):
@@ -599,16 +787,16 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             # Write pos, vel
             for j in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[j] = pos[i_b, i_p, j]
-                self.particles[f, i_p, i_b].vel[j] = vel[i_b, i_p, j]
+                self.particles.pos[f, i_p, i_b][j] = pos[i_b, i_p, j]
+                self.particles.vel[f, i_p, i_b][j] = vel[i_b, i_p, j]
                 # Write C, F
                 for k in qd.static(range(3)):
-                    self.particles[f, i_p, i_b].C[j, k] = C[i_b, i_p, j, k]
-                    self.particles[f, i_p, i_b].F[j, k] = F[i_b, i_p, j, k]
+                    self.particles.C[f, i_p, i_b][j, k] = C[i_b, i_p, j, k]
+                    self.particles.F[f, i_p, i_b][j, k] = F[i_b, i_p, j, k]
             # Write Jp, actu, active
-            self.particles[f, i_p, i_b].Jp = Jp[i_b, i_p]
-            self.particles[f, i_p, i_b].actu = actu[i_b, i_p]
-            self.particles_ng[f, i_p, i_b].active = active[i_b, i_p]
+            self.particles.Jp[f, i_p, i_b] = Jp[i_b, i_p]
+            self.particles.actu[f, i_p, i_b] = actu[i_b, i_p]
+            self.particles_ng.active[f, i_p, i_b] = active[i_b, i_p]
 
     def get_state(self, f):
         if not self.is_active:
@@ -633,14 +821,14 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             for j in qd.static(range(3)):
-                pos[i_b, i_p, j] = self.particles[f, i_p, i_b].pos[j]
-                vel[i_b, i_p, j] = self.particles[f, i_p, i_b].vel[j]
+                pos[i_b, i_p, j] = self.particles.pos[f, i_p, i_b][j]
+                vel[i_b, i_p, j] = self.particles.vel[f, i_p, i_b][j]
                 for k in qd.static(range(3)):
-                    C[i_b, i_p, j, k] = self.particles[f, i_p, i_b].C[j, k]
-                    F[i_b, i_p, j, k] = self.particles[f, i_p, i_b].F[j, k]
-            Jp[i_b, i_p] = self.particles[f, i_p, i_b].Jp
-            actu[i_b, i_p] = self.particles[f, i_p, i_b].actu
-            active[i_b, i_p] = qd.cast(self.particles_ng[f, i_p, i_b].active, gs.qd_bool)
+                    C[i_b, i_p, j, k] = self.particles.C[f, i_p, i_b][j, k]
+                    F[i_b, i_p, j, k] = self.particles.F[f, i_p, i_b][j, k]
+            Jp[i_b, i_p] = self.particles.Jp[f, i_p, i_b]
+            actu[i_b, i_p] = self.particles.actu[f, i_p, i_b]
+            active[i_b, i_p] = qd.cast(self.particles_ng.active[f, i_p, i_b], gs.qd_bool)
 
     def update_render_fields(self):
         self._kernel_update_render_fields(self.sim.cur_substep_local)
@@ -648,18 +836,18 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     @qd.kernel
     def _kernel_update_render_fields(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[f, i_p, i_b].active:
-                self.particles_render[i_p, i_b].pos = self.particles[f, i_p, i_b].pos
-                self.particles_render[i_p, i_b].vel = self.particles[f, i_p, i_b].vel
+            if self.particles_ng.active[f, i_p, i_b]:
+                self.particles_render[i_p, i_b].pos = self.particles.pos[f, i_p, i_b]
+                self.particles_render[i_p, i_b].vel = self.particles.vel[f, i_p, i_b]
             else:
                 self.particles_render[i_p, i_b].pos = gu.qd_nowhere()
-            self.particles_render[i_p, i_b].active = self.particles_ng[f, i_p, i_b].active
+            self.particles_render[i_p, i_b].active = self.particles_ng.active[f, i_p, i_b]
 
         for i_v, i_b in qd.ndrange(self._n_vverts, self._B):
             vvert_pos = qd.Vector.zero(gs.qd_float, 3)
             for j in range(self._n_vvert_supports):
                 vvert_pos += (
-                    self.particles[f, self.vverts_info.support_idxs[i_v][j], i_b].pos
+                    self.particles.pos[f, self.vverts_info.support_idxs[i_v][j], i_b]
                     * self.vverts_info.support_weights[i_v][j]
                 )
             self.vverts_render[i_v, i_b].pos = vvert_pos
@@ -682,25 +870,25 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_ in range(n_particles):
             i_p = i_p_ + particle_start
 
-            self.particles_info[i_p].material_idx = material_idx
-            self.particles_info[i_p].default_Jp = mat_default_Jp
-            self.particles_info[i_p].mass = self._particle_volume * mat_rho
-            self.particles_info[i_p].free = True
-            self.particles_info[i_p].muscle_group = 0
-            self.particles_info[i_p].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+            self.particles_info.material_idx[i_p] = material_idx
+            self.particles_info.default_Jp[i_p] = mat_default_Jp
+            self.particles_info.mass[i_p] = self._particle_volume * mat_rho
+            self.particles_info.free[i_p] = True
+            self.particles_info.muscle_group[i_p] = 0
+            self.particles_info.muscle_direction[i_p] = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
 
         for i_p_, i_b in qd.ndrange(n_particles, self._B):
             i_p = i_p_ + particle_start
 
-            self.particles_ng[f, i_p, i_b].active = qd.cast(active, gs.qd_bool)
+            self.particles_ng.active[f, i_p, i_b] = qd.cast(active, gs.qd_bool)
             for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[i] = pos[i_p_, i]
+                self.particles.pos[f, i_p, i_b][i] = pos[i_p_, i]
 
-            self.particles[f, i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].C = qd.Matrix.zero(gs.qd_float, 3, 3)
-            self.particles[f, i_p, i_b].Jp = mat_default_Jp
-            self.particles[f, i_p, i_b].actu = gs.qd_float(0.0)
+            self.particles.vel[f, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            self.particles.F[f, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
+            self.particles.C[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            self.particles.Jp[f, i_p, i_b] = mat_default_Jp
+            self.particles.actu[f, i_p, i_b] = gs.qd_float(0.0)
 
     @qd.kernel
     def _kernel_set_particles_pos(
@@ -711,13 +899,13 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_b = envs_idx[i_b_]
 
             for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
+                self.particles.pos[f, i_p, i_b][i] = poss[i_b_, i_p_, i]
 
             # Reset these attributes whenever overwritting particle positions manually
-            self.particles[f, i_p, i_b].vel.fill(0.0)
-            self.particles[f, i_p, i_b].F = qd.Matrix.identity(gs.qd_float, 3)
-            self.particles[f, i_p, i_b].C.fill(0.0)
-            self.particles[f, i_p, i_b].Jp = self.particles_info[i_p].default_Jp
+            self.particles.vel[f, i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            self.particles.F[f, i_p, i_b] = qd.Matrix.identity(gs.qd_float, 3)
+            self.particles.C[f, i_p, i_b] = qd.Matrix.zero(gs.qd_float, 3, 3)
+            self.particles.Jp[f, i_p, i_b] = self.particles_info.default_Jp[i_p]
 
     @qd.kernel
     def _kernel_set_particles_pos_grad(
@@ -745,7 +933,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_p = i_p_ + particle_start
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
-                poss[i_b_, i_p_, i] = self.particles[f, i_p, i_b].pos[i]
+                poss[i_b_, i_p_, i] = self.particles.pos[f, i_p, i_b][i]
 
     @qd.kernel
     def _kernel_set_particles_vel(
@@ -759,7 +947,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
-                self.particles[f, i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
+                self.particles.vel[f, i_p, i_b][i] = vels[i_b_, i_p_, i]
 
     @qd.kernel
     def _kernel_set_particles_vel_grad(
@@ -787,7 +975,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             i_p = i_p_ + particle_start
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
-                vels[i_b_, i_p_, i] = self.particles[f, i_p, i_b].vel[i]
+                vels[i_b_, i_p_, i] = self.particles.vel[f, i_p, i_b][i]
 
     @qd.kernel
     def _kernel_set_particles_active(
@@ -800,7 +988,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            self.particles_ng[f, i_p, i_b].active = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
+            self.particles_ng.active[f, i_p, i_b] = qd.cast(actives[i_b_, i_p_], gs.qd_bool)
 
     @qd.kernel
     def _kernel_get_particles_active(
@@ -814,7 +1002,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(n_particles, envs_idx.shape[0]):
             i_p = i_p_ + particle_start
             i_b = envs_idx[i_b_]
-            actives[i_b_, i_p_] = self.particles_ng[f, i_p, i_b].active
+            actives[i_b_, i_p_] = self.particles_ng.active[f, i_p, i_b]
 
     @qd.kernel
     def _kernel_set_particles_actu(
@@ -828,8 +1016,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_g, i_b_ in qd.ndrange(particles_idx.shape[1], n_groups, envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
-            if self.particles_info[i_p].muscle_group == i_g:
-                self.particles[f, i_p, i_b].actu = actus[i_b_, i_p_, i_g]
+            if self.particles_info.muscle_group[i_p] == i_g:
+                self.particles.actu[f, i_p, i_b] = actus[i_b_, i_p_, i_g]
 
     @qd.kernel
     def _kernel_set_particles_actu_grad(
@@ -842,7 +1030,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b in qd.ndrange(n_particles, self._B):
             i_p = i_p_ + particle_start
             # Each particle reads the column of its muscle group (see _kernel_set_particles_actu)
-            i_g = self.particles_info[i_p].muscle_group
+            i_g = self.particles_info.muscle_group[i_p]
             actus_grad[i_b, i_p_, i_g] = self.particles.grad[f, i_p, i_b].actu
             # The input overwrites the actuation, so the value it replaces has no effect past this substep
             self.particles.grad[f, i_p, i_b].actu = 0.0
@@ -859,13 +1047,13 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_, i_b_ in qd.ndrange(n_particles, envs_idx.shape[0]):
             i_p = i_p_ + particle_start
             i_b = envs_idx[i_b_]
-            actus[i_b_, i_p_] = self.particles[f, i_p, i_b].actu
+            actus[i_b_, i_p_] = self.particles.actu[f, i_p, i_b]
 
     @qd.kernel
     def _kernel_set_particles_muscle_group(self, particles_idx: qd.types.ndarray(), muscle_group: qd.types.ndarray()):
         for i_p_ in range(particles_idx.shape[0]):
             i_p = particles_idx[i_p_]
-            self.particles_info[i_p].muscle_group = muscle_group[i_p_]
+            self.particles_info.muscle_group[i_p] = muscle_group[i_p_]
 
     @qd.kernel
     def _kernel_get_particles_muscle_group(
@@ -873,7 +1061,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     ):
         for i_p_ in range(n_particles):
             i_p = i_p_ + particle_start
-            muscle_group[i_p_] = self.particles_info[i_p].muscle_group
+            muscle_group[i_p_] = self.particles_info.muscle_group[i_p]
 
     @qd.kernel
     def _kernel_set_particles_muscle_direction(
@@ -882,19 +1070,19 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for i_p_ in range(particles_idx.shape[0]):
             i_p = particles_idx[i_p_]
             for i in qd.static(range(3)):
-                self.particles_info[i_p].muscle_direction[i] = muscle_direction[i_p_, i]
+                self.particles_info.muscle_direction[i_p][i] = muscle_direction[i_p_, i]
 
     @qd.kernel
     def _kernel_set_particles_free(self, particles_idx: qd.types.ndarray(), free: qd.types.ndarray()):
         for i_p_ in range(particles_idx.shape[0]):
             i_p = particles_idx[i_p_]
-            self.particles_info[i_p].free = free[i_p_]
+            self.particles_info.free[i_p] = free[i_p_]
 
     @qd.kernel
     def _kernel_get_particles_free(self, particle_start: qd.i32, n_particles: qd.i32, free: qd.types.ndarray()):
         for i_p_ in range(n_particles):
             i_p = i_p_ + particle_start
-            free[i_p_] = self.particles_info[i_p].free
+            free[i_p_] = self.particles_info.free[i_p]
 
     @qd.kernel
     def _kernel_get_mass(
@@ -903,7 +1091,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         total_mass = gs.qd_float(0.0)
         for i_p_ in range(n_particles):
             i_p = i_p_ + particle_start
-            total_mass += self.particles_info[i_p].mass
+            total_mass += self.particles_info.mass[i_p]
         total_mass = total_mass / self._particle_volume_scale
         for i_b_ in range(envs_idx.shape[0]):
             mass[i_b_] = total_mass
@@ -928,7 +1116,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 i_p = i_p_local + particle_start
 
                 # Get current particle position
-                pos = self.particles[f, i_p, i_b].pos
+                pos = self.particles.pos[f, i_p, i_b]
 
                 # Get link transform
                 l_pos = qd.Vector([link_pos[i_b, 0], link_pos[i_b, 1], link_pos[i_b, 2]], dt=gs.qd_float)
@@ -974,17 +1162,17 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 # Apply spring force to velocity
                 target_pos = self.particle_constraints[i_p, i_b].target_pos
                 stiffness = self.particle_constraints[i_p, i_b].stiffness
-                mass = self.particles_info[i_p].mass / self._particle_volume_scale
+                mass = self.particles_info.mass[i_p] / self._particle_volume_scale
 
-                pos = self.particles[f + 1, i_p, i_b].pos
-                vel = self.particles[f + 1, i_p, i_b].vel
+                pos = self.particles.pos[f + 1, i_p, i_b]
+                vel = self.particles.vel[f + 1, i_p, i_b]
 
                 pos_error = pos - target_pos
                 spring_force = -stiffness * pos_error
                 damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * vel
 
                 dv = self.substep_dt * (spring_force + damping_force) / mass
-                self.particles[f + 1, i_p, i_b].vel = vel + dv
+                self.particles.vel[f + 1, i_p, i_b] = vel + dv
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1109,18 +1297,24 @@ class MpmCheckpoint(IntEnum):
 
 @qd.kernel(graph=True, checkpoints=True)
 def kernel_substep(
-    particles: qd.template(),
-    particles_ng: qd.template(),
-    particles_info: qd.template(),
+    particles: MpmParticles,
+    particles_ng: MpmParticlesNG,
+    particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
     control: qd.template(),
     force_fields: qd.template(),
-    boundary: qd.template(),
     config: qd.template(),
+    params: qd.template(),
     gravity: qd.Tensor,
+    geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    links_state: array_class.LinksState,
+    links_info: array_class.LinksInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
     f: qd.i32,
     t: qd.f32,
 ):
@@ -1130,25 +1324,50 @@ def kernel_substep(
     resume point (Quadrants #956 may otherwise run a top-level func after a yielding checkpoint once). Checkpoint
     bodies wrap their calls in a static branch, as checkpoint lowering rejects bare top-level func calls.
     """
-    dt = qd.static(config.substep_dt)
+    dt = params.substep_dt[()]
     with qd.checkpoint(MpmCheckpoint.GRID, yield_on=grid.grid_overflow):
         if qd.static(True):
-            mpm_func.func_build_grid(particles, particles_ng, grid, config, f)
+            mpm_func.func_build_grid(particles, particles_ng, grid, params, f)
     with qd.checkpoint(MpmCheckpoint.PREDICT, yield_on=control.never_yield):
         if qd.static(True):
-            mpm_func.func_p2g(particles, particles_info, grid, config, gravity, f, dt)
-            mpm_func.func_apply_force_fields(grid, force_fields, config, t, dt)
-            mpm_func.func_constrain_walls(grid, boundary, config)
+            mpm_func.func_p2g(particles, particles_info, grid, params, gravity, f, dt)
+            mpm_func.func_apply_force_fields(grid, force_fields, params, t, dt)
+            mpm_func.func_fix_nodes(grid)
+            mpm_func.func_reset_contact_rows(grid, newton)
             mpm_func.func_newton_reset(grid, newton)
+            # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights
+            mpm_func.func_report_extent(grid, linear)
+            mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
+            func_sort_reduce_bcoo(linear.matrix)
+            mpm_func.func_gather_node_diag(grid, linear)
+            mpm_func.func_build_wall_rows(particles, grid, newton, params, f, dt)
+            if qd.static(config.has_rigid):
+                func_build_rigid_rows(
+                    particles,
+                    grid,
+                    newton,
+                    geoms_state,
+                    geoms_info,
+                    links_state,
+                    links_info,
+                    rigid_info,
+                    sdf_info,
+                    config,
+                    config,
+                    params,
+                    f,
+                    dt,
+                )
+            mpm_func.func_newton_start(grid, newton, params, dt)
             func_reset_newton_control(control)
-            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, config, f, dt, False)
+            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, False)
 
     while qd.graph.do_while(control.newton_cond):
         with qd.checkpoint(MpmCheckpoint.ASSEMBLE, yield_on=linear.matrix.triplet_overflow):
             if qd.static(True):
                 func_reset_newton_measures(control)
                 mpm_func.func_report_extent(grid, linear)
-                mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, config, f, dt)
+                mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
         with qd.checkpoint(MpmCheckpoint.SOLVE, yield_on=control.never_yield):
             if qd.static(True):
                 func_sort_reduce_bcoo(linear.matrix)
@@ -1165,7 +1384,7 @@ def kernel_substep(
             if qd.static(True):
                 mpm_func.func_negate_du(grid, newton, linear)
                 mpm_func.func_record_start_point(grid, newton)
-                mpm_func.func_contribute_newton_max_disp(grid, newton, control)
+                mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
                 func_check_convergence(control)
                 func_init_line_search(control)
         while qd.graph.do_while(control.ls_cond):
@@ -1173,7 +1392,7 @@ def kernel_substep(
                 if qd.static(True):
                     mpm_func.func_step_forward(grid, newton, control)
                     mpm_func.func_energy(
-                        particles, particles_info, materials, grid, newton, control, config, f, dt, True
+                        particles, particles_info, materials, grid, newton, control, params, f, dt, True
                     )
                     func_accept_or_backtrack(control)
         with qd.checkpoint(MpmCheckpoint.NEWTON_POST, yield_on=control.never_yield):
@@ -1183,124 +1402,236 @@ def kernel_substep(
     with qd.checkpoint(MpmCheckpoint.FINALIZE, yield_on=control.never_yield):
         if qd.static(True):
             mpm_func.func_grid_velocity(grid, newton, dt)
-            mpm_func.func_g2p_advect(particles, particles_ng, grid, config, f, dt)
+            mpm_func.func_g2p_advect(particles, particles_ng, grid, params, f, dt)
 
 
 @qd.kernel
-def kernel_build_grid(
-    particles: qd.template(),
-    particles_ng: qd.template(),
+def kernel_grid_keys(
+    particles: MpmParticles,
+    particles_ng: MpmParticlesNG,
     grid: qd.template(),
-    config: qd.template(),
+    params: qd.template(),
     f: qd.i32,
 ):
-    mpm_func.func_build_grid(particles, particles_ng, grid, config, f)
+    mpm_func.func_reset_grid(grid)
+    mpm_func.func_compose_particle_keys(particles, particles_ng, grid, params, f)
 
 
 @qd.kernel
-def kernel_p2g(
-    particles: qd.template(),
-    particles_info: qd.template(),
+def kernel_grid_blocks(
+    grid: qd.template(),
+    params: qd.template(),
+):
+    mpm_func.func_append_particle_blocks(grid, params)
+    mpm_func.func_gen_neighbor_keys(grid)
+
+
+@qd.kernel
+def kernel_grid_block_flags(grid: qd.template()):
+    mpm_func.func_block_flags(grid)
+
+
+@qd.kernel
+def kernel_grid_publish_blocks(grid: qd.template()):
+    mpm_func.func_publish_blocks(grid)
+    mpm_func.func_publish_grid_demand(grid)
+    mpm_func.func_cell_flags(grid)
+
+
+@qd.kernel
+def kernel_grid_cells(grid: qd.template()):
+    mpm_func.func_publish_cells(grid)
+    mpm_func.func_reset_cell_segs(grid)
+    mpm_func.func_fill_cell_segs(grid)
+
+
+def build_grid(particles, particles_ng, grid, params, f):
+    """Host-driven func_build_grid, its sorts and scans shared launches."""
+    kernel_grid_keys(particles, particles_ng, grid, params, f)
+    dynamic_radix_sort(
+        grid.particle_sort, grid.sort_keys, grid.sort_keys_tmp, grid.sort_ids, grid.sort_ids_tmp, grid.n_sort_keys
+    )
+    kernel_grid_blocks(grid, params)
+    dynamic_radix_sort(
+        grid.block_sort, grid.nbr_keys, grid.nbr_keys_tmp, grid.nbr_perm, grid.nbr_perm_tmp, grid.n_neighbor_keys
+    )
+    kernel_grid_block_flags(grid)
+    kernel_dynamic_exclusive_sum(grid.block_scan, grid.block_flags, grid.block_ranks, grid.n_neighbor_keys)
+    kernel_grid_publish_blocks(grid)
+    kernel_dynamic_exclusive_sum(grid.cell_scan, grid.cell_flags, grid.cell_ranks, grid.n_valid)
+    kernel_dynamic_exclusive_sum(grid.task_scan, grid.task_flags, grid.task_ranks, grid.n_valid)
+    kernel_grid_cells(grid)
+
+
+@qd.kernel
+def kernel_predict(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),
     newton: qd.template(),
-    control: qd.template(),
     force_fields: qd.template(),
-    boundary: qd.template(),
-    config: qd.template(),
+    params: qd.template(),
     gravity: qd.Tensor,
     f: qd.i32,
     t: qd.f32,
 ):
-    dt = qd.static(config.substep_dt)
-    mpm_func.func_p2g(particles, particles_info, grid, config, gravity, f, dt)
-    mpm_func.func_apply_force_fields(grid, force_fields, config, t, dt)
-    mpm_func.func_constrain_walls(grid, boundary, config)
+    dt = params.substep_dt[()]
+    mpm_func.func_p2g(particles, particles_info, grid, params, gravity, f, dt)
+    mpm_func.func_apply_force_fields(grid, force_fields, params, t, dt)
+    mpm_func.func_fix_nodes(grid)
+    mpm_func.func_reset_contact_rows(grid, newton)
     mpm_func.func_newton_reset(grid, newton)
+
+
+@qd.kernel
+def kernel_contact_rows(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    control: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    links_state: array_class.LinksState,
+    links_info: array_class.LinksInfo,
+    rigid_info: array_class.RigidInfo,
+    sdf_info: array_class.SDFInfo,
+    f: qd.i32,
+):
+    """Contact rows from the reduced physical Hessian at u = 0, then arm the Newton loop."""
+    dt = params.substep_dt[()]
+    mpm_func.func_gather_node_diag(grid, linear)
+    mpm_func.func_build_wall_rows(particles, grid, newton, params, f, dt)
+    if qd.static(config.has_rigid):
+        func_build_rigid_rows(
+            particles,
+            grid,
+            newton,
+            geoms_state,
+            geoms_info,
+            links_state,
+            links_info,
+            rigid_info,
+            sdf_info,
+            config,
+            config,
+            params,
+            f,
+            dt,
+        )
+    mpm_func.func_newton_start(grid, newton, params, dt)
     func_reset_newton_control(control)
 
 
 @qd.kernel
-def kernel_start_energy(
-    particles: qd.template(),
-    particles_info: qd.template(),
+def kernel_energy(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     control: qd.template(),
-    config: qd.template(),
+    params: qd.template(),
     f: qd.i32,
+    is_trial: qd.i32,
 ):
     mpm_func.func_energy(
-        particles, particles_info, materials, grid, newton, control, config, f, qd.static(config.substep_dt), False
+        particles, particles_info, materials, grid, newton, control, params, f, params.substep_dt[()], is_trial
     )
 
 
 @qd.kernel
 def kernel_assemble(
-    particles: qd.template(),
-    particles_info: qd.template(),
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
     control: qd.template(),
-    config: qd.template(),
+    params: qd.template(),
     f: qd.i32,
 ):
-    dt = qd.static(config.substep_dt)
+    dt = params.substep_dt[()]
     func_reset_newton_measures(control)
     mpm_func.func_report_extent(grid, linear)
-    mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, config, f, dt)
+    mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
 
 
 @qd.kernel
-def kernel_sort_reduce(linear: qd.template()):
-    func_sort_reduce_bcoo(linear.matrix)
-
-
-@qd.kernel(graph=True)
-def kernel_solve_linear(
+def kernel_pcg_start(
     grid: qd.template(),
     linear: qd.template(),
 ):
+    """Brick preconditioner of the reduced matrix, and the PCG start from x = 0: r = b, z = M^-1 r, p = z."""
     mpm_func.func_reset_brick(grid, linear)
     mpm_func.func_gather_brick(linear)
     mpm_func.func_invert_brick(grid, linear)
     func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
     mpm_func.func_apply_brick(grid, linear)
     func_init_linear_pcg_direction(linear.pcg)
-    mpm_func.func_solve_brick_pcg(grid, linear)
+
+
+@qd.kernel(graph=True)
+def kernel_pcg_loop(
+    grid: qd.template(),
+    linear: qd.template(),
+):
+    """The PCG iterations after kernel_pcg_start, until convergence or the iteration budget, as one graph."""
+    while qd.graph.do_while(linear.pcg.cond):
+        func_linear_pcg_spmv(linear.pcg, linear.matrix)
+        func_linear_pcg_update_xr(linear.pcg, linear.solution)
+        mpm_func.func_apply_brick(grid, linear)
+        func_linear_pcg_direction_update(linear.pcg)
 
 
 @qd.kernel
 def kernel_start_line_search(
+    particles: MpmParticles,
     grid: qd.template(),
     newton: qd.template(),
     linear: qd.template(),
     control: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
 ):
     mpm_func.func_negate_du(grid, newton, linear)
     mpm_func.func_record_start_point(grid, newton)
-    mpm_func.func_contribute_newton_max_disp(grid, newton, control)
+    mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
     func_check_convergence(control)
     func_init_line_search(control)
 
 
 @qd.kernel
-def kernel_line_search_trial(
-    particles: qd.template(),
-    particles_info: qd.template(),
-    materials: MpmMaterialTable,
+def kernel_step_forward(
     grid: qd.template(),
     newton: qd.template(),
     control: qd.template(),
-    config: qd.template(),
+):
+    mpm_func.func_step_forward(grid, newton, control)
+
+
+@qd.kernel
+def kernel_accept_or_backtrack(control: qd.template()):
+    func_accept_or_backtrack(control)
+
+
+@qd.kernel
+def kernel_line_alpha(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    control: qd.template(),
+    params: qd.template(),
     f: qd.i32,
 ):
-    dt = qd.static(config.substep_dt)
-    mpm_func.func_step_forward(grid, newton, control)
-    mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, config, f, dt, True)
-    func_accept_or_backtrack(control)
+    """First line-search step from the piecewise-quadratic model along the Newton direction (func_line_alpha)."""
+    mpm_func.func_line_rows(particles, grid, newton, params, f)
+    mpm_func.func_line_model(grid, newton, linear)
+    mpm_func.func_line_alpha(grid, newton, control, params)
 
 
 @qd.kernel
@@ -1308,15 +1639,391 @@ def kernel_update_convergence(control: qd.template()):
     func_update_convergence(control)
 
 
-@qd.kernel
-def kernel_g2p(
-    particles: qd.template(),
-    particles_ng: qd.template(),
+@qd.kernel(graph=True)
+def kernel_newton_loop(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
     grid: qd.template(),
     newton: qd.template(),
-    config: qd.template(),
+    linear: qd.template(),
+    control: qd.template(),
+    params: qd.template(),
     f: qd.i32,
 ):
-    dt = qd.static(config.substep_dt)
+    """The Newton iterations of a substep as one graph, after the start energy armed the loop.
+
+    The triplet demand of an assembly depends on the grid topology only, fixed for the substep, so the assembly that
+    sized the storage before the loop covers every assembly inside it and the graph needs no capacity checkpoint.
+    """
+    dt = params.substep_dt[()]
+    while qd.graph.do_while(control.newton_cond):
+        func_reset_newton_measures(control)
+        mpm_func.func_report_extent(grid, linear)
+        mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
+        func_sort_reduce_bcoo_graph(linear.matrix)
+
+        mpm_func.func_reset_brick(grid, linear)
+        mpm_func.func_gather_brick(linear)
+        mpm_func.func_invert_brick(grid, linear)
+        func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
+        mpm_func.func_apply_brick(grid, linear)
+        func_init_linear_pcg_direction(linear.pcg)
+        while qd.graph.do_while(linear.pcg.cond):
+            func_linear_pcg_spmv(linear.pcg, linear.matrix)
+            func_linear_pcg_update_xr(linear.pcg, linear.solution)
+            mpm_func.func_apply_brick(grid, linear)
+            func_linear_pcg_direction_update(linear.pcg)
+
+        mpm_func.func_negate_du(grid, newton, linear)
+        mpm_func.func_record_start_point(grid, newton)
+        mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
+        func_check_convergence(control)
+        func_init_line_search(control)
+        mpm_func.func_line_rows(particles, grid, newton, params, f)
+        mpm_func.func_line_model(grid, newton, linear)
+        mpm_func.func_line_alpha(grid, newton, control, params)
+        while qd.graph.do_while(control.ls_cond):
+            mpm_func.func_step_forward(grid, newton, control)
+            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
+            func_accept_or_backtrack(control)
+        func_update_convergence(control)
+
+
+@qd.kernel
+def kernel_finalize(
+    particles: MpmParticles,
+    particles_ng: MpmParticlesNG,
+    grid: qd.template(),
+    newton: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    dt = params.substep_dt[()]
     mpm_func.func_grid_velocity(grid, newton, dt)
-    mpm_func.func_g2p_advect(particles, particles_ng, grid, config, f, dt)
+    mpm_func.func_g2p_advect(particles, particles_ng, grid, params, f, dt)
+
+
+# ------------------------------------------ joint solve with Rigid ------------------------------------------
+
+
+@qd.kernel
+def kernel_rigid_begin(
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+):
+    mpm_rigid_func.func_rigid_begin(coupling, dyn_state.dofs, constraint_state, rigid_config, config, params)
+
+
+@qd.kernel
+def kernel_rigid_point_disp(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    mpm_rigid_func.func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
+    mpm_rigid_func.func_contact_point_disp(
+        particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_dr
+    )
+
+
+@qd.kernel
+def kernel_rigid_energy(
+    coupling: qd.template(),
+    control: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    is_trial: qd.i32,
+):
+    mpm_rigid_func.func_rigid_evaluate(
+        coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
+    )
+    mpm_rigid_func.func_rigid_energy(coupling, control, params, is_trial)
+
+
+@qd.kernel
+def kernel_rigid_newton_prepare(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    mpm_rigid_func.func_rigid_evaluate(
+        coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
+    )
+    mpm_rigid_func.func_rigid_gradient(
+        particles,
+        grid,
+        newton,
+        coupling,
+        dyn_state,
+        constraint_state,
+        dyn_info,
+        rigid_info,
+        rigid_config,
+        config,
+        params,
+        f,
+    )
+
+
+@qd.kernel
+def kernel_coupled_pcg_start(
+    grid: qd.template(),
+    linear: qd.template(),
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+):
+    """kernel_pcg_start over the MPM rows and the Rigid dofs, preconditioned by the bricks and Rigid's factor."""
+    mpm_func.func_reset_brick(grid, linear)
+    mpm_func.func_gather_brick(linear)
+    mpm_func.func_invert_brick(grid, linear)
+    func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
+    mpm_rigid_func.func_rigid_pcg_init(coupling)
+    mpm_func.func_apply_brick(grid, linear)
+    mpm_rigid_func.func_rigid_precondition(coupling, dyn_state, constraint_state, rigid_info, rigid_config, config)
+    func_init_linear_pcg_direction(linear.pcg)
+    mpm_rigid_func.func_rigid_pcg_init_direction(coupling, linear.pcg)
+
+
+@qd.kernel(graph=True)
+def kernel_coupled_pcg_loop(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    """kernel_pcg_loop over the MPM rows and the Rigid dofs, with the joint operator."""
+    while qd.graph.do_while(linear.pcg.cond):
+        func_linear_pcg_spmv(linear.pcg, linear.matrix)
+        mpm_rigid_func.func_rigid_pcg_matvec(
+            particles,
+            grid,
+            newton,
+            linear,
+            coupling,
+            dyn_state,
+            constraint_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            config,
+            params,
+            f,
+        )
+        mpm_rigid_func.func_rigid_pcg_update_xr(coupling, linear.pcg)
+        func_linear_pcg_update_xr(linear.pcg, linear.solution)
+        mpm_func.func_apply_brick(grid, linear)
+        mpm_rigid_func.func_rigid_precondition(coupling, dyn_state, constraint_state, rigid_info, rigid_config, config)
+        mpm_rigid_func.func_rigid_pcg_dot_rz(coupling, linear.pcg)
+        func_linear_pcg_direction_update(linear.pcg)
+        mpm_rigid_func.func_rigid_pcg_direction(coupling, linear.pcg)
+
+
+@qd.kernel
+def kernel_rigid_start_line_search(coupling: qd.template(), control: qd.template()):
+    mpm_rigid_func.func_rigid_start_line_search(coupling, control)
+
+
+@qd.kernel
+def kernel_coupled_line_alpha(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    control: qd.template(),
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    """kernel_line_alpha along the joint direction, the contact points moving with the Rigid direction."""
+    mpm_rigid_func.func_link_spatial_disp(coupling, coupling.dx, dyn_info.links, dyn_state.dofs, config)
+    mpm_rigid_func.func_contact_point_disp(
+        particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_ddr
+    )
+    mpm_func.func_line_rows(particles, grid, newton, params, f)
+    mpm_func.func_line_model(grid, newton, linear)
+    mpm_rigid_func.func_rigid_line_model(coupling, newton)
+    mpm_func.func_line_alpha(grid, newton, control, params)
+
+
+@qd.kernel
+def kernel_rigid_step_forward(coupling: qd.template(), control: qd.template()):
+    mpm_rigid_func.func_rigid_step_forward(coupling, control)
+
+
+@qd.kernel(graph=True)
+def kernel_coupled_newton_loop(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    control: qd.template(),
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    """kernel_newton_loop over the grid displacement and Rigid's dofs together (design §6.2.3): one PCG over both,
+    preconditioned by the bricks and Rigid's island factor, and a line search on the joint energy."""
+    dt = params.substep_dt[()]
+    while qd.graph.do_while(control.newton_cond):
+        func_reset_newton_measures(control)
+        mpm_func.func_report_extent(grid, linear)
+        mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
+        func_sort_reduce_bcoo_graph(linear.matrix)
+        mpm_rigid_func.func_rigid_evaluate(
+            coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
+        )
+        mpm_rigid_func.func_rigid_gradient(
+            particles,
+            grid,
+            newton,
+            coupling,
+            dyn_state,
+            constraint_state,
+            dyn_info,
+            rigid_info,
+            rigid_config,
+            config,
+            params,
+            f,
+        )
+
+        mpm_func.func_reset_brick(grid, linear)
+        mpm_func.func_gather_brick(linear)
+        mpm_func.func_invert_brick(grid, linear)
+        func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
+        mpm_rigid_func.func_rigid_pcg_init(coupling)
+        mpm_func.func_apply_brick(grid, linear)
+        mpm_rigid_func.func_rigid_precondition(coupling, dyn_state, constraint_state, rigid_info, rigid_config, config)
+        func_init_linear_pcg_direction(linear.pcg)
+        mpm_rigid_func.func_rigid_pcg_init_direction(coupling, linear.pcg)
+        while qd.graph.do_while(linear.pcg.cond):
+            func_linear_pcg_spmv(linear.pcg, linear.matrix)
+            mpm_rigid_func.func_rigid_pcg_matvec(
+                particles,
+                grid,
+                newton,
+                linear,
+                coupling,
+                dyn_state,
+                constraint_state,
+                dyn_info,
+                rigid_info,
+                rigid_config,
+                config,
+                params,
+                f,
+            )
+            mpm_rigid_func.func_rigid_pcg_update_xr(coupling, linear.pcg)
+            func_linear_pcg_update_xr(linear.pcg, linear.solution)
+            mpm_func.func_apply_brick(grid, linear)
+            mpm_rigid_func.func_rigid_precondition(
+                coupling, dyn_state, constraint_state, rigid_info, rigid_config, config
+            )
+            mpm_rigid_func.func_rigid_pcg_dot_rz(coupling, linear.pcg)
+            func_linear_pcg_direction_update(linear.pcg)
+            mpm_rigid_func.func_rigid_pcg_direction(coupling, linear.pcg)
+
+        mpm_rigid_func.func_rigid_start_line_search(coupling, control)
+        mpm_func.func_negate_du(grid, newton, linear)
+        mpm_func.func_record_start_point(grid, newton)
+        mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
+        func_check_convergence(control)
+        func_init_line_search(control)
+        mpm_rigid_func.func_link_spatial_disp(coupling, coupling.dx, dyn_info.links, dyn_state.dofs, config)
+        mpm_rigid_func.func_contact_point_disp(
+            particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_ddr
+        )
+        mpm_func.func_line_rows(particles, grid, newton, params, f)
+        mpm_func.func_line_model(grid, newton, linear)
+        mpm_rigid_func.func_rigid_line_model(coupling, newton)
+        mpm_func.func_line_alpha(grid, newton, control, params)
+        while qd.graph.do_while(control.ls_cond):
+            mpm_func.func_step_forward(grid, newton, control)
+            mpm_rigid_func.func_rigid_step_forward(coupling, control)
+            mpm_rigid_func.func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
+            mpm_rigid_func.func_contact_point_disp(
+                particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_dr
+            )
+            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
+            mpm_rigid_func.func_rigid_evaluate(
+                coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
+            )
+            mpm_rigid_func.func_rigid_energy(coupling, control, params, 1)
+            func_accept_or_backtrack(control)
+        func_update_convergence(control)
+
+
+@qd.kernel
+def kernel_rigid_write_back(
+    coupling: qd.template(),
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),
+    params: qd.template(),
+):
+    mpm_rigid_func.func_rigid_evaluate(
+        coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
+    )
+    mpm_rigid_func.func_rigid_write_back(coupling, constraint_state, config)

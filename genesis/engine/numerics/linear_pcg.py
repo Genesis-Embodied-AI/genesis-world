@@ -164,6 +164,17 @@ def func_linear_pcg_matvec_update(
     on entry (init, or the previous iteration's tail). The caller applies its preconditioner next, then calls
     func_linear_pcg_direction_update.
     """
+    func_linear_pcg_spmv(ws, matrix)
+    func_linear_pcg_update_xr(ws, x)
+
+
+@qd.func(requires_top_level=True)
+def func_linear_pcg_spmv(
+    ws: qd.template(),  # PCGWorkspace
+    matrix: qd.template(),  # BCOOMatrix, symmetric 3x3 blocks
+):
+    """The SpMV half of func_linear_pcg_matvec_update: Ap += A p with p.Ap in energy form. A caller whose operator has
+    a term beyond the matrix adds it to Ap and p.Ap before func_linear_pcg_update_xr."""
     qd.loop_config(name="pcg_spmv_pap", block_dim=PCG_BLOCK)
     for t in range(ws.n_spmv_blocks * PCG_BLOCK):
         lane = qd.i32(qd.simt.subgroup.invocation_id()) & 31
@@ -202,6 +213,14 @@ def func_linear_pcg_matvec_update(
         energy_sum = _warp_sum(energy_sum)
         if lane == 0 and energy_sum != 0.0:
             qd.atomic_add(ws.p_dot_ap[()], energy_sum)
+
+
+@qd.func(requires_top_level=True)
+def func_linear_pcg_update_xr(
+    ws: qd.template(),  # PCGWorkspace
+    x: qd.template(),  # qd.Ndarray
+):
+    """x += alpha p and r -= alpha Ap with alpha = rz / p.Ap, and the rz_new slot zeroed for the dot that follows."""
     qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
     for t in range(ws.n_blocks * PCG_BLOCK):
         if ws.converged[()] == 0:

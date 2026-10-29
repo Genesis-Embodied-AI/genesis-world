@@ -91,6 +91,9 @@ class DynamicRadixSort:
         self.lookback_partial = qd.ndarray(qd.i32, shape=(n_blocks, _RADIX_DIGITS))
         self.lookback_complete = qd.ndarray(qd.i32, shape=(n_blocks, _RADIX_DIGITS))
         self.tile_counters = qd.ndarray(qd.i32, shape=(n_passes,))
+        # Device-side pass loop of kernel_radix_sort: the first of the two passes of an iteration, and its condition
+        self.pass_idx = qd.ndarray(qd.i32, shape=())
+        self.pass_cond = qd.ndarray(qd.i32, shape=())
 
         self.bins.from_numpy(np.zeros((n_passes, _RADIX_DIGITS), dtype=np.int32))
         lookback_shape = (n_blocks, _RADIX_DIGITS)
@@ -165,7 +168,7 @@ class DynamicRadixSort:
     @qd.func(requires_top_level=True)
     def clear_pass(
         self,
-        radix_pass: qd.template(),  # int
+        radix_pass,
         n: qd.template(),  # int
     ):
         qd.loop_config(name="drs_memset_lookback", block_dim=256)
@@ -185,11 +188,12 @@ class DynamicRadixSort:
         perm_in: qd.template(),  # qd.Ndarray
         perm_out: qd.template(),  # qd.Ndarray
         n: qd.template(),  # int
-        radix_pass: qd.template(),  # int
+        radix_pass,
     ):
         qd.loop_config(name="drs_onesweep", block_dim=256)
         needed_blocks = qd.max((n + 6143) // 6144, 1)
         for _ in range(needed_blocks * 256):
+            shift = qd.u32(radix_pass * 8)
             qd.simt.block.sync()
             tid = qd.simt.block.thread_idx()
             count = n
@@ -225,12 +229,11 @@ class DynamicRadixSort:
                         else:
                             key64 = keys_in[input_index]
 
-                    shift = qd.static(radix_pass * 8)
                     digit_key = qd.u32(0xFF)
                     if qd.static(self.key_dtype == qd.u32):
                         digit_key = (key32 >> shift) & qd.u32(0xFF)
                     else:
-                        digit_key = qd.u32((key64 >> shift) & qd.u64(0xFF))
+                        digit_key = qd.u32((key64 >> qd.u64(shift)) & qd.u64(0xFF))
                     digit = qd.i32(digit_key)
                     keys32[item] = key32
                     keys64[item] = key64
@@ -290,8 +293,7 @@ class DynamicRadixSort:
                     sorted_index = item * 256 + tid
                     if sorted_index < valid_count:
                         key = sorted_data[sorted_index]
-                        shift = qd.static(radix_pass * 8)
-                        digit = qd.i32((key >> shift) & qd.u64(0xFF))
+                        digit = qd.i32((key >> qd.u64(shift)) & qd.u64(0xFF))
                         output_index = (
                             self.bins[radix_pass, digit] + tile_prefixes[digit] + sorted_index - block_prefixes[digit]
                         )
@@ -301,6 +303,18 @@ class DynamicRadixSort:
                             keys_out[output_index] = key
                         perm_out[output_index] = sorted_perm[sorted_index]
             qd.simt.block.sync()
+
+    @qd.func(requires_top_level=True)
+    def start_passes(self):
+        for _ in range(1):
+            self.pass_idx[()] = 0
+            self.pass_cond[()] = 1
+
+    @qd.func(requires_top_level=True)
+    def advance_passes(self):
+        for _ in range(1):
+            self.pass_idx[()] = self.pass_idx[()] + 2
+            self.pass_cond[()] = qd.i32(self.pass_idx[()] < self.n_passes)
 
     @qd.func(requires_top_level=True)
     def sort(
@@ -337,3 +351,44 @@ def func_dynamic_radix_sort(
     lands back in the 'a' halves.
     """
     sorter.sort(keys_a, keys_b, perm_a, perm_b, n)
+
+
+@qd.func(requires_top_level=True)
+def func_dynamic_radix_sort_graph(
+    sorter: qd.template(),  # DynamicRadixSort
+    keys_a: qd.template(),  # qd.Ndarray
+    keys_b: qd.template(),  # qd.Ndarray
+    perm_a: qd.template(),  # qd.Ndarray
+    perm_b: qd.template(),  # qd.Ndarray
+    n: qd.template(),  # int
+):
+    """func_dynamic_radix_sort for a graph kernel: the passes run in a device loop, two per iteration (a to b, then b
+    to a), so that the graph holds two passes whatever the key width."""
+    sorter.clear_bins()
+    sorter.histogram(keys_a, n)
+    sorter.scan_bins()
+    sorter.start_passes()
+    while qd.graph.do_while(sorter.pass_cond):
+        sorter.clear_pass(sorter.pass_idx[()], n)
+        sorter.onesweep_pass(keys_a, keys_b, perm_a, perm_b, n, sorter.pass_idx[()])
+        sorter.clear_pass(sorter.pass_idx[()] + 1, n)
+        sorter.onesweep_pass(keys_b, keys_a, perm_b, perm_a, n, sorter.pass_idx[()] + 1)
+        sorter.advance_passes()
+
+
+@qd.kernel(graph=True)
+def kernel_radix_sort(
+    sorter: qd.template(),  # DynamicRadixSort
+    keys_a: qd.types.ndarray(),
+    keys_b: qd.types.ndarray(),
+    perm_a: qd.types.ndarray(),
+    perm_b: qd.types.ndarray(),
+    n: qd.types.ndarray(),  # i32 scalar
+):
+    """func_dynamic_radix_sort_graph as a graph of its own, with the count a device scalar."""
+    func_dynamic_radix_sort_graph(sorter, keys_a, keys_b, perm_a, perm_b, n[()])
+
+
+def dynamic_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n) -> None:
+    """Sort the first n keys of keys_a with their permutation perm_a, n a device scalar, ending in keys_a / perm_a."""
+    kernel_radix_sort(sorter, keys_a, keys_b, perm_a, perm_b, n)
