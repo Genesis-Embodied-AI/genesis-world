@@ -309,15 +309,30 @@ class Collider:
         self._init_terrain_state()
 
         # Initialize [state], which stores every data that are may be updated at every single simulation step
-        n_possible_pairs_ = max(self._n_possible_pairs, 1)
-        self.collider_state = array_class.get_collider_state(
-            self._solver,
-            self._solver.rigid_config,
-            n_possible_pairs_,
-            self._n_terrain_threads,
-            self.collider_info,
-            self.collider_config,
-            split_narrowphase=self._use_split_narrowphase,
+        config, collider_info = self._solver.rigid_config, self.collider_info
+        self.collider_state = array_class.ColliderState(
+            sizes=dict(
+                envs=self._solver._B,
+                links=self._solver.n_links_,
+                valid_link_pairs=collider_info.n_valid_link_pairs[None],
+                possible_pairs=self._n_possible_pairs,
+                broad_pairs=collider_info.max_collision_pairs_broad[None],
+                candidate_contacts=collider_info.max_candidate_contacts[None],
+                nonconvex_pair_contacts=self.collider_config.n_contacts_per_nonconvex_pair,
+                contact_slots=1 if self._solver._options.enable_contact_patch else 5,
+                terrain_threads=self._n_terrain_threads,
+            ),
+            env_first={array_class.ColliderState.contact_sort_key: True, "pruning": True},
+            unused={
+                "box_box": not config.box_box_detection,
+                "contact_cache": not self.collider_config.has_non_box_plane_convex_convex,
+                "diff_contacts": not config.requires_grad,
+                "work_queue": not (self._use_split_narrowphase or self.collider_config.has_terrain),
+                "split_narrowphase": not self._use_split_narrowphase,
+                "perturbed_slots": not (self._use_split_narrowphase and not self._solver._options.enable_contact_patch),
+                "pruning": not self.collider_config.has_prunable_contacts,
+            },
+            requires_grad=config.requires_grad,
         )
 
         # 'contact_data_cache' is not used in Quadrants kernels, so keep it outside of the collider state / info

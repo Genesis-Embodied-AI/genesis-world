@@ -174,7 +174,7 @@ def func_collider_reset_env(
     if qd.static(not cache_only):
         collider_state.first_time[i_b] = True
 
-    # The contact cache is only held for the convex-convex pairs (see get_contact_cache in array_class.py)
+    # The contact cache is only held for the convex-convex pairs (see ContactCache in array_class.py)
     if qd.static(collider_static_config.has_non_box_plane_convex_convex):
         for i_pair in range(collider_state.contact_cache.normal.shape[0]):
             collider_state.contact_cache.normal[i_pair, i_b] = qd.Vector.zero(gs.qd_float, 3)

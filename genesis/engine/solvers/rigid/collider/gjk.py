@@ -103,12 +103,22 @@ class GJK:
             diff_contact_min_penetration=gs.EPS * 100.0,
         )
 
+        # The sizes of the scratch states (see GJKState)
+        self._state_sizes = dict(
+            polytope_verts=5 + epa_max_iterations,
+            polytope_faces=polytope_max_faces,
+            polytope_horizons=6 + epa_max_iterations,
+            pair_contacts=max_contacts_per_pair,
+            polygon_verts=max_contact_polygon_verts,
+        )
+
         # The scratch states GJK runs on, at the smallest size until 'activate' sizes those the narrowphase uses
         # FIXME: quadrants#856 - a kernel cannot take None for a struct argument, so every state is allocated at the
         # smallest size first, even one the scene never runs GJK on, and 'activate' allocates the used ones again.
-        self.gjk_state = array_class.get_gjk_state_contact_only(1)
-        self.contact0_gjk_state = array_class.get_gjk_state_contact_only(1)
-        self.multicontact_gjk_state = array_class.get_gjk_state_contact_only(1)
+        sizes, unused = dict(self._state_sizes, envs=1), {("epa", "diff_contacts"): True}
+        self.gjk_state = array_class.GJKState(sizes=sizes, unused=unused)
+        self.contact0_gjk_state = array_class.GJKState(sizes=sizes, unused=unused)
+        self.multicontact_gjk_state = array_class.GJKState(sizes=sizes, unused=unused)
 
     def activate(self, n_contact0_threads=0, n_multicontact_threads=0):
         """Allocate the scratch states GJK runs on, for the narrowphase that runs it.
@@ -117,18 +127,23 @@ class GJK:
         narrowphase runs it on one state per thread of its contact0 pass (n_contact0_threads), which detects the first
         contact alone, and on one full state per thread of its multicontact pass (n_multicontact_threads).
         """
+        requires_grad = self._solver.rigid_config.requires_grad
         if n_contact0_threads > 0:
-            self.contact0_gjk_state = array_class.get_gjk_state_contact_only(n_contact0_threads)
-            self.multicontact_gjk_state = array_class.get_gjk_state(
-                n_multicontact_threads,
-                self._solver.rigid_config,
-                self._gjk_info,
-                self._solver.rigid_config.requires_grad,
+            self.contact0_gjk_state = array_class.GJKState(
+                sizes=dict(self._state_sizes, envs=n_contact0_threads), unused={("epa", "diff_contacts"): True}
             )
+            n_envs = n_multicontact_threads
         else:
-            self.gjk_state = array_class.get_gjk_state(
-                self._solver._B, self._solver.rigid_config, self._gjk_info, self._solver.rigid_config.requires_grad
-            )
+            n_envs = self._solver._B
+        state = array_class.GJKState(
+            sizes=dict(self._state_sizes, envs=n_envs),
+            unused={"diff_contacts": not requires_grad},
+            requires_grad=requires_grad,
+        )
+        if n_contact0_threads > 0:
+            self.multicontact_gjk_state = state
+        else:
+            self.gjk_state = state
 
 
 @qd.func

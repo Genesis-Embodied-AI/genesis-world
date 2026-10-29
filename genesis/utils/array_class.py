@@ -1298,303 +1298,157 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
 # =========================================== Collider ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactData:
-    kind: ClassVar[DataKind] = DataKind.DERIVED
+# Sizes of the collision detection
+VERTS = Size("verts")
+# Link pairs holding a valid geom pair, the possible geom pairs and those the broad phase keeps at most
+VALID_LINK_PAIRS = Size("valid_link_pairs")
+POSSIBLE_PAIRS = Size("possible_pairs")
+BROAD_PAIRS = Size("broad_pairs")
+# Contacts the narrow phase detects at most per environment, and per nonconvex pair
+CANDIDATE_CONTACTS = Size("candidate_contacts")
+NONCONVEX_PAIR_CONTACTS = Size("nonconvex_pair_contacts")
+# A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its first
+# contact alone under the contact patch
+CONTACT_SLOTS = Size("contact_slots")
+# Threads of the terrain pass, each testing the prism under one triangle
+TERRAIN_THREADS = Size("terrain_threads")
 
-    geom_a: qd.Tensor
-    geom_b: qd.Tensor
-    penetration: qd.Tensor
-    normal: qd.Tensor
-    pos: qd.Tensor
-    friction: qd.Tensor
-    friction_torsional: qd.Tensor
-    friction_rolling: qd.Tensor
-    sol_params: qd.Tensor
-    force: qd.Tensor
-    link_a: qd.Tensor
-    link_b: qd.Tensor
-    pair_idx: qd.Tensor
-
-
-def get_contact_data(solver, max_candidate_contacts, requires_grad):
-    _B = solver._B
-    max_candidate_contacts_ = max(max_candidate_contacts, 1)
-
-    return ContactData(
-        geom_a=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        geom_b=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        normal=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_, _B), needs_grad=requires_grad),
-        pos=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_, _B), needs_grad=requires_grad),
-        penetration=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B), needs_grad=requires_grad),
-        friction=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        friction_torsional=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        friction_rolling=V(dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        sol_params=V_VEC(7, dtype=gs.qd_float, shape=(max_candidate_contacts_, _B)),
-        force=V(dtype=gs.qd_vec3, shape=(max_candidate_contacts_, _B)),
-        link_a=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        link_b=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-        pair_idx=V(dtype=gs.qd_int, shape=(max_candidate_contacts_, _B)),
-    )
+# The scratch of the box-box detection
+BOX_BOX = Label("box_box")
+# The contact cache, which the convex-convex detection alone reads
+CONTACT_CACHE = Label("contact_cache")
+# The inputs of the differentiable contact detection, which the backward pass reads
+DIFF_CONTACTS = Label("diff_contacts")
+# The work queue of the split narrowphase and of the terrain pass, its contact slots, and the status of each slot
+WORK_QUEUE = Label("work_queue")
+SPLIT_NARROWPHASE = Label("split_narrowphase")
+PERTURBED_SLOTS = Label("perturbed_slots")
+# The scratch of the link-pair contact pruning, read by the threads of the block running an environment
+PRUNING = Label("pruning")
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class DiffContactInput:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
+class ContactData(Data, kind=DataKind.DERIVED, shape=(CANDIDATE_CONTACTS, ENVS)):
+    geom_a: qd.Tensor = field(int)
+    geom_b: qd.Tensor = field(int)
+    normal: qd.Tensor = field((float, 3), grad=True)
+    pos: qd.Tensor = field((float, 3), grad=True)
+    penetration: qd.Tensor = field(float, grad=True)
+    friction: qd.Tensor = field(float)
+    friction_torsional: qd.Tensor = field(float)
+    friction_rolling: qd.Tensor = field(float)
+    sol_params: qd.Tensor = field((float, 7))
+    force: qd.Tensor = field((float, 3))
+    link_a: qd.Tensor = field(int)
+    link_b: qd.Tensor = field(int)
+    pair_idx: qd.Tensor = field(int)
 
+
+class DiffContactInput(Data, kind=DataKind.SCRATCH):
     ### Non-differentiable input data
     # Geom id of the two geometries
-    geom_a: qd.Tensor
-    geom_b: qd.Tensor
+    geom_a: qd.Tensor = field(int)
+    geom_b: qd.Tensor = field(int)
     # Local positions of the 3 vertices from the two geometries that define the face on the Minkowski difference
-    local_pos1_a: qd.Tensor
-    local_pos1_b: qd.Tensor
-    local_pos1_c: qd.Tensor
-    local_pos2_a: qd.Tensor
-    local_pos2_b: qd.Tensor
-    local_pos2_c: qd.Tensor
+    local_pos1_a: qd.Tensor = field((float, 3))
+    local_pos1_b: qd.Tensor = field((float, 3))
+    local_pos1_c: qd.Tensor = field((float, 3))
+    local_pos2_a: qd.Tensor = field((float, 3))
+    local_pos2_b: qd.Tensor = field((float, 3))
+    local_pos2_c: qd.Tensor = field((float, 3))
     # Local positions of the 1 vertex from the two geometries that define the support point for the face above
-    w_local_pos1: qd.Tensor
-    w_local_pos2: qd.Tensor
+    w_local_pos1: qd.Tensor = field((float, 3))
+    w_local_pos2: qd.Tensor = field((float, 3))
     # Plane-convex contacts only: the convex support "core" (box vertex / sphere center / capsule nearest endpoint)
     # in the convex geom's local frame.
-    core_local: qd.Tensor
+    core_local: qd.Tensor = field((float, 3))
     # Reference id of the contact point, which is needed for the backward pass
-    ref_id: qd.Tensor
+    ref_id: qd.Tensor = field(int)
     # Flag whether the contact data can be computed in numerically stable way in both the forward and backward passes
-    valid: qd.Tensor
+    valid: qd.Tensor = field(int)
     ### Differentiable input data
     # Reference penetration depth, which is needed for computing the weight of the contact point
-    ref_penetration: qd.Tensor
+    ref_penetration: qd.Tensor = field(float, grad=True)
 
 
-def get_diff_contact_input(_B, max_contacts_per_pair, is_active, requires_grad=False):
-    shape = maybe_shape((_B, max_contacts_per_pair), is_active and requires_grad)
-    return DiffContactInput(
-        geom_a=V(dtype=gs.qd_int, shape=shape),
-        geom_b=V(dtype=gs.qd_int, shape=shape),
-        local_pos1_a=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos1_b=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos1_c=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos2_a=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos2_b=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_pos2_c=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        w_local_pos1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        w_local_pos2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        core_local=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        ref_id=V(dtype=gs.qd_int, shape=shape),
-        valid=V(dtype=gs.qd_int, shape=shape),
-        ref_penetration=V(dtype=gs.qd_float, shape=shape, needs_grad=True),
-    )
+class SortBuffer(Data, kind=DataKind.STATE, shape=(2 * LINKS, ENVS)):
+    value: qd.Tensor = field(float)
+    i_l: qd.Tensor = field(int)
+    is_max: qd.Tensor = field(bool)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class SortBuffer:
-    kind: ClassVar[DataKind] = DataKind.STATE
-
-    value: qd.Tensor
-    i_l: qd.Tensor
-    is_max: qd.Tensor
-
-
-def get_sort_buffer(solver):
-    _B = solver._B
-
-    return SortBuffer(
-        value=V(dtype=gs.qd_float, shape=(2 * solver.n_links_, _B)),
-        i_l=V(dtype=gs.qd_int, shape=(2 * solver.n_links_, _B)),
-        is_max=V(dtype=gs.qd_bool, shape=(2 * solver.n_links_, _B)),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactCache:
-    kind: ClassVar[DataKind] = DataKind.STATE
-
-    normal: qd.Tensor
+class ContactCache(Data, kind=DataKind.STATE, shape=(POSSIBLE_PAIRS, ENVS)):
+    normal: qd.Tensor = field((float, 3))
     # Previous-step penetration per pair (reset to 0 when out of contact), the warm-start for the MPR->GJK gate.
-    penetration: qd.Tensor
+    penetration: qd.Tensor = field(float)
 
 
-def get_contact_cache(solver, n_possible_pairs, active):
-    # Only the convex-convex detection reads the cache, so the other scenes keep it empty
-    shape = maybe_shape((max(n_possible_pairs, 1), solver._B), active)
-    return ContactCache(
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        penetration=V(dtype=gs.qd_float, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class NarrowphaseWorkQueue:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
+class NarrowphaseWorkQueue(Data, kind=DataKind.SCRATCH, shape=(BROAD_PAIRS * ENVS,)):
     # The pair of every entry (see collision_pair_idx in ColliderInfo), queued for the multicontact pass, then for the
     # terrain pass, which runs after it
-    i_b: qd.Tensor
-    i_ga: qd.Tensor
-    i_gb: qd.Tensor
-    i_pair: qd.Tensor
+    i_b: qd.Tensor = field(int, labels=WORK_QUEUE)
+    i_ga: qd.Tensor = field(int, labels=WORK_QUEUE)
+    i_gb: qd.Tensor = field(int, labels=WORK_QUEUE)
+    i_pair: qd.Tensor = field(int, labels=WORK_QUEUE)
     # Candidate contacts of the multicontact pass, one slot per contact a pair can hold. The contact0 kernel stores the
     # first contact of the pair in slot 0, the detections of the pass store theirs in their own slot, and the gather
     # accepts them in slot order according to their status (see MULTICONTACT_SLOT in collider/constants.py). Under the
     # contact patch an entry holds slot 0 alone and no status.
-    contact_pos: qd.Tensor
-    contact_normal: qd.Tensor
-    contact_penetration: qd.Tensor
-    contact_status: qd.Tensor
+    contact_pos: qd.Tensor = field((float, 3), shape=(BROAD_PAIRS * ENVS, CONTACT_SLOTS), labels=SPLIT_NARROWPHASE)
+    contact_normal: qd.Tensor = field((float, 3), shape=(BROAD_PAIRS * ENVS, CONTACT_SLOTS), labels=SPLIT_NARROWPHASE)
+    contact_penetration: qd.Tensor = field(float, shape=(BROAD_PAIRS * ENVS, CONTACT_SLOTS), labels=SPLIT_NARROWPHASE)
+    contact_status: qd.Tensor = field(int, shape=(BROAD_PAIRS * ENVS, CONTACT_SLOTS), labels=PERTURBED_SLOTS)
     # Where contact 0 of the entry stands (see MULTICONTACT_ENTRY in collider/constants.py). The contact0 kernel leaves
     # it to Gilbert-Johnson-Keerthi (GJK) when the per-pair gate from Minkowski portal refinement (MPR) to GJK fired,
     # and each perturbed contact otherwise falls back from MPR to GJK.
-    contact0_status: qd.Tensor
+    contact0_status: qd.Tensor = field(int, labels=SPLIT_NARROWPHASE)
     # The number of pairs queued and claimed so far
-    n_pairs: qd.Tensor
-    n_claimed: qd.Tensor
+    n_pairs: qd.Tensor = field(int, shape=(1,), labels=WORK_QUEUE)
+    n_claimed: qd.Tensor = field(int, shape=(1,), labels=WORK_QUEUE)
 
 
-def get_narrowphase_work_queue(max_entries, n_slots, split_narrowphase, has_terrain):
-    is_queue_active = split_narrowphase or has_terrain
-    entries_shape = maybe_shape((max_entries,), is_queue_active)
-    slots_shape = maybe_shape((max_entries, n_slots), split_narrowphase)
-    return NarrowphaseWorkQueue(
-        i_b=V(dtype=gs.qd_int, shape=entries_shape),
-        i_ga=V(dtype=gs.qd_int, shape=entries_shape),
-        i_gb=V(dtype=gs.qd_int, shape=entries_shape),
-        i_pair=V(dtype=gs.qd_int, shape=entries_shape),
-        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
-        contact_normal=V_VEC(3, dtype=gs.qd_float, shape=slots_shape),
-        contact_penetration=V(dtype=gs.qd_float, shape=slots_shape),
-        contact_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries, n_slots), split_narrowphase and n_slots > 1)),
-        contact0_status=V(dtype=gs.qd_int, shape=maybe_shape((max_entries,), split_narrowphase)),
-        n_pairs=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_queue_active)),
-        n_claimed=V(dtype=gs.qd_int, shape=maybe_shape((1,), is_queue_active)),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ColliderState:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
+class ColliderState(Data, kind=DataKind.SCRATCH):
     sort_buffer: SortBuffer
-    contact_data: ContactData
-    active_buffer: qd.Tensor
+    active_buffer: qd.Tensor = field(int, shape=(LINKS, ENVS))
     # Bounding box of every link, the box of its frame moved with it (see func_collision_clear in broadphase.py)
-    links_aabb_min: qd.Tensor
-    links_aabb_max: qd.Tensor
+    links_aabb_min: qd.Tensor = field((float, 3), shape=(LINKS, ENVS))
+    links_aabb_max: qd.Tensor = field((float, 3), shape=(LINKS, ENVS))
     # Valid link pairs whose boxes overlap, by index into ColliderInfo.valid_link_pairs
-    n_broad_link_pairs: qd.Tensor
-    broad_link_pairs: qd.Tensor
-    n_broad_pairs: qd.Tensor
-    broad_collision_pairs: qd.Tensor
-    box_depth: qd.Tensor
-    box_points: qd.Tensor
-    box_pts: qd.Tensor
-    box_lines: qd.Tensor
-    box_linesu: qd.Tensor
-    box_axi: qd.Tensor
-    box_ppts2: qd.Tensor
-    box_pu: qd.Tensor
+    n_broad_link_pairs: qd.Tensor = field(int, shape=(ENVS,))
+    broad_link_pairs: qd.Tensor = field(int, shape=(VALID_LINK_PAIRS, ENVS))
+    n_broad_pairs: qd.Tensor = field(int, shape=(ENVS,))
+    box_depth: qd.Tensor = field(float, shape=(NONCONVEX_PAIR_CONTACTS, ENVS), labels=BOX_BOX)
+    box_points: qd.Tensor = field((float, 3), shape=(NONCONVEX_PAIR_CONTACTS, ENVS), labels=BOX_BOX)
+    box_pts: qd.Tensor = field((float, 3), shape=(6, ENVS), labels=BOX_BOX)
+    box_lines: qd.Tensor = field((float, 6), shape=(4, ENVS), labels=BOX_BOX)
+    box_linesu: qd.Tensor = field((float, 6), shape=(4, ENVS), labels=BOX_BOX)
+    box_axi: qd.Tensor = field((float, 3), shape=(3, ENVS), labels=BOX_BOX)
+    box_ppts2: qd.Tensor = field(float, shape=(4, 2, ENVS), labels=BOX_BOX)
+    box_pu: qd.Tensor = field((float, 3), shape=(4, ENVS), labels=BOX_BOX)
     # The prism under the triangle every thread of the terrain pass tests, which reads its thread count from its shape
-    prism: qd.Tensor
-    n_contacts: qd.Tensor = of_kind(DataKind.DERIVED)
+    prism: qd.Tensor = field((float, 3), shape=(6, TERRAIN_THREADS))
+    n_contacts: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
     # Kept contacts of the sleepers, at the front of the contact buffer with the identity permutation: a hibernated
     # link's contacts against fixed links and other sleepers are carried from step to step with the force of the last
     # solve they took part in, for the contact getters and the per-link contact force alone. Every per-step pass
     # (prune, sort, island edges, constraint rows, noslip) walks the live contacts after them,
     # [n_contacts_hibernated, n_contacts).
-    n_contacts_hibernated: qd.Tensor = of_kind(DataKind.DERIVED)
-    first_time: qd.Tensor = of_kind(DataKind.STATE)
-    contact_cache: ContactCache
+    n_contacts_hibernated: qd.Tensor = field(int, shape=(ENVS,), kind=DataKind.DERIVED)
+    first_time: qd.Tensor = field(bool, shape=(ENVS,), kind=DataKind.STATE)
+    contact_cache: ContactCache = field(labels=CONTACT_CACHE)
+    broad_collision_pairs: qd.Tensor = field((int, 2), shape=(BROAD_PAIRS, ENVS))
+    contact_data: ContactData
     # Input data for differentiable contact detection used in the backward pass
-    diff_contact_input: DiffContactInput
+    diff_contact_input: DiffContactInput = field(shape=(ENVS, CANDIDATE_CONTACTS), labels=DIFF_CONTACTS)
     work_queue: NarrowphaseWorkQueue
-    contact_sort_key: qd.Tensor
-    contact_sort_idx: qd.Tensor = of_kind(DataKind.DERIVED)
-    contact_proj_v: qd.Tensor
-    contact_keep: qd.Tensor
-    contact_hull_stack: qd.Tensor
+    contact_sort_key: qd.Tensor = field(float, shape=(CANDIDATE_CONTACTS, ENVS))
+    contact_sort_idx: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), kind=DataKind.DERIVED)
+    contact_proj_v: qd.Tensor = field(float, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
+    contact_keep: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
+    contact_hull_stack: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
     # Per-bucket lex sort permutation used by the cooperative dedup kernel
     # (func_clamp_prune_contacts_coop) for the phase-3 (u, v) lex sort. Sized to max_candidate_contacts because
     # each env writes its own permutation.
-    contact_lex_idx: qd.Tensor
-
-
-def get_collider_state(
-    solver,
-    rigid_config,
-    n_possible_pairs,
-    n_terrain_threads,
-    collider_info,
-    collider_static_config,
-    split_narrowphase,
-):
-    _B = solver._B
-    n_links = solver.n_links_
-    n_valid_link_pairs = collider_info.n_valid_link_pairs[None]
-    # Collider._init_max_contacts, which runs before this, sizes the contacts per regime (convex vs nonconvex) and the
-    # broad phase candidates within the possible pairs.
-    max_collision_pairs_broad = collider_info.max_collision_pairs_broad[None]
-    max_candidate_contacts = max(collider_info.max_candidate_contacts[None], 1)
-    requires_grad = rigid_config.requires_grad
-
-    box_depth_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection
-    )
-    box_points_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_nonconvex_pair, _B), rigid_config.box_box_detection
-    )
-    box_pts_shape = maybe_shape((6, _B), rigid_config.box_box_detection)
-    box_lines_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
-    box_linesu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
-    box_axi_shape = maybe_shape((3, _B), rigid_config.box_box_detection)
-    box_ppts2_shape = maybe_shape((4, 2, _B), rigid_config.box_box_detection)
-    box_pu_shape = maybe_shape((4, _B), rigid_config.box_box_detection)
-    # The pruning scratch is laid out environment-first, so that the threads of the block running an environment read
-    # neighbouring slots from the same cache lines (see func_clamp_prune_contacts_coop)
-    prune_shape = maybe_shape((max(max_candidate_contacts, 1), _B), collider_static_config.has_prunable_contacts)
-    prune_layout = (1, 0) if collider_static_config.has_prunable_contacts else None
-
-    return ColliderState(
-        sort_buffer=get_sort_buffer(solver),
-        active_buffer=V(dtype=gs.qd_int, shape=(n_links, _B)),
-        links_aabb_min=V(dtype=gs.qd_vec3, shape=(n_links, _B)),
-        links_aabb_max=V(dtype=gs.qd_vec3, shape=(n_links, _B)),
-        n_broad_link_pairs=V(dtype=gs.qd_int, shape=(_B,)),
-        broad_link_pairs=V(dtype=gs.qd_int, shape=(max(n_valid_link_pairs, 1), _B)),
-        n_broad_pairs=V(dtype=gs.qd_int, shape=(_B,)),
-        box_depth=V(dtype=gs.qd_float, shape=box_depth_shape),
-        box_points=V_VEC(3, dtype=gs.qd_float, shape=box_points_shape),
-        box_pts=V_VEC(3, dtype=gs.qd_float, shape=box_pts_shape),
-        box_lines=V_VEC(6, dtype=gs.qd_float, shape=box_lines_shape),
-        box_linesu=V_VEC(6, dtype=gs.qd_float, shape=box_linesu_shape),
-        box_axi=V_VEC(3, dtype=gs.qd_float, shape=box_axi_shape),
-        box_ppts2=V(dtype=gs.qd_float, shape=box_ppts2_shape),
-        box_pu=V_VEC(3, dtype=gs.qd_float, shape=box_pu_shape),
-        prism=V_VEC(3, dtype=gs.qd_float, shape=(6, n_terrain_threads)),
-        n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
-        n_contacts_hibernated=V(dtype=gs.qd_int, shape=(_B,)),
-        first_time=V(dtype=gs.qd_bool, shape=(_B,)),
-        contact_cache=get_contact_cache(
-            solver, n_possible_pairs, collider_static_config.has_non_box_plane_convex_convex
-        ),
-        broad_collision_pairs=V_VEC(2, dtype=gs.qd_int, shape=(max(max_collision_pairs_broad, 1), _B)),
-        contact_data=get_contact_data(solver, max_candidate_contacts, requires_grad),
-        diff_contact_input=get_diff_contact_input(_B, max(max_candidate_contacts, 1), True, requires_grad),
-        # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its
-        # first contact alone under the contact patch (see NarrowphaseWorkQueue).
-        work_queue=get_narrowphase_work_queue(
-            max(max_collision_pairs_broad, 1) * _B,
-            1 if solver._options.enable_contact_patch else 5,
-            split_narrowphase,
-            collider_static_config.has_terrain,
-        ),
-        contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B), layout=(1, 0)),
-        contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
-        contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape, layout=prune_layout),
-        contact_keep=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
-        contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
-        contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape, layout=prune_layout),
-    )
+    contact_lex_idx: qd.Tensor = field(int, shape=(CANDIDATE_CONTACTS, ENVS), labels=PRUNING)
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -1704,344 +1558,131 @@ def get_mpr_info(**kwargs):
 # =========================================== GJK ===========================================
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class MDVertex:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
+# Sizes of the scratch of Gilbert-Johnson-Keerthi (GJK) and of the expanding polytope algorithm (EPA): the vertices,
+# faces and horizon edges of the polytope, the contacts of a pair and the vertices of a contact polygon
+POLYTOPE_VERTS = Size("polytope_verts")
+POLYTOPE_FACES = Size("polytope_faces")
+POLYTOPE_HORIZONS = Size("polytope_horizons")
+PAIR_CONTACTS = Size("pair_contacts")
+POLYGON_VERTS = Size("polygon_verts")
+# The arrays of the EPA, of the multi-contact detection and of their results, which the overlap test never reads
+EPA = Label("epa")
 
+
+class MDVertex(Data, kind=DataKind.SCRATCH):
     # Vertex of the Minkowski difference
-    obj1: qd.Tensor
-    obj2: qd.Tensor
-    local_obj1: qd.Tensor
-    local_obj2: qd.Tensor
-    id1: qd.Tensor
-    id2: qd.Tensor
-    mink: qd.Tensor
+    obj1: qd.Tensor = field((float, 3))
+    obj2: qd.Tensor = field((float, 3))
+    local_obj1: qd.Tensor = field((float, 3))
+    local_obj2: qd.Tensor = field((float, 3))
+    id1: qd.Tensor = field(int)
+    id2: qd.Tensor = field(int)
+    mink: qd.Tensor = field((float, 3))
 
 
-def get_gjk_simplex_vertex(_B):
-    shape = (_B, 4)
-    return MDVertex(
-        obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
-        mink=V_VEC(3, dtype=gs.qd_float, shape=shape),
-    )
+class GJKSimplex(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    nverts: qd.Tensor = field(int)
 
 
-def get_epa_polytope_vertex(_B, gjk_info):
-    max_num_polytope_verts = 5 + gjk_info.epa_max_iterations[None]
-    shape = (_B, max_num_polytope_verts)
-    return MDVertex(
-        obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        local_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
-        mink=V_VEC(3, dtype=gs.qd_float, shape=shape),
-    )
+class GJKSimplexBuffer(Data, kind=DataKind.SCRATCH, shape=(ENVS, 4)):
+    normal: qd.Tensor = field((float, 3))
+    sdist: qd.Tensor = field(float)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class GJKSimplex:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    nverts: qd.Tensor
-
-
-def get_gjk_simplex(_B):
-    shape = (_B,)
-    return GJKSimplex(nverts=V(dtype=gs.qd_int, shape=shape))
+class EPAPolytope(Data, kind=DataKind.SCRATCH, shape=(ENVS,)):
+    nverts: qd.Tensor = field(int)
+    nfaces: qd.Tensor = field(int)
+    nfaces_map: qd.Tensor = field(int)
+    horizon_nedges: qd.Tensor = field(int)
+    horizon_w: qd.Tensor = field((float, 3))
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class GJKSimplexBuffer:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    normal: qd.Tensor
-    sdist: qd.Tensor
-
-
-def get_gjk_simplex_buffer(_B):
-    shape = (_B, 4)
-    return GJKSimplexBuffer(normal=V_VEC(3, dtype=gs.qd_float, shape=shape), sdist=V(dtype=gs.qd_float, shape=shape))
+class EPAPolytopeFace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYTOPE_FACES)):
+    verts_idx: qd.Tensor = field((int, 3))
+    adj_idx: qd.Tensor = field((int, 3))
+    normal: qd.Tensor = field((float, 3))
+    dist2: qd.Tensor = field(float)
+    map_idx: qd.Tensor = field(int)
+    visited: qd.Tensor = field(int)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EPAPolytope:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    nverts: qd.Tensor
-    nfaces: qd.Tensor
-    nfaces_map: qd.Tensor
-    horizon_nedges: qd.Tensor
-    horizon_w: qd.Tensor
+class EPAPolytopeHorizonData(Data, kind=DataKind.SCRATCH):
+    face_idx: qd.Tensor = field(int)
+    edge_idx: qd.Tensor = field(int)
 
 
-def get_epa_polytope(_B):
-    shape = (_B,)
-    return EPAPolytope(
-        nverts=V(dtype=gs.qd_int, shape=shape),
-        nfaces=V(dtype=gs.qd_int, shape=shape),
-        nfaces_map=V(dtype=gs.qd_int, shape=shape),
-        horizon_nedges=V(dtype=gs.qd_int, shape=shape),
-        horizon_w=V_VEC(3, dtype=gs.qd_float, shape=shape),
-    )
+class ContactFace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
+    vert1: qd.Tensor = field((float, 3))
+    vert2: qd.Tensor = field((float, 3))
+    endverts: qd.Tensor = field((float, 3))
+    normal1: qd.Tensor = field((float, 3))
+    normal2: qd.Tensor = field((float, 3))
+    id1: qd.Tensor = field(int)
+    id2: qd.Tensor = field(int)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EPAPolytopeFace:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    verts_idx: qd.Tensor
-    adj_idx: qd.Tensor
-    normal: qd.Tensor
-    dist2: qd.Tensor
-    map_idx: qd.Tensor
-    visited: qd.Tensor
+class ContactNormal(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
+    endverts: qd.Tensor = field((float, 3))
+    normal: qd.Tensor = field((float, 3))
+    id: qd.Tensor = field(int)
 
 
-def get_epa_polytope_face(_B, polytope_max_faces):
-    shape = (_B, polytope_max_faces)
-    return EPAPolytopeFace(
-        verts_idx=V_VEC(3, dtype=gs.qd_int, shape=shape),
-        adj_idx=V_VEC(3, dtype=gs.qd_int, shape=shape),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        dist2=V(dtype=gs.qd_float, shape=shape),
-        map_idx=V(dtype=gs.qd_int, shape=shape),
-        visited=V(dtype=gs.qd_int, shape=shape),
-    )
+class ContactHalfspace(Data, kind=DataKind.SCRATCH, shape=(ENVS, POLYGON_VERTS)):
+    normal: qd.Tensor = field((float, 3))
+    dist: qd.Tensor = field(float)
 
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class EPAPolytopeHorizonData:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    face_idx: qd.Tensor
-    edge_idx: qd.Tensor
+class Witness(Data, kind=DataKind.SCRATCH, shape=(ENVS, PAIR_CONTACTS)):
+    point_obj1: qd.Tensor = field((float, 3))
+    point_obj2: qd.Tensor = field((float, 3))
 
 
-def get_epa_polytope_horizon_data(_B, polytope_max_horizons):
-    shape = (_B, polytope_max_horizons)
-    return EPAPolytopeHorizonData(face_idx=V(dtype=gs.qd_int, shape=shape), edge_idx=V(dtype=gs.qd_int, shape=shape))
+class GJKState(Data, kind=DataKind.SCRATCH):
+    """
+    The scratch of a detection by Gilbert-Johnson-Keerthi (GJK) and the expanding polytope algorithm (EPA), one column
+    per thread or environment.
 
+    The state of the overlap test alone leaves the arrays labeled EPA unused.
+    """
 
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactFace:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    vert1: qd.Tensor
-    vert2: qd.Tensor
-    endverts: qd.Tensor
-    normal1: qd.Tensor
-    normal2: qd.Tensor
-    id1: qd.Tensor
-    id2: qd.Tensor
-
-
-def get_contact_face(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactFace(
-        vert1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        vert2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal1=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal2=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id1=V(dtype=gs.qd_int, shape=shape),
-        id2=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactNormal:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    endverts: qd.Tensor
-    normal: qd.Tensor
-    id: qd.Tensor
-
-
-def get_contact_normal(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactNormal(
-        endverts=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
-        id=V(dtype=gs.qd_int, shape=shape),
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class ContactHalfspace:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    normal: qd.Tensor
-    dist: qd.Tensor
-
-
-def get_contact_halfspace(_B, max_contact_polygon_verts):
-    shape = (_B, max_contact_polygon_verts)
-    return ContactHalfspace(normal=V_VEC(3, dtype=gs.qd_float, shape=shape), dist=V(dtype=gs.qd_float, shape=shape))
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class Witness:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    point_obj1: qd.Tensor
-    point_obj2: qd.Tensor
-
-
-def get_witness(_B, max_contacts_per_pair):
-    shape = (_B, max_contacts_per_pair)
-    return Witness(
-        point_obj1=V_VEC(3, dtype=gs.qd_float, shape=shape), point_obj2=V_VEC(3, dtype=gs.qd_float, shape=shape)
-    )
-
-
-@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class GJKState:
-    kind: ClassVar[DataKind] = DataKind.SCRATCH
-
-    support_mesh_prev_vertex_id: qd.Tensor
-    simplex_vertex: MDVertex
+    # GJK simplex
+    support_mesh_prev_vertex_id: qd.Tensor = field(int, shape=(ENVS, 2))
+    simplex_vertex: MDVertex = field(shape=(ENVS, 4))
     simplex_buffer: GJKSimplexBuffer
     simplex: GJKSimplex
-    simplex_vertex_intersect: MDVertex
+    last_searched_simplex_vertex_id: qd.Tensor = field(int, shape=(ENVS,))
+    simplex_vertex_intersect: MDVertex = field(shape=(ENVS, 4))
     simplex_buffer_intersect: GJKSimplexBuffer
-    nsimplex: qd.Tensor
-    last_searched_simplex_vertex_id: qd.Tensor
-    polytope: EPAPolytope
-    polytope_verts: MDVertex
-    polytope_faces: EPAPolytopeFace
-    polytope_faces_map: qd.Tensor
-    polytope_horizon_data: EPAPolytopeHorizonData
-    polytope_horizon_stack: EPAPolytopeHorizonData
-    contact_faces: ContactFace
-    contact_normals: ContactNormal
-    contact_halfspaces: ContactHalfspace
-    contact_clipped_polygons: qd.Tensor
-    multi_contact_flag: qd.Tensor
+    nsimplex: qd.Tensor = field(int, shape=(ENVS,))
+    # EPA polytope
+    polytope: EPAPolytope = field(labels=EPA)
+    polytope_verts: MDVertex = field(shape=(ENVS, POLYTOPE_VERTS), labels=EPA)
+    polytope_faces: EPAPolytopeFace = field(labels=EPA)
+    polytope_faces_map: qd.Tensor = field(int, shape=(ENVS, POLYTOPE_FACES), labels=EPA)
+    polytope_horizon_data: EPAPolytopeHorizonData = field(shape=(ENVS, POLYTOPE_HORIZONS), labels=EPA)
+    polytope_horizon_stack: EPAPolytopeHorizonData = field(shape=(ENVS, 3 * POLYTOPE_FACES), labels=EPA)
+    # Multi-contact detection (MuJoCo compatibility)
+    contact_faces: ContactFace = field(labels=EPA)
+    contact_normals: ContactNormal = field(labels=EPA)
+    contact_halfspaces: ContactHalfspace = field(labels=EPA)
+    contact_clipped_polygons: qd.Tensor = field((float, 3), shape=(ENVS, 2, POLYGON_VERTS), labels=EPA)
+    multi_contact_flag: qd.Tensor = field(bool, shape=(ENVS,))
+    # Final results
     witness: Witness
-    n_witness: qd.Tensor
-    n_contacts: qd.Tensor
-    contact_pos: qd.Tensor
-    normal: qd.Tensor
-    is_col: qd.Tensor
-    penetration: qd.Tensor
-    distance: qd.Tensor
+    n_witness: qd.Tensor = field(int, shape=(ENVS,))
+    n_contacts: qd.Tensor = field(int, shape=(ENVS,), labels=EPA)
+    contact_pos: qd.Tensor = field((float, 3), shape=(ENVS, PAIR_CONTACTS), labels=EPA)
+    normal: qd.Tensor = field((float, 3), shape=(ENVS, PAIR_CONTACTS), labels=EPA)
+    is_col: qd.Tensor = field(bool, shape=(ENVS,), labels=EPA)
+    penetration: qd.Tensor = field(float, shape=(ENVS,), labels=EPA)
+    distance: qd.Tensor = field(float, shape=(ENVS,))
     # Index of the EPA polytope face nearest to the origin (the penetration face), or -1 when EPA did not run. Lets the
     # multi-contact perturbation reconstruct the exact unperturbed normal from that face's un-rotated support simplex.
-    nearest_face: qd.Tensor
+    nearest_face: qd.Tensor = field(int, shape=(ENVS,))
     # Differentiable contact detection
-    diff_contact_input: DiffContactInput
-    n_diff_contact_input: qd.Tensor
-    diff_penetration: qd.Tensor
-
-
-def get_gjk_state(_B, rigid_config, gjk_info, requires_grad=False):
-    enable_mujoco_compatibility = rigid_config.enable_mujoco_compatibility
-    polytope_max_faces = gjk_info.polytope_max_faces[None]
-    max_contacts_per_pair = gjk_info.max_contacts_per_pair[None]
-    max_contact_polygon_verts = gjk_info.max_contact_polygon_verts[None]
-
-    # FIXME: Define GJKState and MujocoCompatGJKState that derives from the former but defines additional attributes
-    return GJKState(
-        # GJK simplex
-        support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
-        simplex_vertex=get_gjk_simplex_vertex(_B),
-        simplex_buffer=get_gjk_simplex_buffer(_B),
-        simplex=get_gjk_simplex(_B),
-        last_searched_simplex_vertex_id=V(dtype=gs.qd_int, shape=(_B,)),
-        simplex_vertex_intersect=get_gjk_simplex_vertex(_B),
-        simplex_buffer_intersect=get_gjk_simplex_buffer(_B),
-        nsimplex=V(dtype=gs.qd_int, shape=(_B,)),
-        # EPA polytope
-        polytope=get_epa_polytope(_B),
-        polytope_verts=get_epa_polytope_vertex(_B, gjk_info),
-        polytope_faces=get_epa_polytope_face(_B, polytope_max_faces),
-        polytope_faces_map=V(dtype=gs.qd_int, shape=(_B, polytope_max_faces)),
-        polytope_horizon_data=get_epa_polytope_horizon_data(_B, 6 + gjk_info.epa_max_iterations[None]),
-        polytope_horizon_stack=get_epa_polytope_horizon_data(_B, polytope_max_faces * 3),
-        # Multi-contact detection (MuJoCo compatibility)
-        contact_faces=get_contact_face(_B, max_contact_polygon_verts),
-        contact_normals=get_contact_normal(_B, max_contact_polygon_verts),
-        contact_halfspaces=get_contact_halfspace(_B, max_contact_polygon_verts),
-        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(_B, 2, max_contact_polygon_verts)),
-        multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
-        # Final results
-        witness=get_witness(_B, max_contacts_per_pair),
-        n_witness=V(dtype=gs.qd_int, shape=(_B,)),
-        n_contacts=V(dtype=gs.qd_int, shape=(_B,)),
-        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(_B, max_contacts_per_pair)),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=(_B, max_contacts_per_pair)),
-        is_col=V(dtype=gs.qd_bool, shape=(_B,)),
-        penetration=V(dtype=gs.qd_float, shape=(_B,)),
-        distance=V(dtype=gs.qd_float, shape=(_B,)),
-        nearest_face=V(dtype=gs.qd_int, shape=(_B,)),
-        diff_contact_input=get_diff_contact_input(
-            _B, max(max_contacts_per_pair, 1), is_active=True, requires_grad=requires_grad
-        ),
-        n_diff_contact_input=V(dtype=gs.qd_int, shape=(_B,)),
-        diff_penetration=V(dtype=gs.qd_float, shape=maybe_shape((_B, max_contacts_per_pair), requires_grad)),
-    )
-
-
-def get_gjk_state_contact_only(_B):
-    """Minimal GJK state for contact detection only (no EPA, no multi-contact).
-
-    Used by kernel 1 to run func_gjk as a boolean overlap test. All EPA polytope,
-    multi-contact, and differentiable fields are allocated at dummy size (1,) since
-    func_gjk never accesses them.
-    """
-    _dummy_B = 1
-
-    return GJKState(
-        support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
-        simplex_vertex=get_gjk_simplex_vertex(_B),
-        simplex_buffer=get_gjk_simplex_buffer(_B),
-        simplex=get_gjk_simplex(_B),
-        last_searched_simplex_vertex_id=V(dtype=gs.qd_int, shape=(_B,)),
-        simplex_vertex_intersect=get_gjk_simplex_vertex(_B),
-        simplex_buffer_intersect=get_gjk_simplex_buffer(_B),
-        nsimplex=V(dtype=gs.qd_int, shape=(_B,)),
-        # EPA - dummy allocations, never accessed by func_gjk
-        polytope=get_epa_polytope(_dummy_B),
-        polytope_verts=MDVertex(
-            obj1=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            obj2=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            local_obj1=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            local_obj2=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-            id1=V(dtype=gs.qd_int, shape=(1, 1)),
-            id2=V(dtype=gs.qd_int, shape=(1, 1)),
-            mink=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-        ),
-        polytope_faces=get_epa_polytope_face(_dummy_B, 1),
-        polytope_faces_map=V(dtype=gs.qd_int, shape=(1, 1)),
-        polytope_horizon_data=get_epa_polytope_horizon_data(_dummy_B, 1),
-        polytope_horizon_stack=get_epa_polytope_horizon_data(_dummy_B, 1),
-        # Multi-contact - dummy
-        contact_faces=get_contact_face(_dummy_B, 1),
-        contact_normals=get_contact_normal(_dummy_B, 1),
-        contact_halfspaces=get_contact_halfspace(_dummy_B, 1),
-        contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(1, 2, 1)),
-        multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
-        # Results - full _B for fields func_gjk writes; dummy for EPA-only fields
-        witness=get_witness(_B, 1),
-        n_witness=V(dtype=gs.qd_int, shape=(_B,)),
-        n_contacts=V(dtype=gs.qd_int, shape=(1,)),
-        contact_pos=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-        normal=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
-        is_col=V(dtype=gs.qd_bool, shape=(1,)),
-        penetration=V(dtype=gs.qd_float, shape=(1,)),
-        distance=V(dtype=gs.qd_float, shape=(_B,)),
-        nearest_face=V(dtype=gs.qd_int, shape=(_B,)),
-        diff_contact_input=get_diff_contact_input(_dummy_B, 1, is_active=False),
-        n_diff_contact_input=V(dtype=gs.qd_int, shape=(1,)),
-        diff_penetration=V(dtype=gs.qd_float, shape=()),
-    )
+    diff_contact_input: DiffContactInput = field(shape=(ENVS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
+    n_diff_contact_input: qd.Tensor = field(int, shape=(ENVS,), labels=EPA)
+    diff_penetration: qd.Tensor = field(float, shape=(ENVS, PAIR_CONTACTS), labels=DIFF_CONTACTS)
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
