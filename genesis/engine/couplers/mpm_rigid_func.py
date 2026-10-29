@@ -437,17 +437,17 @@ def func_contact_point_disp(
     f,
 ):
     """Displacement J_pt x of the contact point of every particle with Rigid rows, for the dof vector x whose link
-    displacements `link_V` holds."""
+    displacements `link_V` holds. The other particles keep theirs, from `func_reset_contact_rows` or from the
+    coupling that gave them rows."""
     qd.loop_config(name="mpm_contact_point_disp")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
-        dr = qd.Vector.zero(gs.qd_float, 3)
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
             lin, ang = link_spatial(coupling, i_l, i_b)
             dr = lin + ang.cross(particle_arm(particles, links_state, f, i_p, i_b, i_l))
-        for d in qd.static(range(3)):
-            newton.contact_dr[3 * s + d] = dr[d]
+            for d in qd.static(range(3)):
+                newton.contact_dr[3 * s + d] = dr[d]
 
 
 # ============================================== Layer 1: Rigid block ===============================================

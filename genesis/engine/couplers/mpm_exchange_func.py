@@ -1,10 +1,10 @@
-"""Momentum exchanges of the implicit MPM solver with SPH and PBD.
+"""Momentum exchange of the implicit MPM solver with SPH.
 
-Each exchange is a perfectly inelastic impulse between an MPM node and the partner particles in its cell, applied to
-the free velocity of the node before the Newton solve, so that the solve enforces the walls, the Rigid contacts and the
+The exchange is a perfectly inelastic impulse between an MPM node and the SPH particles in its cell, applied to the
+free velocity of the node before the Newton solve, so that the solve enforces the walls, the Rigid contacts and the
 elasticity on top of it: the pair moves to its common velocity v_c = (m_a v_a + M v) / (m_a + M), which conserves the
-momentum and dissipates energy. The partner side keeps its relative velocities and takes the opposite momentum. The
-neighbourhoods are the legacy coupler's: the partner particles in the cell of the node.
+momentum and dissipates energy. The SPH side keeps its relative velocities and takes the opposite momentum. The
+neighbourhood is the legacy coupler's: the SPH particles in the cell of the node.
 """
 
 import quadrants as qd
@@ -18,11 +18,10 @@ from genesis.engine.solvers.mpm_func import local_offset, unpack_block
 def func_exchange_particles(
     grid: qd.template(),  # MpmGrid
     params: qd.template(),  # MpmParams
-    partner: qd.template(),  # SPHSolver or PBDSolver, after its particles were reordered by its spatial hash
+    partner: qd.template(),  # SPHSolver, after its particles were reordered by its spatial hash
     stencil: qd.template(),  # int, hash cells per axis covering one MPM cell
-    only_free: qd.template(),  # bool, exchange with the free particles only (PBD)
 ):
-    """Exchange momentum between every free MPM node and the partner particles in its cell, |x_s - x_n|_inf < dx / 2.
+    """Exchange momentum between every free MPM node and the SPH particles in its cell, |x_s - x_n|_inf < dx / 2.
 
     A particle lies in the cell of one node only, so every node writes its own particles."""
     dx = params.dx[()]
@@ -38,10 +37,7 @@ def func_exchange_particles(
             for offset in qd.grouped(qd.ndrange(stencil, stencil, stencil)):
                 slot = sh.grid_to_slot(base + offset)
                 for i in range(sh.slot_start[slot, env], sh.slot_start[slot, env] + sh.slot_size[slot, env]):
-                    is_member = qd.abs(partner.particles_reordered.pos[i, env] - x_n).max() < 0.5 * dx
-                    if qd.static(only_free):
-                        is_member = is_member and partner.particles_reordered.free[i, env]
-                    if is_member:
+                    if qd.abs(partner.particles_reordered.pos[i, env] - x_n).max() < 0.5 * dx:
                         m_s = partner.particles_info_reordered.mass[i, env]
                         mass_s += m_s
                         mom_s += m_s * partner.particles_reordered.vel[i, env]
@@ -55,8 +51,5 @@ def func_exchange_particles(
                 for offset in qd.grouped(qd.ndrange(stencil, stencil, stencil)):
                     slot = sh.grid_to_slot(base + offset)
                     for i in range(sh.slot_start[slot, env], sh.slot_start[slot, env] + sh.slot_size[slot, env]):
-                        is_member = qd.abs(partner.particles_reordered.pos[i, env] - x_n).max() < 0.5 * dx
-                        if qd.static(only_free):
-                            is_member = is_member and partner.particles_reordered.free[i, env]
-                        if is_member:
+                        if qd.abs(partner.particles_reordered.pos[i, env] - x_n).max() < 0.5 * dx:
                             partner.particles_reordered.vel[i, env] = partner.particles_reordered.vel[i, env] + dv_s

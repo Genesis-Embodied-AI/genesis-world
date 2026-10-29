@@ -100,6 +100,11 @@ class MpmParams:
         # Penalty stiffness of an FEM contact row, in units of the row's effective mass, the inverse of its inverse
         # weight: the row energy is 1/2 stiffness m_eff c^2 in the joint dt^2-scaled units
         self.fem_contact_stiffness = _scalar(gs.qd_float, 10.0)
+        # The contact rows of MPM particles against PBD particles: the thickness beyond the PBD radius, the penalty
+        # stiffness in units of the row's effective mass, and the friction coefficient, which PBD particles do not hold
+        self.pbd_contact_thickness = _scalar(gs.qd_float, 0.5 * dx)
+        self.pbd_contact_stiffness = _scalar(gs.qd_float, 10.0)
+        self.pbd_contact_friction = _scalar(gs.qd_float, 0.15)
         # Rigid's solref / solimp parameters of the domain-wall rows, (timeconst, dampratio, dmin, dmax, width, mid,
         # power)
         self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
@@ -312,6 +317,8 @@ class MpmNewton:
         # closest point on it
         self.contact_tri = qd.ndarray(qd.i32, shape=(n_padded,))
         self.contact_bary = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        # The PBD particle of the particle's pyramid rows, in PBD's reordered layout (-1 if none)
+        self.contact_pbd = qd.ndarray(qd.i32, shape=(n_padded,))
         # Nearest obstacle of each sorted particle during a BVH query: its gap, its index, and, for a triangle, the
         # distance to it and the alignment of the triangle normal with the direction to the particle that pick it, the
         # barycentric coordinates of the closest point and the contact normal. The query point and the frame the

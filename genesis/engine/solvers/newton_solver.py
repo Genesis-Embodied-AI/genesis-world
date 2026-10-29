@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 USE_NEWTON_GRAPH = False
 
 # Slots of the composed kernels
-N_SECONDARY_SLOTS = 2
-N_COUPLING_SLOTS = 2
+N_SECONDARY_SLOTS = 3
+N_COUPLING_SLOTS = 3
 
 
 @qd.data_oriented
@@ -130,8 +130,10 @@ class NullParticipant:
 def func_assemble_secondary(
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f,
 ):
     """The secondary participants' gradients and factors at the current iterate, after the primary's assembly staged
@@ -139,11 +141,15 @@ def func_assemble_secondary(
     s0.func_evaluate(f)
     s0.func_gradient(f)
     s1.func_evaluate(f)
+    s2.func_evaluate(f)
     s1.func_gradient(f)
+    s2.func_gradient(f)
     c0.func_contact_gradient(f)
     c1.func_contact_gradient(f)
+    c2.func_contact_gradient(f)
     s0.func_factor()
     s1.func_factor()
+    s2.func_factor()
 
 
 @qd.func(requires_top_level=True)
@@ -151,18 +157,22 @@ def func_pcg_start(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
 ):
     """Each participant's preconditioner, and the PCG start from 0: r = -grad, z = M^-1 r, p = z, rz."""
     p.func_pcg_prepare()
     p.func_pcg_init_residual()
     s0.func_pcg_init()
     s1.func_pcg_init()
+    s2.func_pcg_init()
     p.func_precondition()
     s0.func_precondition()
     s1.func_precondition()
+    s2.func_precondition()
     p.func_pcg_init_direction()
     s0.func_pcg_init_direction(p.ws)
     s1.func_pcg_init_direction(p.ws)
+    s2.func_pcg_init_direction(p.ws)
 
 
 @qd.func(requires_top_level=True)
@@ -170,31 +180,41 @@ def func_pcg_iteration(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f,
 ):
     """One PCG iteration over the rows of every participant, with the couplings' cross terms in the operator."""
     p.func_pcg_spmv()
     c0.func_contact_matvec(f)
     c1.func_contact_matvec(f)
+    c2.func_contact_matvec(f)
     s0.func_matvec()
     s1.func_matvec()
+    s2.func_matvec()
     c0.func_contact_matvec_post(f)
     c1.func_contact_matvec_post(f)
+    c2.func_contact_matvec_post(f)
     s0.func_matvec_dot(p.ws)
     s1.func_matvec_dot(p.ws)
+    s2.func_matvec_dot(p.ws)
     s0.func_pcg_update_xr(p.ws)
     s1.func_pcg_update_xr(p.ws)
+    s2.func_pcg_update_xr(p.ws)
     p.func_pcg_update_xr()
     p.func_precondition()
     s0.func_precondition()
     s1.func_precondition()
+    s2.func_precondition()
     s0.func_pcg_dot_rz(p.ws)
     s1.func_pcg_dot_rz(p.ws)
+    s2.func_pcg_dot_rz(p.ws)
     p.func_pcg_direction_update()
     s0.func_pcg_direction(p.ws)
     s1.func_pcg_direction(p.ws)
+    s2.func_pcg_direction(p.ws)
 
 
 @qd.func(requires_top_level=True)
@@ -203,11 +223,13 @@ def func_start_line_search(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     f,
 ):
     """The Newton direction of every participant from the PCG solution, its measure, and the line search armed."""
     s0.func_start_line_search(control, f)
     s1.func_start_line_search(control, f)
+    s2.func_start_line_search(control, f)
     p.func_start_line_search(control, f)
     func_check_convergence(control)
     func_init_line_search(control)
@@ -219,16 +241,20 @@ def func_step_forward(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f,
 ):
     """The trial point of every participant at the line-search step, and what the couplings derive from it."""
     p.func_step_forward(control)
     s0.func_step_forward(control, f)
     s1.func_step_forward(control, f)
+    s2.func_step_forward(control, f)
     c0.func_after_step(f)
     c1.func_after_step(f)
+    c2.func_after_step(f)
 
 
 @qd.func(requires_top_level=True)
@@ -237,6 +263,7 @@ def func_energy(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     f,
     is_trial,
 ):
@@ -244,6 +271,7 @@ def func_energy(
     p.func_energy(control, f, is_trial)
     s0.func_energy(control, f, is_trial)
     s1.func_energy(control, f, is_trial)
+    s2.func_energy(control, f, is_trial)
 
 
 # ================================================== kernels ==================================================
@@ -253,11 +281,13 @@ def func_energy(
 def kernel_assemble_secondary(
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f: qd.i32,
 ):
-    func_assemble_secondary(s0, s1, c0, c1, f)
+    func_assemble_secondary(s0, s1, s2, c0, c1, c2, f)
 
 
 @qd.kernel
@@ -265,8 +295,9 @@ def kernel_pcg_start(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
 ):
-    func_pcg_start(p, s0, s1)
+    func_pcg_start(p, s0, s1, s2)
 
 
 @qd.kernel(graph=True)
@@ -274,13 +305,15 @@ def kernel_pcg_loop(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f: qd.i32,
 ):
     """The PCG iterations after kernel_pcg_start, until convergence or the iteration budget, as one graph."""
     while qd.graph.do_while(p.ws.cond):
-        func_pcg_iteration(p, s0, s1, c0, c1, f)
+        func_pcg_iteration(p, s0, s1, s2, c0, c1, c2, f)
 
 
 @qd.kernel
@@ -289,9 +322,10 @@ def kernel_start_line_search(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     f: qd.i32,
 ):
-    func_start_line_search(control, p, s0, s1, f)
+    func_start_line_search(control, p, s0, s1, s2, f)
 
 
 @qd.kernel
@@ -300,11 +334,13 @@ def kernel_step_forward(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f: qd.i32,
 ):
-    func_step_forward(control, p, s0, s1, c0, c1, f)
+    func_step_forward(control, p, s0, s1, s2, c0, c1, c2, f)
 
 
 @qd.kernel
@@ -313,10 +349,11 @@ def kernel_energy(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     f: qd.i32,
     is_trial: qd.i32,
 ):
-    func_energy(control, p, s0, s1, f, is_trial)
+    func_energy(control, p, s0, s1, s2, f, is_trial)
 
 
 @qd.kernel
@@ -335,8 +372,10 @@ def kernel_newton_loop(
     p: qd.template(),
     s0: qd.template(),
     s1: qd.template(),
+    s2: qd.template(),
     c0: qd.template(),
     c1: qd.template(),
+    c2: qd.template(),
     f: qd.i32,
 ):
     """The Newton iterations of a substep as one graph, after the start energy armed the loop.
@@ -346,14 +385,14 @@ def kernel_newton_loop(
     """
     while qd.graph.do_while(control.newton_cond):
         p.func_assemble(control, f)
-        func_assemble_secondary(s0, s1, c0, c1, f)
-        func_pcg_start(p, s0, s1)
+        func_assemble_secondary(s0, s1, s2, c0, c1, c2, f)
+        func_pcg_start(p, s0, s1, s2)
         while qd.graph.do_while(p.ws.cond):
-            func_pcg_iteration(p, s0, s1, c0, c1, f)
-        func_start_line_search(control, p, s0, s1, f)
+            func_pcg_iteration(p, s0, s1, s2, c0, c1, c2, f)
+        func_start_line_search(control, p, s0, s1, s2, f)
         while qd.graph.do_while(control.ls_cond):
-            func_step_forward(control, p, s0, s1, c0, c1, f)
-            func_energy(control, p, s0, s1, f, 1)
+            func_step_forward(control, p, s0, s1, s2, c0, c1, c2, f)
+            func_energy(control, p, s0, s1, s2, f, 1)
             func_accept_or_backtrack(control)
         func_update_convergence(control)
 

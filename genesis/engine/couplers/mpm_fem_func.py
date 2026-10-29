@@ -292,8 +292,7 @@ def func_fem_point_disp(
     params: qd.template(),  # MpmParams
     f,
 ):
-    """Displacement of the contact point of every particle with FEM rows at the current FEM iterate, after the Rigid
-    contact point displacement wrote the others."""
+    """Displacement of the contact point of every particle with FEM rows at the current FEM iterate."""
     qd.loop_config(name="mpm_fem_point_disp")
     for s in range(grid.n_valid[()]):
         i_s = newton.contact_tri[s]

@@ -18,6 +18,14 @@ from genesis.engine.couplers.mpm_fem_newton import (
     MpmFemContact,
     MpmFemContactHost,
 )
+from genesis.engine.couplers.mpm_pbd_func import (
+    MpmPbdContact,
+    MpmPbdContactHost,
+    PbdNewtonData,
+    PbdNewtonHost,
+    PbdNewtonParticipant,
+    PbdParticleQuery,
+)
 from genesis.engine.couplers.mpm_rigid_func import RigidGeomQuery, func_build_rigid_rows
 from genesis.engine.couplers.mpm_rigid_newton import (
     MpmRigidContact,
@@ -330,6 +338,14 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             query = FemTriangleQuery(fem, self._mpm_newton, self._mpm_params, self._B)
             contact = MpmFemContact(self._newton_participant, fem_participant, query)
             newton_solver.register_coupling(MpmFemContactHost(contact), contact)
+        # PBD's particles join the solve with their inertia around PBD's own projection (see mpm_pbd_func)
+        if self._pbd_coupled:
+            pbd = self._sim.pbd_solver
+            pbd_participant = PbdNewtonParticipant(PbdNewtonData(pbd, self._B))
+            newton_solver.register_secondary(PbdNewtonHost(pbd_participant.pd, self._mpm_params), pbd_participant)
+            query = PbdParticleQuery(pbd, self._mpm_newton, self._mpm_params, self._B)
+            contact = MpmPbdContact(self._newton_participant, pbd_participant, query)
+            newton_solver.register_coupling(MpmPbdContactHost(contact), contact)
 
     def _wall_sol_params(self):
         """Rigid's default solref / solimp parameters, with the Rigid constraint timeconst floored at twice the
@@ -589,15 +605,11 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         sort_reduce_bcoo(self._mpm_linear.matrix)
 
     def _exchange_momentum(self, f):
-        """The momentum exchanges with SPH and PBD, on the free node velocity of the substep."""
-        grid, params = self._mpm_grid, self._mpm_params
-        for solver, is_coupled, only_free in (
-            (self._sim.sph_solver, self._sph_coupled, False),
-            (self._sim.pbd_solver, self._pbd_coupled, True),
-        ):
-            if is_coupled:
-                stencil = int(np.floor(self._dx / solver.hash_grid_cell_size)) + 2
-                kernel_exchange_particles(grid, params, solver, stencil, only_free)
+        """The momentum exchange with SPH, on the free node velocity of the substep."""
+        if self._sph_coupled:
+            sph = self._sim.sph_solver
+            stencil = int(np.floor(self._dx / sph.hash_grid_cell_size)) + 2
+            kernel_exchange_particles(self._mpm_grid, self._mpm_params, sph, stencil)
 
     # ------------------------------------------------------------------------------------
     # --------------------------- Newton solver participant -----------------------------
@@ -1648,9 +1660,8 @@ def kernel_exchange_particles(
     params: qd.template(),
     partner: qd.template(),
     stencil: qd.template(),
-    only_free: qd.template(),
 ):
-    mpm_exchange_func.func_exchange_particles(grid, params, partner, stencil, only_free)
+    mpm_exchange_func.func_exchange_particles(grid, params, partner, stencil)
 
 
 @qd.kernel
