@@ -23,8 +23,6 @@ from .entities import (
     RigidLinkSolverOptions,
     SPHEntityOptions,
     SPHEntitySolverOptions,
-    ToolEntityOptions,
-    ToolEntitySolverOptions,
     VertexOptions,
 )
 from .misc import CoacdOptions, FoamOptions
@@ -87,9 +85,6 @@ __all__ = [
     "SPHEntityOptions",
     "SPHEntitySolverOptions",
     "SPHOptions",
-    "ToolEntityOptions",
-    "ToolEntitySolverOptions",
-    "ToolOptions",
     "VertexOptions",
     "ViewerOptions",
     "VisOptions",

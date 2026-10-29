@@ -37,16 +37,21 @@ def test_mpm_rigid_push_grad(show_viewer):
         )
     )
     stick = scene.add_entity(
-        options=gs.options.ToolEntityOptions(
+        options=gs.options.RigidEntityOptions(
             morph=gs.morphs.Mesh(
                 file="meshes/stirrer.obj",
                 scale=0.6,
                 pos=(0.5, 0.5, 0.05),
                 euler=(90.0, 0.0, 0.0),
             ),
+            # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
             material=gs.materials.Material(
-                friction=8.0,
+                density=1e6,
             ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=8.0,
+            ),
+            gravity_compensation=1.0,
         ),
     )
     obj = scene.add_entity(
@@ -136,11 +141,11 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
             ),
             show_viewer=show_viewer and requires_grad,
         )
-        box = scene.add_entity(
+        mpm_box = scene.add_entity(
             options=gs.options.MPMEntityOptions(
                 morph=gs.morphs.Box(
-                    lower=(-0.1, -0.1, 0.1),
-                    upper=(0.1, 0.1, 0.2),
+                    lower=(-0.35, -0.1, 0.1),
+                    upper=(-0.15, 0.1, 0.2),
                 ),
                 material=gs.materials.Muscle(
                     density=1000.0,
@@ -154,14 +159,18 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
             ),
         )
         fem_box = scene.add_entity(
-            morph=gs.morphs.Box(
-                pos=(0.3, 0.0, 0.3),
-                size=(0.1, 0.1, 0.1),
-            ),
-            material=gs.materials.FEM.Muscle(
-                E=5e4,
-                nu=0.3,
-                n_groups=2,
+            options=gs.options.FEMEntityOptions(
+                morph=gs.morphs.Box(
+                    pos=(0.3, 0.0, 0.3),
+                    size=(0.1, 0.1, 0.1),
+                ),
+                material=gs.materials.Muscle(
+                    youngs_modulus=5e4,
+                    poisson_ratio=0.3,
+                ),
+                solver_options=gs.options.FEMEntitySolverOptions(
+                    n_groups=2,
+                ),
             ),
         )
         scene.build(n_envs=2)

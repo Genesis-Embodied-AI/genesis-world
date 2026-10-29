@@ -5,7 +5,6 @@ import numpy as np
 import torch
 
 import genesis as gs
-from genesis.grad.bridge import QueriedStates
 from genesis.options.entities import EntityOptions, HybridEntityOptions, KinematicEntityOptions
 from genesis.options.materials import BaseMaterial
 from genesis.options.morphs import Morph

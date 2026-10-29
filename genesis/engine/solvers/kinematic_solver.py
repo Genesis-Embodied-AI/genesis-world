@@ -160,6 +160,10 @@ class KinematicSolver(Solver):
     RigidSolver extends this with physics (collision, constraints, dynamics).
     """
 
+    # Kinematic entities carry no dynamics, so their state stays outside the autograd graph of a differentiable scene.
+    # The rigid solver deriving from this one reverses its own dynamics.
+    is_differentiable = True
+
     # The kinds of entity this solver builds, each with the morph class it is built from, the most specific first
     _entity_classes = ((Morph, KinematicEntity),)
 

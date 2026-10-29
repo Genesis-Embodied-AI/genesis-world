@@ -37,19 +37,24 @@ def main():
         )
     )
     stick = scene.add_entity(
-        options=gs.options.ToolEntityOptions(
+        options=gs.options.RigidEntityOptions(
             morph=gs.morphs.Mesh(
                 file="meshes/stirrer.obj",
-                scale=0.6,
+                scale=1.0,
                 pos=(0.5, 0.5, 0.05),
                 euler=(90.0, 0.0, 0.0),
             ),
             surface=gs.surfaces.Default(
-                color=(1.0, 1.0, 1.0, 1.0),
+                color=(0.85, 0.2, 0.15, 1.0),
             ),
+            # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
             material=gs.materials.Material(
-                friction=8.0,
+                density=1e6,
             ),
+            solver_options=gs.options.RigidEntitySolverOptions(
+                coup_friction=8.0,
+            ),
+            gravity_compensation=1.0,
         ),
     )
     obj1 = scene.add_entity(

@@ -12,6 +12,7 @@ import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
 from genesis.engine.solvers.mpm_models import MPMModel, MPMModelKey, build_mpm_model, get_mpm_model_key
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
@@ -25,7 +26,9 @@ if TYPE_CHECKING:
 
 
 @qd.data_oriented
-class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
+class MPMSolver(ParticleSolver):
+    has_frames = True
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------

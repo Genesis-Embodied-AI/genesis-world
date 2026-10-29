@@ -303,13 +303,6 @@ class LegacyCoupler(RBC):
 
         return vel
 
-    @qd.func
-    def _func_mpm_tool(self, f, pos_world, vel, i_b):
-        for entity in qd.static(self.tool_solver.entities):
-            if qd.static(entity.mesh.collision):
-                vel = entity.collide(f, pos_world, vel, i_b)
-        return vel
-
     @qd.kernel
     def mpm_grid_op(
         self,

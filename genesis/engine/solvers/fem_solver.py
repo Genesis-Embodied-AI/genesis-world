@@ -12,6 +12,7 @@ import genesis.utils.array_class as array_class
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.solvers.fem_models import FEMModel, FEMModelKey, build_fem_model, get_fem_model_key
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import FEMSolverState
 from genesis.grad.bridge import no_grad
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
@@ -22,6 +23,8 @@ from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 @qd.data_oriented
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
+    has_frames = True
+
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
@@ -356,7 +359,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         # The vertices the vertex options fix are held at their initial positions from the first substep on
         for entity in self._entities:
             if entity._fixed_verts_idx_local.size > 0:
-                entity.set_vertex_constraints(entity._fixed_verts_idx_local)
+                self._set_vertex_constraints(entity._fixed_verts_idx_local + entity._v_start)
 
     @property
     def is_active(self):
@@ -1267,6 +1270,12 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         envs_idx : None | int | array_like, shape (M,), optional
             The indices of the environments to set. If None, all environments will be considered. Defaults to None.
         """
+        self._set_vertex_constraints(verts_idx, target_poss, link_idx, is_soft_constraint, stiffness, envs_idx)
+
+    def _set_vertex_constraints(
+        self, verts_idx=None, target_poss=None, link_idx=-1, is_soft_constraint=False, stiffness=0.0, envs_idx=None
+    ):
+        """Constrain some vertices (see 'set_vertex_constraints'), also before the scene is built."""
         if self._use_implicit_solver and not self._enable_vertex_constraints:
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."

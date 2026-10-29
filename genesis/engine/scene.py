@@ -48,8 +48,6 @@ from genesis.options import (
     SimOptions,
     SPHEntityOptions,
     SPHOptions,
-    ToolEntityOptions,
-    ToolOptions,
     ViewerOptions,
     VisOptions,
 )
@@ -440,7 +438,7 @@ class Scene(RBC):
             surface.double_sided = isinstance(options, PBDClothEntityOptions) or isinstance(material, Cloth)
 
         # validate and populate default surface.vis_mode considering the kind of entity
-        if isinstance(options, (RigidEntityOptions, KinematicEntityOptions, ToolEntityOptions)):
+        if isinstance(options, (RigidEntityOptions, KinematicEntityOptions)):
             vis_modes = ("visual", "collision", "sdf")
         elif isinstance(options, (PBDLiquidEntityOptions, PBDParticleEntityOptions, SPHEntityOptions)) or (
             isinstance(options, MPMEntityOptions) and isinstance(material, (Liquid, Sand, Snow))

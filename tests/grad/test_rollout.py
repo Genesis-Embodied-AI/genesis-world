@@ -356,15 +356,17 @@ def test_state_getters_grad_matches_fd(grad_free_with_hinge_ball_slide, precisio
 @pytest.mark.precision("64")
 def test_reject_non_differentiable_solvers():
     box = gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1))
-    for materials, options, component_name in (
-        ((gs.materials.PBD.Liquid(),), {}, "PBDSolver"),
-        ((gs.materials.SPH.Liquid(),), {}, "SPHSolver"),
-        ((gs.materials.FEM.Elastic(),), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
-        ((gs.materials.FEM.Elastic(), gs.materials.Rigid()), {}, "LegacyCoupler"),
-        ((gs.materials.Rigid(),), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),
+    fem_options = gs.options.FEMEntityOptions(morph=box, material=gs.materials.Elastic())
+    rigid_options = gs.options.RigidEntityOptions(morph=box)
+    for entities_options, scene_options, component_name in (
+        ((gs.options.PBDLiquidEntityOptions(morph=box),), {}, "PBDSolver"),
+        ((gs.options.SPHEntityOptions(morph=box),), {}, "SPHSolver"),
+        ((fem_options,), {"fem_options": gs.options.FEMOptions(use_implicit_solver=True)}, "FEMSolver"),
+        ((fem_options, rigid_options), {}, "LegacyCoupler"),
+        ((rigid_options,), {"coupler_options": gs.options.SAPCouplerOptions()}, "SAPCoupler"),
     ):
-        scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True), **options, show_viewer=False)
-        for material in materials:
-            scene.add_entity(morph=box, material=material)
+        scene = gs.Scene(sim_options=gs.options.SimOptions(requires_grad=True), **scene_options, show_viewer=False)
+        for options in entities_options:
+            scene.add_entity(options=options)
         with pytest.raises(gs.GenesisException, match=component_name):
             scene.build()

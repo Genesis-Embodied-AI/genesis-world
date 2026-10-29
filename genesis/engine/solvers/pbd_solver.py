@@ -14,6 +14,7 @@ from genesis.engine.entities import (
     PBDParticleEntity,
 )
 from genesis.engine.entities.pbd_entity import PBDTetEntity
+from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.options.entities import (
     PBDClothEntityOptions,
@@ -21,7 +22,6 @@ from genesis.options.entities import (
     PBDLiquidEntityOptions,
     PBDParticleEntityOptions,
 )
-from genesis.utils.array_class import LinksState
 from genesis.utils.geom import SpatialHasher
 
 from .particle_solver import ParticleSolver
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 
 @qd.data_oriented
-class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
+class PBDSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------

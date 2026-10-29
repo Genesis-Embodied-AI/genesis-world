@@ -11,6 +11,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
+from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
@@ -197,6 +198,13 @@ class GravityMixin:
 
 
 class Solver(RBC):
+    # Whether the solver supports a scene with `requires_grad`, which every active solver of such a scene must
+    is_differentiable: bool = False
+    # Whether the solver holds its state in frames, one per substep of a window of them (see 'n_frames'), frame 0
+    # holding the state between two steps. The simulator copies the last frame into frame 0 at the end of each
+    # window ('copy_frame'), and a boundary checkpoint holds frame 0 alone.
+    has_frames: bool = False
+
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
         self._sim = sim
