@@ -151,7 +151,51 @@ class _OrdinalIndex(Options):
         return self.ordinals is None and self.mask is None and self.span is None
 
 
-class GeomIndex(_OrdinalIndex):
+class _NamedOrdinalIndex(_OrdinalIndex):
+    """Select the geoms of a link by their ordinal in the asset, counted within the link, or by name.
+
+    A name is an exact name or a glob pattern (see ``LinkIndex``).
+    """
+
+    names: Annotated[StrArrayType, Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def _check_names_alone(self) -> Self:
+        if self.names is not None and not super().is_all:
+            gs.raise_exception(f"{type(self).__name__} takes one of ordinals, a mask, a span and names.")
+        return self
+
+    @classmethod
+    def all(cls) -> Self:
+        """Select every geom."""
+        return cls()
+
+    @classmethod
+    def named(cls, *names: str) -> Self:
+        """Select the geoms of the given names, each an exact geom name or a glob pattern."""
+        return cls(names=names)
+
+    @property
+    def is_all(self) -> bool:
+        """Whether the selection holds every element."""
+        return super().is_all and self.names is None
+
+    def matches(self, geom_name: str) -> bool:
+        """Whether a selection by name holds the geom of a given name."""
+        return any(fnmatchcase(geom_name, name) for name in self.names)
+
+    def resolve(self, geoms_name: list[str]) -> np.ndarray:
+        """Return the ordinals of the selected geoms among the geoms of a link, given their names.
+
+        A selection by name may match no geom of a link, so that it combines with a selection of several links. A
+        selection by name that matches no geom of the whole entity raises when the entity is added.
+        """
+        if self.names is None:
+            return self._resolve_ordinals(len(geoms_name), "geom")
+        return np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
+
+
+class GeomIndex(_NamedOrdinalIndex):
     """Select the collision geoms of a link by their ordinal in the asset, counted within the link, or by name.
 
     Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
@@ -161,42 +205,48 @@ class GeomIndex(_OrdinalIndex):
     so a pattern such as '*/collision' selects it.
     """
 
-    names: Annotated[StrArrayType, Field(min_length=1)] | None = None
+
+class VGeomIndex(_NamedOrdinalIndex):
+    """Select the visual geoms of a link by their ordinal in the asset, counted within the link, by name or by material.
+
+    A mesh asset holding several materials loads as one visual geom per material, so the ordinal counts the visual
+    geoms as the asset splits them. A name is matched against the names the asset gives its geoms (see ``GeomIndex``).
+    A material name is matched against the name of the material the asset assigns a visual geom: the material of a
+    glTF primitive, an OBJ or a URDF, the 'material' attribute of an MJCF geom, or the prim path of the material bound
+    to a USD mesh. Names and material names are exact names or glob patterns (see ``LinkIndex``).
+    """
+
+    material_names: Annotated[StrArrayType, Field(min_length=1)] | None = None
 
     @model_validator(mode="after")
-    def _check_names_alone(self) -> Self:
-        if self.names is not None and not super().is_all:
-            gs.raise_exception("GeomIndex takes one of ordinals, a mask, a span and names.")
+    def _check_material_names_alone(self) -> Self:
+        if self.material_names is not None and not super().is_all:
+            gs.raise_exception("VGeomIndex takes one of ordinals, a mask, a span, names and material names.")
         return self
 
     @classmethod
-    def all(cls) -> Self:
-        """Select every collision geom."""
-        return cls()
-
-    @classmethod
-    def named(cls, *names: str) -> Self:
-        """Select the collision geoms of the given names, each an exact geom name or a glob pattern."""
-        return cls(names=names)
+    def with_material(cls, *names: str) -> Self:
+        """Select the visual geoms whose asset material has one of the given names, each exact or a glob pattern."""
+        return cls(material_names=names)
 
     @property
     def is_all(self) -> bool:
         """Whether the selection holds every element."""
-        return super().is_all and self.names is None
+        return super().is_all and self.material_names is None
 
-    def matches(self, geom_name: str) -> bool:
-        """Whether a selection by name holds the collision geom of a given name."""
-        return any(fnmatchcase(geom_name, name) for name in self.names)
+    def matches_material(self, material_name: str) -> bool:
+        """Whether a selection by material name holds the visual geom of a given asset material name."""
+        return any(fnmatchcase(material_name, name) for name in self.material_names)
 
-    def resolve(self, geoms_name: list[str]) -> np.ndarray:
-        """Return the ordinals of the selected geoms among the collision geoms of a link, given their names.
+    def resolve(self, vgeoms_name: list[str], vgeoms_material_name: list[str]) -> np.ndarray:
+        """Return the ordinals of the selected visual geoms of a link, given their names and asset material names.
 
-        A selection by name may match no geom of a link, so that it combines with a selection of several links. A
-        selection by name that matches no geom of the whole entity raises when the entity is added.
+        A selection by name or by material may match no visual geom of a link (see ``GeomIndex.resolve``).
         """
-        if self.names is None:
-            return self._resolve_ordinals(len(geoms_name), "geom")
-        return np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
+        if self.material_names is None:
+            return super().resolve(vgeoms_name)
+        is_selected = [self.matches_material(material_name) for material_name in vgeoms_material_name]
+        return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 
 class VertexIndex(Options):
