@@ -427,6 +427,7 @@ def postprocess_collision_geoms(
         geom_type = g_info.get("type")
         friction = g_info.get("friction")
         density = g_info.get("density")
+        mass = g_info.get("mass")
         sol_params = g_info.get("sol_params")
         key_parts += [
             np.ascontiguousarray(mesh.verts),
@@ -436,6 +437,7 @@ def postprocess_collision_geoms(
             int(g_info.get("conaffinity", 0)),
             float("nan") if friction is None else float(friction),
             float("nan") if density is None else float(density),
+            float("nan") if mass is None else float(mass),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
             np.ascontiguousarray(g_info.get("pos", gu.zero_pos()), dtype=np.float64),
             np.ascontiguousarray(g_info.get("quat", gu.identity_quat()), dtype=np.float64),
@@ -603,10 +605,13 @@ def _postprocess_collision_geoms_impl(
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
+                        # A fused mesh carries a single density, so geoms with different authored densities, and any
+                        # geom stating its mass, must stay separate for the density-weighted link inertial to survive
+                        # fusion.
+                        and "mass" not in first_g_info
+                        and "mass" not in g_info
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
-                            # A fused mesh carries a single density, so geoms with different authored densities must
-                            # stay separate for the density-weighted link inertial to survive fusion.
                             for name in ("friction", "sol_params", "density")
                         )
                     ):
@@ -722,7 +727,13 @@ def _postprocess_collision_geoms_impl(
                     )
                     for tmesh in tmeshes
                 ]
-                _g_infos += [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
+                parts_g_info = [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
+                # The parts share a stated mass in proportion to their volume
+                if "mass" in g_info:
+                    parts_volume = np.abs([tmesh.volume for tmesh in tmeshes])
+                    for part_g_info, part_volume in zip(parts_g_info, parts_volume):
+                        part_g_info["mass"] = g_info["mass"] * part_volume / parts_volume.sum()
+                _g_infos += parts_g_info
             else:
                 _g_infos.append(g_info)
         g_infos = _g_infos

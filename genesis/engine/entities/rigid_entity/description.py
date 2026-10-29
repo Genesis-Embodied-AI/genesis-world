@@ -52,6 +52,7 @@ from .inertial import (
     compose_inertial_from_g_infos,
     compose_inertial_properties,
     finalize_inertial,
+    get_local_inertial_from_geom,
 )
 
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
@@ -1398,6 +1399,7 @@ class KinematicEntityDescription(EntityDescription):
         if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
             for g_info in g_infos:
                 g_info.pop("density", None)
+                g_info.pop("mass", None)
 
         cg_infos, vg_infos = [], []
         for g_info in g_infos:
@@ -1460,6 +1462,15 @@ class KinematicEntityDescription(EntityDescription):
                     morph.coacd_options,
                     morph.watertighten,
                 )
+
+        # A geom stating its mass takes the density giving that mass on its final geometry, which post-processing
+        # carries the mass to. A geom spanning no volume keeps no density.
+        for g_info in cg_infos:
+            mass = g_info.pop("mass", None)
+            if mass is not None:
+                unit_mass = get_local_inertial_from_geom(g_info["type"], g_info["data"], g_info["mesh"]).mass
+                if unit_mass > 0.0:
+                    g_info["density"] = mass / unit_mass
 
         # Randomize collision mesh colors. This is especially useful to check convex decomposition.
         for g_info in cg_infos:
