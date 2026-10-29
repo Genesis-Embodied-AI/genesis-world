@@ -1,15 +1,8 @@
 """Shared helpers for translating a desired collision matrix into contype/conaffinity bitmasks."""
 
 from functools import lru_cache
-from time import perf_counter
-
-import z3
 
 from .cache import register_cache_clear
-
-# A fallback search keeps refuting one width per bit below its answer, so it is abandoned after this delay in total,
-# and every check is bounded by what remains of it. Callers fall back on their default masks when nothing is found.
-Z3_SEARCH_TIMEOUT_S = 30
 
 
 # Geoms of one entity are parsed once per scene it is added to, which asks for the same assignment every time.
@@ -25,11 +18,11 @@ def solve_contype_conaffinity(
     collide, this finds bitmasks such that every excluded pair is disabled and every other pair is enabled. Used by
     both the MJCF importer (``<contact><exclude>``) and the USD importer (CollisionGroup / FilteredPairsAPI).
 
-    Geoms excluding exactly the same partners are interchangeable, so one bit per group of such geoms discriminates
-    them against every other group, in O(n^2) time. Each geom takes the bit of its group as ``contype``, and as
-    ``conaffinity`` the bits of every group it may collide with, its own group included. A collision matrix whose
-    groups do not fit in ``max_bits`` bits falls back on an ascending z3 search over the bit widths, which gives up
-    after ``Z3_SEARCH_TIMEOUT_S`` seconds. The result is memoized per input.
+    Finding the fewest bits is NP-hard, so two deterministic polynomial constructions are tried in turn. Geoms
+    excluding exactly the same partners are interchangeable, so the first one assigns one bit per group of such geoms:
+    each geom takes the bit of its group as ``contype``, and as ``conaffinity`` the bits of every group it may collide
+    with, its own group included. When there are more groups than ``max_bits``, the second one covers the allowed
+    pairs with cliques greedily, one bit per clique set in both masks of its members. The result is memoized per input.
 
     Every geom keeps at least one bit set across its two masks: a geom whose masks are both zero would be demoted to
     a visual-only geom downstream (``contype or conaffinity`` is the collision-geom discriminator), silently
@@ -47,7 +40,7 @@ def solve_contype_conaffinity(
     Returns
     -------
     tuple[tuple[int, int], ...] | None
-        ``(contype, conaffinity)`` per geom index, or ``None`` if no assignment up to ``max_bits`` bits was found.
+        ``(contype, conaffinity)`` per geom index, or ``None`` if neither construction fits in ``max_bits`` bits.
     """
     excluded_geoms = [set() for _ in range(n)]
     for i_ga in range(n):
@@ -69,39 +62,36 @@ def solve_contype_conaffinity(
                 conaffinity_of_group[i_group] &= ~(1 << group_of_geom[i_g])
         return tuple((1 << i_group, conaffinity_of_group[i_group]) for i_group in group_of_geom)
 
-    deadline = perf_counter() + Z3_SEARCH_TIMEOUT_S
-    for num_bits in range(1, max_bits + 1):
-        solver = z3.Solver()
-        contype_bits = [[z3.Bool(f"contype_{i}_{b}") for b in range(num_bits)] for i in range(n)]
-        conaffinity_bits = [[z3.Bool(f"conaffinity_{i}_{b}") for b in range(num_bits)] for i in range(n)]
-        for i in range(n):
-            solver.add(z3.Or([*contype_bits[i], *conaffinity_bits[i]]))
-            for j in range(i + 1, n):
-                cond1 = z3.Or([z3.And(contype_bits[i][b], conaffinity_bits[j][b]) for b in range(num_bits)])
-                cond2 = z3.Or([z3.And(contype_bits[j][b], conaffinity_bits[i][b]) for b in range(num_bits)])
-                if frozenset((i, j)) in invalid_pairs:
-                    solver.add(z3.Not(cond1), z3.Not(cond2))
-                else:
-                    solver.add(z3.Or(cond1, cond2))
-        # Building the constraints of a width takes time on its own, so the delay left is read once they are built.
-        remaining_ms = int((deadline - perf_counter()) * 1000)
-        if remaining_ms <= 0:
-            return None
-        solver.set("timeout", remaining_ms)
-        result = solver.check()
-        if result == z3.sat:
-            model = solver.model()
-            return tuple(
-                tuple(
-                    sum((1 << b) if z3.is_true(model[e]) else 0 for b, e in enumerate(bits))
-                    for bits in (contype_bits[i], conaffinity_bits[i])
-                )
-                for i in range(n)
-            )
-        # A width the remaining delay cannot refute ends the search, since the wider widths cost more to refute.
-        if result != z3.unsat:
-            return None
-    return None
+    # Each clique grows from a geom with an allowed pair left uncovered, adding the candidate that covers the most
+    # uncovered pairs with the clique. That count is updated as the clique grows, keeping each addition linear in n.
+    allowed_geoms = [set(range(n)) - excluded_geoms[i_g] - {i_g} for i_g in range(n)]
+    uncovered_geoms = [set(geoms) for geoms in allowed_geoms]
+    mask_of_geom = [0] * n
+    num_cliques = 0
+    for i_ga in range(n):
+        while uncovered_geoms[i_ga]:
+            if num_cliques == max_bits:
+                return None
+            clique = {i_ga}
+            candidate_geoms = set(allowed_geoms[i_ga])
+            gain_of_geom = dict.fromkeys(candidate_geoms, 0)
+            for i_g in uncovered_geoms[i_ga]:
+                gain_of_geom[i_g] = 1
+            while candidate_geoms:
+                i_gb = max(candidate_geoms, key=lambda i_g: (gain_of_geom[i_g], -i_g))
+                clique.add(i_gb)
+                candidate_geoms &= allowed_geoms[i_gb]
+                for i_g in uncovered_geoms[i_gb] & candidate_geoms:
+                    gain_of_geom[i_g] += 1
+            for i_g in clique:
+                uncovered_geoms[i_g] -= clique
+                mask_of_geom[i_g] |= 1 << num_cliques
+            num_cliques += 1
+
+    # A geom allowed to collide with no other one still needs a bit, set in a 'conaffinity' that no 'contype' matches.
+    if 0 in mask_of_geom and num_cliques == max_bits:
+        return None
+    return tuple((mask, mask) if mask else (0, 1 << num_cliques) for mask in mask_of_geom)
 
 
 register_cache_clear(solve_contype_conaffinity.cache_clear)
