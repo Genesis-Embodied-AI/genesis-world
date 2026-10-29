@@ -112,9 +112,6 @@ def test_link_filter_strict():
                 pos=(0, 0, 0.2),
                 fixed=True,
             ),
-            solver_options=gs.options.RigidEntitySolverOptions(
-                coup_type="two_way_soft_constraint",
-            ),
             links={
                 "base": gs.options.LinkOptions(
                     solver_options=gs.options.RigidLinkSolverOptions(
@@ -132,6 +129,8 @@ def test_link_filter_strict():
     base_link = robot.get_link("base")
     moving_link = robot.get_link("moving")
 
+    # Coupling some links alone resolves the coupling left to None to the two-way one
+    assert coupler._coup_type_by_entity[robot] == COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT
     assert robot in coupler._coup_links
     assert coupler._coup_links[robot] == {moving_link}
 
@@ -396,13 +395,14 @@ def test_link_coup_collision():
     assert collision_settings[base_link] is False
     assert moving_link not in collision_settings
 
-    # A link density would weigh the link differently in the rigid solver and in IPC, which holds one per entity
+    # A link density would weigh the link differently in the rigid solver and in IPC, which holds one per entity, even
+    # on a link IPC merges into the affine body of its parent
     scene_with_link_density = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(two_way_coupling=True))
     scene_with_link_density.add_entity(
         options=gs.options.RigidEntityOptions(
-            morph=gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", fixed=True),
+            morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda_non_overlap.xml"),
             solver_options=gs.options.RigidEntitySolverOptions(coup_type="two_way_soft_constraint"),
-            links={"moving": gs.options.LinkOptions(material=gs.materials.Material(density=2000.0))},
+            links={"hand": gs.options.LinkOptions(material=gs.materials.Material(density=2000.0))},
         )
     )
     with pytest.raises(gs.GenesisException, match="density"):
