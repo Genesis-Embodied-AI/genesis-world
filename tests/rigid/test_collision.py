@@ -2033,24 +2033,22 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
     # excluding its neighbours, and disjoint excluded pairs among free geoms both need more groups than bits.
     rng = np.random.default_rng(0)
     collision_matrices = [
-        (40, frozenset(frozenset((i_g, i_g + 1)) for i_g in range(39)), 31),
-        (52, frozenset(frozenset((2 * i_p, 2 * i_p + 1)) for i_p in range(16)), 31),
+        (40, {frozenset((i_g, i_g + 1)) for i_g in range(39)}, 31),
+        (52, {frozenset((2 * i_p, 2 * i_p + 1)) for i_p in range(16)}, 31),
     ]
     for density in (0.0, 0.05, 0.25, 0.5, 0.75, 1.0):
         for _ in range(64):
             num_geoms = int(rng.integers(1, 32))
-            invalid_pairs = frozenset(
+            invalid_pairs = {
                 frozenset((i_ga, i_gb))
                 for i_ga in range(num_geoms)
                 for i_gb in range(i_ga + 1, num_geoms)
                 if rng.random() < density
-            )
+            }
             collision_matrices.append((num_geoms, invalid_pairs, 31))
     # Every geom excluding every other one needs one bit per geom to group, so a single-bit budget falls back on the
     # clique cover, which realizes that matrix by leaving every 'contype' empty.
-    collision_matrices.append(
-        (5, frozenset(frozenset((i_ga, i_gb)) for i_ga in range(5) for i_gb in range(i_ga + 1, 5)), 1)
-    )
+    collision_matrices.append((5, {frozenset((i_ga, i_gb)) for i_ga in range(5) for i_gb in range(i_ga + 1, 5)}, 1))
     for num_geoms, invalid_pairs, max_bits in collision_matrices:
         masks = solve_contype_conaffinity(num_geoms, invalid_pairs, max_bits=max_bits)
 
@@ -2062,7 +2060,7 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
                 assert is_colliding != (frozenset((i_ga, i_gb)) in invalid_pairs)
 
     # A matrix that one bit cannot realize is reported as such, so that callers fall back on their default masks.
-    assert solve_contype_conaffinity(3, frozenset((frozenset((0, 1)), frozenset((0, 2)))), max_bits=1) is None
+    assert solve_contype_conaffinity(3, {frozenset((0, 1)), frozenset((0, 2))}, max_bits=1) is None
 
 
 @pytest.mark.required

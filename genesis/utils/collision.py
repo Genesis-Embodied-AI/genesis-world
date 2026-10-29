@@ -1,15 +1,9 @@
 """Shared helpers for translating a desired collision matrix into contype/conaffinity bitmasks."""
 
-from functools import lru_cache
 
-from .cache import register_cache_clear
-
-
-# Geoms of one entity are parsed once per scene it is added to, which asks for the same assignment every time.
-@lru_cache(maxsize=64)
 def solve_contype_conaffinity(
-    n: int, invalid_pairs: frozenset[frozenset[int]], max_bits: int = 31
-) -> tuple[tuple[int, int], ...] | None:
+    n: int, invalid_pairs: set[frozenset[int]], max_bits: int = 31
+) -> list[tuple[int, int]] | None:
     """
     Synthesize per-geom ``(contype, conaffinity)`` bitmasks realizing a desired collision matrix.
 
@@ -22,7 +16,7 @@ def solve_contype_conaffinity(
     excluding exactly the same partners are interchangeable, so the first one assigns one bit per group of such geoms:
     each geom takes the bit of its group as ``contype``, and as ``conaffinity`` the bits of every group it may collide
     with, its own group included. When there are more groups than ``max_bits``, the second one covers the allowed
-    pairs with cliques greedily, one bit per clique set in both masks of its members. The result is memoized per input.
+    pairs with cliques greedily, one bit per clique set in both masks of its members.
 
     Every geom keeps at least one bit set across its two masks: a geom whose masks are both zero would be demoted to
     a visual-only geom downstream (``contype or conaffinity`` is the collision-geom discriminator), silently
@@ -32,14 +26,14 @@ def solve_contype_conaffinity(
     ----------
     n : int
         Number of collision geoms (indices ``0..n-1``).
-    invalid_pairs : frozenset[frozenset[int]]
+    invalid_pairs : set[frozenset[int]]
         Pairs ``frozenset({i, j})`` that must be prevented from colliding.
     max_bits : int
         Maximum number of bits the masks may use (default 31, keeping masks within a signed 32-bit int).
 
     Returns
     -------
-    tuple[tuple[int, int], ...] | None
+    list[tuple[int, int]] | None
         ``(contype, conaffinity)`` per geom index, or ``None`` if neither construction fits in ``max_bits`` bits.
     """
     excluded_geoms = [set() for _ in range(n)]
@@ -60,7 +54,7 @@ def solve_contype_conaffinity(
         for exclusion, i_group in group_of_exclusion.items():
             for i_g in exclusion:
                 conaffinity_of_group[i_group] &= ~(1 << group_of_geom[i_g])
-        return tuple((1 << i_group, conaffinity_of_group[i_group]) for i_group in group_of_geom)
+        return [(1 << i_group, conaffinity_of_group[i_group]) for i_group in group_of_geom]
 
     # Each clique grows from a geom with an allowed pair left uncovered, adding the candidate that covers the most
     # uncovered pairs with the clique. That count is updated as the clique grows, keeping each addition linear in n.
@@ -91,7 +85,4 @@ def solve_contype_conaffinity(
     # A geom allowed to collide with no other one still needs a bit, set in a 'conaffinity' that no 'contype' matches.
     if 0 in mask_of_geom and num_cliques == max_bits:
         return None
-    return tuple((mask, mask) if mask else (0, 1 << num_cliques) for mask in mask_of_geom)
-
-
-register_cache_clear(solve_contype_conaffinity.cache_clear)
+    return [(mask, mask) if mask else (0, 1 << num_cliques) for mask in mask_of_geom]
