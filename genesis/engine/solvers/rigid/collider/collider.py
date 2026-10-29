@@ -899,7 +899,8 @@ class Collider:
                 # field; per-env trimming to n_contacts[i] happens in the ragged split below.
                 if not (as_tensor or n_envs == 0) and not padded:
                     n_contacts_max = n_contacts.max().item()
-                sort_idx_view = qd_to_torch(self.collider_state.contact_sort_idx, transpose=True, copy=False)
+                # torch.gather needs an int64 index; contact_sort_idx is a 32-bit field.
+                sort_idx_view = qd_to_torch(self.collider_state.contact_sort_idx, transpose=True, copy=False).long()
                 if padded:
                     # Gather the full capacity so no host-side trim (sync) is needed. Sort indices past the live
                     # range may be stale; clamp (out-of-place, preserving the zero-copy view) keeps them in-bounds.
