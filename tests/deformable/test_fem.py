@@ -436,6 +436,49 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("precision", ["64"])
+def test_hard_constraint_rigid_translation(show_viewer):
+    DT = 0.01
+    BOX_SIZE = 0.1
+    VELOCITY = torch.tensor(((0.1, 0.0, 0.0), (0.0, 0.0, 0.1)), dtype=gs.tc_float, device=gs.device)
+    VERTICES_IDX = [0, 1, 2, 3]
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+            # Mass-proportional damping slows down any moving body
+            damping_alpha=0.0,
+            enable_vertex_constraints=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.2, 0.2, 0.15),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+        show_FPS=False,
+    )
+    box = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    scene.build(n_envs=2)
+
+    box.set_velocity(VELOCITY)
+    box.set_vertex_constraints(VERTICES_IDX)
+    for i in range(10):
+        poss_ref = box.init_positions + (i + 1) * DT * VELOCITY[:, None]
+        box.update_constraint_targets(VERTICES_IDX, poss_ref[:, VERTICES_IDX])
+        scene.step()
+        assert_allclose(box.get_state().pos, poss_ref, tol=1e-6)
+
+
+@pytest.mark.required
 @pytest.mark.xfail(raises=AssertionError, reason="Constraint dynamics inconsistent with analytical formula")
 @pytest.mark.parametrize("precision", ["64"])
 def test_explicit_legacy_coupler_soft_constraint_box(show_viewer):

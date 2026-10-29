@@ -569,6 +569,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
     def _func_compute_element_mapping_matrix(self, i_vs, B, i_b):
         """
         Compute the element mapping matrix S for an element.
+
+        The rows of the constrained vertices are zero, so S only maps between the element and the free vertices.
         """
         S = qd.Matrix.zero(gs.qd_float, 4, 3)
         S[:3, :] = B
@@ -609,16 +611,16 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                 damping_beta_over_dt = self._damping_beta / self._substep_dt
                 i_vs = self.elements_i[i_e].el2v
                 B = self.elements_i[i_e].B
-                S = self._func_compute_element_mapping_matrix(i_vs, B, i_b)
 
                 x_diff = qd.Vector.zero(gs.qd_float, 12)
                 for i in qd.static(range(4)):
                     x_diff[i * 3 : i * 3 + 3] = (
                         self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
                     )
+                # Use B to include the motion of the constrained vertices (see _func_compute_element_mapping_matrix)
                 St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 4)):
-                    St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
+                for i, j in qd.static(qd.ndrange(3, 3)):
+                    St_x_diff[i * 3 : i * 3 + 3] += B[j, i] * (x_diff[j * 3 : j * 3 + 3] - x_diff[9:12])
 
                 H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
                 for i, j in qd.static(qd.ndrange(3, 3)):
@@ -669,9 +671,10 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
                     x_diff[i * 3 : i * 3 + 3] = (
                         self.elements_v[f + 1, i_vs[i], i_b].pos - self.elements_v[f, i_vs[i], i_b].pos
                     )
+                # Use B to include the motion of the constrained vertices (see _func_compute_element_mapping_matrix)
                 St_x_diff = qd.Vector.zero(gs.qd_float, 9)
-                for i, j in qd.static(qd.ndrange(3, 4)):
-                    St_x_diff[i * 3 : i * 3 + 3] += S[j, i] * x_diff[j * 3 : j * 3 + 3]
+                for i, j in qd.static(qd.ndrange(3, 3)):
+                    St_x_diff[i * 3 : i * 3 + 3] += B[j, i] * (x_diff[j * 3 : j * 3 + 3] - x_diff[9:12])
 
                 H_St_x_diff = qd.Vector.zero(gs.qd_float, 9)
                 for i, j in qd.static(qd.ndrange(3, 3)):
