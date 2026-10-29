@@ -11,7 +11,14 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.couplers import mpm_exchange_func
-from genesis.engine.couplers.mpm_rigid_func import func_build_rigid_rows
+from genesis.engine.couplers.mpm_fem_func import FemTriangleQuery
+from genesis.engine.couplers.mpm_fem_newton import (
+    FemNewtonHost,
+    FemNewtonParticipant,
+    MpmFemContact,
+    MpmFemContactHost,
+)
+from genesis.engine.couplers.mpm_rigid_func import RigidGeomQuery, func_build_rigid_rows
 from genesis.engine.couplers.mpm_rigid_newton import (
     MpmRigidContact,
     MpmRigidContactHost,
@@ -259,6 +266,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             family[idx] = mpm_func.FAMILY_FIXED_COROTATED
 
         rigid = self._sim.rigid_solver
+        # A Rigid solver without any coupled geom gives no contact rows
+        if self._has_rigid and not rigid.dyn_info.geoms.needs_coup.to_numpy().any():
+            self._has_rigid = False
         self._mpm_config = MpmStaticConfig(
             has_rigid=self._has_rigid,
             rigid_batch_links_info=rigid._options.batch_links_info,
@@ -287,6 +297,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._mpm_materials = get_mpm_material_table(table.reshape(-1), family)
         self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks)
         self._mpm_newton = MpmNewton(n_sort, max_blocks * BLOCK_CELLS)
+        self._rigid_query = RigidGeomQuery(rigid, self._mpm_newton, self._B, self._has_rigid)
         self._mpm_linear = MpmLinearSystem(max_blocks * BLOCK_CELLS, max_triplets)
         newton_solver = self._sim.newton_solver
         self._mpm_control = newton_solver.control
@@ -310,6 +321,15 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             newton_solver.register_secondary(RigidNewtonHost(rigid, rigid_participant), rigid_participant)
             contact = MpmRigidContact(self._newton_participant, rigid_participant)
             newton_solver.register_coupling(MpmRigidContactHost(contact), contact)
+        # Implicit FEM's substep joins the solve, its surface triangles giving the particles contact rows
+        fem = self._sim.fem_solver
+        fem._defer_solve = self._fem_coupled
+        if self._fem_coupled:
+            fem_participant = FemNewtonParticipant(fem)
+            newton_solver.register_secondary(FemNewtonHost(fem, self._coupler), fem_participant)
+            query = FemTriangleQuery(fem, self._mpm_newton, self._mpm_params, self._B)
+            contact = MpmFemContact(self._newton_participant, fem_participant, query)
+            newton_solver.register_coupling(MpmFemContactHost(contact), contact)
 
     def _wall_sol_params(self):
         """Rigid's default solref / solimp parameters, with the Rigid constraint timeconst floored at twice the
@@ -569,7 +589,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         sort_reduce_bcoo(self._mpm_linear.matrix)
 
     def _exchange_momentum(self, f):
-        """The momentum exchanges with SPH, PBD and FEM, on the free node velocity of the substep."""
+        """The momentum exchanges with SPH and PBD, on the free node velocity of the substep."""
         grid, params = self._mpm_grid, self._mpm_params
         for solver, is_coupled, only_free in (
             (self._sim.sph_solver, self._sph_coupled, False),
@@ -578,8 +598,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             if is_coupled:
                 stencil = int(np.floor(self._dx / solver.hash_grid_cell_size)) + 2
                 kernel_exchange_particles(grid, params, solver, stencil, only_free)
-        if self._fem_coupled:
-            kernel_exchange_fem(grid, params, self._sim.fem_solver, f)
 
     # ------------------------------------------------------------------------------------
     # --------------------------- Newton solver participant -----------------------------
@@ -616,6 +634,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         # also sizes the triplet storage for the substep's fixed grid topology, which every assembly of the Newton
         # loop shares.
         self._assemble(f)
+        self._rigid_query.build(params)
         kernel_contact_rows(
             self.particles,
             grid,
@@ -630,6 +649,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             rigid.dyn_info.links,
             rigid.rigid_info,
             rigid.collider.sdf.sdf_info,
+            self._rigid_query,
             f,
         )
 
@@ -673,9 +693,12 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             rigid.dyn_info.links,
             rigid.rigid_info,
             rigid.collider.sdf.sdf_info,
+            self._rigid_query,
             f,
             self._sim.cur_t,
         )
+        # Rigid holds still over the MPM substep, so its trees are built ahead of the graph
+        self._rigid_query.build(self._mpm_params)
         status = kernel_substep(*args)
         while status.yielded:
             if status.checkpoint == MpmCheckpoint.GRID:
@@ -1387,6 +1410,7 @@ def kernel_substep(
     links_info: array_class.LinksInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
+    rigid_query: qd.template(),
     f: qd.i32,
     t: qd.f32,
 ):
@@ -1427,6 +1451,7 @@ def kernel_substep(
                     config,
                     config,
                     params,
+                    rigid_query,
                     f,
                     dt,
                 )
@@ -1570,6 +1595,7 @@ def kernel_contact_rows(
     links_info: array_class.LinksInfo,
     rigid_info: array_class.RigidInfo,
     sdf_info: array_class.SDFInfo,
+    rigid_query: qd.template(),
     f: qd.i32,
 ):
     """Contact rows from the reduced physical Hessian at u = 0, then arm the Newton loop."""
@@ -1590,6 +1616,7 @@ def kernel_contact_rows(
             config,
             config,
             params,
+            rigid_query,
             f,
             dt,
         )
@@ -1624,16 +1651,6 @@ def kernel_exchange_particles(
     only_free: qd.template(),
 ):
     mpm_exchange_func.func_exchange_particles(grid, params, partner, stencil, only_free)
-
-
-@qd.kernel
-def kernel_exchange_fem(
-    grid: qd.template(),
-    params: qd.template(),
-    fem: qd.template(),
-    f: qd.i32,
-):
-    mpm_exchange_func.func_exchange_fem(grid, params, fem, f)
 
 
 @qd.kernel

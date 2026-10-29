@@ -26,7 +26,7 @@ class RigidNewtonParticipant:
         self.params = params
 
     @qd.func(requires_top_level=True)
-    def func_evaluate(self):
+    def func_evaluate(self, f):
         mpm_rigid_func.func_rigid_evaluate(
             self.coupling,
             self.dyn_state,
@@ -39,7 +39,7 @@ class RigidNewtonParticipant:
         )
 
     @qd.func(requires_top_level=True)
-    def func_gradient(self):
+    def func_gradient(self, f):
         mpm_rigid_func.func_rigid_gradient(
             self.coupling, self.dyn_state, self.constraint_state, self.config, self.params
         )
@@ -47,7 +47,13 @@ class RigidNewtonParticipant:
     @qd.func(requires_top_level=True)
     def func_factor(self):
         mpm_rigid_func.func_rigid_factor(
-            self.constraint_state, self.dyn_info, self.rigid_info, self.rigid_config, self.config
+            self.coupling,
+            self.dyn_state,
+            self.constraint_state,
+            self.dyn_info,
+            self.rigid_info,
+            self.rigid_config,
+            self.config,
         )
 
     @qd.func(requires_top_level=True)
@@ -87,16 +93,16 @@ class RigidNewtonParticipant:
         mpm_rigid_func.func_rigid_pcg_direction(self.coupling, ws)
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template()):
+    def func_start_line_search(self, control: qd.template(), f):
         mpm_rigid_func.func_rigid_start_line_search(self.coupling, control)
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template()):
+    def func_step_forward(self, control: qd.template(), f):
         mpm_rigid_func.func_rigid_step_forward(self.coupling, control)
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), is_trial):
-        self.func_evaluate()
+    def func_energy(self, control: qd.template(), f, is_trial):
+        self.func_evaluate(f)
         mpm_rigid_func.func_rigid_energy(self.coupling, control, self.params, is_trial)
 
 
@@ -147,7 +153,7 @@ class MpmRigidContact:
         )
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self):
+    def func_contact_matvec_post(self, f):
         mpm_rigid_func.func_rigid_contact_matvec_post(self.coupling, self.dyn_state, self.dyn_info, self.config)
 
     @qd.func(requires_top_level=True)
@@ -168,8 +174,8 @@ def kernel_rigid_begin(rigid: qd.template()):
 
 
 @qd.kernel
-def kernel_rigid_write_back(rigid: qd.template()):
-    rigid.func_evaluate()
+def kernel_rigid_write_back(rigid: qd.template(), f: qd.i32):
+    rigid.func_evaluate(f)
     mpm_rigid_func.func_rigid_write_back(rigid.coupling, rigid.constraint_state, rigid.config)
 
 
@@ -209,7 +215,7 @@ class RigidNewtonHost:
         kernel_rigid_begin(self._device)
 
     def newton_finish(self, f):
-        kernel_rigid_write_back(self._device)
+        kernel_rigid_write_back(self._device, f)
 
     def newton_after(self, f):
         self._rigid_solver.finish_deferred_substep()

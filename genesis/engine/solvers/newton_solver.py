@@ -51,11 +51,11 @@ class NullParticipant:
     """Stands in for an absent secondary participant or coupling of the composed kernels: every stage does nothing."""
 
     @qd.func(requires_top_level=True)
-    def func_evaluate(self):
+    def func_evaluate(self, f):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_gradient(self):
+    def func_gradient(self, f):
         pass
 
     @qd.func(requires_top_level=True)
@@ -95,15 +95,15 @@ class NullParticipant:
         pass
 
     @qd.func(requires_top_level=True)
-    def func_start_line_search(self, control: qd.template()):
+    def func_start_line_search(self, control: qd.template(), f):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_step_forward(self, control: qd.template()):
+    def func_step_forward(self, control: qd.template(), f):
         pass
 
     @qd.func(requires_top_level=True)
-    def func_energy(self, control: qd.template(), is_trial):
+    def func_energy(self, control: qd.template(), f, is_trial):
         pass
 
     @qd.func(requires_top_level=True)
@@ -115,7 +115,7 @@ class NullParticipant:
         pass
 
     @qd.func(requires_top_level=True)
-    def func_contact_matvec_post(self):
+    def func_contact_matvec_post(self, f):
         pass
 
     @qd.func(requires_top_level=True)
@@ -136,10 +136,10 @@ def func_assemble_secondary(
 ):
     """The secondary participants' gradients and factors at the current iterate, after the primary's assembly staged
     what the couplings read of it."""
-    s0.func_evaluate()
-    s0.func_gradient()
-    s1.func_evaluate()
-    s1.func_gradient()
+    s0.func_evaluate(f)
+    s0.func_gradient(f)
+    s1.func_evaluate(f)
+    s1.func_gradient(f)
     c0.func_contact_gradient(f)
     c1.func_contact_gradient(f)
     s0.func_factor()
@@ -180,8 +180,8 @@ def func_pcg_iteration(
     c1.func_contact_matvec(f)
     s0.func_matvec()
     s1.func_matvec()
-    c0.func_contact_matvec_post()
-    c1.func_contact_matvec_post()
+    c0.func_contact_matvec_post(f)
+    c1.func_contact_matvec_post(f)
     s0.func_matvec_dot(p.ws)
     s1.func_matvec_dot(p.ws)
     s0.func_pcg_update_xr(p.ws)
@@ -206,8 +206,8 @@ def func_start_line_search(
     f,
 ):
     """The Newton direction of every participant from the PCG solution, its measure, and the line search armed."""
-    s0.func_start_line_search(control)
-    s1.func_start_line_search(control)
+    s0.func_start_line_search(control, f)
+    s1.func_start_line_search(control, f)
     p.func_start_line_search(control, f)
     func_check_convergence(control)
     func_init_line_search(control)
@@ -225,8 +225,8 @@ def func_step_forward(
 ):
     """The trial point of every participant at the line-search step, and what the couplings derive from it."""
     p.func_step_forward(control)
-    s0.func_step_forward(control)
-    s1.func_step_forward(control)
+    s0.func_step_forward(control, f)
+    s1.func_step_forward(control, f)
     c0.func_after_step(f)
     c1.func_after_step(f)
 
@@ -242,8 +242,8 @@ def func_energy(
 ):
     """The total energy at the start or trial point: the primary writes it, the secondary participants add theirs."""
     p.func_energy(control, f, is_trial)
-    s0.func_energy(control, is_trial)
-    s1.func_energy(control, is_trial)
+    s0.func_energy(control, f, is_trial)
+    s1.func_energy(control, f, is_trial)
 
 
 # ================================================== kernels ==================================================

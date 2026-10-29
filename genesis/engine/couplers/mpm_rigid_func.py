@@ -17,11 +17,13 @@ dr = V_lin + V_ang x r for the link's spatial displacement V = sum over the dofs
 gradient g pushes the dofs of that chain with the spatial force (g, r x g).
 """
 
+import numpy as np
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
+from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
 from genesis.engine.solvers.mpm_data import (
     CONTACT_ROWS,
     PYRAMID_ROWS,
@@ -48,6 +50,9 @@ from genesis.engine.solvers.rigid.constraint.solver import (
     initialize_Ma,
 )
 from genesis.utils import array_class
+
+# Half extent of the inverted box of a leaf that must meet no query, finite so that its center gets a morton code
+EMPTY_BOX_HALF = 1e10
 
 
 # ============================================ Layer 0: spatial algebra =============================================
@@ -180,6 +185,99 @@ def geom_normal(
     return normal
 
 
+# ============================================== Layer 1: broad phase ==============================================
+
+
+@qd.data_oriented
+class RigidGeomQuery:
+    """The LBVH over the coupled Rigid geoms of every environment (see genesis.engine.bvh), and what the filter of its
+    queries reads: the geoms, and the query point and nearest geom of each sorted particle in `newton`. A query that is
+    not active holds no geom and builds nothing."""
+
+    def __init__(self, rigid, newton, n_envs, is_active):
+        coupled_geoms = np.zeros(0, dtype=np.int32)
+        if is_active:
+            coupled_geoms = np.flatnonzero(rigid.dyn_info.geoms.needs_coup.to_numpy()).astype(np.int32)
+        self.n_coupled = len(coupled_geoms)
+        self.coupled_geoms = qd.ndarray(qd.i32, shape=(max(self.n_coupled, 1),))
+        if self.n_coupled:
+            self.coupled_geoms.from_numpy(coupled_geoms)
+        self.bvh_state, self.bvh_config = get_bvh_data(n_envs, max(self.n_coupled, 1), is_active=self.n_coupled > 0)
+        self.tree = self.bvh_state.tree
+        self.leaves = self.bvh_state.leaves
+        # Every query keeps its nearest geom in `newton` and records no pair
+        self.results = array_class.get_bvh_query_results(1)
+        self.geoms_state = rigid.dyn_state.geoms
+        self.geoms_info = rigid.dyn_info.geoms
+        self.geoms_init_AABB = rigid.geoms_init_AABB
+        self.links_state = rigid.dyn_state.links
+        self.links_info = rigid.dyn_info.links
+        self.batch_links_info = rigid._options.batch_links_info
+        self.sdf_info = rigid.collider.sdf.sdf_info
+        self.newton = newton
+
+    def build(self, params):
+        """Fit the leaf boxes to the geoms of the substep and build the trees."""
+        if self.n_coupled:
+            kernel_fit_geom_leaves(self, params)
+            build_bvh(self.bvh_state, self.bvh_config, eps=gs.EPS)
+
+
+@qd.func(requires_top_level=True)
+def func_fit_geom_leaves(
+    query: qd.template(),  # RigidGeomQuery
+    dt,
+):
+    """The box of every coupled geom, the world box of its posed initial box (as `func_update_geom_aabbs` fits it,
+    which Rigid skips without collisions), grown by the geom's contact margin and by twice the distance its points may
+    travel over the substep, bounded by the link velocity at the box center and the spin over its radius. A geom an
+    environment does not carry gets an empty box with a finite center, for the morton code."""
+    qd.loop_config(name="mpm_fit_geom_leaves")
+    for i_b, i_a in qd.ndrange(query.leaves.aabbs_min.shape[0], query.leaves.aabbs_min.shape[1]):
+        i_g = query.coupled_geoms[i_a]
+        i_l = query.geoms_info.link_idx[i_g]
+        is_carried = True
+        if qd.static(query.batch_links_info):
+            is_carried = query.links_info.geom_start[i_l, i_b] <= i_g < query.links_info.geom_end[i_l, i_b]
+        if is_carried:
+            g_pos = query.geoms_state.pos[i_g, i_b]
+            g_quat = query.geoms_state.quat[i_g, i_b]
+            lo = gu.qd_vec3(qd.math.inf)
+            hi = gu.qd_vec3(-qd.math.inf)
+            for i_corner in qd.static(range(8)):
+                corner = gu.qd_transform_by_trans_quat(query.geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
+                lo = qd.min(lo, corner)
+                hi = qd.max(hi, corner)
+            center = 0.5 * (lo + hi)
+            radius = 0.5 * (hi - lo).norm()
+            speed = func_vel_at_point(i_l, i_b, center, query.links_state).norm()
+            speed += query.links_state.cd_ang[i_l, i_b].norm() * radius
+            margin = qd.max(query.geoms_info.coup_softness[i_g], 0.0) + 2.0 * dt * speed
+            query.leaves.aabbs_min[i_b, i_a] = lo - margin
+            query.leaves.aabbs_max[i_b, i_a] = hi + margin
+        else:
+            query.leaves.aabbs_min[i_b, i_a] = qd.Vector([EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+            query.leaves.aabbs_max[i_b, i_a] = qd.Vector([-EMPTY_BOX_HALF] * 3, dt=gs.qd_float)
+
+
+@qd.kernel
+def kernel_fit_geom_leaves(query: qd.template(), params: qd.template()):
+    func_fit_geom_leaves(query, params.substep_dt[()])
+
+
+@qd.func
+def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) -> bool:
+    """The narrow phase of a box query of sorted particle i_q in environment i_t: keep the coupled geom of the nearest
+    contact range in `newton.query_phi` / `query_idx`, and record no pair."""
+    i_g = query.coupled_geoms[i_a]
+    x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    phi = geom_sdf(i_g, i_t, x, query.geoms_state, query.geoms_info, query.sdf_info) - query.geoms_info.coup_softness[i_g]
+    if phi < query.newton.query_phi[i_q]:
+        query.newton.query_phi[i_q] = phi
+        query.newton.query_idx[i_q] = i_g
+    return True
+
+
 # =============================================== Layer 1: contact rows ===============================================
 
 
@@ -197,11 +295,12 @@ def func_build_rigid_rows(
     collider_static_config: qd.template(),
     config: qd.template(),  # MpmStaticConfig
     params: qd.template(),  # MpmParams
+    query: qd.template(),  # RigidGeomQuery, its trees built for the substep
     f,
     dt,
 ):
     """Pyramid contact rows of every valid particle within the soft range of a coupled geom, after
-    `func_build_wall_rows` reset the rows.
+    `func_build_wall_rows` reset the rows. The nearest geom is found by a box query of the coupled geoms' trees.
 
     The geom's `coup_softness` is a contact margin: a row starts at that distance from the surface, and its constraint
     position is the signed distance minus the margin, so the resting penetration of the soft row is taken up outside
@@ -212,20 +311,20 @@ def func_build_rigid_rows(
     beyond the link's velocity at the substep start. The nearest geom gives rows to a particle within its range or short
     of it by less than `contact_band_width`, by `band_row`.
     """
-    n_geoms = geoms_info.link_idx.shape[0]
     qd.loop_config(name="mpm_build_rigid_rows")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
         x_p = particles.pos[f, i_p, i_b]
-        # The nearest coupled geom, by its gap to the contact range
-        i_g_contact = -1
-        phi = gs.qd_float(float("inf"))
-        for i_g in range(n_geoms):
-            if geoms_info.needs_coup[i_g]:
-                phi_g = geom_sdf(i_g, i_b, x_p, geoms_state, geoms_info, sdf_info) - geoms_info.coup_softness[i_g]
-                if phi_g < phi:
-                    phi = phi_g
-                    i_g_contact = i_g
+        # The nearest coupled geom, by its gap to the contact range, among those whose grown box meets the particle's
+        # band: the two grown boxes together cover the band of the relative velocity
+        for d in qd.static(range(3)):
+            newton.query_pos[3 * s + d] = x_p[d]
+        newton.query_phi[s] = float("inf")
+        newton.query_idx[s] = -1
+        reach = params.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
+        func_bvh_query_aabb(i_b, s, x_p - reach, x_p + reach, query.tree, query.results, func_nearest_geom_filter, query)
+        i_g_contact = newton.query_idx[s]
+        phi = newton.query_phi[s]
         i_l = -1
         v_r = qd.Vector.zero(gs.qd_float, 3)
         v_rel = qd.Vector.zero(gs.qd_float, 3)
@@ -467,19 +566,117 @@ def func_rigid_gradient(
         coupling.grad[i_d, i_b] = dt_sq * value
 
 
+@qd.func
+def rigid_solve(
+    i_b,
+    rhs: qd.template(),  # qd.Ndarray (n_dofs, n_envs)
+    out: qd.template(),  # qd.Ndarray (n_dofs, n_envs)
+    dyn_state: array_class.DynState,
+    constraint_state: array_class.ConstraintState,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),  # MpmStaticConfig
+):
+    """out = A^-1 rhs in environment i_b, A = M + J^T D J by Rigid's island Cholesky factor, or A = M by Rigid's mass
+    factor in a scene without Rigid constraint rows."""
+    if qd.static(config.has_rigid_rows):
+        for i_island in range(constraint_state.island.n_islands[i_b]):
+            func_cholesky_solve_batch(
+                i_b, i_island, rhs=rhs, out=out, constraint_state=constraint_state, rigid_config=rigid_config
+            )
+    else:
+        func_solve_mass_batch(i_b, rhs, out, dyn_state, rigid_info, rigid_config)
+
+
 @qd.func(requires_top_level=True)
 def func_rigid_factor(
+    coupling: qd.template(),  # MpmRigidCoupling
+    dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
     config: qd.template(),  # MpmStaticConfig
 ):
-    """Rigid's island factor of M + J^T D J at the current x, for the preconditioner."""
+    """The preconditioner of the Rigid block, (A + U K U^T)^-1 with A = M + J^T D J and the MPM contact stiffness
+    U K U^T of the links in contact, after func_rigid_contact_gradient summed their K_l.
+
+    Rigid's island factor of A at the current x, then the Woodbury identity on it: per environment, U holds one column
+    per spatial component of each link in contact, the cdofs of its chain, W = A^-1 U, and S = I + K U^T W is factored
+    by LU, its order 6 times the links in contact. Without the contact stiffness, the rows of the many particles on a
+    link, far stiffer than its inertia, leave the joint PCG stopping on a direction that barely moves the link."""
     if qd.static(config.has_rigid_rows):
         func_hessian_and_cholesky_factor_direct(
             constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
         )
+    n_dofs = coupling.x.shape[0]
+    n_envs = coupling.x.shape[1]
+    qd.loop_config(name="mpm_rigid_contact_factor")
+    for i_b in range(n_envs):
+        n_links = 0
+        for i_l in range(coupling.link_K.shape[0]):
+            k_sum = gs.qd_float(0.0)
+            for k in range(36):
+                k_sum += qd.abs(coupling.link_K[i_l, i_b, k])
+            if k_sum > 0.0 and n_links < qd.static(coupling.n_contact_links):
+                coupling.contact_links[i_b, n_links] = i_l
+                n_links += 1
+        coupling.n_links_in_contact[i_b] = n_links
+        n_cols = 6 * n_links
+        for col in range(n_cols):
+            i_l = coupling.contact_links[i_b, col // 6]
+            c = col % 6
+            for i_d in range(n_dofs):
+                coupling.solve_rhs[i_d, i_b] = 0.0
+            i_a = i_l
+            while i_a >= 0:
+                I_a = [i_a, i_b] if qd.static(config.rigid_batch_links_info) else i_a
+                for i_d in range(dyn_info.links.dof_start[I_a], dyn_info.links.dof_end[I_a]):
+                    value = gs.qd_float(0.0)
+                    for e in qd.static(range(3)):
+                        if c == e:
+                            value = dyn_state.dofs.cdof_vel[i_d, i_b][e]
+                        if c == 3 + e:
+                            value = dyn_state.dofs.cdof_ang[i_d, i_b][e]
+                    coupling.solve_rhs[i_d, i_b] = value
+                i_a = dyn_info.links.parent_idx[I_a]
+            rigid_solve(
+                i_b, coupling.solve_rhs, coupling.solve_out, dyn_state, constraint_state, rigid_info, rigid_config, config
+            )
+            for i_d in range(n_dofs):
+                coupling.wb_U[i_d, i_b, col] = coupling.solve_rhs[i_d, i_b]
+                coupling.wb_W[i_d, i_b, col] = coupling.solve_out[i_d, i_b]
+        # S = I + K U^T W, the rows of a link's block from its K_l and the rows of U^T W of its columns
+        for b in range(n_cols):
+            for j in range(n_links):
+                g = qd.Vector.zero(gs.qd_float, 6)
+                for k in qd.static(range(6)):
+                    value = gs.qd_float(0.0)
+                    for i_d in range(n_dofs):
+                        value += coupling.wb_U[i_d, i_b, 6 * j + k] * coupling.wb_W[i_d, i_b, b]
+                    g[k] = value
+                i_l = coupling.contact_links[i_b, j]
+                for i in qd.static(range(6)):
+                    value = gs.qd_float(1.0) if 6 * j + i == b else gs.qd_float(0.0)
+                    for k in qd.static(range(6)):
+                        value += coupling.link_K[i_l, i_b, 6 * i + k] * g[k]
+                    coupling.wb_S[i_b, 6 * j + i, b] = value
+        # LU with partial pivoting, in place; S is non-singular, K and U^T W being positive semi-definite
+        for k in range(n_cols):
+            i_max = k
+            for i in range(k + 1, n_cols):
+                if qd.abs(coupling.wb_S[i_b, i, k]) > qd.abs(coupling.wb_S[i_b, i_max, k]):
+                    i_max = i
+            coupling.wb_pivot[i_b, k] = i_max
+            if i_max != k:
+                for jj in range(n_cols):
+                    tmp = coupling.wb_S[i_b, k, jj]
+                    coupling.wb_S[i_b, k, jj] = coupling.wb_S[i_b, i_max, jj]
+                    coupling.wb_S[i_b, i_max, jj] = tmp
+            for i in range(k + 1, n_cols):
+                coupling.wb_S[i_b, i, k] = coupling.wb_S[i_b, i, k] / coupling.wb_S[i_b, k, k]
+                for jj in range(k + 1, n_cols):
+                    coupling.wb_S[i_b, i, jj] -= coupling.wb_S[i_b, i, k] * coupling.wb_S[i_b, k, jj]
 
 
 @qd.func(requires_top_level=True)
@@ -495,20 +692,37 @@ def func_rigid_contact_gradient(
     f,
 ):
     """The Rigid contact rows' share of the gradient in x, after func_rigid_gradient and the MPM assembly that staged
-    the row gradients: minus the generalized force of the rows of the particles on their links."""
+    the row gradients and Hessians: minus the generalized force of the rows of the particles on their links, and the
+    spatial stiffness K_l = sum_s P_s^T H_s P_s of each link for the preconditioner, P_s = [I, -[r_s]x] mapping the
+    link's spatial displacement to that of the contact point at arm r_s."""
     func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
+    qd.loop_config(name="mpm_rigid_link_K_clear")
+    for i_l, i_b, k in qd.ndrange(coupling.link_K.shape[0], coupling.link_K.shape[1], 36):
+        coupling.link_K[i_l, i_b, k] = 0.0
     qd.loop_config(name="mpm_rigid_row_forces")
     for s in range(grid.n_valid[()]):
         i_l = newton.contact_link[s]
         if i_l >= 0:
             i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
             g = qd.Vector([newton.g_rigid[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            if g.norm_sqr() > 0.0:
+            H = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for i, j in qd.static(qd.ndrange(3, 3)):
+                H[i, j] = newton.h_rigid[9 * s + 3 * i + j]
+            if g.norm_sqr() > 0.0 or H.norm_sqr() > 0.0:
                 r = particle_arm(particles, dyn_state.links, f, i_p, i_b, i_l)
                 torque = r.cross(g)
                 for d in qd.static(range(3)):
                     qd.atomic_add(coupling.link_F[i_l, i_b, d], g[d])
                     qd.atomic_add(coupling.link_F[i_l, i_b, 3 + d], torque[d])
+                R = qd.Matrix([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]], dt=gs.qd_float)
+                HR = H @ R
+                RH = R @ H
+                RHR = RH @ R
+                for i, j in qd.static(qd.ndrange(3, 3)):
+                    qd.atomic_add(coupling.link_K[i_l, i_b, 6 * i + j], H[i, j])
+                    qd.atomic_add(coupling.link_K[i_l, i_b, 6 * i + 3 + j], -HR[i, j])
+                    qd.atomic_add(coupling.link_K[i_l, i_b, 6 * (3 + i) + j], RH[i, j])
+                    qd.atomic_add(coupling.link_K[i_l, i_b, 6 * (3 + i) + 3 + j], -RHR[i, j])
     func_link_force_to_dofs(coupling, coupling.grad, -1.0, dyn_info.links, dyn_state.dofs, config)
 
 
@@ -521,26 +735,51 @@ def func_rigid_precondition(
     rigid_config: qd.template(),
     config: qd.template(),  # MpmStaticConfig
 ):
-    """z = (M + J^T D J)^-1 r over the Rigid dofs by Rigid's island Cholesky factor, or z = M^-1 r by Rigid's mass
-    factor in a scene without Rigid constraint rows. The MPM contact stiffness on the links is left to the iterations:
-    its coupling of the blocks is of the rank of the dofs of the contacting chains at most. Adding it to the Rigid block
-    of the factor was tried and made the joint PCG and Newton slower: the material behind the contact is softer than the
-    rows, so the block-diagonal stiffness overstates what the link feels."""
+    """z = (A + U K U^T)^-1 r over the Rigid dofs, with the factors of func_rigid_factor: z0 = A^-1 r, then
+    z = z0 - W S^-1 K U^T z0 by the Woodbury identity."""
+    n_dofs = coupling.x.shape[0]
     n_envs = coupling.x.shape[1]
     qd.loop_config(name="mpm_rigid_precondition")
     for i_b in range(n_envs):
-        if qd.static(config.has_rigid_rows):
-            for i_island in range(constraint_state.island.n_islands[i_b]):
-                func_cholesky_solve_batch(
-                    i_b,
-                    i_island,
-                    rhs=coupling.r,
-                    out=coupling.z,
-                    constraint_state=constraint_state,
-                    rigid_config=rigid_config,
-                )
-        else:
-            func_solve_mass_batch(i_b, coupling.r, coupling.z, dyn_state, rigid_info, rigid_config)
+        rigid_solve(i_b, coupling.r, coupling.z, dyn_state, constraint_state, rigid_info, rigid_config, config)
+        n_links = coupling.n_links_in_contact[i_b]
+        n_cols = 6 * n_links
+        for a in range(n_cols):
+            value = gs.qd_float(0.0)
+            for i_d in range(n_dofs):
+                value += coupling.wb_U[i_d, i_b, a] * coupling.z[i_d, i_b]
+            coupling.wb_y[i_b, a] = value
+        for j in range(n_links):
+            i_l = coupling.contact_links[i_b, j]
+            y = qd.Vector([coupling.wb_y[i_b, 6 * j + k] for k in qd.static(range(6))], dt=gs.qd_float)
+            for i in qd.static(range(6)):
+                value = gs.qd_float(0.0)
+                for k in qd.static(range(6)):
+                    value += coupling.link_K[i_l, i_b, 6 * i + k] * y[k]
+                coupling.wb_y[i_b, 6 * j + i] = value
+        # S q = K U^T z0 by the LU factor: the row pivots, then the unit lower and the upper triangular solves
+        for k in range(n_cols):
+            i_p = coupling.wb_pivot[i_b, k]
+            if i_p != k:
+                tmp = coupling.wb_y[i_b, k]
+                coupling.wb_y[i_b, k] = coupling.wb_y[i_b, i_p]
+                coupling.wb_y[i_b, i_p] = tmp
+        for i in range(n_cols):
+            value = coupling.wb_y[i_b, i]
+            for k in range(i):
+                value -= coupling.wb_S[i_b, i, k] * coupling.wb_y[i_b, k]
+            coupling.wb_y[i_b, i] = value
+        for i_rev in range(n_cols):
+            i = n_cols - 1 - i_rev
+            value = coupling.wb_y[i_b, i]
+            for k in range(i + 1, n_cols):
+                value -= coupling.wb_S[i_b, i, k] * coupling.wb_y[i_b, k]
+            coupling.wb_y[i_b, i] = value / coupling.wb_S[i_b, i, i]
+        for i_d in range(n_dofs):
+            value = gs.qd_float(0.0)
+            for b in range(n_cols):
+                value += coupling.wb_W[i_d, i_b, b] * coupling.wb_y[i_b, b]
+            coupling.z[i_d, i_b] -= value
 
 
 # ========================================= Layer 1: joint PCG over (u, x) ==========================================

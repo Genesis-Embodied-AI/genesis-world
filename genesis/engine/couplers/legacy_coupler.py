@@ -631,17 +631,22 @@ class LegacyCoupler(RBC):
             clamped_inv_dt = min(substep_inv_dt, CLAMPED_INV_DT)
             self.kernel_pbd_rigid_solve_animate_particles_by_link(clamped_inv_dt, self.rigid_solver.dyn_state.links)
 
-        if self.fem_solver.is_active:
-            self.fem_surface_force(
-                f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.dyn_state.links,
-                self.rigid_solver.rigid_info,
-                self.rigid_solver.collider.sdf.sdf_info,
-                self.rigid_solver.collider.collider_config,
-            )
-            self.fem_rigid_link_constraints()
+        if self.fem_solver.is_active and not self.fem_solver._defer_solve:
+            self.couple_fem(f)
+
+    def couple_fem(self, f):
+        """The coupling of FEM's end-of-substep velocities with the floor, Rigid and SPH, and of its vertices linked to
+        Rigid. A deferred FEM substep (see FemNewtonHost) runs it after the joint solve that gives the velocities."""
+        self.fem_surface_force(
+            f,
+            self.rigid_solver.dyn_state.geoms,
+            self.rigid_solver.dyn_info.geoms,
+            self.rigid_solver.dyn_state.links,
+            self.rigid_solver.rigid_info,
+            self.rigid_solver.collider.sdf.sdf_info,
+            self.rigid_solver.collider.collider_config,
+        )
+        self.fem_rigid_link_constraints()
 
     def couple_grad(self, f):
         if self.fem_solver.is_active:

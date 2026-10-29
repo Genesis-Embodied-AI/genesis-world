@@ -95,6 +95,11 @@ class MpmParams:
         # non-penetration barrier needs the non-penetrating start u = 0 for its continuous collision detection, so this
         # stays a switch.
         self.newton_start_inertial = _scalar(qd.i32, 0)
+        # Thickness of the FEM surface for the MPM contact rows, in metres: a triangle has no volume of its own
+        self.fem_contact_thickness = _scalar(gs.qd_float, 0.5 * dx)
+        # Penalty stiffness of an FEM contact row, in units of the row's effective mass, the inverse of its inverse
+        # weight: the row energy is 1/2 stiffness m_eff c^2 in the joint dt^2-scaled units
+        self.fem_contact_stiffness = _scalar(gs.qd_float, 10.0)
         # Rigid's solref / solimp parameters of the domain-wall rows, (timeconst, dampratio, dmin, dmax, width, mid,
         # power)
         self.wall_sol_params = qd.ndarray(gs.qd_float, shape=(7,))
@@ -263,8 +268,6 @@ class MpmGrid:
         self.node_diag = qd.ndarray(gs.qd_float, shape=(9 * max_nodes,))
         self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
-        # Velocity change of every node from the momentum exchanges with FEM, gathered before it is applied
-        self.node_dv = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_solved = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
 
     @property
@@ -305,6 +308,22 @@ class MpmNewton:
         self.contact_D = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
         self.contact_t = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
         self.contact_link = qd.ndarray(qd.i32, shape=(n_padded,))
+        # The FEM surface triangle of the particle's pyramid rows (-1 if none), and the barycentric coordinates of its
+        # closest point on it
+        self.contact_tri = qd.ndarray(qd.i32, shape=(n_padded,))
+        self.contact_bary = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        # Nearest obstacle of each sorted particle during a BVH query: its gap, its index, and, for a triangle, the
+        # distance to it and the alignment of the triangle normal with the direction to the particle that pick it, the
+        # barycentric coordinates of the closest point and the contact normal. The query point and the frame the
+        # obstacles are read at sit alongside, for the filter that measures the gaps.
+        self.query_phi = qd.ndarray(gs.qd_float, shape=(n_padded,))
+        self.query_idx = qd.ndarray(qd.i32, shape=(n_padded,))
+        self.query_dist = qd.ndarray(gs.qd_float, shape=(n_padded,))
+        self.query_align = qd.ndarray(gs.qd_float, shape=(n_padded,))
+        self.query_bary = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.query_normal = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.query_pos = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        self.query_frame = qd.ndarray(qd.i32, shape=())
 
 
 @qd.data_oriented
@@ -337,6 +356,11 @@ class MpmLinearSystem:
         self.brick_mask = qd.ndarray(qd.i32, shape=(n_bricks,))
 
 
+# Links in contact with MPM per environment whose contact stiffness the Rigid preconditioner takes in; the stiffness on
+# any further link is left to the PCG iterations
+MAX_PRECONDITIONED_LINKS = 16
+
+
 @qd.data_oriented
 class MpmRigidCoupling:
     """Rigid unknowns of the joint Newton solve of MPM and Rigid, and the Rigid part of its PCG vectors.
@@ -356,6 +380,22 @@ class MpmRigidCoupling:
         link_shape = (max(n_links, 1), n_envs)
         self.link_F = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
         self.link_V = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
+        # The MPM contact stiffness on the links for the preconditioner, by the Woodbury identity on Rigid's factor A:
+        # per link its 6 x 6 spatial stiffness K_l, row-major; per environment the links in contact, at most
+        # `n_contact_links`, the cdof map U of their chains, one column per spatial component, W = A^-1 U, and the LU
+        # factor of S = I + K U^T W with its row pivots. `solve_rhs` / `solve_out` stage one column of a solve.
+        self.n_contact_links = min(max(n_links, 1), MAX_PRECONDITIONED_LINKS)
+        n_cols = 6 * self.n_contact_links
+        self.link_K = qd.ndarray(gs.qd_float, shape=(*link_shape, 36))
+        self.contact_links = qd.ndarray(qd.i32, shape=(n_envs, self.n_contact_links))
+        self.n_links_in_contact = qd.ndarray(qd.i32, shape=(n_envs,))
+        self.wb_U = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
+        self.wb_W = qd.ndarray(gs.qd_float, shape=(max(n_dofs, 1), n_envs, n_cols))
+        self.wb_S = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols, n_cols))
+        self.wb_pivot = qd.ndarray(qd.i32, shape=(n_envs, n_cols))
+        self.wb_y = qd.ndarray(gs.qd_float, shape=(n_envs, n_cols))
+        self.solve_rhs = qd.ndarray(gs.qd_float, shape=shape)
+        self.solve_out = qd.ndarray(gs.qd_float, shape=shape)
 
 
 @qd.data_oriented

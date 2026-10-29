@@ -1,26 +1,17 @@
-"""Momentum exchanges of the implicit MPM solver with SPH, PBD and FEM.
+"""Momentum exchanges of the implicit MPM solver with SPH and PBD.
 
-Each exchange is a perfectly inelastic impulse between an MPM node and the partner material around it, applied to the
-free velocity of the node before the Newton solve, so that the solve enforces the walls, the Rigid contacts and the
+Each exchange is a perfectly inelastic impulse between an MPM node and the partner particles in its cell, applied to
+the free velocity of the node before the Newton solve, so that the solve enforces the walls, the Rigid contacts and the
 elasticity on top of it: the pair moves to its common velocity v_c = (m_a v_a + M v) / (m_a + M), which conserves the
 momentum and dissipates energy. The partner side keeps its relative velocities and takes the opposite momentum. The
-neighbourhoods are the legacy coupler's: the partner particles in the cell of the node for SPH and PBD, the cell of a
-surface vertex for FEM, with the trilinear weights of the implicit grid.
+neighbourhoods are the legacy coupler's: the partner particles in the cell of the node.
 """
 
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.solvers.mpm_data import BLOCK_CELLS
-from genesis.engine.solvers.mpm_func import (
-    block_of,
-    cell_local,
-    local_offset,
-    node_offset,
-    pack_block,
-    q1_stencil,
-    unpack_block,
-)
+from genesis.engine.solvers.mpm_func import local_offset, unpack_block
 
 
 @qd.func(requires_top_level=True)
@@ -69,55 +60,3 @@ def func_exchange_particles(
                             is_member = is_member and partner.particles_reordered.free[i, env]
                         if is_member:
                             partner.particles_reordered.vel[i, env] = partner.particles_reordered.vel[i, env] + dv_s
-
-
-@qd.func(requires_top_level=True)
-def func_exchange_fem(
-    grid: qd.template(),  # MpmGrid
-    params: qd.template(),  # MpmParams
-    fem: qd.template(),  # FEMSolver, after its substep wrote the end-of-substep vertex velocities
-    f,
-):
-    """Exchange momentum between every FEM surface vertex and the free MPM nodes of its cell, weighted by their
-    trilinear weights: the vertex meets the nodes' weighted mass sum_a w_a m_a, and node a takes the share w_a m_a of
-    the momentum change. The node changes of all vertices are gathered in `node_dv` and applied together."""
-    n_nodes = grid.n_blocks[()] * BLOCK_CELLS
-    inv_dx = params.inv_dx[()]
-    qd.loop_config(name="mpm_exchange_fem_clear")
-    for i in range(3 * n_nodes):
-        grid.node_dv[i] = 0.0
-    qd.loop_config(name="mpm_exchange_fem")
-    for i_sv, i_b in qd.ndrange(fem.surface_vertices.shape[0], params.n_envs[()]):
-        i_v = fem.surface_vertices[i_sv]
-        x_v = fem.elements_v[f, i_v, i_b].pos
-        cell = qd.floor(x_v * inv_dx, qd.i32)
-        w, grad_w = q1_stencil(x_v * inv_dx - cell.cast(gs.qd_float), inv_dx)
-        slots = qd.Vector.zero(qd.i32, 8)
-        mass_n = gs.qd_float(0.0)
-        mom_n = qd.Vector.zero(gs.qd_float, 3)
-        for a in qd.static(range(8)):
-            node = cell + node_offset(a)
-            block_slot = grid.hash.lookup(pack_block(i_b, block_of(node)))
-            slots[a] = -1
-            if block_slot >= 0:
-                slot = block_slot * BLOCK_CELLS + cell_local(node)
-                if grid.node_mass[slot] > 0.0 and grid.node_fixed[slot] == 0:
-                    slots[a] = slot
-                    m_a = w[a] * grid.node_mass[slot]
-                    mass_n += m_a
-                    mom_n += m_a * qd.Vector(
-                        [grid.node_v_free[3 * slot + d] for d in qd.static(range(3))], dt=gs.qd_float
-                    )
-        if mass_n > 0.0:
-            m_v = fem.elements_v_info[i_v].mass
-            v_v = fem.elements_v[f + 1, i_v, i_b].vel
-            v_c = (m_v * v_v + mom_n) / (m_v + mass_n)
-            dv_n = v_c - mom_n / mass_n
-            fem.elements_v[f + 1, i_v, i_b].vel = v_c
-            for a in qd.static(range(8)):
-                if slots[a] >= 0:
-                    for d in qd.static(range(3)):
-                        qd.atomic_add(grid.node_dv[3 * slots[a] + d], w[a] * dv_n[d])
-    qd.loop_config(name="mpm_exchange_fem_apply")
-    for i in range(3 * n_nodes):
-        grid.node_v_free[i] += grid.node_dv[i]

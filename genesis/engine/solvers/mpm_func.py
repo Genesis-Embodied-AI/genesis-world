@@ -874,6 +874,7 @@ def func_reset_contact_rows(
     qd.loop_config(name="mpm_reset_contact_rows")
     for s in range(grid.n_valid[()]):
         newton.contact_link[s] = -1
+        newton.contact_tri[s] = -1
         for r in qd.static(range(CONTACT_ROWS)):
             newton.contact_D[CONTACT_ROWS * s + r] = 0.0
         for d in qd.static(range(3)):
