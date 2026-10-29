@@ -26,37 +26,69 @@ class Slice(Options):
     step: StrictInt | None = None
 
 
-class LinkIndex(Options):
-    """Select the links of an entity by name, each name being an exact link name or a glob pattern such as 'finger*'.
+def get_links_path(links_name: list[str], links_parent_idx: list[int]) -> list[tuple[str, ...]]:
+    """Return the names of the links from the root of the kinematic tree down to each link, the link included.
 
-    A name or a tuple of names keying the 'links' of entity options stands for ``LinkIndex.named(*names)``. A name that
-    matches no link raises an error. A glob metacharacter ('*', '?' or '[') in a link name is matched literally by
-    enclosing it in brackets, so 'arm[[]1]' selects the link 'arm[1]'. A link merged into its parent by the asset parser
-    has no name of its own any more, so a selection naming it raises an error too (see 'links_to_keep' of the morph).
+    'links_parent_idx' gives the index of the parent of each link among the same links, -1 for a root, every parent
+    preceding its children.
+    """
+    links_path = []
+    for link_name, parent_idx in zip(links_name, links_parent_idx):
+        links_path.append((*links_path[parent_idx], link_name) if parent_idx >= 0 else (link_name,))
+    return links_path
+
+
+class LinkIndex(Options):
+    """Select the links of an entity by name, or the links of the subtrees under some links.
+
+    Each name is an exact link name or a glob pattern such as 'finger*', and a name that matches no link raises an error.
+    A glob metacharacter ('*', '?' or '[') in a link name is matched literally by enclosing it in brackets, so
+    'arm[[]1]' selects the link 'arm[1]'. A name or a tuple of names keying the 'links' of entity options stands for
+    ``LinkIndex.named(*names)``. A link merged into its parent by the asset parser has no name of its own any more, so a
+    selection naming it raises an error too (see 'links_to_keep' of the morph).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    names: Annotated[StrArrayType, Field(min_length=1)]
+    names: Annotated[StrArrayType, Field(min_length=1)] | None = None
+    subtree_roots: Annotated[StrArrayType, Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def _check_single_selection(self) -> Self:
+        if (self.names is None) == (self.subtree_roots is None):
+            gs.raise_exception("LinkIndex takes either names or subtree roots. Use 'LinkIndex.named' or 'subtree'.")
+        return self
 
     @classmethod
     def named(cls, *names: str) -> Self:
         """Select the links of the given names, each an exact link name or a glob pattern (see ``fnmatch``)."""
         return cls(names=names)
 
-    def matches(self, link_name: str) -> bool:
-        """Whether the selection holds the link of a given name."""
-        return any(fnmatchcase(link_name, name) for name in self.names)
+    @classmethod
+    def subtree(cls, *names: str) -> Self:
+        """Select the links of the given names and every link below them in the kinematic tree, such as a gripper."""
+        return cls(subtree_roots=names)
 
-    def resolve(self, links_name: list[str]) -> np.ndarray:
-        """Return the indices of the selected links among links of the given names, raising on a name matching none."""
-        unknown_names = [name for name in self.names if not any(fnmatchcase(l_name, name) for l_name in links_name)]
+    def matches(self, link_path: tuple[str, ...]) -> bool:
+        """Whether the selection holds a link, given the names from the root of its tree down to it (see 'resolve')."""
+        if self.names is not None:
+            return any(fnmatchcase(link_path[-1], name) for name in self.names)
+        return any(fnmatchcase(link_name, name) for link_name in link_path for name in self.subtree_roots)
+
+    def resolve(self, links_path: list[tuple[str, ...]]) -> np.ndarray:
+        """Return the indices of the selected links, raising on a name matching no link.
+
+        'links_path' holds the names from the root of the kinematic tree down to each link (see 'get_links_path').
+        """
+        links_name = [link_path[-1] for link_path in links_path]
+        names = self.names if self.names is not None else self.subtree_roots
+        unknown_names = [name for name in names if not any(fnmatchcase(l_name, name) for l_name in links_name)]
         if unknown_names:
             gs.raise_exception(
                 f"No link matches {unknown_names}. Existing links: {links_name}. A link the asset parser merges into "
                 "its parent keeps its name with the 'links_to_keep' option of the morph."
             )
-        return np.flatnonzero([self.matches(link_name) for link_name in links_name]).astype(gs.np_int, copy=False)
+        return np.flatnonzero([self.matches(link_path) for link_path in links_path]).astype(gs.np_int, copy=False)
 
 
 class _OrdinalIndex(Options):
@@ -116,21 +148,52 @@ class _OrdinalIndex(Options):
 
 
 class GeomIndex(_OrdinalIndex):
-    """Select the collision geoms of a link by their ordinal in the asset, counted within the link.
+    """Select the collision geoms of a link by their ordinal in the asset, counted within the link, or by name.
 
     Post-processing splits a geom into convex pieces and fuses geoms with identical properties, which renumbers them,
     so the ordinal counts the collision geoms as the asset states them, and selecting one selects every piece it is
-    split into.
+    split into. A name is matched against the names the asset gives its geoms, which MJCF and USD state and URDF does
+    not, as an exact name or a glob pattern (see ``LinkIndex``).
     """
+
+    names: Annotated[StrArrayType, Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def _check_names_alone(self) -> Self:
+        if self.names is not None and not super().is_all:
+            gs.raise_exception("GeomIndex takes one of ordinals, a mask, a span and names.")
+        return self
 
     @classmethod
     def all(cls) -> Self:
         """Select every collision geom."""
         return cls()
 
-    def resolve(self, n_geoms: int) -> np.ndarray:
-        """Return the ordinals of the selected geoms among 'n_geoms' collision geoms of a link."""
-        return self._resolve_ordinals(n_geoms, "geom")
+    @classmethod
+    def named(cls, *names: str) -> Self:
+        """Select the collision geoms of the given names, each an exact geom name or a glob pattern."""
+        return cls(names=names)
+
+    @property
+    def is_all(self) -> bool:
+        """Whether the selection holds every element."""
+        return super().is_all and self.names is None
+
+    def matches(self, geom_name: str) -> bool:
+        """Whether a selection by name holds the collision geom of a given name."""
+        return any(fnmatchcase(geom_name, name) for name in self.names)
+
+    def resolve(self, geoms_name: list[str]) -> np.ndarray:
+        """Return the ordinals of the selected geoms among the collision geoms of a link, given their names.
+
+        A selection by name raises when it matches no geom of the link.
+        """
+        if self.names is None:
+            return self._resolve_ordinals(len(geoms_name), "geom")
+        ordinals = np.flatnonzero([self.matches(geom_name) for geom_name in geoms_name]).astype(gs.np_int, copy=False)
+        if ordinals.size == 0:
+            gs.raise_exception(f"No collision geom matches {list(self.names)}. Existing geoms: {geoms_name}.")
+        return ordinals
 
 
 class VertexIndex(Options):

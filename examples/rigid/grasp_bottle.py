@@ -49,7 +49,7 @@ def main():
                 file="xml/franka_emika_panda/panda.xml",
             ),
             links={
-                gs.LinkIndex.named("left_finger", "right_finger"): gs.options.LinkOptions(
+                gs.LinkIndex.named("*_finger"): gs.options.LinkOptions(
                     material=gs.materials.Material(
                         friction=1.5,
                     ),

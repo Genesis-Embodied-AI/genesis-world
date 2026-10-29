@@ -837,7 +837,7 @@ class KinematicSolver(Solver):
         vgeom_enabled = torch.zeros(self.n_vgeoms_, dtype=gs.tc_bool, device=gs.device)
         for entity in self.entities:
             for link in entity.links:
-                if entity._options.get_link_use_visual_raycasting(link.name):
+                if entity._options.get_link_use_visual_raycasting(entity._links_path[link.name]):
                     for vgeom in link.vgeoms:
                         vgeom_enabled[vgeom.idx] = 1
         self._vfaces_raycast_mask = vgeom_enabled[qd_to_torch(self.dyn_info.vfaces.vgeom_idx)]
