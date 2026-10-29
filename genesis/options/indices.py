@@ -5,7 +5,16 @@ from typing import Annotated
 
 import numpy as np
 
-from pydantic import ConfigDict, Field, StrictBool, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializeAsAny,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    model_serializer,
+    model_validator,
+)
 from typing_extensions import Self
 
 import genesis as gs
@@ -16,7 +25,20 @@ from .options import Options
 BArrayType = Annotated[tuple[StrictBool, ...], Field(min_length=1, strict=False)]
 
 
-class Slice(Options):
+class _Selection(Options):
+    """A selection keying the options set on part of an entity.
+
+    A selection dumps to a tuple of (field, value) pairs in Python mode, so that the dump of the options it keys holds it
+    as a key, since a dict is unhashable and any mapping is dumped as one.
+    """
+
+    @model_serializer(mode="wrap")
+    def _dump_hashable(self, handler: SerializerFunctionWrapHandler, info: SerializationInfo):
+        dumped = handler(self)
+        return tuple(dumped.items()) if info.mode == "python" else dumped
+
+
+class Slice(_Selection):
     """A slice of a range of elements, as Python slices one (``slice(start, stop, step)``)."""
 
     model_config = ConfigDict(frozen=True)
@@ -38,7 +60,7 @@ def get_links_path(links_name: list[str], links_parent_idx: list[int]) -> list[t
     return links_path
 
 
-class LinkIndex(Options):
+class LinkIndex(_Selection):
     """Select the links of an entity by name, or the links of the subtrees under some links.
 
     Each name is an exact link name or a glob pattern such as 'finger*', and a name matching no link raises an error.
@@ -95,7 +117,7 @@ class LinkIndex(Options):
         return np.flatnonzero([self.matches(link_path) for link_path in links_path]).astype(gs.np_int, copy=False)
 
 
-class _OrdinalIndex(Options):
+class _OrdinalIndex(_Selection):
     """Select elements by their ordinal, as numpy indexes a range of the number of elements.
 
     The selection is ordinals, a boolean mask over every element, or a span (a slice), at most one of them. None of them
@@ -249,7 +271,7 @@ class VGeomIndex(_NamedOrdinalIndex):
         return np.flatnonzero(is_selected).astype(gs.np_int, copy=False)
 
 
-class VertexIndex(Options):
+class VertexIndex(_Selection):
     """Select vertices of an entity, by ordinal or by position in the frame of its morph.
 
     A selection resolves once, as the entity is added, on the vertices of its simulation mesh. The frame of the morph
@@ -344,7 +366,7 @@ class VertexClosestIndex(VertexIndex):
 class VertexUnionIndex(VertexIndex):
     """Select the vertices any of several selections picks (see ``VertexIndex.__or__``)."""
 
-    members: Annotated[tuple[VertexIndex, ...], Field(min_length=2, strict=False)]
+    members: Annotated[tuple[SerializeAsAny[VertexIndex], ...], Field(min_length=2, strict=False)]
 
     def resolve(self, verts_pos: np.ndarray) -> np.ndarray:
         return np.unique(np.concatenate([member.resolve(verts_pos) for member in self.members]))
