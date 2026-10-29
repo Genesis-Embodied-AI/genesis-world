@@ -69,7 +69,7 @@ jobs:
 
       - name: Run examples suite
         run: |
-          pytest -v -m examples tests/test_examples.py
+          pytest -v --logical -m examples tests/test_examples.py
 
       - name: Save cache
         if: always()

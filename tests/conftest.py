@@ -387,17 +387,12 @@ def pytest_xdist_auto_num_workers(config):
                 num_gpus = 0
                 vram_memory = float("inf")
 
-    # Compute the default number of workers based on available RAM, VRAM, and number of physical cores.
-    # Note that if `forked` is not enabled, up to 7.5Gb per worker is necessary on Linux because Quadrants
-    # does not completely release memory between each test.
+    # Compute the default number of workers based on available RAM, VRAM, and number of physical cores
     if sys.platform == "darwin":
-        ram_memory_per_worker = vram_memory_per_worker = 3.0
-    elif config.option.forked:
-        ram_memory_per_worker = 5.5
-        vram_memory_per_worker = 1.8
+        ram_memory_per_worker = vram_memory_per_worker = 2.0
     else:
-        ram_memory_per_worker = 7.5
-        vram_memory_per_worker = 2.5
+        ram_memory_per_worker = 3.5
+        vram_memory_per_worker = 1.8
     num_workers = min(
         physical_core_count,
         max(ram_memory / ram_memory_per_worker, 1),
