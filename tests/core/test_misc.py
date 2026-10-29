@@ -399,6 +399,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     assert loaded["rigid"].geoms == rigid_options.geoms
     assert loaded["rigid"].vgeoms == rigid_options.vgeoms
     assert loaded["fem"].vertices == fem_options.vertices
+    assert loaded["rigid"].model_dump() == rigid_options.model_dump()
+    assert loaded["fem"].model_dump() == fem_options.model_dump()
 
     # Geom densities weigh in the mass of an aligned body alone, whose frame stays where its kinematic ghost puts it
     dense_body = scene.add_entity(
