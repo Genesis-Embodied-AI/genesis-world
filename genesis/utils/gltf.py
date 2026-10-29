@@ -444,7 +444,11 @@ def parse_mesh_glb(path, group_by_material, scale, is_mesh_zup, surface):
             group_idx = primitive.material if group_by_material else (i_node, primitive.material)
             mesh_info, first_created = mesh_infos.get(group_idx)
             if first_created:
-                metadata = {"mesh_path": path, "name": material_name if group_by_material else mesh_name}
+                metadata = {
+                    "mesh_path": path,
+                    "name": material_name if group_by_material else mesh_name,
+                    "material_name": material_name or "",
+                }
                 if not group_by_material:
                     # Record the source mesh node so per-material submeshes can be regrouped into one physical body
                     # (e.g. merged into a single collision geom) while still rendering with their own textures.

@@ -525,6 +525,8 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
     is_2d_texture = False
     has_explicit_texcoords = False
     if mj_mat_id >= 0:
+        name_start = mj.name_matadr[mj_mat_id]
+        metadata["material_name"] = mj.names[name_start : mj.names.find(b"\x00", name_start)].decode("utf-8")
         mj_mat = mj.mat(mj_mat_id)
         tex_id_RGB = mj_mat.texid[mujoco.mjtTextureRole.mjTEXROLE_RGB]
         tex_id_RGBA = mj_mat.texid[mujoco.mjtTextureRole.mjTEXROLE_RGBA]

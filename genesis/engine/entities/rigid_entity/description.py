@@ -378,6 +378,9 @@ class Resolution:
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
     # The names of every collision geom as its asset states them, which the geom options of the entity select on
     geoms_name: list[str] = field(default_factory=list)
+    # The names and asset material names of every visual geom, which the visual geom options of the entity select on
+    vgeoms_name: list[str] = field(default_factory=list)
+    vgeoms_material_name: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -484,6 +487,23 @@ class KinematicEntityDescription(EntityDescription):
                         f"No collision geom of the entity matches {list(geom_index.names)}. Existing geoms: "
                         f"{resolution.geoms_name}."
                     )
+        vgeoms_index = [
+            *options.vgeoms,
+            *(i_vg for link_options in options.links.values() for i_vg in link_options.vgeoms),
+        ]
+        for vgeom_index in vgeoms_index:
+            if vgeom_index.names is not None and not any(map(vgeom_index.matches, resolution.vgeoms_name)):
+                gs.raise_exception(
+                    f"No visual geom of the entity matches {list(vgeom_index.names)}. Existing visual geoms: "
+                    f"{resolution.vgeoms_name}."
+                )
+            if vgeom_index.material_names is not None and not any(
+                map(vgeom_index.matches_material, resolution.vgeoms_material_name)
+            ):
+                gs.raise_exception(
+                    f"No visual geom of the entity has a material matching {list(vgeom_index.material_names)}. "
+                    f"Existing materials: {sorted(set(resolution.vgeoms_material_name) - {''})}."
+                )
         return desc
 
     def _load_morph(self, morph: Morph, resolution: Resolution):
@@ -1468,6 +1488,17 @@ class KinematicEntityDescription(EntityDescription):
             for g_info, material in zip(cg_infos, self.options.get_geoms_material(link_path, geoms_name)):
                 if material is not None:
                     g_info["material"] = material
+
+        # The surface the link and visual geom options give a visual geom replaces the one it was parsed with, which
+        # fills the textures the given surface leaves unset with those of the asset and of the entity surface
+        vgeoms_name = [g_info["vmesh"].metadata.get("name", "") for g_info in vg_infos]
+        vgeoms_material_name = [g_info["vmesh"].metadata.get("material_name", "") for g_info in vg_infos]
+        resolution.vgeoms_name += vgeoms_name
+        resolution.vgeoms_material_name += vgeoms_material_name
+        vgeoms_surface = self.options.get_vgeoms_surface(link_path, vgeoms_name, vgeoms_material_name)
+        for g_info, surface in zip(vg_infos, vgeoms_surface):
+            if surface is not None:
+                g_info["vmesh"].set_surface(surface)
 
         # Post-process all collision meshes at once.
         # Destroying the original geometries should be avoided if possible as it will change the way objects

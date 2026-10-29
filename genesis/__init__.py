@@ -515,7 +515,7 @@ from .options import sensors
 from .options import renderers
 from .options import surfaces
 from .options import textures
-from .options.indices import GeomIndex, LinkIndex, VertexIndex
+from .options.indices import GeomIndex, LinkIndex, VertexIndex, VGeomIndex
 
 from .datatypes import List
 

@@ -825,15 +825,12 @@ def parse_mesh_trimesh(path, group_by_material, scale, is_mesh_zup, surface) -> 
     tmeshes = _FILE_TMESHES_CACHE.find(key)
     if tmeshes is None:
         tmeshes = _load_trimesh_geometries(*key)
-    meshes = [
-        gs.Mesh.from_trimesh(
-            mesh=tmesh,
-            surface=surface,
-            metadata={"mesh_path": path, "imported_as_zup": is_mesh_zup},
-            share_arrays=True,
-        )
-        for tmesh in tmeshes
-    ]
+    meshes = []
+    for tmesh in tmeshes:
+        metadata = {"mesh_path": path, "imported_as_zup": is_mesh_zup}
+        if isinstance(tmesh.visual, trimesh.visual.TextureVisuals) and tmesh.visual.material is not None:
+            metadata["material_name"] = tmesh.visual.material.name or ""
+        meshes.append(gs.Mesh.from_trimesh(mesh=tmesh, surface=surface, metadata=metadata, share_arrays=True))
     for mesh in meshes:
         _FILE_TMESHES_CACHE.own(mesh, key, tmeshes)
     return meshes
