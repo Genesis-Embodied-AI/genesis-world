@@ -72,11 +72,7 @@ def solve_contype_conaffinity(
 
     deadline = perf_counter() + Z3_SEARCH_TIMEOUT_S
     for num_bits in range(1, max_bits + 1):
-        remaining_ms = int((deadline - perf_counter()) * 1000)
-        if remaining_ms <= 0:
-            return None
         solver = z3.Solver()
-        solver.set("timeout", remaining_ms)
         contype_bits = [[z3.Bool(f"contype_{i}_{b}") for b in range(num_bits)] for i in range(n)]
         conaffinity_bits = [[z3.Bool(f"conaffinity_{i}_{b}") for b in range(num_bits)] for i in range(n)]
         for i in range(n):
@@ -88,6 +84,11 @@ def solve_contype_conaffinity(
                     solver.add(z3.Not(cond1), z3.Not(cond2))
                 else:
                     solver.add(z3.Or(cond1, cond2))
+        # Building the constraints of a width takes time on its own, so the delay left is read once they are built.
+        remaining_ms = int((deadline - perf_counter()) * 1000)
+        if remaining_ms <= 0:
+            return None
+        solver.set("timeout", remaining_ms)
         result = solver.check()
         if result == z3.sat:
             model = solver.model()
