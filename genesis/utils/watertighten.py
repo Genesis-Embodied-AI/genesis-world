@@ -1067,12 +1067,20 @@ def _estimate_feature_size(verts: np.ndarray, faces: np.ndarray) -> float:
         idx = np.random.default_rng(0).choice(len(centroids), 4000, replace=False)
         centroids = centroids[idx]
         normals = normals[idx]
-    origins = centroids - (bbox_diag * 1e-5) * normals
-    locs, ray_idx, _ = src.ray.intersects_location(origins, -normals, multiple_hits=False)
+    offset = bbox_diag * 1e-5
+    origins = centroids - offset * normals
+    locs, ray_idx, _ = src.ray.intersects_location(origins, -normals, multiple_hits=True)
     if len(locs) == 0:
         return bbox_diag
     distances = np.linalg.norm(locs - origins[ray_idx], axis=1)
-    return np.percentile(distances, FEATURE_SIZE_PERCENTILE)
+    # A hit within the offset lies on the face the ray starts from or on a duplicate of it, which bounds no solid. The
+    # ray engine reports such hits once the offset falls below its tolerance.
+    is_beyond_face = distances > 2.0 * offset
+    if not is_beyond_face.any():
+        return bbox_diag
+    thicknesses = np.full(len(origins), np.inf)
+    np.minimum.at(thicknesses, ray_idx[is_beyond_face], distances[is_beyond_face])
+    return np.percentile(thicknesses[np.isfinite(thicknesses)], FEATURE_SIZE_PERCENTILE)
 
 
 def _adaptive_params(verts: np.ndarray, faces: np.ndarray, aggressiveness: int):

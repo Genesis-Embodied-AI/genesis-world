@@ -68,6 +68,22 @@ def get_signed_volume(verts: np.ndarray, faces: np.ndarray) -> float:
     return np.einsum("ij,ij->", tris[:, 0], np.cross(tris[:, 1], tris[:, 2])) / 6.0
 
 
+def get_watertight_mesh(tmesh: trimesh.Trimesh, aggressiveness: int) -> trimesh.Trimesh:
+    """Return a closed wrap of a mesh that follows its surface (see 'watertighten_mesh').
+
+    The wrap is read from an on-disk cache keyed by the vertices, the faces and 'aggressiveness', so a repeated build on
+    the same mesh is a file read instead of a multi-second rebuild.
+    """
+    from .watertighten import watertighten_mesh
+
+    cache = get_wt_cache(tmesh.vertices, tmesh.faces, aggressiveness)
+    wrap = cache.load()
+    if wrap is None:
+        wrap = watertighten_mesh(tmesh.vertices, tmesh.faces, aggressiveness=aggressiveness)
+        cache.save(wrap)
+    return trimesh.Trimesh(*wrap, process=False)
+
+
 def convex_hull(tmesh: trimesh.Trimesh) -> trimesh.Trimesh:
     """Compute the convex hull of a mesh, with its faces wound outward unless the vertices are coplanar.
 
@@ -668,8 +684,6 @@ def _postprocess_collision_geoms_impl(
     # Nonconvex: watertighten each fused surface into a closed mesh so the grid SDF is reliable. The convex path skips
     # this (its hull / decomposition replaces the surface anyway, so an alpha-wrap would be wasted work).
     if not convexify and watertighten is not None:
-        from .watertighten import watertighten_mesh
-
         for g_info, is_fused in zip(g_infos, geoms_is_fused):
             # Fused geoms are always watertightened, as their sub-meshes may overlap while being individually
             # watertight. Other geoms are skipped if they are not generic meshes or already watertight or convex.
@@ -677,15 +691,7 @@ def _postprocess_collision_geoms_impl(
             if not is_fused and (g_info["type"] != gs.GEOM_TYPE.MESH or tmesh.is_watertight or tmesh.is_convex):
                 continue
 
-            # On-disk cache keyed by (vertices, faces, aggressiveness): a repeated build on the same geom is a file read
-            # instead of a multi-second SDF + DC + QEM rebuild.
-            cache = get_wt_cache(tmesh.vertices, tmesh.faces, watertighten)
-            cached_mesh = cache.load()
-            if cached_mesh is None:
-                cached_mesh = watertighten_mesh(tmesh.vertices, tmesh.faces, aggressiveness=watertighten)
-                cache.save(cached_mesh)
-            v_out, f_out = cached_mesh
-            fused = trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
+            fused = get_watertight_mesh(tmesh, watertighten)
             metadata = g_info["mesh"].metadata.copy()
             metadata["watertightened"] = True
             g_info["mesh"] = gs.Mesh.from_trimesh(mesh=fused, surface=gs.surfaces.Collision(), metadata=metadata)

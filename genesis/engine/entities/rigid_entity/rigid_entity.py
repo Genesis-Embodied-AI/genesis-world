@@ -19,7 +19,7 @@ from .description import (
     RigidEqualityDescription,
     RigidLinkDescription,
 )
-from .inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT, compose_inertial_from_g_infos, finalize_inertial
+from .inertial import finalize_inertial
 from .rigid_equality import RigidEquality
 from .rigid_geom import RigidGeom
 from .rigid_joint import RigidJoint
@@ -360,24 +360,16 @@ class KinematicEntity(Entity):
                 link.desc.invweight = np.full((2,), fill_value=-1.0, dtype=gs.np_float)
 
                 # Inertial resolution skips the geometry estimate for a world-carried link (see '_describe_link'), so a
-                # link that starts moving recomputes it from its geoms at the density its entity simulates. Values the
-                # asset states still win over the estimate.
+                # link that starts moving resolves with the estimate the build made for it, from the same geometry and
+                # density as a link moving from the start (see 'inertial_estimate' in 'RigidLinkDescription'). Values
+                # the asset states still win over the estimate.
                 if was_fixed and not link.is_fixed and isinstance(link.desc, RigidLinkDescription):
                     desc = link.desc
-                    # An entity attached beneath this one shares its root, so the density comes from the link's own
-                    # entity rather than from this one.
-                    rho = link.entity.material.rho
-                    if rho is None:
-                        if self._solver._enable_mujoco_compatibility:
-                            rho = RHO_MUJOCO
-                        else:
-                            rho = RHO_ROBOT if desc.is_robot else RHO_OBJECT
-                    # A geom description holds the fields a parse states it with, so one composition serves either.
-                    hint = compose_inertial_from_g_infos([vars(g_desc) for g_desc in (desc.geoms or desc.vgeoms)], rho)
                     # A fixed link holds what the asset states and None elsewhere (see 'RigidLinkDescription'), so
                     # this resolves it exactly as '_describe_link' resolves a moving link.
+                    assert desc.inertial_estimate is not None
                     desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia = finalize_inertial(
-                        desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *hint
+                        desc.mass, desc.inertial_pos, desc.inertial_quat, desc.inertia, *desc.inertial_estimate
                     )
 
         # The anchor of an aligned free root is the center of mass and principal axes of the body the build described,

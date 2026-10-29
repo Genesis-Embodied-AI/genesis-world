@@ -354,9 +354,9 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Mass, center of mass and inertia tensor of the geometry in its own frame, at unit density.
 
-        Non-watertight geometry is closed by its convex hull first so the volume integral is well-defined. A degenerate
-        geometry has no mass, and composes as a geom of no mass at the origin. The result is shared by reference across
-        the meshes of one trimesh.
+        Geometry that stays open once its vertices are merged is closed by its convex hull first, so that the volume
+        integral is well-defined. A degenerate geometry has no mass, and composes as a geom of no mass at the origin.
+        The result is shared by reference across the meshes of one trimesh.
         """
         # A degenerate geometry carries no inertia: one enclosing no volume has no center of mass, and the convex hull
         # closing a non-watertight one raises when it has fewer than 4 non-coplanar vertices.
@@ -365,10 +365,13 @@ class Mesh(RBC, serialization.SerializationMixin):
             # The watertightness of the mesh is cached and counted on edge keys (see 'is_watertight'), while this fresh
             # trimesh would group the rows of all its edges again.
             if not self.is_watertight:
-                gs.logger.warning(
-                    "Mesh is not watertight. Falling back to convex hull for estimating inertial properties."
-                )
-                tmesh = mu.convex_hull(tmesh)
+                # A mesh splitting its vertices along normal and texture seams is closed once they are merged
+                tmesh.merge_vertices()
+                if not tmesh.is_watertight:
+                    gs.logger.warning(
+                        "Mesh is not watertight. Falling back to convex hull for estimating inertial properties."
+                    )
+                    tmesh = mu.convex_hull(tmesh)
             volume = mu.get_signed_volume(tmesh.vertices, tmesh.faces)
         except QhullError:
             volume = 0.0
@@ -1119,3 +1122,20 @@ def _loaded_geometry(raw: dict, loading: serialization.Loading) -> trimesh.Trime
 
 
 serialization.register(trimesh.Trimesh, _exported_geometry, _loaded_geometry)
+
+
+def _exported_inertial(inertial: InertialProperties, exporting: serialization.Exporting) -> dict:
+    """Export an inertial: its mass, its center of mass and its inertia tensor."""
+    return {
+        "mass": exporting.value(inertial.mass, float),
+        "com": exporting.array(inertial.com),
+        "i": exporting.array(inertial.i),
+    }
+
+
+def _loaded_inertial(raw: dict, loading: serialization.Loading) -> InertialProperties:
+    """Recreate the inertial as it was exported."""
+    return InertialProperties(raw["mass"], loading.array(raw["com"]), loading.array(raw["i"]))
+
+
+serialization.register(InertialProperties, _exported_inertial, _loaded_inertial)

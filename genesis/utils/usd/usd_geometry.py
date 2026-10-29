@@ -334,25 +334,28 @@ def parse_prim_geoms(
         is_collision = is_visible and (match_collision or not (match_collision or match_visual))
 
         g_infos = links_g_infos[link_path_to_idx[str(link_prim.GetPath())]]
+        physics_material = context.get_physics_material(prim) if is_collision else None
         if is_visual:
             for mesh in meshes:
-                g_infos.append(
-                    dict(
-                        vmesh=mesh,
-                        pos=geom_pos,
-                        quat=geom_quat,
-                        contype=0,
-                        conaffinity=0,
-                        type=gs_type,
-                        data=geom_data,
-                    )
+                visual_g_info = dict(
+                    vmesh=mesh,
+                    pos=geom_pos,
+                    quat=geom_quat,
+                    contype=0,
+                    conaffinity=0,
+                    type=gs_type,
+                    data=geom_data,
                 )
+                # A prim both drawn and colliding states one density, which an inertia estimated from visual
+                # geometry honors as well
+                if physics_material is not None and physics_material.density is not None:
+                    visual_g_info["density"] = physics_material.density
+                g_infos.append(visual_g_info)
         if is_collision:
             # A bound UsdPhysicsMaterialAPI overrides the default friction. Prefer dynamic friction,
             # falling back to static; restitution has no rigid-rigid equivalent in the solver and is
             # dropped (with a one-time warning).
             geom_friction = gu.default_friction()
-            physics_material = context.get_physics_material(prim)
             if physics_material is not None:
                 # PhysicsMaterial fields are None when unauthored, so an explicitly authored 0 (a
                 # frictionless collider) is honored. Prefer dynamic friction, fall back to static.
