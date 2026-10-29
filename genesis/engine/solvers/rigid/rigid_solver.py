@@ -45,7 +45,6 @@ from .abd.accessor import (
     kernel_control_dofs_position,
     kernel_control_dofs_position_velocity,
     kernel_control_dofs_velocity,
-    kernel_get_dofs_control_force,
     kernel_get_links_acc,
     kernel_get_links_vel,
     kernel_set_dofs_act_bias,
@@ -2644,14 +2643,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         kernel_control_dofs_force(dofs_idx, envs_idx, force, self.dyn_state, self.rigid_config)
 
-    @mutates(differentiable=False)
+    @mutates()
     def control_dofs_velocity(self, velocity, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
             ctrl_mode = qd_to_torch(self.dyn_state.dofs.ctrl_mode, transpose=True, copy=False)
             ctrl_mode[mask] = gs.CTRL_MODE.VELOCITY
-            ctrl_pos = qd_to_torch(self.dyn_state.dofs.ctrl_pos, transpose=True, copy=False)
-            ctrl_pos[mask] = 0.0
             ctrl_vel = qd_to_torch(self.dyn_state.dofs.ctrl_vel, transpose=True, copy=False)
             assign_indexed_tensor(ctrl_vel, mask, velocity)
             if gs.backend == gs.metal:
@@ -2664,10 +2661,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             velocity = velocity[None]
 
-        # The backward pass of a step stops at the PD targets, which are inputs without gradient
         kernel_control_dofs_velocity(dofs_idx, envs_idx, velocity, self.dyn_state, self.rigid_config)
 
-    @mutates(differentiable=False)
+    @mutates()
     def control_dofs_position(self, position, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
@@ -2687,10 +2683,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         if self.n_envs == 0:
             position = position[None]
 
-        # See 'control_dofs_velocity'
         kernel_control_dofs_position(dofs_idx, envs_idx, position, self.dyn_state, self.rigid_config)
 
-    @mutates(differentiable=False)
+    @mutates()
     def control_dofs_position_velocity(self, position, velocity, dofs_idx=None, envs_idx=None):
         if gs.use_zerocopy:
             mask = (0, *indices_to_mask(dofs_idx)) if self.n_envs == 0 else indices_to_mask(envs_idx, dofs_idx)
@@ -2714,7 +2709,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             position = position[None]
             velocity = velocity[None]
 
-        # See 'control_dofs_velocity'
         kernel_control_dofs_position_velocity(dofs_idx, envs_idx, position, velocity, self.dyn_state, self.rigid_config)
 
     def get_sol_params(self, geoms_idx=None, envs_idx=None, *, joints_idx=None, eqs_idx=None):
@@ -2917,29 +2911,28 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_control_force(self, dofs_idx=None, envs_idx=None):
-        _tensor, dofs_idx, envs_idx = self._sanitize_io_variables(None, dofs_idx, self.n_dofs, "dofs_idx", envs_idx)
-        tensor = _tensor[None] if self.n_envs == 0 else _tensor
-        kernel_get_dofs_control_force(dofs_idx, envs_idx, tensor, self.dyn_state, self.dyn_info, self.rigid_config)
-        return _tensor
+        tensor = self._read_data(self.dyn_state.dofs.qf_applied, envs_idx, dofs_idx, copy=True)
+        return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_actuator_force(self, dofs_idx=None, envs_idx=None):
         """
         Generalized effort transmitted to each DOF at the actuator output (torque for revolute DOFs, force for
         prismatic DOFs), accounting for the gearbox losses between the motor and the joint.
 
-        Computed as qf_applied - armature * qacc + qf_frictionloss + qf_passive: the commanded effort from
-        get_dofs_control_force minus the armature-inertia load, plus the dissipative frictionloss and passive damping
-        efforts. Contact, Coriolis and gravity loads are captured implicitly through the constraint-solved acceleration.
+        Computed over the last step as qf_applied - armature * acc + qf_frictionloss + qf_passive: the control force the
+        step applied (see get_dofs_control_force) minus the armature-inertia load, plus the dissipative frictionloss and
+        passive damping efforts. Contact, Coriolis and gravity loads are captured implicitly through the acceleration of
+        the dofs.
         """
-        qf_applied = qd_to_torch(self.dyn_state.dofs.qf_applied, envs_idx, transpose=True)
-        qacc = qd_to_torch(self.constraint_solver.qacc, envs_idx, transpose=True)
-        qf_passive = qd_to_torch(self.dyn_state.dofs.qf_passive, envs_idx, transpose=True)
-        if self._options.batch_dofs_info:
-            armature = qd_to_torch(self.dyn_info.dofs.armature, envs_idx, transpose=True)
-            frictionloss = qd_to_torch(self.dyn_info.dofs.frictionloss, envs_idx, transpose=True)
-        else:
-            armature = qd_to_torch(self.dyn_info.dofs.armature, transpose=True)
-            frictionloss = qd_to_torch(self.dyn_info.dofs.frictionloss, transpose=True)
+        dofs_state = self.dyn_state.dofs
+        qf_applied, qf_passive, dofs_acc = self._read_data(
+            (dofs_state.qf_applied, dofs_state.qf_passive, dofs_state.acc), envs_idx, None
+        )
+        info_envs_idx = envs_idx if self._options.batch_dofs_info else None
+        armature, frictionloss = [
+            qd_to_torch(field, info_envs_idx, transpose=True)
+            for field in (self.dyn_info.dofs.armature, self.dyn_info.dofs.frictionloss)
+        ]
 
         # Frictionloss constraint forces mapped back to DOF space. Frictionloss constraints occupy the contiguous block
         # [n_constraints_equality, n_constraints_equality + n_constraints_frictionloss) of the constraint list, the DOF
@@ -2949,24 +2942,24 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # the k-th frictionloss row is the k-th DOF with nonzero frictionloss. Its row index is therefore
         # `n_constraints_equality + rank`, with `rank` the running count of frictionloss-enabled DOFs (-1 for DOFs
         # without frictionloss, which contribute zero).
-        efc_force = qd_to_torch(self.constraint_solver.efc_force, envs_idx, transpose=True)
+        efc_force = self._read_data(self.constraint_solver.efc_force, envs_idx, None)
         n_constraints_equality = qd_to_torch(self.constraint_solver.n_constraints_equality, envs_idx)
         has_frictionloss = frictionloss > gs.EPS
         rank = torch.cumsum(has_frictionloss, dim=-1) - 1
         gather_idx = (n_constraints_equality[:, None] + rank).clamp_(min=0)
         qf_frictionloss = torch.gather(efc_force, 1, gather_idx) * has_frictionloss
 
-        actuator_force = qf_applied - armature * qacc + qf_frictionloss + qf_passive
+        actuator_force = qf_applied - armature * dofs_acc + qf_frictionloss + qf_passive
         if dofs_idx is not None:
             actuator_force = actuator_force[indices_to_mask(None, dofs_idx)]
         return actuator_force[0] if self.n_envs == 0 else actuator_force
 
     def get_dofs_force(self, dofs_idx=None, envs_idx=None):
-        tensor = qd_to_torch(self.dyn_state.dofs.force, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = self._read_data(self.dyn_state.dofs.force, envs_idx, dofs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_acc(self, dofs_idx=None, envs_idx=None):
-        tensor = qd_to_torch(self.dyn_state.dofs.acc, envs_idx, dofs_idx, transpose=True, copy=True)
+        tensor = self._read_data(self.dyn_state.dofs.acc, envs_idx, dofs_idx, copy=True)
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_dofs_kp(self, dofs_idx=None, envs_idx=None):

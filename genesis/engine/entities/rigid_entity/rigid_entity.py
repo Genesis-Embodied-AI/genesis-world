@@ -2553,7 +2553,10 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_control_force(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the entity's dofs' internal control force, computed based on the position/velocity control command.
+        Get the control force the last step applied to the entity's dofs, clamped to their force range.
+
+        A force is discontinuous at a step, so this getter reports it over the last step, like `get_dofs_force`. A target
+        set since then shows in the force of the next step.
 
         Parameters
         ----------
@@ -2565,7 +2568,7 @@ class RigidEntity(KinematicEntity):
         Returns
         -------
         control_force : torch.Tensor, shape (n_dofs,) or (n_envs, n_dofs)
-            The entity's dofs' internal control force.
+            The control force of the entity's dofs.
         """
         dofs_idx = self._get_global_idx(dofs_idx_local, self.n_dofs, self._dof_start, unsafe=True)
         return self._solver.get_dofs_control_force(dofs_idx, envs_idx)
@@ -2573,11 +2576,10 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def get_dofs_force(self, dofs_idx_local=None, envs_idx=None):
         """
-        Get the entity's dofs' internal force at the current time step.
+        Get the smooth force on the entity's dofs over the last step.
 
-        Note
-        ----
-        Different from `get_dofs_control_force`, this function returns the actual internal force experienced by all the dofs at the current time step.
+        It sums the control force the step applied and the passive forces of damping and stiffness, minus the bias
+        forces of gravity, Coriolis and centrifugal effects. Constraint, contact and external forces are left out.
 
         Parameters
         ----------

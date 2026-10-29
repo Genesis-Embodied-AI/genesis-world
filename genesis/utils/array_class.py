@@ -1232,7 +1232,9 @@ def get_constraint_state(constraint_solver, solver, collider):
         aref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         Jaref=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         efc_frictionloss=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
-        efc_force=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
+        efc_force=V(
+            dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout, needs_grad=solver._requires_grad
+        ),
         efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),

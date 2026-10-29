@@ -120,9 +120,20 @@ def kernel_solve_adjoint_u(
     we use CG solver.
 
     Specifically, A = M + J^T * diag(D) * J, where M = mass matrix, J = Jacobian, diag(D) = diagonal matrix of efc_D.
+    The gradient g sums the one of the acceleration and the direct one of the constraint forces: efc_force is
+    -D * (J qacc - aref) on an active row and a constant otherwise, so g += J^T * (-D * dL/defc_force).
     """
     n_dofs = constraint_state.bw_u.shape[0]
     _B = constraint_state.bw_u.shape[1]
+    len_constraints = constraint_state.bw_Ju.shape[0]
+
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_c, i_b in qd.ndrange(len_constraints, _B):
+        if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
+            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
+            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
 
     # Initialize u
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
@@ -168,6 +179,8 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
     - dL_daref = Ju \odot D
     - dL_defc_D = -Ju \odot (Jqacc - aref)
     - dL_dforce = u
+    The gradient of the constraint forces efc_force adds to Ju in the terms of aref, efc_D and J (see
+    kernel_solve_adjoint_u), and is cleared once consumed, since every substep overwrites efc_force.
     """
     _B = constraint_state.bw_u.shape[1]
     n_dofs = constraint_state.bw_u.shape[0]
@@ -202,15 +215,17 @@ def kernel_compute_gradients(constraint_state: array_class.ConstraintState, rigi
             constraint_state.bw_y[i_c, i_b] = y
 
             is_active = constraint_state.active[i_c, i_b] != 0
-            # aref: Ju \odot D, D: -Ju \odot w
-            DJu = constraint_state.efc_D[i_c, i_b] * Ju
+            # aref: Ju \odot D, D: -Ju \odot w, the gradient of efc_force adding to Ju
+            Ju_force = Ju + constraint_state.efc_force.grad[i_c, i_b]
+            DJu = constraint_state.efc_D[i_c, i_b] * Ju_force
             constraint_state.dL_daref[i_c, i_b] = DJu if is_active else gs.qd_float(0.0)
-            constraint_state.dL_defc_D[i_c, i_b] = -Ju * w if is_active else gs.qd_float(0.0)
+            constraint_state.dL_defc_D[i_c, i_b] = -Ju_force * w if is_active else gs.qd_float(0.0)
             # J: -[u * y^T + qacc * (D \odot (Ju))^T]
             for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
                 i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
                 dL_djac = -(constraint_state.bw_u[i_d, i_b] * y + constraint_state.qacc[i_d, i_b] * DJu)
                 constraint_state.dL_djac[i_c, i_d, i_b] = dL_djac if is_active else gs.qd_float(0.0)
+        constraint_state.efc_force.grad[i_c, i_b] = gs.qd_float(0.0)
 
     # M: -u * qacc^T, over the mass blocks the forward reads (see dofs_mass_block_start in array_class.py): an entry
     # outside them is structurally zero and moves nothing, so its gradient is zero.

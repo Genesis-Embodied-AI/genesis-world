@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 import pytest
 import torch
@@ -235,36 +233,69 @@ def test_fk_multistep_force_grad_matches_fd(model_name, request, precision, show
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("control_mode", ["position", "velocity"])
-def test_per_step_pd_target_grad_matches_fd(control_mode, grad_revolute, precision, show_viewer):
-    # Per-step-varying PD targets are scenario commands, replayed by the backward unroll; the gradient of a tracked
-    # initial velocity through the controlled rollout must match finite differences.
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_per_step_pd_target_grad_matches_fd(n_envs, grad_free_with_revolute, precision, show_viewer):
+    # The setters take turns every other step, each target holding over the step in between: position-velocity, then
+    # position, then velocity on the hinge alone, then position-velocity again. A target loses its gradient from the
+    # steps after the next setter, which overwrites it or switches its dof to a mode that ignores it. The last dimension
+    # of a target selects its setter, and the free joint drives its rotation from Euler angle targets. A plain target
+    # finally overwrites those of the free joint, while the hinge keeps its last tracked one. Between steps, the loss
+    # reads the forces and the acceleration of the dofs over the last step, the control force depending on the targets
+    # directly.
     pair = make_diff_scene_pair(
-        grad_revolute,
+        grad_free_with_revolute,
+        n_envs=n_envs,
         substeps=4,
         show_viewer=show_viewer,
     )
     for entity in (pair.entity_ana, pair.entity_fd):
         entity.set_dofs_kp(4.0)
         entity.set_dofs_kv(0.8)
-    targets = [0.3 * math.sin(0.7 * t) for t in range(10)]
+    n_dofs = pair.entity_ana.n_dofs
+    batch_shape = (n_envs,) if n_envs > 0 else ()
+    inputs = [None] * 8
+    for i_step, target_shape in ((0, (n_dofs, 2)), (2, (n_dofs,)), (4, (1,)), (6, (n_dofs, 2))):
+        inputs[i_step] = 0.3 * np.random.standard_normal((*batch_shape, *target_shape))
+
+    def apply_target(entity, target):
+        if target.shape[-1] == 2:
+            entity.control_dofs_position_velocity(target[..., 0], target[..., 1])
+        elif target.shape[-1] == 1:
+            entity.control_dofs_velocity(target, dofs_idx_local=[n_dofs - 1])
+        else:
+            entity.control_dofs_position(target)
+
+    dofs_readings = []
 
     def step_fn(entity, i_step):
-        if control_mode == "position":
-            entity.control_dofs_position(targets[i_step])
+        if i_step == 0:
+            dofs_readings.clear()
         else:
-            entity.control_dofs_velocity(targets[i_step])
+            dofs_readings.extend(
+                [
+                    entity.get_dofs_control_force(),
+                    entity.solver.get_dofs_actuator_force(),
+                    entity.get_dofs_force(),
+                    entity.get_dofs_acc(),
+                ]
+            )
+        if i_step == len(inputs):
+            entity.control_dofs_position(0.1, dofs_idx_local=range(n_dofs - 1))
+
+    def loss_fn(scene, entity):
+        dofs_readings.append(entity.get_dofs_control_force())
+        return (entity.get_dofs_position() ** 2).sum() + sum([value.sum() for value in dofs_readings])
 
     assert_grad_matches_fd(
         pair,
-        [np.array([1.5])],
-        lambda e, x: e.set_dofs_velocity(x),
-        lambda scene, entity: entity.get_qpos()[0] ** 2,
+        inputs,
+        apply_target,
+        loss_fn,
         n_steps=10,
         step_fn=step_fn,
-        rtol=1e-10 if precision == "64" else 5e-5,
-        atol=1e-10 if precision == "64" else 5e-5,
-        eps=3e-5 if precision == "64" else 3e-2,
+        rtol=2e-10 if precision == "64" else 5e-4,
+        atol=2e-10 if precision == "64" else 5e-4,
+        eps=1e-4 if precision == "64" else 1e-1,
     )
 
 

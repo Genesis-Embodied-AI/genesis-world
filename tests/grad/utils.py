@@ -77,9 +77,9 @@ def assert_grad_matches_fd(
     Input i of `inputs` is applied via `apply_fn(entity, x)` before step i and receives its own adjoint, None for a step
     given no input. The scene runs `n_steps` steps (default len(inputs)), the extra ones without input.
     `setup_fn(scene, entity)` runs once after reset, for initialization without gradient. `step_fn(entity, i_step)` runs
-    before every step on both scenes, for per-step scenario commands without gradient (e.g. position targets). The FD
-    reference perturbs each input entry in turn, so the cost is O(n_steps * total input size). rtol / atol / eps are
-    per-scenario, pinned to the measured finite-difference floor."""
+    before every step on both scenes, for per-step scenario commands without gradient (e.g. a target overwriting a
+    tracked one). The FD reference perturbs each input entry in turn, so the cost is O(n_steps * total input size).
+    rtol / atol / eps are per-scenario, pinned to the measured finite-difference floor."""
     base = [None if inp is None else np.array(inp, dtype=np.float64) for inp in inputs]
     total_steps = len(base) if n_steps is None else n_steps
 

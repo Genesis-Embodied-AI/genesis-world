@@ -1070,36 +1070,6 @@ def kernel_get_terrain_height(
 
 
 @qd.kernel(fastcache=True)
-def kernel_get_dofs_control_force(
-    dofs_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    tensor: qd.types.ndarray(),
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    rigid_config: qd.template(),
-):
-    # we need to compute control force here because this won't be computed until the next actual simulation step
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_d_, i_b_ in qd.ndrange(dofs_idx.shape[0], envs_idx.shape[0]):
-        i_d = dofs_idx[i_d_]
-        i_b = envs_idx[i_b_]
-        I_d = [i_d, i_b] if qd.static(rigid_config.batch_dofs_info) else i_d
-        force = gs.qd_float(0.0)
-        if dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.FORCE:
-            force = dyn_state.dofs.ctrl_force[i_d, i_b]
-        elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.VELOCITY:
-            force = -dyn_info.dofs.act_bias[I_d][2] * (dyn_state.dofs.ctrl_vel[i_d, i_b] - dyn_state.dofs.vel[i_d, i_b])
-        elif dyn_state.dofs.ctrl_mode[i_d, i_b] == gs.CTRL_MODE.POSITION:
-            force = (
-                dyn_info.dofs.act_gain[I_d] * (dyn_state.dofs.ctrl_pos[i_d, i_b] - dyn_state.dofs.pos[i_d, i_b])
-                + dyn_info.dofs.act_bias[I_d][0]
-                + (dyn_info.dofs.act_gain[I_d] + dyn_info.dofs.act_bias[I_d][1]) * dyn_state.dofs.pos[i_d, i_b]
-                + dyn_info.dofs.act_bias[I_d][2] * (dyn_state.dofs.vel[i_d, i_b] - dyn_state.dofs.ctrl_vel[i_d, i_b])
-            )
-        tensor[i_b_, i_d_] = qd.math.clamp(force, dyn_info.dofs.force_range[I_d][0], dyn_info.dofs.force_range[I_d][1])
-
-
-@qd.kernel(fastcache=True)
 def kernel_set_drone_rpm(
     propellers_link_idx: qd.types.ndarray(),
     kf: float,
