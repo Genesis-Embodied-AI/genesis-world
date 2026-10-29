@@ -46,14 +46,12 @@ class Rigid(Kinematic["RigidEntity"]):
     needs_coup : bool, optional
         Whether the material participates in coupling with other solvers. Default is True.
     coup_friction : float, optional
-        Coulomb friction against an entity owned by another solver. When unset, it depends on the coupler. With
-        ``SAPCouplerOptions`` and ``IPCCouplerOptions``, which couple solids, each geom uses the sliding friction it
-        resolves at build: the material ``friction`` where set, otherwise the coefficient parsed from the asset,
-        otherwise 1. IPC stores one coefficient per entity, so an entity whose IPC contact geoms resolve to different
-        values uses the largest of them everywhere, with a warning. With ``LegacyCouplerOptions``, which couples
-        particles such as fluids and sand, it is 0.1. Set a value to give coupling a different grip from rigid-rigid
-        contact: a lower value lets the entity slip against soft and particle materials while rigid contacts keep their
-        own coefficient. Default is None.
+        Friction used during coupling. Must be non-negative. If None, resolved depending on the coupler:
+          - ``SAPCouplerOptions`` and ``IPCCouplerOptions``: the sliding friction of each geom, i.e. the material
+            ``friction`` if set, otherwise the value from the asset file, otherwise 1. IPC keeps a single value per
+            entity, so if its geoms differ, the largest one is used and a warning is logged.
+          - ``LegacyCouplerOptions``: 0.1, as this coupler handles particles such as fluids and sand.
+        Default is None.
     coup_softness : float, optional
         Softness of coupling interaction. Must be non-negative. Default is 0.002.
     coup_restitution : float, optional
