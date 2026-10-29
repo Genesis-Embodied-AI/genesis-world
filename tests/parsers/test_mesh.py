@@ -1024,3 +1024,20 @@ def test_convex_decompose_cache(monkeypatch, asset_tmp_path):
         for part, cached_part in zip(parts, cached_parts):
             assert_allclose(part.vertices, cached_part.vertices * (scale / SCALES[0]), rtol=1e-6)
             assert_equal(part.faces, cached_part.faces)
+
+
+# ==================== Decimation Tests ====================
+
+
+@pytest.mark.required
+def test_decimate_mesh_with_duplicate_faces():
+    verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    faces = np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+    tmesh = trimesh.Trimesh(verts, np.vstack((faces, faces)), process=False)
+
+    # A non-zero aggressiveness selects the lossy path, the only one on which the target face count is checked
+    gmesh = gs.Mesh.from_trimesh(mesh=tmesh, decimate=True, decimate_face_num=5, decimate_aggressiveness=2)
+    assert "decimated" not in gmesh.metadata
+    assert len(gmesh.trimesh.faces) == 4
+    assert gmesh.trimesh.is_watertight
+    assert_allclose(gmesh.trimesh.volume, 1.0 / 6.0, tol=gs.EPS)

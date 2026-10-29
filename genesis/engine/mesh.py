@@ -226,16 +226,17 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         if self._mesh.vertices.shape[0] > 3 and len(self._mesh.faces) > decimate_face_num:
             self._mesh.process(validate=True)
-            self._mesh = trimesh.Trimesh(
-                *fast_simplification.simplify(
-                    self._mesh.vertices,
-                    self._mesh.faces,
-                    target_count=decimate_face_num,
-                    agg=decimate_aggressiveness,
-                    lossless=(decimate_aggressiveness == 0),
-                ),
-            )
-            self._metadata["decimated"] = True
+            if len(self._mesh.faces) > decimate_face_num:
+                self._mesh = trimesh.Trimesh(
+                    *fast_simplification.simplify(
+                        self._mesh.vertices,
+                        self._mesh.faces,
+                        target_count=decimate_face_num,
+                        agg=decimate_aggressiveness,
+                        lossless=(decimate_aggressiveness == 0),
+                    ),
+                )
+                self._metadata["decimated"] = True
 
         self.clear_visuals()
 
