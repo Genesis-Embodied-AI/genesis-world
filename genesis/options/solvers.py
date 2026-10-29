@@ -828,6 +828,31 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
         Maximum number of iterations for the solving density constraints. Defaults to 1.
     max_viscosity_solver_iterations : int, optional
         Maximum number of iterations for the solving viscosity constraints. Defaults to 1.
+    solver_iterations : int, optional
+        Iterations of the unified constraint loop (Macklin et al. 2014, "Unified Particle Physics for Real-Time
+        Applications"). Every iteration processes the stretch, bending and volume constraints, each kind as its own
+        group within its own maximum number of iterations above, then the density constraints within theirs, then the
+        contacts. Defaults to 4.
+    sor_relaxation : float, optional
+        Successive over-relaxation factor of the averaged contact corrections: every particle moves by this factor
+        times the mean of the corrections of its contacts. Defaults to 1.5.
+    stabilization_iterations : int, optional
+        Iterations of the contact pre-stabilization, which resolves the contacts violated at the start of the substep on
+        the start positions as well, so that their resolution adds no velocity. Defaults to 1.
+    sleep_threshold : float, optional
+        Displacement over a substep in meters below which a particle stays at its start position, 0 to disable.
+        Defaults to 0.
+    use_xpbd : bool, optional
+        Solve the stretch, bending and volume constraints by XPBD (Macklin et al. 2016, "XPBD: Position-Based
+        Simulation of Compliant Constrained Dynamics"): every constraint accumulates its Lagrange multiplier over the
+        iterations of a substep, so that the converged stiffness follows its compliance rather than the number of
+        iterations. Under the parallel update, the mass of every particle is split over its constraints of the kind,
+        which keeps the summed corrections stable and leaves the converged solution unchanged, so that the relaxation
+        factors of the materials are not used. Defaults to False.
+    position_tolerance : float, optional
+        Largest particle correction of a constraint iteration in meters under which the constraint loop, and the
+        projection after a coupling, stop before `solver_iterations`; 0 runs all of them. Every check syncs the GPU.
+        Defaults to 0.
     particle_size : float, optional
         Particle diameter in meters. Defaults to 1e-2.
     hash_grid_res : tuple, optional
@@ -846,6 +871,12 @@ class PBDOptions(GravityMixin, TimeBasedMixin):
     max_volume_solver_iterations: PositiveInt = 1
     max_density_solver_iterations: PositiveInt = 1
     max_viscosity_solver_iterations: PositiveInt = 1
+    solver_iterations: PositiveInt = 4
+    sor_relaxation: PositiveFloat = 1.5
+    stabilization_iterations: NonNegativeInt = 1
+    sleep_threshold: NonNegativeFloat = 0.0
+    use_xpbd: bool = False
+    position_tolerance: NonNegativeFloat = 0.0
 
     # self collision
     particle_size: PositiveFloat = 1e-2

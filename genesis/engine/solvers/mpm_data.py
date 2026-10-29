@@ -274,6 +274,9 @@ class MpmGrid:
         self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_solved = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
+        # Mass and momentum that the proxy particles of another solver add to every node before the Newton solve
+        self.node_proxy_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
+        self.node_proxy_mom = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
 
     @property
     def max_nodes(self) -> int:

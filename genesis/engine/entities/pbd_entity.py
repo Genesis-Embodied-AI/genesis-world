@@ -439,6 +439,38 @@ class PBD2DEntity(PBDTetEntity):
             self.solver.inner_edges_info[i_ie].v3 = self._particle_start + inner_edges[i_ie_, 2]
             self.solver.inner_edges_info[i_ie].v4 = self._particle_start + inner_edges[i_ie_, 3]
 
+    def _add_vverts_to_solver(self):
+        """Embed every vvert in its nearest triangle of the simulation mesh at rest, by its barycentric coordinates.
+
+        The vverts of a cloth follow the particles of that triangle alone, so that neighboring vverts, embedded in the
+        same or adjacent triangles, stay on one continuous surface as the cloth bends. The affine fit over the nearest
+        particles of `ParticleEntity` switches support sets between neighboring vverts and creases the rendered cloth.
+        The supports past the three of the triangle take zero weight."""
+        n_supports = self.solver.n_vvert_supports
+        if n_supports < 3:
+            super()._add_vverts_to_solver()
+            return
+        faces = np.asarray(self._mesh.faces, dtype=gs.np_int)
+        mesh = trimesh.Trimesh(vertices=self._particles, faces=faces, process=False)
+        closest, _, tri_idx = trimesh.proximity.closest_point(mesh, self._vverts)
+        bary = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_idx], closest)
+        support_idxs = np.zeros((len(self._vverts), n_supports), dtype=gs.np_int)
+        support_weights = np.zeros((len(self._vverts), n_supports), dtype=gs.np_float)
+        support_idxs[:, :3] = faces[tri_idx]
+        support_idxs[:, 3:] = faces[tri_idx, :1]
+        support_weights[:, :3] = bary
+        self._kernel_add_vverts_supports_to_solver(support_idxs_local=support_idxs, support_weights=support_weights)
+
+    @qd.kernel
+    def _kernel_add_vverts_supports_to_solver(
+        self, support_idxs_local: qd.types.ndarray(), support_weights: qd.types.ndarray()
+    ):
+        for i_vv_ in range(self.n_vverts):
+            i_vv = i_vv_ + self._vvert_start
+            for j in range(self.solver.n_vvert_supports):
+                self.solver.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + self._particle_start
+                self.solver.vverts_info.support_weights[i_vv][j] = support_weights[i_vv_, j]
+
     @property
     def n_inner_edges(self):
         """The number of inner edges in the 2D mesh."""
