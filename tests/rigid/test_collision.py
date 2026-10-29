@@ -2029,7 +2029,7 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
     assert_allclose(exclude_entity.get_link("passer_excluded").get_pos(), (-1.0, 2.0, 0.2), atol=1e-3)
     assert_allclose(exclude_entity.get_link("passer_colliding").get_pos(), (1.0, 2.0, 0.6), atol=1e-3)
 
-    # The importers realize any collision matrix whose geoms fall into at most 31 groups of identical forbidden partners.
+    # The importers realize any collision matrix whose geoms fall into at most 31 groups of identical excluded partners.
     rng = np.random.default_rng(0)
     for density in (0.0, 0.05, 0.25, 0.5, 0.75, 1.0):
         for _ in range(64):
@@ -2049,7 +2049,7 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
                     is_colliding = bool((contype & masks[i_gb][1]) | (masks[i_gb][0] & conaffinity))
                     assert is_colliding != (frozenset((i_ga, i_gb)) in invalid_pairs)
 
-    # Every geom forbidding every other one needs one bit per geom to group, so a single-bit budget answers with the
+    # Every geom excluding every other one needs one bit per geom to group, so a single-bit budget answers with the
     # bit search instead. One bit realizes that matrix by leaving every 'contype' empty, which disables every pair.
     num_geoms = 5
     invalid_pairs = frozenset(

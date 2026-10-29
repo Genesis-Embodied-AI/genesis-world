@@ -25,7 +25,7 @@ def solve_contype_conaffinity(
     collide, this finds bitmasks such that every excluded pair is disabled and every other pair is enabled. Used by
     both the MJCF importer (``<contact><exclude>``) and the USD importer (CollisionGroup / FilteredPairsAPI).
 
-    Geoms forbidding exactly the same partners are interchangeable, so one bit per group of such geoms discriminates
+    Geoms excluding exactly the same partners are interchangeable, so one bit per group of such geoms discriminates
     them against every other group, in O(n^2) time. Each geom takes the bit of its group as ``contype``, and as
     ``conaffinity`` the bits of every group it may collide with, its own group included. A collision matrix whose
     groups do not fit in ``max_bits`` bits falls back on an ascending z3 search over the bit widths, which gives up
@@ -49,24 +49,23 @@ def solve_contype_conaffinity(
     tuple[tuple[int, int], ...] | None
         ``(contype, conaffinity)`` per geom index, or ``None`` if no assignment up to ``max_bits`` bits was found.
     """
-    forbidden_geoms_of_geom = [set() for _ in range(n)]
+    excluded_geoms = [set() for _ in range(n)]
     for i_ga in range(n):
         for i_gb in range(i_ga + 1, n):
             if frozenset((i_ga, i_gb)) in invalid_pairs:
-                forbidden_geoms_of_geom[i_ga].add(i_gb)
-                forbidden_geoms_of_geom[i_gb].add(i_ga)
+                excluded_geoms[i_ga].add(i_gb)
+                excluded_geoms[i_gb].add(i_ga)
 
-    group_of_forbidden_set = {}
+    group_of_exclusion = {}
     group_of_geom = [
-        group_of_forbidden_set.setdefault(frozenset(forbidden_geoms), len(group_of_forbidden_set))
-        for forbidden_geoms in forbidden_geoms_of_geom
+        group_of_exclusion.setdefault(frozenset(exclusion), len(group_of_exclusion)) for exclusion in excluded_geoms
     ]
-    num_groups = len(group_of_forbidden_set)
+    num_groups = len(group_of_exclusion)
     if num_groups <= max_bits:
-        # A geom never forbids its own group, since a geom forbidding a partner of its group would forbid itself.
+        # A geom never excludes its own group, since a geom excluding a partner of its group would exclude itself.
         conaffinity_of_group = [(1 << num_groups) - 1] * num_groups
-        for forbidden_geoms, i_group in group_of_forbidden_set.items():
-            for i_g in forbidden_geoms:
+        for exclusion, i_group in group_of_exclusion.items():
+            for i_g in exclusion:
                 conaffinity_of_group[i_group] &= ~(1 << group_of_geom[i_g])
         return tuple((1 << i_group, conaffinity_of_group[i_group]) for i_group in group_of_geom)
 
