@@ -63,6 +63,7 @@ def main():
             ),
             material=gs.materials.Elastic(
                 density=200,
+                youngs_modulus=3e5,
             ),
         ),
     )

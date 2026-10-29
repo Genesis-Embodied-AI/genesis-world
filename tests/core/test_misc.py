@@ -111,7 +111,9 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
             )
         if issubclass(options_cls, gs.options.MPMEntityOptions):
             options_kwargs.update(
-                material=gs.materials.Elastic(),
+                material=gs.materials.Elastic(
+                    youngs_modulus=3e5,
+                ),
                 solver_options=gs.options.MPMEntitySolverOptions(
                     sampler="regular",
                 ),

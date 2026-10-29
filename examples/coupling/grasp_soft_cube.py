@@ -46,7 +46,9 @@ def main():
             surface=gs.surfaces.Default(
                 vis_mode="particle",
             ),
-            material=gs.materials.Elastic(),
+            material=gs.materials.Elastic(
+                youngs_modulus=3e5,
+            ),
         ),
     )
     franka = scene.add_entity(

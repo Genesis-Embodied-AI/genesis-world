@@ -62,6 +62,7 @@ def test_mpm_rigid_push_grad(show_viewer):
             ),
             material=gs.materials.Elastic(
                 density=500,
+                youngs_modulus=3e5,
             ),
         ),
     )

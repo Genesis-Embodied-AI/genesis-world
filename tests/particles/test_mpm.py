@@ -60,7 +60,9 @@ def test_particle_constraints(show_viewer, tol):
                 poss=((0.5, 0.5, 0.3), (-0.5, 0.5, 0.3)),
                 eulers=((0.0, 0.0, 90.0), (90.0, 0.0, 0.0)),
             ),
-            material=gs.materials.Elastic(),
+            material=gs.materials.Elastic(
+                youngs_modulus=3e5,
+            ),
             solver_options=gs.options.MPMEntitySolverOptions(
                 sampler="regular",
             ),

@@ -560,12 +560,11 @@ class FEMEntityOptions(EntityOptions["FEMEntity"]):
     def material_params(self) -> FEMMaterialParams:
         """The parameters of the material, the defaults of the FEM solver filled in.
 
-        The Young's modulus of Elastic defaults to 1e6 Pa, the density of Cloth to 200 kg/m^3 and the friction
-        coefficient to 0.1.
+        The density of Cloth defaults to 200 kg/m^3 and the friction coefficient to 0.1.
         """
         material = self.material
         return FEMMaterialParams(
-            youngs_modulus=1e6 if material.youngs_modulus is None else material.youngs_modulus,
+            youngs_modulus=material.youngs_modulus,
             poisson_ratio=material.poisson_ratio,
             density=200.0 if material.density is None else material.density,
             friction=0.1 if material.friction is None else material.friction,
@@ -642,16 +641,13 @@ class MPMEntityOptions(EntityOptions["MPMEntity"]):
     def material_params(self) -> MPMMaterialParams:
         """The parameters of the material, the defaults of the MPM solver filled in.
 
-        The Young's modulus of Elastic defaults to 3e5 Pa, and a Liquid takes the Lame parameters of a Young's modulus
-        of 1e6 Pa and a Poisson ratio of 0.2 (see 'MPMLiquidModel'). The stress model defaults to 'corotation' for
-        Elastic and 'neohooken' for Muscle, and the sampler to 'random' for Sand and Snow and to 'pbs' on Linux x86
-        and 'random' elsewhere otherwise.
+        A Liquid takes the Lame parameters of a Young's modulus of 1e6 Pa and a Poisson ratio of 0.2 (see
+        'MPMLiquidModel'). The stress model defaults to 'corotation' for Elastic and 'neohooken' for Muscle, and the
+        sampler to 'random' for Sand and Snow and to 'pbs' on Linux x86 and 'random' elsewhere otherwise.
         """
         material, solver_options = self.material, self.solver_options
         if isinstance(material, Liquid):
             youngs_modulus, poisson_ratio = 1e6, 0.2
-        elif isinstance(material, Elastic) and material.youngs_modulus is None:
-            youngs_modulus, poisson_ratio = 3e5, material.poisson_ratio
         else:
             youngs_modulus, poisson_ratio = material.youngs_modulus, material.poisson_ratio
         model = solver_options.model
