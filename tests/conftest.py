@@ -281,10 +281,14 @@ def _get_gpu_indices():
             if device_count > 0:
                 return tuple(range(device_count))
 
-        warnings.warn(
-            "No GPU backend detected (neither NVML nor AMD SMI); multi-GPU support will be disabled.",
-            stacklevel=2,
-        )
+        # The device nodes of the NVIDIA and AMD ROCm kernel drivers only exist on a machine with a GPU, which tells a
+        # missing management library apart from a CPU-only machine.
+        if any([Path(path).exists() for path in ("/dev/nvidiactl", "/dev/kfd")]):
+            warnings.warn(
+                "GPU detected but no GPU management library available (neither NVML nor AMD SMI); multi-GPU support "
+                "will be disabled.",
+                stacklevel=2,
+            )
 
     return (0,)
 
