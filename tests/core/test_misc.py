@@ -491,20 +491,26 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     # A force on the translation of the body acts at its frame, off its center of mass, so it spins the body
     PUSH_FORCE = 50.0
     dense_body.control_dofs_force([0.0, 0.0, PUSH_FORCE, 0.0, 0.0, 0.0])
-    for _ in range(N_STEPS):
-        scene.step()
-    for entity in entities:
-        if isinstance(entity, gs.engine.entities.HybridEntity):
-            continue
-        if isinstance(entity, gs.engine.entities.KinematicEntity):
-            pos = entity.get_pos()
-        elif isinstance(entity, gs.engine.entities.particle_entity.ParticleEntity):
-            pos = entity.get_particles_pos().mean(dim=-2)
-        elif isinstance(entity, gs.engine.entities.FEMEntity):
-            pos = entity.get_state().pos.mean(dim=-2)
-        else:
-            pos = entity.get_state().pos
-        drop = entity.options.morph.pos[2] - pos[..., 2]
+    measured_entities = [entity for entity in entities if not isinstance(entity, gs.engine.entities.HybridEntity)]
+    # The drop is measured from the height before stepping, since the mean of the vertices of a tetrahedralized box
+    # starts off its center by an amount that depends on the mesh.
+    entities_z = []
+    for n_steps in (0, N_STEPS):
+        for _ in range(n_steps):
+            scene.step()
+        entities_z.append([])
+        for entity in measured_entities:
+            if isinstance(entity, gs.engine.entities.KinematicEntity):
+                pos = entity.get_pos()
+            elif isinstance(entity, gs.engine.entities.particle_entity.ParticleEntity):
+                pos = entity.get_particles_pos().mean(dim=-2)
+            elif isinstance(entity, gs.engine.entities.FEMEntity):
+                pos = entity.get_state().pos.mean(dim=-2)
+            else:
+                pos = entity.get_state().pos
+            entities_z[-1].append(pos[..., 2])
+    for entity, z_start, z_end in zip(measured_entities, *entities_z):
+        drop = z_start - z_end
         if isinstance(entity.options, gs.options.KinematicEntityOptions):
             assert_allclose(drop, 0.0, tol=tol)
         else:
