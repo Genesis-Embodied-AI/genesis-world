@@ -34,6 +34,31 @@ def two_box_free_mjcf():
 
 
 @pytest.fixture
+def three_objects_obj(asset_tmp_path):
+    # Three objects, of which two share a material
+    (asset_tmp_path / "three_objects.mtl").write_text("newmtl plastic\nKd 0.5 0.5 0.5\nnewmtl lcd\nKd 0.0 0.0 0.0\n")
+    lines = ["mtllib three_objects.mtl"]
+    for i, (name, material) in enumerate((("body", "plastic"), ("knob", "plastic"), ("screen", "lcd"))):
+        lines += [f"o {name}", f"usemtl {material}"]
+        lines += [f"v {0.1 * i + dx} {dy} 0.0" for dx, dy in ((0.0, 0.0), (0.05, 0.0), (0.05, 0.05), (0.0, 0.05))]
+        lines += [f"f {4 * i + 1} {4 * i + 2} {4 * i + 3}", f"f {4 * i + 1} {4 * i + 3} {4 * i + 4}"]
+    obj_path = asset_tmp_path / "three_objects.obj"
+    obj_path.write_text("\n".join(lines) + "\n")
+    return obj_path
+
+
+@pytest.fixture
+def three_objects_urdf(three_objects_obj):
+    robot = ET.Element("robot", name="panel")
+    link = ET.SubElement(robot, "link", name="panel")
+    visual = ET.SubElement(link, "visual")
+    ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=str(three_objects_obj))
+    collision = ET.SubElement(link, "collision")
+    ET.SubElement(ET.SubElement(collision, "geometry"), "box", size="0.25 0.05 0.01")
+    return ET.tostring(robot, encoding="unicode")
+
+
+@pytest.fixture
 def torus_box_sphere_mjcf(asset_tmp_path):
     torus_path = asset_tmp_path / "torus.obj"
     trimesh.creation.torus(major_radius=0.1, minor_radius=0.03).export(torus_path)
@@ -54,7 +79,9 @@ def torus_box_sphere_mjcf(asset_tmp_path):
 
 
 @pytest.mark.required
-def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf):
+def test_entity_options(
+    tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box_sphere_mjcf, three_objects_obj, three_objects_urdf
+):
     DT = 1e-2
     SUBSTEPS = 10
     N_STEPS = 10
@@ -342,6 +369,43 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
                     surface=gs.surfaces.Default(
                         color=(0.0, 0.0, 1.0),
                     ),
+                ),
+            },
+        ),
+    )
+    # The objects of an OBJ file stay apart as visual geoms named after them, whether the file is a mesh or the visual
+    # of a URDF link
+    knob_surface = gs.surfaces.Default(
+        color=(0.0, 1.0, 0.0),
+    )
+    objects_mesh = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Mesh(
+                file=str(three_objects_obj),
+                pos=(5.0, 2.0, 0.6),
+                fixed=True,
+            ),
+            vgeoms={
+                gs.VGeomIndex.named("knob"): gs.options.VGeomOptions(
+                    surface=knob_surface,
+                ),
+            },
+        ),
+    )
+    objects_urdf = scene.add_entity(
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.URDF(
+                file=three_objects_urdf,
+                pos=(5.0, 3.0, 0.6),
+                fixed=True,
+            ),
+            links={
+                "panel": gs.options.LinkOptions(
+                    vgeoms={
+                        gs.VGeomIndex.named("knob"): gs.options.VGeomOptions(
+                            surface=knob_surface,
+                        ),
+                    },
                 ),
             },
         ),
@@ -637,6 +701,12 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     for vgeom in boat.vgeoms:
         is_selected = vgeom.metadata["material_name"] == "material_2"
         assert isinstance(vgeom.surface.get_rgba(), gs.textures.ColorTexture) == is_selected
+    for entity in (objects_mesh, objects_urdf):
+        vgeoms_name = sorted(vgeom.metadata["name"] for vgeom in entity.vgeoms)
+        assert vgeoms_name == ["body", "knob", "screen"]
+        for vgeom in entity.vgeoms:
+            is_knob_color = np.allclose(vgeom.surface.get_rgba().color[:3], (0.0, 1.0, 0.0), atol=gs.EPS)
+            assert is_knob_color == (vgeom.metadata["name"] == "knob")
     # The fixed vertices, on the face at the top of each box in the frame of its morph, hold the box while the opposite
     # face sags under gravity
     for box in (rotated_box, hanging_box):

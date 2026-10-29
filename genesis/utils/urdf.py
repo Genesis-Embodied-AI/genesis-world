@@ -203,10 +203,14 @@ def parse_urdf(morph, surface):
                 geom_type = gs.GEOM_TYPE.MESH
                 geom_data = None
 
-                # One asset may contain multiple meshes (.obj, .glb, ...)
+                # One asset may contain multiple meshes (.obj, .glb, ...), each geom of a visual named after the object
+                # of the file it comes from
                 mesh_path = urdfpy.utils.get_filename(parent_dir, geometry.filename)
                 tmeshes = geometry.meshes
                 metadatas = [{"mesh_path": mesh_path} for _ in tmeshes]
+                if not geom_is_col:
+                    for tmesh, metadata in zip(tmeshes, metadatas):
+                        metadata["name"] = tmesh.metadata.get("name", "")
                 if mesh_path.lower().endswith(GLTF_FORMATS):
                     meshes = gltf_utils.parse_mesh_glb(
                         mesh_path, group_by_material=False, scale=None, is_mesh_zup=True, surface=surface

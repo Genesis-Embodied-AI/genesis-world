@@ -226,20 +226,23 @@ def get_filename(base_path, file_path):
     return fn
 
 
-def load_meshes(filename):
+def load_meshes(filename, group_material=True):
     """Loads triangular meshes from a file.
 
     Parameters
     ----------
     filename : str
         Path to the mesh file.
+    group_material : bool
+        Whether to merge the faces of one material across the objects of an OBJ file. Otherwise each object keeps its
+        faces, split by material, and its mesh is named after the object.
 
     Returns
     -------
     meshes : list of :class:`~trimesh.base.Trimesh`
-        The meshes loaded from the file.
+        The meshes loaded from the file, each named in its metadata.
     """
-    meshes = load_trimesh(filename, process=False)
+    meshes = load_trimesh(filename, process=False, group_material=group_material)
 
     if isinstance(meshes, trimesh.Scene):
         # FIXME: Scene.dump() has bug that uses copy without include_cache=True,
