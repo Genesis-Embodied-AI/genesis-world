@@ -1107,7 +1107,7 @@ def qd_zero_grad(value) -> None:
 
     cls = type(value)
     if dataclasses.is_dataclass(cls):
-        # The fields alone: a struct also declares its data kind as a class variable (see array_class.DataKind)
+        # The fields alone: a struct also declares its data kind as a class variable (see DataKind in data.py)
         attr_names = [field.name for field in dataclasses.fields(cls)]
     else:
         try:

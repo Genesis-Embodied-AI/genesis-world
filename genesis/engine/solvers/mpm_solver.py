@@ -7,6 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+from genesis.utils.data import ArrayItem, DataKind
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
@@ -678,7 +679,7 @@ class MPMSolver(ParticleSolver):
             ("particles.actu", self.particles.actu),
             ("particles_ng.active", self.particles_ng.active),
         ):
-            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field)
+            yield ArrayItem(name, DataKind.STATE, field)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------

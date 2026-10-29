@@ -10,6 +10,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+from genesis.utils.data import ArrayItem, CHECKPOINT_KINDS, ConfigItem, DataItem, DataKind, ScalarItem, V, fill_data
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
@@ -100,18 +101,18 @@ class BoundaryItems(NamedTuple):
     """The items a boundary checkpoint holds, listed once by the solver (see 'Solver.save_checkpoint')."""
 
     # Every item the checkpoint holds
-    items: list[array_class.DataItem]
+    items: list[DataItem]
     # The names of the arrays copied at once, in the order of their views
     names: list[str]
     # The zero-copy views of the arrays copied at once
     views: list[torch.Tensor]
     # The items copied one by one: the scalars, and the arrays without a view
-    items_copied: list[array_class.DataItem]
+    items_copied: list[DataItem]
     # The zero-copy views of the gradients of the arrays, which a backward pass checks at every step, the environment
     # first with a trailing axis that gives every view one to reduce over
     grads: list[torch.Tensor]
     # The items whose gradient has no view, copied at every check
-    items_grad_copied: list[array_class.ArrayItem]
+    items_grad_copied: list[ArrayItem]
 
 
 class GravityMixin:
@@ -143,7 +144,7 @@ class GravityMixin:
             if as_field:
                 gravity = qd.tensor(gs.qd_vec3, shape, backend=qd.Backend.FIELD)
             else:
-                gravity = array_class.V(gs.qd_vec3, shape)
+                gravity = V(gs.qd_vec3, shape)
         self._gravity = gravity
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
 
@@ -551,15 +552,13 @@ class Solver(RBC):
         """Zero the adjoint of the state of the solver, from which a backward pass starts."""
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
+    def data(self) -> Iterator[DataItem | ConfigItem]:
         """Yield every array, scalar and static config the solver holds, under the dotted name a checkpoint and a
         trajectory frame use for it (see 'iter_data').
         """
         gs.raise_exception(f"{type(self).__name__} cannot be checkpointed yet.")
 
-    def save_checkpoint(
-        self, kinds: frozenset[array_class.DataKind], *, boundary_only: bool = False
-    ) -> SolverCheckpoint:
+    def save_checkpoint(self, kinds: frozenset[DataKind], *, boundary_only: bool = False) -> SolverCheckpoint:
         """
         Return a checkpoint of the arrays of the given kinds this solver holds, for 'load_checkpoint' to restore.
 
@@ -579,9 +578,9 @@ class Solver(RBC):
                 )
                 grad_names = set()
                 for item in self.data:
-                    if isinstance(item, array_class.ConfigItem) or item.kind not in kinds:
+                    if isinstance(item, ConfigItem) or item.kind not in kinds:
                         continue
-                    if isinstance(item, array_class.ArrayItem):
+                    if isinstance(item, ArrayItem):
                         is_placeholder = not isinstance(item.array, torch.Tensor) and not item.array.shape
                         if item.name in grad_names or is_placeholder:
                             continue
@@ -599,7 +598,7 @@ class Solver(RBC):
                             else:
                                 self._boundary_items.grads.append(grad[..., None])
                     self._boundary_items.items.append(item)
-                    if isinstance(item, array_class.ScalarItem) or not gs.use_zerocopy.is_supported:
+                    if isinstance(item, ScalarItem) or not gs.use_zerocopy.is_supported:
                         self._boundary_items.items_copied.append(item)
                         continue
                     if isinstance(item.array, torch.Tensor):
@@ -629,9 +628,9 @@ class Solver(RBC):
                 arrays.update(zip(self._boundary_items.names, copies))
             items = self._boundary_items.items_copied
         else:
-            items = [item for item in self.data if not isinstance(item, array_class.ConfigItem) and item.kind in kinds]
+            items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in kinds]
         for item in items:
-            if isinstance(item, array_class.ScalarItem):
+            if isinstance(item, ScalarItem):
                 arrays[item.name] = np.array(getattr(item.owner, item.attr))
             elif boundary_only and self.has_frames:
                 arrays[item.name] = qd_to_torch(item.array, row_mask=0, keepdim=False, copy=True)
@@ -642,7 +641,7 @@ class Solver(RBC):
         # The static configs are provenance, which a boundary checkpoint never leaving the process does without
         configs = {}
         if not boundary_only:
-            configs = {item.name: item.config for item in self.data if isinstance(item, array_class.ConfigItem)}
+            configs = {item.name: item.config for item in self.data if isinstance(item, ConfigItem)}
         return SolverCheckpoint(arrays=arrays, configs=configs, kinds=kinds)
 
     def load_checkpoint(self, checkpoint: SolverCheckpoint, *, boundary_only: bool = False) -> None:
@@ -666,17 +665,13 @@ class Solver(RBC):
             items = self._boundary_items.items_copied
             arrays = {item.name: checkpoint.arrays[item.name] for item in items}
         else:
-            items = [
-                item
-                for item in self.data
-                if not isinstance(item, array_class.ConfigItem) and item.kind in checkpoint.kinds
-            ]
+            items = [item for item in self.data if not isinstance(item, ConfigItem) and item.kind in checkpoint.kinds]
             arrays = checkpoint.arrays
-        array_class.fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
+        fill_data(items, arrays, frame_only=boundary_only and self.has_frames)
 
     def __getstate__(self) -> SolverCheckpoint:
         """Return a SolverCheckpoint of this solver, for '__setstate__' to restore (see 'CHECKPOINT_KINDS')."""
-        return self.save_checkpoint(array_class.CHECKPOINT_KINDS)
+        return self.save_checkpoint(CHECKPOINT_KINDS)
 
     def __setstate__(self, state: SolverCheckpoint) -> None:
         """Write back the arrays of the kinds a record holds, rejecting a record read from another build."""

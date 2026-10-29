@@ -35,7 +35,7 @@ from quadrants.lang import impl
 
 import genesis as gs
 from genesis.grad.kernel_writes import get_written_paths
-from genesis.utils.array_class import iter_state_arrays
+from genesis.utils.data import iter_state_arrays
 from genesis.utils.cache import OwnedCache
 from genesis.utils.misc import qd_from_torch, qd_to_torch
 

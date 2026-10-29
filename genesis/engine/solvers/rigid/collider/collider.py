@@ -18,6 +18,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+from genesis.utils.data import ConfigItem, DataItem, iter_data
 import genesis.utils.geom as gu
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
@@ -144,7 +145,7 @@ class Collider:
         self.clear()
 
     @property
-    def data(self) -> Iterator[array_class.DataItem | array_class.ConfigItem]:
+    def data(self) -> Iterator[DataItem | ConfigItem]:
         """Yield every array and static config of the collider (see 'Solver.data')."""
         structs = [
             (self, "collider_config"),
@@ -161,7 +162,7 @@ class Collider:
         if self._n_terrain_threads > 1 and not self._use_split_narrowphase:
             structs.append((self.mpr, "multicontact_mpr_state"))
         for owner, name in structs:
-            yield from array_class.iter_data(owner, name)
+            yield from iter_data(owner, name)
 
     def _init_static_config(self) -> None:
         # Identify the convex collision detection (ccd) algorithm

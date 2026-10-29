@@ -9,6 +9,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+from genesis.utils.data import ArrayItem, DataKind
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.materials import FEM
@@ -998,7 +999,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             ("elements_v.vel", self.elements_v.vel),
             ("elements_el.actu", self.elements_el.actu),
         ):
-            yield array_class.ArrayItem(name, array_class.DataKind.STATE, field)
+            yield ArrayItem(name, DataKind.STATE, field)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------------- io -----------------------------------------

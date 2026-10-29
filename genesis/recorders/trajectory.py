@@ -34,7 +34,7 @@ from genesis.engine.state_change import StateChange, Subscriber
 from genesis.engine.states.solvers import SimulatorCheckpoint, SolverCheckpoint
 from genesis.options.recorders import TrajectoryFile
 from genesis.utils import serialization
-from genesis.utils.array_class import ArrayItem, ConfigItem, DataKind, ScalarItem
+from genesis.utils.data import ArrayItem, ConfigItem, DataKind, ScalarItem
 from genesis.utils.misc import data_to_array, tensor_to_array
 from genesis.utils.tools import Rate
 
