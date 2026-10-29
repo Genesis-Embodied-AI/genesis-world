@@ -227,7 +227,9 @@ class IPCCoupler(RBC):
         entity: "RigidEntity"
         for i_e, entity in enumerate(cast(list["RigidEntity"], self.rigid_solver.entities)):
             # An entity takes part in the coupling as soon as one of its links does
-            links_solver_options = [entity._options.get_link_solver_options(link.name) for link in entity.links]
+            links_solver_options = [
+                entity._options.get_link_solver_options(entity._links_path[link.name]) for link in entity.links
+            ]
             coup_links = {
                 link
                 for link, link_solver_options in zip(entity.links, links_solver_options)
@@ -535,7 +537,7 @@ class IPCCoupler(RBC):
 
                 # An affine body holds the density of its entity alone, over every link merged into it
                 for source_link in source_links:
-                    if entity._options.has_link_density(source_link.name):
+                    if entity._options.has_link_density(entity._links_path[source_link.name]):
                         gs.raise_exception(
                             f"The IPC coupler simulates link '{source_link.name}' of entity '{entity.name}' at the "
                             "density of its material alone, so the link and geom options cannot give it a density."

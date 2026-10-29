@@ -24,6 +24,7 @@ import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.mesh import InertialProperties
 from genesis.options.entities import EntityOptions, KinematicEntityOptions, RigidEntityOptions, RigidEntitySolverOptions
+from genesis.options.indices import get_links_path
 from genesis.options.materials import Material
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
@@ -375,6 +376,11 @@ class Resolution:
     options: Options
     is_mujoco_compatible: bool
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
+    # The names from the root of the kinematic tree down to each link a scene parse states, keyed by link name, which
+    # the link options of the entity select on (see 'gs.LinkIndex')
+    links_path: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # The names of every collision geom as its asset states them, which the geom options of the entity select on
+    geoms_name: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -463,10 +469,20 @@ class KinematicEntityDescription(EntityDescription):
             name=name,
             options=options,
         )
-        desc._load_morph(morphs[0], Resolution(solver_options, enable_mujoco_compatibility))
-        links_name = [l_desc.name for l_desc in desc.links]
+        resolution = Resolution(solver_options, enable_mujoco_compatibility)
+        desc._load_morph(morphs[0], resolution)
+        links_path = get_links_path(
+            [l_desc.name for l_desc in desc.links], [l_desc.parent_idx for l_desc in desc.links]
+        )
         for link_index in options.links:
-            link_index.resolve(links_name)
+            link_index.resolve(links_path)
+        if isinstance(options, RigidEntityOptions):
+            for geom_index in options.geoms:
+                if geom_index.names is not None and not any(map(geom_index.matches, resolution.geoms_name)):
+                    gs.raise_exception(
+                        f"No collision geom of the entity matches {list(geom_index.names)}. Existing geoms: "
+                        f"{resolution.geoms_name}."
+                    )
         return desc
 
     def _load_morph(self, morph: Morph, resolution: Resolution):
@@ -567,9 +583,12 @@ class KinematicEntityDescription(EntityDescription):
                 offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
                 cg_vg_infos = []
-                for v_l_info, v_j_infos, v_g_infos in zip(v_l_infos, v_links_j_infos, v_links_g_infos):
+                v_links_path = get_links_path(
+                    [v_l_info["name"] for v_l_info in v_l_infos], [v_l_info["parent_idx"] for v_l_info in v_l_infos]
+                )
+                for v_l_info, v_link_path, v_g_infos in zip(v_l_infos, v_links_path, v_links_g_infos):
                     is_robot = v_l_info["is_robot"]
-                    cg_infos, vg_infos = self._resolve_geoms(morph, v_g_infos, is_robot, v_l_info["name"])
+                    cg_infos, vg_infos = self._resolve_geoms(morph, v_g_infos, is_robot, v_link_path, resolution)
                     cg_vg_infos.append((cg_infos, vg_infos))
 
                 # Extract variant's init_qpos from parsed joint infos, composing the morph offset into the free joint so
@@ -643,7 +662,9 @@ class KinematicEntityDescription(EntityDescription):
                     g_infos = self._load_primitive(morph, resolution, load_geom_only_for_heterogeneous=True)
                 if morph.fixed != self.morphs[0].fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
-                cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, is_robot=False, link_name=self.links[0].name)
+                cg_infos, vg_infos = self._resolve_geoms(
+                    morph, g_infos, is_robot=False, link_path=(self.links[0].name,), resolution=resolution
+                )
 
                 # The COM/principal-axis anchoring is deferred to '_align_free_roots', which runs once every variant
                 # is described. Compose only the morph pose offset here.
@@ -1206,6 +1227,9 @@ class KinematicEntityDescription(EntityDescription):
         l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
+        links_name = [l_info["name"] for l_info in l_infos]
+        links_path = get_links_path(links_name, [l_info["parent_idx"] for l_info in l_infos])
+        resolution.links_path.update(zip(links_name, links_path))
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
 
@@ -1219,6 +1243,7 @@ class KinematicEntityDescription(EntityDescription):
         """
         links = self.links
         variants = self.variants
+        links_path = get_links_path([l_desc.name for l_desc in links], [l_desc.parent_idx for l_desc in links])
         for i_root, root in enumerate(links):
             if root.parent_idx != -1 or not root.is_aligned:
                 continue
@@ -1356,7 +1381,7 @@ class KinematicEntityDescription(EntityDescription):
             # kinematic entity of the same asset puts it (see '_resolve_inertial'), so the solver reads the body as
             # unaligned, as it does once an attach extends it
             if isinstance(self.options, RigidEntityOptions) and any(
-                self.options.has_link_density(links[i_l].name) for i_l in subtree
+                self.options.has_link_density(links_path[i_l]) for i_l in subtree
             ):
                 root.is_aligned = False
 
@@ -1378,7 +1403,8 @@ class KinematicEntityDescription(EntityDescription):
 
         # Split and convexify collision geometry. Must be done before alignment so that convexified geoms are used
         # to compute the inertia frame.
-        cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, l_info["is_robot"], l_info["name"])
+        link_path = resolution.links_path.get(l_info["name"], (l_info["name"],))
+        cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, l_info["is_robot"], link_path, resolution)
 
         # Carry the morph pose offset into root links and align them to their collision-geometry COM/principal axes.
         inertial_info = self._align_link(l_info, j_infos, cg_infos, vg_infos, morph, resolution)
@@ -1405,14 +1431,14 @@ class KinematicEntityDescription(EntityDescription):
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
         )
 
-    def _resolve_geoms(self, morph, g_infos, is_robot, link_name):
+    def _resolve_geoms(self, morph, g_infos, is_robot, link_path, resolution: Resolution):
         """Split what a parse states about the geoms of one link, and post-process its collision geometry.
 
         Post-processing convexifies the collision meshes, decomposing the ones a single hull cannot approximate within
         the threshold the morph carries. Both kinds of geometry stay as parsed info, so the inertial composition
         treats them alike and '_describe_geoms' resolves the collision coefficients later. A plain load and a
-        heterogeneous variant both go through here. The link and geom options of the entity apply to the link of the
-        name 'link_name'.
+        heterogeneous variant both go through here. The link and geom options of the entity apply to the link that
+        'link_path' names, from the root of its kinematic tree down to it.
         """
         # An explicitly set material density overrides any asset-authored per-geom density, as material friction does
         # for authored frictions. Dropping the keys up front keeps the align anchor, its all-or-none source check,
@@ -1432,8 +1458,10 @@ class KinematicEntityDescription(EntityDescription):
         # The material the link and geom options give a collision geom is set before post-processing, which keeps geoms
         # of different materials from fusing. Its density stays out of the authored ones, which anchor an aligned link
         # where a kinematic entity of the same asset anchors it (see '_resolve_inertial').
+        geoms_name = [g_info["mesh"].metadata.get("name", "") for g_info in cg_infos]
+        resolution.geoms_name += geoms_name
         if isinstance(self.options, RigidEntityOptions):
-            for g_info, material in zip(cg_infos, self.options.get_geoms_material(link_name, len(cg_infos))):
+            for g_info, material in zip(cg_infos, self.options.get_geoms_material(link_path, geoms_name)):
                 if material is not None:
                     g_info["material"] = material
 
@@ -1665,6 +1693,9 @@ class RigidEntityDescription(KinematicEntityDescription):
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
+        links_name = [l_info["name"] for l_info in l_infos]
+        links_path = get_links_path(links_name, [l_info["parent_idx"] for l_info in l_infos])
+        resolution.links_path.update(zip(links_name, links_path))
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
 

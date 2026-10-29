@@ -267,16 +267,19 @@ class _ArticulatedEntityOptions(EntityOptions[EntityT]):
     use_visual_raycasting: StrictBool = False
     links: Annotated[FrozenDictType[LinkIndex, LinkOptions], BeforeValidator(_key_links_by_index)] = {}
 
-    def get_link_use_visual_raycasting(self, link_name: str) -> bool:
-        """Return whether the link of a given name exposes its visual mesh to visual raycasting."""
+    def get_link_use_visual_raycasting(self, link_path: tuple[str, ...]) -> bool:
+        """Return whether a link exposes its visual mesh to visual raycasting.
+
+        'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``).
+        """
         values = [
             link_options.use_visual_raycasting
             for link_index, link_options in self.links.items()
-            if link_index.matches(link_name) and link_options.use_visual_raycasting is not None
+            if link_index.matches(link_path) and link_options.use_visual_raycasting is not None
         ]
         if len(values) > 1:
             gs.raise_exception(
-                f"Two selections of equal specificity give 'use_visual_raycasting' of link '{link_name}'."
+                f"Two selections of equal specificity give 'use_visual_raycasting' of link '{link_path[-1]}'."
             )
         return values[0] if values else self.use_visual_raycasting
 
@@ -303,7 +306,8 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
         The options of the collision geoms each key selects, which override those of the entity and the material of
         the links. They stand at the specificity of the geom options of the links, so the two giving one field of one
         geom raise an error.
-        ``gs.GeomIndex.all()`` selects every collision geom of the entity, and any other key requires a mesh or a
+        ``gs.GeomIndex.all()`` selects every collision geom of the entity, and ``gs.GeomIndex.named`` the geoms of the
+        given names in any of its links, raising if no link has one. A selection by ordinal requires a mesh or a
         primitive morph, whose entity has a single link. Select the geoms of one link of another asset through 'links'
         instead. Default is no geom options.
     """
@@ -329,12 +333,12 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
             if friction is not None and not 0.01 <= friction <= 5.0:
                 gs.raise_exception(f"The friction of a rigid entity must lie between 0.01 and 5, got {friction}.")
         morphs = self.morph if isinstance(self.morph, tuple) else (self.morph,)
-        if any(not geom_index.is_all for geom_index in self.geoms) and not all(
+        if any(not geom_index.is_all and geom_index.names is None for geom_index in self.geoms) and not all(
             isinstance(morph, (Mesh, Primitive)) for morph in morphs
         ):
             gs.raise_exception(
-                "Geom options of an entity take 'gs.GeomIndex.all()' alone unless its morph is a mesh or a primitive. "
-                "Select the geoms of one link through the options of that link instead."
+                "Geom options of an entity select geoms by ordinal only if its morph is a mesh or a primitive. Select "
+                "them with 'gs.GeomIndex.all()' or 'gs.GeomIndex.named', or through the options of their link instead."
             )
         solver_options = self.solver_options
         if solver_options.coup_type == "ipc_only" and abs(self.gravity_compensation) > gs.EPS:
@@ -360,11 +364,14 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
             )
         return self
 
-    def has_link_density(self, link_name: str) -> bool:
-        """Whether the link and geom options give a density to the link of a given name or to one of its geoms."""
+    def has_link_density(self, link_path: tuple[str, ...]) -> bool:
+        """Whether the link and geom options give a density to a link or to one of its geoms.
+
+        'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``).
+        """
         geoms_options = list(self.geoms.values())
         for link_index, link_options in self.links.items():
-            if link_index.matches(link_name):
+            if link_index.matches(link_path):
                 if link_options.material is not None and link_options.material.density is not None:
                     return True
                 geoms_options.extend(link_options.geoms.values())
@@ -373,35 +380,49 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
             for geom_options in geoms_options
         )
 
-    def get_link_solver_options(self, link_name: str) -> RigidLinkSolverOptions:
-        """Return the solver options of the link of a given name, the fields its link options leave unset inherited."""
+    def get_link_solver_options(self, link_path: tuple[str, ...]) -> RigidLinkSolverOptions:
+        """Return the solver options of a link, the fields its link options leave unset inherited.
+
+        'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``).
+        """
         fields = {}
         for link_index, link_options in self.links.items():
-            if link_index.matches(link_name) and link_options.solver_options is not None:
-                _merge_fields(fields, link_options.solver_options, f"link '{link_name}'")
+            if link_index.matches(link_path) and link_options.solver_options is not None:
+                _merge_fields(fields, link_options.solver_options, f"link '{link_path[-1]}'")
         return RigidLinkSolverOptions(
             needs_coup=fields.get("needs_coup", self.solver_options.needs_coup),
             enable_coup_collision=fields.get("enable_coup_collision", self.solver_options.enable_coup_collision),
         )
 
-    def get_geoms_material(self, link_name: str, n_geoms: int) -> list[Material | None]:
+    def get_geoms_material(self, link_path: tuple[str, ...], geoms_name: list[str]) -> list[Material | None]:
         """Return the material the link and geom options give each collision geom of a link, or None where none.
 
-        'n_geoms' is the number of collision geoms of the link as its asset states them, which a ``gs.GeomIndex``
-        counts. A material holds the fields given explicitly alone, those of the geom options overriding those of the
-        link options. Two selections of equal specificity giving one field of one geom raise an error.
+        'link_path' holds the names from the root of the kinematic tree down to the link (see ``gs.LinkIndex``), and
+        'geoms_name' the names of the collision geoms of the link as its asset states them, which a ``gs.GeomIndex``
+        counts and matches. A material holds the fields given explicitly alone, those of the geom options overriding
+        those of the link options. Two selections of equal specificity giving one field of one geom raise an error.
+        A selection by name of the entity-level geom options may match no geom of a given link.
         """
+        link_name = link_path[-1]
         link_fields = {}
-        geoms_options = list(self.geoms.items())
+        geoms_selection = [
+            (geom_index, geom_options, geom_index.names is not None) for geom_index, geom_options in self.geoms.items()
+        ]
         for link_index, link_options in self.links.items():
-            if link_index.matches(link_name):
+            if link_index.matches(link_path):
                 if link_options.material is not None:
                     _merge_fields(link_fields, link_options.material, f"link '{link_name}'")
-                geoms_options.extend(link_options.geoms.items())
-        geoms_fields = [{} for _ in range(n_geoms)]
-        for geom_index, geom_options in geoms_options:
+                geoms_selection.extend(
+                    (geom_index, geom_options, False) for geom_index, geom_options in link_options.geoms.items()
+                )
+        geoms_fields = [{} for _ in geoms_name]
+        for geom_index, geom_options, is_entity_named in geoms_selection:
             if geom_options.material is not None:
-                for i_g in geom_index.resolve(n_geoms):
+                if is_entity_named:
+                    geoms_idx = [i_g for i_g, geom_name in enumerate(geoms_name) if geom_index.matches(geom_name)]
+                else:
+                    geoms_idx = geom_index.resolve(geoms_name)
+                for i_g in geoms_idx:
                     _merge_fields(geoms_fields[i_g], geom_options.material, f"geom {i_g} of link '{link_name}'")
         return [
             Material(**{**link_fields, **geom_fields}) if link_fields or geom_fields else None
