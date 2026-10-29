@@ -875,8 +875,10 @@ def qd_to_torch(
         # advanced masking, which would spare computation later on if expected from the user.
         if copy is False:
             gs.raise_exception("Specifying 'copy=False' is not supported by this method if 'gs.use_zerocopy=False'.")
-        # See the copy of a zero-copy view below
-        tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose).contiguous()
+        # See the copy of a zero-copy view below. 'contiguous' would return as is a transposed view already laid out
+        # contiguously (size-1 dimensions), which the autograd graph refuses to write in place once a node returns it.
+        tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
+        tensor = tensor.clone(memory_format=torch.contiguous_format)
         is_copy = True
     else:
         try:
@@ -888,7 +890,9 @@ def qd_to_torch(
             except (ValueError, RuntimeError, TypeError):
                 if copy is False:
                     raise
-                tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose).contiguous()
+                # See the copy without zero-copy support above
+                tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
+                tensor = tensor.clone(memory_format=torch.contiguous_format)
                 is_copy = True
             else:
                 value._tc = tc
