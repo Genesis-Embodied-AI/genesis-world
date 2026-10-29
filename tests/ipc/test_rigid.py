@@ -337,19 +337,13 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
     from genesis.engine.entities import RigidEntity
 
     mjcf = ET.Element("mujoco", model="frictions")
-    rough = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="rough")
-    ET.SubElement(rough, "freejoint")
-    ET.SubElement(rough, "geom", type="box", size="0.025 0.025 0.025", friction="0.7")
-    smooth = ET.SubElement(rough, "body", name="smooth", pos="0 0 0.1")
-    ET.SubElement(smooth, "joint", type="hinge", axis="0 0 1")
-    ET.SubElement(smooth, "geom", type="box", size="0.02 0.02 0.02", friction="0.25")
+    smooth = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="smooth")
+    ET.SubElement(smooth, "freejoint")
+    ET.SubElement(smooth, "geom", type="box", size="0.025 0.025 0.025", friction="0.25")
+    rough = ET.SubElement(smooth, "body", name="rough", pos="0 0 0.1")
+    ET.SubElement(rough, "joint", type="hinge", axis="0 0 1")
+    ET.SubElement(rough, "geom", type="box", size="0.02 0.02 0.02", friction="0.7")
     mjcf_file = ET.tostring(mjcf, encoding="unicode")
-
-    # IPC stores one friction per entity, so an unset coup_friction must resolve to one value over its contact geoms
-    scene_mixed = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(), show_viewer=False)
-    scene_mixed.add_entity(morph=gs.morphs.MJCF(file=mjcf_file), material=gs.materials.Rigid())
-    with pytest.raises(gs.GenesisException, match="coup_friction"):
-        scene_mixed.build()
 
     scene = gs.Scene(
         coupler_options=gs.options.IPCCouplerOptions(
@@ -404,8 +398,15 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
             pos=(-0.4, 0.0, 0.12),
         ),
         material=gs.materials.Rigid(
-            coup_collision_links=("rough",),
+            coup_collision_links=("smooth",),
         ),
+    )
+    rigid_e = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_file,
+            pos=(-0.6, 0.0, 0.12),
+        ),
+        material=gs.materials.Rigid(),
     )
     fem = scene.add_entity(
         morph=gs.morphs.Box(
@@ -426,7 +427,7 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
     coupler = cast("IPCCoupler", scene.sim.coupler)
 
     tab = coupler._ipc_scene.contact_tabular()
-    for entities in permutations((plane, rigid_a, rigid_b, rigid_c, rigid_d, fem), 2):
+    for entities in permutations((plane, rigid_a, rigid_b, rigid_c, rigid_d, rigid_e, fem), 2):
         elems_idx = []
         frictions = []
         resistances = []
@@ -436,7 +437,9 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
                     elem = coupler._ipc_ground_contacts[entity]
                 else:
                     elem = coupler._ipc_abd_contacts[entity]
-                friction = entity.geoms[0].coup_friction
+                # An entity whose IPC contact geoms disagree on an unset coup_friction takes the largest one
+                links = (entity.get_link("smooth"),) if entity is rigid_d else entity.links
+                friction = max(geom.coup_friction for link in links for geom in link.geoms)
             else:
                 elem = coupler._ipc_fem_contacts[entity]
                 friction = entity.material.friction_mu

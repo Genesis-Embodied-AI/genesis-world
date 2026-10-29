@@ -696,16 +696,19 @@ class IPCCoupler(RBC):
         When an entity material does not define
         ``contact_resistance``, ``options.contact_resistance`` is used as the per-entity fallback.
         An unset ``coup_friction`` uses the sliding friction resolved onto the geoms that join the entity's contact
-        element. IPC stores one coefficient per entity, so those geoms have to agree. Ground pairs combine that
+        element. IPC stores one coefficient per entity, so where those geoms disagree the largest one applies to all
+        of them, which keeps the grip of high-friction pads such as gripper fingertips. Ground pairs combine that
         coefficient with the plane's.
         """
         coup_friction_by_entity = {}
         for entity, geoms_coup_friction in self._ipc_contacts_geoms_coup_friction.items():
-            coup_friction = geoms_coup_friction[0]
+            coup_friction = max(geoms_coup_friction)
             if not np.allclose(geoms_coup_friction, coup_friction, atol=gs.EPS):
-                gs.raise_exception(
-                    "Unset coup_friction resolves to more than one sliding friction on the IPC contact geoms of one "
-                    "entity. IPC stores one coefficient per entity, so set coup_friction on its rigid material."
+                gs.logger.warning(
+                    f"Entity {entity.uid} leaves coup_friction unset while its IPC contact geoms resolve to sliding "
+                    f"frictions from {min(geoms_coup_friction):.3g} to {coup_friction:.3g}. IPC stores one coefficient "
+                    f"per entity, so all of them use the largest one, {coup_friction:.3g}. Set coup_friction on its "
+                    "rigid material to choose another value."
                 )
             coup_friction_by_entity[entity] = coup_friction
 
