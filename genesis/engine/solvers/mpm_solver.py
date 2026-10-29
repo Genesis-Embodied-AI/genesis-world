@@ -493,10 +493,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 kernel_pcg_start(grid, linear)
                 kernel_pcg_loop(grid, linear)
             kernel_start_line_search(self.particles, grid, newton, linear, control, params, f)
-            if has_rigid:
-                kernel_coupled_line_alpha(self.particles, grid, newton, linear, control, coupling, *rigid_args, f)
-            else:
-                kernel_line_alpha(self.particles, grid, newton, linear, control, params, f)
             while True:
                 kernel_step_forward(grid, newton, control)
                 if has_rigid:
@@ -1619,22 +1615,6 @@ def kernel_accept_or_backtrack(control: qd.template()):
 
 
 @qd.kernel
-def kernel_line_alpha(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    control: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    """First line-search step from the piecewise-quadratic model along the Newton direction (func_line_alpha)."""
-    mpm_func.func_line_rows(particles, grid, newton, params, f)
-    mpm_func.func_line_model(grid, newton, linear)
-    mpm_func.func_line_alpha(grid, newton, control, params)
-
-
-@qd.kernel
 def kernel_update_convergence(control: qd.template()):
     func_update_convergence(control)
 
@@ -1680,9 +1660,6 @@ def kernel_newton_loop(
         mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
         func_check_convergence(control)
         func_init_line_search(control)
-        mpm_func.func_line_rows(particles, grid, newton, params, f)
-        mpm_func.func_line_model(grid, newton, linear)
-        mpm_func.func_line_alpha(grid, newton, control, params)
         while qd.graph.do_while(control.ls_cond):
             mpm_func.func_step_forward(grid, newton, control)
             mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
@@ -1737,9 +1714,7 @@ def kernel_rigid_point_disp(
     f: qd.i32,
 ):
     mpm_rigid_func.func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
-    mpm_rigid_func.func_contact_point_disp(
-        particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_dr
-    )
+    mpm_rigid_func.func_contact_point_disp(particles, grid, newton, coupling, dyn_state.links, params, f)
 
 
 @qd.kernel
@@ -1869,34 +1844,6 @@ def kernel_rigid_start_line_search(coupling: qd.template(), control: qd.template
 
 
 @qd.kernel
-def kernel_coupled_line_alpha(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    control: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    """kernel_line_alpha along the joint direction, the contact points moving with the Rigid direction."""
-    mpm_rigid_func.func_link_spatial_disp(coupling, coupling.dx, dyn_info.links, dyn_state.dofs, config)
-    mpm_rigid_func.func_contact_point_disp(
-        particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_ddr
-    )
-    mpm_func.func_line_rows(particles, grid, newton, params, f)
-    mpm_func.func_line_model(grid, newton, linear)
-    mpm_rigid_func.func_rigid_line_model(coupling, newton)
-    mpm_func.func_line_alpha(grid, newton, control, params)
-
-
-@qd.kernel
 def kernel_rigid_step_forward(coupling: qd.template(), control: qd.template()):
     mpm_rigid_func.func_rigid_step_forward(coupling, control)
 
@@ -1988,21 +1935,11 @@ def kernel_coupled_newton_loop(
         mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
         func_check_convergence(control)
         func_init_line_search(control)
-        mpm_rigid_func.func_link_spatial_disp(coupling, coupling.dx, dyn_info.links, dyn_state.dofs, config)
-        mpm_rigid_func.func_contact_point_disp(
-            particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_ddr
-        )
-        mpm_func.func_line_rows(particles, grid, newton, params, f)
-        mpm_func.func_line_model(grid, newton, linear)
-        mpm_rigid_func.func_rigid_line_model(coupling, newton)
-        mpm_func.func_line_alpha(grid, newton, control, params)
         while qd.graph.do_while(control.ls_cond):
             mpm_func.func_step_forward(grid, newton, control)
             mpm_rigid_func.func_rigid_step_forward(coupling, control)
             mpm_rigid_func.func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
-            mpm_rigid_func.func_contact_point_disp(
-                particles, grid, newton, coupling, dyn_state.links, params, f, newton.contact_dr
-            )
+            mpm_rigid_func.func_contact_point_disp(particles, grid, newton, coupling, dyn_state.links, params, f)
             mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
             mpm_rigid_func.func_rigid_evaluate(
                 coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params

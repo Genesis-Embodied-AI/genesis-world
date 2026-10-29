@@ -76,12 +76,6 @@ _BRICK_FINITE_LIMIT = float("inf")
 # Lanes of a warp
 _WARP = 32
 
-# One-dimensional search of the first line-search step (func_line_alpha): the largest step, the cap of its Newton
-# steps, and the relative slope at which it stops
-LINE_ALPHA_MAX = 2.0
-LINE_NEWTON_ITERS = 8
-LINE_SLOPE_TOL = 1e-3
-
 
 # ============================================== Layer 0: shape and keys ==============================================
 
@@ -303,35 +297,6 @@ def fixed_corotated_principal(sigma, mu, lam):
         A[i, j] = lam * (cof[i] * cof[j] + (J - 1.0) * sigma[other])
         A[j, i] = A[i, j]
     return psi, g, A
-
-
-@qd.func
-def rotation_of(F):
-    """Rotation of the signed polar decomposition of F, a proper rotation also for an inverted F."""
-    U, S, V = qd.svd(F, gs.qd_float)
-    return U @ V.transpose()
-
-
-@qd.func
-def linear_corotated_strain(R0, F):
-    """Linearized corotational strain sym(R0^T F) - I about the rotation R0."""
-    RtF = R0.transpose() @ F
-    return 0.5 * (RtF + RtF.transpose()) - qd.Matrix.identity(gs.qd_float, 3)
-
-
-@qd.func
-def linear_corotated_stress(R0, F, mu, lam):
-    """2 mu E + lam tr(E) I of the linear corotational energy about R0; the first Piola stress is R0 times it."""
-    E = linear_corotated_strain(R0, F)
-    return 2.0 * mu * E + lam * E.trace() * qd.Matrix.identity(gs.qd_float, 3)
-
-
-@qd.func
-def linear_corotated_energy(R0, F, mu, lam):
-    """mu |E|^2 + lam / 2 tr(E)^2 with E the linearized corotational strain about R0 (Zong et al. 2024): quadratic and
-    convex in F once R0 is fixed for the substep."""
-    E = linear_corotated_strain(R0, F)
-    return mu * (E * E).sum() + 0.5 * lam * E.trace() * E.trace()
 
 
 @qd.func
@@ -913,7 +878,6 @@ def func_reset_contact_rows(
             newton.contact_D[CONTACT_ROWS * s + r] = 0.0
         for d in qd.static(range(3)):
             newton.contact_dr[3 * s + d] = 0.0
-            newton.contact_ddr[3 * s + d] = 0.0
 
 
 @qd.func(requires_top_level=True)
@@ -999,10 +963,9 @@ def func_build_wall_rows(
 ):
     """Frictionless domain-wall rows of every valid particle, after `func_reset_contact_rows`.
 
-    A particle beyond a wall plane `params.wall_lower` / `wall_upper` gets one soft row along the inward wall normal,
-    with Rigid's impedance of `params.wall_sol_params` and the particle's inverse weight in the implicit system. With
-    `params.contact_band`, a particle short of the nearer wall plane by less than `contact_band_width` gets one too, by
-    `band_row` (see it).
+    A particle beyond a wall plane `params.wall_lower` / `wall_upper`, or short of the nearer one by less than
+    `contact_band_width`, gets one soft row along the inward wall normal by `band_row`, with Rigid's impedance of
+    `params.wall_sol_params` and the particle's inverse weight in the implicit system.
     """
     qd.loop_config(name="mpm_build_wall_rows")
     for s in range(grid.n_valid[()]):
@@ -1020,10 +983,7 @@ def func_build_wall_rows(
                 phi = params.wall_upper[d] - x_p[d]
                 sign = -1.0
             vel = sign * v_p[d]
-            has_row = phi < 0.0
-            if params.contact_band[()] != 0:
-                has_row = phi < contact_band_width(params, -vel, dt)
-            if has_row:
+            if phi < contact_band_width(params, -vel, dt):
                 n = qd.Vector.zero(gs.qd_float, 3)
                 n[d] = sign
                 D, t = band_row(sol_params, phi, vel, particle_inv_weight(grid, slots, w, n), dt)
@@ -1097,7 +1057,6 @@ def func_g2p_advect(
 @qd.func
 def contact_row_terms(
     newton: qd.template(),  # MpmNewton
-    params: qd.template(),  # MpmParams
     s,
     dx,
     r_lo: qd.template(),  # int
@@ -1107,44 +1066,20 @@ def contact_row_terms(
     dx: the trial displacement of the particle for the wall rows, relative to its contact point on the link for the
     Rigid rows.
 
-    A row is active where it is violated at dx, as in Rigid's Newton, or, with `params.freeze_contact`, where it is
-    violated at the substep start (target t > 0), for the whole Newton solve: the contact energy of the substep is then
-    one quadratic.
-
-    With a band `eps = params.contact_smooth > 0`, the row's curvature ramps linearly from D at c = -eps to 0 at c = 0,
-    so that the row energy is C2 and has local support: `-D c^3 / (6 eps)` in the band, `1/2 D (c + eps/2)^2 + D eps^2
-    / 24` below it. A row about to release is then soft in the Newton model instead of pulling at its full stiffness
-    past c = 0."""
+    A row is active where it is violated at dx, as in Rigid's Newton."""
     energy = gs.qd_float(0.0)
     grad = qd.Vector.zero(gs.qd_float, 3)
     hess = qd.Matrix.zero(gs.qd_float, 3, 3)
-    freeze = params.freeze_contact[()] != 0
-    eps = params.contact_smooth[()]
     for r in qd.static(range(r_lo, r_hi)):
         k = CONTACT_ROWS * s + r
         D = newton.contact_D[k]
         if D > 0.0:
             J = qd.Vector([newton.contact_dir[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
             c = J.dot(dx) - newton.contact_t[k]
-            is_active = c < 0.0
-            if freeze:
-                is_active = newton.contact_t[k] > 0.0
-            if is_active:
-                e_row = 0.5 * D * c * c
-                g_row = D * c
-                h_row = D
-                if eps > 0.0 and not freeze:
-                    if c > -eps:
-                        e_row = -D * c * c * c / (6.0 * eps)
-                        g_row = -D * c * c / (2.0 * eps)
-                        h_row = -D * c / eps
-                    else:
-                        shifted = c + 0.5 * eps
-                        e_row = 0.5 * D * shifted * shifted + D * eps * eps / 24.0
-                        g_row = D * shifted
-                energy += e_row
-                grad += g_row * J
-                hess += h_row * J.outer_product(J)
+            if c < 0.0:
+                energy += 0.5 * D * c * c
+                grad += D * c * J
+                hess += D * J.outer_product(J)
     return energy, grad, hess
 
 
@@ -1276,39 +1211,19 @@ def func_elastic_assemble(
                 for d in qd.static(range(3)):
                     movable[a, d] = gs.qd_float(grid.dof_fixed[3 * slots[a] + d] == 0)
             F_tr, grad_w, F = trial_deformation(particles, grid, newton, params, f, i_p, i_b, cell, slots)
+            U_, S, V = qd.svd(F_tr, gs.qd_float)
+            U = U_
+            sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
             slot = particles_info.material_idx[i_p]
             mu, lam = material_params(materials, params, slot)
+            psi, g, A = elastic_principal(materials, slot, sigma, mu, lam)
             scale = params.particle_volume[()] * dt * dt
-            P = qd.Matrix.zero(gs.qd_float, 3, 3)
-            VtFt = qd.Matrix.zero(gs.qd_float, 3, 3)
-            if params.linear_corotated[()] != 0:
-                # Linear corotational energy about the rotation of the substep start: quadratic in F_trial, so that
-                # this is its exact Hessian, in isotropic_pair_block form with the frame R0 and V = I
-                R0 = rotation_of(F)
-                P = R0 @ linear_corotated_stress(R0, F_tr, mu, lam)
-                U = R0
-                VtFt = F.transpose()
-                S_block = lam + 2.0 * mu * qd.Matrix.identity(gs.qd_float, 3)
-                alp = qd.Vector([mu, mu, mu], dt=gs.qd_float)
-                bet = qd.Vector([mu, mu, mu], dt=gs.qd_float)
-            else:
-                U_, S, V = qd.svd(F_tr, gs.qd_float)
-                U = U_
-                sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=gs.qd_float)
-                psi, g, A = elastic_principal(materials, slot, sigma, mu, lam)
-                P = (
-                    U
-                    @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float)
-                    @ V.transpose()
-                )
-                S_block_, alp_, bet_ = isotropic_projected_modes(sigma, g, A)
-                S_block = S_block_
-                alp = alp_
-                bet = bet_
-                VtFt = V.transpose() @ F.transpose()
+            P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=gs.qd_float) @ V.transpose()
             G = scale * P @ F.transpose()
             for i, j in qd.static(qd.ndrange(3, 3)):
                 newton.g_p[9 * s + 3 * i + j] = G[i, j]
+            S_block, alp, bet = isotropic_projected_modes(sigma, g, A)
+            VtFt = V.transpose() @ F.transpose()
             for a in qd.static(range(8)):
                 r_a = VtFt @ qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
                 for d in qd.static(range(3)):
@@ -1316,10 +1231,8 @@ def func_elastic_assemble(
             dx, w_ = particle_trial_disp(particles, newton, params, f, i_p, i_b, cell, slots)
             w = w_
             dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            energy_wall, grad_wall, hess_wall = contact_row_terms(newton, params, s, dx, 0, WALL_ROWS)
-            energy_rigid, grad_rigid, hess_rigid = contact_row_terms(
-                newton, params, s, dx - dr, WALL_ROWS, CONTACT_ROWS
-            )
+            energy_wall, grad_wall, hess_wall = contact_row_terms(newton, s, dx, 0, WALL_ROWS)
+            energy_rigid, grad_rigid, hess_rigid = contact_row_terms(newton, s, dx - dr, WALL_ROWS, CONTACT_ROWS)
             hess_contact = hess_wall + hess_rigid
             for d in qd.static(range(3)):
                 newton.g_contact[3 * s + d] = grad_wall[d] + grad_rigid[d]
@@ -1742,166 +1655,6 @@ def func_contribute_newton_max_disp(
 
 
 @qd.func(requires_top_level=True)
-def func_line_rows(
-    particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    params: qd.template(),  # MpmParams
-    f,
-):
-    """Value c0 at the line-search start and slope s along the Newton direction of every soft contact row, after
-    func_record_start_point and, when coupled, the contact point displacement along the Rigid direction."""
-    qd.loop_config(name="mpm_line_rows")
-    for s in range(grid.n_valid[()]):
-        i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
-        slots = stencil_node_slots(grid, env, cell)
-        w, grad_w = q1_stencil(
-            particles.pos[f, i_p, i_b] * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()]
-        )
-        dx0 = qd.Vector.zero(gs.qd_float, 3)
-        ddx = qd.Vector.zero(gs.qd_float, 3)
-        for a in qd.static(range(8)):
-            dx0 += w[a] * qd.Vector([newton.u[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            ddx += w[a] * qd.Vector([newton.du[3 * slots[a] + d] for d in qd.static(range(3))], dt=gs.qd_float)
-        dr0 = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-        ddr = qd.Vector([newton.contact_ddr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-        for r in qd.static(range(CONTACT_ROWS)):
-            k = CONTACT_ROWS * s + r
-            c0 = gs.qd_float(0.0)
-            slope = gs.qd_float(0.0)
-            if newton.contact_D[k] > 0.0:
-                J = qd.Vector([newton.contact_dir[3 * k + d] for d in qd.static(range(3))], dt=gs.qd_float)
-                if qd.static(r < WALL_ROWS):
-                    c0 = J.dot(dx0) - newton.contact_t[k]
-                    slope = J.dot(ddx)
-                else:
-                    c0 = J.dot(dx0 - dr0) - newton.contact_t[k]
-                    slope = J.dot(ddx - ddr)
-            newton.ls_c0[k] = c0
-            newton.ls_s[k] = slope
-
-
-@qd.func(requires_top_level=True)
-def func_line_model(
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    linear: qd.template(),  # MpmLinearSystem
-):
-    """Sums of the one-dimensional model along d = -solution: sol.b and sol.r over the MPM rows (g.d = -sol.b and
-    d^T H d = sol.(b - r), r the final PCG residual), and the contact rows' share of slope and curvature at alpha = 0.
-    A coupled solve adds the Rigid dofs' sol.b and sol.r after this."""
-    for _ in range(1):
-        for i in qd.static(range(6)):
-            newton.ls_sums[i] = 0.0
-    n_rows = 3 * grid.n_blocks[()] * BLOCK_CELLS
-    qd.loop_config(name="mpm_line_model_rows", block_dim=REDUCE_BLOCK_DIM)
-    for i in range(((n_rows + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM) * REDUCE_BLOCK_DIM):
-        sol_b = gs.qd_float(0.0)
-        sol_r = gs.qd_float(0.0)
-        if i < n_rows:
-            row = 3 * linear.row_offset + i
-            sol_b = linear.solution[row] * linear.b_rhs[row]
-            sol_r = linear.solution[row] * linear.pcg.r[row]
-        block_b = qd.simt.block.reduce_add(sol_b, REDUCE_BLOCK_DIM, gs.qd_float)
-        block_r = qd.simt.block.reduce_add(sol_r, REDUCE_BLOCK_DIM, gs.qd_float)
-        if qd.simt.block.thread_idx() == 0:
-            qd.atomic_add(newton.ls_sums[0], block_b)
-            qd.atomic_add(newton.ls_sums[1], block_r)
-    n_contact = CONTACT_ROWS * grid.n_valid[()]
-    qd.loop_config(name="mpm_line_model_contacts", block_dim=REDUCE_BLOCK_DIM)
-    for k in range(((n_contact + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM) * REDUCE_BLOCK_DIM):
-        slope = gs.qd_float(0.0)
-        curvature = gs.qd_float(0.0)
-        if k < n_contact:
-            c0 = newton.ls_c0[k]
-            if c0 < 0.0:
-                D = newton.contact_D[k]
-                s = newton.ls_s[k]
-                slope = D * c0 * s
-                curvature = D * s * s
-        block_slope = qd.simt.block.reduce_add(slope, REDUCE_BLOCK_DIM, gs.qd_float)
-        block_curvature = qd.simt.block.reduce_add(curvature, REDUCE_BLOCK_DIM, gs.qd_float)
-        if qd.simt.block.thread_idx() == 0:
-            qd.atomic_add(newton.ls_sums[2], block_slope)
-            qd.atomic_add(newton.ls_sums[3], block_curvature)
-
-
-@qd.func(requires_top_level=True)
-def func_line_alpha(
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
-    control: qd.template(),  # NewtonControl
-    params: qd.template(),  # MpmParams
-):
-    """First trial step of the line search: the minimizer over [0, LINE_ALPHA_MAX] of
-
-        phi(alpha) = a1 alpha + 1/2 a2 alpha^2 + sum_rows 1/2 D min(0, c0 + alpha s)^2,
-
-    the smooth terms (kinetic, elastic, Rigid) by their Newton model with the contact rows' share at alpha = 0 removed,
-    the contact rows exact: a row enters the model where the direction makes it penetrate and leaves it where the
-    direction releases it. phi' is non-decreasing and piecewise linear; a safeguarded Newton on it takes at most
-    LINE_NEWTON_ITERS steps. The line search then checks the true energy from that step, backtracking as before.
-    """
-    for _ in range(1):
-        a1 = -newton.ls_sums[0]
-        a2 = newton.ls_sums[0] - newton.ls_sums[1]
-        a1_smooth = a1 - newton.ls_sums[2]
-        a2_smooth = a2 - newton.ls_sums[3]
-        newton.ls_state[0] = 0.0
-        newton.ls_state[1] = LINE_ALPHA_MAX
-        newton.ls_state[2] = 1.0
-        newton.ls_state[3] = a1_smooth
-        newton.ls_state[4] = a2_smooth
-        is_done = params.exact_line_search[()] == 0 or a1 >= 0.0 or a2_smooth <= 0.0
-        newton.ls_state[5] = gs.qd_float(is_done)
-    n_contact = CONTACT_ROWS * grid.n_valid[()]
-    for _it in qd.static(range(LINE_NEWTON_ITERS)):
-        for _ in range(1):
-            newton.ls_sums[4] = 0.0
-            newton.ls_sums[5] = 0.0
-        qd.loop_config(name="mpm_line_alpha_rows", block_dim=REDUCE_BLOCK_DIM)
-        for k in range(((n_contact + REDUCE_BLOCK_DIM - 1) // REDUCE_BLOCK_DIM) * REDUCE_BLOCK_DIM):
-            slope = gs.qd_float(0.0)
-            curvature = gs.qd_float(0.0)
-            if k < n_contact and newton.ls_state[5] == 0.0:
-                s = newton.ls_s[k]
-                c = newton.ls_c0[k] + newton.ls_state[2] * s
-                if c < 0.0:
-                    D = newton.contact_D[k]
-                    slope = D * c * s
-                    curvature = D * s * s
-            block_slope = qd.simt.block.reduce_add(slope, REDUCE_BLOCK_DIM, gs.qd_float)
-            block_curvature = qd.simt.block.reduce_add(curvature, REDUCE_BLOCK_DIM, gs.qd_float)
-            if qd.simt.block.thread_idx() == 0:
-                qd.atomic_add(newton.ls_sums[4], block_slope)
-                qd.atomic_add(newton.ls_sums[5], block_curvature)
-        for _ in range(1):
-            if newton.ls_state[5] == 0.0:
-                alpha = newton.ls_state[2]
-                dphi = newton.ls_state[3] + newton.ls_state[4] * alpha + newton.ls_sums[4]
-                ddphi = newton.ls_state[4] + newton.ls_sums[5]
-                lo = newton.ls_state[0]
-                hi = newton.ls_state[1]
-                if dphi > 0.0:
-                    hi = alpha
-                else:
-                    lo = alpha
-                if qd.abs(dphi) <= LINE_SLOPE_TOL * qd.abs(newton.ls_state[3]) or hi - lo <= 1e-6:
-                    newton.ls_state[5] = 1.0
-                elif dphi < 0.0 and alpha >= LINE_ALPHA_MAX:
-                    newton.ls_state[5] = 1.0
-                else:
-                    alpha_next = alpha - dphi / ddphi
-                    if not (alpha_next > lo and alpha_next < hi):
-                        alpha_next = 0.5 * (lo + hi)
-                    newton.ls_state[2] = alpha_next
-                newton.ls_state[0] = lo
-                newton.ls_state[1] = hi
-    for _ in range(1):
-        control.alpha[()] = newton.ls_state[2]
-
-
-@qd.func(requires_top_level=True)
 def func_step_forward(
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
@@ -1933,17 +1686,11 @@ def func_elastic_energy_partial(
             F_tr, grad_w, F = trial_deformation(particles, grid, newton, params, f, i_p, i_b, cell, slots)
             slot = particles_info.material_idx[i_p]
             mu, lam = material_params(materials, params, slot)
-            psi = gs.qd_float(0.0)
-            if params.linear_corotated[()] != 0:
-                psi = linear_corotated_energy(rotation_of(F), F_tr, mu, lam)
-            else:
-                psi = elastic_energy(materials, slot, signed_singular_values(F_tr), mu, lam)
+            psi = elastic_energy(materials, slot, signed_singular_values(F_tr), mu, lam)
             dx, w = particle_trial_disp(particles, newton, params, f, i_p, i_b, cell, slots)
             dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
-            energy_wall, grad_wall, hess_wall = contact_row_terms(newton, params, s, dx, 0, WALL_ROWS)
-            energy_rigid, grad_rigid, hess_rigid = contact_row_terms(
-                newton, params, s, dx - dr, WALL_ROWS, CONTACT_ROWS
-            )
+            energy_wall, grad_wall, hess_wall = contact_row_terms(newton, s, dx, 0, WALL_ROWS)
+            energy_rigid, grad_rigid, hess_rigid = contact_row_terms(newton, s, dx - dr, WALL_ROWS, CONTACT_ROWS)
             energy = params.particle_volume[()] * dt * dt * psi + energy_wall + energy_rigid
         write_block_partial(energy, newton.energy_partials, s // REDUCE_BLOCK_DIM, gs.qd_float)
 

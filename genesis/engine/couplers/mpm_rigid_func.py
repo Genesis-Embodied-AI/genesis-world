@@ -207,11 +207,10 @@ def func_build_rigid_rows(
     timeconst is floored at twice the substep, and every row `normal + mu d_k` of the pyramid gets
     `diag = 2 mu_reg^2 (1 + mu_reg^2) invweight (1 - imp) / imp`, with `mu_reg^2 = mu^2 / impratio`. The row target
     `dt J.v_p + dt^2 aref` is on the displacement of the particle relative to the motion J_pt x of its contact point
-    beyond the link's velocity at the substep start. With `params.contact_band`, the nearest geom also gives rows to a
-    particle short of its range by less than `contact_band_width`, by `band_row`.
+    beyond the link's velocity at the substep start. The nearest geom gives rows to a particle within its range or short
+    of it by less than `contact_band_width`, by `band_row`.
     """
     n_geoms = geoms_info.link_idx.shape[0]
-    use_band = params.contact_band[()] != 0
     qd.loop_config(name="mpm_build_rigid_rows")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
@@ -234,14 +233,14 @@ def func_build_rigid_rows(
             v_r = func_vel_at_point(i_l, i_b, x_p, links_state)
             v_rel = particles.vel[f, i_p, i_b] - v_r
             # The relative speed bounds the normal approach speed, which needs the normal
-            is_candidate = phi < 0.0 or (use_band and phi < contact_band_width(params, v_rel.norm(), dt))
+            is_candidate = phi < contact_band_width(params, v_rel.norm(), dt)
         normal = qd.Vector.zero(gs.qd_float, 3)
         in_range = False
         if is_candidate:
             normal = geom_normal(
                 i_g_contact, i_b, x_p, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
             )
-            in_range = phi < 0.0 or (use_band and phi < contact_band_width(params, -normal.dot(v_rel), dt))
+            in_range = phi < contact_band_width(params, -normal.dot(v_rel), dt)
         if in_range:
             I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l
             friction = qd.max(geoms_info.friction[i_g_contact] * geoms_state.friction_ratio[i_g_contact, i_b], 1e-2)
@@ -335,9 +334,8 @@ def func_contact_point_disp(
     links_state: array_class.LinksState,
     params: qd.template(),  # MpmParams
     f,
-    out: qd.template(),  # qd.Ndarray, 3 per sorted particle
 ):
-    """Displacement J_pt y of the contact point of every particle with Rigid rows, for the dof vector y whose link
+    """Displacement J_pt x of the contact point of every particle with Rigid rows, for the dof vector x whose link
     displacements `link_V` holds."""
     qd.loop_config(name="mpm_contact_point_disp")
     for s in range(grid.n_valid[()]):
@@ -348,21 +346,7 @@ def func_contact_point_disp(
             lin, ang = link_spatial(coupling, i_l, i_b)
             dr = lin + ang.cross(particle_arm(particles, links_state, f, i_p, i_b, i_l))
         for d in qd.static(range(3)):
-            out[3 * s + d] = dr[d]
-
-
-@qd.func(requires_top_level=True)
-def func_rigid_line_model(
-    coupling: qd.template(),  # MpmRigidCoupling
-    newton: qd.template(),  # MpmNewton
-):
-    """The Rigid dofs' sol.b and sol.r in the sums of the one-dimensional line-search model, after func_line_model."""
-    n_dofs = coupling.x.shape[0]
-    n_envs = coupling.x.shape[1]
-    qd.loop_config(name="mpm_rigid_line_model")
-    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
-        qd.atomic_add(newton.ls_sums[0], coupling.sol[i_d, i_b] * coupling.grad[i_d, i_b])
-        qd.atomic_add(newton.ls_sums[1], coupling.sol[i_d, i_b] * coupling.r[i_d, i_b])
+            newton.contact_dr[3 * s + d] = dr[d]
 
 
 # ============================================== Layer 1: Rigid block ===============================================

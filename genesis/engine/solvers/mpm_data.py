@@ -91,22 +91,6 @@ class MpmParams:
         self.particle_volume = _scalar(gs.qd_float, particle_volume)
         self.mass_scale = _scalar(gs.qd_float, mass_scale)
         self.n_materials = _scalar(qd.i32, n_materials)
-        # Freeze the active set of the soft contact rows at the substep start for the whole Newton solve (experimental,
-        # off: the active set follows the iterate, as in Rigid's Newton)
-        self.freeze_contact = _scalar(qd.i32, 0)
-        # Width, in metres of constraint value, of the band below c = 0 over which a contact row's curvature ramps from
-        # D down to 0, which makes the row energy C2 (experimental; 0 keeps the one-sided quadratic)
-        self.contact_smooth = _scalar(gs.qd_float, 0.0)
-        # Start each line search at the minimizer of the piecewise-quadratic model along the Newton direction (smooth
-        # terms by their Newton model, contact rows exact) instead of at alpha = 1 (experimental)
-        self.exact_line_search = _scalar(qd.i32, 0)
-        # Build contact rows for the particles the substep may bring into contact, not only those in contact at its
-        # start: a row outside its contact range lets the particle close the gap freely and resists past it
-        # (experimental)
-        self.contact_band = _scalar(qd.i32, 0)
-        # Linear corotational elasticity about the rotation of each particle at the substep start (Zong et al. 2024):
-        # the elastic energy of a substep is then quadratic and convex (experimental)
-        self.linear_corotated = _scalar(qd.i32, 0)
         # Start the Newton solve from the inertial prediction u = dt v_free instead of u = 0: contact rows the substep
         # will violate are then active at the first assembly, so that the first direction already sees them. A
         # non-penetration barrier needs the non-penetrating start u = 0 for its continuous collision detection, so this
@@ -312,15 +296,6 @@ class MpmNewton:
         self.g_rigid = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
         self.h_rigid = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
         self.contact_dr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
-        # Line search along the Newton direction: the displacement of each contact point along the Rigid direction, and
-        # per contact row its value c0 at the start point and its slope s along the direction
-        self.contact_ddr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
-        self.ls_c0 = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
-        self.ls_s = qd.ndarray(gs.qd_float, shape=(CONTACT_ROWS * n_padded,))
-        # [sol.b, sol.r, contact slope at 0, contact curvature at 0, contact slope at alpha, contact curvature at alpha]
-        # and [lo, hi, alpha, smooth slope, smooth curvature, done] of the one-dimensional search
-        self.ls_sums = qd.ndarray(gs.qd_float, shape=(6,))
-        self.ls_state = qd.ndarray(gs.qd_float, shape=(6,))
         self.energy_partials = qd.ndarray(gs.qd_float, shape=(n_partials,))
         # Soft contact rows, CONTACT_ROWS per sorted particle on its trial displacement dx = sum_a w_a u_a: direction J,
         # stiffness D (zero where there is no row) and target t of the row term 1/2 D min(0, J.dx - t)^2, and the
