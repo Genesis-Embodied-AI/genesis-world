@@ -1094,12 +1094,10 @@ def test_unset_coup_friction_follows_sliding_friction(show_viewer):
     )
     scene.build()
 
-    assert material_friction.material.coup_friction is None
     assert_allclose(material_friction.geoms[0].coup_friction, 0.4, tol=1e-6)
 
     assert_allclose(explicit_coup.geoms[0].coup_friction, 0.15, tol=1e-6)
 
-    assert authored.material.coup_friction is None
     assert_allclose(authored.get_link("rough").geoms[0].coup_friction, 0.7, tol=1e-6)
     assert_allclose(authored.get_link("smooth").geoms[0].coup_friction, 0.25, tol=1e-6)
     assert_allclose(authored.get_link("plain").geoms[0].coup_friction, 1.0, tol=1e-6)

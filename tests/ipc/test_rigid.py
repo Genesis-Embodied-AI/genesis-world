@@ -412,7 +412,7 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
                     elem = coupler._ipc_ground_contacts[entity]
                 else:
                     elem = coupler._ipc_abd_contacts[entity]
-                friction = entity.material.coup_friction
+                friction = entity.geoms[0].coup_friction
             else:
                 elem = coupler._ipc_fem_contacts[entity]
                 friction = entity.material.friction_mu
@@ -899,35 +899,44 @@ def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
 
 
 @pytest.mark.required
-def test_unset_coup_friction_requires_one_coefficient(show_viewer):
-    mixed = ET.Element("mujoco", model="mixed")
-    body = ET.SubElement(ET.SubElement(mixed, "worldbody"), "body", name="pair", pos="0 0 0.5")
-    ET.SubElement(body, "geom", type="box", size="0.05 0.05 0.05", friction="0.7")
-    ET.SubElement(body, "geom", type="box", size="0.04 0.04 0.04", pos="0 0 0.1", friction="0.25")
-    file = ET.tostring(mixed, encoding="unicode")
+def test_unset_coup_friction_requires_one_coefficient():
+    mjcf = ET.Element("mujoco", model="frictions")
+    rough = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="rough", pos="0 0 0.5")
+    ET.SubElement(rough, "freejoint")
+    ET.SubElement(rough, "geom", type="box", size="0.05 0.05 0.05", friction="0.7")
+    smooth = ET.SubElement(rough, "body", name="smooth", pos="0 0 0.15")
+    ET.SubElement(smooth, "joint", type="hinge", axis="0 0 1")
+    ET.SubElement(smooth, "geom", type="box", size="0.04 0.04 0.04", friction="0.25")
+    file = ET.tostring(mjcf, encoding="unicode")
 
-    rejected = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(), show_viewer=show_viewer)
-    rejected.add_entity(morph=gs.morphs.MJCF(file=file), material=gs.materials.Rigid())
+    scene_mixed = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(), show_viewer=False)
+    scene_mixed.add_entity(morph=gs.morphs.MJCF(file=file), material=gs.materials.Rigid())
     with pytest.raises(gs.GenesisException, match="coup_friction"):
-        rejected.build()
+        scene_mixed.build()
 
     scene = gs.Scene(
         coupler_options=gs.options.IPCCouplerOptions(),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.2, -0.8, 0.6),
-            camera_lookat=(0.0, 0.0, 0.5),
+        show_viewer=False,
+    )
+    plane = scene.add_entity(
+        morph=gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_type="ipc_only",
         ),
-        show_viewer=show_viewer,
     )
     entity = scene.add_entity(
         morph=gs.morphs.MJCF(
             file=file,
         ),
         material=gs.materials.Rigid(
-            coup_friction=0.3,
+            coup_collision_links=("rough",),
         ),
     )
     scene.build()
+    assert scene.sim is not None
+    coupler = cast("IPCCoupler", scene.sim.coupler)
 
-    for geom in entity.geoms:
-        assert_allclose(geom.coup_friction, 0.3, tol=1e-6)
+    model = coupler._ipc_scene.contact_tabular().at(
+        coupler._ipc_ground_contacts[plane].id(), coupler._ipc_abd_contacts[entity].id()
+    )
+    assert model.friction_rate() == pytest.approx(geometric_mean(1.0, 0.7))

@@ -156,6 +156,7 @@ class IPCCoupler(RBC):
         self._ipc_cloth_contacts: dict["FEMEntity", ContactElement] = {}
         self._ipc_abd_contacts: dict["RigidEntity", ContactElement] = {}
         self._ipc_ground_contacts: dict["RigidEntity", ContactElement] = {}
+        self._ipc_contacts_geoms_coup_friction: dict["RigidEntity", list[float]] = {}
 
         # ==== Entity Coupling Configuration ====
         self._coup_type_by_entity: dict["RigidEntity", COUPLING_TYPE] = {}
@@ -460,6 +461,7 @@ class IPCCoupler(RBC):
                                 plane_contact = self._ipc_contact_tabular.create(f"ground_contact_{i_e}")
                                 self._ipc_ground_contacts[entity] = plane_contact
                             self._ipc_ground_contacts[entity].apply_to(plane_geom)
+                            self._ipc_contacts_geoms_coup_friction.setdefault(entity, []).append(geom.coup_friction)
 
                             plane_obj = self._ipc_objects.create(f"rigid_plane_{geom.idx}_{env_idx}")
 
@@ -520,6 +522,9 @@ class IPCCoupler(RBC):
                         abd_contact = self._ipc_contact_tabular.create(f"abd_contact_{i_e}")
                         self._ipc_abd_contacts[entity] = abd_contact
                     self._ipc_abd_contacts[entity].apply_to(rigid_link_geom)
+                    self._ipc_contacts_geoms_coup_friction.setdefault(entity, []).extend(
+                        geom.coup_friction for source_link in source_links for geom in source_link.geoms if geom.n_verts
+                    )
                 else:
                     self._ipc_no_collision_contact.apply_to(rigid_link_geom)
 
@@ -690,21 +695,18 @@ class IPCCoupler(RBC):
         Friction is combined by geometric mean, resistance by harmonic mean (series spring).
         When an entity material does not define
         ``contact_resistance``, ``options.contact_resistance`` is used as the per-entity fallback.
-        An unset ``coup_friction`` uses the sliding friction resolved onto the entity's geoms. IPC stores one
-        coefficient per entity, so those geoms have to agree. Ground pairs combine that coefficient with the plane's.
+        An unset ``coup_friction`` uses the sliding friction resolved onto the geoms that join the entity's contact
+        element. IPC stores one coefficient per entity, so those geoms have to agree. Ground pairs combine that
+        coefficient with the plane's.
         """
         coup_friction_by_entity = {}
-        for entity in (*self._ipc_abd_contacts, *self._ipc_ground_contacts):
-            coup_friction = entity.material.coup_friction
-            if coup_friction is None:
-                frictions = [geom.coup_friction for link in entity.links for geom in link.geoms]
-                assert frictions
-                coup_friction = frictions[0]
-                if any(not np.allclose(friction, coup_friction, atol=gs.EPS) for friction in frictions):
-                    gs.raise_exception(
-                        "Unset coup_friction resolves to more than one sliding friction on one entity. IPC stores "
-                        "one coefficient per entity, so set coup_friction on its rigid material."
-                    )
+        for entity, geoms_coup_friction in self._ipc_contacts_geoms_coup_friction.items():
+            coup_friction = geoms_coup_friction[0]
+            if not np.allclose(geoms_coup_friction, coup_friction, atol=gs.EPS):
+                gs.raise_exception(
+                    "Unset coup_friction resolves to more than one sliding friction on the IPC contact geoms of one "
+                    "entity. IPC stores one coefficient per entity, so set coup_friction on its rigid material."
+                )
             coup_friction_by_entity[entity] = coup_friction
 
         # Collect (ContactElement, friction_mu, resistance, is_abd) for all entity contact elements
