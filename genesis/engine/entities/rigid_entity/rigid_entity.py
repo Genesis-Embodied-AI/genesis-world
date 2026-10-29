@@ -73,11 +73,11 @@ class KinematicEntity(Entity):
         self._is_attached: bool = False
         self._is_vverts_overridden: bool = False
 
-        # The names from the root of the kinematic tree down to each link, keyed by link name, which the link options
+        # The names from the root of the kinematic tree down to each link, by local link index, which the link options
         # select on (see 'gs.LinkIndex')
-        links_name = [l_desc.name for l_desc in desc.links]
-        links_path = get_links_path(links_name, [l_desc.parent_idx for l_desc in desc.links])
-        self._links_path: dict[str, tuple[str, ...]] = dict(zip(links_name, links_path))
+        self._links_path = get_links_path(
+            [l_desc.name for l_desc in desc.links], [l_desc.parent_idx for l_desc in desc.links]
+        )
 
         self._load_model()
 
@@ -1529,7 +1529,7 @@ class RigidEntity(KinematicEntity):
 
     def _add_heterogeneous_variant(self, link, v_link):
         # Add collision geometries
-        needs_coup = self._options.get_link_solver_options(self._links_path[link.name]).needs_coup
+        needs_coup = self._options.get_link_solver_options(self._links_path[link.idx_local]).needs_coup
         for g_desc in v_link.geoms:
             link._add_geom(g_desc, needs_coup=needs_coup)
 
@@ -1679,7 +1679,7 @@ class RigidEntity(KinematicEntity):
         # Add visual geometries
         for g_desc in l_desc.vgeoms:
             link._add_vgeom(g_desc)
-        needs_coup = self._options.get_link_solver_options(self._links_path[link.name]).needs_coup
+        needs_coup = self._options.get_link_solver_options(self._links_path[link.idx_local]).needs_coup
         for g_desc in l_desc.geoms:
             link._add_geom(g_desc, needs_coup=needs_coup)
 

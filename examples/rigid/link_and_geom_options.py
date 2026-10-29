@@ -52,9 +52,7 @@ def main():
 
     for side in ("right", "left"):
         leg_mass = sum(humanoid.get_link(f"{part}_{side}").get_mass() for part in ("thigh", "shin", "foot"))
-        feet_friction = ", ".join(
-            f"{float(geom.get_friction()):.1f}" for geom in humanoid.get_link(f"foot_{side}").geoms
-        )
+        feet_friction = ", ".join(f"{geom.get_friction():.1f}" for geom in humanoid.get_link(f"foot_{side}").geoms)
         print(f"{side} leg: {leg_mass:.2f} kg, foot geoms friction {feet_friction}")
 
     for _ in range(200):

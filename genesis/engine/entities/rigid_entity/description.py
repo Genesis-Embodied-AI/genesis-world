@@ -376,9 +376,6 @@ class Resolution:
     options: Options
     is_mujoco_compatible: bool
     links_inertial_info: list[list[LinkInertialInfo]] = field(default_factory=list)
-    # The names from the root of the kinematic tree down to each link a scene parse states, keyed by link name, which
-    # the link options of the entity select on (see 'gs.LinkIndex')
-    links_path: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # The names of every collision geom as its asset states them, which the geom options of the entity select on
     geoms_name: list[str] = field(default_factory=list)
 
@@ -477,7 +474,11 @@ class KinematicEntityDescription(EntityDescription):
         for link_index in options.links:
             link_index.resolve(links_path)
         if isinstance(options, RigidEntityOptions):
-            for geom_index in options.geoms:
+            geoms_index = [
+                *options.geoms,
+                *(i_g for link_options in options.links.values() for i_g in link_options.geoms),
+            ]
+            for geom_index in geoms_index:
                 if geom_index.names is not None and not any(map(geom_index.matches, resolution.geoms_name)):
                     gs.raise_exception(
                         f"No collision geom of the entity matches {list(geom_index.names)}. Existing geoms: "
@@ -1227,9 +1228,11 @@ class KinematicEntityDescription(EntityDescription):
         l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
-        links_name = [l_info["name"] for l_info in l_infos]
-        links_path = get_links_path(links_name, [l_info["parent_idx"] for l_info in l_infos])
-        resolution.links_path.update(zip(links_name, links_path))
+        links_path = get_links_path(
+            [l_info["name"] for l_info in l_infos], [l_info["parent_idx"] for l_info in l_infos]
+        )
+        for l_info, link_path in zip(l_infos, links_path):
+            l_info["path"] = link_path
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
 
@@ -1403,7 +1406,8 @@ class KinematicEntityDescription(EntityDescription):
 
         # Split and convexify collision geometry. Must be done before alignment so that convexified geoms are used
         # to compute the inertia frame.
-        link_path = resolution.links_path.get(l_info["name"], (l_info["name"],))
+        # A parse states the path from the root of the tree down to the link, a single-link morph holding its link alone
+        link_path = l_info.get("path", (l_info["name"],))
         cg_infos, vg_infos = self._resolve_geoms(morph, g_infos, l_info["is_robot"], link_path, resolution)
 
         # Carry the morph pose offset into root links and align them to their collision-geometry COM/principal axes.
@@ -1693,9 +1697,11 @@ class RigidEntityDescription(KinematicEntityDescription):
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, resolution)
 
         # Add (link, joints, geoms) tuples sequentially
-        links_name = [l_info["name"] for l_info in l_infos]
-        links_path = get_links_path(links_name, [l_info["parent_idx"] for l_info in l_infos])
-        resolution.links_path.update(zip(links_name, links_path))
+        links_path = get_links_path(
+            [l_info["name"] for l_info in l_infos], [l_info["parent_idx"] for l_info in l_infos]
+        )
+        for l_info, link_path in zip(l_infos, links_path):
+            l_info["path"] = link_path
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._resolve_link(l_info, link_j_infos, link_g_infos, morph, resolution)
 

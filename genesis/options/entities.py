@@ -401,28 +401,21 @@ class RigidEntityOptions(_ArticulatedEntityOptions["RigidEntity"]):
         'geoms_name' the names of the collision geoms of the link as its asset states them, which a ``gs.GeomIndex``
         counts and matches. A material holds the fields given explicitly alone, those of the geom options overriding
         those of the link options. Two selections of equal specificity giving one field of one geom raise an error.
-        A selection by name of the entity-level geom options may match no geom of a given link.
+        A selection by name may match no geom of a given link, the description checking that it matches one of the
+        entity.
         """
         link_name = link_path[-1]
         link_fields = {}
-        geoms_selection = [
-            (geom_index, geom_options, geom_index.names is not None) for geom_index, geom_options in self.geoms.items()
-        ]
+        geoms_options = list(self.geoms.items())
         for link_index, link_options in self.links.items():
             if link_index.matches(link_path):
                 if link_options.material is not None:
                     _merge_fields(link_fields, link_options.material, f"link '{link_name}'")
-                geoms_selection.extend(
-                    (geom_index, geom_options, False) for geom_index, geom_options in link_options.geoms.items()
-                )
+                geoms_options.extend(link_options.geoms.items())
         geoms_fields = [{} for _ in geoms_name]
-        for geom_index, geom_options, is_entity_named in geoms_selection:
+        for geom_index, geom_options in geoms_options:
             if geom_options.material is not None:
-                if is_entity_named:
-                    geoms_idx = [i_g for i_g, geom_name in enumerate(geoms_name) if geom_index.matches(geom_name)]
-                else:
-                    geoms_idx = geom_index.resolve(geoms_name)
-                for i_g in geoms_idx:
+                for i_g in geom_index.resolve(geoms_name):
                     _merge_fields(geoms_fields[i_g], geom_options.material, f"geom {i_g} of link '{link_name}'")
         return [
             Material(**{**link_fields, **geom_fields}) if link_fields or geom_fields else None

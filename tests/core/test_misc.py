@@ -46,6 +46,9 @@ def torus_box_sphere_mjcf(asset_tmp_path):
     ET.SubElement(body, "geom", name="torus", type="mesh", mesh="torus")
     ET.SubElement(body, "geom", name="top_cap", type="box", size="0.03 0.03 0.03", pos="0 0 0.1")
     ET.SubElement(body, "geom", name="bottom_cap", type="sphere", size="0.03", pos="0 0 -0.1")
+    tip = ET.SubElement(body, "body", name="tip", pos="0 0 0.2")
+    ET.SubElement(tip, "joint", type="hinge")
+    ET.SubElement(tip, "geom", name="tip", type="capsule", size="0.02 0.03")
     return ET.tostring(mjcf, encoding="unicode")
 
 
@@ -153,6 +156,8 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
         gs.options.PBDElasticEntityOptions(morph=gs.morphs.Sphere(), material=gs.materials.Elastic(youngs_modulus=1e6))
     with pytest.raises(gs.GenesisException, match="gs.options.FEMEntityOptions or gs.options.MPMEntityOptions"):
         scene.add_entity(morph=gs.morphs.Sphere(), material=gs.materials.Elastic())
+    with pytest.raises(gs.GenesisException, match="either entity options"):
+        scene.add_entity(morph=gs.morphs.Sphere(), options=gs.options.RigidEntityOptions(morph=gs.morphs.Sphere()))
 
     # Link and geom options override the material of the entity on the geoms they select, the geom options winning
     arm = scene.add_entity(
@@ -284,6 +289,16 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
                 friction_rolling=0.0005,
             ),
             links={
+                # The geom name selects in every link of the subtree, of which the parent has none of that name
+                gs.LinkIndex.subtree("body"): gs.options.LinkOptions(
+                    geoms={
+                        gs.GeomIndex.named("tip"): gs.options.GeomOptions(
+                            material=gs.materials.Material(
+                                friction=1.2,
+                            ),
+                        ),
+                    },
+                ),
                 "body": gs.options.LinkOptions(
                     geoms={
                         gs.GeomIndex.named("tor*"): gs.options.GeomOptions(
@@ -515,13 +530,15 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf, torus_box
     inertia_yy = boxes_mass @ ((boxes_x - com_x) ** 2 + 2.0 * 0.2**2 / 12.0)
     assert_allclose(dense_body.get_dofs_velocity()[..., 4], com_x * PUSH_FORCE / inertia_yy * N_STEPS * DT, tol=5e-2)
     # The pieces of the decomposed torus take the options of its name, the box those of the mask and of the slice, and
-    # the sphere those of the slice over the friction of the entity, both caps taking the glob of the entity
+    # the sphere those of the slice over the friction of the entity, both caps taking the glob of the entity and the
+    # capsule of the child link the name its subtree selection gives
     torus_pieces = [geom for geom in mixed_geoms_body.geoms if geom.type == gs.GEOM_TYPE.MESH]
     assert len(torus_pieces) > 1
     geoms_friction = {
         gs.GEOM_TYPE.MESH: (0.7, 0.01, 0.0005),
         gs.GEOM_TYPE.BOX: (1.5, 0.03, 0.002),
         gs.GEOM_TYPE.SPHERE: (0.3, 0.03, 0.002),
+        gs.GEOM_TYPE.CAPSULE: (1.2, 0.01, 0.0005),
     }
     for geom in mixed_geoms_body.geoms:
         friction, friction_torsional, friction_rolling = geoms_friction[geom.type]
