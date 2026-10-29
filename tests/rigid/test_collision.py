@@ -1943,20 +1943,8 @@ def test_filter_neutral_self_collisions(show_viewer):
 
 
 @pytest.mark.required
-def test_contype_conaffinity(show_viewer, tol):
+def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, tol):
     GRAVITY = (0.0, 0.0, -10.0)
-
-    mjcf = ET.Element("mujoco", model="contact_exclude")
-    contact = ET.SubElement(mjcf, "contact")
-    ET.SubElement(contact, "exclude", body1="base_excluded", body2="passer_excluded")
-    worldbody = ET.SubElement(mjcf, "worldbody")
-    for body_name, x_pos in (("base_excluded", -1.0), ("base_colliding", 1.0)):
-        body = ET.SubElement(worldbody, "body", name=body_name)
-        ET.SubElement(body, "geom", type="box", size="0.4 0.4 0.2", pos=f"{x_pos} 0 0.2")
-    for body_name, x_pos in (("passer_excluded", -1.0), ("passer_colliding", 1.0)):
-        body = ET.SubElement(worldbody, "body", name=body_name, pos=f"{x_pos} 0 0.7")
-        ET.SubElement(body, "joint", type="free")
-        ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2")
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -2022,7 +2010,7 @@ def test_contype_conaffinity(show_viewer, tol):
     )
     exclude_entity = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=ET.tostring(mjcf, encoding="unicode"),
+            file=boxes_dropped_with_contact_exclude,
             pos=(0.0, 2.0, 0.0),
         ),
     )

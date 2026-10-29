@@ -1501,3 +1501,19 @@ def damped_pendulum_and_tilted_light_capsule():
         solref="0.004 1",
     )
     return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def boxes_dropped_with_contact_exclude():
+    mjcf = ET.Element("mujoco", model="contact_exclude")
+    contact = ET.SubElement(mjcf, "contact")
+    ET.SubElement(contact, "exclude", body1="base_excluded", body2="passer_excluded")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    for body_name, x_pos in (("base_excluded", -1.0), ("base_colliding", 1.0)):
+        body = ET.SubElement(worldbody, "body", name=body_name)
+        ET.SubElement(body, "geom", type="box", size="0.4 0.4 0.2", pos=f"{x_pos} 0 0.2")
+    for body_name, x_pos in (("passer_excluded", -1.0), ("passer_colliding", 1.0)):
+        body = ET.SubElement(worldbody, "body", name=body_name, pos=f"{x_pos} 0 0.7")
+        ET.SubElement(body, "joint", type="free")
+        ET.SubElement(body, "geom", type="box", size="0.2 0.2 0.2")
+    return ET.tostring(mjcf, encoding="unicode")
