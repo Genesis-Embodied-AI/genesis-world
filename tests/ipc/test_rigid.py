@@ -336,6 +336,21 @@ def test_ground_sliding(n_envs, show_viewer):
 def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
     from genesis.engine.entities import RigidEntity
 
+    mjcf = ET.Element("mujoco", model="frictions")
+    rough = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="rough")
+    ET.SubElement(rough, "freejoint")
+    ET.SubElement(rough, "geom", type="box", size="0.025 0.025 0.025", friction="0.7")
+    smooth = ET.SubElement(rough, "body", name="smooth", pos="0 0 0.1")
+    ET.SubElement(smooth, "joint", type="hinge", axis="0 0 1")
+    ET.SubElement(smooth, "geom", type="box", size="0.02 0.02 0.02", friction="0.25")
+    mjcf_file = ET.tostring(mjcf, encoding="unicode")
+
+    # IPC stores one friction per entity, so an unset coup_friction must resolve to one value over its contact geoms
+    scene_mixed = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(), show_viewer=False)
+    scene_mixed.add_entity(morph=gs.morphs.MJCF(file=mjcf_file), material=gs.materials.Rigid())
+    with pytest.raises(gs.GenesisException, match="coup_friction"):
+        scene_mixed.build()
+
     scene = gs.Scene(
         coupler_options=gs.options.IPCCouplerOptions(
             contact_resistance=36.0,
@@ -383,6 +398,15 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
             contact_resistance=None,
         ),
     )
+    rigid_d = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_file,
+            pos=(-0.4, 0.0, 0.12),
+        ),
+        material=gs.materials.Rigid(
+            coup_collision_links=("rough",),
+        ),
+    )
     fem = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.4, 0.0, 0.12),
@@ -402,7 +426,7 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
     coupler = cast("IPCCoupler", scene.sim.coupler)
 
     tab = coupler._ipc_scene.contact_tabular()
-    for entities in permutations((plane, rigid_a, rigid_b, rigid_c, fem), 2):
+    for entities in permutations((plane, rigid_a, rigid_b, rigid_c, rigid_d, fem), 2):
         elems_idx = []
         frictions = []
         resistances = []
@@ -897,47 +921,3 @@ def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
     if z_actual.ndim > 1:
         z_target = z_target[:, np.newaxis]
     assert_allclose(z_actual, z_target, atol=0.005)
-
-
-@pytest.mark.required
-def test_unset_coup_friction_requires_one_coefficient():
-    mjcf = ET.Element("mujoco", model="frictions")
-    rough = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="rough", pos="0 0 0.5")
-    ET.SubElement(rough, "freejoint")
-    ET.SubElement(rough, "geom", type="box", size="0.05 0.05 0.05", friction="0.7")
-    smooth = ET.SubElement(rough, "body", name="smooth", pos="0 0 0.15")
-    ET.SubElement(smooth, "joint", type="hinge", axis="0 0 1")
-    ET.SubElement(smooth, "geom", type="box", size="0.04 0.04 0.04", friction="0.25")
-    file = ET.tostring(mjcf, encoding="unicode")
-
-    scene_mixed = gs.Scene(coupler_options=gs.options.IPCCouplerOptions(), show_viewer=False)
-    scene_mixed.add_entity(morph=gs.morphs.MJCF(file=file), material=gs.materials.Rigid())
-    with pytest.raises(gs.GenesisException, match="coup_friction"):
-        scene_mixed.build()
-
-    scene = gs.Scene(
-        coupler_options=gs.options.IPCCouplerOptions(),
-        show_viewer=False,
-    )
-    plane = scene.add_entity(
-        morph=gs.morphs.Plane(),
-        material=gs.materials.Rigid(
-            coup_type="ipc_only",
-        ),
-    )
-    entity = scene.add_entity(
-        morph=gs.morphs.MJCF(
-            file=file,
-        ),
-        material=gs.materials.Rigid(
-            coup_collision_links=("rough",),
-        ),
-    )
-    scene.build()
-    assert scene.sim is not None
-    coupler = cast("IPCCoupler", scene.sim.coupler)
-
-    model = coupler._ipc_scene.contact_tabular().at(
-        coupler._ipc_ground_contacts[plane].id(), coupler._ipc_abd_contacts[entity].id()
-    )
-    assert model.friction_rate() == pytest.approx(geometric_mean(1.0, 0.7))
