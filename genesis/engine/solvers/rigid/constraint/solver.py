@@ -183,7 +183,7 @@ class ConstraintSolver:
         n_tile_classes = len(array_class.island_tile_caps(config.island_tile_cap_first, config.island_tile_cap_last))
         is_serialized = config.para_level < gs.PARA_LEVEL.ALL
         self.constraint_state = array_class.ConstraintState(
-            shape=dict(
+            sizes=dict(
                 envs=solver._B,
                 dofs=solver.n_dofs_,
                 links=solver.n_links_,
@@ -191,11 +191,10 @@ class ConstraintSolver:
                 constraints=self.len_constraints_,
                 contacts=collider_info.max_contacts[None],
                 cone_rows=self.n_cone_constraints_,
-                cones=self.n_cone_constraints_ // rows_per_contact,
-                nt_vec_rows=solver.n_dofs_ * nt_vec_n_slots,
+                rows_per_contact=rows_per_contact,
+                nt_vec_slots=nt_vec_n_slots,
                 jac_dofs=min(solver.n_dofs_, max(2, 2 * links_chain_n_dofs.max(initial=0))),
-                noslip_columns=2 * (32 if config.enable_cooperative_noslip else 1) * solver._B,
-                worklist=n_tile_classes * solver.n_trees_ * solver._B,
+                noslip_lanes=32 if config.enable_cooperative_noslip else 1,
                 tile_classes=n_tile_classes,
             ),
             env_first={

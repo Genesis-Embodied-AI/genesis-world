@@ -1,5 +1,6 @@
 import dataclasses
 import math
+import operator
 import types
 from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
@@ -95,11 +96,42 @@ class StaticConfig(metaclass=_StaticConfigMeta):
     """
 
 
-class Axis:
-    """
-    A dimension of solver data, sized when a struct spanning it is allocated (see Data).
+class _SizeArithmetic:
+    """The arithmetic of sizes and integers (see Size)."""
 
-    Its size is given under its name in the `shape` of the constructor, padded to one, or `()` to drop the dimension.
+    __slots__ = ()
+
+    def __add__(self, other):
+        return SizeExpr(operator.add, "+", self, other)
+
+    def __radd__(self, other):
+        return SizeExpr(operator.add, "+", other, self)
+
+    def __sub__(self, other):
+        return SizeExpr(operator.sub, "-", self, other)
+
+    def __rsub__(self, other):
+        return SizeExpr(operator.sub, "-", other, self)
+
+    def __mul__(self, other):
+        return SizeExpr(operator.mul, "*", self, other)
+
+    def __rmul__(self, other):
+        return SizeExpr(operator.mul, "*", other, self)
+
+    def __floordiv__(self, other):
+        return SizeExpr(operator.floordiv, "//", self, other)
+
+    def __rfloordiv__(self, other):
+        return SizeExpr(operator.floordiv, "//", other, self)
+
+
+class Size(_SizeArithmetic):
+    """
+    A named size of solver data, given under its name in the `sizes` of the constructor of a struct (see Data).
+
+    It is padded to one, or `()` to drop the dimension it stands for. Sizes combine with each other and with integers
+    through `+`, `-`, `*` and `//`, into the size of a dimension.
     """
 
     __slots__ = ("_name",)
@@ -107,15 +139,44 @@ class Axis:
     def __init__(self, name: str):
         self._name = name
 
+    def size(self, sizes: Mapping[str, Any]) -> int:
+        """Return the size, padded to one."""
+        size = sizes.get(self._name)
+        if size is None or isinstance(size, tuple):
+            raise TypeError(f"The size '{self._name}' is missing.")
+        return max(int(size), 1)
+
     def __str__(self):
         return self._name
 
     def __repr__(self):
-        return f"Axis({self._name!r})"
+        return f"Size({self._name!r})"
+
+
+class SizeExpr(_SizeArithmetic):
+    """An arithmetic of sizes and integers, the size of a dimension computed from them (see Size)."""
+
+    __slots__ = ("_function", "_symbol", "_operands")
+
+    def __init__(self, function, symbol: str, *operands):
+        self._function, self._symbol, self._operands = function, symbol, operands
+
+    def size(self, sizes: Mapping[str, Any]) -> int:
+        """Return the size of the dimension, padded to one."""
+        values = [
+            operand.size(sizes) if isinstance(operand, _SizeArithmetic) else operand for operand in self._operands
+        ]
+        return max(self._function(*values), 1)
+
+    def __str__(self):
+        return f"({self._operands[0]} {self._symbol} {self._operands[1]})"
+
+    def __repr__(self):
+        return f"SizeExpr{self}"
 
 
 # The environments, the last axis of every per-environment array in canonical order
-ENVS = Axis("envs")
+ENVS = Size("envs")
 
 
 class Label:
@@ -186,7 +247,7 @@ SPEC = "spec"
 def field(
     dtype: Any = None,
     *,
-    shape: "tuple[Axis | int, ...] | None" = None,
+    shape: "tuple[Size | int, ...] | None" = None,
     kind: "DataKind | None" = None,
     labels: "Label | str | tuple[Label | str, ...]" = (),
     grad: bool = False,
@@ -198,7 +259,7 @@ def field(
 
     `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
     type, or such a type paired with an element shape, `(float, 3)` for a vector and `(float, (3, 3))` for a matrix.
-    `shape` lists the axes and the fixed sizes of the array, replacing the default shape of its struct, and a field of
+    `shape` lists the sizes of the dimensions of the array (see Size), replacing the default shape of its struct, and a field of
     shape () and kind CONSTANT or INFO is a constant the constructor fills. `kind` replaces the kind of its struct (see
     DataKind). `labels` are the families of the array, or of every array of a member, for the property tables of the
     constructor. `grad` gives it gradients when the constructor requires them. An
@@ -238,10 +299,10 @@ class Data:
     DataKind), a member taking the shape of its field, else the default shape of its own class, else that of the
     struct holding it.
 
-    The constructor allocates every array of the tree in declaration order, once and for all. `shape` maps the name of
-    each axis to its size, the axes no array spans being ignored. `values` holds the constants nested like the struct,
+    The constructor allocates every array of the tree in declaration order, once and for all. `sizes` maps the name of
+    each size to its value, those no array uses being ignored. `values` holds the constants nested like the struct,
     validated strictly. `requires_grad` gives gradients to the arrays declared with `grad`. The property tables map a
-    selection of arrays to a value: `env_first` stores the environment axis first or last, `layout` stores the axes in
+    selection of arrays to a value: `env_first` stores the environment axis first or last, `layout` stores the dimensions in
     the given permutation of their canonical order, and `unused` leaves the arrays no kernel reads as 0-d placeholders,
     to spare their memory. A selection is a label or its name, matching any number of arrays, a reference to a field of
     the struct (see FieldRef), which must exist, a tuple of them, or None for every array, and no two keys may select
@@ -276,7 +337,7 @@ class Data:
     def __init__(
         self,
         *,
-        shape: Mapping[str, Any] | None = None,
+        sizes: Mapping[str, Any] | None = None,
         values: Mapping[str, Any] | None = None,
         env_first: Mapping[Any, bool] | None = None,
         layout: Mapping[Any, "tuple[int, ...] | None"] | None = None,
@@ -285,7 +346,7 @@ class Data:
         _binds: "Mapping[tuple[str, ...], Data | qd.Tensor] | None" = None,
     ):
         cls = type(self)
-        context = (shape or {}, values or {}, env_first or {}, layout or {}, unused or {}, requires_grad)
+        context = (sizes or {}, values or {}, env_first or {}, layout or {}, unused or {}, requires_grad)
         object.__setattr__(self, "_context", context)
         cls._build(self, cls._shape or (), (), (), None, context, _binds or {})
 
@@ -372,20 +433,22 @@ class Data:
             else:
                 dims, axes = [], []
                 for dim in field_shape:
-                    if isinstance(dim, Axis):
-                        if str(dim) not in sizes:
-                            raise TypeError(f"{cls.__name__}.{data_field.name} needs the size of axis '{dim}'.")
-                        size = sizes[str(dim)]
-                        if isinstance(size, tuple):
-                            continue
-                        dims.append(max(int(size), 1))
+                    if isinstance(dim, Size) and isinstance(sizes.get(str(dim)), tuple):
+                        continue
+                    if isinstance(dim, _SizeArithmetic):
+                        try:
+                            dims.append(dim.size(sizes))
+                        except TypeError as err:
+                            raise TypeError(f"{cls.__name__}.{data_field.name}: {err}") from None
                     else:
                         dims.append(dim)
                     axes.append(dim)
                 array_layout = leaf_properties.get("layout")
                 if leaf_properties.get("env_first") is not None:
                     if ENVS not in axes:
-                        raise TypeError(f"'env_first' selects {'.'.join(field_path)}, which spans no environment axis.")
+                        raise TypeError(
+                            f"'env_first' selects {'.'.join(field_path)}, which spans no environment dimension."
+                        )
                     order = [i for i, dim in enumerate(axes) if dim != ENVS]
                     i_env = axes.index(ENVS)
                     order = [i_env, *order] if leaf_properties["env_first"] else [*order, i_env]
@@ -403,7 +466,7 @@ class Data:
         if member is None:
             member_cls, spec = type(self)._lazy[name]
             sizes, *_, requires_grad = self._context
-            member = member_cls(shape=sizes, requires_grad=requires_grad)
+            member = member_cls(sizes=sizes, requires_grad=requires_grad)
             object.__setattr__(self, f"_lazy_{name}", member)
         return member
 
@@ -744,20 +807,19 @@ class ErrorCode(IntEnum):
 # =========================================== RigidInfo ===========================================
 
 
-# Axes of the rigid solver data, sized by the solver counts padded to one (see the trailing-underscore counts of
+# Sizes of the rigid solver data, sized by the solver counts padded to one (see the trailing-underscore counts of
 # KinematicSolver)
-ENVS = Axis("envs")
-QS = Axis("qs")
-DOFS = Axis("dofs")
-LINKS = Axis("links")
-JOINTS = Axis("joints")
-GEOMS = Axis("geoms")
-ROOTS = Axis("roots")
-TREES = Axis("trees")
+ENVS = Size("envs")
+QS = Size("qs")
+DOFS = Size("dofs")
+LINKS = Size("links")
+JOINTS = Size("joints")
+GEOMS = Size("geoms")
+ROOTS = Size("roots")
+TREES = Size("trees")
 # The links of every tree level by level, and the children of every link (see trees_levels_links_idx in RigidInfo)
-TREES_LEVELS_LINKS = Axis("trees_levels_links")
-CHILD_LINKS = Axis("child_links")
-LINKS_BOUNDS = Axis("links_bounds")
+TREES_LEVELS_LINKS = Size("trees_levels_links")
+CHILD_LINKS = Size("child_links")
 
 # The arrays of the dynamics, which a kinematic-only solver never reads
 DYNAMICS = Label("dynamics")
@@ -830,7 +892,7 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     roots_levels_links_end: qd.Tensor = field(int, shape=(LINKS,), labels=LEVEL_SWEEP)
     # The children of link i_l are links_child_idx[links_child_start[i_l]:links_child_start[i_l + 1]], in descending
     # order: the leaf-to-root folds of the level sweep add them into their parent in the order of the serial folds.
-    links_child_start: qd.Tensor = field(int, shape=(LINKS_BOUNDS,), labels=LEVEL_SWEEP)
+    links_child_start: qd.Tensor = field(int, shape=(LINKS + 1,), labels=LEVEL_SWEEP)
     links_child_idx: qd.Tensor = field(int, shape=(CHILD_LINKS,), labels=LEVEL_SWEEP)
     # Per-DOF bounds of the mass block the DOF belongs to: the DOFs of its branch rooted where the fixed structure ends
     # (deeper branches stay mass-coupled to their chain and belong to the enclosing block), merged across entities and
@@ -876,21 +938,20 @@ def is_tensor_addressable(shape, dtype) -> bool:
 # =========================================== Constraint ===========================================
 
 
-# Axes of the constraint solve
-CONSTRAINTS = Axis("constraints")
-CONTACTS = Axis("contacts")
-# Rows of the elliptic cones, and the cones themselves (see n_constraints_cone)
-CONE_ROWS = Axis("cone_rows")
-CONES = Axis("cones")
-# Rows of the Newton update vectors, one per dof and slot (see nt_vec)
-NT_VEC_ROWS = Axis("nt_vec_rows")
+# Sizes of the constraint solve
+CONSTRAINTS = Size("constraints")
+CONTACTS = Size("contacts")
+# Rows of the elliptic cones, and the rows of each (see n_constraints_cone)
+CONE_ROWS = Size("cone_rows")
+ROWS_PER_CONTACT = Size("rows_per_contact")
+# Fused updates of the per-island factor, one slot each (see nt_vec)
+NT_VEC_SLOTS = Size("nt_vec_slots")
 # Dofs a Jacobian row reaches at most (see jac_dofs_idx)
-JAC_DOFS = Axis("jac_dofs")
-# Columns of the noslip scratch, two per environment, or per lane of the cooperative sweep (see noslip_MinvJT)
-NOSLIP_COLUMNS = Axis("noslip_columns")
-# Slots of the work-lists of the tiled island seed, and their size classes (see factor_worklist_i_b)
-WORKLIST = Axis("worklist")
-TILE_CLASSES = Axis("tile_classes")
+JAC_DOFS = Size("jac_dofs")
+# Lanes of the cooperative noslip sweep, one without it (see noslip_MinvJT)
+NOSLIP_LANES = Size("noslip_lanes")
+# Size classes of the work-lists of the tiled island seed (see factor_worklist_i_b)
+TILE_CLASSES = Size("tile_classes")
 
 # The rows of the constraint state and of the islands the cooperative kernels read, one env per block, which they
 # read from consecutive addresses once stored environment-first
@@ -971,8 +1032,8 @@ class IslandState(Data, kind=DataKind.SCRATCH):
     # island_tile_caps): class c holds its factor_worklist_size[c] awake islands in its own region of the two index
     # lists, of n_trees * _B slots each, in the order of the atomic reservation of the partition pass. Read where an env
     # can hold several islands (see func_island_tiled_factor_solve_all in solver.py).
-    factor_worklist_i_b: qd.Tensor = field(int, shape=(WORKLIST,), labels=WORKLISTS)
-    factor_worklist_i_island: qd.Tensor = field(int, shape=(WORKLIST,), labels=WORKLISTS)
+    factor_worklist_i_b: qd.Tensor = field(int, shape=(TILE_CLASSES * TREES * ENVS,), labels=WORKLISTS)
+    factor_worklist_i_island: qd.Tensor = field(int, shape=(TILE_CLASSES * TREES * ENVS,), labels=WORKLISTS)
     factor_worklist_size: qd.Tensor = field(int, shape=(TILE_CLASSES,), labels=WORKLISTS)
     # Scratch of the reverse Cuthill-McKee tree reorder of the CPU per-island skyline path: a tree's island-local slot,
     # contact degree and ordered flag, and the resulting visit order. Distinct buffers, since quadrants assumes
@@ -993,14 +1054,14 @@ class IslandState(Data, kind=DataKind.SCRATCH):
 # =========================================== IKState ===========================================
 
 
-# Axes of the inverse-kinematics scratch, sized by the largest entity of the solver and the target cap
-IK_QS = Axis("ik_qs")
-IK_DOFS = Axis("ik_dofs")
-IK_LINKS = Axis("ik_links")
-IK_JOINTS = Axis("ik_joints")
-IK_TARGETS = Axis("ik_targets")
+# Sizes of the inverse-kinematics scratch, sized by the largest entity of the solver and the target cap
+IK_QS = Size("ik_qs")
+IK_DOFS = Size("ik_dofs")
+IK_LINKS = Size("ik_links")
+IK_JOINTS = Size("ik_joints")
+IK_TARGETS = Size("ik_targets")
 # The pose residuals of the targets stacked, six per target
-IK_ERRORS = Axis("ik_errors")
+IK_ERRORS = Size("ik_errors")
 
 
 class IKState(Data, kind=DataKind.SCRATCH):
@@ -1084,7 +1145,7 @@ class IKScratch(Data, kind=DataKind.SCRATCH):
 
 
 # The dofs of the widest entity of the solver, and the scratch of its kinematics queries
-ENTITY_DOFS = Axis("entity_dofs")
+ENTITY_DOFS = Size("entity_dofs")
 KINEMATICS = Label("kinematics")
 
 
@@ -1135,8 +1196,8 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     cone_prev_jaref: qd.Tensor = field(float, shape=(CONE_ROWS, ENVS), labels=(SERIAL_ROWS, CONE_INCREMENTAL))
     # Per contact under 'signorini': the latched normal force scaling its friction discs (negative until seeded, see
     # func_relatch_cone in solver.py), and the gap between the iterate's normal force and the latch at the last update.
-    cone_latch: qd.Tensor = field(float, shape=(CONES, ENVS), labels=SIGNORINI)
-    cone_latch_gap: qd.Tensor = field(float, shape=(CONES, ENVS), labels=SIGNORINI)
+    cone_latch: qd.Tensor = field(float, shape=(CONE_ROWS // ROWS_PER_CONTACT, ENVS), labels=SIGNORINI)
+    cone_latch_gap: qd.Tensor = field(float, shape=(CONE_ROWS // ROWS_PER_CONTACT, ENVS), labels=SIGNORINI)
     search: qd.Tensor = field(float, shape=(DOFS, ENVS), labels=COOPERATIVE_ROWS)
     qfrc_constraint: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
     qacc: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.STATE, labels=COOPERATIVE_ROWS)
@@ -1149,7 +1210,7 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     # Rank-1 working vectors of the incremental Cholesky update, flattened slot-minor as [i_d * n_slots + i_u]: one slot
     # per fused update of the per-island factor (func_rank_batch_update_island), a single slot for the whole-env factor
     # of a single-island scene (indexing then reduces to [i_d]). Flat 2D to keep the DOF-vec rank and layout everywhere.
-    nt_vec: qd.Tensor = field(float, shape=(NT_VEC_ROWS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
+    nt_vec: qd.Tensor = field(float, shape=(DOFS * NT_VEC_SLOTS, ENVS), labels=(COOPERATIVE_ROWS, NEWTON))
     # Hessian matrix of the optimization problem as a dense 2D tensor.
     # Note that only the lower triangular part is updated for efficiency because this matrix is symmetric by definition.
     # As a result, the values of the strictly upper triangular part is undefined - except under
@@ -1224,7 +1285,7 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     # Scratch of the noslip sweep (empty when noslip is off): M^{-1} J^T of the two rows of the pair being updated, in
     # the two columns of the env, or of the lane of the cooperative sweep at [i_d, 2 * (i_b * 32 + tid) + i_r] (see
     # func_noslip_update_row in noslip.py).
-    noslip_MinvJT: qd.Tensor = field(float, shape=(DOFS, NOSLIP_COLUMNS), labels=NOSLIP)
+    noslip_MinvJT: qd.Tensor = field(float, shape=(DOFS, 2 * NOSLIP_LANES * ENVS), labels=NOSLIP)
     # Row coloring of the cooperative noslip sweep (empty otherwise, see func_color_rows_batch in noslip.py): the color
     # of each row, the color count of each island and the next free color of the mass block starting at each dof.
     noslip_rows_color: qd.Tensor = field(int, shape=(CONSTRAINTS, ENVS), labels=(COOPERATIVE_ROWS, NOSLIP_COOPERATIVE))
@@ -3207,7 +3268,7 @@ class DataManager:
                 f"Mass matrix shape (n_dofs={solver.n_dofs_}, n_dofs={solver.n_dofs_}, n_envs={solver._B}) is too large."
             )
         config, options = solver.rigid_config, solver._options
-        shape = dict(
+        sizes = dict(
             envs=solver._B,
             qs=solver.n_qs_,
             dofs=solver.n_dofs_,
@@ -3217,11 +3278,10 @@ class DataManager:
         )
         values = dict(EPS=gs.EPS)
         if is_dynamic:
-            shape.update(
+            sizes.update(
                 geoms=solver.n_geoms_,
                 trees_levels_links=np.count_nonzero(solver._links_tree_root_idx >= 0),
                 child_links=np.count_nonzero(solver._links_parent_idx >= 0),
-                links_bounds=solver.n_links_ + 1,
             )
             values.update(
                 substep_dt=solver._substep_dt,
@@ -3237,7 +3297,7 @@ class DataManager:
                 hibernation_thresh_vel=solver._hibernation_thresh_vel,
             )
         self.rigid_info = RigidInfo(
-            shape=shape,
+            sizes=sizes,
             values=values,
             layout={
                 RigidInfo.mass_mat: (2, 1, 0) if is_dynamic and config.enable_cooperative_constraint_kernels else None
@@ -3284,7 +3344,7 @@ class DataManager:
 
         entity_dofs = max((entity.n_dofs for entity in solver.entities), default=0)
         self.kinematics_scratch = KinematicsScratch(
-            shape=dict(envs=solver._B, qs=solver.n_qs, entity_dofs=entity_dofs), unused={KINEMATICS: entity_dofs == 0}
+            sizes=dict(envs=solver._B, qs=solver.n_qs, entity_dofs=entity_dofs), unused={KINEMATICS: entity_dofs == 0}
         )
 
         self.dyn_info = DynInfo(
@@ -3327,7 +3387,7 @@ class DataManager:
         mass, a center of mass or an inertia allocates none of this.
         """
         if self._weight_scratch is None:
-            self._weight_scratch = WeightScratch(shape=dict(envs=self._solver._B, dofs=self._solver.n_dofs_))
+            self._weight_scratch = WeightScratch(sizes=dict(envs=self._solver._B, dofs=self._solver.n_dofs_))
         return self._weight_scratch
 
     @property
@@ -3341,7 +3401,7 @@ class DataManager:
             entities = self._solver.entities
             n_targets = self._solver._options.IK_max_targets
             self._ik_scratch = IKScratch(
-                shape=dict(
+                sizes=dict(
                     envs=self._solver._B,
                     ik_qs=max([entity.n_qs for entity in entities]),
                     ik_dofs=max([entity.n_dofs for entity in entities]),
