@@ -176,8 +176,8 @@ def field(
     Declare a struct field that departs from the defaults of its struct (see Data).
 
     `shape` replaces the shape of the struct, axes and fixed sizes. `kind` replaces its kind (see DataKind). `layout`
-    is the physical order of the axes when its switch is on: environment first for a switch alone, the environment axis
-    being the last one, else the given permutation. `when` makes the array a placeholder unless its switch is on.
+    is the physical order of the axes: a permutation, or a switch alone for the environment axis, the last one, first,
+    or a permutation and the switch it holds under. `when` makes the array a placeholder unless its switch is on.
     `grad` gives it gradients under REQUIRES_GRAD. An `ndarray` array is one whatever the backend of the solver data. A
     `lazy` member is allocated the first time it is read.
     """
@@ -261,20 +261,18 @@ class Data:
         """Return the names of the keywords of the constructor, required and optional."""
         names, optional_names = set(), set()
         for data_field, spec, kind, field_shape in cls._members(shape):
-            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                member_names, member_optional_names = data_field.type._parameters(field_shape)
-                if spec.when is not None:
-                    names.add(spec.when.name)
-                (names if spec.when is None else optional_names).update(member_names)
-                optional_names |= member_optional_names
-                continue
             # What a switch turns off is optional, and required once it is on (see '_allocate')
             if spec.when is not None:
                 names.add(spec.when.name)
             field_names = names if spec.when is None else optional_names
+            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
+                member_names, member_optional_names = data_field.type._parameters(field_shape)
+                field_names |= member_names
+                optional_names |= member_optional_names
+                continue
             field_names |= {dim.name for dim in field_shape if isinstance(dim, Axis)}
-            if spec.layout is not None:
-                field_names.add((spec.layout if isinstance(spec.layout, Switch) else spec.layout[1]).name)
+            if isinstance(spec.layout, Switch) or (spec.layout and isinstance(spec.layout[-1], Switch)):
+                field_names.add((spec.layout if isinstance(spec.layout, Switch) else spec.layout[-1]).name)
             if spec.grad:
                 field_names.add(REQUIRES_GRAD.name)
             if field_shape == () and kind in (DataKind.CONSTANT, DataKind.INFO):
@@ -302,32 +300,32 @@ class Data:
                 object.__setattr__(self, data_field.name, member)
                 continue
             dtype = cls._elements[data_field.name].dtype
-            needed = [dim.name for dim in field_shape if isinstance(dim, Axis)]
-            if field_shape == () and kind in (DataKind.CONSTANT, DataKind.INFO):
-                needed.append(data_field.name)
+            is_constant = field_shape == () and kind in (DataKind.CONSTANT, DataKind.INFO)
+            needed = [dim.name for dim in field_shape if isinstance(dim, Axis)] + (
+                [data_field.name] if is_constant else []
+            )
             if is_on and not values.keys() >= set(needed):
                 raise TypeError(f"{cls.__name__}.{data_field.name} needs {needed} once its switches are on.")
-            if is_on and field_shape == () and kind in (DataKind.CONSTANT, DataKind.INFO):
+            if is_on and is_constant:
                 object.__setattr__(self, data_field.name, V_SCALAR_FROM(dtype=dtype, value=values[data_field.name]))
                 continue
             sizes = [values[dim.name] if isinstance(dim, Axis) else dim for dim in field_shape] if is_on else [None]
-            dims = [max(int(size), 1) for size in sizes if not isinstance(size, tuple)] if None not in sizes else None
+            dims = (
+                None if None in sizes else tuple([max(int(size), 1) for size in sizes if not isinstance(size, tuple)])
+            )
             layout = None
-            if dims is not None and spec.layout is not None:
+            if dims and spec.layout is not None:
                 if isinstance(spec.layout, Switch):
-                    if values[spec.layout.name]:
-                        layout = (len(dims) - 1, *range(len(dims) - 1))
-                elif values[spec.layout[1].name]:
-                    layout = spec.layout[0]
+                    layout = (len(dims) - 1, *range(len(dims) - 1)) if values[spec.layout.name] else None
+                elif isinstance(spec.layout[-1], Switch):
+                    layout = spec.layout[0] if values[spec.layout[-1].name] else None
+                else:
+                    layout = spec.layout
             if spec.ndarray:
-                array = qd.ndarray(dtype, shape=() if dims is None else tuple(dims))
+                array = qd.ndarray(dtype, shape=dims or ())
             else:
-                array = V(
-                    dtype=dtype,
-                    shape=() if dims is None else tuple(dims),
-                    layout=layout,
-                    needs_grad=spec.grad and values.get(REQUIRES_GRAD.name, False),
-                )
+                needs_grad = spec.grad and values.get(REQUIRES_GRAD.name, False)
+                array = V(dtype=dtype, shape=dims or (), layout=layout, needs_grad=needs_grad)
             object.__setattr__(self, data_field.name, array)
 
     def _get_lazy(self, name):
