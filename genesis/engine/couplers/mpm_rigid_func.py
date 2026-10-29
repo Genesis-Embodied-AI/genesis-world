@@ -448,22 +448,14 @@ def func_rigid_energy(
 
 @qd.func(requires_top_level=True)
 def func_rigid_gradient(
-    particles: MpmParticles,
-    grid: qd.template(),  # MpmGrid
-    newton: qd.template(),  # MpmNewton
     coupling: qd.template(),  # MpmRigidCoupling
     dyn_state: array_class.DynState,
     constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
     config: qd.template(),  # MpmStaticConfig
     params: qd.template(),  # MpmParams
-    f,
 ):
-    """Gradient of the joint energy in x, after func_rigid_evaluate at the current x and the MPM assembly that staged
-    the row gradients: dt^2 (M qacc - qf_smooth - qfrc_constraint) minus the generalized force of the Rigid rows of the
-    particles on their links. Rigid's island factor of M + J^T D J is refreshed alongside, for the preconditioner."""
+    """Gradient of Rigid's share of the joint energy in x, after func_rigid_evaluate at the current x:
+    dt^2 (M qacc - qf_smooth - qfrc_constraint)."""
     n_dofs = coupling.x.shape[0]
     n_envs = coupling.x.shape[1]
     dt_sq = params.substep_dt[()] * params.substep_dt[()]
@@ -473,6 +465,37 @@ def func_rigid_gradient(
         if qd.static(config.has_rigid_rows):
             value -= constraint_state.qfrc_constraint[i_d, i_b]
         coupling.grad[i_d, i_b] = dt_sq * value
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_factor(
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),  # MpmStaticConfig
+):
+    """Rigid's island factor of M + J^T D J at the current x, for the preconditioner."""
+    if qd.static(config.has_rigid_rows):
+        func_hessian_and_cholesky_factor_direct(
+            constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
+        )
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_contact_gradient(
+    particles: MpmParticles,
+    grid: qd.template(),  # MpmGrid
+    newton: qd.template(),  # MpmNewton
+    coupling: qd.template(),  # MpmRigidCoupling
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    config: qd.template(),  # MpmStaticConfig
+    params: qd.template(),  # MpmParams
+    f,
+):
+    """The Rigid contact rows' share of the gradient in x, after func_rigid_gradient and the MPM assembly that staged
+    the row gradients: minus the generalized force of the rows of the particles on their links."""
     func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
     qd.loop_config(name="mpm_rigid_row_forces")
     for s in range(grid.n_valid[()]):
@@ -487,10 +510,6 @@ def func_rigid_gradient(
                     qd.atomic_add(coupling.link_F[i_l, i_b, d], g[d])
                     qd.atomic_add(coupling.link_F[i_l, i_b, 3 + d], torque[d])
     func_link_force_to_dofs(coupling, coupling.grad, -1.0, dyn_info.links, dyn_state.dofs, config)
-    if qd.static(config.has_rigid_rows):
-        func_hessian_and_cholesky_factor_direct(
-            constraint_state, dyn_info, rigid_info, rigid_config, compute_envelope=True
-        )
 
 
 @qd.func(requires_top_level=True)
@@ -559,30 +578,26 @@ def func_rigid_pcg_init_direction(
 
 
 @qd.func(requires_top_level=True)
-def func_rigid_pcg_matvec(
+def func_rigid_contact_matvec(
     particles: MpmParticles,
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     linear: qd.template(),  # MpmLinearSystem
     coupling: qd.template(),  # MpmRigidCoupling
     dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
     config: qd.template(),  # MpmStaticConfig
     params: qd.template(),  # MpmParams
     f,
 ):
-    """The joint operator beyond the MPM matrix, after func_linear_pcg_spmv, on p = (p_u, p_r).
+    """The Rigid contact rows' share of the joint operator beyond the MPM matrix, after func_linear_pcg_spmv, on
+    p = (p_u, p_r), and before func_rigid_matvec overwrites Ap_r.
 
     A particle with Rigid rows of Hessian H, trial displacement dxp = sum_a w_a p_u,a and contact point displacement dr of
-    p_r adds -w_a H dr to Ap_u,a and the generalized force of the spatial force (h, r x h), h = H (dr - dxp), to Ap_r;
-    Ap_r also takes (M + J^T D J) p_r over Rigid's active rows. p.Ap takes p_u.(-sum w_a H dr) and p_r.Ap_r.
+    p_r adds -w_a H dr to Ap_u,a and the spatial force (h, r x h), h = H (dr - dxp), to its link in `link_F`, which
+    func_rigid_contact_matvec_post hands to Ap_r. p.Ap takes p_u.(-sum w_a H dr).
     """
     ws = linear.pcg
-    n_dofs = coupling.x.shape[0]
-    n_envs = coupling.x.shape[1]
     func_link_spatial_disp(coupling, coupling.p, dyn_info.links, dyn_state.dofs, config)
     qd.loop_config(name="mpm_rigid_matvec_particles")
     for s in range(grid.n_valid[()]):
@@ -610,6 +625,19 @@ def func_rigid_pcg_matvec(
                 qd.atomic_add(coupling.link_F[i_l, i_b, d], h[d])
                 qd.atomic_add(coupling.link_F[i_l, i_b, 3 + d], torque[d])
             qd.atomic_add(ws.p_dot_ap[()], -dxp.dot(H_dr))
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_matvec(
+    coupling: qd.template(),  # MpmRigidCoupling
+    constraint_state: array_class.ConstraintState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    rigid_config: qd.template(),
+    config: qd.template(),  # MpmStaticConfig
+):
+    """Ap_r = (M + J^T D J) p_r over Rigid's active rows."""
+    n_envs = coupling.x.shape[1]
     initialize_Ma(coupling.ap, coupling.p, dyn_info, rigid_info, rigid_config)
     if qd.static(config.has_rigid_rows):
         qd.loop_config(name="mpm_rigid_matvec_rows")
@@ -624,7 +652,27 @@ def func_rigid_pcg_matvec(
                     for i_d_ in range(constraint_state.jac_n_dofs[i_c, i_b]):
                         i_d = constraint_state.jac_dofs_idx[i_c, i_d_, i_b]
                         coupling.ap[i_d, i_b] += coef * constraint_state.jac[i_c, i_d, i_b]
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_contact_matvec_post(
+    coupling: qd.template(),  # MpmRigidCoupling
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    config: qd.template(),  # MpmStaticConfig
+):
+    """Ap_r += the generalized force of the spatial forces func_rigid_contact_matvec accumulated on the links."""
     func_link_force_to_dofs(coupling, coupling.ap, 1.0, dyn_info.links, dyn_state.dofs, config)
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_matvec_dot(
+    coupling: qd.template(),  # MpmRigidCoupling
+    ws: qd.template(),  # PCGWorkspace
+):
+    """p.Ap += p_r.Ap_r, once Ap_r holds the whole joint operator."""
+    n_dofs = coupling.x.shape[0]
+    n_envs = coupling.x.shape[1]
     qd.loop_config(name="mpm_rigid_matvec_dot")
     for i_d, i_b in qd.ndrange(n_dofs, n_envs):
         if ws.converged[()] == 0:

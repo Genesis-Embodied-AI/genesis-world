@@ -19,7 +19,6 @@ from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM
 from genesis.engine.numerics.dynamic_exclusive_sum import DynamicExclusiveSum
 from genesis.engine.numerics.dynamic_radix_sort import DynamicRadixSort
 from genesis.engine.numerics.linear_pcg import PCGWorkspace
-from genesis.engine.numerics.newton_control import NewtonControl
 from genesis.engine.numerics.open_addressing_hash import OpenAddressingHash
 
 # Number of cells along each axis of a grid block, and of cells (and nodes) in a block
@@ -357,10 +356,6 @@ class MpmRigidCoupling:
         link_shape = (max(n_links, 1), n_envs)
         self.link_F = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
         self.link_V = qd.ndarray(gs.qd_float, shape=(*link_shape, 6))
-
-
-def get_mpm_newton_control() -> NewtonControl:
-    return NewtonControl(gs.qd_float)
 
 
 @qd.data_oriented

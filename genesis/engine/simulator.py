@@ -26,6 +26,7 @@ from .solvers import (
     ToolSolver,
 )
 from .solvers.base_solver import GravityMixin, TimeBasedMixin
+from .solvers.newton_solver import NewtonSolver
 from .states.solvers import SimState, SimulatorCheckpoint
 
 if TYPE_CHECKING:
@@ -88,6 +89,9 @@ class Simulator(RBC):
         self.pbd_solver = PBDSolver(self.scene, self, options.pbd)
         self.fem_solver = FEMSolver(self.scene, self, options.fem)
         self.sf_solver = SFSolver(self.scene, self, options.sf)
+        # The Newton solve of the solvers that couple strongly, into which they register at build. It owns no physical
+        # state, so it stays out of the solvers whose state the simulator gathers.
+        self.newton_solver = NewtonSolver(self.scene, self)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -486,6 +490,7 @@ class Simulator(RBC):
 
     # -------------- post coupling --------------
     def substep_post_coupling(self, f):
+        self.newton_solver.step(f)
         for solver in self._active_solvers:
             solver.substep_post_coupling(f)
 

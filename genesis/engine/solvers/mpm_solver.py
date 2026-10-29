@@ -10,8 +10,14 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.couplers import mpm_exchange_func, mpm_rigid_func
+from genesis.engine.couplers import mpm_exchange_func
 from genesis.engine.couplers.mpm_rigid_func import func_build_rigid_rows
+from genesis.engine.couplers.mpm_rigid_newton import (
+    MpmRigidContact,
+    MpmRigidContactHost,
+    RigidNewtonHost,
+    RigidNewtonParticipant,
+)
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
 from genesis.engine.numerics.bcoo_matrix import func_sort_reduce_bcoo, func_sort_reduce_bcoo_graph, sort_reduce_bcoo
@@ -52,7 +58,6 @@ from .mpm_data import (
     MpmRigidCoupling,
     MpmStaticConfig,
     get_mpm_material_table,
-    get_mpm_newton_control,
     get_mpm_particles,
     get_mpm_particles_info,
     get_mpm_particles_ng,
@@ -76,11 +81,95 @@ NEWTON_VELOCITY_TOL = 5e-2
 # whose kernels each compile once and are shared by every call site; the host-driven substep is the default meanwhile.
 USE_SUBSTEP_GRAPH = False
 
-# Run the Newton iterations of the host-driven substep as one graph (`kernel_newton_loop`), or drive them from the host
-# with only the PCG iterations as a graph. The graph runs faster, the host loop compiles faster.
-# FIXME: The Newton graph compiles cold in about 47 s against about 15 s for its stages as separate kernels (the
-# compile time of a graph grows faster than its size), and a change of any stage in it recompiles it whole.
-USE_NEWTON_GRAPH = False
+
+@qd.data_oriented
+class MpmNewtonParticipant:
+    """The grid displacement as the primary participant of the NewtonSolver: it owns the BCOO matrix and the PCG
+    workspace `ws` whose scalars every participant reduces into, with the brick preconditioner over its rows."""
+
+    def __init__(self, particles, particles_info, materials, grid, newton, linear, params):
+        self.particles = particles
+        self.particles_info = particles_info
+        self.materials = materials
+        self.grid = grid
+        self.newton = newton
+        self.linear = linear
+        self.params = params
+        self.ws = linear.pcg
+
+    @qd.func(requires_top_level=True)
+    def func_assemble(self, control: qd.template(), f):
+        """The Newton system at the current iterate, inside a graph that needs no storage growth (see
+        NewtonSolver.kernel_newton_loop)."""
+        func_reset_newton_measures(control)
+        mpm_func.func_report_extent(self.grid, self.linear)
+        mpm_func.func_assemble(
+            self.particles,
+            self.particles_info,
+            self.materials,
+            self.grid,
+            self.newton,
+            self.linear,
+            self.params,
+            f,
+            self.params.substep_dt[()],
+        )
+        func_sort_reduce_bcoo_graph(self.linear.matrix)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_prepare(self):
+        mpm_func.func_reset_brick(self.grid, self.linear)
+        mpm_func.func_gather_brick(self.linear)
+        mpm_func.func_invert_brick(self.grid, self.linear)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_init_residual(self):
+        func_init_linear_pcg_residual(self.ws, self.linear.b_rhs, self.linear.solution)
+
+    @qd.func(requires_top_level=True)
+    def func_precondition(self):
+        mpm_func.func_apply_brick(self.grid, self.linear)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_init_direction(self):
+        func_init_linear_pcg_direction(self.ws)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_spmv(self):
+        func_linear_pcg_spmv(self.ws, self.linear.matrix)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_update_xr(self):
+        func_linear_pcg_update_xr(self.ws, self.linear.solution)
+
+    @qd.func(requires_top_level=True)
+    def func_pcg_direction_update(self):
+        func_linear_pcg_direction_update(self.ws)
+
+    @qd.func(requires_top_level=True)
+    def func_start_line_search(self, control: qd.template(), f):
+        mpm_func.func_negate_du(self.grid, self.newton, self.linear)
+        mpm_func.func_record_start_point(self.grid, self.newton)
+        mpm_func.func_contribute_newton_max_disp(self.particles, self.grid, self.newton, control, self.params, f)
+
+    @qd.func(requires_top_level=True)
+    def func_step_forward(self, control: qd.template()):
+        mpm_func.func_step_forward(self.grid, self.newton, control)
+
+    @qd.func(requires_top_level=True)
+    def func_energy(self, control: qd.template(), f, is_trial):
+        mpm_func.func_energy(
+            self.particles,
+            self.particles_info,
+            self.materials,
+            self.grid,
+            self.newton,
+            control,
+            self.params,
+            f,
+            self.params.substep_dt[()],
+            is_trial,
+        )
 
 
 @qd.data_oriented
@@ -199,9 +288,28 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._mpm_grid = MpmGrid(n_sort, max_blocks, max_blocks)
         self._mpm_newton = MpmNewton(n_sort, max_blocks * BLOCK_CELLS)
         self._mpm_linear = MpmLinearSystem(max_blocks * BLOCK_CELLS, max_triplets)
-        self._mpm_control = get_mpm_newton_control()
+        newton_solver = self._sim.newton_solver
+        self._mpm_control = newton_solver.control
         self._mpm_control.disp_tol.from_numpy(np.array(NEWTON_VELOCITY_TOL * self.substep_dt, dtype=gs.np_float))
         self._mpm_force_fields = MpmForceFields(self._ffs)
+
+        # The grid displacement is the primary unknown of the substep's Newton solve; Rigid's dofs and the contact rows
+        # on them join it when coupled
+        self._newton_participant = MpmNewtonParticipant(
+            self.particles,
+            self.particles_info,
+            self._mpm_materials,
+            self._mpm_grid,
+            self._mpm_newton,
+            self._mpm_linear,
+            self._mpm_params,
+        )
+        newton_solver.register_primary(self, self._newton_participant)
+        if self._rigid_coupled:
+            rigid_participant = RigidNewtonParticipant(rigid, self._mpm_coupling, self._mpm_config, self._mpm_params)
+            newton_solver.register_secondary(RigidNewtonHost(rigid, rigid_participant), rigid_participant)
+            contact = MpmRigidContact(self._newton_participant, rigid_participant)
+            newton_solver.register_coupling(MpmRigidContactHost(contact), contact)
 
     def _wall_sol_params(self):
         """Rigid's default solref / solimp parameters, with the Rigid constraint timeconst floored at twice the
@@ -418,12 +526,12 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         matrix.triplet_overflow.from_numpy(np.array(0, dtype=np.int32))
 
     def substep_post_coupling(self, f):
-        if not self._mpm_sized:
-            self._size_to_particles(f)
+        """The substep's G2P happened in the Newton solver's substep, which ran before this; under the single substep
+        graph, this runs the whole substep instead."""
         if USE_SUBSTEP_GRAPH:
+            if not self._mpm_sized:
+                self._size_to_particles(f)
             self._substep_graph(f)
-        else:
-            self._substep_launches(f)
 
         # Apply particle constraints after g2p
         if self._constraints_initialized:
@@ -460,59 +568,6 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             kernel_assemble(*args)
         sort_reduce_bcoo(self._mpm_linear.matrix)
 
-    def _rigid_args(self):
-        rigid = self._sim.rigid_solver
-        return (
-            rigid.dyn_state,
-            rigid.constraint_solver.constraint_state,
-            rigid.dyn_info,
-            rigid.rigid_info,
-            rigid.rigid_config,
-            self._mpm_config,
-            self._mpm_params,
-        )
-
-    def _rigid_point_disp(self, f):
-        kernel_rigid_point_disp(
-            self.particles, self._mpm_grid, self._mpm_newton, self._mpm_coupling, *self._rigid_args(), f
-        )
-
-    def _rigid_energy(self, is_trial):
-        kernel_rigid_energy(self._mpm_coupling, self._mpm_control, *self._rigid_args(), is_trial)
-
-    def _newton_loop_launches(self, f):
-        """The Newton iterations driven from the host, the PCG iterations of each as one graph."""
-        grid, newton, linear, control = self._mpm_grid, self._mpm_newton, self._mpm_linear, self._mpm_control
-        coupling, has_rigid = self._mpm_coupling, self._rigid_coupled
-        params = self._mpm_params
-        energy_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, control, params, f)
-        while True:
-            self._assemble(f)
-            if has_rigid:
-                rigid_args = self._rigid_args()
-                kernel_rigid_newton_prepare(self.particles, grid, newton, coupling, *rigid_args, f)
-                kernel_coupled_pcg_start(grid, linear, coupling, *rigid_args)
-                kernel_coupled_pcg_loop(self.particles, grid, newton, linear, coupling, *rigid_args, f)
-                kernel_rigid_start_line_search(coupling, control)
-            else:
-                kernel_pcg_start(grid, linear)
-                kernel_pcg_loop(grid, linear)
-            kernel_start_line_search(self.particles, grid, newton, linear, control, params, f)
-            while True:
-                kernel_step_forward(grid, newton, control)
-                if has_rigid:
-                    kernel_rigid_step_forward(coupling, control)
-                    self._rigid_point_disp(f)
-                kernel_energy(*energy_args, 1)
-                if has_rigid:
-                    self._rigid_energy(1)
-                kernel_accept_or_backtrack(control)
-                if not int(control.ls_cond.to_numpy()):
-                    break
-            kernel_update_convergence(control)
-            if not int(control.newton_cond.to_numpy()):
-                break
-
     def _exchange_momentum(self, f):
         """The momentum exchanges with SPH, PBD and FEM, on the free node velocity of the substep."""
         grid, params = self._mpm_grid, self._mpm_params
@@ -526,16 +581,21 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         if self._fem_coupled:
             kernel_exchange_fem(grid, params, self._sim.fem_solver, f)
 
-    def _substep_launches(self, f):
-        """The substep of `kernel_substep` as separate launches, with the Newton, line-search and PCG loops and the
-        capacity growth driven from the host. When coupled with Rigid, the Newton solve is over the grid displacement
-        and Rigid's dofs together, and finishes Rigid's substep."""
-        rigid = self._sim.rigid_solver
-        grid, newton, linear, control = self._mpm_grid, self._mpm_newton, self._mpm_linear, self._mpm_control
-        params, config, coupling = self._mpm_params, self._mpm_config, self._mpm_coupling
-        has_rigid = self._rigid_coupled
-        energy_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, control, params, f)
+    # ------------------------------------------------------------------------------------
+    # --------------------------- Newton solver participant -----------------------------
+    # ------------------------------------------------------------------------------------
 
+    def runs_own_substep(self):
+        """Whether this solver runs its whole substep itself (see USE_SUBSTEP_GRAPH), the Newton solver skipping it."""
+        return USE_SUBSTEP_GRAPH
+
+    def newton_prepare(self, f):
+        """The substep up to the Newton solve: the grid, P2G with the force fields, the momentum exchanges, the
+        physical Hessian at u = 0 and the contact rows from it, which arm the Newton loop."""
+        if not self._mpm_sized:
+            self._size_to_particles(f)
+        rigid = self._sim.rigid_solver
+        grid, params = self._mpm_grid, self._mpm_params
         build_grid(self.particles, self.particles_ng, grid, params, f)
         while int(grid.grid_overflow.to_numpy()):
             self._grow_grid()
@@ -544,7 +604,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self.particles,
             self.particles_info,
             grid,
-            newton,
+            self._mpm_newton,
             self._mpm_force_fields,
             params,
             self._gravity,
@@ -552,15 +612,17 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             self._sim.cur_t,
         )
         self._exchange_momentum(f)
-        # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights
+        # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights. It
+        # also sizes the triplet storage for the substep's fixed grid topology, which every assembly of the Newton
+        # loop shares.
         self._assemble(f)
         kernel_contact_rows(
             self.particles,
             grid,
-            newton,
-            linear,
-            control,
-            config,
+            self._mpm_newton,
+            self._mpm_linear,
+            self._mpm_control,
+            self._mpm_config,
             params,
             rigid.dyn_state.geoms,
             rigid.dyn_info.geoms,
@@ -570,29 +632,16 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             rigid.collider.sdf.sdf_info,
             f,
         )
-        if has_rigid:
-            kernel_rigid_begin(coupling, *self._rigid_args())
-            self._rigid_point_disp(f)
-        kernel_energy(*energy_args, 0)
-        if has_rigid:
-            self._rigid_energy(0)
 
-        if USE_NEWTON_GRAPH:
-            # The assembly above sized the triplet storage for the substep's fixed grid topology, which every assembly
-            # of the Newton loop shares
-            newton_args = (self.particles, self.particles_info, self._mpm_materials, grid, newton, linear, control)
-            if has_rigid:
-                kernel_coupled_newton_loop(*newton_args, coupling, *self._rigid_args(), f)
-            else:
-                kernel_newton_loop(*newton_args, params, f)
-        else:
-            self._newton_loop_launches(f)
+    def newton_assemble(self, f):
+        self._assemble(f)
 
-        kernel_finalize(self.particles, self.particles_ng, grid, newton, params, f)
-        if has_rigid:
-            kernel_rigid_write_back(self.particles, grid, newton, coupling, *self._rigid_args(), f)
-            rigid.finish_deferred_substep()
-            kernel_add_mpm_contact_force(coupling, rigid.dyn_state.links, params)
+    def newton_finish(self, f):
+        """G2P from the solved grid displacement."""
+        kernel_finalize(self.particles, self.particles_ng, self._mpm_grid, self._mpm_newton, self._mpm_params, f)
+
+    def newton_after(self, f):
+        pass
 
     def _substep_graph(self, f):
         if self._rigid_coupled:
@@ -1549,23 +1598,6 @@ def kernel_contact_rows(
 
 
 @qd.kernel
-def kernel_energy(
-    particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    grid: qd.template(),
-    newton: qd.template(),
-    control: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-    is_trial: qd.i32,
-):
-    mpm_func.func_energy(
-        particles, particles_info, materials, grid, newton, control, params, f, params.substep_dt[()], is_trial
-    )
-
-
-@qd.kernel
 def kernel_assemble(
     particles: MpmParticles,
     particles_info: MpmParticlesInfo,
@@ -1581,117 +1613,6 @@ def kernel_assemble(
     func_reset_newton_measures(control)
     mpm_func.func_report_extent(grid, linear)
     mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
-
-
-@qd.kernel
-def kernel_pcg_start(
-    grid: qd.template(),
-    linear: qd.template(),
-):
-    """Brick preconditioner of the reduced matrix, and the PCG start from x = 0: r = b, z = M^-1 r, p = z."""
-    mpm_func.func_reset_brick(grid, linear)
-    mpm_func.func_gather_brick(linear)
-    mpm_func.func_invert_brick(grid, linear)
-    func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
-    mpm_func.func_apply_brick(grid, linear)
-    func_init_linear_pcg_direction(linear.pcg)
-
-
-@qd.kernel(graph=True)
-def kernel_pcg_loop(
-    grid: qd.template(),
-    linear: qd.template(),
-):
-    """The PCG iterations after kernel_pcg_start, until convergence or the iteration budget, as one graph."""
-    while qd.graph.do_while(linear.pcg.cond):
-        func_linear_pcg_spmv(linear.pcg, linear.matrix)
-        func_linear_pcg_update_xr(linear.pcg, linear.solution)
-        mpm_func.func_apply_brick(grid, linear)
-        func_linear_pcg_direction_update(linear.pcg)
-
-
-@qd.kernel
-def kernel_start_line_search(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    control: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    mpm_func.func_negate_du(grid, newton, linear)
-    mpm_func.func_record_start_point(grid, newton)
-    mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
-    func_check_convergence(control)
-    func_init_line_search(control)
-
-
-@qd.kernel
-def kernel_step_forward(
-    grid: qd.template(),
-    newton: qd.template(),
-    control: qd.template(),
-):
-    mpm_func.func_step_forward(grid, newton, control)
-
-
-@qd.kernel
-def kernel_accept_or_backtrack(control: qd.template()):
-    func_accept_or_backtrack(control)
-
-
-@qd.kernel
-def kernel_update_convergence(control: qd.template()):
-    func_update_convergence(control)
-
-
-@qd.kernel(graph=True)
-def kernel_newton_loop(
-    particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    control: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    """The Newton iterations of a substep as one graph, after the start energy armed the loop.
-
-    The triplet demand of an assembly depends on the grid topology only, fixed for the substep, so the assembly that
-    sized the storage before the loop covers every assembly inside it and the graph needs no capacity checkpoint.
-    """
-    dt = params.substep_dt[()]
-    while qd.graph.do_while(control.newton_cond):
-        func_reset_newton_measures(control)
-        mpm_func.func_report_extent(grid, linear)
-        mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
-        func_sort_reduce_bcoo_graph(linear.matrix)
-
-        mpm_func.func_reset_brick(grid, linear)
-        mpm_func.func_gather_brick(linear)
-        mpm_func.func_invert_brick(grid, linear)
-        func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
-        mpm_func.func_apply_brick(grid, linear)
-        func_init_linear_pcg_direction(linear.pcg)
-        while qd.graph.do_while(linear.pcg.cond):
-            func_linear_pcg_spmv(linear.pcg, linear.matrix)
-            func_linear_pcg_update_xr(linear.pcg, linear.solution)
-            mpm_func.func_apply_brick(grid, linear)
-            func_linear_pcg_direction_update(linear.pcg)
-
-        mpm_func.func_negate_du(grid, newton, linear)
-        mpm_func.func_record_start_point(grid, newton)
-        mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
-        func_check_convergence(control)
-        func_init_line_search(control)
-        while qd.graph.do_while(control.ls_cond):
-            mpm_func.func_step_forward(grid, newton, control)
-            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
-            func_accept_or_backtrack(control)
-        func_update_convergence(control)
 
 
 @qd.kernel
@@ -1727,302 +1648,3 @@ def kernel_finalize(
     dt = params.substep_dt[()]
     mpm_func.func_grid_velocity(grid, newton, dt)
     mpm_func.func_g2p_advect(particles, particles_ng, grid, params, f, dt)
-
-
-# ------------------------------------------ joint solve with Rigid ------------------------------------------
-
-
-@qd.kernel
-def kernel_rigid_begin(
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-):
-    mpm_rigid_func.func_rigid_begin(coupling, dyn_state.dofs, constraint_state, rigid_config, config, params)
-
-
-@qd.kernel
-def kernel_rigid_point_disp(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    mpm_rigid_func.func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
-    mpm_rigid_func.func_contact_point_disp(particles, grid, newton, coupling, dyn_state.links, params, f)
-
-
-@qd.kernel
-def kernel_rigid_energy(
-    coupling: qd.template(),
-    control: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    is_trial: qd.i32,
-):
-    mpm_rigid_func.func_rigid_evaluate(
-        coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
-    )
-    mpm_rigid_func.func_rigid_energy(coupling, control, params, is_trial)
-
-
-@qd.kernel
-def kernel_rigid_newton_prepare(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    mpm_rigid_func.func_rigid_evaluate(
-        coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
-    )
-    mpm_rigid_func.func_rigid_gradient(
-        particles,
-        grid,
-        newton,
-        coupling,
-        dyn_state,
-        constraint_state,
-        dyn_info,
-        rigid_info,
-        rigid_config,
-        config,
-        params,
-        f,
-    )
-
-
-@qd.kernel
-def kernel_coupled_pcg_start(
-    grid: qd.template(),
-    linear: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-):
-    """kernel_pcg_start over the MPM rows and the Rigid dofs, preconditioned by the bricks and Rigid's factor."""
-    mpm_func.func_reset_brick(grid, linear)
-    mpm_func.func_gather_brick(linear)
-    mpm_func.func_invert_brick(grid, linear)
-    func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
-    mpm_rigid_func.func_rigid_pcg_init(coupling)
-    mpm_func.func_apply_brick(grid, linear)
-    mpm_rigid_func.func_rigid_precondition(coupling, dyn_state, constraint_state, rigid_info, rigid_config, config)
-    func_init_linear_pcg_direction(linear.pcg)
-    mpm_rigid_func.func_rigid_pcg_init_direction(coupling, linear.pcg)
-
-
-@qd.kernel(graph=True)
-def kernel_coupled_pcg_loop(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    """kernel_pcg_loop over the MPM rows and the Rigid dofs, with the joint operator."""
-    while qd.graph.do_while(linear.pcg.cond):
-        func_linear_pcg_spmv(linear.pcg, linear.matrix)
-        mpm_rigid_func.func_rigid_pcg_matvec(
-            particles,
-            grid,
-            newton,
-            linear,
-            coupling,
-            dyn_state,
-            constraint_state,
-            dyn_info,
-            rigid_info,
-            rigid_config,
-            config,
-            params,
-            f,
-        )
-        mpm_rigid_func.func_rigid_pcg_update_xr(coupling, linear.pcg)
-        func_linear_pcg_update_xr(linear.pcg, linear.solution)
-        mpm_func.func_apply_brick(grid, linear)
-        mpm_rigid_func.func_rigid_precondition(coupling, dyn_state, constraint_state, rigid_info, rigid_config, config)
-        mpm_rigid_func.func_rigid_pcg_dot_rz(coupling, linear.pcg)
-        func_linear_pcg_direction_update(linear.pcg)
-        mpm_rigid_func.func_rigid_pcg_direction(coupling, linear.pcg)
-
-
-@qd.kernel
-def kernel_rigid_start_line_search(coupling: qd.template(), control: qd.template()):
-    mpm_rigid_func.func_rigid_start_line_search(coupling, control)
-
-
-@qd.kernel
-def kernel_rigid_step_forward(coupling: qd.template(), control: qd.template()):
-    mpm_rigid_func.func_rigid_step_forward(coupling, control)
-
-
-@qd.kernel(graph=True)
-def kernel_coupled_newton_loop(
-    particles: MpmParticles,
-    particles_info: MpmParticlesInfo,
-    materials: MpmMaterialTable,
-    grid: qd.template(),
-    newton: qd.template(),
-    linear: qd.template(),
-    control: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    """kernel_newton_loop over the grid displacement and Rigid's dofs together (design §6.2.3): one PCG over both,
-    preconditioned by the bricks and Rigid's island factor, and a line search on the joint energy."""
-    dt = params.substep_dt[()]
-    while qd.graph.do_while(control.newton_cond):
-        func_reset_newton_measures(control)
-        mpm_func.func_report_extent(grid, linear)
-        mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
-        func_sort_reduce_bcoo_graph(linear.matrix)
-        mpm_rigid_func.func_rigid_evaluate(
-            coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
-        )
-        mpm_rigid_func.func_rigid_gradient(
-            particles,
-            grid,
-            newton,
-            coupling,
-            dyn_state,
-            constraint_state,
-            dyn_info,
-            rigid_info,
-            rigid_config,
-            config,
-            params,
-            f,
-        )
-
-        mpm_func.func_reset_brick(grid, linear)
-        mpm_func.func_gather_brick(linear)
-        mpm_func.func_invert_brick(grid, linear)
-        func_init_linear_pcg_residual(linear.pcg, linear.b_rhs, linear.solution)
-        mpm_rigid_func.func_rigid_pcg_init(coupling)
-        mpm_func.func_apply_brick(grid, linear)
-        mpm_rigid_func.func_rigid_precondition(coupling, dyn_state, constraint_state, rigid_info, rigid_config, config)
-        func_init_linear_pcg_direction(linear.pcg)
-        mpm_rigid_func.func_rigid_pcg_init_direction(coupling, linear.pcg)
-        while qd.graph.do_while(linear.pcg.cond):
-            func_linear_pcg_spmv(linear.pcg, linear.matrix)
-            mpm_rigid_func.func_rigid_pcg_matvec(
-                particles,
-                grid,
-                newton,
-                linear,
-                coupling,
-                dyn_state,
-                constraint_state,
-                dyn_info,
-                rigid_info,
-                rigid_config,
-                config,
-                params,
-                f,
-            )
-            mpm_rigid_func.func_rigid_pcg_update_xr(coupling, linear.pcg)
-            func_linear_pcg_update_xr(linear.pcg, linear.solution)
-            mpm_func.func_apply_brick(grid, linear)
-            mpm_rigid_func.func_rigid_precondition(
-                coupling, dyn_state, constraint_state, rigid_info, rigid_config, config
-            )
-            mpm_rigid_func.func_rigid_pcg_dot_rz(coupling, linear.pcg)
-            func_linear_pcg_direction_update(linear.pcg)
-            mpm_rigid_func.func_rigid_pcg_direction(coupling, linear.pcg)
-
-        mpm_rigid_func.func_rigid_start_line_search(coupling, control)
-        mpm_func.func_negate_du(grid, newton, linear)
-        mpm_func.func_record_start_point(grid, newton)
-        mpm_func.func_contribute_newton_max_disp(particles, grid, newton, control, params, f)
-        func_check_convergence(control)
-        func_init_line_search(control)
-        while qd.graph.do_while(control.ls_cond):
-            mpm_func.func_step_forward(grid, newton, control)
-            mpm_rigid_func.func_rigid_step_forward(coupling, control)
-            mpm_rigid_func.func_link_spatial_disp(coupling, coupling.x, dyn_info.links, dyn_state.dofs, config)
-            mpm_rigid_func.func_contact_point_disp(particles, grid, newton, coupling, dyn_state.links, params, f)
-            mpm_func.func_energy(particles, particles_info, materials, grid, newton, control, params, f, dt, 1)
-            mpm_rigid_func.func_rigid_evaluate(
-                coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
-            )
-            mpm_rigid_func.func_rigid_energy(coupling, control, params, 1)
-            func_accept_or_backtrack(control)
-        func_update_convergence(control)
-
-
-@qd.kernel
-def kernel_rigid_write_back(
-    particles: MpmParticles,
-    grid: qd.template(),
-    newton: qd.template(),
-    coupling: qd.template(),
-    dyn_state: array_class.DynState,
-    constraint_state: array_class.ConstraintState,
-    dyn_info: array_class.DynInfo,
-    rigid_info: array_class.RigidInfo,
-    rigid_config: qd.template(),
-    config: qd.template(),
-    params: qd.template(),
-    f: qd.i32,
-):
-    mpm_rigid_func.func_rigid_evaluate(
-        coupling, dyn_state, constraint_state, dyn_info, rigid_info, rigid_config, config, params
-    )
-    mpm_rigid_func.func_rigid_write_back(coupling, constraint_state, config)
-    mpm_rigid_func.func_mpm_reaction(particles, grid, newton, coupling, dyn_state, constraint_state, params, f)
-
-
-@qd.kernel
-def kernel_add_mpm_contact_force(
-    coupling: qd.template(),
-    links_state: array_class.LinksState,
-    params: qd.template(),
-):
-    mpm_rigid_func.func_add_mpm_contact_force(coupling, links_state, params)
