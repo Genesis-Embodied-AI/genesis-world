@@ -51,7 +51,6 @@ Entities are physical objects in the simulation:
 | `FEMEntity` | FEM | Finite element deformable bodies |
 | `PBD2DEntity`, `PBD3DEntity` | PBD | Cloth, soft bodies |
 | `DroneEntity` | Rigid | Quadcopters with aerodynamics |
-| `ToolEntity` | Tool | Cutting/interaction tools |
 
 Location: `genesis/engine/entities/`
 
