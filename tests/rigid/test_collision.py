@@ -2029,8 +2029,13 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
     assert_allclose(exclude_entity.get_link("passer_excluded").get_pos(), (-1.0, 2.0, 0.2), atol=1e-3)
     assert_allclose(exclude_entity.get_link("passer_colliding").get_pos(), (1.0, 2.0, 0.6), atol=1e-3)
 
-    # The importers realize any collision matrix whose geoms fall into at most 31 groups of identical excluded partners.
+    # Random matrices mostly fit one bit per group of geoms excluding the same partners. A path of geoms, each one
+    # excluding its neighbours, and disjoint excluded pairs among free geoms both need more groups than bits.
     rng = np.random.default_rng(0)
+    collision_matrices = [
+        (40, frozenset(frozenset((i_g, i_g + 1)) for i_g in range(39)), 31),
+        (52, frozenset(frozenset((2 * i_p, 2 * i_p + 1)) for i_p in range(16)), 31),
+    ]
     for density in (0.0, 0.05, 0.25, 0.5, 0.75, 1.0):
         for _ in range(64):
             num_geoms = int(rng.integers(1, 32))
@@ -2040,27 +2045,21 @@ def test_contype_conaffinity(boxes_dropped_with_contact_exclude, show_viewer, to
                 for i_gb in range(i_ga + 1, num_geoms)
                 if rng.random() < density
             )
-            masks = solve_contype_conaffinity(num_geoms, invalid_pairs)
-
-            assert masks is not None
-            for i_ga, (contype, conaffinity) in enumerate(masks):
-                assert 0 < (contype | conaffinity).bit_length() <= 31
-                for i_gb in range(i_ga + 1, num_geoms):
-                    is_colliding = bool((contype & masks[i_gb][1]) | (masks[i_gb][0] & conaffinity))
-                    assert is_colliding != (frozenset((i_ga, i_gb)) in invalid_pairs)
-
-    # Every geom excluding every other one needs one bit per geom to group, so a single-bit budget answers with the
-    # bit search instead. One bit realizes that matrix by leaving every 'contype' empty, which disables every pair.
-    num_geoms = 5
-    invalid_pairs = frozenset(
-        frozenset((i_ga, i_gb)) for i_ga in range(num_geoms) for i_gb in range(i_ga + 1, num_geoms)
+            collision_matrices.append((num_geoms, invalid_pairs, 31))
+    # Every geom excluding every other one needs one bit per geom to group, so a single-bit budget falls back on the
+    # clique cover, which realizes that matrix by leaving every 'contype' empty.
+    collision_matrices.append(
+        (5, frozenset(frozenset((i_ga, i_gb)) for i_ga in range(5) for i_gb in range(i_ga + 1, 5)), 1)
     )
-    masks = solve_contype_conaffinity(num_geoms, invalid_pairs, max_bits=1)
-    assert masks is not None
-    for i_ga, (contype, conaffinity) in enumerate(masks):
-        assert contype | conaffinity
-        for i_gb in range(i_ga + 1, num_geoms):
-            assert not ((contype & masks[i_gb][1]) | (masks[i_gb][0] & conaffinity))
+    for num_geoms, invalid_pairs, max_bits in collision_matrices:
+        masks = solve_contype_conaffinity(num_geoms, invalid_pairs, max_bits=max_bits)
+
+        assert masks is not None
+        for i_ga, (contype, conaffinity) in enumerate(masks):
+            assert 0 < (contype | conaffinity).bit_length() <= max_bits
+            for i_gb in range(i_ga + 1, num_geoms):
+                is_colliding = bool((contype & masks[i_gb][1]) | (masks[i_gb][0] & conaffinity))
+                assert is_colliding != (frozenset((i_ga, i_gb)) in invalid_pairs)
 
     # A matrix that one bit cannot realize is reported as such, so that callers fall back on their default masks.
     assert solve_contype_conaffinity(3, frozenset((frozenset((0, 1)), frozenset((0, 2)))), max_bits=1) is None
