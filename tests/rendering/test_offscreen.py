@@ -847,7 +847,6 @@ def test_segmentation_map(segmentation_level, particle_mode, renderer_type, rend
     if renderer_type == RENDERER_TYPE.RASTERIZER:
         entities_config = (
             *entities_config,
-            (gs.options.ToolEntityOptions, gs.materials.Material(), "visual"),
             (gs.options.FEMEntityOptions, gs.materials.Elastic(), "visual"),
             (gs.options.MPMEntityOptions, gs.materials.Elastic(), particle_mode),
             (gs.options.PBDClothEntityOptions, gs.materials.Cloth(), particle_mode),

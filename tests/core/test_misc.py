@@ -89,14 +89,6 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf):
                     scale=0.2,
                 ),
             )
-        if issubclass(options_cls, gs.options.ToolEntityOptions):
-            options_kwargs.update(
-                morph=gs.morphs.Mesh(
-                    file="meshes/stirrer.obj",
-                    pos=pos,
-                    scale=0.2,
-                ),
-            )
         if issubclass(options_cls, gs.options.FEMEntityOptions):
             options_kwargs.update(
                 material=gs.materials.Elastic(),
@@ -182,7 +174,6 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf):
         (gs.options.MPMEntityOptions, gs.materials.Cloth()),
         (gs.options.SPHEntityOptions, gs.materials.Elastic()),
         (gs.options.PBDClothEntityOptions, gs.materials.Liquid()),
-        (gs.options.ToolEntityOptions, gs.materials.Elastic()),
     ):
         with pytest.raises(gs.GenesisException, match="material"):
             options_cls(morph=gs.morphs.Sphere(), material=material)
@@ -447,7 +438,7 @@ def test_entity_options(tmp_path, show_viewer, tol, two_box_free_mjcf):
         else:
             pos = entity.get_state().pos
         drop = entity.options.morph.pos[2] - pos[..., 2]
-        if isinstance(entity.options, (gs.options.KinematicEntityOptions, gs.options.ToolEntityOptions)):
+        if isinstance(entity.options, gs.options.KinematicEntityOptions):
             assert_allclose(drop, 0.0, tol=tol)
         else:
             # The mean of the particles or vertices stands in for the center of mass, so it falls at gravity approximately

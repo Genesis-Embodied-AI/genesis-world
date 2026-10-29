@@ -13,7 +13,7 @@ import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
 from genesis.options.entities import MPMEntityOptions
-from genesis.utils.misc import broadcast_tensor, to_gs_tensor
+from genesis.utils.misc import broadcast_tensor
 
 from .base_entity import Entity
 

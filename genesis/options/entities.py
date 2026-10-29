@@ -17,7 +17,7 @@ from .indices import GeomIndex, LinkIndex, VertexIndex
 from .materials import BaseMaterial, Cloth, Elastic, ElastoPlastic, Liquid, Material, Muscle, Sand, Snow
 from .morphs import URDF, Mesh, Morph, Primitive
 from .options import Options
-from .solvers import FEMOptions, KinematicOptions, MPMOptions, PBDOptions, RigidOptions, SPHOptions, ToolOptions
+from .solvers import FEMOptions, KinematicOptions, MPMOptions, PBDOptions, RigidOptions, SPHOptions
 from .surfaces import Surface
 
 if TYPE_CHECKING:
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
         PBDParticleEntity,
         RigidEntity,
         SPHEntity,
-        ToolEntity,
     )
 
 
@@ -979,59 +978,6 @@ class PBDParticleEntityOptions(EntityOptions["PBDFreeParticleEntity"]):
     def _check_material(self) -> "PBDParticleEntityOptions":
         _reject_fields(self, self.material, ("bulk_modulus", "viscosity", "surface_tension"))
         return self
-
-
-class ToolEntitySolverOptions(Options):
-    """Options of the tool solver specific to one tool.
-
-    Parameters
-    ----------
-    coup_softness : float, optional
-        The distance over which the tool pushes the particles away, in m. A larger value holds the particles off more
-        smoothly, at the cost of a visible gap. Default is 0.01.
-    collision : bool, optional
-        Whether the particles collide with the tool. Disabling it spares the signed distance field and its cost.
-        Default is True.
-    sdf_res : int, optional
-        The resolution of the signed distance field of the tool along each axis. A finer grid resolves the shape of
-        the tool better, at the cost of memory and build time. Default is 128.
-    """
-
-    coup_softness: NonNegativeFloat = 0.01
-    collision: StrictBool = True
-    sdf_res: PositiveInt = 128
-
-
-class ToolEntityOptions(EntityOptions["ToolEntity"]):
-    """Options of a tool, a mesh whose pose the user drives and which material point method (MPM) entities collide with.
-
-    Use it to cut, push or scoop an MPM entity along a prescribed motion. A tool takes no forces in return, so use
-    a rigid entity instead where the reaction of the particles must move it. Parameters follow ``EntityOptions``, plus
-    the following.
-
-    Parameters
-    ----------
-    material : gs.materials.Material, optional
-        The physical properties of the tool, of which only the friction applies. If its friction is None, the tool is
-        frictionless. Defaults to ``gs.materials.Material()``.
-    solver_options : ToolEntitySolverOptions, optional
-        The options of the tool solver specific to the tool. Defaults to ``ToolEntitySolverOptions()``.
-    """
-
-    _solver_options_cls = ToolOptions
-
-    material: Material = Field(default_factory=Material)
-    solver_options: ToolEntitySolverOptions = Field(default_factory=ToolEntitySolverOptions)
-
-    @model_validator(mode="after")
-    def _check_material(self) -> "ToolEntityOptions":
-        _reject_fields(self, self.material, ("density", "friction_torsional", "friction_rolling"))
-        return self
-
-    @property
-    def friction(self) -> float:
-        """The friction coefficient of the tool, which is frictionless unless its material states one."""
-        return 0.0 if self.material.friction is None else self.material.friction
 
 
 class HybridEntitySolverOptions(Options):

@@ -61,7 +61,7 @@ class SPHEntity(ParticleEntity):
 
     def _add_particles_to_solver(self):
         material_params = self._options.material_params
-        self._solver._kernel_add_particles(
+        self._solver.add_particles(
             self._sim.cur_substep_local,
             self.active,
             self._particle_start,

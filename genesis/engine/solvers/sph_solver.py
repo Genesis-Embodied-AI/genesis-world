@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @qd.data_oriented
-class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
+class SPHSolver(ParticleSolver):
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
     # ------------------------------------------------------------------------------------
