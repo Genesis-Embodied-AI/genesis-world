@@ -46,7 +46,12 @@ class Rigid(Kinematic["RigidEntity"]):
     needs_coup : bool, optional
         Whether the material participates in coupling with other solvers. Default is True.
     coup_friction : float, optional
-        Friction used during coupling. Must be non-negative. Default is 0.1.
+        Friction used during coupling. Must be non-negative. If None, resolved depending on the coupler:
+          - ``SAPCouplerOptions`` and ``IPCCouplerOptions``: the ``friction`` of each geom, i.e. the material
+            ``friction`` if set, otherwise the value from the asset file, otherwise 1. IPC keeps a single value per
+            entity, so if its geoms differ, the largest one is used.
+          - ``LegacyCouplerOptions``: Defaults to 0.1.
+        Default is None.
     coup_softness : float, optional
         Softness of coupling interaction. Must be non-negative. Default is 0.002.
     coup_restitution : float, optional
@@ -95,7 +100,7 @@ class Rigid(Kinematic["RigidEntity"]):
     friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
     friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
     needs_coup: StrictBool = True
-    coup_friction: NonNegativeFloat = 0.1
+    coup_friction: NonNegativeFloat | None = None
     coup_softness: NonNegativeFloat = 0.002
     coup_restitution: Annotated[ValidFloat, Field(ge=0.0, le=1.0)] = 0.0
     sdf_cell_size: PositiveFloat = 0.005

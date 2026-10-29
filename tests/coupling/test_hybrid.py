@@ -511,3 +511,7 @@ def test_sap_fem_vs_robot(show_viewer):
 
     # Check that the legs of the ants are resting on the sphere
     assert_allclose(robot.get_qpos()[-4:].abs(), 1.0, tol=0.1)
+
+    # An unset coupling friction follows the sliding friction of each geom
+    for geom in robot.geoms:
+        assert_allclose(geom.coup_friction, geom.get_friction(), tol=gs.EPS)
