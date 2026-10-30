@@ -1,11 +1,11 @@
 """Materials, each stating the parameters of one physical law, whichever solver simulates the entity."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, PositiveFloat, ValidFloat
+from genesis.typing import NonNegativeFloat, PositiveFloat, StrArrayType, ValidFloat
 
 from .options import Options
 
@@ -268,3 +268,85 @@ class Muscle(BaseMaterial):
     friction: NonNegativeFloat | None = None
     youngs_modulus: PositiveFloat = 1e6
     poisson_ratio: PoissonRatio = 0.2
+
+
+class Kinematic(Options):
+    """Deprecated material of a kinematic entity, replaced by ``gs.options.KinematicEntityOptions``.
+
+    ``Scene.add_entity`` turns it into the options of the entity, with a warning. See ``KinematicEntityOptions`` for
+    'use_visual_raycasting'.
+    """
+
+    use_visual_raycasting: StrictBool | None = None
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        options_name = "RigidEntityOptions" if isinstance(self, Rigid) else "KinematicEntityOptions"
+        gs.logger.warning(
+            f"'gs.materials.{type(self).__name__}' is deprecated and will be removed. Pass "
+            f"'options=gs.options.{options_name}(...)' to 'add_entity' instead."
+        )
+
+    def get_entity_options_fields(self) -> dict[str, Any]:
+        """Return the fields of the entity options that this material stands for."""
+        return self.model_dump(exclude_none=True)
+
+
+class Rigid(Kinematic):
+    """Deprecated material of a rigid entity, replaced by ``gs.options.RigidEntityOptions``.
+
+    ``Scene.add_entity`` turns it into the options of the entity, with a warning. 'rho' is the density of
+    ``gs.materials.Material``, which takes the friction coefficients as well. 'gravity_compensation' and
+    'use_visual_raycasting' are fields of ``RigidEntityOptions``, and the coupling and signed distance field options
+    are fields of ``RigidEntitySolverOptions``. 'coup_links' and 'coup_collision_links' enable the coupling and the
+    collision of the links of these names alone, through the solver options of these links.
+    """
+
+    rho: PositiveFloat | None = None
+    friction: NonNegativeFloat | None = None
+    friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    gravity_compensation: ValidFloat | None = None
+    needs_coup: StrictBool | None = None
+    coup_friction: NonNegativeFloat | None = None
+    coup_softness: NonNegativeFloat | None = None
+    coup_restitution: Annotated[ValidFloat, Field(ge=0.0, le=1.0)] | None = None
+    coup_type: Literal["two_way_soft_constraint", "external_articulation", "ipc_only"] | None = None
+    coup_links: StrArrayType | None = None
+    enable_coup_collision: StrictBool | None = None
+    coup_collision_links: StrArrayType | None = None
+    contact_resistance: PositiveFloat | None = None
+    sdf_cell_size: PositiveFloat | None = None
+    sdf_min_res: Annotated[StrictInt, Field(ge=16)] | None = None
+    sdf_max_res: Annotated[StrictInt, Field(ge=16)] | None = None
+
+    def get_entity_options_fields(self) -> dict[str, Any]:
+        solver_fields = self.model_dump(exclude_none=True)
+        material_fields = {
+            name: solver_fields.pop(name)
+            for name in ("friction", "friction_torsional", "friction_rolling")
+            if name in solver_fields
+        }
+        if "rho" in solver_fields:
+            material_fields["density"] = solver_fields.pop("rho")
+        entity_fields = {
+            name: solver_fields.pop(name)
+            for name in ("use_visual_raycasting", "gravity_compensation")
+            if name in solver_fields
+        }
+        links_solver_fields: dict[str, dict[str, bool]] = {}
+        for field_name, flag_name in (("coup_links", "needs_coup"), ("coup_collision_links", "enable_coup_collision")):
+            links_name = solver_fields.pop(field_name, None)
+            if links_name is None:
+                continue
+            if not solver_fields.get(flag_name, True):
+                gs.raise_exception(f"'{field_name}' requires '{flag_name}=True'.")
+            solver_fields[flag_name] = False
+            for link_name in links_name:
+                links_solver_fields.setdefault(link_name, {})[flag_name] = True
+        return {
+            "material": Material(**material_fields),
+            "solver_options": solver_fields,
+            "links": {name: {"solver_options": fields} for name, fields in links_solver_fields.items()},
+            **entity_fields,
+        }
