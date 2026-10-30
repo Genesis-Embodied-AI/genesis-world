@@ -205,9 +205,8 @@ class Viewer(pyglet.window.Window):
         self._offscreen_result = None
 
         self._video_recorder = None
-        # Step counter of the last frame written to the video, so a paused (non-advancing) simulation does not fill
-        # the recording with duplicate frozen frames.
-        self._last_recorded_t = -1
+        self._video_size = None
+        self._recorded_frames = 0
 
         self._default_render_flags = {
             "flip_wireframe": False,
@@ -632,13 +631,15 @@ class Viewer(pyglet.window.Window):
             # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
             from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 
+            # H.264 yuv420p needs even dimensions. Window sizes can be odd, especially after resizing.
+            self._video_size = tuple(n + n % 2 for n in self.viewport_size)
             self._video_recorder = FFMPEG_VideoWriter(
                 filename=os.path.join(get_cache_dir(), "tmp_video.mp4"),
                 fps=self.viewer_flags["refresh_rate"],
-                size=self.viewport_size,
+                size=self._video_size,
+                ffmpeg_params=["-movflags", "+faststart"],
             )
-            # Sentinel so the first frame is always captured regardless of the current step counter.
-            self._last_recorded_t = -1
+            self._recorded_frames = 0
             self.set_caption("{} (RECORDING)".format(self.viewer_flags["window_title"]))
         self.viewer_flags["record"] = not self.viewer_flags["record"]
         return self.viewer_flags["record"]
@@ -1040,15 +1041,19 @@ class Viewer(pyglet.window.Window):
             cv2.imwrite(filename, np.flip(data, axis=-1))
 
     def _record(self):
-        """Append the current frame to the video, unless the simulation has not advanced since the last recorded
-        frame (e.g. while paused) so the recording does not accumulate duplicate frozen frames."""
-        t = self.gs_context.scene.sim.cur_step_global
-        if t == self._last_recorded_t:
-            return
-        self._last_recorded_t = t
+        """Record the rendered view, including camera motion and joint edits while simulation is paused."""
         data = self._renderer.jit.read_color_buf(*self._viewport_size, rgba=False)
-        if not np.all(data == 0.0):
-            self._video_recorder.write_frame(data)
+        height, width = data.shape[:2]
+        if height % 2 or width % 2:
+            data = np.pad(data, ((0, height % 2), (0, width % 2), (0, 0)), mode="edge")
+        # The writer consumes fixed-size raw frames; changing window dimensions mid-recording must not
+        # corrupt its byte stream. Keep the resolution chosen at the start of the recording.
+        if (data.shape[1], data.shape[0]) != self._video_size:
+            import cv2
+
+            data = cv2.resize(data, self._video_size)
+        self._video_recorder.write_frame(data)
+        self._recorded_frames += 1
 
     def _rotate(self):
         """Animate the scene by rotating the camera."""

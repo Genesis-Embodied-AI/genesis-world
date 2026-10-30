@@ -317,6 +317,8 @@ class IPCCouplerOptions(BaseCouplerOptions):
     enable_rigid_ground_contact: StrictBool = True
     enable_rigid_rigid_contact: StrictBool = True
     two_way_coupling: StrictBool = True
+    native_prismatic_limits: StrictBool = False
+    prismatic_limit_strength: PositiveFloat = 5000.0
     enable_rigid_dofs_sync: StrictBool = False
     free_base_driven_by_ipc: StrictBool = False
 
