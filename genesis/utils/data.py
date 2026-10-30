@@ -287,25 +287,26 @@ class Data:
     takes the shape of its field, else the default of its class, else that of its holder, and the kind of its field,
     else that of its holder, else the default of its class.
 
-    The constructor allocates every array of the tree in declaration order. `sizes` maps the name of each size to its
-    value, those no array uses being ignored. `values` maps the name of each constant to its value, validated strictly.
-    Both also map a field, by its name or by a reference (see FieldRef), to the sizes or the values of its own arrays,
-    the sizes given to a field overriding those of its holder, so one struct may hold several members of a type sized
-    apart. `requires_grad` gives gradients to the arrays declared with `grad`. The property tables map a selection of
-    arrays to a value: `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the
-    given permutation of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders.
-    A selection is a label or its name, matching any number of arrays, a reference to a field of the struct (see
-    FieldRef), a tuple of them, or None for every array. A member, by its name or by a reference, also takes a nested
-    table, whose keys select within it as in its own constructor. Where two keys select the same array, the deepest
-    field wins, None selecting the struct or member it applies to, and a tie or a label raises. A plain value in place
-    of a table applies to every array. `_binds` maps a field, by its name or by a reference, to an array or a struct
-    allocated elsewhere, bound in its place: no kernel may access both, since Quadrants assumes distinct kernel
-    arguments never alias.
+    The constructor allocates every array of the tree in declaration order. `sizes` maps each size (see Size), or its
+    name, to its value. `values` maps the name of each constant to its value, validated strictly. Both also map a field,
+    by its name or by a reference (see FieldRef), to the sizes or the values of its own arrays, the sizes given to a
+    field overriding those of its holder, so one struct may hold several members of a type sized apart. `requires_grad`
+    gives gradients to the arrays declared with `grad`. The property tables map a selection of arrays to a value:
+    `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the given permutation
+    of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders. A selection is a
+    label or its name, matching any number of arrays, a reference to a field of the struct (see FieldRef), a tuple of
+    them, or None for every array. A member, by its name or by a reference, also takes a nested table, whose keys select
+    within it as in its own constructor. Where two keys select the same array, the deepest field wins, None selecting
+    the struct or member it applies to, and a tie or a label raises. A plain value in place of a table applies to every
+    array. `_binds` maps a field, by its name or by a reference, to an array or a struct allocated elsewhere, bound in
+    its place: no kernel may access both, since Quadrants assumes distinct kernel arguments never alias.
     """
 
     kind: ClassVar["DataKind | None"] = None
     _shape: ClassVar[tuple | None] = None
     _lazy: ClassVar[dict[str, type]] = {}
+    # The names of the sizes of the arrays of the tree, lazy members included
+    _size_names: ClassVar[frozenset[str]] = frozenset()
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
 
@@ -327,15 +328,30 @@ class Data:
                 member = self.__dict__.get(f"_lazy_{name}")
                 if member is None:
                     sizes, requires_grad = self._context
-                    member = type(self)._lazy[name](sizes=sizes, requires_grad=requires_grad)
+                    member_cls = type(self)._lazy[name]
+                    member_sizes = {key: size for key, size in sizes.items() if key in member_cls._size_names}
+                    member = member_cls(sizes=member_sizes, requires_grad=requires_grad)
                     object.__setattr__(self, f"_lazy_{name}", member)
                 return member
 
             setattr(cls, name, property(get_lazy))
         dataclasses.dataclass(init=False, eq=True, frozen=True)(cls)
-        # An instance shadows them with its arrays and members
+        dims, size_names = [*(cls._shape or ())], set().union(*[member._size_names for member in cls._lazy.values()])
         for data_field in dataclasses.fields(cls):
+            # An instance shadows them with its arrays and members
             setattr(cls, data_field.name, FieldRef(cls, (data_field.name,)))
+            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
+                size_names |= data_field.type._size_names
+            spec = data_field.metadata.get(_SPEC, _FieldSpec())
+            element_shape = spec.dtype[1] if isinstance(spec.dtype, tuple) else ()
+            dims += [*(spec.shape or ()), *(element_shape if isinstance(element_shape, tuple) else (element_shape,))]
+        while dims:
+            dim = dims.pop()
+            if isinstance(dim, Size):
+                size_names.add(str(dim))
+            elif isinstance(dim, SizeExpr):
+                dims += dim._operands
+        cls._size_names = frozenset(size_names)
 
     def __init__(
         self,
@@ -383,6 +399,9 @@ class Data:
                 raise TypeError(f"{name}() '_binds' names {key}, which is no field of it.")
             binds[key_path] = bound
         sizes = _by_path(name, "sizes", sizes or {}, paths)
+        for entries in sizes.values():
+            if unknown := sorted(entries.keys() - cls._size_names):
+                raise TypeError(f"{name}() 'sizes' gives {unknown}, which size no array of it.")
         properties = {leaf.path: {} for leaf in leaves}
         for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
             # The entries of the table with the path of the member they apply to, a member taking a nested table
@@ -469,7 +488,7 @@ def _by_path(struct_name, arg_name, table, paths):
     while pending:
         path, level = pending.pop()
         for key, item in level.items():
-            key_path = (*path, *key._path) if isinstance(key, FieldRef) else (*path, key)
+            key_path = (*path, *key._path) if isinstance(key, FieldRef) else (*path, str(key))
             if isinstance(key, FieldRef) and key_path not in paths:
                 raise TypeError(f"{struct_name}() '{arg_name}' names {key}, which is no field of it.")
             if isinstance(item, Mapping):
