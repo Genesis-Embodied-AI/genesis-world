@@ -93,6 +93,7 @@ class ViewerOptions(Options):
                 gs.raise_exception("'max_FPS' is deprecated and replaced by 'refresh_rate'; set only one of them.")
             gs.logger.warning("'max_FPS' is deprecated and will be removed; it now maps to 'refresh_rate'.")
             self.refresh_rate = self.max_FPS
+            self.max_FPS = None
         if not self.enable_gui:
             return
         # The GUI overlay renders its own controls and captures keyboard input, so the help-text overlay and default
