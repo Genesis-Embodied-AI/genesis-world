@@ -210,6 +210,7 @@ class ConstraintSolver:
                 array_class.WORKLISTS: not (config.enable_tiled_island_seed and not config.is_single_island),
                 array_class.BACKWARD: not solver._requires_grad,
             },
+            requires_grad=solver._requires_grad,
             # The Hessian is the largest array of the simulation, so it reuses the scratch of the register-tiled mass
             # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
             # solve repopulates it in the same step. Quadrants assumes distinct kernel arguments never alias, so no

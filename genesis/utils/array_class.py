@@ -70,8 +70,8 @@ class RigidInfo(Data, kind=DataKind.CONSTANT):
     mass_mat: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
     # Stored in declared order whatever the kernels: its main reader, a serial back-substitution with lanes varying
     # i_b, would lose more from the reversed order than the tiled factor gains.
-    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, grad=True, labels=DYNAMICS)
-    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.DERIVED, grad=True, labels=DYNAMICS)
+    mass_mat_L: qd.Tensor = field(float, shape=(DOFS, DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
+    mass_mat_D_inv: qd.Tensor = field(float, shape=(DOFS, ENVS), kind=DataKind.DERIVED, labels=DYNAMICS, grad=True)
     # Scratch of the register-tiled mass factor, environment-first like the tile operations. The constraint Hessian
     # aliases it (see nt_H in ConstraintState).
     mass_mat_tiled_scratch: qd.Tensor = field(float, shape=(ENVS, DOFS, DOFS), kind=DataKind.SCRATCH, labels=TILED_MASS)
@@ -418,7 +418,9 @@ class ConstraintState(Data, kind=DataKind.SCRATCH):
     # The friction loss of a frictionloss row. The normal row of an elliptic cone holds the sliding friction coefficient
     # of its contact and its spin row the torsional one, its tangent rows 0.
     efc_frictionloss: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
-    efc_force: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), kind=DataKind.DERIVED, grad=True, labels=COOPERATIVE_ROWS)
+    efc_force: qd.Tensor = field(
+        float, shape=(CONSTRAINTS, ENVS), kind=DataKind.DERIVED, labels=COOPERATIVE_ROWS, grad=True
+    )
     efc_D: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     jv: qd.Tensor = field(float, shape=(CONSTRAINTS, ENVS), labels=COOPERATIVE_ROWS)
     # Stored environment-first for the cooperative kernels and serialized execution (see JACOBIAN_ROWS). The lanes of
