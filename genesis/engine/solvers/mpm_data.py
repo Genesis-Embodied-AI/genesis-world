@@ -130,15 +130,15 @@ class MpmParticles:
     Jp: qd.Tensor
 
 
-def get_mpm_particles(n_frames: int, n_particles: int, n_envs: int) -> MpmParticles:
+def get_mpm_particles(n_frames: int, n_particles: int, n_envs: int, requires_grad: bool = False) -> MpmParticles:
     shape = (n_frames, n_particles, n_envs)
     return MpmParticles(
-        pos=array_class.V(dtype=gs.qd_vec3, shape=shape),
-        vel=array_class.V(dtype=gs.qd_vec3, shape=shape),
-        C=array_class.V(dtype=gs.qd_mat3, shape=shape),
-        F=array_class.V(dtype=gs.qd_mat3, shape=shape),
-        actu=array_class.V(dtype=gs.qd_float, shape=shape),
-        Jp=array_class.V(dtype=gs.qd_float, shape=shape),
+        pos=array_class.V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        vel=array_class.V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        C=array_class.V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
+        F=array_class.V(dtype=gs.qd_mat3, shape=shape, needs_grad=requires_grad),
+        actu=array_class.V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        Jp=array_class.V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
     )
 
 
@@ -300,6 +300,9 @@ class MpmNewton:
         self.u = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.u_temp = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.du = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
+        # Adjoint of the node momentum and mass of P2G, which the backward pass of a substep gathers to the particles
+        self.adj_mom = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
+        self.adj_mass = qd.ndarray(gs.qd_float, shape=(max_nodes,))
         # Per sorted particle: V dt^2 P(F_trial) F^T, the factor of its elastic gradient contribution to every node
         self.g_p = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
         # Per sorted particle: the gradient of its contact rows with respect to its trial displacement sum_a w_a u_a

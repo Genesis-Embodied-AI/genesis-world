@@ -45,6 +45,10 @@ class PCGWorkspace:
         self.parity = scalar(qd.i32, 0, np.int32)
         self.p_dot_ap = scalar(value_type, 0.0, np_float)
         self.converged = scalar(qd.i32, 0, np.int32)
+        # With `check_curvature` set, a direction of non-positive curvature (p.Ap <= 0) flags `breakdown`: the operator
+        # is not positive definite, which a solve on a matrix that is not SPD-projected checks for
+        self.check_curvature = scalar(qd.i32, 0, np.int32)
+        self.breakdown = scalar(qd.i32, 0, np.int32)
         self.not_done = scalar(qd.i32, 0, np.int32)
         self.ticket = scalar(qd.i32, 0, np.int32)
 
@@ -124,6 +128,7 @@ def func_init_linear_pcg_residual(
             i += ws.n_blocks * PCG_BLOCK
         if t == 0:
             ws.converged[()] = 0
+            ws.breakdown[()] = 0
             ws.p_dot_ap[()] = 0.0
             ws.not_done[()] = 0
             ws.ticket[()] = 0
@@ -220,11 +225,15 @@ def func_linear_pcg_update_xr(
     ws: qd.template(),  # PCGWorkspace
     x: qd.template(),  # qd.Ndarray
 ):
-    """x += alpha p and r -= alpha Ap with alpha = rz / p.Ap, and the rz_new slot zeroed for the dot that follows."""
+    """x += alpha p and r -= alpha Ap with alpha = rz / p.Ap, and the rz_new slot zeroed for the dot that follows.
+    With `check_curvature`, a non-positive p.Ap along a non-zero direction flags `breakdown`."""
     qd.loop_config(name="pcg_update_xr", block_dim=PCG_BLOCK)
     for t in range(ws.n_blocks * PCG_BLOCK):
         if ws.converged[()] == 0:
             p_dot_ap = ws.p_dot_ap[()]
+            if t == 0 and ws.check_curvature[()] != 0:
+                if p_dot_ap <= 0.0 and ws.rz_slots[ws.parity[()]] != 0.0:
+                    ws.breakdown[()] = 1
             alpha = ws.rz_slots[ws.parity[()]] / p_dot_ap if p_dot_ap != 0.0 else ws.value_type(0.0)
             i = t
             while i < 3 * ws.n_rows[()]:

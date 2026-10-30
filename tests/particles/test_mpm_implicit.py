@@ -8,10 +8,12 @@ from genesis.engine.solvers.mpm_func import (
     extended_hencky_principal,
     fixed_corotated_energy,
     fixed_corotated_principal,
+    isotropic_first_piola_differential,
     isotropic_pair_block,
     isotropic_projected_modes,
     liquid_principal,
     q1_stencil,
+    q1_weight_hessian,
     signed_singular_values,
     stable_neohookean_principal,
 )
@@ -286,3 +288,94 @@ def test_q1_stencil_partition_of_unity():
         # Q1 reproduces linear fields: sum_a w_a x_a = x and sum_a x_a grad w_a^T = I / dx (dx = 1 / 2)
         np.testing.assert_allclose(w @ offsets, fx)
         np.testing.assert_allclose(offsets.T @ grad / 2.0, np.eye(3), atol=1e-12)
+
+
+@qd.kernel
+def kernel_q1_hessian(fx_in: qd.types.ndarray(), H_out: qd.types.ndarray()):
+    for _ in range(1):
+        fx = qd.Vector([fx_in[0], fx_in[1], fx_in[2]], dt=qd.f64)
+        for a in qd.static(range(8)):
+            H = q1_weight_hessian(fx, a, 2.0)
+            for i, j in qd.static(qd.ndrange(3, 3)):
+                H_out[a, i, j] = H[i, j]
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_q1_weight_hessian():
+    """The Hessians of the trilinear weights with respect to the particle position are those of the stencil
+    gradients."""
+    rng = np.random.default_rng(4)
+    inv_dx, h = 2.0, 1e-6
+    fx_nd, w_nd, grad_nd = qd.ndarray(qd.f64, shape=(3,)), qd.ndarray(qd.f64, shape=(8,)), qd.ndarray(qd.f64, (8, 3))
+    H_nd = qd.ndarray(qd.f64, shape=(8, 3, 3))
+
+    def gradient(fx):
+        fx_nd.from_numpy(fx)
+        kernel_q1(fx_nd, w_nd, grad_nd)
+        return qd_to_numpy(grad_nd).copy()
+
+    fx = rng.random(3)
+    fx_nd.from_numpy(fx)
+    kernel_q1_hessian(fx_nd, H_nd)
+    H = qd_to_numpy(H_nd)
+    for d in range(3):
+        step = np.zeros(3)
+        step[d] = h
+        # A step dx of the position moves fx by dx * inv_dx
+        H_fd = (gradient(fx + step) - gradient(fx - step)) / (2.0 * h / inv_dx)
+        np.testing.assert_allclose(H[:, :, d], H_fd, rtol=1e-6, atol=1e-6)
+
+
+_STRESS_FAMILIES = (fixed_corotated_principal, stable_neohookean_principal, extended_hencky_principal)
+
+
+@qd.kernel
+def kernel_first_piola(
+    family: qd.template(),  # int, the index of the energy in _STRESS_FAMILIES
+    F_in: qd.types.ndarray(),
+    dF_in: qd.types.ndarray(),
+    mu: qd.f64,
+    lam: qd.f64,
+    P_out: qd.types.ndarray(),
+    dP_out: qd.types.ndarray(),
+):
+    for _ in range(1):
+        F = qd.Matrix([[F_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
+        dF = qd.Matrix([[dF_in[i, j] for j in range(3)] for i in range(3)], dt=qd.f64)
+        U, S, V = qd.svd(F, qd.f64)
+        sigma = qd.Vector([S[0, 0], S[1, 1], S[2, 2]], dt=qd.f64)
+        psi, g, A = qd.static(_STRESS_FAMILIES[family])(sigma, mu, lam)
+        P = U @ qd.Matrix([[g[0], 0.0, 0.0], [0.0, g[1], 0.0], [0.0, 0.0, g[2]]], dt=qd.f64) @ V.transpose()
+        dP = isotropic_first_piola_differential(U, V, sigma, g, A, dF)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            P_out[i, j] = P[i, j]
+            dP_out[i, j] = dP[i, j]
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.cpu])
+@pytest.mark.parametrize("family", [0, 1, 2], ids=["fixed_corotated", "stable_neohookean", "extended_hencky"])
+def test_first_piola_differential(family):
+    """The exact stress differential the adjoint pulls back with is the directional derivative of the stress."""
+    rng = np.random.default_rng(6)
+    mu, lam, h = 3.0, 5.0, 1e-6
+    F_nd, dF_nd = qd.ndarray(qd.f64, (3, 3)), qd.ndarray(qd.f64, (3, 3))
+    P_nd, dP_nd = qd.ndarray(qd.f64, (3, 3)), qd.ndarray(qd.f64, (3, 3))
+
+    def evaluate(F, dF):
+        F_nd.from_numpy(F)
+        dF_nd.from_numpy(dF)
+        kernel_first_piola(family, F_nd, dF_nd, mu, lam, P_nd, dP_nd)
+        return qd_to_numpy(P_nd).copy(), qd_to_numpy(dP_nd).copy()
+
+    for _ in range(4):
+        # Away from inversion and from repeated singular values, where the decomposition is smooth
+        F = np.eye(3) + 0.3 * rng.standard_normal((3, 3))
+        assert np.linalg.det(F) > 0.1
+        dF = rng.standard_normal((3, 3))
+        _, dP = evaluate(F, dF)
+        dP_fd = (evaluate(F + h * dF, dF)[0] - evaluate(F - h * dF, dF)[0]) / (2.0 * h)
+        np.testing.assert_allclose(dP, dP_fd, rtol=1e-5, atol=1e-5)

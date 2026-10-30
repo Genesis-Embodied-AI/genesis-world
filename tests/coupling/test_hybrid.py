@@ -6,7 +6,6 @@ import pytest
 import torch
 
 import genesis as gs
-from genesis.engine.solvers.mpm_solver import NEWTON_VELOCITY_TOL
 from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
@@ -314,7 +313,7 @@ def test_deformable_parallel(show_viewer):
     assert_allclose(cloth.get_particles_vel(), 0.0, atol=1e-5)
     # The implicit MPM solve stops once its velocity update falls below the Newton tolerance, which bounds the velocity
     # of the cube at rest
-    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=NEWTON_VELOCITY_TOL)
+    assert_allclose(mpm_cube.get_particles_vel(), 0.0, atol=scene.sim.mpm_solver._options.newton_velocity_tol)
     assert_allclose(entity_fem._solver.get_state(0).vel, 0, atol=1e-3)
     assert_allclose(water.get_particles_vel(), 0.0, atol=5e-2)
 

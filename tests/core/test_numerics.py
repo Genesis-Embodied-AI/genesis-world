@@ -227,25 +227,23 @@ def kernel_pcg_solve(
         func_linear_pcg_direction_update(ws)
 
 
-@pytest.mark.required
-@pytest.mark.precision("64")
-@pytest.mark.parametrize("backend", [gs.gpu])
-def test_linear_pcg_solves_spd_block_system():
+def _pcg_block_system(off_diagonal_scale, check_curvature):
+    """A symmetric block system with SPD diagonal blocks a^T a + c I, solved by PCG with the block-Jacobi
+    preconditioner, which they keep SPD whatever the off-diagonal blocks. Returns the dense matrix, the right-hand side,
+    the solution and the workspace."""
     rng = np.random.default_rng(17)
     n_rows, n_triplets = 60, 400
     rows, cols, values, _ = _random_symmetric_triplets(rng, n_rows, n_triplets)
-    # Make the matrix SPD by adding a dominant diagonal of blocks a^T a + c I
     diag_values = np.stack([a.T @ a + 30.0 * np.eye(3) for a in rng.standard_normal((n_rows, 3, 3))])
     rows = np.concatenate((rows, np.arange(n_rows, dtype=np.int32)))
     cols = np.concatenate((cols, np.arange(n_rows, dtype=np.int32)))
-    values = np.concatenate((0.1 * values, diag_values))
+    values = np.concatenate((off_diagonal_scale * values, diag_values))
     n_triplets = len(rows)
     dense = np.zeros((3 * n_rows, 3 * n_rows))
     for row, col, block in zip(rows, cols, values):
         dense[3 * row : 3 * row + 3, 3 * col : 3 * col + 3] += block
         if row != col:
             dense[3 * col : 3 * col + 3, 3 * row : 3 * row + 3] += block.T
-    assert np.all(np.linalg.eigvalsh(dense) > 0)
 
     matrix = BCOOMatrix(
         shape=(n_rows, n_rows),
@@ -265,6 +263,7 @@ def test_linear_pcg_solves_spd_block_system():
     ws = PCGWorkspace(n_rows, qd.f64)
     ws.n_rows.from_numpy(np.array(n_rows, dtype=np.int32))
     ws.tol_rate.from_numpy(np.array(1e-20))
+    ws.check_curvature.from_numpy(np.array(int(check_curvature), dtype=np.int32))
     precond_inv_diag = qd.ndarray(qd.f64, shape=(9 * n_rows,))
     b = rng.standard_normal(3 * n_rows)
     b_nd, x_nd = qd.ndarray(qd.f64, shape=(3 * n_rows,)), qd.ndarray(qd.f64, shape=(3 * n_rows,))
@@ -275,9 +274,29 @@ def test_linear_pcg_solves_spd_block_system():
     kernel_invert_block_diagonal(matrix, precond_inv_diag)
     kernel_pcg_solve(ws, matrix, precond_inv_diag, b_nd, x_nd)
     qd.sync()
+    return dense, b, qd_to_numpy(x_nd), ws
 
-    np.testing.assert_allclose(qd_to_numpy(x_nd), np.linalg.solve(dense, b), rtol=1e-7, atol=1e-8)
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_linear_pcg_solves_spd_block_system():
+    # A dominant diagonal makes the matrix SPD, which the curvature check accepts
+    dense, b, x, ws = _pcg_block_system(0.1, check_curvature=True)
+    assert np.all(np.linalg.eigvalsh(dense) > 0)
+    np.testing.assert_allclose(x, np.linalg.solve(dense, b), rtol=1e-7, atol=1e-8)
     assert 0 < int(qd_to_numpy(ws.iter_remaining)) < int(qd_to_numpy(ws.max_iter))
+    assert int(qd_to_numpy(ws.breakdown)) == 0
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_linear_pcg_flags_non_positive_curvature():
+    # Off-diagonal blocks large enough to make the matrix indefinite, its SPD diagonal keeping the preconditioner SPD
+    dense, b, x, ws = _pcg_block_system(10.0, check_curvature=True)
+    assert np.linalg.eigvalsh(dense)[0] < 0
+    assert int(qd_to_numpy(ws.breakdown)) == 1
 
 
 @qd.kernel(graph=True)

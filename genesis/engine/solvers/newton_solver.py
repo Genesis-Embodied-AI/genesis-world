@@ -18,9 +18,11 @@ dataclasses, so the slots are kernel arguments rather than a list.
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.grad.bridge import custom_backward
 from genesis.engine.numerics.newton_control import (
     NewtonControl,
     func_accept_or_backtrack,
@@ -44,6 +46,10 @@ USE_NEWTON_GRAPH = False
 # Slots of the composed kernels
 N_SECONDARY_SLOTS = 3
 N_COUPLING_SLOTS = 3
+
+# Relative reduction of r . z at which the PCG of the adjoint solve stops, tighter than the forward solve's, whose
+# error the adjoint carries into every gradient
+ADJOINT_PCG_TOL_RATE = {64: 1e-24, 32: 1e-12}
 
 
 @qd.data_oriented
@@ -446,9 +452,42 @@ class NewtonSolver(Solver):
 
     def step(self, f):
         """The Newton solve of substep f: the participants' preparation, the start energy, the Newton iterations and
-        the hand-back of the solution."""
+        the hand-back of the solution.
+
+        Its launches are one entry of the step being recorded for a backward pass, which `backward` reverses: the
+        solve is differentiated by the implicit function theorem rather than launch by launch."""
         if not self.is_active or self._primary[0].runs_own_substep():
             return
+        with custom_backward(self.backward, f):
+            self._step(f)
+
+    def backward(self, f):
+        """Reverse the Newton solve of substep f, from the state the replay of its forward pass left."""
+        if self._secondaries or self._couplings:
+            gs.raise_exception("The backward pass of the joint Newton solve with other solvers is not supported yet.")
+        self._primary[0].newton_backward(f)
+
+    def solve_adjoint(self, f, check_curvature=False) -> bool:
+        """Solve H lambda = b on the primary's rows by the PCG of the forward solve of substep f, from the right-hand
+        side and the matrix the primary staged, at the tighter tolerance of the adjoint.
+
+        With `check_curvature`, for a matrix that is not SPD-projected, returns whether the solve met no direction of
+        non-positive curvature, otherwise True."""
+        primary, secondary, coupling = self._slots()
+        ws = primary.ws
+        tol_rate = ws.tol_rate.to_numpy()
+        bits = 64 if gs.qd_float == qd.f64 else 32
+        ws.tol_rate.from_numpy(np.array(ADJOINT_PCG_TOL_RATE[bits], dtype=tol_rate.dtype))
+        ws.check_curvature.from_numpy(np.array(int(check_curvature), dtype=np.int32))
+        kernel_pcg_start(primary, *secondary)
+        kernel_pcg_loop(primary, *secondary, *coupling, f)
+        ws.tol_rate.from_numpy(tol_rate)
+        if not check_curvature:
+            return True
+        ws.check_curvature.from_numpy(np.array(0, dtype=np.int32))
+        return not int(ws.breakdown.to_numpy())
+
+    def _step(self, f):
         control = self.control
         primary, secondary, coupling = self._slots()
         hosts = [self._primary[0]] + [host for host, _ in self._secondaries]

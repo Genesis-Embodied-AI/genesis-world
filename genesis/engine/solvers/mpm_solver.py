@@ -57,9 +57,17 @@ from genesis.engine.numerics.newton_control import (
 )
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import LegacyCouplerOptions, MPMOptions
-from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
+from genesis.grad.bridge import no_grad
+from genesis.utils.misc import (
+    DeprecationError,
+    broadcast_tensor,
+    qd_from_torch,
+    qd_isfinite,
+    qd_to_torch,
+    qd_zero_grad,
+)
 
-from . import mpm_func
+from . import mpm_adjoint_func, mpm_func
 from .mpm_data import (
     BLOCK_CELLS,
     MpmForceFields,
@@ -88,12 +96,13 @@ if TYPE_CHECKING:
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
 
-# Largest grid node velocity update, in m/s, under which the Newton solve of a substep is converged
-NEWTON_VELOCITY_TOL = 5e-2
-
 # Number of substeps between two reads of whether a Newton solve stopped before converging, each read waiting for the
 # device
 NEWTON_FAILURE_CHECK_PERIOD = 32
+
+# Rows of the dense matrix of a direct adjoint solve at most, 3.2 GB in fp64; the option documents the value
+# (see MPMOptions.adjoint_linear_solver)
+ADJOINT_DIRECT_MAX_ROWS = 20000
 
 # Run the substep as the single checkpointed graph `kernel_substep`, or as separate launches driven from the host with
 # the PCG iterations and the radix sorts as small graphs of their own.
@@ -230,6 +239,8 @@ class MPMSolver(ParticleSolver):
 
     material_cls = MPM.Base
     has_frames = True
+    # The configurations without an adjoint raise at build (see '_check_supported')
+    is_differentiable = True
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
@@ -245,6 +256,7 @@ class MPMSolver(ParticleSolver):
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
         self._constraints_initialized = False
+        self._has_warned_adjoint_projection = False
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
@@ -279,7 +291,7 @@ class MPMSolver(ParticleSolver):
     def init_particle_fields(self):
         # Particle state of the frames, its gradient-free part and the static info, as dynamic tensors in the default
         # array mode, so that a scene with another particle count reuses the compiled kernels
-        self.particles = get_mpm_particles(self.n_frames, self._n_particles, self._B)
+        self.particles = get_mpm_particles(self.n_frames, self._n_particles, self._B, self._requires_grad)
         self.particles_ng = get_mpm_particles_ng(self.n_frames, self._n_particles, self._B)
         self.particles_info = get_mpm_particles_info(self._n_particles)
 
@@ -325,8 +337,8 @@ class MPMSolver(ParticleSolver):
             has_rigid_rows=self._has_rigid and not rigid._disable_constraint,
             has_terrain=self._has_rigid and rigid.collider.collider_config.has_terrain,
         )
-        # Rigid geoms give contact rows whenever Rigid is coupled, but its dofs join the Newton solve only if it has any:
-        # rows on static geoms (a plane, a terrain) act on the particle displacement alone, as wall rows do
+        # Rigid geoms give contact rows whenever Rigid is coupled, but its dofs join the Newton solve only if it has
+        # any: rows on static geoms (a plane, a terrain) act on the particle displacement alone, as wall rows do
         self._rigid_coupled = self._has_rigid and rigid.n_dofs > 0
         self._mpm_coupling = MpmRigidCoupling(rigid.n_dofs_ if self._rigid_coupled else 1, rigid.n_links, self._B)
         # Rigid stops its substep after assembling its constraint rows; the MPM substep solves them with its own
@@ -351,7 +363,9 @@ class MPMSolver(ParticleSolver):
         self._mpm_linear = MpmLinearSystem(max_blocks * BLOCK_CELLS, max_triplets)
         newton_solver = self._sim.newton_solver
         self._mpm_control = newton_solver.control
-        self._mpm_control.disp_tol.from_numpy(np.array(NEWTON_VELOCITY_TOL * self.substep_dt, dtype=gs.np_float))
+        self._mpm_control.disp_tol.from_numpy(
+            np.array(self._options.newton_velocity_tol * self.substep_dt, dtype=gs.np_float)
+        )
         self._mpm_force_fields = MpmForceFields(self._ffs)
 
         # The grid displacement is the primary unknown of the substep's Newton solve; Rigid's dofs and the contact rows
@@ -380,7 +394,8 @@ class MPMSolver(ParticleSolver):
             query = FemTriangleQuery(fem, self._mpm_newton, self._mpm_params, self._B)
             contact = MpmFemContact(self._newton_participant, fem_participant, query)
             newton_solver.register_coupling(MpmFemContactHost(contact), contact)
-        # The MPM particles are boundary particles of the SPH fluid, whose impulses enter the next P2G (see mpm_sph_func)
+        # The MPM particles are boundary particles of the SPH fluid, whose impulses enter the next P2G (see
+        # mpm_sph_func)
         if self._sph_coupled:
             sph = self._sim.sph_solver
             self._sph_boundary = MpmSphBoundary(self, sph, self._mpm_params, self._B)
@@ -442,10 +457,14 @@ class MPMSolver(ParticleSolver):
         self.particle_constraints.is_constrained.fill(False)
         self.particle_constraints.link_idx.fill(-1)
 
+    def reset_grad(self):
+        if self._requires_grad and self.is_active:
+            qd_zero_grad(self.particles)
+            if gs.use_zerocopy.is_supported and gs.backend == gs.metal:
+                torch.mps.synchronize()
+
     def _check_supported(self):
         """Raise for the configurations the implicit solver does not handle yet."""
-        if self._sim.requires_grad:
-            gs.raise_exception("Differentiable simulation is not supported by the implicit MPM solver yet.")
         if self._enable_CPIC:
             gs.raise_exception("CPIC is not supported by the implicit MPM solver.")
         for material in self._materials:
@@ -480,6 +499,22 @@ class MPMSolver(ParticleSolver):
                 "Coupling the implicit MPM solver with FEM requires FEM's implicit solver "
                 "(FEMOptions(use_implicit_solver=True)), or LegacyCouplerOptions(fem_mpm=False)."
             )
+        if self._requires_grad:
+            for material in self._materials:
+                if isinstance(material, (MPM.ElastoPlastic, MPM.Liquid, MPM.Sand)):
+                    gs.raise_exception(
+                        "Differentiable simulation with the implicit MPM solver does not support the plasticity of "
+                        f"the material {type(material).__name__} yet."
+                    )
+            if self._has_rigid:
+                gs.raise_exception(
+                    "Differentiable simulation with the implicit MPM solver does not support the coupling with Rigid "
+                    "yet; use LegacyCouplerOptions(rigid_mpm=False)."
+                )
+            if self._ffs:
+                gs.raise_exception(
+                    "Differentiable simulation with the implicit MPM solver does not support force fields yet."
+                )
 
     def build(self):
         super().build()
@@ -551,6 +586,7 @@ class MPMSolver(ParticleSolver):
     # ----------------------------------- simulation -------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @no_grad
     @qd.kernel
     def _kernel_flag_non_finite_pos(self, f: int):
         """Flag INVALID_PARTICLE_NAN for every env with a particle whose position in the given frame is not finite."""
@@ -611,8 +647,9 @@ class MPMSolver(ParticleSolver):
             if int(self._mpm_control.failed.to_numpy()):
                 gs.logger.warning("The implicit MPM Newton solve stopped before converging.")
 
-    def _assemble(self, f):
-        """Assemble the Newton system, growing the triplet storage until it holds the assembly."""
+    def _assemble(self, f, is_exact=False):
+        """Assemble the Newton system, growing the triplet storage until it holds the assembly. The elastic Hessian is
+        SPD-projected, or exact with `is_exact` (see func_elastic_assemble)."""
         args = (
             self.particles,
             self.particles_info,
@@ -623,6 +660,7 @@ class MPMSolver(ParticleSolver):
             self._mpm_control,
             self._mpm_params,
             f,
+            is_exact,
         )
         kernel_assemble(*args)
         while int(self._mpm_linear.matrix.triplet_overflow.to_numpy()):
@@ -703,6 +741,82 @@ class MPMSolver(ParticleSolver):
 
     def newton_after(self, f):
         pass
+
+    def newton_backward(self, f):
+        """Reverse substep f from the state the replay of its forward pass left (see mpm_adjoint_func): the reverse of
+        G2P into the adjoint of u*, the adjoint solve at the converged u* on the Hessian and by the solver the options
+        select, then the pullback and the reverse of P2G into the adjoint of frame f."""
+        grid, newton, linear = self._mpm_grid, self._mpm_newton, self._mpm_linear
+        mode = self._options.adjoint_hessian
+        is_exact = mode in ("exact", "auto")
+        kernel_adjoint_g2p(self.particles, grid, newton, self._mpm_params, f)
+        self._assemble(f, is_exact=is_exact)
+        kernel_adjoint_rhs(grid, newton, linear)
+        newton_solver = self._sim.newton_solver
+        if self._options.adjoint_linear_solver == "direct":
+            self._solve_adjoint_direct()
+        elif not newton_solver.solve_adjoint(f, check_curvature=is_exact):
+            # At a converged solution the Hessian of the incremental potential is positive definite
+            if mode == "exact":
+                gs.raise_exception(
+                    "The exact Hessian of an implicit MPM substep is not positive definite at its solution, which the "
+                    "forward Newton solve most likely stopped short of: tighten MPMOptions(newton_velocity_tol), or "
+                    "use MPMOptions(adjoint_hessian='auto') or 'projected'."
+                )
+            if not self._has_warned_adjoint_projection:
+                gs.logger.warning(
+                    "The exact Hessian of an implicit MPM substep is not positive definite at its solution, which the "
+                    "forward Newton solve most likely stopped short of: its adjoint solves on the projected Hessian, "
+                    "whose gradients are approximate. Tighten MPMOptions(newton_velocity_tol) for exact ones."
+                )
+                self._has_warned_adjoint_projection = True
+            self._assemble(f)
+            kernel_adjoint_rhs(grid, newton, linear)
+            newton_solver.solve_adjoint(f)
+        kernel_adjoint_pullback(
+            self.particles,
+            self.particles_ng,
+            self.particles_info,
+            self._mpm_materials,
+            self._mpm_grid,
+            self._mpm_newton,
+            self._mpm_linear,
+            self._mpm_params,
+            self._gravity,
+            f,
+        )
+
+    def _solve_adjoint_direct(self):
+        """Solve the adjoint system the primary staged (see `NewtonSolver.solve_adjoint`) by a dense LU factorization
+        of the matrix on the device, the symmetric matrix rebuilt from its stored diagonal and upper blocks."""
+        linear = self._mpm_linear
+        matrix = linear.matrix
+        n_rows = 3 * int(linear.pcg.n_rows.to_numpy())
+        if n_rows > ADJOINT_DIRECT_MAX_ROWS:
+            gs.raise_exception(
+                f"The direct adjoint solve of the implicit MPM solver, meant for gradient tests on small scenes, holds "
+                f"{ADJOINT_DIRECT_MAX_ROWS} rows at most, got {n_rows}: shrink the scene or its environments, or use "
+                "MPMOptions(adjoint_linear_solver='pcg')."
+            )
+        nnz = int(matrix.bcoo_nnz.to_numpy())
+        rows = qd_to_torch(matrix.bcoo_row, copy=True)[:nnz].long()
+        cols = qd_to_torch(matrix.bcoo_col, copy=True)[:nnz].long()
+        blocks = qd_to_torch(matrix.bcoo_val, copy=True)[: 9 * nnz].reshape(nnz, 3, 3)
+        offsets = torch.arange(3, device=gs.device)
+        block_rows = (3 * rows[:, None, None] + offsets[None, :, None]).expand(nnz, 3, 3)
+        block_cols = (3 * cols[:, None, None] + offsets[None, None, :]).expand(nnz, 3, 3)
+        H = torch.zeros((n_rows, n_rows), dtype=gs.tc_float, device=gs.device)
+        H.index_put_((block_rows.reshape(-1), block_cols.reshape(-1)), blocks.reshape(-1), accumulate=True)
+        is_off = rows != cols
+        H.index_put_(
+            (block_cols[is_off].reshape(-1), block_rows[is_off].reshape(-1)),
+            blocks[is_off].reshape(-1),
+            accumulate=True,
+        )
+        rhs = qd_to_torch(linear.b_rhs, copy=True)
+        solution = qd_to_torch(linear.solution, copy=True)
+        solution[:n_rows] = torch.linalg.solve(H, rhs[:n_rows])
+        qd_from_torch(linear.solution, solution)
 
     def _substep_graph(self, f):
         if self._rigid_coupled:
@@ -1603,11 +1717,12 @@ def kernel_assemble(
     control: qd.template(),
     params: qd.template(),
     f: qd.i32,
+    is_exact: qd.template(),
 ):
     dt = params.substep_dt[()]
     func_reset_newton_measures(control)
     mpm_func.func_report_extent(grid, linear)
-    mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
+    mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt, is_exact)
 
 
 @qd.kernel
@@ -1624,3 +1739,49 @@ def kernel_finalize(
     dt = params.substep_dt[()]
     mpm_func.func_grid_velocity(grid, newton, dt)
     mpm_func.func_g2p_advect(particles, particles_ng, particles_info, materials, grid, params, f, dt)
+
+
+@qd.kernel
+def kernel_adjoint_g2p(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    """The adjoint of u* into `newton.du` and the direct terms of the adjoint of frame f (see mpm_adjoint_func)."""
+    dt = params.substep_dt[()]
+    mpm_adjoint_func.func_adjoint_reset_u_bar(grid, newton)
+    mpm_adjoint_func.func_adjoint_g2p(particles, grid, newton, params, f, dt)
+
+
+@qd.kernel
+def kernel_adjoint_rhs(
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+):
+    mpm_adjoint_func.func_adjoint_rhs(grid, newton, linear)
+
+
+@qd.kernel
+def kernel_adjoint_pullback(
+    particles: MpmParticles,
+    particles_ng: MpmParticlesNG,
+    particles_info: MpmParticlesInfo,
+    materials: MpmMaterialTable,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    params: qd.template(),
+    gravity: qd.Tensor,
+    f: qd.i32,
+):
+    """The pullback of the adjoint solution and the reverse of P2G into frame f, then the adjoint of frame f + 1
+    cleared (see mpm_adjoint_func)."""
+    dt = params.substep_dt[()]
+    mpm_adjoint_func.func_adjoint_nodes(grid, newton, linear, dt)
+    mpm_adjoint_func.func_adjoint_particles(
+        particles, particles_info, materials, grid, newton, linear, params, gravity, f, dt
+    )
+    mpm_adjoint_func.func_adjoint_consume(particles, particles_ng, params, f)

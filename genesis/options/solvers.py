@@ -651,6 +651,22 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
         Lower bound of the simulation domain. Defaults to (-1.0, -1.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
+    newton_velocity_tol : float, optional
+        Largest change of the velocity of any particle, in m/s, of a Newton iteration of the implicit solve under which
+        the solve of a substep is converged. A finite-difference check of the gradients needs a much tighter value,
+        since it differentiates the solve where it stopped. Defaults to 5e-2.
+    adjoint_hessian : str, optional
+        The Hessian of the incremental potential at the converged displacement on which the backward pass of a
+        differentiable scene solves for the adjoint: 'projected', the SPD-projected one of the forward Newton solve,
+        whose gradients are approximate where the projection clamps a mode, 'exact', which gives the exact gradients, or
+        'auto'. The exact Hessian is positive definite at a converged solution; its PCG solve raises on a direction of
+        non-positive curvature, the sign of a forward solve stopped short of convergence, where 'auto' solves that
+        substep again on the projected Hessian instead, with a warning. Defaults to 'projected'.
+    adjoint_linear_solver : str, optional
+        How the adjoint system is solved: 'pcg', the preconditioned conjugate gradient of the forward solve, or
+        'direct', a dense LU factorization on the device, meant for the tests that check the gradients against finite
+        differences alone. Its memory grows with the square of the grid nodes, so it is limited to 20000 rows (three per
+        active grid node and environment): a test using it keeps its scene small. Defaults to 'pcg'.
     use_sparse_grid : bool, optional
         This option is deprecated.
     leaf_block_size : int, optional
@@ -664,6 +680,10 @@ class MPMOptions(GravityMixin, TimeBasedMixin):
     # These will later be converted to discrete grid bound. The actual grid boundary could be slightly tighter.
     lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
     upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+
+    newton_velocity_tol: PositiveFloat = 5e-2
+    adjoint_hessian: Literal["projected", "exact", "auto"] = "projected"
+    adjoint_linear_solver: Literal["pcg", "direct"] = "pcg"
 
     def __init__(self, *, use_sparse_grid: bool = False, leaf_block_size: int = 8, **data):
         super().__init__(**data)

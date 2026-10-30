@@ -7,7 +7,6 @@ from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
-
 @pytest.mark.slow  # ~75s
 @pytest.mark.required
 @pytest.mark.debug(False)
@@ -109,6 +108,11 @@ def test_mpm_rigid_push_grad(show_viewer):
 
 
 @pytest.mark.required
+# The finite differences of the implicit MPM solve need its Newton iterations converged far below their default
+# tolerance, which fp32 cannot resolve. Its adjoint solves on the exact Hessian by a direct factorization, which the
+# finite differences match, where the SPD-projected Hessian of production gradients clamps the modes of the
+# compressed muscle.
+@pytest.mark.precision("64")
 def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
     # The backward pass replays each step from the state it started from, the actuation holding over the steps that give
     # none. An MPM muscle and an explicit FEM muscle, far apart and uncoupled, each get their own inputs.
@@ -124,6 +128,9 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
                 lower_bound=(-0.5, -0.5, -0.1),
                 upper_bound=(0.5, 0.5, 0.5),
                 grid_density=32,
+                newton_velocity_tol=1e-10,
+                adjoint_hessian="exact",
+                adjoint_linear_solver="direct",
             ),
             # The coupling of FEM and MPM carries no gradient (see 'LegacyCoupler.is_differentiable')
             coupler_options=gs.options.LegacyCouplerOptions(
@@ -230,9 +237,10 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
                 losses.append(float(rollout(scenes[1], boxes_by_scene[1], *perturbed_inputs)[idx[0]]))
             fd_grad[idx] = (losses[0] - losses[1]) / (2.0 * eps)
         assert (np.abs(fd_grad) > 1e-3).all()
-    tol = 2e-9 if precision == "64" else 2e-4
-    assert_allclose(actus_ana.grad, inputs_fd_grad[0], rtol=tol, atol=tol)
-    assert_allclose(vels_ana.grad, inputs_fd_grad[1], rtol=tol, atol=tol)
+    # The finite differences of the implicit MPM solve keep the error of its Newton tolerance
+    for i_box, tol in enumerate((2e-6, 2e-9)):
+        assert_allclose(actus_ana.grad[i_box], inputs_fd_grad[0][i_box], rtol=tol, atol=tol)
+        assert_allclose(vels_ana.grad[i_box], inputs_fd_grad[1][i_box], rtol=tol, atol=tol)
 
 
 @pytest.mark.required

@@ -184,6 +184,26 @@ def q1_stencil(fx, inv_dx):
 
 
 @qd.func
+def q1_weight_hessian(fx, a: qd.template(), inv_dx):
+    """Hessian with respect to the particle position of the trilinear weight of node a of a cell (see q1_stencil): the
+    product of two axis derivatives and the third axis weight off the diagonal, zero on it."""
+    axis_w = qd.Vector.zero(gs.qd_float, 3)
+    axis_dw = qd.Vector.zero(gs.qd_float, 3)
+    for d in qd.static(range(3)):
+        if qd.static((a >> (2 - d)) & 1):
+            axis_w[d] = fx[d]
+            axis_dw[d] = inv_dx
+        else:
+            axis_w[d] = 1.0 - fx[d]
+            axis_dw[d] = -inv_dx
+    H = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        if qd.static(i != j):
+            H[i, j] = axis_dw[i] * axis_dw[j] * axis_w[3 - i - j]
+    return H
+
+
+@qd.func
 def q1_node_weight(fx, o, inv_dx):
     """Weight and weight gradient of the node at integer offset o in {0, 1}^3 of a cell, at offset fx in the cell."""
     axis_w = qd.Vector.zero(gs.qd_float, 3)
@@ -366,7 +386,15 @@ def fixed_corotated_principal(sigma, mu, lam):
 
 @qd.func
 def isotropic_pair_eigenvalues(sigma, g, A):
-    """Projected twist and flip eigenvalues of an isotropic energy for the axis pairs (0,1), (0,2), (1,2).
+    """Projected twist and flip eigenvalues of an isotropic energy for the axis pairs (0,1), (0,2), (1,2) (see
+    isotropic_pair_eigenvalues_exact)."""
+    twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
+    return qd.max(twist, 0.0), qd.max(flip, 0.0)
+
+
+@qd.func
+def isotropic_pair_eigenvalues_exact(sigma, g, A):
+    """Twist and flip eigenvalues of an isotropic energy for the axis pairs (0,1), (0,2), (1,2).
 
     Twist (g_i + g_j) / (sigma_i + sigma_j) and flip (g_i - g_j) / (sigma_i - sigma_j) (Smith et al. 2019). The flip
     takes its limit A_ii - A_ij on equal singular values; the twist denominator is kept away from zero, which an
@@ -386,24 +414,54 @@ def isotropic_pair_eigenvalues(sigma, g, A):
         if qd.abs(den_twist) < eps:
             den_twist = eps if den_twist >= 0.0 else -eps
         twist[k] = (g[i] + g[j]) / den_twist
-    return qd.max(twist, 0.0), qd.max(flip, 0.0)
+    return twist, flip
 
 
 @qd.func
-def isotropic_projected_modes(sigma, g, A):
-    """The SPD-projected principal Hessian of an isotropic energy in CGQ's eigenbasis form.
+def isotropic_first_piola_differential(U, V, sigma, g, A, dF):
+    """dP = (dP/dF) : dF of an isotropic energy at F = U diag(sigma) V^T, exact (no projection).
+
+    In the singular frame dF_hat = U^T dF V, the diagonal moves by A dF_hat_ii and each axis pair (i, j) by the
+    unprojected flip/twist block: dP_hat_ij = alp dF_hat_ij + bet dF_hat_ji, with alp = (flip + twist) / 2 and
+    bet = (flip - twist) / 2, the operator whose projection `isotropic_pair_block` assembles.
+    """
+    dF_hat = U.transpose() @ dF @ V
+    twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
+    dP_hat = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i in qd.static(range(3)):
+        for j in qd.static(range(3)):
+            dP_hat[i, i] += A[i, j] * dF_hat[j, j]
+    for k in qd.static(range(3)):
+        i, j = qd.static(_PAIRS[k])
+        alp = 0.5 * (flip[k] + twist[k])
+        bet = 0.5 * (flip[k] - twist[k])
+        dP_hat[i, j] = alp * dF_hat[i, j] + bet * dF_hat[j, i]
+        dP_hat[j, i] = bet * dF_hat[i, j] + alp * dF_hat[j, i]
+    return U @ dP_hat @ V.transpose()
+
+
+@qd.func
+def isotropic_projected_modes(sigma, g, A, is_exact: qd.template() = False):
+    """The SPD-projected principal Hessian of an isotropic energy in CGQ's eigenbasis form, or with `is_exact` the
+    Hessian itself.
 
     Returns the clamped scaling block S = sum_k max(l_k, 0) a_k a_k^T of sym(A), and per axis pair (0,1), (0,2),
     (1,2) the flip/twist combinations alp = (flip + twist) / 2 and bet = (flip - twist) / 2 of the clamped flip and
-    twist eigenvalues.
+    twist eigenvalues. `is_exact` keeps sym(A) and the eigenvalues unclamped.
     """
-    ev, Q = qd.sym_eig(0.5 * (A + A.transpose()), gs.qd_float)
-    S = qd.Matrix.zero(gs.qd_float, 3, 3)
-    for k in qd.static(range(3)):
-        S += qd.max(ev[k], 0.0) * qd.Vector([Q[d, k] for d in qd.static(range(3))], dt=gs.qd_float).outer_product(
-            qd.Vector([Q[d, k] for d in qd.static(range(3))], dt=gs.qd_float)
-        )
-    twist, flip = isotropic_pair_eigenvalues(sigma, g, A)
+    S = 0.5 * (A + A.transpose())
+    twist = qd.Vector.zero(gs.qd_float, 3)
+    flip = qd.Vector.zero(gs.qd_float, 3)
+    if qd.static(is_exact):
+        twist, flip = isotropic_pair_eigenvalues_exact(sigma, g, A)
+    else:
+        ev, Q = qd.sym_eig(S, gs.qd_float)
+        S = qd.Matrix.zero(gs.qd_float, 3, 3)
+        for k in qd.static(range(3)):
+            S += qd.max(ev[k], 0.0) * qd.Vector([Q[d, k] for d in qd.static(range(3))], dt=gs.qd_float).outer_product(
+                qd.Vector([Q[d, k] for d in qd.static(range(3))], dt=gs.qd_float)
+            )
+        twist, flip = isotropic_pair_eigenvalues(sigma, g, A)
     return S, 0.5 * (flip + twist), 0.5 * (flip - twist)
 
 
@@ -619,10 +677,8 @@ def return_map(
                 Jp_new = trace
             else:
                 Jp_new = 0.0
-                delta_gamma = (
-                    eps_hat_norm
-                    + (3.0 * lam + 2.0 * mu) / (2.0 * mu) * trace * material_param(materials, params, PARAM_SAND_ALPHA, slot)
-                )
+                alpha = material_param(materials, params, PARAM_SAND_ALPHA, slot)
+                delta_gamma = eps_hat_norm + (3.0 * lam + 2.0 * mu) / (2.0 * mu) * trace * alpha
                 sigma_new = qd.exp(eps - qd.max(delta_gamma, 0.0) / eps_hat_norm * eps_hat)
         else:
             lower = 1.0 - material_param(materials, params, PARAM_YIELD_LOWER, slot)
@@ -1356,6 +1412,7 @@ def func_elastic_assemble(
     params: qd.template(),  # MpmParams
     f,
     dt,
+    is_exact: qd.template() = False,
 ):
     """Elastic and contact Hessian blocks and gradient factors, one warp per 32 sorted particles.
 
@@ -1363,7 +1420,8 @@ def func_elastic_assemble(
     36 upper-triangular stencil blocks over the task, and the head lane of the task writes them. Every lane also
     stages V dt^2 P(F_trial) F^T and the gradient of its active contact rows for the gradient gather; the rows act on
     the trial displacement sum_a w_a u_a, so their Hessian enters block (a, b) as w_a w_b H. Rows and columns of fixed
-    components are dropped from the blocks.
+    components are dropped from the blocks. The elastic blocks are SPD-projected, or exact with `is_exact`, which only
+    an adjoint solve at the converged displacement takes.
     """
     qd.loop_config(name="mpm_elastic_assemble", block_dim=128)
     for s in range(grid.n_valid_chunks[()] * _WARP):
@@ -1407,11 +1465,13 @@ def func_elastic_assemble(
             )
             P += P_fibre
             fibre_curvature = fibre_curvature_
+            if qd.static(is_exact):
+                fibre_curvature = material_param(materials, params, PARAM_FIBRE, slot) * particles.actu[f, i_p, i_b]
             fibre_frame = V.transpose() @ m
             G = scale * P @ F.transpose()
             for i, j in qd.static(qd.ndrange(3, 3)):
                 newton.g_p[9 * s + 3 * i + j] = G[i, j]
-            S_block, alp, bet = isotropic_projected_modes(sigma, g, A)
+            S_block, alp, bet = isotropic_projected_modes(sigma, g, A, is_exact)
             VtFt = V.transpose() @ F.transpose()
             for a in qd.static(range(8)):
                 r_a = VtFt @ qd.Vector([grad_w[a, d] for d in qd.static(range(3))], dt=gs.qd_float)
@@ -1532,9 +1592,10 @@ def func_assemble(
     params: qd.template(),  # MpmParams
     f,
     dt,
+    is_exact: qd.template() = False,
 ):
     func_kinetic_assemble(grid, linear)
-    func_elastic_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
+    func_elastic_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt, is_exact)
     func_gradient_gather(particles, grid, newton, linear, params, f, dt)
 
 
