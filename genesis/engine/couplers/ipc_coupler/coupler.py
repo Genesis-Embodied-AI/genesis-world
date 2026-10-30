@@ -37,6 +37,7 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
     from uipc.constitution import (
         AffineBodyConstitution,
         AffineBodyPrismaticJoint,
+        AffineBodyPrismaticJointLimit,
         AffineBodyRevoluteJoint,
         DiscreteShellBending,
         ElasticModuli,
@@ -325,6 +326,8 @@ class IPCCoupler(RBC):
         # Add rigid geoms and articulated entities to IPC based on per-entity coupling types
         if self.rigid_solver.is_active:
             self._add_rigid_geoms_to_ipc()
+            if self.options.native_prismatic_limits:
+                self._add_two_way_prismatic_limits()
             self._add_articulation_entities_to_ipc()
 
         # Register all per-entity contact pair models with per-material friction
@@ -660,6 +663,79 @@ class IPCCoupler(RBC):
 
                 # ---- Store slot mappings ----
                 self._abd_slots_by_link.setdefault(target_link, []).append(abd_geom_slot)
+
+    def _add_two_way_prismatic_limits(self) -> None:
+        """Add native IPC limits for prismatic links in soft-coupled robots.
+
+        ``two_way_soft_constraint`` normally couples each ABD link to its
+        Genesis pose independently.  A Genesis prismatic limit therefore runs
+        after IPC has already advanced the ABD state and cannot prevent a
+        one-step excursion.  The finger links are ordinary prismatic joints;
+        represent the same joint in IPC and attach its native limit before the
+        world is initialized.  The joint constitution keeps the two ABD bodies
+        on the prismatic axis, while the limit constitution enforces the
+        finite Genesis range inside the same solve.
+
+        External-articulation entities build their own joint geometry below;
+        they must not receive a duplicate constraint here.
+        """
+        if COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT not in self._entities_by_coup_type:
+            return
+
+        joints_added = 0
+        joints_limit = AffineBodyPrismaticJointLimit()
+        joints_prismatic = AffineBodyPrismaticJoint()
+        self._ipc_constitution_tabular.insert(joints_prismatic)
+        self._ipc_constitution_tabular.insert(joints_limit)
+        joints_xaxis = qd_to_numpy(self.rigid_solver.dyn_state.joints.xaxis, transpose=True)
+        joints_xanchor = qd_to_numpy(self.rigid_solver.dyn_state.joints.xanchor, transpose=True)
+
+        for i_e, entity in enumerate(cast(list["RigidEntity"], self.rigid_solver.entities)):
+            if self._coup_type_by_entity.get(entity) != COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT:
+                continue
+            for joint in entity.joints:
+                if joint.type != gs.constants.JOINT_TYPE.PRISMATIC:
+                    continue
+                # A limit is meaningful only for finite Genesis ranges.  The
+                # Tianji finger joints are the only such prismatic links in the
+                # current robot, but this keeps the rule generic for other
+                # soft-coupled assets.
+                lim = np.asarray(joint.desc.dofs_limit, dtype=float)
+                if lim.ndim != 2 or lim.shape[0] != joint.desc.n_dofs or not np.isfinite(lim[0]).all():
+                    continue
+                child_link = joint.link
+                parent_link = entity.links[max(joint.link.parent_idx, 0) - entity.link_start]
+                parent_link = find_target_link_for_fixed_merge(parent_link)
+                child_link = find_target_link_for_fixed_merge(child_link)
+                if parent_link not in self._abd_slots_by_link or child_link not in self._abd_slots_by_link:
+                    continue
+
+                for env_idx in range(self.sim._B):
+                    joint_axis = joints_xaxis[env_idx, joint.idx]
+                    joint_pos = joints_xanchor[env_idx, joint.idx]
+                    v1 = joint_pos - 0.5 * joint_axis
+                    v2 = joint_pos + 0.5 * joint_axis
+                    joint_geom = uipc.geometry.linemesh(np.array([v1, v2], dtype=np.float64), np.array([[0, 1]], dtype=np.int32))
+                    if self.sim.n_envs > 0:
+                        self._ipc_subscenes[env_idx].apply_to(joint_geom)
+                    joints_prismatic.apply_to(
+                        joint_geom,
+                        [self._abd_slots_by_link[parent_link][env_idx]], [0],
+                        [self._abd_slots_by_link[child_link][env_idx]], [0],
+                        [JOINT_STRENGTH_RATIO],
+                    )
+                    joints_limit.apply_to(
+                        joint_geom,
+                        float(lim[0, 0]),
+                        float(lim[0, 1]),
+                        float(self.options.prismatic_limit_strength),
+                    )
+                    joint_obj = self._ipc_objects.create(f"two_way_prismatic_limit_{i_e}_{joint.idx}_{env_idx}")
+                    joint_obj.geometries().create(joint_geom)
+                    joints_added += 1
+
+        if joints_added:
+            gs.logger.info(f"IPC native prismatic limits: {joints_added} joint instances")
 
     def _add_articulation_entities_to_ipc(self) -> None:
         """
