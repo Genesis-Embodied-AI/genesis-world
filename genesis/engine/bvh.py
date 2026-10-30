@@ -108,11 +108,11 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
         ),
         values=dict(n_keys=n_trees * n_leaves),
         # A set switched off leaves every array unused, else the scratch of the sort and the fit it runs alone
-        unused={
-            array_class.DEVICE_RADIX_SORT: sort_kind != array_class.BVH_SORT_KIND.DEVICE_RADIX,
-            array_class.PER_TREE_RADIX_SORT: sort_kind != array_class.BVH_SORT_KIND.PER_TREE_RADIX,
-            array_class.BLOCK_SWEEP_FIT: fit_kind != array_class.BVH_FIT_KIND.BLOCK_SWEEP,
-        }
+        unused=dict(
+            device_radix_sort=sort_kind != array_class.BVH_SORT_KIND.DEVICE_RADIX,
+            per_tree_radix_sort=sort_kind != array_class.BVH_SORT_KIND.PER_TREE_RADIX,
+            block_sweep_fit=fit_kind != array_class.BVH_FIT_KIND.BLOCK_SWEEP,
+        )
         if is_active
         else True,
     )
