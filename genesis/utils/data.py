@@ -297,9 +297,10 @@ class Data:
     A selection is a label or its name, matching any number of arrays, a reference to a field of the struct (see
     FieldRef), a tuple of them, or None for every array. A member, by its name or by a reference, also takes a nested
     table, whose keys select within it as in its own constructor. Where two keys select the same array, the deepest
-    field wins, None selecting the struct or member it applies to, and a tie or a label raises. `_binds`
-    maps a field, by its name or by a reference, to an array or a struct allocated elsewhere, bound in its place: no
-    kernel may access both, since Quadrants assumes distinct kernel arguments never alias.
+    field wins, None selecting the struct or member it applies to, and a tie or a label raises. A plain value in place
+    of a table applies to every array. `_binds` maps a field, by its name or by a reference, to an array or a struct
+    allocated elsewhere, bound in its place: no kernel may access both, since Quadrants assumes distinct kernel
+    arguments never alias.
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -341,9 +342,9 @@ class Data:
         *,
         sizes: Mapping[str, Any] | None = None,
         values: Mapping[str, Any] | None = None,
-        env_first: Mapping[Any, bool] | None = None,
-        layout: Mapping[Any, "tuple[int, ...] | None"] | None = None,
-        unused: Mapping[Any, bool] | None = None,
+        env_first: Mapping[Any, bool] | bool | None = None,
+        layout: "Mapping[Any, tuple[int, ...] | None] | tuple[int, ...] | None" = None,
+        unused: Mapping[Any, bool] | bool | None = None,
         requires_grad: bool = False,
         _binds: "Mapping[str | FieldRef, Data | qd.Tensor] | None" = None,
     ):
@@ -386,7 +387,7 @@ class Data:
         for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
             # The entries of the table with the path of the member they apply to, a member taking a nested table
             entries = []
-            pending = [((), table or {})]
+            pending = [((), table if isinstance(table, Mapping) else {} if table is None else {None: table})]
             while pending:
                 scope, level = pending.pop()
                 for key, value in level.items():
