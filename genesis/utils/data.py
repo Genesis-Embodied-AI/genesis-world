@@ -300,7 +300,9 @@ class Data:
     else that of its holder, else the default of its class.
 
     The constructor allocates every array of the tree in declaration order. `sizes` maps the name of each size to its
-    value, those no array uses being ignored. `values` holds the constants nested like the struct, validated strictly.
+    value, those no array uses being ignored, and the name of a member to the sizes of its arrays, which override those
+    of its holder, so one struct type may hold several members of a type sized apart. `values` holds the constants
+    nested like the struct, validated strictly.
     `requires_grad` gives gradients to the arrays declared with `grad`. The property tables map a selection of arrays to
     a value: `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the given
     permutation of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders. A
@@ -434,6 +436,13 @@ def _is_selected(key, leaf) -> bool:
 
 def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
     """Allocate an array of a struct tree (see Data)."""
+    # The sizes of the members holding the array override those of the struct, innermost first
+    level, sizes = sizes, {name: size for name, size in sizes.items() if not isinstance(size, Mapping)}
+    for name in leaf.path[:-1]:
+        level = level.get(name)
+        if not isinstance(level, Mapping):
+            break
+        sizes.update({name: size for name, size in level.items() if not isinstance(size, Mapping)})
     dtype = _resolve_dtype(leaf.spec.dtype, sizes)
     if properties.get("unused"):
         return V(dtype=dtype, shape=())
