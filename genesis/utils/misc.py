@@ -16,9 +16,6 @@ from importlib import import_module
 from itertools import combinations
 from typing import Any, NoReturn, Optional, Sequence
 
-if sys.version_info >= (3, 14):
-    import annotationlib
-
 import numpy as np
 import torch
 
@@ -1129,6 +1126,9 @@ def get_own_annotations(cls: type) -> dict[str, Any]:
     Python 3.14 evaluates annotations lazily (PEP 649), leaving them out of the dictionary of the class.
     """
     if sys.version_info >= (3, 14):
+        # Standard library from Python 3.14 only
+        import annotationlib
+
         return annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF)
     return dict(cls.__dict__.get("__annotations__", {}))
 

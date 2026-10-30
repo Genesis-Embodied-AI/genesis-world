@@ -8,6 +8,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.utils.data import is_opted_in
 
 
 if TYPE_CHECKING:
@@ -33,13 +34,13 @@ class SupportField:
     their list. A lookup runs on the critical path of collision detection, where that wait costs more than the reads.
     """
 
-    def __init__(self, rigid_solver: "RigidSolver", is_active: bool) -> None:
-        """Build the support tables of the geoms into the support field info, which is a placeholder when inactive."""
+    def __init__(self, rigid_solver: "RigidSolver") -> None:
+        """Build the support tables of the geoms into the support field info, for a scene opting it in."""
         self.solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        if not is_active:
+        if not is_opted_in(array_class.SupportFieldInfo):
             return
 
         band_rows = self._support_res // 2

@@ -248,7 +248,6 @@ class _FieldSpec(NamedTuple):
     opt_in: bool = False
     oversize_hint: str = ""
     is_required: bool = False
-    is_optional: bool = False
 
 
 def field(
@@ -282,12 +281,41 @@ def field(
     return dataclasses.field(metadata={_SPEC: spec})
 
 
-def requires(*, optional: bool = False):
+def requires(*, opt_in: bool = False):
     """Declare a field holding a struct built and owned elsewhere, which the struct binds when built (see Data).
 
-    An `optional` struct is unused when none is built, the struct then allocating its 0-d placeholders itself.
+    An `opt_in` requirement is unused until another component opts it in (see 'opt_in'): the struct then allocates the
+    0-d placeholders of the required struct itself when none is built, and raises when it is opted in.
     """
-    return dataclasses.field(metadata={_SPEC: _FieldSpec(is_required=True, is_optional=optional)})
+    return dataclasses.field(metadata={_SPEC: _FieldSpec(opt_in=opt_in, is_required=True)})
+
+
+def attach(target: "type[Data]", **structs: "type[Data]") -> None:
+    """Add to a struct owned elsewhere the requirements of the given structs, by field name, each declared `opt_in`.
+
+    A module calls it when imported, `attach(ColliderInfo, sdf=SDFInfo)`, so that a kernel reaches the struct through the
+    target without the owner of the target declaring it, and opts the field in where it uses it (see 'requires'). A
+    field attached again with the same struct is left as is. The fields of a struct are final once an instance is built,
+    since a kernel taking it compiles its layout in.
+    """
+    for field_name, struct_cls in structs.items():
+        target_field = target.__dataclass_fields__.get(field_name)
+        if target_field is not None:
+            spec = target_field.metadata.get(_SPEC, _FieldSpec())
+            if not (spec.is_required and spec.opt_in and _resolve_type(target_field.type, target) is struct_cls):
+                raise TypeError(f"attach({target.__name__}, {field_name}={struct_cls.__name__}) names another field.")
+            continue
+        if target._is_sealed:
+            raise TypeError(
+                f"attach({target.__name__}, {field_name}={struct_cls.__name__}) comes too late, an instance being already "
+                f"built: import the module calling it before building any scene."
+            )
+        # The field of the requirement, taken from a dataclass declaring it alone
+        target.__dataclass_fields__[field_name] = dataclasses.fields(
+            dataclasses.make_dataclass(field_name, [(field_name, struct_cls, requires(opt_in=True))])
+        )[0]
+        setattr(target, field_name, FieldRef(target, (field_name,)))
+        target._requires[field_name] = struct_cls
 
 
 def opt_in(target: "FieldRef | type[Data]", *, cond: "Callable[[], bool] | None" = None, **sizes: Any) -> None:
@@ -295,7 +323,7 @@ def opt_in(target: "FieldRef | type[Data]", *, cond: "Callable[[], bool] | None"
 
     The target is a field by reference from the struct holding it, `opt_in(GJKScratch.contact0, envs=n_threads)`, with
     the sizes of its arrays, which add to those its struct is built with, or a struct class, which its builder checks
-    with 'is_opted_in'. `cond` defers the decision to the moment the struct is built, the opt-in holding if it returns
+    with 'is_opted_in'. Opting in a requirement (see 'requires') opts in the struct it requires as well. `cond` defers the decision to the moment the struct is built, the opt-in holding if it returns
     true then, so that a component asks before it knows. It holds in the children of the namespace too, and must come
     before any instance of the struct is built in it.
     """
@@ -308,6 +336,9 @@ def opt_in(target: "FieldRef | type[Data]", *, cond: "Callable[[], bool] | None"
             f"opt_in({target!r}) comes too late: a {root_cls.__name__} is already built in {entered_namespace!r}."
         )
     entered_namespace._opt_ins.setdefault((root_cls, path), []).append((cond, sizes))
+    if len(path) == 1 and path[0] in root_cls._requires:
+        required_cls = _resolve_type(root_cls._requires[path[0]], root_cls)
+        entered_namespace._opt_ins.setdefault((required_cls, ()), []).append((cond, {}))
 
 
 def is_opted_in(target: "FieldRef | type[Data]") -> bool:
@@ -334,9 +365,6 @@ def _opt_in_sizes(cls: type) -> dict[tuple[str, ...], dict[str, Any]]:
 
 # The namespace structs register in and find the structs they require from, set while one is entered (see Namespace)
 _ACTIVE_NAMESPACE: ContextVar["Namespace | None"] = ContextVar("data_namespace", default=None)
-# The structs defined so far by qualified name, and the hooks into those not defined yet (see 'into' in Data)
-_DATA_CLASSES: "weakref.WeakValueDictionary[str, type]" = weakref.WeakValueDictionary()
-_PENDING_HOOKS: dict[str, list[tuple[type, str]]] = {}
 
 
 class Namespace:
@@ -405,33 +433,17 @@ class Data:
     """
     Base of the structs of solver data, which kernels take as arguments.
 
-    A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field'), and its members as fields annotated
-    with another struct. The class keywords `kind` and `shape` set the defaults of its fields (see DataKind). A member
-    takes the shape of its field, else the default of its class, else that of its holder, and the kind of its field,
-    else that of its holder, else the default of its class.
+    A subclass declares its arrays as fields annotated `qd.Tensor` (see 'field'), its members as fields annotated with
+    another struct, and the structs it uses without owning them (see 'requires' and 'attach'). The class keywords `kind`
+    and `shape` set the defaults of its fields (see DataKind).
 
-    The constructor allocates every array of the tree in declaration order. `sizes` maps each size (see Size), or its
-    name, to its value. `values` maps the name of each constant to its value, validated strictly. Both also map a field,
-    by its name or by a reference (see FieldRef), to the sizes or the values of its own arrays, the sizes given to a
-    field overriding those of its holder, so one struct may hold several members of a type sized apart. `requires_grad`
-    gives gradients to the arrays declared with `grad`. The property tables map a selection of arrays to a value:
-    `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the given permutation
-    of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders. A selection is a
-    label or its name, matching any number of arrays, a reference to a field of the struct (see FieldRef), a tuple of
-    them, or None for every array. A member, by its name or by a reference, also takes a nested table, whose keys select
-    within it as in its own constructor. Where two keys select the same array, the deepest field wins, None selecting
-    the struct or member it applies to, and a tie or a label raises. A plain value in place of a table applies to every
-    array. `_binds` maps a field, by its name or by a reference, to an array or a struct allocated elsewhere, bound in
-    its place: no kernel may access both, since Quadrants assumes distinct kernel arguments never alias.
-
-    A struct may also require structs built and owned elsewhere, which it references without allocating them, so that a
-    kernel reaches the data of several components through one argument. The struct declares the field of each (see
-    'requires'), and a module adds one to a struct it does not own with the class keyword `into`: the struct, or its
-    qualified name for one defined later, and the name of the field, before any instance of it is built. Every struct
-    registers in the namespace entered when it is built (see Namespace), and the constructor binds each required struct
-    to the one of its type in the entered namespace, else in its nearest ancestor holding any, which must hold exactly
-    one. A struct requires one struct per type, and no array or struct appears twice in its tree, which Quadrants could
-    not tell apart.
+    The constructor allocates every array of the tree. `sizes` maps each size (see Size) to its value and `values` each
+    constant to its value, either one also keyed by a field (see FieldRef) for the arrays of that field alone.
+    `requires_grad` gives gradients to the arrays declared with `grad`. The property tables `env_first`, `layout` and
+    `unused` map a selection of arrays (a label, a field reference, a tuple of them, or None for all) to whether the
+    environment dimension comes first, the order the dimensions are stored in, and whether the array is a 0-d
+    placeholder no kernel reads. Each required struct is bound to the one of its type built in the entered namespace or
+    its nearest ancestor holding one (see Namespace).
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -439,28 +451,18 @@ class Data:
     _lazy: ClassVar[dict[str, type]] = {}
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
-    # The type of each struct the struct requires by its field, those hooked into it among them, its fields being
-    # final once an instance is built. A struct hooked into one first built without it is refused afterwards.
+    # The type of each struct the struct requires by its field, those attached to it among them, its fields being
+    # final once an instance is built
     _requires: ClassVar[dict[str, type]] = {}
-    _hooks: ClassVar[set[str]] = set()
-    _optional_requires: ClassVar[set[str]] = set()
     _is_sealed: ClassVar[bool] = False
-    _is_refused: ClassVar[bool] = False
 
-    def __init_subclass__(
-        cls,
-        kind: "DataKind | None" = None,
-        shape: tuple | None = None,
-        into: "tuple[type[Data] | str, str] | None" = None,
-        **kwargs,
-    ):
+    def __init_subclass__(cls, kind: "DataKind | None" = None, shape: tuple | None = None, **kwargs):
         super().__init_subclass__(**kwargs)
         if kind is not None:
             cls.kind = kind
         if shape is not None:
             cls._shape = shape
-        cls._lazy, cls._values_models, cls._requires, cls._hooks = dict(cls._lazy), {}, {}, set()
-        cls._optional_requires = set()
+        cls._lazy, cls._values_models, cls._requires = dict(cls._lazy), {}, {}
         annotations = get_own_annotations(cls)
         lazy_names = [
             name
@@ -491,37 +493,6 @@ class Data:
             spec = data_field.metadata.get(_SPEC, _FieldSpec())
             if spec.is_required:
                 cls._requires[data_field.name] = data_field.type
-            if spec.is_optional:
-                cls._optional_requires.add(data_field.name)
-        if into is not None:
-            target, field_name = into
-            target = _DATA_CLASSES.get(target) if isinstance(target, str) else target
-            if target is None:
-                _PENDING_HOOKS.setdefault(into[0], []).append((cls, field_name))
-            else:
-                target._hook(field_name, cls)
-        qualified_name = f"{cls.__module__}.{cls.__qualname__}"
-        _DATA_CLASSES[qualified_name] = cls
-        for hook_cls, field_name in _PENDING_HOOKS.pop(qualified_name, []):
-            cls._hook(field_name, hook_cls)
-
-    @classmethod
-    def _hook(cls, field_name: str, hook_cls: type) -> None:
-        # The layout of a struct a kernel took is compiled in, so its fields are final once an instance is built
-        if cls._is_sealed:
-            raise TypeError(
-                f"{hook_cls.__name__} hooks into {cls.__name__} too late, an instance being already built: import the "
-                f"module defining {hook_cls.__name__} before building any scene."
-            )
-        if field_name in cls.__dataclass_fields__:
-            raise TypeError(f"{hook_cls.__name__} hooks into {cls.__name__}.{field_name}, which already exists.")
-        # The field of the hooked struct, taken from a dataclass declaring it alone
-        cls.__dataclass_fields__[field_name] = dataclasses.fields(
-            dataclasses.make_dataclass(field_name, [(field_name, hook_cls)])
-        )[0]
-        setattr(cls, field_name, FieldRef(cls, (field_name,)))
-        cls._requires[field_name] = hook_cls
-        cls._hooks.add(field_name)
 
     def __init__(
         self,
@@ -536,11 +507,8 @@ class Data:
     ):
         cls = type(self)
         name = cls.__name__
-        if cls._is_refused:
-            raise TypeError(f"{name}() is refused: it hooks into a struct first built without it (see the warning).")
         # The first instance resolves the annotations of the required structs and checks them, its fields being final
-        is_first = not cls._is_sealed
-        if is_first:
+        if not cls._is_sealed:
             cls._requires = {
                 field_name: _resolve_type(annotation, cls) for field_name, annotation in cls._requires.items()
             }
@@ -552,33 +520,19 @@ class Data:
                 raise TypeError(f"{name}: a struct requires one struct per type.")
             cls._is_sealed = True
 
+        # The fields opted in within the entered namespace or its ancestors (see 'opt_in'), the struct itself aside
+        opted_in = {path: path_sizes for path, path_sizes in _opt_in_sizes(cls).items() if path}
         # The required structs are bound in their fields, from the entered namespace, else from the nearest ancestor
         binds = {}
-        for field_name, required_cls in list(cls._requires.items()):
+        for field_name, required_cls in cls._requires.items():
             holding_namespace = _ACTIVE_NAMESPACE.get()
             while holding_namespace is not None and not holding_namespace._structs.get(required_cls):
                 holding_namespace = holding_namespace.parent
-            # A struct hooked in but built nowhere is dropped from the first instance on, and refused afterwards, so
-            # that a broken plugin disables itself rather than every struct it hooks into
-            # An optional struct built nowhere is a placeholder of its own, registered in no namespace
-            if holding_namespace is None and field_name in cls._optional_requires:
-                token = _ACTIVE_NAMESPACE.set(None)
-                try:
-                    binds[(field_name,)] = required_cls(unused=True)
-                finally:
-                    _ACTIVE_NAMESPACE.reset(token)
-                continue
-            if holding_namespace is None and is_first and field_name in cls._hooks:
-                gs.logger.warning(
-                    f"{required_cls.__name__} hooks into {name}, but none is built: {name} goes without it, and any "
-                    f"{required_cls.__name__} built from now on is refused."
-                )
-                del cls.__dataclass_fields__[field_name], cls._requires[field_name]
-                delattr(cls, field_name)
-                cls._hooks.discard(field_name)
-                required_cls._is_refused = True
-                continue
             if holding_namespace is None:
+                # An opt-in requirement built nowhere and opted in by nobody holds placeholders of its own, its arrays
+                # being unused as those of any opt-in field
+                if cls.__dataclass_fields__[field_name].metadata[_SPEC].opt_in and (field_name,) not in opted_in:
+                    continue
                 raise TypeError(f"{name}() finds no {required_cls.__name__} in {_ACTIVE_NAMESPACE.get()!r}.")
             structs = list(holding_namespace._structs[required_cls])
             if len(structs) > 1:
@@ -606,6 +560,8 @@ class Data:
                 node_kind = holder.kind if node_kind is None else node_kind
                 nodes.append(_Node(node_path, None, spec, node_kind, node_shape, node_labels))
                 continue
+            # A member takes the shape of its field, else the default of its class, else that of its holder. Its kind,
+            # that of its field else that of its holder, falls back on the default of its class for its arrays.
             node_shape = next(iter([s for s in (spec.shape, member._shape) if s is not None]), shape)
             nodes.append(_Node(node_path, member, spec, node_kind, node_shape, node_labels))
             if node_path not in binds:
@@ -613,14 +569,14 @@ class Data:
         paths = {node.path for node in nodes}
         leaves = [node for node in nodes if node.member is None]
 
+        # A field bound to an array or a struct allocated elsewhere, which no kernel may access through both, since
+        # Quadrants assumes distinct kernel arguments never alias
         for key, bound in (_binds or {}).items():
             key_path = key._path if isinstance(key, FieldRef) else (key,)
             if key_path not in paths:
                 raise TypeError(f"{name}() '_binds' names {key}, which is no field of it.")
             binds[key_path] = bound
         sizes = _by_path(name, "sizes", sizes or {}, paths)
-        # The fields opted in within the entered namespace or its ancestors (see 'opt_in'), the struct itself aside
-        opted_in = {path: path_sizes for path, path_sizes in _opt_in_sizes(cls).items() if path}
         if unknown := sorted(opted_in.keys() - {node.path for node in nodes if node.spec.opt_in}):
             raise TypeError(f"{name}() is opted in at {unknown}, which no field declares opt_in.")
         for path, path_sizes in opted_in.items():
@@ -630,7 +586,8 @@ class Data:
                 raise TypeError(f"{name}() 'sizes' gives {unknown}, which size no array of it.")
         properties = {leaf.path: {} for leaf in leaves}
         for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
-            # The entries of the table with the path of the member they apply to, a member taking a nested table
+            # The entries of the table with the path of the member they apply to, a member taking a nested table that
+            # selects within it as in its own constructor, and a plain value applying to every array
             entries = []
             pending = [((), table if isinstance(table, Mapping) else {} if table is None else {None: table})]
             while pending:
@@ -654,7 +611,8 @@ class Data:
                         pending.append((key_path, value))
                     else:
                         entries.append((scope, items, value))
-            # The depth of the key setting the property of each array, the deepest field reference winning
+            # The depth of the key setting the property of each array, the deepest field reference winning, None
+            # selecting the struct or member it applies to, and a tie or a label selecting it twice raising
             selected_depths = {}
             for scope, items, value in entries:
                 for leaf in leaves:
@@ -964,23 +922,26 @@ class DataKind(IntEnum):
     """The kind of every array or scalar a solver yields (see 'Solver.data'), which checkpoints and trajectories
     select by.
 
-    CONSTANT is an array the build computes from the scene description once. INFO is a model parameter the setters
-    write, such as mass, friction, gains or limits. STATE is what specifies the scene with INFO: the reduced-space
-    configuration, velocities, accelerations, control inputs and the warm starts of the collision detection and the
-    constraint solve, which change the result of the next step. DERIVED is what the next step or forward kinematics
-    recomputes from STATE and INFO, such as the link poses, the contacts and the constraint forces, and recomputing it
-    changes the result at the last bits at most. A step or a solve writes SCRATCH before it reads it.
-
-    The kinds decide what a minimal trajectory records (see TrajectoryFile), so every solver classifies its arrays by
-    one rule: an array the next step reads before writing it is STATE or INFO, and a DERIVED array is recomputed
-    before it is read, by the next step or by the restore of a record without it (see 'Solver.__setstate__').
+    An array the next step reads before writing it is STATE or INFO, and a DERIVED array is recomputed before it is
+    read, by the next step or by the restore of a record without it (see 'Solver.__setstate__').
     """
 
     CONSTANT = 0
+    """Computed from the scene description once, at build."""
+
     INFO = 1
+    """A model parameter the setters write, such as mass, friction, gains or limits."""
+
     STATE = 2
+    """What specifies the scene with INFO: the configuration, velocities, accelerations, control inputs and the warm
+    starts of the collision detection and the constraint solve, which change the result of the next step."""
+
     DERIVED = 3
+    """Recomputed from STATE and INFO by the next step or forward kinematics, such as the link poses, the contacts and
+    the constraint forces, recomputing it changing the result at the last bits at most."""
+
     SCRATCH = 4
+    """Written by a step or a solve before it reads it."""
 
 
 # The kinds a checkpoint carries: INFO, STATE and DERIVED. The static configs travel in a separate field of the

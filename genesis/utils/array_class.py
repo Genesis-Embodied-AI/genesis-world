@@ -926,10 +926,10 @@ TERRAIN_COLS = Size("terrain_cols")
 
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
-    sdf: SDFInfo = requires(optional=True)
+    sdf: SDFInfo = requires(opt_in=True)
     mpr: MPRInfo = requires()
     gjk: GJKInfo = requires()
-    support_field: SupportFieldInfo = requires(optional=True)
+    support_field: SupportFieldInfo = requires(opt_in=True)
     vert_neighbors: qd.Tensor = field(int, shape=(VERT_NEIGHBORS,))
     vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
     vert_n_neighbors: qd.Tensor = field(int, shape=(VERTS,))

@@ -25,6 +25,7 @@ class SDF:
         # The grids are costly to load, so they are only for a scene with a consumer opting the SDF info in
         if not is_opted_in(array_class.SDFInfo):
             return
+
         geoms = rigid_solver.geoms
         geoms_grid_idx = np.empty((len(geoms),), dtype=gs.np_int)
         grids_idx_by_key: dict[tuple[str, "SignedDistanceFieldDescription"], int] = {}

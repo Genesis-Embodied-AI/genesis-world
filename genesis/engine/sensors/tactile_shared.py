@@ -555,8 +555,9 @@ class ContactDepthQuerySensorMixin:
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Queried through signed distance fields unless raycast, the backend of the class being resolved at build
-        opt_in(array_class.SDFInfo, cond=lambda: self._options.contact_depth_query != "raycast")
+        # Queried through signed distance fields unless raycast
+        if self._options.contact_depth_query != "raycast":
+            opt_in(array_class.SDFInfo)
 
     def build(self):
         super().build()
