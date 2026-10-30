@@ -266,9 +266,56 @@ class Collider:
         link_pair_idx[valid_link_pairs[:, 0], valid_link_pairs[:, 1]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
         link_pair_idx[valid_link_pairs[:, 1], valid_link_pairs[:, 0]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
 
-        max_collision_pairs, max_candidate_contacts, max_collision_pairs_broad, max_contacts = (
-            self._compute_max_contacts(self._n_possible_pairs, self._large_contact_pair_mask)
+        n_possible_nonconvex_pairs = int(np.count_nonzero(self._large_contact_pair_mask))
+        max_collision_pairs = min(self._solver.max_collision_pairs, self._n_possible_pairs)
+        # Size the contact buffer per regime: nonconvex pairs each emit up to n_contacts_per_nonconvex_pair, convex and
+        # terrain pairs up to n_contacts_per_convex_pair. The worst case fills the capped pair budget with as many
+        # (larger-cap) nonconvex pairs as exist, then the rest with convex pairs. The budget of a nonconvex pair is
+        # shared between its two vertex scans: the verification scan appends while the pair is under its cap and then
+        # only displaces the pair's least-penetrating contact, so the cap holds regardless of the number of scans.
+        cap_nonconvex = self.collider_config.n_contacts_per_nonconvex_pair
+        cap_convex = self.collider_config.n_contacts_per_convex_pair
+        n_nonconvex = min(n_possible_nonconvex_pairs, max_collision_pairs)
+        n_convex = min(self._n_possible_pairs - n_possible_nonconvex_pairs, max_collision_pairs - n_nonconvex)
+        max_candidate_contacts = n_nonconvex * cap_nonconvex + n_convex * cap_convex
+        # The broad phase reports each possible pair at most once per environment
+        max_collision_pairs_broad = min(
+            max_collision_pairs * self._solver._options.multiplier_collision_broad_phase, self._n_possible_pairs
         )
+
+        # Post-pruning contact budget for sizing the contact constraint buffers. The physical contact buffer must hold
+        # everything the narrowphase can emit (max_candidate_contacts), but the constraint solver only consumes
+        # contacts surviving link-pair pruning, which keeps roughly the 2D support polygon of each (link_a, link_b)
+        # contact patch. Cap each candidate link pair at _prune_max_contacts_per_link_pair points (or the sum of its
+        # geom-pair caps if smaller) instead of the per-geom-pair worst case. This is a heuristic, not a hard
+        # guarantee: conforming (non-coplanar) contact patches are not pruned and can exceed the cap, which clamps
+        # the contact count and halts the simulation with a request to increase 'max_contacts'. Tightening only pays
+        # off when the worst case is large, so the budget never goes below _prune_max_contacts_floor: under it, the
+        # halt risk buys no meaningful memory savings.
+        max_contacts = max_candidate_contacts
+        if (
+            self.collider_config.has_prunable_contacts
+            and not self._solver._requires_grad
+            and self._solver._options.contact_pruning_tolerance is not None
+        ):
+            geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=np.int64)
+            pairs_link_idx = geoms_link_idx[self._valid_collision_pairs]
+            pairs_key = self._solver.n_links * pairs_link_idx.min(axis=1) + pairs_link_idx.max(axis=1)
+            _, pairs_group_idx = np.unique(pairs_key, return_inverse=True)
+            pairs_n_contacts = np.where(self._large_contact_pair_mask, cap_nonconvex, cap_convex)
+            link_pairs_n_contacts = np.bincount(pairs_group_idx, weights=pairs_n_contacts)
+            max_contacts_pruned = np.minimum(link_pairs_n_contacts, self._prune_max_contacts_per_link_pair)
+            max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._prune_max_contacts_floor)
+            max_contacts = min(max_contacts, max_contacts_pruned_total)
+
+        # The option 'max_contacts' replaces the post-pruning budget, capped by the candidate budget. It is resolved in
+        # place, since the constraint solver reads it.
+        options = self._solver._options
+        if options.max_contacts is None:
+            options.max_contacts = max_contacts
+        else:
+            options.max_contacts = min(options.max_contacts, max_candidate_contacts)
+
         terrain_hf_shape = (1, 1)
         for geom in self._solver.geoms:
             if geom.type == gs.GEOM_TYPE.TERRAIN:
@@ -297,7 +344,7 @@ class Collider:
                 max_collision_pairs=max_collision_pairs,
                 max_candidate_contacts=max_candidate_contacts,
                 max_collision_pairs_broad=max_collision_pairs_broad,
-                max_contacts=max_contacts,
+                max_contacts=options.max_contacts,
                 n_valid_link_pairs=n_valid_link_pairs,
                 mc_perturbation=self._mc_perturbation,
                 mc_tolerance=self._mc_tolerance,
@@ -348,15 +395,15 @@ class Collider:
                 terrain_threads=self._n_terrain_threads,
             ),
             env_first={array_class.ColliderState.contact_sort_key: True, "pruning": True},
-            unused={
-                "box_box": not config.box_box_detection,
-                "contact_cache": not self.collider_config.has_non_box_plane_convex_convex,
-                "diff_contacts": not config.requires_grad,
-                "work_queue": not (self._use_split_narrowphase or self.collider_config.has_terrain),
-                "split_narrowphase": not self._use_split_narrowphase,
-                "perturbed_slots": not (self._use_split_narrowphase and not self._solver._options.enable_contact_patch),
-                "pruning": not self.collider_config.has_prunable_contacts,
-            },
+            unused=dict(
+                box_box=not config.box_box_detection,
+                contact_cache=not self.collider_config.has_non_box_plane_convex_convex,
+                diff_contacts=not config.requires_grad,
+                work_queue=not (self._use_split_narrowphase or self.collider_config.has_terrain),
+                split_narrowphase=not self._use_split_narrowphase,
+                perturbed_slots=not (self._use_split_narrowphase and not self._solver._options.enable_contact_patch),
+                pruning=not self.collider_config.has_prunable_contacts,
+            ),
             requires_grad=config.requires_grad,
         )
 
@@ -749,59 +796,6 @@ class Collider:
             self.collider_info.vert_neighbors.from_numpy(vert_neighbors)
             self.collider_info.vert_neighbor_start.from_numpy(vert_neighbor_start)
             self.collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)
-
-    def _compute_max_contacts(self, n_possible_pairs, large_contact_pair_mask):
-        """Return the collision pair, candidate contact, broad phase pair and contact budgets, resolving 'max_contacts'."""
-        n_possible_nonconvex_pairs = int(np.count_nonzero(large_contact_pair_mask))
-        max_collision_pairs = min(self._solver.max_collision_pairs, n_possible_pairs)
-        # Size the contact buffer per regime: nonconvex pairs each emit up to n_contacts_per_nonconvex_pair, convex and
-        # terrain pairs up to n_contacts_per_convex_pair. The worst case fills the capped pair budget with as many
-        # (larger-cap) nonconvex pairs as exist, then the rest with convex pairs. The budget of a nonconvex pair is
-        # shared between its two vertex scans: the verification scan appends while the pair is under its cap and then
-        # only displaces the pair's least-penetrating contact, so the cap holds regardless of the number of scans.
-        cap_nonconvex = self.collider_config.n_contacts_per_nonconvex_pair
-        cap_convex = self.collider_config.n_contacts_per_convex_pair
-        n_nonconvex = min(n_possible_nonconvex_pairs, max_collision_pairs)
-        n_convex = min(n_possible_pairs - n_possible_nonconvex_pairs, max_collision_pairs - n_nonconvex)
-        max_candidate_contacts = n_nonconvex * cap_nonconvex + n_convex * cap_convex
-        # The broad phase reports each possible pair at most once per environment
-        max_collision_pairs_broad = min(
-            max_collision_pairs * self._solver._options.multiplier_collision_broad_phase, n_possible_pairs
-        )
-
-        # Post-pruning contact budget for sizing the contact constraint buffers. The physical contact buffer must hold
-        # everything the narrowphase can emit (max_candidate_contacts), but the constraint solver only consumes
-        # contacts surviving link-pair pruning, which keeps roughly the 2D support polygon of each (link_a, link_b)
-        # contact patch. Cap each candidate link pair at _prune_max_contacts_per_link_pair points (or the sum of its
-        # geom-pair caps if smaller) instead of the per-geom-pair worst case. This is a heuristic, not a hard
-        # guarantee: conforming (non-coplanar) contact patches are not pruned and can exceed the cap, which clamps
-        # the contact count and halts the simulation with a request to increase 'max_contacts'. Tightening only pays
-        # off when the worst case is large, so the budget never goes below _prune_max_contacts_floor: under it, the
-        # halt risk buys no meaningful memory savings.
-        max_contacts = max_candidate_contacts
-        if (
-            self.collider_config.has_prunable_contacts
-            and not self._solver._requires_grad
-            and self._solver._options.contact_pruning_tolerance is not None
-        ):
-            geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=np.int64)
-            pairs_link_idx = geoms_link_idx[self._valid_collision_pairs]
-            pairs_key = self._solver.n_links * pairs_link_idx.min(axis=1) + pairs_link_idx.max(axis=1)
-            _, pairs_group_idx = np.unique(pairs_key, return_inverse=True)
-            pairs_n_contacts = np.where(large_contact_pair_mask, cap_nonconvex, cap_convex)
-            link_pairs_n_contacts = np.bincount(pairs_group_idx, weights=pairs_n_contacts)
-            max_contacts_pruned = np.minimum(link_pairs_n_contacts, self._prune_max_contacts_per_link_pair)
-            max_contacts_pruned_total = max(int(max_contacts_pruned.sum()), self._prune_max_contacts_floor)
-            max_contacts = min(max_contacts, max_contacts_pruned_total)
-
-        # The option 'max_contacts' replaces the post-pruning budget, capped by the candidate budget. It is resolved in
-        # place, since the constraint solver reads it.
-        options = self._solver._options
-        if options.max_contacts is None:
-            options.max_contacts = max_contacts
-        else:
-            options.max_contacts = min(options.max_contacts, max_candidate_contacts)
-        return max_collision_pairs, max_candidate_contacts, max_collision_pairs_broad, options.max_contacts
 
     def _init_terrain_state(self):
         if self.collider_config.has_terrain:
