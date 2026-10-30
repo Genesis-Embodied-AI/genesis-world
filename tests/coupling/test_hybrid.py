@@ -90,6 +90,7 @@ def test_rigid_mpm_muscle(show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.cpu_threads(1)
 @pytest.mark.parametrize("substeps", [1, 10])
 def test_rigid_mpm_legacy_coupling(substeps, tol, show_viewer):
     # This test is aimining at two things:
