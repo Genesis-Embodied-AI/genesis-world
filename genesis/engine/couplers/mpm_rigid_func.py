@@ -4,7 +4,7 @@ dofs.
 Rigid geoms enter the MPM energy as soft contact rows with Rigid's own contact model: the deepest geom of a particle
 within its soft range gives the pyramid rows of its friction cone, with the geom's friction and solref / solimp
 impedance, and the summed inverse weight of the link and of the particle in the implicit system (the material it is
-embedded in, see `particle_inv_weight`). A row acts on the displacement of the particle relative to its contact point on
+embedded in, see `func_contact_invweight`). A row acts on the displacement of the particle relative to its contact point on
 the link.
 
 The Rigid unknown is x = dt^2 qacc per dof, so that the link point moves by dt v + J_pt x over the substep; Rigid's
@@ -29,12 +29,13 @@ from genesis.engine.solvers.mpm_data import (
     PYRAMID_ROWS,
     WALL_ROWS,
     MpmParticles,
+    MpmParticlesInfo,
 )
 from genesis.engine.solvers.mpm_func import (
     band_row,
     contact_band_width,
+    contact_invweight,
     contact_row_terms,
-    particle_inv_weight,
     particle_of_sorted,
     particle_trial_disp,
     q1_stencil,
@@ -271,7 +272,9 @@ def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template())
     contact range in `newton.query_phi` / `query_idx`, and record no pair."""
     i_g = query.coupled_geoms[i_a]
     x = qd.Vector([query.newton.query_pos[3 * i_q + d] for d in qd.static(range(3))], dt=gs.qd_float)
-    phi = geom_sdf(i_g, i_t, x, query.geoms_state, query.geoms_info, query.sdf_info) - query.geoms_info.coup_softness[i_g]
+    phi = (
+        geom_sdf(i_g, i_t, x, query.geoms_state, query.geoms_info, query.sdf_info) - query.geoms_info.coup_softness[i_g]
+    )
     if phi < query.newton.query_phi[i_q]:
         query.newton.query_phi[i_q] = phi
         query.newton.query_idx[i_q] = i_g
@@ -284,6 +287,7 @@ def func_nearest_geom_filter(i_t: int, i_a: int, i_q: int, query: qd.template())
 @qd.func(requires_top_level=True)
 def func_build_rigid_rows(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     geoms_state: array_class.GeomsState,
@@ -322,7 +326,9 @@ def func_build_rigid_rows(
         newton.query_phi[s] = float("inf")
         newton.query_idx[s] = -1
         reach = params.dx[()] + 2.0 * dt * particles.vel[f, i_p, i_b].norm()
-        func_bvh_query_aabb(i_b, s, x_p - reach, x_p + reach, query.tree, query.results, func_nearest_geom_filter, query)
+        func_bvh_query_aabb(
+            i_b, s, x_p - reach, x_p + reach, query.tree, query.results, func_nearest_geom_filter, query
+        )
         i_g_contact = newton.query_idx[s]
         phi = newton.query_phi[s]
         i_l = -1
@@ -346,9 +352,7 @@ def func_build_rigid_rows(
             I_l = [i_l, i_b] if qd.static(config.rigid_batch_links_info) else i_l
             friction = qd.max(geoms_info.friction[i_g_contact] * geoms_state.friction_ratio[i_g_contact, i_b], 1e-2)
             friction_sq_reg = friction * friction / rigid_info.impratio[None]
-            slots = stencil_node_slots(grid, env, cell)
-            w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
-            invweight = particle_inv_weight(grid, slots, w, normal) + links_info.invweight[I_l][0]
+            invweight = contact_invweight(particles, particles_info, f, i_p, i_b, normal) + links_info.invweight[I_l][0]
             diag_coef = invweight * (1.0 + friction_sq_reg) * 2.0 * friction_sq_reg
             sol_params = geoms_info.sol_params[i_g_contact]
             sol_params[0] = qd.max(sol_params[0], 2.0 * dt)
@@ -641,7 +645,14 @@ def func_rigid_factor(
                     coupling.solve_rhs[i_d, i_b] = value
                 i_a = dyn_info.links.parent_idx[I_a]
             rigid_solve(
-                i_b, coupling.solve_rhs, coupling.solve_out, dyn_state, constraint_state, rigid_info, rigid_config, config
+                i_b,
+                coupling.solve_rhs,
+                coupling.solve_out,
+                dyn_state,
+                constraint_state,
+                rigid_info,
+                rigid_config,
+                config,
             )
             for i_d in range(n_dofs):
                 coupling.wb_U[i_d, i_b, col] = coupling.solve_rhs[i_d, i_b]
@@ -1012,6 +1023,39 @@ def func_rigid_write_back(
         constraint_state.qacc[i_d, i_b] = coupling.qacc[i_d, i_b]
         if qd.static(not config.has_rigid_rows):
             constraint_state.qfrc_constraint[i_d, i_b] = 0.0
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_adjoint_rhs(
+    coupling: qd.template(),  # MpmRigidCoupling
+    constraint_state: array_class.ConstraintState,
+    params: qd.template(),  # MpmParams
+):
+    """Rigid's right-hand side of the joint adjoint solve, in place of the gradient the PCG starts from: the adjoint
+    of x = dt^2 qacc, dL/dqacc / dt^2, with dL/dqacc as Rigid's own adjoint solve takes it (see
+    ConstraintSolver.backward)."""
+    n_dofs = coupling.x.shape[0]
+    n_envs = coupling.x.shape[1]
+    inv_dt_sq = 1.0 / (params.substep_dt[()] * params.substep_dt[()])
+    qd.loop_config(name="mpm_rigid_adjoint_rhs")
+    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
+        coupling.grad[i_d, i_b] = constraint_state.dL_dqacc[i_d, i_b] * inv_dt_sq
+
+
+@qd.func(requires_top_level=True)
+def func_rigid_adjoint_finish(
+    coupling: qd.template(),  # MpmRigidCoupling
+    constraint_state: array_class.ConstraintState,
+    params: qd.template(),  # MpmParams
+):
+    """The solution of Rigid's adjoint solve from the joint one: Rigid's joint energy is dt^4 times its cost of
+    x / dt^2, whose gradient in the parameters of Rigid's rows is dt^2 times that of its cost, so u = dt^2 lambda_x."""
+    n_dofs = coupling.x.shape[0]
+    n_envs = coupling.x.shape[1]
+    dt_sq = params.substep_dt[()] * params.substep_dt[()]
+    qd.loop_config(name="mpm_rigid_adjoint_finish")
+    for i_d, i_b in qd.ndrange(n_dofs, n_envs):
+        constraint_state.bw_u[i_d, i_b] = dt_sq * coupling.sol[i_d, i_b]
 
 
 @qd.func(requires_top_level=True)

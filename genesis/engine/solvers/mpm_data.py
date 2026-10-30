@@ -167,6 +167,8 @@ class MpmParticlesInfo:
     free: qd.Tensor
     muscle_group: qd.Tensor
     muscle_direction: qd.Tensor
+    # Inverse weight matrix of the particle in its contact rows, a model constant (see func_contact_invweight)
+    contact_invweight: qd.Tensor
 
 
 def get_mpm_particles_info(n_particles: int) -> MpmParticlesInfo:
@@ -178,6 +180,7 @@ def get_mpm_particles_info(n_particles: int) -> MpmParticlesInfo:
         free=array_class.V(dtype=gs.qd_bool, shape=shape),
         muscle_group=array_class.V(dtype=gs.qd_int, shape=shape),
         muscle_direction=array_class.V(dtype=gs.qd_vec3, shape=shape),
+        contact_invweight=array_class.V(dtype=gs.qd_mat3, shape=shape),
     )
 
 
@@ -272,8 +275,8 @@ class MpmGrid:
         self.node_fixed = qd.ndarray(qd.i32, shape=(max_nodes,))
         # Per displacement component: held at zero by the Newton solve
         self.dof_fixed = qd.ndarray(qd.i32, shape=(3 * max_nodes,))
-        # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic) at the substep start, from
-        # which the contact rows take the effective inverse weight of the material they push
+        # Diagonal 3x3 block of every node of the physical Hessian (kinetic and elastic), from which the inverse weights
+        # of the particles in their contact rows are computed once (see func_contact_invweight)
         self.node_diag = qd.ndarray(gs.qd_float, shape=(9 * max_nodes,))
         self.node_v = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))
         self.node_v_free = qd.ndarray(gs.qd_float, shape=(3 * max_nodes,))

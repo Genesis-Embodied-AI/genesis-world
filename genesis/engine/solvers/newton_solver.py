@@ -16,6 +16,7 @@ The participant and coupling objects enter the kernels as templates, in a fixed 
 dataclasses, so the slots are kernel arguments rather than a list.
 """
 
+import functools
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -323,6 +324,20 @@ def kernel_pcg_loop(
 
 
 @qd.kernel
+def kernel_pcg_iteration(
+    p: qd.template(),
+    s0: qd.template(),
+    s1: qd.template(),
+    s2: qd.template(),
+    c0: qd.template(),
+    c1: qd.template(),
+    c2: qd.template(),
+    f: qd.i32,
+):
+    func_pcg_iteration(p, s0, s1, s2, c0, c1, c2, f)
+
+
+@qd.kernel
 def kernel_start_line_search(
     control: qd.template(),
     p: qd.template(),
@@ -460,12 +475,43 @@ class NewtonSolver(Solver):
             return
         with custom_backward(self.backward, f):
             self._step(f)
+        # What follows the solve is reversed by its own autodiff, such as the integration of Rigid's deferred substep
+        for host in [self._primary[0]] + [host for host, _ in self._secondaries + self._couplings]:
+            host.newton_end(f)
 
     def backward(self, f):
-        """Reverse the Newton solve of substep f, from the state the replay of its forward pass left."""
-        if self._secondaries or self._couplings:
-            gs.raise_exception("The backward pass of the joint Newton solve with other solvers is not supported yet.")
-        self._primary[0].newton_backward(f)
+        """Reverse the Newton solve of substep f, from the state the replay of its forward pass left.
+
+        The primary reverses the solve. A secondary participant's own reverse of the part of its substep the joint
+        solve took over wraps it, its adjoint solve being the joint one (see 'stage_adjoint')."""
+        hosts = [host for host, _ in self._secondaries + self._couplings]
+        if not all(getattr(host, "is_differentiable", False) for host in hosts):
+            gs.raise_exception(
+                "The backward pass of the joint Newton solve supports the participants of Rigid alone besides MPM."
+            )
+        solve = functools.partial(self._primary[0].newton_backward, f)
+        for host, _ in self._secondaries:
+            solve = functools.partial(host.newton_backward, f, solve)
+        solve()
+
+    def stage_adjoint(self, f):
+        """The rows of the secondary participants and couplings at the solution of substep f and their right-hand side
+        of the adjoint solve, after the primary assembled its Hessian at the solution and staged its own."""
+        if not (self._secondaries or self._couplings):
+            return
+        primary, secondary, coupling = self._slots()
+        kernel_assemble_secondary(*secondary, *coupling, f)
+        for host, _ in self._secondaries + self._couplings:
+            host.newton_adjoint_rhs(f)
+
+    def finish_adjoint(self, f):
+        """Hand the solution of the adjoint solve of substep f to the secondary participants and couplings."""
+        for host, _ in self._secondaries + self._couplings:
+            host.newton_adjoint_finish(f)
+
+    @property
+    def has_secondaries(self):
+        return bool(self._secondaries or self._couplings)
 
     def solve_adjoint(self, f, check_curvature=False) -> bool:
         """Solve H lambda = b on the primary's rows by the PCG of the forward solve of substep f, from the right-hand
@@ -479,8 +525,7 @@ class NewtonSolver(Solver):
         bits = 64 if gs.qd_float == qd.f64 else 32
         ws.tol_rate.from_numpy(np.array(ADJOINT_PCG_TOL_RATE[bits], dtype=tol_rate.dtype))
         ws.check_curvature.from_numpy(np.array(int(check_curvature), dtype=np.int32))
-        kernel_pcg_start(primary, *secondary)
-        kernel_pcg_loop(primary, *secondary, *coupling, f)
+        self._pcg(f)
         ws.tol_rate.from_numpy(tol_rate)
         if not check_curvature:
             return True
@@ -497,7 +542,7 @@ class NewtonSolver(Solver):
             host.newton_prepare(f)
         kernel_energy(control, primary, *secondary, f, 0)
 
-        if USE_NEWTON_GRAPH:
+        if USE_NEWTON_GRAPH and not self._has_grad_participants():
             kernel_newton_loop(control, primary, *secondary, *coupling, f)
         else:
             self._newton_loop_launches(f)
@@ -506,6 +551,26 @@ class NewtonSolver(Solver):
             host.newton_finish(f)
         for host in hosts + coupling_hosts:
             host.newton_after(f)
+
+    def _has_grad_participants(self):
+        """Whether a participant other than the primary takes part in a scene tracking gradients, whose ndarrays then
+        own a gradient."""
+        return self._requires_grad and bool(self._secondaries or self._couplings)
+
+    def _pcg(self, f):
+        """The PCG iterations of substep f, from its staged right-hand side, as one graph.
+
+        FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so the iterations launch one by one
+        when other participants take part in a scene tracking gradients."""
+        primary, secondary, coupling = self._slots()
+        kernel_pcg_start(primary, *secondary)
+        if not self._has_grad_participants():
+            kernel_pcg_loop(primary, *secondary, *coupling, f)
+            return
+        while True:
+            kernel_pcg_iteration(primary, *secondary, *coupling, f)
+            if not int(primary.ws.cond.to_numpy()):
+                break
 
     def _newton_loop_launches(self, f):
         """The Newton iterations driven from the host, the PCG iterations of each as one graph."""
@@ -516,8 +581,7 @@ class NewtonSolver(Solver):
             self._primary[0].newton_assemble(f)
             if has_secondary:
                 kernel_assemble_secondary(*secondary, *coupling, f)
-            kernel_pcg_start(primary, *secondary)
-            kernel_pcg_loop(primary, *secondary, *coupling, f)
+            self._pcg(f)
             kernel_start_line_search(control, primary, *secondary, f)
             while True:
                 kernel_step_forward(control, primary, *secondary, *coupling, f)

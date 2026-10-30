@@ -104,6 +104,26 @@ def func_solve_adjoint_u_cg_batch(
             constraint_state.bw_p[i_d, i_b] = constraint_state.bw_r[i_d, i_b] + beta * constraint_state.bw_p[i_d, i_b]
 
 
+@qd.func(requires_top_level=True)
+def func_add_constraint_force_grad(constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+    """g += J^T * (-D * dL/defc_force) over the active rows, the direct gradient of the constraint forces (see
+    kernel_solve_adjoint_u)."""
+    _B = constraint_state.bw_u.shape[1]
+    len_constraints = constraint_state.bw_Ju.shape[0]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_c, i_b in qd.ndrange(len_constraints, _B):
+        if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
+            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
+            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
+                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
+                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
+
+
+@qd.kernel(fastcache=True)
+def kernel_add_constraint_force_grad(constraint_state: array_class.ConstraintState, rigid_config: qd.template()):
+    func_add_constraint_force_grad(constraint_state, rigid_config)
+
+
 @qd.kernel(fastcache=True)
 def kernel_solve_adjoint_u(
     constraint_state: array_class.ConstraintState,
@@ -125,15 +145,8 @@ def kernel_solve_adjoint_u(
     """
     n_dofs = constraint_state.bw_u.shape[0]
     _B = constraint_state.bw_u.shape[1]
-    len_constraints = constraint_state.bw_Ju.shape[0]
 
-    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
-    for i_c, i_b in qd.ndrange(len_constraints, _B):
-        if i_c < constraint_state.n_constraints[i_b] and constraint_state.active[i_c, i_b] != 0:
-            dL_dJaref = -constraint_state.efc_D[i_c, i_b] * constraint_state.efc_force.grad[i_c, i_b]
-            for k in range(constraint_state.jac_n_dofs[i_c, i_b]):
-                i_d = constraint_state.jac_dofs_idx[i_c, k, i_b]
-                constraint_state.dL_dqacc[i_d, i_b] += constraint_state.jac[i_c, i_d, i_b] * dL_dJaref
+    func_add_constraint_force_grad(constraint_state, rigid_config)
 
     # Initialize u
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

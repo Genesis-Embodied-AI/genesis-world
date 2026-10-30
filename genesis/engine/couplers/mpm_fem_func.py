@@ -17,14 +17,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles
-from genesis.engine.solvers.mpm_func import (
-    contact_band_width,
-    particle_inv_weight,
-    particle_of_sorted,
-    q1_stencil,
-    stencil_node_slots,
-)
+from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
+from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted
 from genesis.utils import array_class
 
 from .mpm_rigid_func import particle_stencil
@@ -87,9 +81,7 @@ def closest_point_barycentric(p, a, b, c):
 def is_in_element(fem: qd.template(), i_e, i_b, x, f):
     """Whether point x lies in tet i_e at frame f, by its barycentric coordinates."""
     v3 = fem.elements_v[f, fem.elements_i[i_e].el2v[3], i_b].pos
-    D = qd.Matrix.cols(
-        [fem.elements_v[f, fem.elements_i[i_e].el2v[k], i_b].pos - v3 for k in qd.static(range(3))]
-    )
+    D = qd.Matrix.cols([fem.elements_v[f, fem.elements_i[i_e].el2v[k], i_b].pos - v3 for k in qd.static(range(3))])
     is_inside = False
     if qd.abs(D.determinant()) > gs.EPS:
         lam = D.inverse() @ (x - v3)
@@ -206,6 +198,7 @@ def func_nearest_triangle_filter(i_t: int, i_a: int, i_q: int, query: qd.templat
 @qd.func(requires_top_level=True)
 def func_build_fem_rows(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     fem: qd.template(),  # FEMSolver
@@ -222,8 +215,8 @@ def func_build_fem_rows(
     The gap phi is the signed distance to the triangle, outward along its normal, minus
     `params.fem_contact_thickness`. Every row of the friction pyramid J = n +- mu d is a penalty on the gap at the end
     of the substep, phi + J.r for the relative displacement r: its target is -phi and its stiffness
-    `params.fem_contact_stiffness` times the row's effective mass, the inverse of the particle's inverse weight in the
-    implicit system plus that of the triangle point, sum_k b_k^2 / m_k. The row energy depends on the end positions
+    `params.fem_contact_stiffness` times the row's effective mass, the inverse of the particle's inverse weight (see
+    func_contact_invweight) plus that of the triangle point, sum_k b_k^2 / m_k. The row energy depends on the end positions
     alone, so it adds no energy the way a reference acceleration from the start gap does; the tangential part of a
     pyramid row is dropped with the rows of the next substep, which makes it a dissipative friction bounded by the cone.
     The friction coefficient is the element's."""
@@ -259,9 +252,7 @@ def func_build_fem_rows(
                 v_rel = v_p - v_q
                 if best_phi < contact_band_width(params, -best_normal.dot(v_rel), dt):
                     friction = qd.max(fem.elements_i[fem.surface[best_tri].tri2el].friction_mu, MIN_FRICTION)
-                    slots = stencil_node_slots(grid, env, cell)
-                    w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
-                    invweight = particle_inv_weight(grid, slots, w, best_normal) + inv_mass
+                    invweight = contact_invweight(particles, particles_info, f, i_p, i_b, best_normal) + inv_mass
                     D = params.fem_contact_stiffness[()] / invweight
                     d1, d2 = gu.qd_orthogonals(best_normal)
                     for i in qd.static(range(PYRAMID_ROWS)):
@@ -485,9 +476,7 @@ def func_fem_pcg_dot_rz(fem: qd.template(), ws: qd.template()):
     qd.loop_config(name="mpm_fem_pcg_dot_rz")
     for i_b, i_v in qd.ndrange(fem._B, fem.n_vertices):
         if ws.converged[()] == 0:
-            qd.atomic_add(
-                ws.rz_slots[1 - ws.parity[()]], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z)
-            )
+            qd.atomic_add(ws.rz_slots[1 - ws.parity[()]], fem.pcg_state_v[i_b, i_v].r.dot(fem.pcg_state_v[i_b, i_v].z))
 
 
 @qd.func(requires_top_level=True)

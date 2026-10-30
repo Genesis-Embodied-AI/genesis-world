@@ -1332,17 +1332,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 is_backward=False,
             )
             # The smooth acceleration and the constraint solve are reversed together, through the implicit function
-            # theorem, which spares reversing the factor of the mass matrix
-            with custom_backward(self._constraint_force_grad):
-                kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
-                self._func_constraint_force()
-            kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-            kernel_integrate(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-            kernel_copy_next_to_curr_clear_coupling(
-                self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
-            )
-            if not self._enable_mujoco_compatibility:
-                self._update_forward_kinematics(envs_idx)
+            # theorem, which spares reversing the factor of the mass matrix. A deferred solve is reversed by the solver
+            # solving it jointly (see '_constraint_force_grad'), which leaves nothing to reverse to the assembly.
+            if self._defer_constraint_solve:
+                with custom_backward(None):
+                    kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+                    self._func_constraint_assemble()
+            else:
+                with custom_backward(self._constraint_force_grad):
+                    kernel_compute_smooth_qacc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config)
+                    self._func_constraint_force()
+                self._integrate_recorded_substep()
         elif isinstance(self.sim.coupler, SAPCoupler) or self._requires_grad:
             # A SAP-coupled substep replaces the constraint solve by the coupler's own, so it keeps its own launches.
             # FIXME: quadrants#946 - a graph refuses the ndarrays that own a gradient, so a scene tracking gradients
@@ -1358,6 +1358,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
             if isinstance(self.sim.coupler, SAPCoupler):
                 update_qvel(self.dyn_state, self.rigid_info, self.rigid_config)
+            elif self._defer_constraint_solve:
+                self._func_constraint_assemble()
             else:
                 self._func_constraint_force()
                 kernel_step_2(
@@ -1417,12 +1419,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._is_forward_vel_updated = not self._enable_mujoco_compatibility
 
     def finish_deferred_substep(self):
-        """Resolve the constraint forces and integrate the substep from `constraint_state.qacc`.
-
-        A solver coupled strongly with Rigid sets `_defer_constraint_solve`: the substep then stops after assembling the
-        constraint rows, the coupled solver solves them jointly with its own unknowns, writes the constraint solution
-        (qacc, Jaref, active, efc_force, qfrc_constraint), and calls this to finish the substep.
-        """
+        """Resolve the constraint forces and integrate the substep from `constraint_state.qacc`, after its constraint
+        solve, captured as one graph (see kernel_substep_post)."""
         kernel_substep_post(
             self.dyn_state,
             self.collider.collider_state,
@@ -1434,6 +1432,42 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self._options.noslip_iterations > 0,
             self._errno,
         )
+
+    def finish_deferred_solve(self):
+        """Update the accelerations and the contact forces from the constraint solution a solver coupled strongly with
+        Rigid wrote.
+
+        Such a solver sets `_defer_constraint_solve`: the substep then stops after assembling the constraint rows, the
+        coupled solver solves them jointly with its own unknowns, writes the constraint solution (qacc, Jaref, active,
+        efc_force, qfrc_constraint), calls this, then `integrate_deferred_substep` once its solve is over.
+        """
+        if not self._disable_constraint:
+            self.constraint_solver.resolve_post()
+
+    def integrate_deferred_substep(self):
+        """Integrate a deferred substep (see finish_deferred_solve), launch by launch where they are recorded for the
+        backward pass."""
+        if self._requires_grad and is_recording_launches():
+            self._integrate_recorded_substep()
+        else:
+            kernel_step_2(
+                self.dyn_state,
+                self.constraint_solver.constraint_state,
+                self.dyn_info,
+                self.rigid_info,
+                self.rigid_config,
+                self._errno,
+            )
+
+    def _integrate_recorded_substep(self):
+        """The integration of a substep whose launches are recorded for its backward pass, each reversed by autodiff."""
+        kernel_update_acc(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+        kernel_integrate(self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+        kernel_copy_next_to_curr_clear_coupling(
+            self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, self._errno
+        )
+        if not self._enable_mujoco_compatibility:
+            self._update_forward_kinematics(self._scene._sanitize_envs_idx(None))
 
     def _kernel_detect_collision(self):
         self.collider.clear()
@@ -1451,6 +1485,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         return collision_pairs
 
     def _func_constraint_force(self):
+        self._func_constraint_assemble()
+        if not self._disable_constraint:
+            self.constraint_solver.resolve()
+
+    def _func_constraint_assemble(self):
+        """Assemble the constraint rows of a substep, which its constraint solve resolves."""
         if not self._disable_constraint:
             self.constraint_solver.add_equality_constraints()
 
@@ -1459,17 +1499,17 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         if not self._disable_constraint:
             self.constraint_solver.add_inequality_constraints()
-            self.constraint_solver.resolve()
 
-    def _constraint_force_grad(self):
+    def _constraint_force_grad(self, solve_adjoint=None):
         """
         Reverse the smooth acceleration together with the constraint solve, through the implicit function theorem.
 
         Without constraints, the acceleration is the smooth one alone. Otherwise, dL_dqacc is seeded from acc.grad, the
         adjoint solve runs, its outputs are folded back into the autodiff grad fields, then the constraint-row assembly
-        is reversed.
+        is reversed. A solver that solved the constraint rows jointly with its own unknowns (see
+        `_defer_constraint_solve`) gives its adjoint solve as `solve_adjoint` (see 'ConstraintSolver.backward').
         """
-        if self._disable_constraint:
+        if self._disable_constraint and solve_adjoint is None:
             kernel_manual_compute_qacc_bw(self.dyn_state, self.rigid_info, self.rigid_config)
             return
 
@@ -1488,7 +1528,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 torch.mps.synchronize()
         else:
             kernel_load_dL_dqacc_from_acc_grad(self.dyn_state, constraint_state, self.rigid_config)
-        self.constraint_solver.backward()
+        self.constraint_solver.backward(solve_adjoint)
         if gs.use_zerocopy:
             force_grad = qd_to_torch(self.dyn_state.dofs.force.grad, copy=False)
             dL_dforce = qd_to_torch(constraint_state.dL_dforce, copy=False)

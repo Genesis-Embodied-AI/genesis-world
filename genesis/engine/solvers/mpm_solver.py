@@ -33,6 +33,7 @@ from genesis.engine.couplers.mpm_rigid_newton import (
     MpmRigidContactHost,
     RigidNewtonHost,
     RigidNewtonParticipant,
+    kernel_rigid_contact_adjoint,
 )
 from genesis.engine.entities import MPMEntity
 from genesis.engine.materials import MPM
@@ -380,11 +381,18 @@ class MPMSolver(ParticleSolver):
             self._mpm_params,
         )
         newton_solver.register_primary(self, self._newton_participant)
-        if self._rigid_coupled:
+        if self._has_rigid:
+            if self._requires_grad and self._mpm_config.has_terrain:
+                gs.raise_exception(
+                    "Differentiable simulation with the implicit MPM solver does not support the contact with a Rigid "
+                    "terrain yet."
+                )
             rigid_participant = RigidNewtonParticipant(rigid, self._mpm_coupling, self._mpm_config, self._mpm_params)
+            # The pullback of the contact rows, which the contact coupling runs when Rigid's dofs join the solve
+            self._rigid_contact = MpmRigidContact(self._newton_participant, rigid_participant)
+        if self._rigid_coupled:
             newton_solver.register_secondary(RigidNewtonHost(rigid, rigid_participant), rigid_participant)
-            contact = MpmRigidContact(self._newton_participant, rigid_participant)
-            newton_solver.register_coupling(MpmRigidContactHost(contact), contact)
+            newton_solver.register_coupling(MpmRigidContactHost(self._rigid_contact), self._rigid_contact)
         # Implicit FEM's substep joins the solve, its surface triangles giving the particles contact rows
         fem = self._sim.fem_solver
         fem._defer_solve = self._fem_coupled
@@ -506,11 +514,6 @@ class MPMSolver(ParticleSolver):
                         "Differentiable simulation with the implicit MPM solver does not support the plasticity of "
                         f"the material {type(material).__name__} yet."
                     )
-            if self._has_rigid:
-                gs.raise_exception(
-                    "Differentiable simulation with the implicit MPM solver does not support the coupling with Rigid "
-                    "yet; use LegacyCouplerOptions(rigid_mpm=False)."
-                )
             if self._ffs:
                 gs.raise_exception(
                     "Differentiable simulation with the implicit MPM solver does not support force fields yet."
@@ -539,6 +542,36 @@ class MPMSolver(ParticleSolver):
             self.init_implicit_data()
 
         self._build_gravity()
+        if self.is_active:
+            self._init_contact_invweight()
+
+    def _init_contact_invweight(self):
+        """The inverse weight of every particle in its contact rows (see func_contact_invweight), from the physical
+        Hessian of the configuration the particles are added in, before any step.
+
+        Like the inverse weights Rigid computes from the mass matrix of its initial configuration, it is a model
+        constant: a row's stiffness does not depend on the state, so that its gradients involve the second derivatives
+        of the energy alone. A particle inactive in that configuration keeps the inverse of its own mass."""
+        f = 0
+        grid, params = self._mpm_grid, self._mpm_params
+        self._size_to_particles(f)
+        build_grid(self.particles, self.particles_ng, grid, params, f)
+        while int(grid.grid_overflow.to_numpy()):
+            self._grow_grid()
+            build_grid(self.particles, self.particles_ng, grid, params, f)
+        kernel_predict(
+            self.particles,
+            self.particles_info,
+            grid,
+            self._mpm_newton,
+            self._mpm_force_fields,
+            params,
+            self._gravity,
+            f,
+            0.0,
+        )
+        self._assemble(f)
+        kernel_contact_invweight(self.particles, self.particles_info, grid, self._mpm_linear, params, f)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -678,7 +711,7 @@ class MPMSolver(ParticleSolver):
 
     def newton_prepare(self, f):
         """The substep up to the Newton solve: the impulses of the SPH fluid, the grid, P2G with the force fields, the
-        physical Hessian at u = 0 and the contact rows from it, which arm the Newton loop."""
+        physical Hessian at u = 0 and the contact rows, which arm the Newton loop."""
         if not self._mpm_sized:
             self._size_to_particles(f)
         if self._sph_coupled:
@@ -700,16 +733,15 @@ class MPMSolver(ParticleSolver):
             f,
             self._sim.cur_t,
         )
-        # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights. It
-        # also sizes the triplet storage for the substep's fixed grid topology, which every assembly of the Newton
-        # loop shares.
+        # The physical Hessian at u = 0 sizes the triplet storage for the substep's fixed grid topology, which every
+        # assembly of the Newton loop shares
         self._assemble(f)
         self._rigid_query.build(params)
         kernel_contact_rows(
             self.particles,
+            self.particles_info,
             grid,
             self._mpm_newton,
-            self._mpm_linear,
             self._mpm_control,
             self._mpm_config,
             params,
@@ -742,6 +774,9 @@ class MPMSolver(ParticleSolver):
     def newton_after(self, f):
         pass
 
+    def newton_end(self, f):
+        pass
+
     def newton_backward(self, f):
         """Reverse substep f from the state the replay of its forward pass left (see mpm_adjoint_func): the reverse of
         G2P into the adjoint of u*, the adjoint solve at the converged u* on the Hessian and by the solver the options
@@ -749,11 +784,17 @@ class MPMSolver(ParticleSolver):
         grid, newton, linear = self._mpm_grid, self._mpm_newton, self._mpm_linear
         mode = self._options.adjoint_hessian
         is_exact = mode in ("exact", "auto")
+        newton_solver = self._sim.newton_solver
         kernel_adjoint_g2p(self.particles, grid, newton, self._mpm_params, f)
         self._assemble(f, is_exact=is_exact)
         kernel_adjoint_rhs(grid, newton, linear)
-        newton_solver = self._sim.newton_solver
+        newton_solver.stage_adjoint(f)
         if self._options.adjoint_linear_solver == "direct":
+            if newton_solver.has_secondaries:
+                gs.raise_exception(
+                    "The direct adjoint solve of the implicit MPM solver does not support the joint solve with other "
+                    "solvers; use MPMOptions(adjoint_linear_solver='pcg')."
+                )
             self._solve_adjoint_direct()
         elif not newton_solver.solve_adjoint(f, check_curvature=is_exact):
             # At a converged solution the Hessian of the incremental potential is positive definite
@@ -772,7 +813,12 @@ class MPMSolver(ParticleSolver):
                 self._has_warned_adjoint_projection = True
             self._assemble(f)
             kernel_adjoint_rhs(grid, newton, linear)
+            newton_solver.stage_adjoint(f)
             newton_solver.solve_adjoint(f)
+        newton_solver.finish_adjoint(f)
+        # Rows on static Rigid geoms act on the particle displacement alone, outside of any coupling
+        if self._has_rigid and not self._rigid_coupled:
+            kernel_rigid_contact_adjoint(self._rigid_contact, f)
         kernel_adjoint_pullback(
             self.particles,
             self.particles_ng,
@@ -986,6 +1032,10 @@ class MPMSolver(ParticleSolver):
             self.particles_info.free[i_p] = True
             self.particles_info.muscle_group[i_p] = 0
             self.particles_info.muscle_direction[i_p] = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)
+            # The inverse mass of the particle alone, for a particle the rest configuration does not hold
+            self.particles_info.contact_invweight[i_p] = qd.Matrix.identity(gs.qd_float, 3) / (
+                self._particle_volume_real * mat_rho
+            )
 
         for i_p_, i_b in qd.ndrange(n_particles, self._B):
             i_p = i_p_ + particle_start
@@ -1513,15 +1563,11 @@ def kernel_substep(
             mpm_func.func_fix_nodes(grid)
             mpm_func.func_reset_contact_rows(grid, newton)
             mpm_func.func_newton_reset(grid, newton)
-            # The physical Hessian at u = 0, whose node diagonal blocks give the contact rows their inverse weights
-            mpm_func.func_report_extent(grid, linear)
-            mpm_func.func_assemble(particles, particles_info, materials, grid, newton, linear, params, f, dt)
-            func_sort_reduce_bcoo(linear.matrix)
-            mpm_func.func_gather_node_diag(grid, linear)
-            mpm_func.func_build_wall_rows(particles, grid, newton, params, f, dt)
+            mpm_func.func_build_wall_rows(particles, particles_info, grid, newton, params, f, dt)
             if qd.static(config.has_rigid):
                 func_build_rigid_rows(
                     particles,
+                    particles_info,
                     grid,
                     newton,
                     geoms_state,
@@ -1665,9 +1711,9 @@ def kernel_predict(
 @qd.kernel
 def kernel_contact_rows(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),
     newton: qd.template(),
-    linear: qd.template(),
     control: qd.template(),
     config: qd.template(),
     params: qd.template(),
@@ -1680,13 +1726,13 @@ def kernel_contact_rows(
     rigid_query: qd.template(),
     f: qd.i32,
 ):
-    """Contact rows from the reduced physical Hessian at u = 0, then arm the Newton loop."""
+    """The wall and Rigid contact rows of the substep, then arm the Newton loop."""
     dt = params.substep_dt[()]
-    mpm_func.func_gather_node_diag(grid, linear)
-    mpm_func.func_build_wall_rows(particles, grid, newton, params, f, dt)
+    mpm_func.func_build_wall_rows(particles, particles_info, grid, newton, params, f, dt)
     if qd.static(config.has_rigid):
         func_build_rigid_rows(
             particles,
+            particles_info,
             grid,
             newton,
             geoms_state,
@@ -1704,6 +1750,18 @@ def kernel_contact_rows(
         )
     mpm_func.func_newton_start(grid, newton, params, dt)
     func_reset_newton_control(control)
+
+
+@qd.kernel
+def kernel_contact_invweight(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    grid: qd.template(),
+    linear: qd.template(),
+    params: qd.template(),
+    f: qd.i32,
+):
+    mpm_func.func_contact_invweight(particles, particles_info, grid, linear, params, f)
 
 
 @qd.kernel
@@ -1777,11 +1835,12 @@ def kernel_adjoint_pullback(
     gravity: qd.Tensor,
     f: qd.i32,
 ):
-    """The pullback of the adjoint solution and the reverse of P2G into frame f, then the adjoint of frame f + 1
-    cleared (see mpm_adjoint_func)."""
+    """The pullback of the adjoint solution, its share of the wall rows and the reverse of P2G into frame f, then the
+    adjoint of frame f + 1 cleared (see mpm_adjoint_func)."""
     dt = params.substep_dt[()]
     mpm_adjoint_func.func_adjoint_nodes(grid, newton, linear, dt)
     mpm_adjoint_func.func_adjoint_particles(
         particles, particles_info, materials, grid, newton, linear, params, gravity, f, dt
     )
+    mpm_adjoint_func.func_wall_contact_adjoint(particles, particles_info, grid, newton, linear, params, f, dt)
     mpm_adjoint_func.func_adjoint_consume(particles, particles_ng, params, f)

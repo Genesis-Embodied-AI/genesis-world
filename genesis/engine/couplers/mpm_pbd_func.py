@@ -19,14 +19,8 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.bvh import build_bvh, func_bvh_query_aabb, get_bvh_data
-from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles
-from genesis.engine.solvers.mpm_func import (
-    contact_band_width,
-    particle_inv_weight,
-    particle_of_sorted,
-    q1_stencil,
-    stencil_node_slots,
-)
+from genesis.engine.solvers.mpm_data import CONTACT_ROWS, PYRAMID_ROWS, WALL_ROWS, MpmParticles, MpmParticlesInfo
+from genesis.engine.solvers.mpm_func import contact_band_width, contact_invweight, particle_of_sorted
 from genesis.utils import array_class
 
 from .mpm_rigid_func import EMPTY_BOX_HALF, particle_stencil
@@ -313,6 +307,7 @@ def func_nearest_pbd_filter(i_t: int, i_a: int, i_q: int, query: qd.template()) 
 @qd.func(requires_top_level=True)
 def func_build_pbd_rows(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     pbd: qd.template(),  # PBDSolver
@@ -327,8 +322,8 @@ def func_build_pbd_rows(
     The particle's box spans its band at its own speed, the PBD leaves the sweep, radius and thickness, so together
     they cover the band of the relative velocity. Every row of the pyramid J = n +- mu d is a penalty on the gap at the
     end of the substep, phi + J.r for the relative displacement r: its target is -phi and its stiffness
-    `params.pbd_contact_stiffness` times the row's effective mass, the inverse of the particle's inverse weight in the
-    implicit system plus that of the PBD particle."""
+    `params.pbd_contact_stiffness` times the row's effective mass, the inverse of the particle's inverse weight (see
+    func_contact_invweight) plus that of the PBD particle."""
     friction = params.pbd_contact_friction[()]
     qd.loop_config(name="mpm_build_pbd_rows")
     for s in range(grid.n_valid[()]):
@@ -350,9 +345,7 @@ def func_build_pbd_rows(
                 normal = qd.Vector([newton.query_normal[3 * s + k] for k in qd.static(range(3))], dt=gs.qd_float)
                 v_rel = v_p - pbd.particles_reordered[i_q, i_b].vel
                 if phi < contact_band_width(params, -normal.dot(v_rel), dt):
-                    slots = stencil_node_slots(grid, env, cell)
-                    w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
-                    invweight = particle_inv_weight(grid, slots, w, normal)
+                    invweight = contact_invweight(particles, particles_info, f, i_p, i_b, normal)
                     if is_moving(pbd, i_q, i_b):
                         invweight += 1.0 / pbd.particles_info_reordered[i_q, i_b].mass
                     D = params.pbd_contact_stiffness[()] / invweight
@@ -726,6 +719,7 @@ class MpmPbdContact:
 
     def __init__(self, mpm, pbd_participant: PbdNewtonParticipant, query: PbdParticleQuery):
         self.particles = mpm.particles
+        self.particles_info = mpm.particles_info
         self.grid = mpm.grid
         self.newton = mpm.newton
         self.linear = mpm.linear
@@ -764,6 +758,7 @@ def kernel_pbd_finish(pd: qd.template(), params: qd.template()):
 def kernel_pbd_rows(contact: qd.template(), f: qd.i32):
     func_build_pbd_rows(
         contact.particles,
+        contact.particles_info,
         contact.grid,
         contact.newton,
         contact.pd.pbd,
@@ -792,6 +787,9 @@ class PbdNewtonHost:
     def newton_after(self, f):
         pass
 
+    def newton_end(self, f):
+        pass
+
 
 class MpmPbdContactHost:
     """Host stages of the MPM-PBD contact rows before the joint solve: the PBD trees, then the rows and the PBD
@@ -808,4 +806,7 @@ class MpmPbdContactHost:
         pass
 
     def newton_after(self, f):
+        pass
+
+    def newton_end(self, f):
         pass

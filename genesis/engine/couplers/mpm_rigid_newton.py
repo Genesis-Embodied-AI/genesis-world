@@ -8,7 +8,7 @@ contact coupling acts on the displacement of each particle relative to the motio
 
 import quadrants as qd
 
-from . import mpm_rigid_func
+from . import mpm_rigid_adjoint_func, mpm_rigid_func
 
 
 @qd.data_oriented
@@ -22,6 +22,7 @@ class RigidNewtonParticipant:
         self.dyn_info = rigid.dyn_info
         self.rigid_info = rigid.rigid_info
         self.rigid_config = rigid.rigid_config
+        self.sdf_info = rigid.collider.sdf.sdf_info
         self.config = config
         self.params = params
 
@@ -113,6 +114,7 @@ class MpmRigidContact:
 
     def __init__(self, mpm, rigid):
         self.particles = mpm.particles
+        self.particles_info = mpm.particles_info
         self.grid = mpm.grid
         self.newton = mpm.newton
         self.linear = mpm.linear
@@ -120,6 +122,8 @@ class MpmRigidContact:
         self.dyn_state = rigid.dyn_state
         self.constraint_state = rigid.constraint_state
         self.dyn_info = rigid.dyn_info
+        self.rigid_info = rigid.rigid_info
+        self.sdf_info = rigid.sdf_info
         self.config = rigid.config
         self.params = rigid.params
 
@@ -203,9 +207,46 @@ def kernel_add_mpm_contact_force(contact: qd.template()):
     mpm_rigid_func.func_add_mpm_contact_force(contact.coupling, contact.dyn_state.links, contact.params)
 
 
+@qd.kernel
+def kernel_rigid_adjoint_rhs(rigid: qd.template()):
+    mpm_rigid_func.func_rigid_adjoint_rhs(rigid.coupling, rigid.constraint_state, rigid.params)
+
+
+@qd.kernel
+def kernel_rigid_adjoint_finish(rigid: qd.template()):
+    mpm_rigid_func.func_rigid_adjoint_finish(rigid.coupling, rigid.constraint_state, rigid.params)
+
+
+@qd.kernel
+def kernel_rigid_contact_adjoint(contact: qd.template(), f: qd.i32):
+    mpm_rigid_adjoint_func.func_rigid_contact_adjoint(
+        contact.particles,
+        contact.particles_info,
+        contact.grid,
+        contact.newton,
+        contact.linear,
+        contact.coupling,
+        contact.dyn_state.geoms,
+        contact.dyn_info.geoms,
+        contact.dyn_state.links,
+        contact.dyn_info.links,
+        contact.dyn_state.dofs,
+        contact.rigid_info,
+        contact.sdf_info,
+        contact.config,
+        contact.params,
+        f,
+    )
+
+
 class RigidNewtonHost:
     """Host stages of Rigid's dofs around the joint solve: the start point from Rigid's warm start, and the hand-back
-    of the converged qacc, after which Rigid finishes its deferred substep."""
+    of the converged qacc, from which Rigid updates its accelerations and contact forces, then integrates its deferred
+    substep once the solve is over.
+
+    Its backward pass is Rigid's reverse of its constraint solve, whose adjoint solve is the joint one."""
+
+    is_differentiable = True
 
     def __init__(self, rigid_solver, device: RigidNewtonParticipant):
         self._rigid_solver = rigid_solver
@@ -218,13 +259,28 @@ class RigidNewtonHost:
         kernel_rigid_write_back(self._device, f)
 
     def newton_after(self, f):
-        self._rigid_solver.finish_deferred_substep()
+        self._rigid_solver.finish_deferred_solve()
+
+    def newton_end(self, f):
+        self._rigid_solver.integrate_deferred_substep()
+
+    def newton_backward(self, f, solve):
+        """Reverse Rigid's constraint solve, whose adjoint solve `solve` runs jointly with the other participants."""
+        self._rigid_solver._constraint_force_grad(solve_adjoint=solve)
+
+    def newton_adjoint_rhs(self, f):
+        kernel_rigid_adjoint_rhs(self._device)
+
+    def newton_adjoint_finish(self, f):
+        kernel_rigid_adjoint_finish(self._device)
 
 
 class MpmRigidContactHost:
     """Host stages of the MPM-Rigid contact rows around the joint solve: the contact point displacement at the start
     point, the MPM rows' force on Rigid at the converged solve, and its share of Rigid's reported contact forces once
     Rigid wrote its own."""
+
+    is_differentiable = True
 
     def __init__(self, device: MpmRigidContact):
         self._device = device
@@ -237,3 +293,13 @@ class MpmRigidContactHost:
 
     def newton_after(self, f):
         kernel_add_mpm_contact_force(self._device)
+
+    def newton_end(self, f):
+        pass
+
+    def newton_adjoint_rhs(self, f):
+        pass
+
+    def newton_adjoint_finish(self, f):
+        """The pullback of the contact rows into the adjoints of the particles and of Rigid's state."""
+        kernel_rigid_contact_adjoint(self._device, f)

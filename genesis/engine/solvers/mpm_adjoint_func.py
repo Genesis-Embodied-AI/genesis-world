@@ -10,16 +10,18 @@ the incremental potential E(u; p), `grad_u E(u*; p) = 0`. Its backward pass cons
    exact differential of the first Piola-Kirchhoff stress,
 4. reverse of P2G from the adjoint of the node momentum and mass.
 
-The gradients are approximate where the projection clamps a mode of the elastic Hessian. The contact rows enter the
-adjoint solve through the Hessian, their coefficients held fixed in the pullback. The return maps are the identity:
-only the materials without plasticity reach here.
+The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall rows enter the
+adjoint solve through the Hessian and the pullback through their weights and coefficients (see
+func_wall_contact_adjoint), as the rows of the couplings do (see mpm_rigid_adjoint_func). The return maps are the
+identity: only the materials without plasticity reach here.
 """
 
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 
-from .mpm_data import BLOCK_CELLS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
+from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
 from .mpm_func import (
     PARAM_FIBRE,
     elastic_principal,
@@ -33,6 +35,128 @@ from .mpm_func import (
     stencil_node_slots,
     trial_deformation,
 )
+
+
+@qd.func
+def band_row_bw(sol_params, phi, vel, diag_coef, dt, D_bar, t_bar):
+    """Reverse of `band_row` (see soft_row): the adjoints of phi, vel and diag_coef from those of D and t."""
+    phi_bar = gs.qd_float(0.0)
+    vel_bar = gs.qd_float(0.0)
+    diag_coef_bar = gs.qd_float(0.0)
+    width = sol_params[4]
+    if phi <= 0.0:
+        imp, b, k, d_imp_d_x = gu.imp_aref_grad(sol_params, phi)
+        diag_raw = diag_coef * (1.0 - imp) / imp
+        D = 1.0 / qd.max(diag_raw, gs.EPS)
+        # Zero where the floor holds D
+        diag_raw_bar = gs.qd_float(0.0)
+        if diag_raw > gs.EPS:
+            diag_raw_bar = -D * D * D_bar
+        diag_coef_bar = diag_raw_bar * (1.0 - imp) / imp
+        # t = dt vel + dt^2 (-b vel - k imp phi), imp of |phi| / width
+        imp_bar = diag_raw_bar * (-diag_coef / (imp * imp)) - dt * dt * k * phi * t_bar
+        vel_bar = (dt - dt * dt * b) * t_bar
+        phi_bar = -dt * dt * k * imp * t_bar - imp_bar * d_imp_d_x / width
+    else:
+        imp, b, k, d_imp_d_x = gu.imp_aref_grad(sol_params, 0.0)
+        diag_raw = diag_coef * (1.0 - imp) / imp
+        if diag_raw > gs.EPS:
+            D = 1.0 / diag_raw
+            diag_coef_bar = -D * D * D_bar * (1.0 - imp) / imp
+        phi_bar = -t_bar
+    return phi_bar, vel_bar, diag_coef_bar
+
+
+@qd.func
+def polar_rotation_bw(U, S, V, R_bar):
+    """Reverse of the rotation R = U V^T of the polar decomposition F = R S, F = U S V^T: with M = U^T dF V, dR =
+    U X V^T, X_ij = (M_ij - M_ji) / (s_i + s_j), so F_bar = U Y V^T, Y_ij = (G_ij - G_ji) / (s_i + s_j) for
+    G = U^T R_bar V."""
+    G = U.transpose() @ R_bar @ V
+    Y = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        if qd.static(i != j):
+            Y[i, j] = (G[i, j] - G[j, i]) / qd.max(S[i, i] + S[j, j], gs.EPS)
+    return U @ Y @ V.transpose()
+
+
+@qd.func(requires_top_level=True)
+def func_wall_contact_adjoint(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    grid: qd.template(),  # MpmGrid
+    newton: qd.template(),  # MpmNewton
+    linear: qd.template(),  # MpmLinearSystem
+    params: qd.template(),  # MpmParams
+    f,
+    dt,
+):
+    """The pullback of the wall rows of every valid particle (see func_build_wall_rows) into the adjoint of frame f.
+
+    A row k on the trial displacement Delta = sum_a w_a u_a, of normal J = +-e_d, adds D c J . delta to lambda^T
+    grad_u E, c = J . Delta - t and delta = sum_a w_a lambda_a, when active. Its pullback is that of the Rigid rows
+    (see func_rigid_contact_adjoint) without the link: the weights, and the coefficients through the gap and the
+    velocity along the normal and the inverse weight of the particle."""
+    qd.loop_config(name="mpm_wall_contact_adjoint")
+    for s in range(grid.n_valid[()]):
+        i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+        has_row = False
+        for d in qd.static(range(3)):
+            has_row = has_row or newton.contact_D[CONTACT_ROWS * s + d] > 0.0
+        if has_row:
+            slots = stencil_node_slots(grid, env, cell)
+            x_p = particles.pos[f, i_p, i_b]
+            v_p = particles.vel[f, i_p, i_b]
+            w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
+            Delta = qd.Vector.zero(gs.qd_float, 3)
+            delta = qd.Vector.zero(gs.qd_float, 3)
+            for a in qd.static(range(8)):
+                Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                row = 3 * (linear.row_offset + slots[a])
+                delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+            U, S, V = qd.svd(particles.F[f, i_p, i_b], gs.qd_float)
+            R = U @ V.transpose()
+            W = particles_info.contact_invweight[i_p]
+            sol_params = qd.Vector([params.wall_sol_params[i] for i in qd.static(range(7))], dt=gs.qd_float)
+            x_bar = qd.Vector.zero(gs.qd_float, 3)
+            v_bar = qd.Vector.zero(gs.qd_float, 3)
+            R_bar = qd.Matrix.zero(gs.qd_float, 3, 3)
+            Delta_bar = qd.Vector.zero(gs.qd_float, 3)
+            delta_bar = qd.Vector.zero(gs.qd_float, 3)
+            for d in qd.static(range(3)):
+                k = CONTACT_ROWS * s + d
+                D = newton.contact_D[k]
+                J = qd.Vector([newton.contact_dir[3 * k + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                c = J.dot(Delta) - newton.contact_t[k]
+                if D > 0.0 and c < 0.0:
+                    a_k = J.dot(delta)
+                    Delta_bar -= D * a_k * J
+                    delta_bar -= D * c * J
+                    # The row as func_build_wall_rows built it
+                    phi = x_p[d] - params.wall_lower[d]
+                    sign = gs.qd_float(1.0)
+                    if params.wall_upper[d] - x_p[d] < phi:
+                        phi = params.wall_upper[d] - x_p[d]
+                        sign = -1.0
+                    n = qd.Vector.zero(gs.qd_float, 3)
+                    n[d] = sign
+                    n_rest = R.transpose() @ n
+                    invweight = n_rest.dot(W @ n_rest)
+                    phi_bar, vel_bar, invweight_bar = band_row_bw(
+                        sol_params, phi, sign * v_p[d], invweight, dt, -c * a_k, D * a_k
+                    )
+                    x_bar[d] += sign * phi_bar
+                    v_bar[d] += sign * vel_bar
+                    R_bar += (2.0 * invweight_bar) * n.outer_product(W @ n_rest)
+            for a in qd.static(range(8)):
+                u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                row = 3 * (linear.row_offset + slots[a])
+                lam_a = qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                grad_w_a = qd.Vector([grad_w[a, e] for e in qd.static(range(3))], dt=gs.qd_float)
+                x_bar += (Delta_bar.dot(u_a) + delta_bar.dot(lam_a)) * grad_w_a
+            particles.pos.grad[f, i_p, i_b] += x_bar
+            particles.vel.grad[f, i_p, i_b] += v_bar
+            particles.F.grad[f, i_p, i_b] += polar_rotation_bw(U, S, V, R_bar)
 
 
 @qd.func(requires_top_level=True)

@@ -82,6 +82,7 @@ class MpmFemContact:
 
     def __init__(self, mpm, fem, query):
         self.particles = mpm.particles
+        self.particles_info = mpm.particles_info
         self.grid = mpm.grid
         self.newton = mpm.newton
         self.linear = mpm.linear
@@ -122,6 +123,7 @@ def kernel_fem_begin(fem: qd.template()):
 def kernel_fem_rows(contact: qd.template(), f: qd.i32):
     mpm_fem_func.func_build_fem_rows(
         contact.particles,
+        contact.particles_info,
         contact.grid,
         contact.newton,
         contact.fem,
@@ -153,6 +155,9 @@ class FemNewtonHost:
     def newton_after(self, f):
         self._coupler.couple_fem(f)
 
+    def newton_end(self, f):
+        pass
+
 
 class MpmFemContactHost:
     """Host stages of the MPM-FEM contact rows before the joint solve: the triangle trees, then the rows and their
@@ -169,4 +174,7 @@ class MpmFemContactHost:
         pass
 
     def newton_after(self, f):
+        pass
+
+    def newton_end(self, f):
         pass

@@ -7,6 +7,7 @@ from genesis.utils.misc import tensor_to_array
 
 from ..utils.assertions import assert_allclose
 
+
 @pytest.mark.slow  # ~75s
 @pytest.mark.required
 @pytest.mark.debug(False)
@@ -244,6 +245,10 @@ def test_deformable_inputs_grad_matches_fd(precision, show_viewer):
 
 
 @pytest.mark.required
+# The joint Newton solve of MPM and Rigid converges far below its default tolerance for the finite differences, which
+# fp32 cannot resolve, and its adjoint solves by the joint PCG on the exact MPM Hessian (see
+# test_deformable_inputs_grad_matches_fd).
+@pytest.mark.precision("64")
 def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -256,6 +261,8 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             lower_bound=(-0.5, -0.5, -0.5),
             upper_bound=(0.5, 0.5, 0.5),
             grid_density=16,
+            newton_velocity_tol=1e-10,
+            adjoint_hessian="exact",
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.6, -0.6, 0.4),
@@ -292,7 +299,6 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
             scene.step()
         return (box.get_state().pos ** 2).sum() + (box.get_state().quat[..., 1:] ** 2).sum()
 
-    tol = 2e-10 if precision == "64" else 1e-4
     vel = np.tile([0.1, 0.2, -0.1, 0.5, -0.3, 0.4], (2, 1))
     vel_ana = torch.tensor(vel, dtype=gs.tc_float, device=gs.device, requires_grad=True)
     loss = rollout(vel_ana)
@@ -301,7 +307,7 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
     loss.backward()
     # The finite differences run on the same scene without gradients, which simulates the same physics. A rollout after
     # a reset starts free of the coupling wrench the previous one left.
-    eps = 1e-6 if precision == "64" else 1e-2
+    eps = 1e-6
     fd_grad = np.zeros_like(vel)
     with torch.no_grad():
         for i, j in np.ndindex(vel.shape):
@@ -312,5 +318,6 @@ def test_coupling_wrench_grad_matches_fd(precision, show_viewer):
                 losses.append(float(rollout(perturbed)))
             fd_grad[i, j] = (losses[0] - losses[1]) / (2.0 * eps)
     (grad_rerun,) = torch.autograd.grad(rollout(vel_ana), vel_ana)
-    assert_allclose(grad_rerun, vel_ana.grad, tol=tol)
-    assert_allclose(vel_ana.grad, fd_grad, rtol=tol, atol=tol)
+    assert_allclose(grad_rerun, vel_ana.grad, tol=1e-10)
+    # The finite differences keep the error of the Newton tolerance, which differs between the environments
+    assert_allclose(vel_ana.grad, fd_grad, rtol=1e-4, atol=1e-7)

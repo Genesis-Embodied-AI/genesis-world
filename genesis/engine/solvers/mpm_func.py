@@ -687,9 +687,13 @@ def return_map(
             if kind == PLASTIC_SNOW:
                 Jp_new = Jp * (sigma[0] * sigma[1] * sigma[2]) / (sigma_new[0] * sigma_new[1] * sigma_new[2])
         if is_changed:
-            F_new = U @ qd.Matrix(
-                [[sigma_new[0], 0.0, 0.0], [0.0, sigma_new[1], 0.0], [0.0, 0.0, sigma_new[2]]], dt=gs.qd_float
-            ) @ V.transpose()
+            F_new = (
+                U
+                @ qd.Matrix(
+                    [[sigma_new[0], 0.0, 0.0], [0.0, sigma_new[1], 0.0], [0.0, 0.0, sigma_new[2]]], dt=gs.qd_float
+                )
+                @ V.transpose()
+            )
     return F_new, Jp_new
 
 
@@ -1119,24 +1123,56 @@ def func_gather_node_diag(
                 grid.node_diag[9 * node + 3 * i + j] = block[i, j]
 
 
-@qd.func
-def particle_inv_weight(
+@qd.func(requires_top_level=True)
+def func_contact_invweight(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),  # MpmGrid
-    slots,
-    w,
+    linear: qd.template(),  # MpmLinearSystem
+    params: qd.template(),  # MpmParams
+    f,
+):
+    """Inverse weight matrix of every valid particle of the first environment in its contact rows, from the physical
+    Hessian (kinetic and elastic) at u = 0 that the matrix holds, assembled in the configuration of frame f.
+
+    It is W = sum_a w_a^2 H_aa^-1 over the stencil nodes of the particle, whose n^T W n along the normal n of a row is
+    the block-diagonal approximation of the Delassus diagonal J H^-1 J^T, in the frame of the rest configuration (see
+    contact_invweight). It plays the part of Rigid's body inverse weight, so that a row pushes the material the particle
+    is embedded in rather than the particle mass alone, and like it, it is a model constant of the rest configuration
+    (see MPMSolver._init_contact_invweight): the stiffness of a row depends on the state through its normal and the
+    rotation of the material alone, not through the Hessian."""
+    func_gather_node_diag(grid, linear)
+    qd.loop_config(name="mpm_contact_invweight")
+    for s in range(grid.n_valid[()]):
+        i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+        if i_b == 0:
+            slots = stencil_node_slots(grid, env, cell)
+            fx = particles.pos[f, i_p, i_b] * params.inv_dx[()] - cell.cast(gs.qd_float)
+            w, grad_w = q1_stencil(fx, params.inv_dx[()])
+            W = qd.Matrix.zero(gs.qd_float, 3, 3)
+            for a in qd.static(range(8)):
+                H = qd.Matrix.zero(gs.qd_float, 3, 3)
+                for i, j in qd.static(qd.ndrange(3, 3)):
+                    H[i, j] = grid.node_diag[9 * slots[a] + 3 * i + j]
+                W += w[a] * w[a] * H.inverse()
+            particles_info.contact_invweight[i_p] = 0.5 * (W + W.transpose())
+
+
+@qd.func
+def contact_invweight(
+    particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
+    f,
+    i_p,
+    i_b,
     n,
 ):
-    """Inverse weight of a particle along direction n in the implicit system: n^T (sum_a w_a^2 H_aa^-1) n over its
-    stencil nodes, the block-diagonal approximation of the Delassus diagonal J H^-1 J^T, with H the physical Hessian
-    (kinetic and elastic) at the substep start. It plays the part of Rigid's body inverse weight, so that a row pushes
-    the material the particle is embedded in rather than the particle mass alone."""
-    inv_weight = gs.qd_float(0.0)
-    for a in qd.static(range(8)):
-        H = qd.Matrix.zero(gs.qd_float, 3, 3)
-        for i, j in qd.static(qd.ndrange(3, 3)):
-            H[i, j] = grid.node_diag[9 * slots[a] + 3 * i + j]
-        inv_weight += w[a] * w[a] * n.dot(H.inverse() @ n)
-    return inv_weight
+    """Inverse weight of particle i_p along direction n in frame f: n^T R W R^T n, with W its inverse weight matrix
+    in the rest frame (see func_contact_invweight) and R the rotation of the polar decomposition F = R S of its
+    deformation gradient, which carries the rest frame along with the material."""
+    U, S, V = qd.svd(particles.F[f, i_p, i_b], gs.qd_float)
+    n_rest = V @ (U.transpose() @ n)
+    return n_rest.dot(particles_info.contact_invweight[i_p] @ n_rest)
 
 
 @qd.func
@@ -1179,6 +1215,7 @@ def band_row(
 @qd.func(requires_top_level=True)
 def func_build_wall_rows(
     particles: MpmParticles,
+    particles_info: MpmParticlesInfo,
     grid: qd.template(),  # MpmGrid
     newton: qd.template(),  # MpmNewton
     params: qd.template(),  # MpmParams
@@ -1189,15 +1226,13 @@ def func_build_wall_rows(
 
     A particle beyond a wall plane `params.wall_lower` / `wall_upper`, or short of the nearer one by less than
     `contact_band_width`, gets one soft row along the inward wall normal by `band_row`, with Rigid's impedance of
-    `params.wall_sol_params` and the particle's inverse weight in the implicit system.
+    `params.wall_sol_params` and the particle's inverse weight (see func_contact_invweight).
     """
     qd.loop_config(name="mpm_build_wall_rows")
     for s in range(grid.n_valid[()]):
         i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
         x_p = particles.pos[f, i_p, i_b]
         v_p = particles.vel[f, i_p, i_b]
-        slots = stencil_node_slots(grid, env, cell)
-        w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
         sol_params = qd.Vector([params.wall_sol_params[i] for i in qd.static(range(7))], dt=gs.qd_float)
         for d in qd.static(range(3)):
             # Distance to the nearer wall plane, positive inside the domain, and the inward normal
@@ -1210,7 +1245,8 @@ def func_build_wall_rows(
             if phi < contact_band_width(params, -vel, dt):
                 n = qd.Vector.zero(gs.qd_float, 3)
                 n[d] = sign
-                D, t = band_row(sol_params, phi, vel, particle_inv_weight(grid, slots, w, n), dt)
+                invweight = contact_invweight(particles, particles_info, f, i_p, i_b, n)
+                D, t = band_row(sol_params, phi, vel, invweight, dt)
                 k = CONTACT_ROWS * s + d
                 for e in qd.static(range(3)):
                     newton.contact_dir[3 * k + e] = 0.0

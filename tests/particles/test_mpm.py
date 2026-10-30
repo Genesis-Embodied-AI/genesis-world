@@ -163,7 +163,8 @@ def test_perf_dispatch(variant, show_viewer):
     assert init_elastic_pos[..., 2].mean() - final_elastic_pos[..., 2].mean() > 0.05
     assert init_liquid_pos[..., 2].mean() - final_liquid_pos[..., 2].mean() > 0.05
 
-    # No ground penetration (plane is at z=0). Non-viscous liquid spreads thin enough that a sub-grid-cell penetration
-    # is normal for the MPM coupling, so allow up to 2mm.
-    assert final_elastic_pos[..., 2].min() > -1e-3
-    assert final_liquid_pos[..., 2].min() > -2e-3
+    # The ground (plane at z=0) holds the particles. Its soft contact rests at a penetration its impedance sets, so
+    # only a particle sinking past half a grid cell would have gone through it.
+    dx = 1.0 / 64
+    assert final_elastic_pos[..., 2].min() > -0.5 * dx
+    assert final_liquid_pos[..., 2].min() > -0.5 * dx
