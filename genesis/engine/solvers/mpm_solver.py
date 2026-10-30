@@ -696,13 +696,11 @@ class MPMSolver(ParticleSolver):
         """The substep's G2P happened in the Newton solver's substep, which ran before this; under the single substep
         graph, this runs the whole substep instead."""
         if USE_SUBSTEP_GRAPH:
+            if self._constraints_initialized:
+                gs.raise_exception("The single substep graph of the implicit MPM solver has no particle constraints.")
             if not self._mpm_sized:
                 self._size_to_particles(f)
             self._substep_graph(f)
-
-        # The particle constraints apply after g2p
-        if self._constraints_initialized:
-            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
 
         # The positions a step ends with are checked once, an error being raised at the beginning of the next step
         if (self._sim._cur_substep_global + 1) % self._substeps == 0:
@@ -756,6 +754,10 @@ class MPMSolver(ParticleSolver):
         while int(grid.grid_overflow.to_numpy()):
             self._grow_grid()
             build_grid(self.particles, self.particles_ng, grid, params, f)
+        if self._constraints_initialized:
+            kernel_constraint_rows(
+                self.particles_info, grid, self._mpm_newton, params, self.particle_constraints, rigid.dyn_state.links
+            )
         kernel_predict(
             self.particles,
             self.particles_info,
@@ -853,6 +855,17 @@ class MPMSolver(ParticleSolver):
         # Rows on static Rigid geoms act on the particle displacement alone, outside of any coupling
         if self._has_rigid and not self._rigid_coupled:
             kernel_rigid_contact_adjoint(self._rigid_contact, f)
+        if self._constraints_initialized:
+            kernel_constraint_adjoint(
+                self.particles,
+                grid,
+                newton,
+                linear,
+                self._mpm_params,
+                self.particle_constraints,
+                self._sim.rigid_solver.dyn_state.links,
+                f,
+            )
         kernel_adjoint_pullback(
             self.particles,
             self.particles_ng,
@@ -1307,7 +1320,9 @@ class MPMSolver(ParticleSolver):
         """
         Attach some particles to a rigid link with critically damped springs.
 
-        Each particle is pulled toward the position it holds now, expressed in the frame of the link.
+        Each particle is pulled toward the position it holds now, expressed in the frame of the link. The springs are
+        terms of the implicit solve (see mpm_func.func_build_constraint_rows), stable at any stiffness, and act on the
+        particles alone: the link feels no reaction.
 
         Parameters
         ----------
@@ -1408,32 +1423,6 @@ class MPMSolver(ParticleSolver):
                 i_p = i_p_ + particles_start
                 self.particle_constraints[i_p, i_b].is_constrained = False
                 self.particle_constraints[i_p, i_b].link_idx = -1
-
-    @qd.kernel
-    def apply_particle_constraints(self, f: qd.i32, links_state: array_class.LinksState):
-        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particle_constraints[i_p, i_b].is_constrained:
-                # The target of a particle attached to a link follows the link
-                target_pos = self.particle_constraints[i_p, i_b].target_pos
-                i_l = self.particle_constraints[i_p, i_b].link_idx
-                if i_l >= 0:
-                    link_pos = links_state.pos[i_l, i_b]
-                    link_quat = links_state.quat[i_l, i_b]
-                    local_pos = self.particle_constraints[i_p, i_b].link_local_pos
-                    target_pos = gu.qd_transform_by_trans_quat(local_pos, link_pos, link_quat)
-
-                # Apply spring force to velocity
-                stiffness = self.particle_constraints[i_p, i_b].stiffness
-                mass = self.particles_info.mass[i_p] / self._particle_volume_scale
-
-                pos = self.particles.pos[f + 1, i_p, i_b]
-                vel = self.particles.vel[f + 1, i_p, i_b]
-
-                pos_error = pos - target_pos
-                spring_force = -stiffness * pos_error
-                damping_force = -2.0 * qd.math.sqrt(stiffness * mass) * vel
-
-                self.particles.vel[f + 1, i_p, i_b] += self.substep_dt * (spring_force + damping_force) / mass
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
@@ -1784,6 +1773,32 @@ def kernel_contact_rows(
         )
     mpm_func.func_newton_start(grid, newton, params, dt)
     func_reset_newton_control(control)
+
+
+@qd.kernel
+def kernel_constraint_rows(
+    particles_info: MpmParticlesInfo,
+    grid: qd.template(),
+    newton: qd.template(),
+    params: qd.template(),
+    constraints: qd.template(),
+    links_state: array_class.LinksState,
+):
+    mpm_func.func_build_constraint_rows(particles_info, grid, newton, params, constraints, links_state)
+
+
+@qd.kernel
+def kernel_constraint_adjoint(
+    particles: MpmParticles,
+    grid: qd.template(),
+    newton: qd.template(),
+    linear: qd.template(),
+    params: qd.template(),
+    constraints: qd.template(),
+    links_state: array_class.LinksState,
+    f: qd.i32,
+):
+    mpm_adjoint_func.func_constraint_adjoint(particles, grid, newton, linear, params, constraints, links_state, f)
 
 
 @qd.kernel

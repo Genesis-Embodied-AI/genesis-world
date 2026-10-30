@@ -23,6 +23,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
 from genesis.utils.misc import qd_debug_asserts, qd_isfinite
 from genesis.engine.numerics.block_reduce import REDUCE_BLOCK_DIM, write_block_partial
 from genesis.engine.numerics.dynamic_exclusive_sum import func_dynamic_exclusive_sum
@@ -1542,6 +1543,63 @@ def contact_row_terms(
 
 
 @qd.func
+def constraint_row_terms(
+    newton: qd.template(),  # MpmNewton
+    s,
+    x,
+    dx,
+):
+    """Energy, gradient and Hessian scale of the spring of sorted particle s (see func_build_constraint_rows) at its
+    position x and trial displacement dx, all zero for a free particle."""
+    spring = newton.constraint_spring[s]
+    damping = newton.constraint_damping[s]
+    target = qd.Vector([newton.constraint_target[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
+    gap = x + dx - target
+    energy = 0.5 * spring * gap.norm_sqr() + 0.5 * damping * dx.norm_sqr()
+    grad = spring * gap + damping * dx
+    return energy, grad, spring + damping
+
+
+@qd.func(requires_top_level=True)
+def func_build_constraint_rows(
+    particles_info: MpmParticlesInfo,
+    grid: qd.template(),  # MpmGrid
+    newton: qd.template(),  # MpmNewton
+    params: qd.template(),  # MpmParams
+    constraints: qd.template(),  # qd.StructField of the particle constraints (see MPMSolver.set_particle_constraints)
+    links_state: array_class.LinksState,
+):
+    """The spring of every constrained particle as a term of the incremental potential on its trial displacement
+    Delta, 1/2 dt^2 k |x + Delta - T|^2 + 1/2 dt c |Delta|^2: the backward Euler step of the spring force -k (x' - T)
+    and of the critically damped c = 2 sqrt(k m) drag on its velocity Delta / dt, unconditionally stable whatever k.
+
+    T is the target at the start of the substep, its link's pose placing it for an attached particle. The spring acts
+    on the particle alone: the link feels no reaction."""
+    dt = params.substep_dt[()]
+    qd.loop_config(name="mpm_build_constraint_rows")
+    for s in range(grid.n_valid[()]):
+        i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+        spring = gs.qd_float(0.0)
+        damping = gs.qd_float(0.0)
+        target = qd.Vector.zero(gs.qd_float, 3)
+        if constraints[i_p, i_b].is_constrained:
+            target = constraints[i_p, i_b].target_pos
+            i_l = constraints[i_p, i_b].link_idx
+            if i_l >= 0:
+                target = gu.qd_transform_by_trans_quat(
+                    constraints[i_p, i_b].link_local_pos, links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
+                )
+            k = constraints[i_p, i_b].stiffness
+            mass = particles_info.mass[i_p] / params.mass_scale[()]
+            spring = dt * dt * k
+            damping = dt * 2.0 * qd.sqrt(k * mass)
+        newton.constraint_spring[s] = spring
+        newton.constraint_damping[s] = damping
+        for d in qd.static(range(3)):
+            newton.constraint_target[3 * s + d] = target[d]
+
+
+@qd.func
 def particle_trial_disp(
     particles: MpmParticles,
     newton: qd.template(),  # MpmNewton
@@ -1726,12 +1784,13 @@ def particle_stencil_terms(
     dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
     energy_wall, grad_wall, hess_wall = contact_row_terms(newton, s, dx, 0, WALL_ROWS)
     energy_rigid, grad_rigid, hess_rigid = contact_row_terms(newton, s, dx - dr, WALL_ROWS, CONTACT_ROWS)
+    energy_spring, grad_spring, hess_spring = constraint_row_terms(newton, s, particles.pos[f, i_p, i_b], dx)
     for d in qd.static(range(3)):
-        newton.g_contact[3 * s + d] = grad_wall[d] + grad_rigid[d]
+        newton.g_contact[3 * s + d] = grad_wall[d] + grad_rigid[d] + grad_spring[d]
         newton.g_rigid[3 * s + d] = grad_rigid[d]
     for i, j in qd.static(qd.ndrange(3, 3)):
         newton.h_rigid[9 * s + 3 * i + j] = hess_rigid[i, j]
-    hess_contact = hess_wall + hess_rigid
+    hess_contact = hess_wall + hess_rigid + hess_spring * qd.Matrix.identity(gs.qd_float, 3)
     return slots, movable, r_frame, U, S_block, alp, bet, fibre_curvature, fibre_frame, scale, w, hess_contact
 
 
@@ -2600,7 +2659,7 @@ def particle_energy(
     dt,
     s,
 ):
-    """V dt^2 psi(F_trial) and the contact-row energy of the sorted particle s."""
+    """V dt^2 psi(F_trial), the contact-row energy and the constraint spring energy of the sorted particle s."""
     i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
     slots = stencil_node_slots(grid, env, cell)
     F_tr, grad_w, F = trial_deformation(particles, grid, newton, params, f, i_p, i_b, cell, slots)
@@ -2615,7 +2674,8 @@ def particle_energy(
     dr = qd.Vector([newton.contact_dr[3 * s + d] for d in qd.static(range(3))], dt=gs.qd_float)
     energy_wall, grad_wall, hess_wall = contact_row_terms(newton, s, dx, 0, WALL_ROWS)
     energy_rigid, grad_rigid, hess_rigid = contact_row_terms(newton, s, dx - dr, WALL_ROWS, CONTACT_ROWS)
-    return params.particle_volume[()] * dt * dt * psi + energy_wall + energy_rigid
+    energy_spring, grad_spring, hess_spring = constraint_row_terms(newton, s, particles.pos[f, i_p, i_b], dx)
+    return params.particle_volume[()] * dt * dt * psi + energy_wall + energy_rigid + energy_spring
 
 
 @qd.func(requires_top_level=True)

@@ -12,13 +12,15 @@ the incremental potential E(u; p), `grad_u E(u*; p) = 0`. Its backward pass cons
 
 The gradients are approximate where the projection clamps a mode of the elastic Hessian. The wall rows enter the
 adjoint solve through the Hessian and the pullback through their weights and coefficients (see
-func_wall_contact_adjoint), as the rows of the couplings do (see mpm_rigid_adjoint_func). The return maps are the
+func_wall_contact_adjoint), as the rows of the couplings do (see mpm_rigid_adjoint_func), and the constraint springs
+through the particle position and the pose of their links (see func_constraint_adjoint). The return maps are the
 identity: only the materials without plasticity reach here.
 """
 
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 
 from .mpm_data import BLOCK_CELLS, CONTACT_ROWS, MpmMaterialTable, MpmParticles, MpmParticlesInfo, MpmParticlesNG
@@ -157,6 +159,58 @@ def func_wall_contact_adjoint(
             particles.pos.grad[f, i_p, i_b] += x_bar
             particles.vel.grad[f, i_p, i_b] += v_bar
             particles.F.grad[f, i_p, i_b] += polar_rotation_bw(U, S, V, R_bar)
+
+
+@qd.func(requires_top_level=True)
+def func_constraint_adjoint(
+    particles: MpmParticles,
+    grid: qd.template(),  # MpmGrid
+    newton: qd.template(),  # MpmNewton
+    linear: qd.template(),  # MpmLinearSystem
+    params: qd.template(),  # MpmParams
+    constraints: qd.template(),  # qd.StructField of the particle constraints (see MPMSolver.set_particle_constraints)
+    links_state: array_class.LinksState,
+    f,
+):
+    """The pullback of the constraint springs (see func_build_constraint_rows) into the adjoint of frame f and of the
+    pose of the links the particles are attached to.
+
+    A spring adds delta . g to lambda^T grad_u E, g = kappa (x + Delta - T) + gamma Delta with kappa = dt^2 k and
+    gamma = dt c, Delta = sum_a w_a u_a and delta = sum_a w_a lambda_a. The position enters through the weights, the
+    gap and Delta, x_bar = -[kappa delta + sum_a (lambda_a . g + (kappa + gamma) u_a . delta) grad w_a], and the target
+    through the gap, T_bar = kappa delta. The stiffness and the mass behind the damping are model constants."""
+    qd.loop_config(name="mpm_constraint_adjoint")
+    for s in range(grid.n_valid[()]):
+        spring = newton.constraint_spring[s]
+        if spring > 0.0:
+            i_p, i_b, env, cell = particle_of_sorted(grid, params, s)
+            slots = stencil_node_slots(grid, env, cell)
+            x_p = particles.pos[f, i_p, i_b]
+            w, grad_w = q1_stencil(x_p * params.inv_dx[()] - cell.cast(gs.qd_float), params.inv_dx[()])
+            Delta = qd.Vector.zero(gs.qd_float, 3)
+            delta = qd.Vector.zero(gs.qd_float, 3)
+            for a in qd.static(range(8)):
+                Delta += w[a] * qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                row = 3 * (linear.row_offset + slots[a])
+                delta += w[a] * qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+            damping = newton.constraint_damping[s]
+            target = qd.Vector([newton.constraint_target[3 * s + e] for e in qd.static(range(3))], dt=gs.qd_float)
+            g = spring * (x_p + Delta - target) + damping * Delta
+            x_bar = -spring * delta
+            for a in qd.static(range(8)):
+                u_a = qd.Vector([newton.u[3 * slots[a] + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                row = 3 * (linear.row_offset + slots[a])
+                lam_a = qd.Vector([linear.solution[row + e] for e in qd.static(range(3))], dt=gs.qd_float)
+                grad_w_a = qd.Vector([grad_w[a, e] for e in qd.static(range(3))], dt=gs.qd_float)
+                x_bar -= (lam_a.dot(g) + (spring + damping) * u_a.dot(delta)) * grad_w_a
+            particles.pos.grad[f, i_p, i_b] += x_bar
+            i_l = constraints[i_p, i_b].link_idx
+            if i_l >= 0:
+                target_bar = spring * delta
+                links_state.pos.grad[i_l, i_b] += target_bar
+                links_state.quat.grad[i_l, i_b] += gu.qd_transform_by_quat_grad_quat(
+                    constraints[i_p, i_b].link_local_pos, links_state.quat[i_l, i_b], target_bar
+                )
 
 
 @qd.func(requires_top_level=True)

@@ -319,6 +319,14 @@ class MpmNewton:
         self.g_rigid = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
         self.h_rigid = qd.ndarray(gs.qd_float, shape=(9 * n_padded,))
         self.contact_dr = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        # Per sorted particle: the spring that attaches it to its target (see func_build_constraint_rows), its stiffness
+        # dt^2 k and damping dt c, both zero for a free particle, and the target. Zero until a substep builds them, as
+        # no substep does before the first constraint.
+        self.constraint_spring = qd.ndarray(gs.qd_float, shape=(n_padded,))
+        self.constraint_damping = qd.ndarray(gs.qd_float, shape=(n_padded,))
+        self.constraint_target = qd.ndarray(gs.qd_float, shape=(3 * n_padded,))
+        for array in (self.constraint_spring, self.constraint_damping, self.constraint_target):
+            array.from_numpy(np.zeros(array.shape, dtype=gs.np_float))
         self.energy_partials = qd.ndarray(gs.qd_float, shape=(n_partials,))
         # Soft contact rows, CONTACT_ROWS per sorted particle on its trial displacement dx = sum_a w_a u_a: direction J,
         # stiffness D (zero where there is no row) and target t of the row term 1/2 D min(0, J.dx - t)^2, and the
