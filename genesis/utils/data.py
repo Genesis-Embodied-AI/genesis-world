@@ -6,7 +6,7 @@ import operator
 import types
 from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
-from typing import Any, ClassVar, NamedTuple
+from typing import Annotated, Any, ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -249,8 +249,9 @@ def field(
 
     `dtype` is the element type of an array: `float`, `int` or `bool` in the precision of the simulation, a Quadrants
     type, a function returning one, or such a type paired with an element shape, `(float, 3)` for a vector and
-    `(float, (3, 3))` for a matrix. `shape` lists the sizes of its dimensions (see Size), and a field of shape () and kind
-    CONSTANT or INFO is a constant the constructor fills from its values. `kind` and `shape` replace the defaults of the
+    `(float, (3, 3))` for a matrix, whose dimensions may be sizes. `shape` lists the sizes of its dimensions (see Size),
+    and a field of shape () and kind CONSTANT or INFO is a constant the constructor fills from its values, a vector
+    constant from any sequence of its length. `kind` and `shape` replace the defaults of the
     struct, for every array of a member. `labels` select the array, or every array of a member, in the property tables
     of the constructor. `grad` gives the array gradients when the constructor requires them. `ndarray` allocates an
     ndarray on every backend. A `lazy` member is allocated when first read, from the sizes and the gradient requirement
@@ -260,13 +261,15 @@ def field(
     return dataclasses.field(metadata={SPEC: FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy)})
 
 
-def _resolve_dtype(dtype):
-    """Return the Quadrants type of an element type given to 'field'."""
+def _resolve_dtype(dtype, sizes):
+    """Return the Quadrants type of an element type given to 'field', its element shape sized by 'sizes'."""
     if isinstance(dtype, tuple):
         base, element_shape = dtype
-        if isinstance(element_shape, tuple):
-            return qd.types.matrix(*element_shape, _resolve_dtype(base))
-        return qd.types.vector(element_shape, _resolve_dtype(base))
+        element_shape = element_shape if isinstance(element_shape, tuple) else (element_shape,)
+        dims = [dim.size(sizes) if isinstance(dim, _SizeArithmetic) else dim for dim in element_shape]
+        if len(dims) == 2:
+            return qd.types.matrix(*dims, _resolve_dtype(base, sizes))
+        return qd.types.vector(*dims, _resolve_dtype(base, sizes))
     if isinstance(dtype, types.FunctionType):
         return dtype()
     return {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
@@ -431,7 +434,7 @@ def _is_selected(key, leaf) -> bool:
 
 def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
     """Allocate an array of a struct tree (see Data)."""
-    dtype = _resolve_dtype(leaf.spec.dtype)
+    dtype = _resolve_dtype(leaf.spec.dtype, sizes)
     if properties.get("unused"):
         return V(dtype=dtype, shape=())
     if leaf.is_constant:
@@ -487,6 +490,9 @@ def _values_model(struct_name, constants, is_optional, depth=0):
             value_type = StrictInt
         else:
             value_type = ValidFloat
+        # A vector constant takes any sequence of its length
+        if isinstance(leaf.spec.dtype, tuple):
+            value_type = Annotated[tuple[(value_type,) * leaf.spec.dtype[1]], pydantic.Field(strict=False)]
         fields[name] = (value_type | None, None) if is_optional[leaf.path] else (value_type, ...)
     model = pydantic.create_model(f"{struct_name}Values", __config__=pydantic.ConfigDict(extra="forbid"), **fields)
     _VALUES_MODELS[model_key] = model
@@ -524,6 +530,8 @@ impl.PyQuadrants.clear = _clear_then_drop_fills
 
 def _scalar_from(dtype, value):
     data = V(dtype=dtype, shape=())
+    if isinstance(value, tuple):
+        value = qd.Vector(value, dt=dtype.dtype)
     # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
     # materialization (see quadrants#941 above). An ndarray is filled right away: its zero-copy export runs no
     # materialization on CPU and CUDA, so a deferred value could be read before its fill.
