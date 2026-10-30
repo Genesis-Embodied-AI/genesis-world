@@ -266,6 +266,9 @@ class Collider:
         link_pair_idx[valid_link_pairs[:, 0], valid_link_pairs[:, 1]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
         link_pair_idx[valid_link_pairs[:, 1], valid_link_pairs[:, 0]] = np.arange(n_valid_link_pairs, dtype=gs.np_int)
 
+        max_collision_pairs, max_candidate_contacts, max_collision_pairs_broad, max_contacts = (
+            self._compute_max_contacts(self._n_possible_pairs, self._large_contact_pair_mask)
+        )
         terrain_hf_shape = (1, 1)
         for geom in self._solver.geoms:
             if geom.type == gs.GEOM_TYPE.TERRAIN:
@@ -290,7 +293,11 @@ class Collider:
                 mpr=self.mpr.values,
                 gjk=self.gjk.values,
                 support_field=self._support_field.values,
-                **self._compute_max_contacts(self._n_possible_pairs, self._large_contact_pair_mask),
+                max_possible_pairs=self._n_possible_pairs,
+                max_collision_pairs=max_collision_pairs,
+                max_candidate_contacts=max_candidate_contacts,
+                max_collision_pairs_broad=max_collision_pairs_broad,
+                max_contacts=max_contacts,
                 n_valid_link_pairs=n_valid_link_pairs,
                 mc_perturbation=self._mc_perturbation,
                 mc_tolerance=self._mc_tolerance,
@@ -327,15 +334,15 @@ class Collider:
         self._init_terrain_state()
 
         # Initialize [state], which stores every data that are may be updated at every single simulation step
-        config, collider_info = self._solver.rigid_config, self.collider_info
+        config = self._solver.rigid_config
         self.collider_state = array_class.ColliderState(
             sizes=dict(
                 envs=self._solver._B,
                 links=self._solver.n_links_,
-                valid_link_pairs=collider_info.n_valid_link_pairs[None],
+                valid_link_pairs=n_valid_link_pairs,
                 possible_pairs=self._n_possible_pairs,
-                broad_pairs=collider_info.max_collision_pairs_broad[None],
-                candidate_contacts=collider_info.max_candidate_contacts[None],
+                broad_pairs=max_collision_pairs_broad,
+                candidate_contacts=max_candidate_contacts,
                 nonconvex_pair_contacts=self.collider_config.n_contacts_per_nonconvex_pair,
                 contact_slots=1 if self._solver._options.enable_contact_patch else 5,
                 terrain_threads=self._n_terrain_threads,
@@ -744,7 +751,7 @@ class Collider:
             self.collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)
 
     def _compute_max_contacts(self, n_possible_pairs, large_contact_pair_mask):
-        """Return the contact and collision pair budgets of the collider info, resolving the option 'max_contacts'."""
+        """Return the collision pair, candidate contact, broad phase pair and contact budgets, resolving 'max_contacts'."""
         n_possible_nonconvex_pairs = int(np.count_nonzero(large_contact_pair_mask))
         max_collision_pairs = min(self._solver.max_collision_pairs, n_possible_pairs)
         # Size the contact buffer per regime: nonconvex pairs each emit up to n_contacts_per_nonconvex_pair, convex and
@@ -794,13 +801,7 @@ class Collider:
             options.max_contacts = max_contacts
         else:
             options.max_contacts = min(options.max_contacts, max_candidate_contacts)
-        return dict(
-            max_possible_pairs=n_possible_pairs,
-            max_collision_pairs=max_collision_pairs,
-            max_candidate_contacts=max_candidate_contacts,
-            max_collision_pairs_broad=max_collision_pairs_broad,
-            max_contacts=options.max_contacts,
-        )
+        return max_collision_pairs, max_candidate_contacts, max_collision_pairs_broad, options.max_contacts
 
     def _init_terrain_state(self):
         if self.collider_config.has_terrain:

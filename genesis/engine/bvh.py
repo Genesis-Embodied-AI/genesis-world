@@ -98,6 +98,14 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
         sort_scratch_slots(n_keys, log256_max_n) if sort_kind == array_class.BVH_SORT_KIND.DEVICE_RADIX else 0
     )
     n_sort_chunks = max(1, min(SORT_MAX_CHUNKS, (os.cpu_count() or 1) // n_trees))
+    # A set switched off leaves every array unused, else the scratch of the sort and the fit it runs alone
+    unused = {None: True}
+    if is_active:
+        unused = {
+            array_class.DEVICE_RADIX_SORT: sort_kind != array_class.BVH_SORT_KIND.DEVICE_RADIX,
+            array_class.PER_TREE_RADIX_SORT: sort_kind != array_class.BVH_SORT_KIND.PER_TREE_RADIX,
+            array_class.BLOCK_SWEEP_FIT: fit_kind != array_class.BVH_FIT_KIND.BLOCK_SWEEP,
+        }
     bvh_state = array_class.BVHState(
         sizes=dict(
             bvh_trees=n_trees,
@@ -107,13 +115,7 @@ def get_bvh_data(n_trees: int, n_leaves: int, is_active: bool = True) -> BVHData
             extent_lanes=EXTENT_LANES,
         ),
         values=dict(n_keys=n_trees * n_leaves),
-        unused={None: True}
-        if not is_active
-        else {
-            array_class.DEVICE_RADIX_SORT: sort_kind != array_class.BVH_SORT_KIND.DEVICE_RADIX,
-            array_class.PER_TREE_RADIX_SORT: sort_kind != array_class.BVH_SORT_KIND.PER_TREE_RADIX,
-            array_class.BLOCK_SWEEP_FIT: fit_kind != array_class.BVH_FIT_KIND.BLOCK_SWEEP,
-        },
+        unused=unused,
     )
 
     return BVHData(bvh_state, bvh_config)
