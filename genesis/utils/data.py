@@ -295,7 +295,8 @@ class Data:
     arrays to a value: `env_first` moves the environment dimension first or last, `layout` stores the dimensions in the
     given permutation of their declared order, and `unused` allocates the arrays no kernel reads as 0-d placeholders.
     A selection is a label or its name, matching any number of arrays, a reference to a field of the struct (see
-    FieldRef), a tuple of them, or None for every array. No two keys of a table may select the same array. `_binds`
+    FieldRef), a tuple of them, or None for every array. Where two keys of a table select the same array, the deepest
+    field wins, None being the shallowest, and a tie or a label raises. `_binds`
     maps a field, by its name or by a reference, to an array or a struct allocated elsewhere, bound in its place: no
     kernel may access both, since Quadrants assumes distinct kernel arguments never alias.
     """
@@ -382,17 +383,25 @@ class Data:
         sizes = _by_path(name, "sizes", sizes or {}, paths)
         properties = {leaf.path: {} for leaf in leaves}
         for table_name, table in (("env_first", env_first), ("layout", layout), ("unused", unused)):
-            selected = set()
+            # The depth of the key setting the property of each array, the deepest field reference winning
+            selected_depths = {}
             for key, value in (table or {}).items():
                 for ref in [item for item in (key if isinstance(key, tuple) else (key,)) if isinstance(item, FieldRef)]:
                     if ref._path not in paths:
                         raise TypeError(f"{name}() '{table_name}' selects {ref}, which is no field of it.")
-                for leaf in [leaf for leaf in leaves if _is_selected(key, leaf)]:
-                    if leaf.path in selected:
-                        raise TypeError(f"{name}() '{table_name}' selects {'.'.join(leaf.path)} twice.")
+                for leaf in leaves:
+                    depth = _selection_depth(key, leaf)
+                    if depth is None:
+                        continue
+                    depth_prev = selected_depths.get(leaf.path)
+                    if depth_prev is not None:
+                        if depth == depth_prev or min(depth, depth_prev) < 0:
+                            raise TypeError(f"{name}() '{table_name}' selects {'.'.join(leaf.path)} twice.")
+                        if depth < depth_prev:
+                            continue
                     if table_name == "layout" and "env_first" in properties[leaf.path]:
                         raise TypeError(f"{name}() sets both 'env_first' and 'layout' of {'.'.join(leaf.path)}.")
-                    selected.add(leaf.path)
+                    selected_depths[leaf.path] = depth
                     properties[leaf.path][table_name] = value
 
         constants = [leaf for leaf in leaves if leaf.is_constant]
@@ -457,15 +466,21 @@ def _by_path(struct_name, arg_name, table, paths):
     return entries
 
 
-def _is_selected(key, leaf) -> bool:
-    """Whether a key of a property table of a struct constructor selects an array (see Data)."""
+def _selection_depth(key, leaf) -> int | None:
+    """Return the depth of the field a key of a property table selects an array by, deepest first (see Data).
+
+    None is the struct itself, of depth 0, and a label is of depth -1. It is None when the key leaves the array out.
+    """
+    depths = []
     for item in key if isinstance(key, tuple) else (key,):
-        if isinstance(item, FieldRef):
+        if item is None:
+            depths.append(0)
+        elif isinstance(item, FieldRef):
             if leaf.path[: len(item._path)] == item._path:
-                return True
-        elif item is None or Label(str(item)) in leaf.labels:
-            return True
-    return False
+                depths.append(len(item._path))
+        elif Label(str(item)) in leaf.labels:
+            depths.append(-1)
+    return max(depths, default=None)
 
 
 # FIXME: quadrants#941 - a Python-scope fill of a field still being declared closes its SNode tree, one tree per filled
@@ -505,11 +520,15 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         dtype = dtype()
     dtype = {float: gs.qd_float, int: gs.qd_int, bool: gs.qd_bool}.get(dtype, dtype)
     element_dims = element_shape if isinstance(element_shape, tuple) else (element_shape,)
-    element_dims = [dim.size(sizes) if isinstance(dim, _SizeArithmetic) else dim for dim in element_dims]
-    if len(element_dims) == 1:
-        dtype = qd.types.vector(*element_dims, dtype)
-    elif len(element_dims) == 2:
-        dtype = qd.types.matrix(*element_dims, dtype)
+    element_sizes = [str(dim) for dim in element_dims if isinstance(dim, Size)]
+    is_element_sized = all([sizes.get(name) is not None for name in element_sizes])
+    # An unused array whose element shape is sized by no given size is a placeholder of the element base type
+    if is_element_sized or not properties.get("unused"):
+        element_dims = [dim.size(sizes) if isinstance(dim, _SizeArithmetic) else dim for dim in element_dims]
+        if len(element_dims) == 1:
+            dtype = qd.types.vector(*element_dims, dtype)
+        elif len(element_dims) == 2:
+            dtype = qd.types.matrix(*element_dims, dtype)
 
     if properties.get("unused"):
         return V(dtype=dtype, shape=())
