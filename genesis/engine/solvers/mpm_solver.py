@@ -823,6 +823,32 @@ class MPMSolver(ParticleSolver):
         self._kernel_get_particles_actu(particles_idx, envs_idx, actus)
         return actus[0] if self._scene.n_envs == 0 else actus
 
+    def get_particles_stress(self, material, particles_idx=None, envs_idx=None):
+        """Read Cauchy stress for particles of one elastic material."""
+        if type(material) is not gs.materials.MPM.Elastic:
+            gs.raise_exception("Stress readout is only supported for MPM.Elastic material.")
+        stress, particles_idx, envs_idx = self._sanitize_io_variables(
+            None, particles_idx, self.n_particles, "particles_idx", envs_idx, element_shape=(3, 3), batched_idx=True
+        )
+        errno = torch.zeros(1, dtype=gs.tc_int, device=gs.device)
+        kernel_get_particles_stress(
+            self._sim.cur_substep_local,
+            particles_idx,
+            envs_idx,
+            stress,
+            self.particles,
+            self.particles_ng,
+            self.particles_info,
+            material.update_stress,
+            has_svd=material.needs_svd,
+            errno=errno,
+        )
+        if errno.item():
+            gs.raise_exception("Cauchy stress requires positive volume for every active particle.")
+        if self._scene.n_envs == 0:
+            stress = stress[0]
+        return stress
+
     @mutates(StateChange.MODEL)
     def set_particles_muscle_group(self, muscle_group, particles_idx=None):
         """Set the muscle group of some particles, shared by every environment."""
@@ -1276,3 +1302,50 @@ def backward_svd(grad_U, grad_S, grad_V, U, S, V):
     u_term = U @ ((F * (ut @ grad_U - grad_U.transpose() @ U)) @ S) @ vt
     v_term = U @ (S @ ((F * (vt @ grad_V - grad_V.transpose() @ V)) @ vt))
     return u_term + v_term + S_term
+
+
+@qd.kernel
+def kernel_get_particles_stress(
+    i_f: int,
+    particles_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    stress: qd.types.ndarray(),
+    particles: qd.template(),
+    particles_ng: qd.template(),
+    particles_info: qd.template(),
+    update_stress: qd.template(),
+    has_svd: qd.template(),
+    errno: qd.types.ndarray(),
+):
+    for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        i_p = particles_idx[i_b_, i_p_]
+        i_b = envs_idx[i_b_]
+        stress_cauchy = qd.Matrix.zero(gs.qd_float, 3, 3)
+        if particles_ng[i_f, i_p, i_b].active:
+            F = particles[i_f, i_p, i_b].F
+            J = F.determinant()
+            if J > 0.0:
+                U = qd.Matrix.identity(gs.qd_float, 3)
+                S = qd.Matrix.identity(gs.qd_float, 3)
+                V = qd.Matrix.identity(gs.qd_float, 3)
+                if qd.static(has_svd):
+                    U, S, V = qd.svd(F)
+                # The elastic constitutive function returns Kirchhoff stress, tau = J * sigma
+                stress_cauchy = (
+                    update_stress(
+                        U=U,
+                        S=S,
+                        V=V,
+                        F_tmp=F,
+                        F_new=F,
+                        J=J,
+                        Jp=particles[i_f, i_p, i_b].Jp,
+                        actu=particles[i_f, i_p, i_b].actu,
+                        m_dir=particles_info[i_p].muscle_direction,
+                    )
+                    / J
+                )
+            else:
+                qd.atomic_max(errno[0], 1)
+        for i, j in qd.static(qd.ndrange(3, 3)):
+            stress[i_b_, i_p_, i, j] = stress_cauchy[i, j]
