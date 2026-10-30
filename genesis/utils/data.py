@@ -29,39 +29,44 @@ from genesis.typing import StrictBool, StrictInt, ValidFloat
 from genesis.utils.misc import data_to_array, get_own_annotations
 
 
-def _tensor_backend():
-    return qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD
-
-
 # FIXME: quadrants#936 - a vector or matrix tensor takes no layout, so those read environment by environment are
 # allocated and indexed with the environment first instead of last, against the convention of every other tensor.
 # FIXME: quadrants#935 - indexing a laid-out tensor by a list or tuple skips its axis permutation, so laid-out tensors
 # are indexed by plain subscripts alone.
 def V(*args, **kwargs):
-    return qd.tensor(*args, backend=_tensor_backend(), **kwargs)
+    return qd.tensor(*args, backend=qd.Backend.NDARRAY if gs.use_ndarray else qd.Backend.FIELD, **kwargs)
 
 
 @dataclass_transform(eq_default=True, kw_only_default=True, frozen_default=True)
-class _StaticConfigMeta(type):
-    """Generate the keyword-only constructor, the equality and the hash of a static config from its annotations."""
+class StaticConfig:
+    """
+    Base of the static configs, the compile-time switches kernels take as `qd.template()`.
 
-    def __new__(cls, name, bases, namespace):
-        config_cls = super().__new__(cls, name, bases, namespace)
-        annotations = get_own_annotations(config_cls)
+    A subclass declares its fields as annotations of type bool, int, IntEnum or another static config, an optional
+    default as their value.
+    Kernels key their compiled instances on the configs they take, by equality, so a rebuilt scene with the same
+    values reuses its kernels. A config is immutable, since a write would change the key its kernels are stored under.
+    """
+
+    def __init_subclass__(cls, **kwargs):
+        """Generate the keyword-only constructor, the equality and the hash of the config from its annotations."""
+        super().__init_subclass__(**kwargs)
+        name = cls.__name__
+        annotations = get_own_annotations(cls)
         validators = {}
         for key, annotation in annotations.items():
-            annotation = _resolve_type(annotation, config_cls)
+            annotation = _resolve_type(annotation, cls)
             if annotation is bool:
                 validators[key] = TypeAdapter(StrictBool)
             elif annotation is int:
                 validators[key] = TypeAdapter(StrictInt)
             elif isinstance(annotation, type) and issubclass(annotation, IntEnum):
                 validators[key] = TypeAdapter(annotation)
-            elif isinstance(annotation, _StaticConfigMeta):
+            elif isinstance(annotation, type) and issubclass(annotation, StaticConfig):
                 validators[key] = TypeAdapter(annotation, config=pydantic.ConfigDict(arbitrary_types_allowed=True))
             else:
                 raise TypeError(f"{name}.{key}: a static config holds bool, int, IntEnum or static configs.")
-        defaults = {key: namespace[key] for key in annotations if key in namespace}
+        defaults = {key: cls.__dict__[key] for key in annotations if key in cls.__dict__}
 
         def __init__(self, **kwargs):
             unexpected = kwargs.keys() - validators.keys()
@@ -83,19 +88,7 @@ class _StaticConfigMeta(type):
 
         if annotations:
             for method in (__init__, __setattr__, __eq__, __hash__):
-                setattr(config_cls, method.__name__, method)
-        return config_cls
-
-
-class StaticConfig(metaclass=_StaticConfigMeta):
-    """
-    Base of the static configs, the compile-time switches kernels take as `qd.template()`.
-
-    A subclass declares its fields as annotations of type bool, int, IntEnum or another static config, an optional
-    default as their value.
-    Kernels key their compiled instances on the configs they take, by equality, so a rebuilt scene with the same
-    values reuses its kernels. A config is immutable, since a write would change the key its kernels are stored under.
-    """
+                setattr(cls, method.__name__, method)
 
 
 class _SizeArithmetic:
@@ -641,7 +634,35 @@ class Data:
         unused_paths = frozenset([leaf.path for leaf in constants if properties[leaf.path].get("unused")])
         values_model = cls._values_models.get(unused_paths)
         if values_model is None:
-            values_model = cls._values_models[unused_paths] = _values_model(name, constants, unused_paths)
+            # The pydantic model validating the constants, nested like the struct, the unused ones optional. The fields
+            # of the model of each struct holding constants, by path.
+            structs_fields = {(): {}}
+            for leaf in constants:
+                for depth in range(1, len(leaf.path)):
+                    structs_fields.setdefault(leaf.path[:depth], {})
+                base = leaf.spec.dtype[0] if isinstance(leaf.spec.dtype, tuple) else leaf.spec.dtype
+                if base is bool or base == qd.u1:
+                    value_type = StrictBool
+                elif base is int or (not isinstance(base, type) and base in qd.types.primitive_types.integer_types):
+                    value_type = StrictInt
+                else:
+                    value_type = ValidFloat
+                # A vector constant takes any sequence of its length
+                if isinstance(leaf.spec.dtype, tuple):
+                    value_type = Annotated[tuple[(value_type,) * leaf.spec.dtype[1]], pydantic.Field(strict=False)]
+                field_type = (value_type | None, None) if leaf.path in unused_paths else (value_type, ...)
+                structs_fields[leaf.path[:-1]][leaf.path[-1]] = field_type
+            # The members before their holders, so that each model nests the models of its members
+            for path in sorted(structs_fields, key=len, reverse=True):
+                model_name = ".".join((name, *path)) + "Values"
+                config = pydantic.ConfigDict(extra="forbid")
+                values_model = pydantic.create_model(model_name, __config__=config, **structs_fields[path])
+                if path:
+                    is_required = any([info.is_required() for info in values_model.model_fields.values()])
+                    structs_fields[path[:-1]][path[-1]] = (
+                        (values_model, ...) if is_required else (values_model, values_model())
+                    )
+            cls._values_models[unused_paths] = values_model
         values_nested = {}
         for path, path_values in _by_path(name, "values", values or {}, paths).items():
             level = values_nested
@@ -848,7 +869,7 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
         # Filling a field now would close the SNode tree still collecting fields, so the fill waits for the next
         # materialization (see quadrants#941 above). An ndarray is filled right away: its zero-copy export runs no
         # materialization on CPU and CUDA, so a deferred value could be read before its fill.
-        if _tensor_backend() == qd.Backend.FIELD:
+        if not gs.use_ndarray:
             _pending_fields_fill.append((array, value))
         else:
             array.fill(value)
@@ -886,36 +907,6 @@ def _allocate(struct_name, leaf, properties, sizes, values, requires_grad):
     if leaf.spec.ndarray:
         return qd.tensor(dtype, shape=tuple(dims), backend=qd.Backend.NDARRAY)
     return V(dtype=dtype, shape=tuple(dims), layout=layout, needs_grad=leaf.spec.grad and requires_grad)
-
-
-def _values_model(struct_name, constants, unused_paths):
-    """Return the pydantic model validating the constants of a struct, nested like it, the unused ones optional."""
-    # The fields of the model of each struct holding constants, by path
-    structs_fields = {(): {}}
-    for leaf in constants:
-        for depth in range(1, len(leaf.path)):
-            structs_fields.setdefault(leaf.path[:depth], {})
-        base = leaf.spec.dtype[0] if isinstance(leaf.spec.dtype, tuple) else leaf.spec.dtype
-        if base is bool or base == qd.u1:
-            value_type = StrictBool
-        elif base is int or (not isinstance(base, type) and base in qd.types.primitive_types.integer_types):
-            value_type = StrictInt
-        else:
-            value_type = ValidFloat
-        # A vector constant takes any sequence of its length
-        if isinstance(leaf.spec.dtype, tuple):
-            value_type = Annotated[tuple[(value_type,) * leaf.spec.dtype[1]], pydantic.Field(strict=False)]
-        is_optional = leaf.path in unused_paths
-        structs_fields[leaf.path[:-1]][leaf.path[-1]] = (value_type | None, None) if is_optional else (value_type, ...)
-    # The members before their holders, so that each model nests the models of its members
-    for path in sorted(structs_fields, key=len, reverse=True):
-        model_name = ".".join((struct_name, *path)) + "Values"
-        config = pydantic.ConfigDict(extra="forbid")
-        model = pydantic.create_model(model_name, __config__=config, **structs_fields[path])
-        if path:
-            is_required = any([info.is_required() for info in model.model_fields.values()])
-            structs_fields[path[:-1]][path[-1]] = (model, ...) if is_required else (model, model())
-    return model
 
 
 class DataKind(IntEnum):

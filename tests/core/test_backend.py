@@ -39,12 +39,7 @@ def test_switching(backend, order):
 
             assert gs.use_ndarray == use_nd, f"Cycle {cycle_idx}: expected use_ndarray={use_nd}, got {gs.use_ndarray}"
 
-            from genesis.utils.data import V, _tensor_backend
-
-            expected_backend = qd.Backend.NDARRAY if use_nd else qd.Backend.FIELD
-            assert _tensor_backend() == expected_backend, (
-                f"Cycle {cycle_idx}: expected _tensor_backend()={expected_backend}, got {_tensor_backend()}"
-            )
+            from genesis.utils.data import V
 
             t = V(qd.i32, (4,))
             t.fill(cycle_idx + 1)
