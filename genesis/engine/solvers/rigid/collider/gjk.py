@@ -133,7 +133,7 @@ class GJK:
         contact alone, and on one full state per thread of its multicontact pass (n_multicontact_threads).
         """
         requires_grad = self._solver.rigid_config.requires_grad
-        full = dict(unused={"diff_contacts": not requires_grad}, requires_grad=requires_grad)
+        full = dict(unused=dict(diff_contacts=not requires_grad), requires_grad=requires_grad)
         if n_contact0_threads > 0:
             self.contact0_gjk_state = array_class.GJKState(
                 sizes=dict(self._state_sizes, envs=n_contact0_threads), unused=self._unused_overlap_only

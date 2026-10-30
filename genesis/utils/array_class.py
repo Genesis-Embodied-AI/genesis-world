@@ -1528,14 +1528,14 @@ class DataManager(Data):
                 if is_dynamic and config.enable_cooperative_constraint_kernels
                 else None
             },
-            unused={
-                DYNAMICS: kinematic_only,
-                LEVEL_SWEEP: not (is_dynamic and config.enable_level_sweep),
-                TILED_MASS: not (is_dynamic and config.enable_register_tiled_mass),
-                MIDPOINT: not (is_dynamic and config.integrator != gs.integrator.Euler),
-                BACKWARD: not solver._requires_grad,
-                KINEMATICS: entity_dofs == 0,
-            },
+            unused=dict(
+                dynamics=kinematic_only,
+                level_sweep=not (is_dynamic and config.enable_level_sweep),
+                tiled_mass=not (is_dynamic and config.enable_register_tiled_mass),
+                midpoint=not (is_dynamic and config.integrator != gs.integrator.Euler),
+                backward=not solver._requires_grad,
+                kinematics=entity_dofs == 0,
+            ),
             requires_grad=solver._requires_grad,
         )
 

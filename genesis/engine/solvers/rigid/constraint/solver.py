@@ -188,28 +188,28 @@ class ConstraintSolver:
                 noslip_lanes=32 if config.enable_cooperative_noslip else 1,
                 tile_classes=n_tile_classes,
             ),
-            env_first={
-                array_class.COOPERATIVE_ROWS: config.constraint_layout_batch_first,
-                array_class.JACOBIAN_ROWS: config.enable_cooperative_constraint_kernels or is_serialized,
-                array_class.SERIAL_ROWS: is_serialized,
-            },
+            env_first=dict(
+                cooperative_rows=config.constraint_layout_batch_first,
+                jacobian_rows=config.enable_cooperative_constraint_kernels or is_serialized,
+                serial_rows=is_serialized,
+            ),
             # The noslip columns hold the environments (see noslip_MinvJT), stored first along with the rows
             layout={
                 array_class.ConstraintState.noslip_MinvJT: (1, 0) if config.constraint_layout_batch_first else None
             },
-            unused={
-                array_class.NEWTON: config.solver_type != gs.constraint_solver.Newton,
-                array_class.CONE_INCREMENTAL: not (config.enable_elliptic_friction and config.backend == gs.cpu),
-                array_class.SIGNORINI: not config.enable_signorini_contact,
-                array_class.CONE_FREE_REUSE: not config.enable_cone_free_hessian_reuse,
-                array_class.NOSLIP: solver._options.noslip_iterations == 0,
-                array_class.NOSLIP_COOPERATIVE: not config.enable_cooperative_noslip,
-                array_class.HIBERNATION: not solver._use_hibernation,
-                array_class.RCM: not config.sparse_solve,
-                array_class.ISLAND_CONTACTS: not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
-                array_class.WORKLISTS: not (config.enable_tiled_island_seed and not config.is_single_island),
-                array_class.BACKWARD: not solver._requires_grad,
-            },
+            unused=dict(
+                newton=config.solver_type != gs.constraint_solver.Newton,
+                cone_incremental=not (config.enable_elliptic_friction and config.backend == gs.cpu),
+                signorini=not config.enable_signorini_contact,
+                cone_free_reuse=not config.enable_cone_free_hessian_reuse,
+                noslip=solver._options.noslip_iterations == 0,
+                noslip_cooperative=not config.enable_cooperative_noslip,
+                hibernation=not solver._use_hibernation,
+                rcm=not config.sparse_solve,
+                island_contacts=not (config.sparse_solve or config.enable_cooperative_constraint_kernels),
+                worklists=not (config.enable_tiled_island_seed and not config.is_single_island),
+                backward=not solver._requires_grad,
+            ),
             requires_grad=solver._requires_grad,
             # The Hessian is the largest array of the simulation, so it reuses the scratch of the register-tiled mass
             # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
