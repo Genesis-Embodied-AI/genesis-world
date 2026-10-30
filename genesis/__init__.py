@@ -18,6 +18,8 @@ os.environ.setdefault("QD_ENABLE_PYBUF", "0" if sys.stdout is sys.__stdout__ els
 
 with redirect_stdout(_qd_outputs):
     import quadrants as qd
+    from quadrants._lib.core.quadrants_python import DataTypeCxx
+    from quadrants.lang.matrix import MatrixType, VectorType
 
 try:
     import torch
@@ -53,6 +55,26 @@ use_zerocopy: ZeroCopyMode | None = None
 use_deterministic_algorithms: bool | None = None
 debug: bool | None = None
 EPS: float | None = None
+SEED: int
+qd_float: DataTypeCxx
+np_float: type[np.floating]
+tc_float: torch.dtype
+qd_int: DataTypeCxx
+np_int: type[np.integer]
+tc_int: torch.dtype
+qd_bool: DataTypeCxx
+np_bool: type[np.generic]
+tc_bool: torch.dtype
+qd_vec2: VectorType
+qd_vec4: VectorType
+qd_vec6: VectorType
+qd_vec7: VectorType
+qd_vec18: VectorType
+qd_mat3: MatrixType
+qd_mat4: MatrixType
+qd_ivec2: VectorType
+qd_ivec3: VectorType
+qd_ivec4: VectorType
 
 
 ########################## init ##########################
