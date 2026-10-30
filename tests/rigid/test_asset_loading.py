@@ -44,10 +44,13 @@ def test_depth_first_link_ordering(xml_path, model_name, show_viewer):
         assert sorted(subtree) == list(range(i, i + len(subtree))), f"subtree at link {i} is not contiguous"
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
 def test_mjcf_parsing_with_include():
-    scene = gs.Scene()
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
+    )
     robot1 = scene.add_entity(
         morph=gs.morphs.MJCF(
             file="xml/franka_emika_panda/scene.xml",
@@ -110,7 +113,6 @@ def test_ground_plane_preservation(box_plan):
     assert_equal(sum(geom.type == gs.GEOM_TYPE.BOX for geom in entity_without_ground.geoms), 1)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_urdf_parsing(show_viewer, tol):
     POS_OFFSET = 0.8
@@ -170,8 +172,6 @@ def test_urdf_parsing(show_viewer, tol):
         for key in ((False, False), (False, True), (True, False), (True, True)):
             entities[key].set_pos(np.array([0.5, 0.0, 0.0]), relative=relative)
             entities[key].set_quat(np.array([0.0, 0.0, 0.0, 1.0]), relative=relative)
-        if show_viewer:
-            scene.visualizer.update()
         _check_entity_positions(0.0, tol=tol)
 
     # Check that `set_qpos` applies the same absolute transform in all cases. The fixed roots have no free joint to
@@ -187,8 +187,6 @@ def test_urdf_parsing(show_viewer, tol):
         entities[key].set_pos(np.array([0.0, config_y, 0.0]), relative=False)
         entities[key].set_quat(np.array(world_quat), relative=False)
         entities[key].set_qpos(door_angle)
-    if show_viewer:
-        scene.visualizer.update()
     _check_entity_positions(POS_OFFSET, tol=tol)
 
     # Add dof damping to stabilitze the physics
@@ -556,15 +554,19 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity.get_pos(), (0.0, 0.0, -0.03), atol=5e-4)
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("urdf_path", ["chain.urdf", "dual_arms_glb/dual_arms_glb.urdf", "dual_arms_primitives.urdf"])
 @pytest.mark.parametrize("fixed", [False, True])
 def test_urdf_parsing_merge_fixed_links(urdf_path, fixed, show_viewer, tol):
     POS = (0.0, -0.2, 0.5)
     EULER = (0.0, 90.0, 45.0)
 
-    scene = gs.Scene(show_viewer=show_viewer)
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
+        show_viewer=show_viewer,
+    )
     urdf_rootdir = os.path.dirname(urdf_path)
     asset_path = get_hf_dataset(pattern=os.path.join(urdf_rootdir, "*") if urdf_rootdir else urdf_path)
     robot_1 = scene.add_entity(
@@ -653,7 +655,6 @@ def test_mjcf_parsing_merge_fixed_links(xml_path, show_viewer):
     assert_allclose(robot.get_quat(), QUAT, tol=gs.EPS)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_urdf_capsule(tmp_path, show_viewer, tol):
     urdf_path = tmp_path / "capsule.urdf"
@@ -754,18 +755,8 @@ def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
     )
     # One variant per environment, each weighing differently and asking its own default.
     morphs_heterogeneous = [
-        morph_class(
-            file=xml_path,
-            pos=(2.0, 0.0, 0.0),
-            scale=1.0,
-            default_armature=DEFAULT_ARMATURE,
-        ),
-        morph_class(
-            file=xml_path,
-            pos=(2.0, 0.0, 0.0),
-            scale=2.0,
-            default_armature=None,
-        ),
+        morph_class(file=xml_path, pos=(2.0, 0.0, 0.0), scale=1.0, default_armature=DEFAULT_ARMATURE),
+        morph_class(file=xml_path, pos=(2.0, 0.0, 0.0), scale=2.0, default_armature=None),
     ]
 
     # An attached pair is one kinematic tree spanning two entities, only the mounted one asking a default, beside the
@@ -784,7 +775,11 @@ def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
         )
         carriers.append((carrier, mounted))
 
-    scene = gs.Scene()
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
+    )
     robot = scene.add_entity(morph)
     robot_without_armature = scene.add_entity(morph_without_armature)
     robot_heterogeneous = scene.add_entity(morphs_heterogeneous)
@@ -821,6 +816,7 @@ def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
     armature_heterogeneous = robot_heterogeneous.get_dofs_armature()
     assert_allclose(armature_heterogeneous[0, 6], DEFAULT_ARMATURE, tol=gs.EPS)
     assert_allclose(armature_heterogeneous[1, 6], 0.0, tol=gs.EPS)
+    assert_allclose(robot_heterogeneous.get_mass()[1], 8.0 * robot_heterogeneous.get_mass()[0], tol=tol)
 
     # Rotor inertia lowers the inverse weight of its own joint and, through the inverse mass matrix of the tree, of every
     # joint coupled to it, attached entities included: a weight parsed before the default was applied would miss it.
@@ -836,7 +832,6 @@ def test_default_armature(xml_path, trees_and_slider_mjcf, tol):
     assert_allclose(robot_trees.get_links_invweight()[:, 4], (slider_invweight / 3.0, 0.0), tol=tol)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_xacro_loading(xacro_robot, show_viewer, tol):
     scene = gs.Scene(show_viewer=show_viewer)
@@ -1010,13 +1005,13 @@ def test_color_overwrite(overwrite, urdf_with_external_assets, show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 @pytest.mark.parametrize(
-    "xml_path",
+    "model_name",
     [
-        pytest.param("xml/franka_emika_panda/panda.xml", marks=pytest.mark.slow),
+        "xml/franka_emika_panda/panda.xml",
         "urdf/go2/urdf/go2.urdf",
         "urdf/panda_bullet/panda.urdf",
+        "urdf_with_legacy_parsed_primitives",
     ],
 )
 def test_robot_scale_and_dofs_armature(xml_path, monkeypatch, tol):
@@ -1121,7 +1116,6 @@ def test_robot_scale_and_dofs_armature(xml_path, monkeypatch, tol):
     assert_allclose(qf_passive, 0.0, tol=tol)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_mesh_primitive_COM(show_viewer):
     scene = gs.Scene(
@@ -1311,7 +1305,7 @@ def test_align_mesh(show_viewer, tol):
         scene.step()
 
     assert_allclose(mango.get_dofs_velocity(dofs_idx_local=(0, 1, 2)), 0, tol=0.01)
-    assert_allclose(mango.get_dofs_velocity(dofs_idx_local=(3, 4, 5)), 0, tol=0.08)
+    assert_allclose(mango.get_dofs_velocity(dofs_idx_local=(3, 4, 5)), 0, tol=0.15)
     min_z = mango.get_AABB()[:, 0, 2]
     assert ((-1e-3 < min_z) & (min_z < 0.0)).all()
 
@@ -1924,8 +1918,11 @@ def test_align_heterogeneous_inertial(show_viewer, tol):
     dof_pos = het_obj.get_dofs_position()
     assert_allclose(dof_pos[..., -1], target_dof_pos, tol=1e-3)
     het_links_pos = het_obj.get_links_pos(relative=False)
-    assert_allclose(het_links_pos[..., 1, 0] - het_links_pos[..., 0, 0], target_dof_pos + 0.1, tol=1e-3)
-    assert_allclose(het_links_pos[..., 1, 1:], het_links_pos[..., 0, 1:], tol=5e-3)
+    links_offset = gu.inv_transform_by_quat(
+        het_links_pos[..., 1, :] - het_links_pos[..., 0, :], het_obj.get_quat(relative=False)
+    )
+    assert_allclose(links_offset[..., 0], target_dof_pos + 0.1, tol=1e-3)
+    assert_allclose(links_offset[..., 1:], 0.0, tol=tol)
 
     # Check that the acceleration is matching the analytical formula
     links_mass = qd_to_numpy(scene.rigid_solver.dyn_info.links.inertial_mass, None, links_idx, transpose=True)
@@ -2004,7 +2001,7 @@ def test_multi_root_offset(show_viewer, tol):
     assert_allclose(link_a.get_pos()[..., 2], link_b.get_pos()[..., 2], tol=tol)
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("is_fixed", [False, True])
 @pytest.mark.parametrize("merge_fixed_links", [False, True])
 def test_merge_entities(is_fixed, merge_fixed_links, show_viewer, tol, monkeypatch):

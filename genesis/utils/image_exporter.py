@@ -199,9 +199,10 @@ class FrameImageExporter:
                 imgs_data = np.asarray(imgs_data)
 
             # Make sure that image data has shape `(n_env, H, W [, C>1])``
-            if imgs_data.shape[-1] == 1:
+            has_channels = img_type != IMAGE_TYPE.DEPTH
+            if has_channels and imgs_data.shape[-1] == 1:
                 imgs_data = imgs_data[..., 0]
-            if imgs_data.ndim == (3 if imgs_data.shape[-1] <= 4 else 2):
+            if imgs_data.ndim == (3 if has_channels and imgs_data.shape[-1] <= 4 else 2):
                 imgs_data = imgs_data[None]
             if imgs_data.ndim not in (3, 4):
                 gs.raise_exception("'{imgs_data}' images must be arrays of shape ([n_envs,] H, W [, C>1])")

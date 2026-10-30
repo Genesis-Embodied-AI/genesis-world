@@ -14,12 +14,14 @@ from ..utils.assets import get_hf_dataset
 from .conftest import RENDERER_TYPE
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 def test_batch_deformable_render(monkeypatch, png_snapshot):
-    # Having many particles in the scene creates artifacts that are not deterministic between different hardware
+    # Having many particles in the scene creates artifacts that are not deterministic between different hardware. Every
+    # visible feature spans several pixels, since a renderer rasterizes sub-pixel geometry its own way: the liquid holds
+    # a few hundred particles about 5 pixels wide, and the wireframes of the solver boundaries, thinner than a pixel,
+    # are left out (see 'Reproducing Apple Software Renderer Failures Locally' in CLAUDE.md).
     png_snapshot.extension._std_err_threshold = 2.0
     png_snapshot.extension._blurred_kernel_size = 3
 
@@ -33,7 +35,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
             upper_bound=(1.0, 1.0, 1.0),
         ),
         sph_options=gs.options.SPHOptions(
-            particle_size=0.01,
+            particle_size=0.05,
             lower_bound=(-0.5, -0.5, 0.0),
             upper_bound=(0.5, 0.5, 1),
         ),
@@ -42,8 +44,8 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
         vis_options=gs.options.VisOptions(
             show_world_frame=True,
-            visualize_mpm_boundary=True,
-            visualize_sph_boundary=True,
+            # Shadows are forcibly disabled on software rendering backends
+            shadow=False,
         ),
         viewer_options=gs.options.ViewerOptions(
             res=(640, 480),
@@ -58,8 +60,11 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         show_FPS=False,
     )
 
+    # The planes of the environments tile the ground and stay within the camera frustum
     scene.add_entity(
-        morph=gs.morphs.Plane(),
+        morph=gs.morphs.Plane(
+            plane_size=(2.0, 2.0),
+        ),
         material=gs.materials.Rigid(
             needs_coup=True,
             coup_friction=0.0,
@@ -105,7 +110,7 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
             n_groups=4,
         ),
     )
-    scene.add_entity(
+    liquid = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.65),
             size=(0.4, 0.4, 0.4),
@@ -119,6 +124,17 @@ def test_batch_deformable_render(monkeypatch, png_snapshot):
         ),
     )
     scene.build(n_envs=4, env_spacing=(2.0, 2.0))
+
+    # Every environment renders the liquid in a state of its own: as sampled, lifted, flattened onto its bottom, and
+    # with every other particle deactivated
+    liquid_pos = liquid.get_particles_pos()
+    liquid_pos[1, :, 2] += 0.2
+    liquid_bottom = liquid_pos[2, :, 2].min()
+    liquid_pos[2, :, 2] = liquid_bottom + 0.25 * (liquid_pos[2, :, 2] - liquid_bottom)
+    liquid.set_particles_pos(liquid_pos)
+    is_liquid_active = liquid.get_particles_active()
+    is_liquid_active[3, ::2] = False
+    liquid.set_particles_active(is_liquid_active)
 
     pyrender_viewer = scene.visualizer.viewer._pyrender_viewer
     assert pyrender_viewer.is_active

@@ -8,8 +8,9 @@ import torch
 import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.bvh import BVHData, get_bvh_data
-from genesis.engine.solvers.base_solver import StateChange, Subscriber
-from genesis.engine.solvers.rigid.rigid_solver import RigidSolver, kernel_update_all_verts
+from genesis.engine.solvers.rigid.abd.forward_kinematics import kernel_update_all_verts
+from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.options.sensors import Raycaster as RaycasterOptions
 from genesis.options.sensors import RaycastPattern
 from genesis.utils.geom import normalize, transform_by_quat, transform_by_trans_quat
@@ -518,7 +519,6 @@ class RaycasterSensor(
 ):
     def __init__(self, options: RaycasterOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"):
         super().__init__(options, idx, shared_context, shared_metadata, manager)
-        self.debug_objects: list["Mesh"] = []
         self.ray_starts: torch.Tensor = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
         self.ray_dirs: torch.Tensor = torch.empty((0, 3), device=gs.device, dtype=gs.tc_float)
 
@@ -701,12 +701,10 @@ class RaycasterSensor(
                     is_env_major=is_env_major,
                 )
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        """
-        Draw hit points as spheres in the scene.
-
-        Only draws for first rendered environment.
-        """
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make spheres at the start and at the hit point of every ray, for the first rendered environment."""
+        if 0 not in envs_idx:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
 
         data = self.read(env_idx)
@@ -732,15 +730,10 @@ class RaycasterSensor(
             )
             points = transform_by_trans_quat(hit_points_local + self.ray_starts, pos, quat)
 
-        for debug_object in self.debug_objects:
-            context.clear_debug_object(debug_object)
-        self.debug_objects.clear()
-
-        self.debug_objects += [
-            context.draw_debug_spheres(
-                ray_starts, radius=self._options.debug_sphere_radius, color=self._options.debug_ray_start_color
-            ),
-            context.draw_debug_spheres(
-                points, radius=self._options.debug_sphere_radius, color=self._options.debug_ray_hit_color
-            ),
-        ]
+        ray_starts_spheres = context.make_debug_spheres(
+            ray_starts, radius=self._options.debug_sphere_radius, color=self._options.debug_ray_start_color
+        )
+        hit_points_spheres = context.make_debug_spheres(
+            points, radius=self._options.debug_sphere_radius, color=self._options.debug_ray_hit_color
+        )
+        return [(None, ray_starts_spheres, None), (None, hit_points_spheres, None)]

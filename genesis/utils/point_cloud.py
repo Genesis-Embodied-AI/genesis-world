@@ -7,12 +7,11 @@ import trimesh
 
 import genesis as gs
 
-from . import mesh as msu
-from .misc import get_fps_pc_cache_dir
+from .cache import MeshCache, get_fps_pc_cache_dir
 
 
 def get_fps_pc_cache(verts, faces, n_points: int, n_candidates: int, return_normals: bool, seed: int):
-    return msu.MeshCache(get_fps_pc_cache_dir(), "fps_pc", verts, faces, n_points, n_candidates, return_normals, seed)
+    return MeshCache(get_fps_pc_cache_dir(), "fps_pc", verts, faces, n_points, n_candidates, return_normals, seed)
 
 
 def _furthest_point_sample_impl(

@@ -10,11 +10,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+
 import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.scene import SCENE_FORMAT, description_digest
+from genesis.ext import urdfpy
 from genesis.recorders.trajectory import CHUNK_MAGIC, TRAJECTORY_FORMAT, Trajectory
 from genesis.utils.misc import get_assets_dir, tensor_to_array
 from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME
@@ -69,6 +71,7 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
     scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, -0.6, 0.5),
+            quat=(1.0, 0.0, 0.0, 1.0),
             size=(0.1, 0.1, 0.1),
         ),
         material=gs.materials.Rigid() if requires_grad else gs.materials.Kinematic(),
@@ -76,9 +79,8 @@ def checkpoint_scene(mimic_hinges, requires_grad, show_viewer):
     return scene
 
 
-@pytest.mark.required
 @pytest.mark.parametrize("model_name", ["free_boxes_and_slider"])
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_export_and_load_rigid(
     n_envs, xml_path, mimic_hinges, urdf_with_external_assets, xacro_robot, tmp_path, show_viewer, caplog
 ):
@@ -213,8 +215,9 @@ def test_export_and_load_rigid(
     holder = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(50.0, 50.0, 1.0),
-            size=(0.2, 0.2, 0.2),
+            quat=(1.0, 0.0, 0.0, 1.0),
             fixed=True,
+            size=(0.2, 0.2, 0.2),
         ),
     )
     mounted = scene.add_entity(
@@ -254,10 +257,26 @@ def test_export_and_load_rigid(
         ),
     )
     # An asset may name a mesh outside its own directory, which the mesh states as an absolute path of its own
+    urdf_node = ET.fromstring(urdf_with_external_assets)
     far_mesh = scene.add_entity(
         morph=gs.morphs.URDF(
-            file=urdf_with_external_assets,
+            file=urdfpy.URDF._from_xml(urdf_node, urdf_node, path=str(tmp_path)),
             pos=(80.0, 80.0, 1.0),
+        ),
+    )
+    # A GLTF file is Y-up, so a Z-up claim on it is held as a compensating offset orientation
+    scene.add_entity(
+        morph=gs.morphs.Mesh(
+            pos=(90.0, 90.0, 1.0),
+            file="meshes/camera/camera.glb",
+            file_meshes_are_zup=True,
+        ),
+    )
+    # The same document given inline rather than as a model built in memory
+    inline_urdf = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=urdf_with_external_assets,
+            pos=(100.0, 100.0, 1.0),
         ),
     )
     # A sensor and a recorder observe the scene rather than taking part in it, and a file holds no code to run.
@@ -326,14 +345,16 @@ def test_export_and_load_rigid(
     assert restored.entities[14].surface.normal_texture is None
     assert restored.entities[14].vgeoms[0].vmesh.surface.normal_texture is None
     # A mesh holding uvs is drawn with its texture, laid out as the authored one
-    restored_visual = restored.entities[6].vgeoms[0].get_trimesh().visual
+    restored_visual = restored.entities[6].vgeoms[0].trimesh.visual
     assert restored_visual.kind == "texture"
-    assert_equal(restored_visual.uv, anchored.vgeoms[0].get_trimesh().visual.uv)
+    assert_equal(restored_visual.uv, anchored.vgeoms[0].trimesh.visual.uv)
     # A morph names the asset it was created from, since the description stands for what was parsed out of it
     assert restored.entities[15].morph.file == "two_link.urdf.xacro"
     # A mesh states the asset it was read from by name, wherever that asset stood
     assert restored.entities[16].geoms[0].mesh.metadata["mesh_path"] == "sphere.obj"
-    # The document that entity was created from names that mesh as well, and the name travels without its directory
+    # A model built in memory travels as the document it stands for, which names that mesh without its directory.
+    # The entity it was given to keeps it.
+    assert isinstance(far_mesh.morph.file, urdfpy.URDF)
     assert "external_assets" not in restored.entities[16].morph.file
     assert 'filename="sphere.obj"' in restored.entities[16].morph.file
     # A scale per axis comes back as the three factors it was given, and the geometry it produced with them
@@ -342,7 +363,7 @@ def test_export_and_load_rigid(
     authored_by_index = dict(
         enumerate((brick, articulated, mesh_set, anchored, terrain, drone, heterogeneous), start=3)
     )
-    authored_by_index.update({14: stretched, 15: expanded, 16: far_mesh})
+    authored_by_index.update({14: stretched, 15: expanded, 16: far_mesh, 18: inline_urdf})
     for index, authored in authored_by_index.items():
         assert restored.entities[index].n_links == authored.n_links
         assert restored.entities[index].n_geoms == authored.n_geoms
@@ -411,7 +432,9 @@ def test_export_and_load_rigid(
             assert np.shares_memory(geom.mesh.get_vert_adjacency()[0], twin_geom.mesh.get_vert_adjacency()[0])
             assert geom.mesh.inertial is twin_geom.mesh.inertial
 
-    # A restored scene keeps exactly the description it loaded, so a second export produces the same file
+    # A restored scene keeps exactly the description it loaded, orientations included to the last bit, so a second
+    # export produces the same file and a state saved by either scene restores into the other
+    assert description_digest(restored.desc) == description_digest(scene.desc)
     again = tmp_path / f"again{SCENE_FORMAT}"
     restored.export(again)
     with zipfile.ZipFile(exported) as first, zipfile.ZipFile(again) as second:
@@ -420,8 +443,7 @@ def test_export_and_load_rigid(
         assert first.read(ARRAY_MEMBER) == second.read(ARRAY_MEMBER)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_export_before_build(n_envs, checkpoint_scene, tmp_path, caplog):
     scene = checkpoint_scene
     box = scene.entities[1]
@@ -589,7 +611,7 @@ def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
         checkpoint_scene.export(tmp_path / f"wind{SCENE_FORMAT}")
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("requires_grad", [False, True])
 def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_viewer):
@@ -638,8 +660,6 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     twin_checkpoint = twin_scene.__getstate__()
     assert_equal(twin_checkpoint.sim.steps, checkpoint.sim.steps)
     for name, record in checkpoint.sim.solvers.items():
-        assert twin_checkpoint.sim.solvers[name].is_forward_pos_updated == record.is_forward_pos_updated
-        assert twin_checkpoint.sim.solvers[name].is_forward_vel_updated == record.is_forward_vel_updated
         for array_name, array in record.arrays.items():
             assert_equal(twin_checkpoint.sim.solvers[name].arrays[array_name], array)
     for _ in range(10):
@@ -663,6 +683,11 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     assert_equal(reloaded_state.links_pos, landing_state.links_pos)
     assert_equal(ghost.get_links_pos(), landing_ghost_pos)
     assert_equal(box.get_contacts()["force_a"], landing_contacts["force_a"])
+
+    # A checkpoint file restores into the very scene that wrote it
+    Trajectory(checkpoint_path, scene=scene).seek(-1)
+    assert_equal(scene.get_time(), read_time)
+    assert_equal(arm.get_qpos(), read_arm_qpos)
 
     # A checkpoint file holds the whole state, so a scene loaded from it steps on where the original went
     loaded_scene = gs.Scene.load_checkpoint(checkpoint_path, show_viewer=show_viewer)
@@ -688,60 +713,71 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, caplog, tol):
+# Eight environments make the exact frames large enough for a CUDA device to encode them, while the minimal frames still
+# share their slots
+@pytest.mark.parametrize("n_envs", [0, 8])
+def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, tol):
     scene = checkpoint_scene
     box, arm, ghost = scene.entities[1], scene.entities[2], scene.entities[4]
-    # Both modes logged from one run. Short chunks, so the frames span several chunks and a chunk can be cut off. The
+    # Every mode logged from one run. Short chunks, so the frames span several chunks and a chunk can be cut off. The
     # run ends with a reset, which every log records the state before, and goes on in the same file.
     N_STEPS, CHUNK_SIZE = 30, 8
     exact_path = tmp_path / f"exact{TRAJECTORY_FORMAT}"
-    compressed_path = tmp_path / f"compressed{TRAJECTORY_FORMAT}"
+    minimal_path = tmp_path / f"minimal{TRAJECTORY_FORMAT}"
     scene.start_recording(
         gs.recorders.TrajectoryFile(
             filename=str(exact_path),
-            exact=True,
+            mode="exact",
             chunk_size=CHUNK_SIZE,
         ),
     )
     scene.start_recording(
         gs.recorders.TrajectoryFile(
-            filename=str(compressed_path),
-            exact=False,
+            filename=str(minimal_path),
+            mode="minimal",
             chunk_size=CHUNK_SIZE,
         ),
     )
-    # A third log samples every fourth step, a rate the run length is off
+    # Another log samples every fourth step, a rate the run length is off. Its frames are small, so it records in exact
+    # mode unless told otherwise.
     sparse_path = tmp_path / f"sparse{TRAJECTORY_FORMAT}"
     scene.start_recording(
         gs.recorders.TrajectoryFile(
             filename=str(sparse_path),
             hz=0.25 / scene.sim.dt,
-            exact=True,
             chunk_size=CHUNK_SIZE,
         ),
     )
-    # A fourth log has a size limit below its header, so its first write at the stop fails and is reported there
+    # The last log has a size limit below its header, so its first write at the stop fails and is reported there
     capped_path = tmp_path / f"capped{TRAJECTORY_FORMAT}"
     scene.start_recording(
         gs.recorders.TrajectoryFile(
             filename=str(capped_path),
-            exact=True,
+            mode="exact",
             chunk_size=2 * N_STEPS,
             max_size=1,
         ),
     )
-    caplog.clear()
-    with caplog.at_level("WARNING"):
-        scene.build(n_envs=n_envs)
-    assert "Recording the state alone" in " ".join(record.getMessage() for record in caplog.records)
+    scene.build(n_envs=n_envs)
     # The inputs of a step are recorded whether a setter or a pre-step callback writes them
     scene.register_pre_step_callback(lambda: arm.control_dofs_position([0.3 + 0.001 * scene.sim.cur_step_global, -0.3]))
-    # A frame is the state a step starts from, so the record of frame i is read right before step i
-    states, ghosts_pos, forces, times = [], [], [], []
+    # A step a pre-step callback vetoes records no frame
+    VETO_STEP = N_STEPS // 3
+    is_paused = False
+    scene.register_pre_step_callback(lambda: is_paused)
+    # A frame is the state a step starts from, so the record of frame i is read right before step i. A model parameter
+    # changed by a setter halfway is recorded with the frames from there on.
+    states, ghosts_pos, forces, times, kps = [], [], [], [], []
     for i_step in range(N_STEPS):
+        if i_step == VETO_STEP:
+            is_paused = True
+            scene.step()
+            is_paused = False
         ghost.set_dofs_position([0.01 * i_step, 0.0, 0.0, 0.0, 0.0, 0.0])
+        if i_step == N_STEPS // 2:
+            arm.set_dofs_kp(2.0 * arm.get_dofs_kp())
         states.append(scene.sim.rigid_solver.get_state())
+        kps.append(arm.get_dofs_kp())
         ghosts_pos.append(ghost.get_links_pos())
         forces.append(box.get_contacts()["force_a"])
         times.append(scene.get_time())
@@ -759,10 +795,26 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
     # at. Both trajectories play in the same scene.
     exact_trajectory = gs.Scene.load_trajectory(exact_path, show_viewer=show_viewer)
     replay_scene = exact_trajectory.scene
-    compressed_trajectory = Trajectory(compressed_path, scene=replay_scene)
-    assert len(exact_trajectory) == len(compressed_trajectory) == N_STEPS + 2
-    assert exact_trajectory.is_exact and not compressed_trajectory.is_exact
-    for index, (state, ghost_pos, force, time) in enumerate(zip(states, ghosts_pos, forces, times)):
+    minimal_trajectory = Trajectory(minimal_path, scene=replay_scene)
+    trajectories = (exact_trajectory, minimal_trajectory)
+    assert len(exact_trajectory) == len(minimal_trajectory) == N_STEPS + 2
+    assert [trajectory.mode for trajectory in trajectories] == ["exact", "minimal"]
+    # A frame holds the wall time of every phase of the step that reached its state, which a vetoed step in between
+    # leaves as it is. No step led to the first frame, and no step ran between the reset and the stop, which leave the
+    # timings as they were.
+    for trajectory in trajectories:
+        assert set(trajectory.timings(0)) == {"step", "period", "physics", "sensors", "recorders", "rendering", "video"}
+        assert np.isnan(list(trajectory.timings(0).values())).all()
+        assert_equal(list(trajectory.timings(-1).values()), list(trajectory.timings(-2).values()))
+        for index in range(1, N_STEPS + 1):
+            timings = trajectory.timings(index)
+            assert set(timings) == {"step", "period", "physics", "sensors", "recorders", "rendering", "video"}
+            assert (
+                timings["step"] >= sum(time for phase, time in timings.items() if phase not in ("step", "period")) > 0
+            )
+            # The first step has no previous one to measure its period from
+            assert np.isnan(timings["period"]) == (index == 1)
+    for index, (state, ghost_pos, force, time, kp) in enumerate(zip(states, ghosts_pos, forces, times, kps)):
         # An exact frame puts back everything a step reads or writes, so the scene stands exactly where it stood
         exact_trajectory.seek(index)
         replayed_state = replay_scene.sim.rigid_solver.get_state()
@@ -777,17 +829,33 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
         assert_equal(exact_trajectory.time(index), time)
         ctrl_pos = exact_trajectory.frame(index)["RigidSolver.dyn_state.dofs.ctrl_pos"]
         assert_allclose(ctrl_pos[arm.dof_start], 0.3 + 0.001 * index, tol=gs.EPS)
-        # A compressed frame puts back the state and leaves the poses to forward kinematics, which the mode documents
-        # as lossy at the last bits
-        compressed_trajectory.seek(index)
+        assert_equal(replay_scene.entities[2].get_dofs_kp(), kp)
+        # A minimal frame puts back the state and the model parameters, and leaves the poses to forward kinematics,
+        # which the mode documents as lossy at the last bits
+        minimal_trajectory.seek(index)
         replayed_state = replay_scene.sim.rigid_solver.get_state()
         assert_equal(replayed_state.qpos, state.qpos)
         assert_equal(replayed_state.dofs_vel, state.dofs_vel)
         assert_equal(replayed_state.dofs_acc, state.dofs_acc)
-        assert_equal(replay_scene.entities[1].get_contacts()["force_a"], force)
         assert_allclose(replayed_state.links_pos, state.links_pos, tol=tol)
         assert_allclose(replayed_state.links_quat, state.links_quat, tol=tol)
         assert_allclose(replay_scene.entities[4].get_links_pos(), ghost_pos, tol=tol)
+        assert_equal(replay_scene.entities[2].get_dofs_kp(), kp)
+
+    # A step from a minimal frame recomputes the derived arrays before reading them, so it lands on the same state to
+    # the bit whatever the scene held before the seek, and on the recorded run up to the last bits of the poses
+    steps_states, steps_forces = [], []
+    for index in (0, N_STEPS // 2):
+        exact_trajectory.seek(index)
+        minimal_trajectory.seek(N_STEPS - 1)
+        replay_scene.step()
+        steps_states.append(replay_scene.sim.rigid_solver.get_state())
+        steps_forces.append(replay_scene.entities[1].get_contacts()["force_a"])
+    assert_equal(steps_states[0].qpos, steps_states[1].qpos)
+    assert_equal(steps_states[0].dofs_vel, steps_states[1].dofs_vel)
+    assert_equal(steps_forces[0], steps_forces[1])
+    assert steps_forces[0].shape[-2] > 0
+    assert_allclose(steps_states[0].qpos, final_state.qpos, tol=tol)
 
     exact_trajectory.seek(N_STEPS - 1)
     replay_scene.step()
@@ -800,12 +868,11 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
         exact_trajectory.frame(N_STEPS)["RigidSolver.rigid_info.qpos"],
         tensor_to_array(final_state.qpos).T,
     )
-    compressed_trajectory.seek(N_STEPS)
+    minimal_trajectory.seek(N_STEPS)
     assert_equal(replay_scene.sim.rigid_solver.get_state().qpos, final_state.qpos)
-    assert_equal(replay_scene.entities[1].get_contacts()["force_a"], final_force)
     # The last frame of each file, reached from the end as well, is the state the recording stopped at, whole: the
     # scratch of the solvers comes beside the kinds the other frames hold
-    for trajectory in (exact_trajectory, compressed_trajectory):
+    for trajectory in trajectories:
         assert set(trajectory.frame(-1)) > set(trajectory.frame(-2))
         assert_equal(trajectory.frame(-1)["RigidSolver.rigid_info.qpos"], tensor_to_array(reset_state.qpos).T)
     exact_trajectory.seek(-1)
@@ -826,6 +893,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
     # The sparse log holds the frame of every fourth step, then the states before and after the reset, recorded off
     # its sampling grid. Both carry the same step count, since the log keeps recording across the reset.
     sparse_trajectory = Trajectory(sparse_path, scene=replay_scene)
+    assert sparse_trajectory.mode == "exact"
     n_sampled = len(range(0, N_STEPS, 4))
     assert len(sparse_trajectory) == n_sampled + 2
     for index in range(n_sampled):
@@ -839,14 +907,18 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
         file.write(data[: data.find(CHUNK_MAGIC)])
     with pytest.raises(gs.GenesisException, match="holds no frame"):
         Trajectory(cut_path, scene=replay_scene)
+    # A file written in another version of the format is rejected by that version
+    with open(cut_path, "wb") as file:
+        file.write(b"GSTRAJ3\n" + data[len(b"GSTRAJ3\n") :])
+    with pytest.raises(gs.GenesisException, match="version 3 of the trajectory format"):
+        Trajectory(cut_path, scene=replay_scene)
 
 
-@pytest.mark.required
 @pytest.mark.precision("32")
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_trajectory_replay_across_backends(n_envs, trajectory_snapshot, show_viewer, tol):
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
+def test_trajectory_replay_across_backends(n_envs, checkpoint_scene, load_trajectory_snapshot, show_viewer, tol):
     # The snapshot is a log recorded on CPU in single precision, replayed here on whatever backend the session runs
-    trajectory = gs.Scene.load_trajectory(trajectory_snapshot, show_viewer=show_viewer)
+    trajectory = load_trajectory_snapshot(checkpoint_scene, n_envs=n_envs, n_steps=10, show_viewer=show_viewer)
     assert trajectory.n_envs == n_envs
     replay_scene = trajectory.scene
     for index in range(len(trajectory)):

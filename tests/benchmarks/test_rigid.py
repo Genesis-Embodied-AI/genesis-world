@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 
 from ..utils.assets import get_git_commit_timestamp, get_hf_dataset
@@ -307,7 +309,8 @@ def make_anymal(n_envs, solver=None, gjk=None, control=None, with_kinematic=Fals
     if control == "uniform":
         rand_shape = (12,)
     elif control == "per_env":
-        rand_shape = (n_envs, 12)
+        # n_envs == 0 is an unbatched scene, whose control targets are unbatched (12,) rather than (n_envs, 12).
+        rand_shape = (n_envs, 12) if n_envs > 0 else (12,)
     else:
         rand_shape = None
 
@@ -938,8 +941,6 @@ def make_table_bussing(n_envs, solver=None, gjk=None, **scene_kwargs):
 
 
 def run_benchmark(step_fn, *, n_envs, meta):
-    import quadrants as qd
-
     qd.sync()
 
     # Force CUDA-context init / lazy module load / first kernel SASS JIT to
@@ -1119,6 +1120,7 @@ def table_bussing(solver, n_envs, gjk):
 BENCHMARKS_FIELD = [
     ("go2", None, None, 4096, gs.gpu),
     ("anymal_random", None, None, 20000, gs.gpu),
+    ("anymal_random", None, None, 0, gs.cpu),
     ("g1_fall", None, None, 4096, gs.gpu),
     ("g1_fall_accessors", None, None, 4096, gs.gpu),
     ("double_smplx", None, None, 4096, gs.gpu),

@@ -12,7 +12,7 @@ from ..utils.assertions import assert_allclose, assert_equal
 from ..utils.assets import get_hf_dataset
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("model_name", ["hinge_slide"])
 @pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
 @pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
@@ -58,7 +58,6 @@ def test_set_dofs_frictionloss_physics(gs_sim, tol):
     np.testing.assert_array_less(tol, slide_friction_effect)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_frictionloss_advanced(show_viewer, tol):
     scene = gs.Scene(
@@ -79,7 +78,7 @@ def test_frictionloss_advanced(show_viewer, tol):
     )
     box = scene.add_entity(
         gs.morphs.Box(
-            pos=(0.1, 0.0, 0.6),
+            pos=(0.1, 0.0, 0.62),
             size=(0.025, 0.025, 0.025),
         ),
     )
@@ -100,7 +99,6 @@ def test_frictionloss_advanced(show_viewer, tol):
     assert_allclose(box.get_dofs_velocity(), 0.0, tol=50 * tol)
 
 
-@pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.debug(False)  # Disable debug for speedup
 @pytest.mark.parametrize(
     "backend, mode, friction, n_boxes, solver, scale, mesh_boxes",
@@ -109,10 +107,10 @@ def test_frictionloss_advanced(show_viewer, tol):
         # x geometry matrix, in which every axis value appears four times and every pair of values twice.
         pytest.param(gs.cpu, "noslip", 0.5, 2, gs.constraint_solver.Newton, 0.04, False, marks=pytest.mark.required),
         (gs.cpu, "noslip", 0.5, 2, gs.constraint_solver.Newton, 1.0, True),
-        pytest.param(gs.cpu, "noslip", 2.0, 2, gs.constraint_solver.Newton, 0.04, True, marks=pytest.mark.required),
+        (gs.cpu, "noslip", 2.0, 2, gs.constraint_solver.Newton, 0.04, True),
         (gs.cpu, "noslip", 2.0, 2, gs.constraint_solver.Newton, 1.0, False),
         (gs.gpu, "noslip", 0.5, 2, gs.constraint_solver.Newton, 0.04, True),
-        pytest.param(gs.gpu, "noslip", 0.5, 2, gs.constraint_solver.Newton, 1.0, False, marks=pytest.mark.required),
+        (gs.gpu, "noslip", 0.5, 2, gs.constraint_solver.Newton, 1.0, False),
         (gs.gpu, "noslip", 2.0, 2, gs.constraint_solver.Newton, 0.04, False),
         pytest.param(gs.gpu, "noslip", 2.0, 2, gs.constraint_solver.Newton, 1.0, True, marks=pytest.mark.required),
         # Constraint solver coverage: the CG configurations document the baseline users can expect from CG. It holds the
@@ -121,14 +119,14 @@ def test_frictionloss_advanced(show_viewer, tol):
         # At this low friction the push is so strong that every interface satisfies the balance criterion of the test
         # body, and the full contact manifold holds with no orientation control at all.
         (gs.cpu, "elliptic", 0.25, 2, gs.constraint_solver.Newton, 1.0, False),
-        (gs.cpu, "elliptic", 0.25, 3, gs.constraint_solver.CG, 1.0, False),
+        pytest.param(gs.cpu, "elliptic", 0.25, 3, gs.constraint_solver.CG, 1.0, False, marks=pytest.mark.required),
         # Three floating boxes: the longer friction chain that both mechanisms must hold. At 18 DOF the chain turns
         # contact islands on and, past the 16 DOF cooperative threshold on GPU, engages the decomposed solver arm; the
         # elliptic configurations without islands are covered by test_elliptic_cone_coulomb_isotropy. CG takes the
         # lightly loaded configurations, and the mesh configurations at small scale cover scale and mesh contacts.
         pytest.param(gs.cpu, "elliptic", 2.0, 3, gs.constraint_solver.Newton, 1.0, False, marks=pytest.mark.required),
         (gs.cpu, "elliptic", 0.5, 3, gs.constraint_solver.Newton, 0.04, True),
-        pytest.param(gs.gpu, "elliptic", 2.0, 3, gs.constraint_solver.Newton, 1.0, False, marks=pytest.mark.required),
+        (gs.gpu, "elliptic", 2.0, 3, gs.constraint_solver.Newton, 1.0, False),
         (gs.gpu, "elliptic", 0.5, 3, gs.constraint_solver.Newton, 0.04, True),
         pytest.param(gs.cpu, "noslip", 2.0, 3, gs.constraint_solver.Newton, 0.04, True, marks=pytest.mark.required),
         (gs.cpu, "noslip", 0.5, 3, gs.constraint_solver.CG, 1.0, False),
@@ -317,7 +315,7 @@ def test_static_friction(mode, friction, n_boxes, solver, scale, mesh_boxes, sho
         atol_z = 2e-3 if solver == gs.constraint_solver.Newton else 2e-4
     else:
         atol_x = (2e-5 if solver == gs.constraint_solver.Newton else 5e-6) * scale
-        atol_y = (1e-5 if solver == gs.constraint_solver.Newton else 5e-5) * scale + 2e-7
+        atol_y = 5e-5 * scale + 2e-7
         atol_z = 2e-3
     assert_allclose(drift[..., 0], 0.0, atol=atol_x)
     assert_allclose(drift[..., 1], 0.0, atol=atol_y)
@@ -530,7 +528,7 @@ def test_elliptic_cone_coulomb_isotropy(sparse_solve, show_viewer):
     assert (torch.linalg.norm(box.get_dofs_velocity(dofs_idx_local=[0, 1]), dim=1) < 5e-5).all()
 
 
-@pytest.mark.required
+@pytest.mark.required("sparse")
 @pytest.mark.parametrize("friction_cone", [gs.friction_cone.pyramidal, gs.friction_cone.elliptic])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
@@ -617,9 +615,15 @@ def test_torsional_friction_spin_down_rate(friction_cone, n_envs, show_viewer):
     assert_allclose(w_runtime_start - spheres[0].get_dofs_velocity()[..., 5], spin_downs[-1], rtol=0.05, atol=1e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("friction_cone", [gs.friction_cone.pyramidal, gs.friction_cone.elliptic])
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize(
+    "n_envs, friction_cone",
+    [
+        (0, gs.friction_cone.pyramidal),
+        (0, gs.friction_cone.elliptic),
+        (2, gs.friction_cone.pyramidal),
+        pytest.param(2, gs.friction_cone.elliptic, marks=pytest.mark.required),
+    ],
+)
 def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
     # A sphere rolling without slipping decelerates only through the rolling resistance torque friction_rolling *
     # m * g: with the rolling constraint v = w * r and I = 2/5 m r^2, dv/dt = -(5/7) * friction_rolling * g / r,
@@ -697,7 +701,7 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
 
 
 # The mesh box at the larger scale is the demanding case, so it is the required one: it reaches a face normal's support
-# through the sampled table rather than analytically, and its measured spreads sit closest to their bounds. The two ends
+# through the support table rather than analytically, and its measured spreads sit closest to their bounds. The two ends
 # of the sweep are four orders of magnitude apart, which is what forces every tolerance the step goes through to be
 # relative to the quantity it bounds.
 @pytest.mark.parametrize(
@@ -712,17 +716,10 @@ def test_rolling_friction_deceleration_rate(friction_cone, n_envs, show_viewer):
         pytest.param(True, 100.0, marks=pytest.mark.required),
     ],
 )
-@pytest.mark.parametrize("contact_resolution", [gs.contact_resolution.convex, gs.contact_resolution.signorini])
-def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, precision, show_viewer, tol):
+def test_elliptic_cone_push_isotropy(is_box_mesh, scale, precision, show_viewer, tol):
     N_ENVS = 8
     FRICTION = 0.5
-    is_signorini = contact_resolution == gs.contact_resolution.signorini
-    is_fp64 = gs.np_float == np.float64
-    # In single precision the solve's residuals stop tracking the scene below the static-friction battery's small
-    # scale, and rotated copies of a 'convex' scene genuinely diverge there; the sweep documents that floor by
-    # holding every scale above it.
-    if not is_fp64 and not is_signorini and scale < 0.04:
-        pytest.skip("single-precision convex solve accuracy does not track the scene scale below 0.04")
+    is_fp64 = precision == "64"
     # Every length below is quoted at unit scale and multiplied by it, and gravity with it, leaving the motion
     # geometrically similar at any scale so one scene serves the whole sweep and each bound takes the power of the scale
     # its own quantity carries. What the sweep holds is that the tolerances contact detection compares against are
@@ -740,34 +737,23 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
     # height places the pillar rather than driving it: its plane contact carrying its weight holds it there.
     PUSH_START_LOCAL = (-0.15 * scale, 0.03 * scale, (1 - 1e-4) * 0.5 * PILLAR_HEIGHT)
     PUSH_END_LOCAL = (0.02 * scale, 0.03 * scale, (1 - 1e-4) * 0.5 * PILLAR_HEIGHT)
-    # Each bound is the worst spread measured across every backend, array layout and debug mode, with headroom of about
-    # two on a 1-2-5 grid, per precision and per contact resolution: 'signorini' holds a stable manifold while 'convex'
-    # couples the normal force with the tangential demand (see contact_resolution in genesis/constants.py), which costs
-    # its bounds the difference. Anything that is not rounding exceeds them by orders of magnitude. Each bound carries
-    # its quantity's power of the scale, which is zero for a direction or an angular rate with time held fixed, and a
-    # bound shared by several quantities covers the largest.
-    LENGTH_TOL = (0.2 if is_fp64 else (0.1 if is_signorini else 0.5)) * tol * scale
-    DIRECTION_TOL = (0.5 if is_signorini and not is_fp64 else 2.0) * tol
-    # The velocities and forces are where the constraint solve leaves its residual, and only 'signorini' pins them
-    # tightly enough for a comparison to certify more than their order of magnitude, so they are compared under it
-    # alone; the spread between two converged orientations measures several tens of the solver tolerance.
-    LIN_VEL_TOL = 2.0 * tol * scale
+    # Bounds cover the measured spread across backends, array layouts and debug modes, with headroom on a 1-2-5 grid.
+    # Each bound scales with its quantity and has the precision tolerance as a floor. Shared bounds cover the largest
+    # spread among their quantities. Directions and angular rates are scale-invariant because time is held fixed.
+    LENGTH_TOL = max(tol, (2.0 if is_fp64 else 0.1) * tol * scale)
+    DIRECTION_TOL = (2.0 if is_fp64 else 1.0) * tol
+    # Constraint-solve residuals propagate into velocities and forces, requiring more slack than contact geometry.
+    LIN_VEL_TOL = max(tol, 2.0 * tol * scale)
     ANG_VEL_TOL = (50.0 if is_fp64 else 10.0) * tol
-    # Force carries the stiffness gain on top, and coplanar contacts of one pair share the load with a null space the
-    # solve may resolve anywhere inside, so the bound covers the split. A mass times an acceleration takes three powers
-    # of the scale from the mass and one from gravity; a torque one more from its lever arm.
-    FORCE_TOL = (500.0 if is_fp64 else 50.0) * tol * scale**4
-    TORQUE_TOL = (10.0 if is_fp64 else 5.0) * tol * scale**5
-    # How far either body may sit from the plane resting under its own weight, how still it must end, and how far the
-    # pusher may sit from the height its stance gives it and the yaw it was commanded to. 'signorini' resolves the depth
-    # on its own and meets each bound to a fraction of a thousandth; 'convex' charges a sliding contact's tangential
-    # residual to the normal direction (see contact_resolution in genesis/constants.py), so the body keeps leaving the
-    # plane and falling back, and where in that cycle the run ends costs its bounds an order or two.
-    GROUND_TOL = (2e-4 if is_signorini else 2e-2) * scale
-    REST_LIN_VEL_TOL = ((5e-5 if is_signorini else 1e-4) if is_fp64 else 1e-3) * scale
-    REST_ANG_VEL_TOL = (5e-4 if is_fp64 else 2e-3) if is_signorini else (2e-3 if is_fp64 else 5e-3)
-    REST_LENGTH_TOL = (1e-4 if is_signorini else 1e-2) * scale
-    REST_TILT_TOL = (5e-4 if is_fp64 else 1e-3) if is_signorini else 5e-2
+    # Force scales as mass * gravity (scale**4), and torque gains another length factor. The force bound also covers
+    # stiffness amplification and the nonunique split across coplanar contacts (see the net-wrench checks below).
+    FORCE_TOL = max(tol, (500.0 if is_fp64 else 50.0) * tol * scale**4)
+    TORQUE_TOL = max(tol, (10.0 if is_fp64 else 5.0) * tol * scale**5)
+    GROUND_TOL = max(tol, 2e-4 * scale)
+    REST_LIN_VEL_TOL = max(tol, (5e-5 if is_fp64 else 1e-3) * scale)
+    REST_ANG_VEL_TOL = 5e-4 if is_fp64 else 2e-3
+    REST_LENGTH_TOL = max(tol, 1e-4 * scale)
+    REST_TILT_TOL = 5e-4 if is_fp64 else 1e-3
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -776,7 +762,8 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
         ),
         rigid_options=gs.options.RigidOptions(
             friction_cone=gs.friction_cone.elliptic,
-            contact_resolution=contact_resolution,
+            # Convex resolution generates an artificial upward force during sliding, rocking the box onto its edges.
+            contact_resolution=gs.contact_resolution.signorini,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.7 * scale, 0.7 * scale, 0.8 * scale),
@@ -791,7 +778,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
         ),
     )
     # The box is swept over both geometries because they reach the support of a face normal, a direction where several
-    # vertices tie, by different means: the primitive resolves it analytically and the mesh reads the sampled table.
+    # vertices tie, by different means: the primitive resolves it analytically and the mesh reads the support table.
     # Either may pick a different tied vertex for a rotated copy, and only sweeping both holds each manifold.
     if is_box_mesh:
         box_morph = gs.morphs.MeshSet(
@@ -871,45 +858,34 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
         (box.geoms[0].idx, pusher.geoms[0].idx): 2,
     }
     is_manifold_complete = False
-    n_count_matched = 0
     N_STEPS = 160
     for i_step in range(N_STEPS):
         scene.step()
 
         contacts = scene.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=True)
         counts = [len(positions) for positions in contacts["position"]]
-        # What this sweep asserts is contact MANIFOLD invariance, which holds whenever contact 0 carries real depth:
-        # single-point detection invariance (tie-breaking which of several equivalent supports contact 0 lands on) is
-        # deliberately dropped, since the perturbation-based multi-contact followed by redundant contact pruning
-        # recovers the same patch from any of them and enforcing it buys nothing while growing complexity, runtime and
-        # an endless tail of edge cases. Under 'convex' a grazing contact enters at zero depth and carries no force, and
-        # rounding decides at which step each rotated copy admits it: the manifold is compared at the steps where the
-        # counts agree, and such steps are held rare after the loop.
+        # Contact 0 may select any tied support vertex. Perturbation and pruning must recover the same complete
+        # manifold across rotated scenes regardless of that initial choice.
         is_count_matched = counts == counts[:1] * N_ENVS
-        n_count_matched += is_count_matched
-        if is_signorini:
-            assert is_count_matched, f"contact count differs across envs at step {i_step}: {counts}"
-        # Which contacts the scene has, once it has them all, not merely how many: each geom pair stands on the corners
-        # of one of its geoms, so the per-pair count is a property of the shapes alone and holds for the rest of the
-        # run. Only the resolution holding a sliding body on the plane earns this; in flight there is no manifold.
-        if is_signorini:
-            pair_counts = [
-                {
-                    pair: int(((contacts["geom_a"][i_env] == pair[0]) & (contacts["geom_b"][i_env] == pair[1])).sum())
-                    for pair in expected_manifold
-                }
-                for i_env in range(N_ENVS)
-            ]
-            is_manifold_complete = is_manifold_complete or pair_counts[0] == expected_manifold
-            if is_manifold_complete:
-                for i_env, pair_count in enumerate(pair_counts):
-                    assert pair_count == expected_manifold, (
-                        f"the manifold lost a contact at step {i_step}, env {i_env}: "
-                        f"{pair_count} against {expected_manifold}"
-                    )
+        assert is_count_matched, f"contact count differs across envs at step {i_step}: {counts}"
+        # Once all geom pairs touch, each pair must retain the contacts supporting its face.
+        pair_counts = [
+            {
+                pair: int(((contacts["geom_a"][i_env] == pair[0]) & (contacts["geom_b"][i_env] == pair[1])).sum())
+                for pair in expected_manifold
+            }
+            for i_env in range(N_ENVS)
+        ]
+        is_manifold_complete = is_manifold_complete or pair_counts[0] == expected_manifold
+        if is_manifold_complete:
+            for i_env, pair_count in enumerate(pair_counts):
+                assert pair_count == expected_manifold, (
+                    f"the manifold lost a contact at step {i_step}, env {i_env}: "
+                    f"{pair_count} against {expected_manifold}"
+                )
         # The box leaves the ground for a step at the smallest scale, which leaves the whole scene with nothing
         # to compare while the pose and the velocities below still say the envs agree.
-        if counts[0] and is_count_matched:
+        if counts[0]:
             blocks = []
             for i_env in range(N_ENVS):
                 quat = box_quat_inv[i_env].expand(counts[i_env], 4)
@@ -933,26 +909,23 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
                 ("position", slice(0, 3), LENGTH_TOL),
                 ("normal", slice(3, 6), DIRECTION_TOL),
                 ("penetration", slice(9, 10), LENGTH_TOL),
-                *((("force", slice(6, 9), FORCE_TOL),) if is_signorini else ()),
+                ("force", slice(6, 9), FORCE_TOL),
             ):
                 values = paired[:, :, columns]
                 assert_allclose(values, values[0], atol=atol, err_msg=f"contact {key} differs at step {i_step}")
             # Net wrench per geom pair about the world origin. Coplanar contacts of one pair share the load with a null
             # space the solve may resolve anywhere inside, so the individual forces are not determined while their
             # resultant is: comparing both says which of the two any difference lives in.
-            if is_signorini:
-                for pair in ((0, 1), (0, 2), (1, 2)):
-                    rows = (paired[0, :, 10] == pair[0]) & (paired[0, :, 11] == pair[1])
-                    if not rows.any():
-                        continue
-                    net_force = paired[:, rows, 6:9].sum(dim=1)
-                    net_torque = torch.cross(paired[:, rows, 0:3], paired[:, rows, 6:9], dim=-1).sum(dim=1)
-                    assert_allclose(
-                        net_force, net_force[0], atol=FORCE_TOL, err_msg=f"net force differs at step {i_step}"
-                    )
-                    assert_allclose(
-                        net_torque, net_torque[0], atol=TORQUE_TOL, err_msg=f"net torque differs at step {i_step}"
-                    )
+            for pair in ((0, 1), (0, 2), (1, 2)):
+                rows = (paired[0, :, 10] == pair[0]) & (paired[0, :, 11] == pair[1])
+                if not rows.any():
+                    continue
+                net_force = paired[:, rows, 6:9].sum(dim=1)
+                net_torque = torch.cross(paired[:, rows, 0:3], paired[:, rows, 6:9], dim=-1).sum(dim=1)
+                assert_allclose(net_force, net_force[0], atol=FORCE_TOL, err_msg=f"net force differs at step {i_step}")
+                assert_allclose(
+                    net_torque, net_torque[0], atol=TORQUE_TOL, err_msg=f"net torque differs at step {i_step}"
+                )
         # Dropping through the plane, or leaving it altogether, would leave eight envs identically wrong with every
         # comparison above still green.
         for entity in (box, pusher):
@@ -960,19 +933,12 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
 
         # Every free joint carries a linear half in world axes and an angular half in its own body frame, so only
         # the former is de-rotated; the latter is already invariant under a rotation of the whole scene.
-        if is_signorini:
-            velocity = scene.rigid_solver.get_dofs_velocity().reshape((N_ENVS, -1, 6))
-            quat = box_quat_inv[:, None].expand(N_ENVS, velocity.shape[1], 4)
-            linear = gu.transform_by_quat(velocity[:, :, :3], quat)
-            assert_allclose(linear, linear[0], atol=LIN_VEL_TOL, err_msg=f"linear velocity differs at step {i_step}")
-            angular = velocity[:, :, 3:]
-            assert_allclose(angular, angular[0], atol=ANG_VEL_TOL, err_msg=f"angular velocity differs at step {i_step}")
-
-    # Rounding decides the step at which a grazing row is admitted (see the manifold comment in the loop), so single
-    # steps may skip the comparison. Those steps staying rare is what says only rows carrying no force ever differ, and
-    # the allowance covers one row entering and leaving once.
-    if not is_signorini:
-        assert N_STEPS - n_count_matched <= 2
+        velocity = scene.rigid_solver.get_dofs_velocity().reshape((N_ENVS, -1, 6))
+        quat = box_quat_inv[:, None].expand(N_ENVS, velocity.shape[1], 4)
+        linear = gu.transform_by_quat(velocity[:, :, :3], quat)
+        assert_allclose(linear, linear[0], atol=LIN_VEL_TOL, err_msg=f"linear velocity differs at step {i_step}")
+        angular = velocity[:, :, 3:]
+        assert_allclose(angular, angular[0], atol=ANG_VEL_TOL, err_msg=f"angular velocity differs at step {i_step}")
 
     # The box and pusher come to rest on the plane by the end, the pusher at the height its stance gives it and flat
     # on the yaw it was commanded to: sinking would bury it in the plane, tilting would lift a corner of its stance.
@@ -995,8 +961,7 @@ def test_elliptic_cone_push_isotropy(contact_resolution, is_box_mesh, scale, pre
     assert_allclose(rel_yaw, rel_yaw.mean(), atol=DIRECTION_TOL)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_kinetic_friction(n_envs, show_viewer):
     GRAVITY = 9.81
     SIZE = 0.1

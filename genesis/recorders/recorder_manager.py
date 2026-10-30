@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, Any, Callable
 
+import torch
+
 import genesis as gs
 
 if TYPE_CHECKING:
@@ -99,7 +101,6 @@ class RecorderManager:
         for recorder in self._recorders:
             if recorder.is_alive:
                 recorder.reset(envs_idx)
-                recorder.start()
 
     @gs.assert_built
     def step(self, global_step: int):
@@ -115,6 +116,7 @@ class RecorderManager:
             recorder.step(global_step)
 
     @gs.assert_built
+    @torch.no_grad()
     def record(self, global_step: int):
         """Record the current state through every recorder, whatever its sampling rate."""
         if not self._is_recording:

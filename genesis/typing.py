@@ -1,4 +1,5 @@
 import math
+import sys
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Annotated, Any, Mapping, Sequence, TypeVar, get_args
 
@@ -26,6 +27,11 @@ def _normalize(vec):
         if is_sequence(e):
             raise PydanticCustomError("invalid_type", "Input should be a valid sequence of scalars", {"value": vec})
         sq_norm += e**2
+    # A vector of unit norm up to rounding is kept as is, so validating a value again leaves it bit for bit. A rescaled
+    # vector has a squared norm within a few units in the last place of one, so a description read back from a file
+    # holds the very values it was written with.
+    if abs(sq_norm - 1.0) <= 2 * len(vec) * sys.float_info.epsilon:
+        return tuple(vec)
     if sq_norm > 0:
         inv_norm = 1.0 / math.sqrt(sq_norm)
         vec = tuple(e * inv_norm for e in vec)
@@ -99,6 +105,7 @@ if TYPE_CHECKING:
     PositiveVec3IType = IArrayType
     Vec2FType = FArrayType
     PositiveVec2FType = FArrayType
+    PositiveVec3FType = FArrayType
     Vec3FType = FArrayType
     LaxVec3FType = FArrayType | ValidFloat
     UnitVec3FType = FArrayType
@@ -146,6 +153,7 @@ else:
     PositiveVec3IType = Annotated[tuple[PositiveInt, PositiveInt, PositiveInt], Field(strict=False)]
     Vec2FType = Annotated[tuple[ValidFloat, ValidFloat], Field(strict=False)]
     PositiveVec2FType = Annotated[tuple[PositiveFloat, PositiveFloat], Field(strict=False)]
+    PositiveVec3FType = Annotated[tuple[PositiveFloat, PositiveFloat, PositiveFloat], Field(strict=False)]
     Vec3FType = Annotated[tuple[ValidFloat, ValidFloat, ValidFloat], Field(strict=False)]
     LaxVec3FType = Annotated[
         tuple[ValidFloat, ValidFloat, ValidFloat],

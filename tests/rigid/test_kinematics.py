@@ -291,9 +291,7 @@ def test_jacobian(gs_sim, tol):
     assert_allclose(J_p[:3, 0], lin_expected, tol=tol)
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_joint_get_anchor_pos_and_axis(n_envs):
     scene = gs.Scene(
         show_viewer=False,
@@ -369,16 +367,12 @@ def test_inverse_kinematics_multilink(show_viewer, tol):
     assert_allclose(err, 0.0, atol=tol)
 
     robot.set_qpos(qpos, envs_idx=(1,))
-    if show_viewer:
-        scene.visualizer.update(force=True)
     assert_allclose(index_finger_distal.get_pos(envs_idx=(1,)), index_finger_pos, tol=tol)
     assert_allclose(middle_finger_distal.get_pos(envs_idx=(1,)), middle_finger_pos, tol=tol)
     assert_allclose(wrist.get_pos(envs_idx=(1,)), wrist_pos, tol=tol)
 
 
-@pytest.mark.slow  # ~200s
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
     # local_point positions an offset point of the link at the target. The floating-base go2 also exercises the
     # FREE root joint (base translation and orientation degrees of freedom) at a non-zero entity offset.
@@ -518,11 +512,7 @@ def test_inverse_kinematics_local_point(n_envs, show_viewer, tol):
     fk_actual_point_pos = fk_link_pos + fk_world_offset
     assert_allclose(fk_actual_point_pos, target_pos, tol=tol)
 
-    if show_viewer:
-        scene.visualizer.update()
 
-
-@pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_inverse_kinematics_multilink_local_points(show_viewer, tol):
@@ -565,8 +555,6 @@ def test_inverse_kinematics_multilink_local_points(show_viewer, tol):
 
     # Apply solution
     robot.set_qpos(qpos)
-    if show_viewer:
-        scene.visualizer.update(force=True)
 
     # Verify each offset point is at its target
     for link, local_offset, target in [
@@ -580,7 +568,6 @@ def test_inverse_kinematics_multilink_local_points(show_viewer, tol):
         assert_allclose(actual_point_pos, target, tol=tol)
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
 def test_multi_robot_inverse_kinematics(show_viewer, tol):
     scene = gs.Scene(show_viewer=show_viewer)
@@ -622,9 +609,17 @@ def test_multi_robot_inverse_kinematics(show_viewer, tol):
 
 
 @pytest.mark.slow("gpu")  # gpu ~300s
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs, batch_dofs_info", [(0, True), (2, False), (2, True)])
-@pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
+@pytest.mark.parametrize(
+    "backend, n_envs, batch_dofs_info",
+    [
+        pytest.param(gs.cpu, 0, True, marks=pytest.mark.required),
+        pytest.param(gs.cpu, 2, False, marks=pytest.mark.required),
+        (gs.cpu, 2, True),
+        pytest.param(gs.gpu, 0, True, marks=pytest.mark.required),
+        pytest.param(gs.gpu, 2, False, marks=pytest.mark.required),
+        pytest.param(gs.gpu, 2, True, marks=pytest.mark.required),
+    ],
+)
 def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, tol):
     CUBE_SIZE = 0.07
     DOF_LIMIT = 0.5
@@ -679,7 +674,6 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
     qpos_goal = franka.inverse_kinematics(hand, pos=hand_pos_ref, quat=hand_quat_ref)
     qpos_goal[..., -2:] = 0.04
     franka.set_qpos(qpos_goal)
-    scene.visualizer.update()
     scene.rigid_solver.collider.detection()
     assert not collider_state.n_contacts.to_numpy().any()
     franka.set_qpos(torch.zeros_like(qpos_goal))
@@ -726,7 +720,6 @@ def test_path_planning_avoidance(backend, n_envs, batch_dofs_info, show_viewer, 
         max_penetration = float("-inf")
         for waypoint in path:
             franka.set_qpos(waypoint)
-            scene.visualizer.update()
 
             # Check if the cube is colliding with the robot
             scene.rigid_solver.collider.detection()
@@ -893,7 +886,6 @@ def test_setters(show_viewer, tol):
     assert_allclose([tensor_to_array(entity.get_vAABB()) for entity in scene.entities], frozen_vaabb, tol=gs.EPS)
 
 
-@pytest.mark.slow  # ~250s
 @pytest.mark.required
 def test_track_rigid(show_viewer, tol):
     scene = gs.Scene(

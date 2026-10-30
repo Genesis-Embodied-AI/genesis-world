@@ -87,10 +87,9 @@ def test_position_control(show_viewer):
         dofs_torque.clamp_(force_range[:, 1, 0], force_range[:, 1, 1])
         robot.control_dofs_force(dofs_torque, envs_idx=1)
         scene.step()
-        qf_applied = scene.rigid_solver.dyn_state.dofs.qf_applied.to_numpy().T
-        # dofs_torque = robot.get_dofs_control_force()
-        assert_allclose(qf_applied[1], dofs_torque, tol=1e-6)
-        assert_allclose(qf_applied[0], qf_applied[1], tol=1e-6)
+        control_force = robot.get_dofs_control_force()
+        assert_allclose(control_force[1], dofs_torque, tol=1e-6)
+        assert_allclose(control_force[0], control_force[1], tol=1e-6)
 
     A = 0.1
     f = 1.0
@@ -133,8 +132,10 @@ def test_reset_control(robot_path, tol):
     qpos = np.random.rand(robot.n_dofs)
     robot.set_dofs_position(qpos)
     robot.control_dofs_position(torch.zeros((robot.n_dofs,), dtype=gs.tc_float, device=gs.device))
+    scene.step()
     old_control_force = robot.get_dofs_control_force()
     scene.reset()
+    scene.step()
     new_control_force = robot.get_dofs_control_force()
     assert old_control_force.abs().max() > gs.EPS
     assert_allclose(new_control_force, 0, tol=gs.EPS)

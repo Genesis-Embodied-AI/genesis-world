@@ -9,8 +9,8 @@ import numbers
 import os
 import random
 import sys
-from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import field
 from importlib import import_module
 from itertools import combinations
@@ -20,10 +20,15 @@ import numpy as np
 import torch
 
 import cpuinfo
+import numba as nb
 import psutil
 import pyglet
 
 import quadrants as qd
+from quadrants.lang import kernel_impl
+from quadrants.lang._fast_caching import args_hasher, src_hasher
+from quadrants.lang.kernel import Kernel
+from quadrants.types.enums import AutodiffMode
 
 import genesis as gs
 from genesis.typing import is_sequence
@@ -116,6 +121,55 @@ class redirect_libc_stderr:
         self.original_stderr_fileno = None
 
 
+class ZeroCopyMode:
+    """
+    Whether the accessors of the solvers read and write their arrays through zero-copy torch views, read as a boolean.
+
+    The views exist when the backend and the torch device share memory (`is_supported`). The accessors use them unless
+    a block asks for their kernel path through 'disabled', as the recording of a differentiable rollout does to capture
+    the kernels of every accessor. The copy helpers (see 'qd_to_torch') read `is_supported` alone, so a copy stays a
+    torch operation whichever path the accessors take.
+    """
+
+    def __init__(self, is_supported: bool | None):
+        self.is_supported = bool(is_supported)
+        self._is_disabled = False
+
+    def __bool__(self) -> bool:
+        return self.is_supported and not self._is_disabled
+
+    def __repr__(self) -> str:
+        return repr(bool(self))
+
+    @contextmanager
+    def disabled(self) -> Iterator[None]:
+        """Make the accessors take their kernel path in the block."""
+        is_disabled, self._is_disabled = self._is_disabled, True
+        try:
+            yield
+        finally:
+            self._is_disabled = is_disabled
+
+
+@contextmanager
+def set_environ(environ: Mapping[str, str]):
+    """Set environment variables for the duration of the context, then restore them to their previous state.
+
+    Only the variables in 'environ' are touched: those previously unset are removed on exit, the others get back their
+    previous value.
+    """
+    environ_prev = {name: os.environ.get(name) for name in environ}
+    os.environ.update(environ)
+    try:
+        yield
+    finally:
+        for name, value in environ_prev.items():
+            if value is None:
+                del os.environ[name]
+            else:
+                os.environ[name] = value
+
+
 def assert_initialized(cls):
     original_init = cls.__init__
 
@@ -196,12 +250,14 @@ def get_device(backend: gs.constants.backend, device_idx: Optional[int] = None):
         device_name = device_property.name
         total_mem = device_property.total_memory / 1024**3
     elif backend == gs.metal:
-        if not torch.backends.mps.is_available():
-            gs.raise_exception("Torch device 'mps' not available.")
         # on mac, cpu and gpu are in the same physical hardware and sharing memory
-        _, device_name, total_mem, _ = get_device(gs.cpu)
+        device, device_name, total_mem, _ = get_device(gs.cpu)
         assert not device_idx, "Specifying device index other than 0 is not support for Torch Metal device."
-        device = torch.device("mps")
+        # Quadrants Metal backend runs regardless of Torch MPS support, which virtualized Apple GPUs may lack
+        if os.environ.get("GS_TORCH_FORCE_CPU_DEVICE") != "1":
+            if not torch.backends.mps.is_available():
+                gs.raise_exception("Torch device 'mps' not available.")
+            device = torch.device("mps")
     else:
         cpu_info = cpuinfo.get_cpu_info()
         device_name = next(filter(None, map(cpu_info.get, ("brand_raw", "hardware_raw", "vendor_id_raw"))))
@@ -252,7 +308,8 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
 
     The shared memory of a block only bounds how many blocks a compute unit runs at once. Each candidate is the largest
     multiple of 8 (keeping the padded row stride odd) that runs a given count of resident one-warp blocks, as bounded by
-    the shared memory of a compute unit and of a block, the driver reservation per block and the warp slots.
+    the shared memory of a compute unit and of a block, the driver reservation and allocation granularity per block and
+    the warp slots.
 
     At most max_n_sizes candidates are kept, so that the static values of a kernel stay a small fixed set: those
     minimizing the mean drop in resident blocks that rounding a row count n up to the next kept size causes against its
@@ -264,16 +321,27 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     if gs.backend == gs.cpu:
         gs.raise_exception("CPU backend not supported by this method.")
     itemsize = 4 if gs.qd_float == qd.f32 else 8
+    # FIXME: quadrants#976 - the shared memory of a block is a 64 KiB lower bound on AMDGPU, which caps the tiles of
+    # CDNA4 (gfx950) below what its 160 KiB per block holds.
     block_bytes = qd.lang.impl.get_max_shared_memory_bytes(is_lowerbound_ok=True)
-    unit_bytes, reserved_bytes, max_blocks = block_bytes, 0, block_bytes // (8 * 9 * itemsize)
+    unit_bytes, reserved_bytes, granule_bytes, max_blocks = block_bytes, 0, 1, block_bytes // (8 * 9 * itemsize)
     if torch.cuda.is_available():
-        # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), so the warp slots bound the resident
-        # blocks, and the driver reserves the shared memory of a compute unit beyond what one block may opt in to.
+        # CUDA and ROCm alike: a block of these tiles is one warp (wavefront), whose slots bound the resident blocks.
         device_property = torch.cuda.get_device_properties(torch.cuda.current_device())
         unit_bytes = device_property.shared_memory_per_multiprocessor
-        reserved_bytes = max(unit_bytes - device_property.shared_memory_per_block_optin, 0)
         max_blocks = device_property.max_threads_per_multi_processor // device_property.warp_size
-        if not torch.version.hip:
+        if torch.version.hip:
+            # FIXME: torch exposes no allocation granularity of the local data share (LDS), which AMD sets per
+            # instruction set (see the LLVM AMDGPU usage guide), a block taking its shared memory in whole granules.
+            if device_property.gcnArchName.startswith("gfx950"):
+                granule_bytes = 1280
+            elif device_property.gcnArchName.startswith("gfx125"):
+                granule_bytes = 2048
+            else:
+                granule_bytes = 512
+        else:
+            # The driver reserves the shared memory of a compute unit beyond what one block may opt in to.
+            reserved_bytes = max(unit_bytes - device_property.shared_memory_per_block_optin, 0)
             # FIXME: torch exposes no cap on the resident blocks of a streaming multiprocessor, which NVIDIA sets per
             # compute capability below the warp slots (see the CUDA C++ programming guide).
             compute_capability = (device_property.major, device_property.minor)
@@ -287,8 +355,8 @@ def get_gpu_shared_tile_sizes(max_n_sizes: int) -> tuple[int, ...]:
     # The largest count of resident blocks of each candidate size
     resident_blocks: dict[int, int] = {}
     for n_blocks in range(1, max_blocks + 1):
-        n_bytes = min(unit_bytes // n_blocks - reserved_bytes, block_bytes)
-        tile_size = int((math.sqrt(1.0 + 4.0 * n_bytes / itemsize) - 1.0) / 2.0) // 8 * 8
+        n_bytes = (min(unit_bytes // n_blocks - reserved_bytes, block_bytes) // granule_bytes) * granule_bytes
+        tile_size = (int((math.sqrt(1.0 + 4.0 * n_bytes / itemsize) - 1.0) / 2.0) // 8) * 8
         if tile_size >= 8:
             resident_blocks[tile_size] = max(resident_blocks.get(tile_size, 0), n_blocks)
     tile_sizes = sorted(resident_blocks)
@@ -348,129 +416,6 @@ def get_assets_dir():
     return os.path.join(get_src_dir(), "assets")
 
 
-def get_cache_dir():
-    cache_dir = os.environ.get("GS_CACHE_FILE_PATH")
-    if cache_dir is not None:
-        return cache_dir
-    root_cache_dir = None
-    if sys.platform == "linux":
-        root_cache_dir = os.environ.get("XDG_CACHE_HOME")
-    if root_cache_dir is None:
-        root_cache_dir = os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(root_cache_dir, "genesis")
-
-
-def get_gsd_cache_dir():
-    return os.path.join(get_cache_dir(), "gsd")
-
-
-def get_gnd_cache_dir():
-    return os.path.join(get_cache_dir(), "terrain")
-
-
-def get_cvx_cache_dir():
-    return os.path.join(get_cache_dir(), "cvx")
-
-
-def get_ptc_cache_dir():
-    return os.path.join(get_cache_dir(), "ptc")
-
-
-def get_fps_pc_cache_dir():
-    return os.path.join(get_cache_dir(), "fps_pc")
-
-
-def get_tet_cache_dir():
-    return os.path.join(get_cache_dir(), "tet")
-
-
-def get_gel_cache_dir():
-    return os.path.join(get_cache_dir(), "gel")
-
-
-def get_remesh_cache_dir():
-    return os.path.join(get_cache_dir(), "rm")
-
-
-def get_wt_cache_dir():
-    return os.path.join(get_cache_dir(), "wt")
-
-
-def get_wth_cache_dir():
-    return os.path.join(get_cache_dir(), "wth")
-
-
-def get_exr_cache_dir():
-    return os.path.join(get_cache_dir(), "exr")
-
-
-def get_usd_cache_dir():
-    return os.path.join(get_cache_dir(), "usd")
-
-
-_CLEARABLE_CACHES: list[Callable[[], None]] = []
-
-
-def register_cache_clear(cache_clear: Callable[[], None]) -> None:
-    """Register a callback that drops a module-level cache, invoked by clear_caches on genesis teardown.
-
-    Pass the cache's own clearing method, e.g. the cache_clear of a functools.lru_cache or the clear of a manual dict
-    cache. This lets module-level asset caches (parsed meshes, baked textures, ...) release the large arrays they hold
-    for destroyed scenes without the teardown path having to know about each one.
-    """
-    _CLEARABLE_CACHES.append(cache_clear)
-
-
-def clear_caches() -> None:
-    """Drop every cache registered through register_cache_clear."""
-    for cache_clear in _CLEARABLE_CACHES:
-        cache_clear()
-
-
-class SizeCappedCache:
-    """An LRU cache bounded by the total byte footprint of its values rather than by their count.
-
-    Each value is stored together with an explicit size in bytes; once the running total exceeds max_bytes the
-    least-recently-used entries are evicted until it fits again (the most-recent entry is always kept). This suits
-    caching a handful of large, scene-independent arrays - such as processed collision geometry - where the number of
-    distinct entries is a poor proxy for the memory actually held. An optional max_entries also caps the entry count,
-    so values whose reported size is small or zero (e.g. flat-color textures) cannot accumulate without bound. It
-    registers itself with register_cache_clear so it is dropped together with the other asset caches on genesis
-    teardown.
-    """
-
-    def __init__(self, max_bytes: int, max_entries: "int | None" = None) -> None:
-        self._max_bytes = max_bytes
-        self._max_entries = max_entries
-        self._store: "OrderedDict[Any, tuple[Any, int]]" = OrderedDict()
-        self._total_bytes = 0
-        register_cache_clear(self.clear)
-
-    def get(self, key: Any) -> Any:
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        self._store.move_to_end(key)
-        return entry[0]
-
-    def put(self, key: Any, value: Any, n_bytes: int) -> None:
-        previous = self._store.pop(key, None)
-        if previous is not None:
-            self._total_bytes -= previous[1]
-        self._store[key] = (value, n_bytes)
-        self._total_bytes += n_bytes
-        while len(self._store) > 1 and (
-            self._total_bytes > self._max_bytes
-            or (self._max_entries is not None and len(self._store) > self._max_entries)
-        ):
-            _, (_, evicted_bytes) = self._store.popitem(last=False)
-            self._total_bytes -= evicted_bytes
-
-    def clear(self) -> None:
-        self._store.clear()
-        self._total_bytes = 0
-
-
 def geometric_mean(a, b):
     """Geometric mean of two non-negative values: sqrt(a * b)."""
     if a < 0 or b < 0:
@@ -487,21 +432,6 @@ def harmonic_mean(a, b):
     return 2 * (a * b) / (a + b)
 
 
-def assert_gs_tensor(x):
-    if not isinstance(x, gs.Tensor):
-        gs.raise_exception("Only accepts genesis.Tensor.")
-
-
-def to_gs_tensor(x, dtype: torch.dtype | None = None):
-    if isinstance(x, gs.Tensor):
-        tensor = x
-    elif isinstance(x, torch.Tensor):
-        tensor = gs.Tensor(x)
-    else:
-        tensor = gs.from_numpy(np.asarray(x))
-    return tensor.to(dtype=dtype, device=gs.device)
-
-
 def tensor_to_cpu(x):
     if isinstance(x, torch.Tensor):
         x = x.detach().cpu()
@@ -512,23 +442,103 @@ def tensor_to_array(x: torch.Tensor, dtype: type[np.generic] | None = None) -> n
     return np.asarray(tensor_to_cpu(x), dtype=dtype)
 
 
-def data_to_array(data):
-    """Recursively move any GPU tensor nested in ``data`` to a CPU numpy array, preserving container structure.
+def data_to_array(data, *, to_torch: bool = False, copy: bool | None = None):
+    """Recursively move every tensor and Quadrants array nested in a container to a CPU numpy array, keeping its layout.
 
-    A named tuple, such as the reading of a sensor with several outputs, becomes a dict mapping its field names to their
-    values, which is the form recorders label their data by.
+    With 'to_torch', each one becomes a torch tensor where it lives instead. With 'copy', the result shares no memory
+    with the tensor or Quadrants array it comes from. A numpy array is returned as it is. A named tuple, such as the
+    reading of a sensor with several outputs, becomes a dict mapping its field names to their values, which is the form
+    recorders label their data by.
     """
     if isinstance(data, torch.Tensor):
-        return tensor_to_array(data)
+        if copy:
+            data = data.clone()
+        return data if to_torch else tensor_to_array(data)
+    if isinstance(data, (qd.Tensor, qd.Field, qd.Ndarray)):
+        return qd_to_torch(data, copy=copy) if to_torch else qd_to_numpy(data, copy=copy)
     if isinstance(data, np.ndarray):
         return data
     if isinstance(data, tuple) and (data_asdict := getattr(data, "_asdict", None)) is not None:
-        return {k: data_to_array(v) for k, v in data_asdict().items()}
+        return {k: data_to_array(v, to_torch=to_torch, copy=copy) for k, v in data_asdict().items()}
     if isinstance(data, Mapping):
-        return {k: data_to_array(v) for k, v in data.items()}
+        return {k: data_to_array(v, to_torch=to_torch, copy=copy) for k, v in data.items()}
     if is_sequence(data):
-        return type(data)(data_to_array(v) for v in data)
+        return type(data)(data_to_array(v, to_torch=to_torch, copy=copy) for v in data)
     return data
+
+
+@nb.jit(nopython=True, cache=True)
+def unique_rows(rows):
+    """Find the unique rows of a 2D integer array, in lexicographic order, as 'np.unique' along the first axis does.
+
+    The rows are sorted by a stable least-significant-digit radix sort, linear in the number of rows, which goes through
+    the digits of the last column first. Its stability makes the first row of each run of equal rows its first
+    occurrence.
+
+    Returns the unique rows, the index of the first occurrence of each unique row, the index of the unique row matching
+    each row, and the number of occurrences of each unique row.
+    """
+    n_rows, n_columns = rows.shape
+    # Unsigned arithmetic, modular, yields the exact offset of a value from the minimum of its column whatever the dtype
+    columns_value = np.empty((n_columns, n_rows), dtype=np.uint64)
+    columns_range = np.zeros(n_columns, dtype=np.uint64)
+    if n_rows:
+        for i_c in range(n_columns):
+            column_min = rows[:, i_c].min()
+            for i_r in range(n_rows):
+                columns_value[i_c, i_r] = np.uint64(rows[i_r, i_c]) - np.uint64(column_min)
+                columns_range[i_c] = max(columns_range[i_c], columns_value[i_c, i_r])
+
+    rows_order = np.arange(n_rows)
+    rows_order_next = np.empty(n_rows, dtype=np.int64)
+    # Digits of 11 bits keep the histogram of a pass small enough to stay in cache
+    digits_offset = np.empty(2049, dtype=np.int64)
+    for i_c in range(n_columns - 1, -1, -1):
+        shift = np.uint64(0)
+        while shift < np.uint64(64) and columns_range[i_c] >> shift:
+            # The digit counts are independent of the order of the rows, which spares a random access per row
+            digits_offset[:] = 0
+            for i_r in range(n_rows):
+                digits_offset[((columns_value[i_c, i_r] >> shift) & np.uint64(2047)) + 1] += 1
+            for digit in range(2048):
+                digits_offset[digit + 1] += digits_offset[digit]
+            for i in range(n_rows):
+                i_r = rows_order[i]
+                digit = (columns_value[i_c, i_r] >> shift) & np.uint64(2047)
+                rows_order_next[digits_offset[digit]] = i_r
+                digits_offset[digit] += 1
+            rows_order, rows_order_next = rows_order_next, rows_order
+            shift += np.uint64(11)
+
+    # Equal rows are compared on the rows themselves, whose values are contiguous in memory
+    is_run_start = np.empty(n_rows, dtype=np.bool_)
+    n_unique = 0
+    for i in range(n_rows):
+        i_r = rows_order[i]
+        is_run_start[i] = i == 0
+        if i > 0:
+            i_r_prev = rows_order[i - 1]
+            for i_c in range(n_columns):
+                if rows[i_r, i_c] != rows[i_r_prev, i_c]:
+                    is_run_start[i] = True
+                    break
+        n_unique += is_run_start[i]
+
+    rows_unique = np.empty((n_unique, n_columns), dtype=rows.dtype)
+    unique_index = np.empty(n_unique, dtype=np.int64)
+    unique_counts = np.zeros(n_unique, dtype=np.int64)
+    rows_inverse = np.empty(n_rows, dtype=np.int64)
+    i_u = -1
+    for i in range(n_rows):
+        i_r = rows_order[i]
+        if is_run_start[i]:
+            i_u += 1
+            unique_index[i_u] = i_r
+            for i_c in range(n_columns):
+                rows_unique[i_u, i_c] = rows[i_r, i_c]
+        unique_counts[i_u] += 1
+        rows_inverse[i_r] = i_u
+    return rows_unique, unique_index, rows_inverse, unique_counts
 
 
 def is_approx_multiple(a, b, tol=1e-7):
@@ -859,13 +869,16 @@ def qd_to_torch(
     # Try efficient shortcut first and only fallback to standard branching if necessary.
     # FIXME: Ideally one should detect if slicing would require a copy to avoid enforcing copy here.
     is_copy = False
-    if not gs.use_zerocopy:
+    if not gs.use_zerocopy.is_supported:
         # Transpose if necessary and requested.
         # Note that it is worth transposing here before slicing, as it preserve row-major memory alignment in case of
         # advanced masking, which would spare computation later on if expected from the user.
         if copy is False:
             gs.raise_exception("Specifying 'copy=False' is not supported by this method if 'gs.use_zerocopy=False'.")
+        # See the copy of a zero-copy view below. 'contiguous' would return as is a transposed view already laid out
+        # contiguously (size-1 dimensions), which the autograd graph refuses to write in place once a node returns it.
         tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
+        tensor = tensor.clone(memory_format=torch.contiguous_format)
         is_copy = True
     else:
         try:
@@ -877,7 +890,9 @@ def qd_to_torch(
             except (ValueError, RuntimeError, TypeError):
                 if copy is False:
                     raise
+                # See the copy without zero-copy support above
                 tensor = _maybe_transpose(value.to_torch(device=gs.device), value, transpose)
+                tensor = tensor.clone(memory_format=torch.contiguous_format)
                 is_copy = True
             else:
                 value._tc = tc
@@ -890,7 +905,8 @@ def qd_to_torch(
         if gs.backend == gs.metal:
             qd.sync()
         if copy:
-            tensor = tensor.clone()
+            # A copy of a transposed view is laid out contiguously, which a kernel taking it requires
+            tensor = tensor.clone(memory_format=torch.contiguous_format)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
 
@@ -922,7 +938,7 @@ def qd_to_numpy(
 
     # Try efficient shortcut first and only fallback to standard branching if necessary.
     # FIXME: Ideally one should detect if slicing would require a copy to avoid enforcing copy here.
-    if not gs.use_zerocopy:
+    if not gs.use_zerocopy.is_supported:
         # Transpose if necessary and requested.
         # Note that it is worth transposing here before slicing, as it preserve row-major memory alignment in case of
         # advanced masking, which would spare computation later on if expected from the user.
@@ -959,6 +975,106 @@ def qd_to_numpy(
     return _apply_masks(array, value, row_mask, col_mask, keepdim, copy, to_torch=False)
 
 
+# FIXME: quadrants#882 - the fastcache key of a torch tensor omits whether it tracks gradients, on which the argument
+# layout depends, so a launch with one after a plain one segfaults. The key takes the grad tag an ndarray carries.
+_stringify_obj_type = args_hasher.stringify_obj_type
+
+
+def _stringify_obj_type_with_grad(raise_on_templated_floats, path, obj, arg_meta, *args, **kwargs):
+    obj_repr = _stringify_obj_type(raise_on_templated_floats, path, obj, arg_meta, *args, **kwargs)
+    if isinstance(obj, torch.Tensor) and obj.requires_grad:
+        return f"{obj_repr[:-1]}-g]"
+    return obj_repr
+
+
+args_hasher.stringify_obj_type = _stringify_obj_type_with_grad
+
+# FIXME: quadrants#1003 - a reverse-mode kernel misses the fastcache, since it lacks the callable marking it pure. Both
+# are patched, the autodiff mode joining the key, without which a reverse kernel loads its forward one.
+_kernel_impl = kernel_impl._kernel_impl
+_make_source_config_key = src_hasher.make_source_config_key
+_try_load_fastcache = Kernel._try_load_fastcache
+
+
+def _kernel_impl_with_adjoint_callable(*args, level_of_class_stackframe, **kwargs):
+    # The decorator detects a class kernel from the stack, which this wrapper deepens by one frame
+    wrapped = _kernel_impl(*args, level_of_class_stackframe=level_of_class_stackframe + 1, **kwargs)
+    wrapped._adjoint.quadrants_callable = wrapped
+    return wrapped
+
+
+def _try_load_fastcache_by_autodiff_mode(kernel, args, key):
+    if kernel.autodiff_mode == AutodiffMode.NONE:
+        return _try_load_fastcache(kernel, args, key)
+    autodiff_mode = str(kernel.autodiff_mode)
+    src_hasher.make_source_config_key = lambda info: src_hasher.hash_iterable_strings(
+        (_make_source_config_key(info), autodiff_mode)
+    )
+    try:
+        return _try_load_fastcache(kernel, args, key)
+    finally:
+        src_hasher.make_source_config_key = _make_source_config_key
+
+
+kernel_impl._kernel_impl = _kernel_impl_with_adjoint_callable
+Kernel._try_load_fastcache = _try_load_fastcache_by_autodiff_mode
+
+
+def qd_from_torch(value: qd.Tensor | qd.Field | qd.Ndarray, tensor: torch.Tensor) -> None:
+    """Write a torch tensor into a Quadrants field / ndarray, in the native layout of the latter (see qd_to_torch).
+
+    On Metal, call `torch.mps.synchronize()` once after a batch of writes, before the next quadrants kernel reads the
+    values (see qd_zero_grad).
+    """
+    if isinstance(value, qd.Tensor):
+        value = value._unwrap()
+    if gs.use_zerocopy.is_supported:
+        view = qd_to_torch(value, copy=False)
+        view.copy_(tensor)
+    else:
+        value.from_torch(tensor)
+
+
+@qd.func
+def qd_isfinite(x):
+    """
+    Whether a scalar, or every entry of a vector or a matrix, is neither 'inf' nor 'nan'.
+
+    The magnitude test catches both at once. It holds under fast math, which assumes away the infinities that the bit
+    patterns of 'qd.math.isinf' and 'qd.math.isnan' read, and it has a reverse-mode adjoint, which their bit cast lacks.
+    """
+    # A vector built in the kernel is an expression of tensor type rather than a Matrix
+    if qd.static(isinstance(x, qd.Matrix) or (isinstance(x, qd.lang.expr.Expr) and x.is_tensor())):
+        return (qd.abs(x) < qd.math.inf).all()
+    else:
+        return qd.abs(x) < qd.math.inf
+
+
+def qd_add_grad(value: qd.Tensor, grad: torch.Tensor, row: int | None = None) -> None:
+    """Add a gradient to the adjoint of a Quadrants tensor, given in the layout of its getters (see 'qd_to_torch').
+
+    `row` selects one entry of the first axis, such as a frame of a solver holding its state in frames, the gradient
+    then covering that entry alone. On Metal, call `torch.mps.synchronize()` once after a batch of additions, before the
+    next quadrants kernel reads the adjoint.
+    """
+    value_grad = value.grad
+    if gs.use_zerocopy.is_supported:
+        if row is None:
+            view = qd_to_torch(value_grad, transpose=True, copy=False)
+        else:
+            view = qd_to_torch(value_grad, row_mask=row, keepdim=False, copy=False)
+        view += grad
+    else:
+        # Without zero-copy views, the adjoint is read and written back whole, in its native layout
+        n_dims = len(value_grad.shape)
+        data = qd_to_torch(value_grad, copy=True)
+        if row is not None:
+            data[row] += grad
+        else:
+            data += grad.movedim(0, n_dims - 1) if n_dims > 1 else grad
+        qd_from_torch(value_grad, data)
+
+
 def qd_zero_grad(value) -> None:
     """Zero the `.grad` buffers of a Quadrants field/ndarray, or every grad-bearing slot of a `dataclass` /
     `@qd.data_oriented` struct-of-arrays.
@@ -976,7 +1092,7 @@ def qd_zero_grad(value) -> None:
     if isinstance(value, (qd.Tensor, qd.Field, qd.Ndarray)):
         if value.has_grad():
             grad = value.grad
-            if gs.use_zerocopy:
+            if gs.use_zerocopy.is_supported:
                 try:
                     grad_view = qd_to_torch(grad, copy=False)
                     grad_view.zero_()
@@ -1028,11 +1144,15 @@ def sanitize_index(
             elif index[0] < 0 or index[-1] < 0:
                 index = tuple(index)
                 is_negative_wrap_required = True
-    elif isinstance(index, (list, tuple, torch.Tensor, np.ndarray)):
-        is_bool_mask = (isinstance(index, torch.Tensor) and index.dtype == torch.bool) or (
-            isinstance(index, np.ndarray) and np.issubdtype(index.dtype, np.bool_)
-        )
+    elif isinstance(index, (list, tuple, torch.Tensor)):
+        is_bool_mask = isinstance(index, torch.Tensor) and index.dtype == torch.bool
         is_negative_wrap_required = not is_bool_mask
+    elif isinstance(index, np.ndarray):
+        is_bool_mask = np.issubdtype(index.dtype, np.bool_)
+        is_negative_wrap_required = not is_bool_mask
+        # See broadcast_tensor for arrays with negative strides
+        if any(stride < 0 for stride in index.strides):
+            index = index.copy()
     else:
         gs.raise_exception(f"Expecting integer indices for `{name}`.")
 
@@ -1076,6 +1196,62 @@ def sanitize_index(
     return index.contiguous()
 
 
+def get_last_occurrence(index: torch.Tensor) -> torch.Tensor:
+    """
+    Return the position of the last entry holding the same index as each entry, along the last axis of an index tensor.
+
+    The positions are computed on the device of the index, without synchronizing it. A write given an index several
+    times leaves the value of its last occurrence.
+    """
+    n_entries = index.shape[-1]
+    index_sorted, order = torch.sort(index, dim=-1, stable=True)
+    is_last_sorted = torch.ones_like(index_sorted, dtype=torch.bool)
+    is_last_sorted[..., :-1] = index_sorted[..., 1:] != index_sorted[..., :-1]
+    # The sort is stable, so the last entry of each run of equal indices is their last occurrence
+    positions = torch.arange(n_entries, device=index.device).expand_as(order)
+    run_last = torch.where(is_last_sorted, positions, n_entries).flip(-1).cummin(-1).values.flip(-1)
+    return torch.empty_like(order).scatter_(-1, order, order.gather(-1, run_last))
+
+
+def drop_repeated_index(
+    index_input: Any, index: torch.Tensor, tensors: Sequence[torch.Tensor | None], axis: int, max_size: int
+) -> tuple[torch.Tensor, tuple[torch.Tensor | None, ...]]:
+    """
+    Keep the last occurrence of every index given several times, as a write leaves it, and the matching values.
+
+    `index_input` is the index as given, and `index` its sanitized form, whose entries count `max_size` at most and
+    whose last axis holds the entries of `index_input`. An index given as a sequence is compacted along that axis, and
+    so are the tensors given along `axis`, the repeats being found where the index was given: on the host for a list, a
+    tuple or an array, and on the device for a torch tensor, whose compaction then synchronizes the device. An index
+    given one row per environment cannot be compacted, its rows differing: the earlier occurrences of a row become -1
+    instead, which the kernels skip. A range, a slice, an integer or a boolean mask holds no repeated entry, and the
+    index is returned as it is.
+    """
+    tensors = tuple(tensors)
+    if isinstance(index_input, torch.Tensor):
+        if index_input.dtype == torch.bool or index_input.numel() < 2:
+            return index, tensors
+        n_dims = index_input.ndim
+    elif isinstance(index_input, (list, tuple, np.ndarray)):
+        n_dims = np.ndim(index_input)
+    else:
+        return index, tensors
+    if n_dims > 1:
+        is_last = get_last_occurrence(index) == torch.arange(index.shape[-1], device=index.device)
+        return torch.where(is_last, index, -1), tensors
+    if isinstance(index_input, torch.Tensor):
+        index_row = index[(0,) * (index.ndim - 1)]
+    else:
+        index_row = torch.from_numpy(np.mod(index_input, max_size))
+    is_last = get_last_occurrence(index_row) == torch.arange(index_row.shape[-1], device=index_row.device)
+    positions = is_last.nonzero()[:, 0]
+    if len(positions) == len(is_last):
+        return index, tensors
+    positions = positions.to(device=index.device)
+    tensors_kept = tuple([None if tensor is None else tensor.index_select(axis, positions) for tensor in tensors])
+    return index.index_select(-1, positions), tensors_kept
+
+
 def sanitize_indices(
     indices: Sequence[int | range | slice | tuple[int, ...] | list[int] | torch.Tensor | np.ndarray | None],
     expected_shape: Sequence[int],
@@ -1107,6 +1283,9 @@ def broadcast_tensor(
             )
         return torch.empty(expected_shape, dtype=dtype, device=gs.device)
 
+    # Torch refuses to wrap a numpy array with negative strides, such as a reversed view, so it is copied first
+    if isinstance(tensor, np.ndarray) and any(stride < 0 for stride in tensor.strides):
+        tensor = tensor.copy()
     tensor_ = torch.as_tensor(tensor, dtype=dtype, device=gs.device)
 
     tensor_shape = tensor_.shape
@@ -1227,6 +1406,9 @@ def assign_indexed_tensor(
     dim_names: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     if isinstance(tensor, np.ndarray):
+        # See broadcast_tensor for arrays with negative strides
+        if isinstance(value, np.ndarray) and any(stride < 0 for stride in value.strides):
+            value = value.copy()
         value = torch.as_tensor(value)
     # A single value written over a selection of one axis has faster forms than advanced indexing, which stages an
     # index tensor and a scatter that dominate a write this small: the buffer is filled whole when every axis is taken
@@ -1248,6 +1430,31 @@ def assign_indexed_tensor(
                 if index.ndim == 1 and index.dtype == torch.int64:
                     tensor.index_fill_(axis, index, value)
                     return
+    else:
+        # Every occurrence of an index given several times writes the value of its last occurrence, since a scatter
+        # writes them in no defined order. The tensors and integers indexing the axes broadcast against each other into
+        # one block of axes of the selection, which takes the place of the first of them when they are contiguous, and
+        # leads the selection otherwise. Each tensor spans the axis of the block along which its size is above 1.
+        # A loop spares the frame of a comprehension, which the many small writes of the hot path would pay
+        repeatable_axes = []
+        for axis, index in enumerate(indices):
+            if isinstance(index, torch.Tensor) and index.dtype != torch.bool and index.numel() > 1:
+                repeatable_axes.append(axis)
+        if repeatable_axes:
+            advanced_axes = [axis for axis, index in enumerate(indices) if not isinstance(index, slice)]
+            indexed_shape = get_indexed_shape(tensor.shape, indices)
+            value = broadcast_tensor(value, tensor.dtype, indexed_shape, dim_names)
+            is_advanced_axes_contiguous = advanced_axes == list(range(advanced_axes[0], advanced_axes[-1] + 1))
+            block_start = advanced_axes[0] if is_advanced_axes_contiguous else 0
+            block_ndim = max([indices[axis].ndim for axis in repeatable_axes])
+            for axis in repeatable_axes:
+                index = indices[axis]
+                index_shape = (1,) * (block_ndim - index.ndim) + tuple(index.shape)
+                block_axis = [i for i, size in enumerate(index_shape) if size > 1][0]
+                # An index may live on another device than the values, which a scatter accepts and a gather does not
+                positions = get_last_occurrence(index.squeeze().to(device=value.device))
+                value = value.index_select(block_start + block_axis, positions)
+
     try:
         tensor[indices] = value
     except (TypeError, RuntimeError):

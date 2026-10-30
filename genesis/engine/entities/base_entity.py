@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 import genesis as gs
@@ -164,6 +165,95 @@ class Entity(RBC):
             (B, [history,] entity_cache_size_for_class).
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=self._idx, envs_idx=envs_idx)
+
+    def _get_global_idx(self, idx_local, idx_local_max, idx_global_start=0, *, unsafe=False, batched_idx=False):
+        if idx_local is None:
+            idx_global = range(idx_global_start, idx_local_max + idx_global_start)
+        elif isinstance(idx_local, (int, np.integer)):
+            if idx_local < 0:
+                idx_local = idx_local_max + idx_local
+            idx_global = (idx_local + idx_global_start,)
+        elif isinstance(idx_local, slice):
+            start, stop, step = idx_local.indices(idx_local_max)
+            idx_global = range(start + idx_global_start, stop + idx_global_start, step)
+            if step < 0:
+                idx_global = tuple(idx_global)
+        elif isinstance(idx_local, range):
+            if idx_local and -idx_local_max <= idx_local[0] < 0 and -idx_local_max <= idx_local[-1] < 0:
+                # Every entry shifts by the same amount, so the constant step and the range form are preserved
+                idx_global = range(
+                    idx_local.start + idx_local_max + idx_global_start,
+                    idx_local.stop + idx_local_max + idx_global_start,
+                    idx_local.step,
+                )
+            elif idx_local and (idx_local[0] < 0 or idx_local[-1] < 0):
+                # Mixed-sign entries wrap by different amounts, which breaks the constant step
+                idx_global = [
+                    i + idx_global_start + (idx_local_max if -idx_local_max <= i < 0 else 0) for i in idx_local
+                ]
+            else:
+                idx_global = range(
+                    idx_local.start + idx_global_start, idx_local.stop + idx_global_start, idx_local.step
+                )
+            if isinstance(idx_global, range) and idx_global.step < 0:
+                idx_global = tuple(idx_global)
+        elif isinstance(idx_local, (list, tuple)) and not (batched_idx and np.ndim(idx_local) == 2):
+            try:
+                idx_global = [
+                    i + idx_global_start + (idx_local_max if -idx_local_max <= i < 0 else 0) for i in idx_local
+                ]
+            except TypeError:
+                gs.raise_exception("Expecting a sequence of integers for `idx_local`.")
+        else:
+            if isinstance(idx_local, (list, tuple)):
+                idx_local = np.asarray(idx_local)
+            if isinstance(idx_local, torch.Tensor):
+                if idx_local.dtype == torch.bool:
+                    if idx_local.shape != (idx_local_max,):
+                        gs.raise_exception(f"Boolean masks for `idx_local` must have shape ({idx_local_max},).")
+                    idx_local, *_ = torch.where(idx_local)
+                    is_negative_wrap_required = False
+                else:
+                    is_negative_wrap_required = idx_local.dtype.is_signed
+                    where = torch.where
+            elif isinstance(idx_local, np.ndarray):
+                if np.issubdtype(idx_local.dtype, np.bool_):
+                    if idx_local.shape != (idx_local_max,):
+                        gs.raise_exception(f"Boolean masks for `idx_local` must have shape ({idx_local_max},).")
+                    idx_local, *_ = np.where(idx_local)
+                    is_negative_wrap_required = False
+                else:
+                    is_negative_wrap_required = not np.issubdtype(idx_local.dtype, np.unsignedinteger)
+                    where = np.where
+            else:
+                gs.raise_exception("Expecting integer indices for `idx_local`.")
+            if is_negative_wrap_required:
+                # Wrap valid Python-style negatives before the global offset so those entries stay local to the entity
+                is_valid_negative = (-idx_local_max <= idx_local) & (idx_local < 0)
+                idx_local = where(is_valid_negative, idx_local + idx_local_max, idx_local)
+            # Increment may be slow when dealing with heterogenuous data, so it must be avoided if possible
+            if idx_global_start > 0:
+                idx_global = idx_local + idx_global_start
+            else:
+                idx_global = idx_local
+
+        # Early return if unsafe
+        if unsafe:
+            return idx_global
+
+        # Perform a bunch of sanity checks
+        idx_global = torch.as_tensor(idx_global, dtype=gs.tc_int, device=gs.device).contiguous()
+        ndim = idx_global.ndim
+        if ndim == 0:
+            idx_global = idx_global[None]
+        elif ndim > 1:
+            gs.raise_exception("Expecting a 1D tensor for local index.")
+
+        # FIXME: This check is too expensive
+        # if (idx_global < 0).any() or (idx_global >= idx_global_start + idx_local_max).any():
+        #     gs.raise_exception("`idx_local` exceeds valid range.")
+
+        return idx_global
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------

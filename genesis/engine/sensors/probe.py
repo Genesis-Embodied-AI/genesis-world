@@ -11,6 +11,7 @@ from genesis.options.sensors.tactile import TactileProbeSensorOptionsMixin
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
 
 if TYPE_CHECKING:
+    from genesis.ext.pyrender.mesh import Mesh
     from genesis.options.sensors.options import SensorOptions
     from genesis.utils.ring_buffer import TensorRingBuffer
     from genesis.vis.rasterizer_context import RasterizerContext
@@ -102,7 +103,6 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
         self._probe_layout_shape = raw_pos.shape[:-1]
         self._n_probes = int(np.prod(self._probe_layout_shape))
         self._probe_local_pos = raw_pos.reshape(self._n_probes, 3).contiguous()
-        self._debug_objects: list = []
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
     def build(self) -> None:
@@ -329,16 +329,17 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
     def n_probes(self) -> int:
         return self._n_probes
 
-    def _compute_probes_world_pos(self, context: "RasterizerContext"):
+    def _compute_probes_world_pos(self, context: "RasterizerContext", rendered_envs_idx: list[int]):
         """
         Transform probe positions from link-local to world frame for debug drawing.
 
-        Returns ``(envs_idx, n_debug_envs, env_offsets, probe_world_flat)``. ``probe_world_flat`` is ``(n_debug_envs *
-        n_probes, 3)`` with env-offset already added. Assumes ``self._link`` is set (consumer inherits
-        ``RigidSensorMixin``).
+        'rendered_envs_idx' lists the rendered environments to draw, as indices into those of 'context'. Returns
+        ``(envs_idx, n_debug_envs, env_offsets, probe_world_flat)``, 'envs_idx' being the batch indices of those
+        environments. ``probe_world_flat`` is ``(n_debug_envs * n_probes, 3)`` with env-offset already added. Assumes
+        ``self._link`` is set (consumer inherits ``RigidSensorMixin``).
         """
         if self._manager._sim.n_envs > 0:
-            envs_idx = list(context.rendered_envs_idx)
+            envs_idx = [context.rendered_envs_idx[i] for i in rendered_envs_idx]
             n_debug_envs = len(envs_idx)
             env_offsets = context.scene.envs_offset[np.asarray(envs_idx, dtype=gs.np_int)]
             link_pos = self._link.get_pos(envs_idx, relative=False)[:, None, :]
@@ -373,13 +374,14 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
         are the matching ``(N,)`` per-position nominal sensing radius and additive uniform noise; both default to
         the per-probe values from shared metadata, tiled to match ``probe_world``. When noise is positive, each
         outer sphere is drawn at a fresh sample ``clip(r + U(-noise, +noise), 0, inf)`` rounded to the nearest
-        ``noise`` magnitude so the unique-radius batches stay small. Returns the created debug objects.
+        ``noise`` magnitude so the unique-radius batches stay small. Returns the debug nodes, made without adding them
+        to the scene.
         """
         options = self._options
         rgb = tuple(float(c) for c in rgb)
         center_color = (*rgb, 1.0)
         objs = [
-            context.draw_debug_spheres(
+            context.make_debug_spheres(
                 poss=probe_world,
                 radius=float(options.debug_probe_center_radius),
                 color=center_color,
@@ -410,7 +412,7 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
                 continue
             mask = probe_radii == r
             objs.append(
-                context.draw_debug_spheres(
+                context.make_debug_spheres(
                     poss=probe_world[mask],
                     radius=float(r),
                     color=outer_color,
@@ -421,27 +423,28 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
     def _draw_debug_probes(
         self,
         context: "RasterizerContext",
+        rendered_envs_idx: list[int],
         color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None,
-    ) -> tuple[list[int] | None, int, np.ndarray | None]:
+    ) -> tuple[list["Mesh"], list[int] | None, int, np.ndarray | None]:
         """
         Generic per-probe debug renderer.
 
-        Clears prior debug objects, then for each provided color group draws the two-sphere marker (small opaque
-        center + translucent outer sensing sphere) on the selected probe positions.
+        For each provided color group, makes the two-sphere marker (small opaque center + translucent outer sensing
+        sphere) on the selected probe positions of the rendered environments 'rendered_envs_idx', given as indices into
+        those of 'context', without adding them to the scene.
 
         ``color_groups_fn(envs_idx)`` returns a list of ``(rgb, mask)`` pairs, where ``rgb`` is a length-3 sequence
         and ``mask`` is a flat ``(n_debug_envs * n_probes,)`` bool array (or tensor castable to bool) selecting
         which probe positions take that color. Passing ``None`` falls back to a single group covering every probe
         in the sensor's ``debug_probe_color`` (no contact-state assumption -- usable by any probe sensor).
 
-        Returns ``(envs_idx, n_debug_envs, env_offsets)`` so subclasses can extend the drawing with additional
-        debug geometry without recomputing the env layout.
+        Returns ``(nodes, envs_idx, n_debug_envs, env_offsets)``, the debug nodes then the environment layout, so that
+        subclasses can extend the drawing with additional debug geometry without recomputing the env layout.
         """
-        for obj in self._debug_objects:
-            context.clear_debug_object(obj)
-        self._debug_objects.clear()
+        if not rendered_envs_idx:
+            return [], [], 0, None
 
-        envs_idx, n_debug_envs, env_offsets, probe_world = self._compute_probes_world_pos(context)
+        envs_idx, n_debug_envs, env_offsets, probe_world = self._compute_probes_world_pos(context, rendered_envs_idx)
         probe_start = int(self._shared_metadata.sensor_probe_start[self._idx].item())
         probe_slice = slice(probe_start, probe_start + self._n_probes)
         n_tile = max(n_debug_envs, 1)
@@ -451,17 +454,18 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
             groups = [(self._options.debug_probe_color, np.ones(probe_world.shape[0], dtype=bool))]
         else:
             groups = color_groups_fn(envs_idx)
+        nodes = []
         for rgb, mask in groups:
             mask_arr = tensor_to_array(mask, dtype=bool).reshape(-1)
             (probes_idx,) = np.nonzero(mask_arr)
             if probes_idx.size == 0:
                 continue
-            self._debug_objects.extend(
+            nodes.extend(
                 self._draw_probe_spheres(
                     context, probe_world[probes_idx], rgb, radii_tiled[probes_idx], noise_tiled[probes_idx]
                 )
             )
-        return envs_idx, n_debug_envs, env_offsets
+        return nodes, envs_idx, n_debug_envs, env_offsets
 
     def _tactile_color_groups_fn(
         self, get_is_contact_flat: Callable[[list[int] | None], object]

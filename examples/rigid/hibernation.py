@@ -19,6 +19,7 @@ import os
 
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy
+from genesis.utils.tools import RunningMean
 
 
 RECORDING_FPS = 30
@@ -49,8 +50,6 @@ def main():
         ),
         profiling_options=gs.options.ProfilingOptions(
             show_FPS=False,
-            # The step rate the plot shows is averaged over a fifth of a simulated second
-            timings_window=round(0.2 / dt),
         ),
         show_viewer=args.vis,
     )
@@ -131,13 +130,13 @@ def main():
     # Long enough to show the full settle (ducks) or the whole travelling cascade and its re-sleep (dominos).
     sim_seconds = 7.0 if args.scene == "ducks" else 9.0
     n_steps = int(sim_seconds / dt) if "PYTEST_VERSION" not in os.environ else 5
-    # The step rate of the physics alone, read once the first step, which carries the kernel compilation, has left
-    # the averaging window
-    n_window = scene.options.profiling.timings_window
-    for i_step in range(n_steps):
+    # The step rate of the physics alone, averaged over a fifth of a simulated second and undefined until that much
+    # has run
+    physics_time = RunningMean(window=round(0.2 / dt))
+    for _ in range(n_steps):
         scene.step()
-        if i_step >= n_window:
-            plot_values["step_rate"][0] = 1.0 / scene.timings["physics"]
+        physics_time.update(scene.timings["physics"])
+        plot_values["step_rate"][0] = 1.0 / physics_time.value
         plot_values["awake_bodies"][0] = n_bodies - qd_to_numpy(scene.rigid_solver.dyn_state.links.is_hibernated).sum()
     if args.record:
         camera.stop_recording()

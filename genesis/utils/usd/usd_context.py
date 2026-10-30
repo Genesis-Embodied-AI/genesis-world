@@ -18,6 +18,7 @@ from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 import genesis as gs
 import genesis.utils.mesh as mu
 from genesis.constants import USD_FORMATS
+from genesis.utils.cache import get_usd_bake_path, get_usd_zip_path
 
 from .usd_material import parse_material_preview_surface
 from .usd_utils import extract_scale
@@ -33,7 +34,7 @@ except ImportError:
 
 
 def decompress_usdz(usdz_path: str):
-    usdz_folder = mu.get_usd_zip_path(usdz_path)
+    usdz_folder = get_usd_zip_path(usdz_path)
 
     # The first file in the package must be a native usd file.
     # See https://openusd.org/docs/Usdz-File-Format-Specification.html
@@ -136,7 +137,7 @@ class UsdContext:
             )
 
         # detect bake file caches
-        self._bake_folder = mu.get_usd_bake_path(stage_file)
+        self._bake_folder = get_usd_bake_path(stage_file)
         self._bake_stage_file = os.path.join(self._bake_folder, os.path.basename(stage_file))
         if use_bake_cache:
             if os.path.exists(self._bake_stage_file):

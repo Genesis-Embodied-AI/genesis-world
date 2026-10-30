@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genesis-world"
-version = "1.4.3"
+version = "1.4.5"
 description = "A universal and generative physics engine"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -16,7 +16,9 @@ dependencies = [
     "numpy>=1.26.4",
     "frozendict",
     # * 4.8.2 fixed linear/sRGB color conversion in `to_color()`.
-    "trimesh>=4.8.2",
+    # * 5.0 transforms a mesh without drawing from the global random generator of numpy, which the particle samplers
+    #   draw from, so that a seed gives the same particles whatever the mesh processing.
+    "trimesh>=5.0.0",
     # Used for preprocessing .urdf.xacro files into plain URDF
     "xacro",
     # * No pre-compiled wheels are distributed for LibIGL v2.6.2 on Windows OS
@@ -27,6 +29,8 @@ dependencies = [
     "moviepy>=2.0.0",
     # Streams video frames to file, for 'camera.start_recording' and the 'VideoFile' recorder
     "av",
+    # Compresses the frames of trajectory files, fast enough for the writer thread to keep pace with stepping
+    "zstandard",
     # Used by `pyrender` to manage onscreen graphical windows
     # * 2.1.8 breaks headless windowing, which is used in unit tests of the interactive viewer.
     # * 2.0.15 <= 2.1.8 breaks old-style option overwrite for string literal.
@@ -80,7 +84,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "black",
-    "pytest",
+    # FIXME: Remove this cap once pytest-forked becomes compatible with newer versions (pytest-forked#112)
+    "pytest<9.2.0",
     "pytest-xdist",
     "pytest-forked",
     "pytest-timeout",
@@ -107,6 +112,8 @@ dev = [
     "matplotlib>=3.7.0",
     # Used for ground truth validation in unit tests
     "scipy",
+    # The ImGui overlay snapshots are rendered with imgui-bundle 1.93.0, which draws tab corners differently from 1.92
+    "imgui-bundle>=1.93.0; python_version >= '3.11'",
     # Used for code formatting during commits
     "pre_commit",
 ]
@@ -203,6 +210,7 @@ addopts = [
     # Note that the retry mechanism is not compatible with "--forked".
     "-m not (benchmarks or examples)",
 ]
+xfail_strict = true
 filterwarnings = [
     "ignore::_pytest.warning_types.PytestUnknownMarkWarning",
     "ignore::DeprecationWarning",
@@ -210,7 +218,10 @@ filterwarnings = [
 markers = [
     "examples: example scripts.",
     "benchmarks: benchmarks for profiling and monitoring.",
-    "required: minimal test set that must pass systematically on any environment before merging.",
+    # '@pytest.mark.required("pairwise")' keeps the marker on a subset of the cases of a parametrized test in which every
+    # pair of parameter values occurs together, and '@pytest.mark.required("sparse")' on the diagonal of its parameter
+    # grid, its i-th case taking the i-th value of every decorator, both per backend (resolved in tests/conftest.py).
+    "required: minimal test set that must pass on any environment before merging (args above).",
     # A test is flagged 'slow' when its baseline run time is >= 150s. The baseline is the worst case over the standard
     # parallel CI runs (field and ndarray backends) of the per-test average across its parametrizations.
     # '@pytest.mark.slow' with no argument means slow on every backend; passing one or more backend names, e.g.

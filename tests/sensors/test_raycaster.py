@@ -11,11 +11,12 @@ from genesis.vis.viewer_plugins.raycast import Raycaster
 from ..utils.assertions import assert_allclose, assert_equal
 
 
-@pytest.mark.required
 # A raycast consumer refreshes the solver's forward kinematics before casting; under MuJoCo compatibility the
 # solver relies on redoing that itself, geoms included, so the arm below pins that a raycaster leaves the physics
 # alone - obstacle_1 falls onto the ground plane and the grid rays must still find its top face where it rests.
-@pytest.mark.parametrize("n_envs, enable_mujoco_compatibility", [(0, False), (2, True)])
+@pytest.mark.parametrize(
+    "n_envs, enable_mujoco_compatibility", [(0, False), pytest.param(2, True, marks=pytest.mark.required)]
+)
 def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     NUM_RAYS_XY = (3, 5)
     SPHERE_POS = (2.5, 0.5, 1.0)
@@ -251,8 +252,6 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
         if entity is obstacle_2:
             pos[..., 2] = BOX_SIZE / 2
         entity.set_pos(pos)
-    if show_viewer:
-        scene.visualizer.update(force=True)
     grid_sensor_pos = grid_sensor.get_pos()
     for _ in range(60):
         scene.step()
@@ -269,8 +268,8 @@ def test_hits(show_viewer, n_envs, enable_mujoco_compatibility, tol):
     assert_allclose(grid_distances, grid_distances_ref, tol=1e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.required("sparse")
+@pytest.mark.parametrize("n_envs", [2, 0])
 @pytest.mark.parametrize("kin_raycastable", [True, False])
 def test_against_visual(tmp_path, show_viewer, n_envs, kin_raycastable):
     # Two depth cameras, one per entity:
@@ -504,8 +503,7 @@ def test_lidar_bvh_parallel_env(show_viewer, tol):
     assert_allclose(shared_distances, shared_expected, tol=tol)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 4])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(4, marks=pytest.mark.required)])
 def test_shared_static_bvh_regroup(show_viewer, n_envs):
     scene = gs.Scene(show_viewer=show_viewer)
     scene.add_entity(gs.morphs.Plane())
@@ -751,8 +749,7 @@ def test_heterogeneous_object(show_viewer, tol):
     assert_allclose(lidar.read().distances[:, 0, 0], (3.9, 3.9, 3.8, 3.8, 3.7, 3.7), tol=5e-3)
 
 
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("n_envs", [0, pytest.param(2, marks=pytest.mark.required)])
 def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
     MOUNT_Z = 3.0
     STATIC_TOP_Z = 1.0
@@ -890,14 +887,15 @@ def test_static_dynamic_bvh_split_merge(show_viewer, n_envs, tol):
     scene.step()
     assert_distances(MOUNT_Z - STATIC_TOP_Z)
 
-    # Tactile probes fold both trees by the globally nearest triangle. The step above populated the candidate
-    # contact pairs (pad-table, pad-box); the contact response displaced the interpenetrating movable pair, so their
-    # poses are restored before sampling the sensors alone. Probe 1 is nearer to the table face (0.5mm outside,
-    # static tree) than to the box bottom (1.5mm inside): a fold selecting by deepest penetration instead of
-    # smallest signed-distance magnitude would report the box's larger depth. Probe 2 is nearest to the box's x side
-    # face (2mm inside, dynamic tree).
+    # Tactile probes fold both trees by the globally nearest triangle. The contact response of the step above
+    # displaced the interpenetrating movable pair, so their poses are restored, and the candidate contact pairs
+    # (pad-table, pad-box) detected anew at them, before sampling the sensors alone. Probe 1 is nearer to the table
+    # face (0.5mm outside, static tree) than to the box bottom (1.5mm inside): a fold selecting by deepest penetration
+    # instead of smallest signed-distance magnitude would report the box's larger depth. Probe 2 is nearest to the
+    # box's x side face (2mm inside, dynamic tree).
     pad.set_pos((*TACTILE_POS, PAD_POS_Z))
     tactile_box.set_pos((*TACTILE_POS, TACTILE_BOX_BOTTOM_Z + 0.02))
+    scene.rigid_solver.detect_collision()
     scene.sim._sensor_manager.step()
     probe_1_world_z = PAD_POS_Z + PROBE_1_LOCAL_Z
     assert_allclose(

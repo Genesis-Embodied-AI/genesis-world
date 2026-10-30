@@ -7,7 +7,6 @@ import genesis.utils.geom as gu
 from ..utils.assertions import assert_allclose
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_gravity_force(free_box, n_envs, show_viewer, tol):
@@ -170,7 +169,6 @@ def test_gravity_force(free_box, n_envs, show_viewer, tol):
     assert_allclose(force_sensor_noisy.read()[..., 2], -GRAVITY / 2, tol=gs.EPS)
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_filter_link_idx(show_viewer, tol):
     scene = gs.Scene(

@@ -16,13 +16,18 @@ def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid
     block_start = rigid_info.dofs_mass_block_start[i_d0]
     block_end = rigid_info.dofs_mass_block_end[i_d0]
 
+    # Each substitution walks the chain of mass parents of a dof (see func_solve_mass_block in forward_dynamics.py)
+    n_block = block_end - block_start
     # Step 1: Solve w s.t. L^T @ w = y (backward substitution)
-    for i_d_ in range(block_end - block_start):
+    for i_d_ in range(n_block):
         i_d = block_end - i_d_ - 1
-        curr = vec[i_d, i_col]
-        for j_d in range(i_d + 1, block_end):
-            curr = curr - rigid_info.mass_mat_L[j_d, i_d, i_b] * vec[j_d, i_col]
-        vec[i_d, i_col] = curr
+        w = vec[i_d, i_col]
+        j_d = i_d
+        for _ in range(n_block - 1):
+            j_d = rigid_info.dofs_mass_parent[j_d]
+            if j_d < 0:
+                break
+            vec[j_d, i_col] = vec[j_d, i_col] - rigid_info.mass_mat_L[i_d, j_d, i_b] * w
 
     # Step 2: z = D^{-1} @ w
     for i_d in range(block_start, block_end):
@@ -31,7 +36,11 @@ def func_solve_mass_block(i_d0: int, i_b: int, i_col: int, vec: qd.Tensor, rigid
     # Step 3: Solve x s.t. L @ x = z (forward substitution)
     for i_d in range(block_start, block_end):
         curr = vec[i_d, i_col]
-        for j_d in range(block_start, i_d):
+        j_d = i_d
+        for _ in range(n_block - 1):
+            j_d = rigid_info.dofs_mass_parent[j_d]
+            if j_d < 0:
+                break
             curr = curr - rigid_info.mass_mat_L[i_d, j_d, i_b] * vec[j_d, i_col]
         vec[i_d, i_col] = curr
 
@@ -81,21 +90,25 @@ def func_apply_Minv_rows(
 def func_accumulate_row_blocks(
     i_row: int,
     i_b: int,
-    i_col: int,
+    i_col_0: int,
+    i_col_1: int,
+    coef_0: float,
+    coef_1: float,
     jac_dofs_idx: qd.Tensor,
     vec_src: qd.Tensor,
     vec_dst: qd.Tensor,
     jac_n_dofs: qd.Tensor,
     rigid_info: array_class.RigidInfo,
 ):
-    """Add vec_src[:, i_col] to vec_dst[:, i_b] over the mass blocks touched by constraint row i_row."""
+    """Add coef_0 * vec_src[:, i_col_0] + coef_1 * vec_src[:, i_col_1] to vec_dst[:, i_b] over the mass blocks touched
+    by constraint row i_row."""
     tree_start_prev = gs.qd_int(-1)
     for i_d_ in range(jac_n_dofs[i_row, i_b]):
         i_d = jac_dofs_idx[i_row, i_d_, i_b]
         block_start = rigid_info.dofs_mass_block_start[i_d]
         if block_start != tree_start_prev:
             for j_d in range(block_start, rigid_info.dofs_mass_block_end[i_d]):
-                vec_dst[j_d, i_b] = vec_dst[j_d, i_b] + vec_src[j_d, i_col]
+                vec_dst[j_d, i_b] = vec_dst[j_d, i_b] + coef_0 * vec_src[j_d, i_col_0] + coef_1 * vec_src[j_d, i_col_1]
             tree_start_prev = block_start
 
 
@@ -252,7 +265,8 @@ def func_noslip_update_row(
 
     A dry-friction (dof frictionloss) row gets a 1-dof update and a collision row that is the base of an opposing
     pyramid-edge pair (i_c, i_c + 1) the 2-dof update of the pair with the normal force fixed. Every other row keeps
-    its force, with a zero cost change. M^{-1} J^T of the row is computed in column i_col of noslip_MinvJT.
+    its force, with a zero cost change. M^{-1} J^T of the rows is computed in the columns 2 * i_col and 2 * i_col + 1 of
+    noslip_MinvJT, which the force change then reuses: M^{-1} J^T is linear in the coefficients of the rows.
     """
     # temp variables
     res = qd.Vector.zero(gs.qd_float, 2)
@@ -263,130 +277,101 @@ def func_noslip_update_row(
     cost_change = gs.qd_float(0.0)
 
     if i_c >= ne and i_c < ne + nf:
-        # Each row runs two phases through the single func_apply_Minv_rows call site: phase 0 computes the diagonal
-        # entry A[i_c, i_c] = J M^{-1} J^T and updates the force, phase 1 propagates the force change to qacc (skipped
-        # when the force did not move).
-        delta = gs.qd_float(0.0)
+        func_apply_Minv_rows(
+            i_c,
+            i_c,
+            i_b,
+            2 * i_col,
+            constraint_state.jac_dofs_idx,
+            1.0,
+            0.0,
+            constraint_state.noslip_MinvJT,
+            constraint_state.jac,
+            constraint_state.jac_n_dofs,
+            rigid_info,
+        )
+        A_diag = func_dot_row(
+            i_c,
+            i_b,
+            2 * i_col,
+            constraint_state.jac_dofs_idx,
+            constraint_state.noslip_MinvJT,
+            constraint_state.jac,
+            constraint_state.jac_n_dofs,
+        )
+        res[0] = (
+            func_dot_row(
+                i_c,
+                i_b,
+                i_b,
+                constraint_state.jac_dofs_idx,
+                constraint_state.qacc,
+                constraint_state.jac,
+                constraint_state.jac_n_dofs,
+            )
+            - constraint_state.aref[i_c, i_b]
+        )
+
+        old_force[0] = constraint_state.efc_force[i_c, i_b]
+        constraint_state.efc_force[i_c, i_b] -= res[0] / A_diag
+        if constraint_state.efc_force[i_c, i_b] < -constraint_state.efc_frictionloss[i_c, i_b]:
+            constraint_state.efc_force[i_c, i_b] = -constraint_state.efc_frictionloss[i_c, i_b]
+        elif constraint_state.efc_force[i_c, i_b] > constraint_state.efc_frictionloss[i_c, i_b]:
+            constraint_state.efc_force[i_c, i_b] = constraint_state.efc_frictionloss[i_c, i_b]
+        delta = constraint_state.efc_force[i_c, i_b] - old_force[0]
+        cost_change = 0.5 * delta**2 * A_diag + delta * res[0]
+        if delta != 0.0:
+            func_accumulate_row_blocks(
+                i_c,
+                i_b,
+                2 * i_col,
+                2 * i_col,
+                delta,
+                0.0,
+                constraint_state.jac_dofs_idx,
+                constraint_state.noslip_MinvJT,
+                constraint_state.qacc,
+                constraint_state.jac_n_dofs,
+                rigid_info,
+            )
+    elif i_c >= const_start and i_c < const_end and (i_c - const_start) % 2 == 0:
+        j_efc = i_c
+
+        # Two phases through the single func_apply_Minv_rows call site, each solving M^{-1} J^T of one row of the pair
+        # into its own column: together they give the symmetric 2x2 block of A (both rows share the same dof support,
+        # so two block solves and three sparse dots suffice), then the force update runs at the end of phase 1, and the
+        # force change reaches qacc as the combination of the two columns (skipped when the forces did not move).
+        delta_0 = gs.qd_float(0.0)
+        delta_1 = gs.qd_float(0.0)
         for i_phase in range(2):
-            coef = gs.qd_float(1.0)
-            if i_phase == 1:
-                coef = delta
-            if i_phase == 0 or delta != 0.0:
-                func_apply_Minv_rows(
-                    i_c,
-                    i_c,
-                    i_b,
-                    i_col,
-                    constraint_state.jac_dofs_idx,
-                    coef,
-                    0.0,
-                    constraint_state.noslip_MinvJT,
-                    constraint_state.jac,
-                    constraint_state.jac_n_dofs,
-                    rigid_info,
-                )
-                if i_phase == 0:
-                    A_diag = func_dot_row(
-                        i_c,
+            func_apply_Minv_rows(
+                j_efc,
+                j_efc + 1,
+                i_b,
+                2 * i_col + i_phase,
+                constraint_state.jac_dofs_idx,
+                1.0 - i_phase,
+                i_phase,
+                constraint_state.noslip_MinvJT,
+                constraint_state.jac,
+                constraint_state.jac_n_dofs,
+                rigid_info,
+            )
+            for i2 in qd.static(range(2)):
+                if i_phase == 0 or i2 == 1:
+                    s = func_dot_row(
+                        j_efc + i2,
                         i_b,
-                        i_col,
+                        2 * i_col + i_phase,
                         constraint_state.jac_dofs_idx,
                         constraint_state.noslip_MinvJT,
                         constraint_state.jac,
                         constraint_state.jac_n_dofs,
                     )
-                    res[0] = (
-                        func_dot_row(
-                            i_c,
-                            i_b,
-                            i_b,
-                            constraint_state.jac_dofs_idx,
-                            constraint_state.qacc,
-                            constraint_state.jac,
-                            constraint_state.jac_n_dofs,
-                        )
-                        - constraint_state.aref[i_c, i_b]
-                    )
-
-                    old_force[0] = constraint_state.efc_force[i_c, i_b]
-                    constraint_state.efc_force[i_c, i_b] -= res[0] / A_diag
-                    if constraint_state.efc_force[i_c, i_b] < -constraint_state.efc_frictionloss[i_c, i_b]:
-                        constraint_state.efc_force[i_c, i_b] = -constraint_state.efc_frictionloss[i_c, i_b]
-                    elif constraint_state.efc_force[i_c, i_b] > constraint_state.efc_frictionloss[i_c, i_b]:
-                        constraint_state.efc_force[i_c, i_b] = constraint_state.efc_frictionloss[i_c, i_b]
-                    delta = constraint_state.efc_force[i_c, i_b] - old_force[0]
-                    cost_change = 0.5 * delta**2 * A_diag + delta * res[0]
-                else:
-                    func_accumulate_row_blocks(
-                        i_c,
-                        i_b,
-                        i_col,
-                        constraint_state.jac_dofs_idx,
-                        constraint_state.noslip_MinvJT,
-                        constraint_state.qacc,
-                        constraint_state.jac_n_dofs,
-                        rigid_info,
-                    )
-    elif i_c >= const_start and i_c < const_end and (i_c - const_start) % 2 == 0:
-        j_efc = i_c
-
-        # Three phases through the single func_apply_Minv_rows call site: phases 0 and 1 compute the symmetric 2x2
-        # block of A (both rows share the same dof support, so two block solves and three sparse dots suffice), then
-        # the force update runs at the end of phase 1, and phase 2 propagates the force change to qacc (skipped when
-        # the forces did not move).
-        delta_0 = gs.qd_float(0.0)
-        delta_1 = gs.qd_float(0.0)
-        for i_phase in range(3):
-            coef_0 = gs.qd_float(0.0)
-            coef_1 = gs.qd_float(0.0)
-            if i_phase == 0:
-                coef_0 = 1.0
-            elif i_phase == 1:
-                coef_1 = 1.0
-            else:
-                coef_0 = delta_0
-                coef_1 = delta_1
-            if i_phase < 2 or delta_0 != 0.0 or delta_1 != 0.0:
-                func_apply_Minv_rows(
-                    j_efc,
-                    j_efc + 1,
-                    i_b,
-                    i_col,
-                    constraint_state.jac_dofs_idx,
-                    coef_0,
-                    coef_1,
-                    constraint_state.noslip_MinvJT,
-                    constraint_state.jac,
-                    constraint_state.jac_n_dofs,
-                    rigid_info,
-                )
-                if i_phase == 2:
-                    func_accumulate_row_blocks(
-                        j_efc,
-                        i_b,
-                        i_col,
-                        constraint_state.jac_dofs_idx,
-                        constraint_state.noslip_MinvJT,
-                        constraint_state.qacc,
-                        constraint_state.jac_n_dofs,
-                        rigid_info,
-                    )
-                else:
-                    for i2 in qd.static(range(2)):
-                        if i_phase == 0 or i2 == 1:
-                            s = func_dot_row(
-                                j_efc + i2,
-                                i_b,
-                                i_col,
-                                constraint_state.jac_dofs_idx,
-                                constraint_state.noslip_MinvJT,
-                                constraint_state.jac,
-                                constraint_state.jac_n_dofs,
-                            )
-                            if i_phase == 0:
-                                Ac[i2] = s
-                            else:
-                                Ac[3] = s
+                    if i_phase == 0:
+                        Ac[i2] = s
+                    else:
+                        Ac[3] = s
 
             if i_phase == 1:
                 Ac[2] = Ac[1]
@@ -430,6 +415,21 @@ def func_noslip_update_row(
 
                 delta_0 = constraint_state.efc_force[j_efc, i_b] - old_force[0]
                 delta_1 = constraint_state.efc_force[j_efc + 1, i_b] - old_force[1]
+
+        if delta_0 != 0.0 or delta_1 != 0.0:
+            func_accumulate_row_blocks(
+                j_efc,
+                i_b,
+                2 * i_col,
+                2 * i_col + 1,
+                delta_0,
+                delta_1,
+                constraint_state.jac_dofs_idx,
+                constraint_state.noslip_MinvJT,
+                constraint_state.qacc,
+                constraint_state.jac_n_dofs,
+                rigid_info,
+            )
 
     return cost_change
 

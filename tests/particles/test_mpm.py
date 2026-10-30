@@ -17,7 +17,6 @@ def test_particles_stress(model, n_envs, show_viewer, tol):
         sim_options=gs.options.SimOptions(
             dt=0.001,
             substeps=2,
-            substeps_local=8,
             requires_grad=True,
         ),
         mpm_options=gs.options.MPMOptions(
@@ -208,7 +207,6 @@ def test_particle_constraints(show_viewer, tol):
     assert_allclose(mpm_mesh_set.vmesh.verts.max(axis=0), (0.46, 0.52, 0.46), tol=tol)
     # Positioning the set as a whole moves the mean member position there, keeping the members' layout
     mpm_mesh_set.set_position((0.0, 0.5, 0.5))
-    mpm_mesh_set.process_input()
     assert_allclose(mpm_mesh_set.get_particles_pos(), particles + (0.0, 0.0, 0.2), tol=tol)
 
     # Test get_particles_in_bbox - returns (n_envs, n_particles) mask

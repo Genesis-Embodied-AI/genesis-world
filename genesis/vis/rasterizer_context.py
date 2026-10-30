@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING, NamedTuple
+from collections.abc import Callable, Iterable
+from functools import partial
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -8,11 +10,14 @@ import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
+from genesis.engine.state_change import StateChange, Subscriber
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import tensor_to_array, qd_to_numpy
+from genesis.utils.misc import qd_to_numpy, sanitize_index, tensor_to_array
 
 if TYPE_CHECKING:
+    from genesis.engine.sensors.base_sensor import Sensor
+    from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.solvers.kinematic_solver import KinematicSolver
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
@@ -29,6 +34,78 @@ class RigidNodeBatch(NamedTuple):
     geoms_idx: list[int]
     geoms_uid: list[int]
     is_plane: list[bool]
+
+
+class TrackedNodeList:
+    """Nodes that are drawn again at every sync, and removed when a change of state makes them stale.
+
+    'draw' takes a list of indices into the rendered environments of 'context' and returns one (env_idx, node, seg_key)
+    triple per node it made, without adding them to the scene. 'env_idx' is the rendered environment the node belongs
+    to, or None for a node spanning several of them. 'seg_key' is the segmentation key of the node, or None if the node
+    is excluded from segmentation. Each call to 'update' replaces the previous nodes.
+
+    Some nodes show what a step computed (the contact forces, a sensor reading) rather than the state itself, so they
+    are wrong once the state changes. When one of 'solvers' reports one of the changes 'invalidated_by', the nodes of
+    the affected environments are removed, along with the nodes spanning several environments, and the affected
+    environments are left out of the draws until the next step or reset.
+    """
+
+    def __init__(
+        self,
+        context: "RasterizerContext",
+        draw: Callable[[list[int]], list[tuple[int | None, "pyrender.Mesh", Any]]],
+        solvers: Iterable["Solver"] = (),
+        invalidated_by: frozenset[StateChange] = frozenset(),
+    ):
+        self._context = context
+        self._draw = draw
+        self._nodes: list[tuple[int | None, "pyrender.Node"]] = []
+        self._invalidated_envs_mask = np.zeros(len(context.rendered_envs_idx), dtype=np.bool_)
+        self._invalidated_step = -1
+        if invalidated_by:
+            subscriber = Subscriber(to=invalidated_by, callback=lambda change, envs_idx: self.invalidate(envs_idx))
+            for solver in solvers:
+                solver.subscribe(subscriber)
+
+    def invalidate(self, envs_idx=None):
+        """Remove the nodes of the environments 'envs_idx' (None for all of them) until the next step or reset."""
+        context = self._context
+        envs_idx = tensor_to_array(sanitize_index(envs_idx, -1, context.sim._B, 0, "envs_idx"))
+        envs_mask = np.isin(context.rendered_envs_idx, envs_idx)
+        with context.scene._visualizer.viewer_lock:
+            is_any_env_invalidated = envs_mask.any()
+            nodes_kept = []
+            for env_idx, node in self._nodes:
+                if is_any_env_invalidated if env_idx is None else envs_mask[env_idx]:
+                    context.remove_node_seg(node)
+                    context.remove_node(node)
+                else:
+                    nodes_kept.append((env_idx, node))
+            self._nodes = nodes_kept
+            self._invalidated_envs_mask |= envs_mask
+            self._invalidated_step = context.sim.cur_step_global
+
+    def update(self):
+        """Draw the nodes again, except in the environments whose nodes are stale."""
+        context = self._context
+        with context.scene._visualizer.viewer_lock:
+            if context.sim.cur_step_global != self._invalidated_step:
+                self._invalidated_envs_mask[:] = False
+            self.clear()
+            # The meshes take their environment as a native integer, which the renderer turns into a buffer offset
+            for env_idx, mesh, seg_key in self._draw(np.flatnonzero(~self._invalidated_envs_mask).tolist()):
+                node = context.add_node(mesh)
+                if seg_key is not None:
+                    context.create_node_seg(seg_key, node)
+                self._nodes.append((env_idx, node))
+
+    def clear(self):
+        """Remove every node."""
+        with self._context.scene._visualizer.viewer_lock:
+            for _, node in self._nodes:
+                self._context.remove_node_seg(node)
+                self._context.remove_node(node)
+            self._nodes.clear()
 
 
 class SegmentationColorMap:
@@ -130,6 +207,9 @@ class RasterizerContext:
         self.static_nodes = dict()  # used across all frames
         self.dynamic_nodes = dict()  # nodes that live within single frame
         self.external_nodes = dict()  # nodes added by external user
+        self.links_init_AABB_size: np.ndarray | None = None
+        # The nodes of each solver and sensor drawn anew at every sync (see TrackedNodeList)
+        self.tracked_nodes: dict["Solver | Sensor", TrackedNodeList] = {}
         self.seg_node_map = dict()
         self.seg_color_map = SegmentationColorMap()
 
@@ -182,18 +262,31 @@ class RasterizerContext:
         if self.show_cameras:
             self.on_camera_frustum()
 
-        self.on_tool()
         self.on_rigid()
         self.on_mpm()
         self.on_sph()
         self.on_pbd()
         self.on_fem()
+        self.on_sensors()
+
+        # The update of the nodes of each solver, so that a change of the state of some solvers updates theirs alone
+        rigid_solvers = (self.sim.rigid_solver, self.sim.kinematic_solver)
+        self._updates_solvers = (
+            (self.update_link_frame, rigid_solvers),
+            (self.update_rigid, rigid_solvers),
+            (self.update_mpm, (self.sim.mpm_solver,)),
+            (self.update_sph, (self.sim.sph_solver,)),
+            (self.update_pbd, (self.sim.pbd_solver,)),
+            (self.update_fem, (self.sim.fem_solver,)),
+        )
 
         # segmentation mapping
         self.seg_color_map.generate_seg_colors()
 
     def destroy(self):
         self.clear_dynamic_nodes(only_outdated=False)
+        for node_list in self.tracked_nodes.values():
+            node_list.clear()
 
         for node_registry in (
             self.link_frame_nodes,
@@ -210,6 +303,7 @@ class RasterizerContext:
 
     def reset(self):
         self._t = -1
+        self.clear_dynamic_nodes(only_outdated=False)
 
     def add_node(self, obj, **kwargs):
         with self.scene._visualizer.viewer_lock:
@@ -274,7 +368,7 @@ class RasterizerContext:
 
         entity = geom.entity
         vis_mode = entity.surface.vis_mode
-        mesh = geom.get_sdf_trimesh() if "sdf" in vis_mode else geom.get_trimesh()
+        mesh = geom.sdf_trimesh if "sdf" in vis_mode else geom.trimesh
         geom_T = geoms_T[:, geom.idx]
         envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
         is_shared_floor = False
@@ -462,37 +556,6 @@ class RasterizerContext:
                 self.link_frame_node.mesh.primitives[0].poses = links_T
                 self.jit.update_buffer(self.link_frame_node, "model", links_T.transpose((0, 2, 1)))
 
-    def on_tool(self):
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                if tool_entity.mesh is not None:
-                    for env_i, idx in enumerate(self.rendered_envs_idx):
-                        mesh = trimesh.Trimesh(
-                            tool_entity.mesh.raw_vertices,
-                            tool_entity.mesh.faces_np.reshape([-1, 3]),
-                            tool_entity.mesh.raw_vertex_normals,
-                            process=False,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(tool_entity.surface, n_verts=len(mesh.vertices))
-
-                        pose = gu.trans_quat_to_T(tool_entity.init_pos, tool_entity.init_quat)
-                        double_sided = tool_entity.surface.double_sided
-                        self.add_static_node(
-                            tool_entity,
-                            pyrender.Mesh.from_trimesh(mesh, double_sided=double_sided, envs=env_i),
-                            i_b=idx,
-                            pose=pose,
-                        )
-
-    def update_tool(self):
-        if self.sim.tool_solver.is_active:
-            for tool_entity in self.sim.tool_solver.entities:
-                poss = qd_to_numpy(tool_entity.pos)[self.sim.cur_substep_local]
-                quats = qd_to_numpy(tool_entity.quat)[self.sim.cur_substep_local]
-                for idx in self.rendered_envs_idx:
-                    pose = gu.trans_quat_to_T(poss[idx], quats[idx])
-                    self.set_node_pose(self.static_nodes[(idx, tool_entity.uid)], pose=pose)
-
     def set_reflection_mat(self, geom_T):
         height = geom_T[0, 2, 3]
         self.jit.reflection_mat = np.array(
@@ -533,6 +596,28 @@ class RasterizerContext:
                     if mesh_node is not None:
                         vis_materials.setdefault(surface_key, mesh_node.primitives[0].material)
 
+        if self.sim.rigid_solver.is_active and any(link.visualize_contact for link in self.sim.rigid_solver.links):
+            # Scale contact arrows by the parent link's overall size rather than the individual contacting geom, so
+            # they stay legible on links built from many small convex-decomposition pieces. The per-geom init AABBs
+            # are in each geom's local frame, so offset their corners by the geom pose to get the link-frame extent.
+            geoms_aabb = qd_to_numpy(self.sim.rigid_solver.geoms_init_AABB)
+            self.links_init_AABB_size = np.zeros(self.sim.rigid_solver.n_links, dtype=gs.np_float)
+            for link in self.sim.rigid_solver.links:
+                if link.n_geoms == 0:
+                    continue
+                lower = np.full(3, np.inf, dtype=gs.np_float)
+                upper = np.full(3, -np.inf, dtype=gs.np_float)
+                for geom in link.geoms:
+                    corners = gu.transform_by_trans_quat(geoms_aabb[geom.idx], geom.init_pos, geom.init_quat)
+                    lower = np.minimum(lower, corners.min(axis=0))
+                    upper = np.maximum(upper, corners.max(axis=0))
+                self.links_init_AABB_size[link.idx] = np.linalg.norm(upper - lower)
+
+            # The contacts come from the latest step, so a setter moving the rigid geometry makes them stale
+            self.tracked_nodes[self.sim.rigid_solver] = TrackedNodeList(
+                self, self.draw_rigid, (self.sim.rigid_solver,), frozenset((StateChange.GEOMETRY,))
+            )
+
     def update_rigid(self):
         for solver in self._rigid_solvers():
             for entity in solver.entities:
@@ -549,7 +634,7 @@ class RasterizerContext:
                             if len(geom_envs_idx) == 0:
                                 continue
 
-                            mesh = geom.get_trimesh()
+                            mesh = geom.trimesh
                             v_start = geom.vvert_start + custom_offset
                             v_end = geom.vvert_end + custom_offset
                             for i_b in geom_envs_idx:
@@ -617,60 +702,48 @@ class RasterizerContext:
             for i_plane in np.flatnonzero(batch.is_plane):
                 self.set_reflection_mat(geoms_T[i_plane])
 
-    def update_contact(self):
-        if self.sim.rigid_solver.is_active and any(link.visualize_contact for link in self.sim.rigid_solver.links):
-            # Extract all contact information at once
-            contacts_info_all = self.sim.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
+        if self.sim.rigid_solver in self.tracked_nodes:
+            self.tracked_nodes[self.sim.rigid_solver].update()
 
-            # Scale contact arrows by the parent link's overall size rather than the individual contacting geom, so
-            # they stay legible on links built from many small convex-decomposition pieces. The per-geom init AABBs
-            # are in each geom's local frame, so offset their corners by the geom pose to get the link-frame extent.
-            # This diagonal is constant, so compute it once and cache it.
-            geoms_aabb = qd_to_numpy(self.sim.rigid_solver.geoms_init_AABB)
-            links_init_AABB_size = np.zeros(self.sim.rigid_solver.n_links, dtype=gs.np_float)
-            for link in self.sim.rigid_solver.links:
-                if link.n_geoms == 0:
-                    continue
-                lower = np.full(3, np.inf, dtype=gs.np_float)
-                upper = np.full(3, -np.inf, dtype=gs.np_float)
-                for geom in link.geoms:
-                    corners = gu.transform_by_trans_quat(geoms_aabb[geom.idx], geom.init_pos, geom.init_quat)
-                    lower = np.minimum(lower, corners.min(axis=0))
-                    upper = np.maximum(upper, corners.max(axis=0))
-                links_init_AABB_size[link.idx] = np.linalg.norm(upper - lower)
+    def draw_rigid(self, envs_idx):
+        """Make the arrows showing the force and the normal of the contacts in the rendered environments 'envs_idx'.
 
-            for env_i, batch_idx in enumerate(self.rendered_envs_idx):
-                if self.sim.rigid_solver.n_envs > 0:
-                    contacts_info = {key: value[batch_idx] for key, value in contacts_info_all.items()}
-                else:
-                    contacts_info = contacts_info_all
+        Returns one (env_idx, mesh, seg_key) triple per arrow (see TrackedNodeList).
+        """
+        # Extract all contact information at once
+        contacts_info_all = self.sim.rigid_solver.collider.get_contacts(as_tensor=False, to_torch=False)
 
-                n_contacts = len(contacts_info["geom_a"])
-                if n_contacts == 0:
-                    continue
+        arrows = []
+        for env_i in envs_idx:
+            if self.sim.rigid_solver.n_envs > 0:
+                batch_idx = self.rendered_envs_idx[env_i]
+                contacts_info = {key: value[batch_idx] for key, value in contacts_info_all.items()}
+            else:
+                contacts_info = contacts_info_all
 
-                la_size = links_init_AABB_size[contacts_info["link_a"]]
-                lb_size = links_init_AABB_size[contacts_info["link_b"]]
-                arrow_scale = np.minimum(la_size, lb_size)
-                radius = np.minimum(arrow_scale * 0.04, 0.005)
-                contact_pos = contacts_info["position"]
-                contact_normal_scaled = contacts_info["normal"] * arrow_scale[:, None]
-                contact_force = contacts_info["force"]
+            n_contacts = len(contacts_info["geom_a"])
+            if n_contacts == 0:
+                continue
 
-                for i_c in range(n_contacts):
-                    for link_idx, sign in ((contacts_info["link_a"][i_c], -1), (contacts_info["link_b"][i_c], 1)):
-                        if self.sim.rigid_solver.links[link_idx].visualize_contact:
-                            self.draw_contact_arrow(
-                                pos=contact_pos[i_c], radius=radius[i_c], force=sign * contact_force[i_c], env_idx=env_i
-                            )
-                            self.draw_debug_arrow(
-                                pos=contact_pos[i_c],
-                                radius=radius[i_c],
-                                vec=-sign * contact_normal_scaled[i_c],
-                                color=(0.9, 0.0, 0.8, 1.0),
-                                persistent=False,
-                                env_idx=env_i,
-                            )
+            la_size = self.links_init_AABB_size[contacts_info["link_a"]]
+            lb_size = self.links_init_AABB_size[contacts_info["link_b"]]
+            arrow_scale = np.minimum(la_size, lb_size)
+            radius = np.minimum(arrow_scale * 0.04, 0.005)
+            contact_pos = contacts_info["position"]
+            contact_normal_scaled = contacts_info["normal"] * arrow_scale[:, None]
+            contact_force = contacts_info["force"]
+
+            for i_c in range(n_contacts):
+                for link_idx, sign in ((contacts_info["link_a"][i_c], -1), (contacts_info["link_b"][i_c], 1)):
+                    if self.sim.rigid_solver.links[link_idx].visualize_contact:
+                        for vec, color in (
+                            (sign * contact_force[i_c] * self.contact_force_scale, (0.0, 0.9, 0.8, 1.0)),
+                            (-sign * contact_normal_scaled[i_c], (0.9, 0.0, 0.8, 1.0)),
+                        ):
+                            arrow = self.make_debug_arrow(contact_pos[i_c], vec, radius[i_c], color, env_idx=env_i)
+                            if arrow is not None:
+                                arrows.append((env_i, arrow, None))
+        return arrows
 
     def on_mpm(self):
         if self.sim.mpm_solver.is_active:
@@ -689,6 +762,8 @@ class RasterizerContext:
                         self.add_static_node(
                             mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
                         )
+            if any(mpm_entity.surface.vis_mode in ("recon", "visual") for mpm_entity in self.sim.mpm_solver.entities):
+                self.tracked_nodes[self.sim.mpm_solver] = TrackedNodeList(self, self.draw_mpm)
 
             # boundary
             if self.visualize_mpm_boundary:
@@ -710,38 +785,48 @@ class RasterizerContext:
 
     def update_mpm(self):
         if self.sim.mpm_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
-            active_all = qd_to_numpy(self.sim.mpm_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            vverts_all = qd_to_numpy(self.sim.mpm_solver.vverts_render.pos)
-            for mpm_entity in self.sim.mpm_solver.entities:
-                for env_i, idx in enumerate(self.rendered_envs_idx):
-                    if mpm_entity.surface.vis_mode == "recon":
-                        mesh = pu.particles_to_mesh(
-                            positions=particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx][
-                                active_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
-                            ],
-                            radius=self.sim.mpm_solver.particle_radius,
-                            backend=mpm_entity.surface.recon_backend,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(mpm_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(mpm_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i))
-                    elif mpm_entity.surface.vis_mode == "particle":
-                        tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
+            if any(mpm_entity.surface.vis_mode == "particle" for mpm_entity in self.sim.mpm_solver.entities):
+                particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
+                for mpm_entity in self.sim.mpm_solver.entities:
+                    if mpm_entity.surface.vis_mode == "particle":
+                        for idx in self.rendered_envs_idx:
+                            tfs = np.tile(np.eye(4), (mpm_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
 
-                        node = self.static_nodes[(idx, mpm_entity.uid)]
-                        self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+                            node = self.static_nodes[(idx, mpm_entity.uid)]
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+            if self.sim.mpm_solver in self.tracked_nodes:
+                self.tracked_nodes[self.sim.mpm_solver].update()
 
-                    elif mpm_entity.surface.vis_mode == "visual":
-                        mpm_entity._vmesh.trimesh.vertices = vverts_all[
-                            mpm_entity.vvert_start : mpm_entity.vvert_end, idx
-                        ]
-                        self.add_dynamic_node(
-                            mpm_entity,
-                            pyrender.Mesh.from_trimesh(
-                                mpm_entity.vmesh.trimesh, smooth=mpm_entity.surface.smooth, envs=env_i
-                            ),
-                        )
+    def draw_mpm(self, envs_idx):
+        """Make the meshes of the MPM entities rendered as reconstructed or visual meshes, in environments 'envs_idx'.
+
+        Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
+        """
+        particles_all = qd_to_numpy(self.sim.mpm_solver.particles_render.pos)
+        active_all = qd_to_numpy(self.sim.mpm_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        vverts_all = qd_to_numpy(self.sim.mpm_solver.vverts_render.pos)
+        meshes = []
+        for mpm_entity in self.sim.mpm_solver.entities:
+            for env_i in envs_idx:
+                idx = self.rendered_envs_idx[env_i]
+                if mpm_entity.surface.vis_mode == "recon":
+                    mesh = pu.particles_to_mesh(
+                        positions=particles_all[mpm_entity.particle_start : mpm_entity.particle_end, idx][
+                            active_all[mpm_entity.particle_start : mpm_entity.particle_end, idx]
+                        ],
+                        radius=self.sim.mpm_solver.particle_radius,
+                        backend=mpm_entity.surface.recon_backend,
+                    )
+                    mesh.visual = mu.surface_uvs_to_trimesh_visual(mpm_entity.surface, n_verts=len(mesh.vertices))
+                    meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), mpm_entity.idx))
+                elif mpm_entity.surface.vis_mode == "visual":
+                    mpm_entity._vmesh.trimesh.vertices = vverts_all[mpm_entity.vvert_start : mpm_entity.vvert_end, idx]
+                    mesh = pyrender.Mesh.from_trimesh(
+                        mpm_entity.vmesh.trimesh, smooth=mpm_entity.surface.smooth, envs=env_i
+                    )
+                    meshes.append((env_i, mesh, mpm_entity.idx))
+        return meshes
 
     def on_sph(self):
         if self.sim.sph_solver.is_active:
@@ -760,6 +845,8 @@ class RasterizerContext:
                         self.add_static_node(
                             sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs, envs=env_i), i_b=idx
                         )
+            if any(sph_entity.surface.vis_mode == "recon" for sph_entity in self.sim.sph_solver.entities):
+                self.tracked_nodes[self.sim.sph_solver] = TrackedNodeList(self, self.draw_sph)
 
             # boundary
             if self.visualize_sph_boundary:
@@ -781,27 +868,42 @@ class RasterizerContext:
 
     def update_sph(self):
         if self.sim.sph_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
-            active_all = qd_to_numpy(self.sim.sph_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+            if any(sph_entity.surface.vis_mode == "particle" for sph_entity in self.sim.sph_solver.entities):
+                particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
+                for sph_entity in self.sim.sph_solver.entities:
+                    if sph_entity.surface.vis_mode == "particle":
+                        for idx in self.rendered_envs_idx:
+                            tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles_all[sph_entity.particle_start : sph_entity.particle_end, idx]
 
-            for sph_entity in self.sim.sph_solver.entities:
-                for env_i, idx in enumerate(self.rendered_envs_idx):
-                    if sph_entity.surface.vis_mode == "recon":
-                        mesh = pu.particles_to_mesh(
-                            positions=particles_all[sph_entity.particle_start : sph_entity.particle_end, idx][
-                                active_all[sph_entity.particle_start : sph_entity.particle_end, idx]
-                            ],
-                            radius=self.sim.sph_solver.particle_radius,
-                            backend=sph_entity.surface.recon_backend,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(sph_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(sph_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i))
-                    elif sph_entity.surface.vis_mode == "particle":
-                        tfs = np.tile(np.eye(4), (sph_entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = particles_all[sph_entity.particle_start : sph_entity.particle_end, idx]
+                            node = self.static_nodes[(idx, sph_entity.uid)]
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+            if self.sim.sph_solver in self.tracked_nodes:
+                self.tracked_nodes[self.sim.sph_solver].update()
 
-                        node = self.static_nodes[(idx, sph_entity.uid)]
-                        self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+    def draw_sph(self, envs_idx):
+        """Make the meshes of the SPH entities rendered as reconstructed meshes, in the environments 'envs_idx'.
+
+        Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
+        """
+        particles_all = qd_to_numpy(self.sim.sph_solver.particles_render.pos)
+        active_all = qd_to_numpy(self.sim.sph_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        meshes = []
+        for sph_entity in self.sim.sph_solver.entities:
+            if sph_entity.surface.vis_mode != "recon":
+                continue
+            for env_i in envs_idx:
+                idx = self.rendered_envs_idx[env_i]
+                mesh = pu.particles_to_mesh(
+                    positions=particles_all[sph_entity.particle_start : sph_entity.particle_end, idx][
+                        active_all[sph_entity.particle_start : sph_entity.particle_end, idx]
+                    ],
+                    radius=self.sim.sph_solver.particle_radius,
+                    backend=sph_entity.surface.recon_backend,
+                )
+                mesh.visual = mu.surface_uvs_to_trimesh_visual(sph_entity.surface, n_verts=len(mesh.vertices))
+                meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), sph_entity.idx))
+        return meshes
 
     def on_pbd(self):
         if self.sim.pbd_solver.is_active:
@@ -851,6 +953,8 @@ class RasterizerContext:
                             ),
                             i_b=idx,
                         )
+            if any(pbd_entity.surface.vis_mode == "recon" for pbd_entity in self.sim.pbd_solver.entities):
+                self.tracked_nodes[self.sim.pbd_solver] = TrackedNodeList(self, self.draw_pbd)
 
             # boundary
             if self.visualize_pbd_boundary:
@@ -872,29 +976,15 @@ class RasterizerContext:
         if self.sim.pbd_solver.is_active:
             particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos)
             particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel)
-            active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
             vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos)
             for pbd_entity in self.sim.pbd_solver.entities:
-                for env_i, idx in enumerate(self.rendered_envs_idx):
+                for idx in self.rendered_envs_idx:
                     particles_env = particles_all[:, idx]
                     particles_vel_env = particles_vel_all[:, idx]
-                    active_env = active_all[:, idx]
                     vverts_env = vverts_all[:, idx]
 
-                    if pbd_entity.surface.vis_mode == "recon":
-                        positions = particles_env[pbd_entity.particle_start : pbd_entity.particle_end][
-                            active_env[pbd_entity.particle_start : pbd_entity.particle_end]
-                        ]
-                        mesh = pu.particles_to_mesh(
-                            positions=positions,
-                            radius=self.sim.mpm_solver.particle_radius,
-                            backend=pbd_entity.surface.recon_backend,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i))
-
                     # TODO: need to support multi-env visulaization for tet mode (it's using static node)
-                    elif pbd_entity.surface.vis_mode == "particle":
+                    if pbd_entity.surface.vis_mode == "particle":
                         if self.render_particle_as == "sphere":
                             tfs = np.tile(np.eye(4), (pbd_entity.n_particles, 1, 1))
                             tfs[:, :3, 3] = particles_env[pbd_entity.particle_start : pbd_entity.particle_end]
@@ -922,6 +1012,33 @@ class RasterizerContext:
                         normal_data = self.jit.update_normal(node, update_data)
                         if normal_data is not None:
                             self.jit.update_buffer(node, "normal", normal_data)
+            if self.sim.pbd_solver in self.tracked_nodes:
+                self.tracked_nodes[self.sim.pbd_solver].update()
+
+    def draw_pbd(self, envs_idx):
+        """Make the meshes of the PBD entities rendered as reconstructed meshes, in the environments 'envs_idx'.
+
+        Returns one (env_idx, mesh, seg_key) triple per mesh (see TrackedNodeList).
+        """
+        particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos)
+        active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+        meshes = []
+        for pbd_entity in self.sim.pbd_solver.entities:
+            if pbd_entity.surface.vis_mode != "recon":
+                continue
+            for env_i in envs_idx:
+                idx = self.rendered_envs_idx[env_i]
+                positions = particles_all[pbd_entity.particle_start : pbd_entity.particle_end, idx][
+                    active_all[pbd_entity.particle_start : pbd_entity.particle_end, idx]
+                ]
+                mesh = pu.particles_to_mesh(
+                    positions=positions,
+                    radius=self.sim.pbd_solver.particle_radius,
+                    backend=pbd_entity.surface.recon_backend,
+                )
+                mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
+                meshes.append((env_i, pyrender.Mesh.from_trimesh(mesh, smooth=True, envs=env_i), pbd_entity.idx))
+        return meshes
 
     def on_fem(self):
         if self.sim.fem_solver.is_active:
@@ -966,51 +1083,66 @@ class RasterizerContext:
                         if normal_data is not None:
                             self.jit.update_buffer(node, "normal", normal_data)
 
+    def on_sensors(self):
+        solvers = tuple(solver for solver in (self.sim.rigid_solver, self.sim.kinematic_solver) if solver.is_active)
+        for sensor in self.sim._sensor_manager.sensors:
+            if sensor._options.draw_debug:
+                self.tracked_nodes[sensor] = TrackedNodeList(
+                    self, partial(sensor._draw_debug, self), solvers, sensor.invalidated_by
+                )
+
     def update_sensors(self):
-        self.sim._sensor_manager.draw_debug(self)
+        for sensor in self.sim._sensor_manager.sensors:
+            if sensor in self.tracked_nodes:
+                self.tracked_nodes[sensor].update()
 
     def on_lights(self):
         for light in self.lights:
             self.add_light(light)
 
-    def draw_debug_line(self, start, end, radius=0.002, color=(1.0, 0.0, 0.0, 1.0)):
+    def add_debug_node(self, node, persistent=True):
+        """Add a debug node made by a 'make_debug_*' method to the scene, and return it.
+
+        A persistent node stays until it is cleared (see 'clear_debug_object'), while any other node is removed at the
+        next step. A node drawn anew at every sync goes through TrackedNodeList instead.
+        """
+        if persistent:
+            self.add_external_node(node)
+        else:
+            self.add_dynamic_node(None, node)
+        return node
+
+    def make_debug_line(self, start, end, radius=0.002, color=(1.0, 0.0, 0.0, 1.0)):
+        """Make a line from 'start' to 'end' as a debug node, without adding it to the scene."""
         mesh = mu.create_line(
             tensor_to_array(start, dtype=np.float32), tensor_to_array(end, dtype=np.float32), radius, color
         )
-        node = pyrender.Mesh.from_trimesh(mesh, name=f"debug_line_{gs.UID()}", is_marker=True)
-        self.add_external_node(node)
-        return node
+        return pyrender.Mesh.from_trimesh(mesh, name=f"debug_line_{gs.UID()}", is_marker=True)
 
-    def draw_debug_arrow(
-        self, pos, vec=(0.0, 0.0, 1.0), radius=0.006, color=(1.0, 0.0, 0.0, 0.5), persistent=True, env_idx=None
-    ):
+    def make_debug_arrow(self, pos, vec=(0.0, 0.0, 1.0), radius=0.006, color=(1.0, 0.0, 0.0, 0.5), env_idx=None):
+        """Make an arrow from 'pos' along 'vec' as a debug node, without adding it to the scene, or None if 'vec' is 0.
+
+        An arrow with an environment index 'env_idx' is drawn in that environment only, offset to its position. An arrow
+        without one (None) is shared by all environments.
+        """
         vec = tensor_to_array(vec, dtype=np.float32)
         length = np.linalg.norm(vec)
-        if length > gs.EPS:
-            mesh = mu.create_arrow(length=length, radius=radius, body_color=color, head_color=color)
+        if length <= gs.EPS:
+            return None
+        mesh = mu.create_arrow(length=length, radius=radius, body_color=color, head_color=color)
+        pos = tensor_to_array(pos)
+        if env_idx is not None:
+            poses = np.zeros((len(self.rendered_envs_idx), 4, 4), dtype=np.float32)
+            gu.trans_R_to_T(pos, gu.z_up_to_R(vec), out=poses[env_idx])
+            envs = np.arange(len(self.rendered_envs_idx)) == env_idx
+        else:
+            poses = np.zeros((1, 4, 4), dtype=np.float32)
+            gu.trans_R_to_T(pos, gu.z_up_to_R(vec), out=poses[0])
+            envs = None
+        return pyrender.Mesh.from_trimesh(mesh, name=f"debug_arrow_{gs.UID()}", poses=poses, is_marker=True, envs=envs)
 
-            # An arrow of one environment is drawn in that environment alone, where that environment is. An arrow
-            # without environment is shared by all of them.
-            pos = tensor_to_array(pos)
-            if env_idx is not None:
-                poses = np.zeros((len(self.rendered_envs_idx), 4, 4), dtype=np.float32)
-                gu.trans_R_to_T(pos, gu.z_up_to_R(vec), out=poses[env_idx])
-                envs = np.arange(len(self.rendered_envs_idx)) == env_idx
-            else:
-                poses = np.zeros((1, 4, 4), dtype=np.float32)
-                gu.trans_R_to_T(pos, gu.z_up_to_R(vec), out=poses[0])
-                envs = None
-
-            node = pyrender.Mesh.from_trimesh(
-                mesh, name=f"debug_arrow_{gs.UID()}", poses=poses, is_marker=True, envs=envs
-            )
-            if persistent:
-                self.add_external_node(node)
-            else:
-                self.add_dynamic_node(None, node)
-            return node
-
-    def draw_debug_frame(self, T, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
+    def make_debug_frame(self, T, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
+        """Make a coordinate frame at the pose 'T' (one per rendered environment, or shared) as a debug node."""
         mesh = trimesh.creation.axis(origin_size=origin_size, axis_radius=axis_radius, axis_length=axis_length)
         if color is not None:
             visual = trimesh.visual.ColorVisuals()
@@ -1023,23 +1155,21 @@ class RasterizerContext:
             poses = np.tile(poses[np.newaxis], (n_envs, 1, 1))
         assert len(poses) == n_envs, "Inconsistent batch size."
 
-        node = pyrender.Mesh.from_trimesh(
+        return pyrender.Mesh.from_trimesh(
             mesh, name=f"debug_frame_{gs.UID()}", poses=poses, is_marker=True, envs=self.rendered_envs_mask
         )
-        self.add_external_node(node)
-        return node
 
-    def draw_debug_frames(self, poses, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
+    def make_debug_frames(self, poses, axis_length=1.0, origin_size=0.015, axis_radius=0.01, color=None):
+        """Make one coordinate frame per pose of 'poses' as a single debug node, without adding it to the scene."""
         mesh = trimesh.creation.axis(origin_size=origin_size, axis_radius=axis_radius, axis_length=axis_length)
         if color is not None:
             visual = trimesh.visual.ColorVisuals()
             visual._data["vertex_colors"] = np.tile(mu.color_f32_to_u8(color), (len(mesh.vertices), 1))
             mesh.visual = visual
-        node = pyrender.Mesh.from_trimesh(mesh, name=f"debug_frame_{gs.UID()}", poses=poses, is_marker=True)
-        self.add_external_node(node)
-        return node
+        return pyrender.Mesh.from_trimesh(mesh, name=f"debug_frame_{gs.UID()}", poses=poses, is_marker=True)
 
-    def draw_debug_mesh(self, mesh, pos=np.zeros(3), T=None):
+    def make_debug_mesh(self, mesh, pos=np.zeros(3), T=None):
+        """Make the trimesh 'mesh' at 'pos' or at the pose 'T' as a debug node, without adding it to the scene."""
         n_envs = len(self.rendered_envs_idx)
         if T is None:
             T = gu.trans_to_T(pos)
@@ -1048,17 +1178,12 @@ class RasterizerContext:
             poses = np.tile(poses[np.newaxis], (n_envs, 1, 1))
         assert len(poses) == n_envs, "Inconsistent batch size."
 
-        node = pyrender.Mesh.from_trimesh(
+        return pyrender.Mesh.from_trimesh(
             mesh, name=f"debug_mesh_{gs.UID()}", poses=poses, is_marker=True, envs=self.rendered_envs_mask
         )
-        self.add_external_node(node)
-        return node
 
-    def draw_contact_arrow(self, pos, radius=0.005, force=(0, 0, 1), color=(0.0, 0.9, 0.8, 1.0), env_idx=None):
-        length = (tensor_to_array(force) * self.contact_force_scale,)
-        self.draw_debug_arrow(pos, length, radius, color=color, persistent=False, env_idx=env_idx)
-
-    def draw_debug_sphere(self, pos, radius=0.01, color=(1.0, 0.0, 0.0, 0.5), persistent=True):
+    def make_debug_sphere(self, pos, radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
+        """Make a sphere at 'pos' (one per rendered environment, or shared) as a debug node."""
         mesh = mu.create_sphere(radius=radius, color=color)
 
         n_envs = len(self.rendered_envs_idx)
@@ -1067,7 +1192,7 @@ class RasterizerContext:
             poses = np.tile(poses[np.newaxis], (n_envs, 1, 1))
         assert len(poses) == n_envs, "Inconsistent batch size."
 
-        node = pyrender.Mesh.from_trimesh(
+        return pyrender.Mesh.from_trimesh(
             mesh,
             name=f"debug_sphere_{gs.UID()}",
             smooth=True,
@@ -1075,15 +1200,11 @@ class RasterizerContext:
             is_marker=True,
             envs=self.rendered_envs_mask,
         )
-        if persistent:
-            self.add_external_node(node)
-        else:
-            self.add_dynamic_node(None, node)
-        return node
 
-    def draw_debug_pyramid(self, T, base_width=0.05, base_height=0.05, height=0.05, color=(1.0, 1.0, 1.0, 0.5)):
+    def make_debug_pyramid(self, T, base_width=0.05, base_height=0.05, height=0.05, color=(1.0, 1.0, 1.0, 0.5)):
         """
-        Draw a debug pyramid representing a camera frustum.
+        Make a pyramid representing a camera frustum as a debug node, without adding it to the scene.
+
         Parameters
         ----------
         T: array-like, shape (4, 4), optional
@@ -1129,30 +1250,24 @@ class RasterizerContext:
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         mesh.visual.face_colors = np.tile(mu.color_f32_to_u8(color), (len(faces), 1))
 
-        node = pyrender.Mesh.from_trimesh(mesh, name=f"debug_pyramid_{gs.UID()}", smooth=False, is_marker=True)
-        self.add_external_node(node)
-        return node
+        return pyrender.Mesh.from_trimesh(mesh, name=f"debug_pyramid_{gs.UID()}", smooth=False, is_marker=True)
 
-    def draw_debug_spheres(self, poss, radius=0.01, color=(1.0, 0.0, 0.0, 0.5), persistent=True):
+    def make_debug_spheres(self, poss, radius=0.01, color=(1.0, 0.0, 0.0, 0.5)):
+        """Make one sphere per position of 'poss' as a single debug node, without adding it to the scene."""
         mesh = mu.create_sphere(radius=radius, color=color)
         poses = gu.trans_to_T(tensor_to_array(poss))
-        node = pyrender.Mesh.from_trimesh(
+        return pyrender.Mesh.from_trimesh(
             mesh, name=f"debug_spheres_{gs.UID()}", smooth=True, poses=poses, is_marker=True
         )
-        if persistent:
-            self.add_external_node(node)
-        else:
-            self.add_dynamic_node(None, node)
-        return node
 
-    def draw_debug_box(self, bounds, color=(1.0, 0.0, 0.0, 1.0), wireframe=True, wireframe_radius=0.002):
+    def make_debug_box(self, bounds, color=(1.0, 0.0, 0.0, 1.0), wireframe=True, wireframe_radius=0.002):
+        """Make the axis-aligned box 'bounds' as a debug node, without adding it to the scene."""
         bounds = tensor_to_array(bounds)
         mesh = mu.create_box(bounds=bounds, wireframe=wireframe, wireframe_radius=wireframe_radius, color=color)
-        node = pyrender.Mesh.from_trimesh(mesh, name=f"debug_box_{gs.UID()}", is_marker=True)
-        self.add_external_node(node)
-        return node
+        return pyrender.Mesh.from_trimesh(mesh, name=f"debug_box_{gs.UID()}", is_marker=True)
 
-    def draw_debug_points(self, poss, colors=(1.0, 0.0, 0.0, 0.5)):
+    def make_debug_points(self, poss, colors=(1.0, 0.0, 0.0, 0.5)):
+        """Make the points 'poss' as a debug node, without adding it to the scene."""
         poss = tensor_to_array(poss)
         colors = tensor_to_array(colors)
         if len(colors.shape) == 1:
@@ -1160,9 +1275,7 @@ class RasterizerContext:
         elif len(colors.shape) == 2:
             assert colors.shape[0] == len(poss)
 
-        node = pyrender.Mesh.from_points(poss, name=f"debug_box_{gs.UID()}", colors=colors, is_marker=True)
-        self.add_external_node(node)
-        return node
+        return pyrender.Mesh.from_points(poss, name=f"debug_box_{gs.UID()}", colors=colors, is_marker=True)
 
     def update_debug_objects(self, objs, poses):
         for obj, pose in zip(objs, poses):
@@ -1189,10 +1302,18 @@ class RasterizerContext:
     def clear_debug_objects(self):
         self.clear_external_nodes()
 
-    def update(self, force_render: bool = False):
+    def update(self, force_render: bool = False, solvers=None):
+        """
+        Sync the nodes with the state of the scene.
+
+        `solvers` restricts the sync to the nodes of those solvers, whose state changed since the last sync, the others
+        being current. A sync after a step updates the nodes of every solver, whatever `solvers`.
+        """
         # Early return if already updated previously
         if not force_render and self._t >= self.scene.sim.cur_step_global:
             return
+        if self._t < self.scene.sim.cur_step_global:
+            solvers = None
 
         # The interactive viewer draws from its own thread whatever is uploaded here
         with self.scene._visualizer.viewer_lock:
@@ -1203,19 +1324,14 @@ class RasterizerContext:
             self.clear_dynamic_nodes(only_outdated=True)
 
             # Force updating rendering-only quantities that are not updated automatically during simulation
-            self.visualizer.update_visual_states(force_render)
+            self.visualizer.update_visual_states(force_render, solvers)
 
             # Reset scene bounds to trigger recomputation. They are involved in shadow map.
             self._scene._bounds = None
 
-            self.update_link_frame()
-            self.update_tool()
-            self.update_rigid()
-            self.update_contact()
-            self.update_mpm()
-            self.update_sph()
-            self.update_pbd()
-            self.update_fem()
+            for update, update_solvers in self._updates_solvers:
+                if solvers is None or not solvers.isdisjoint(update_solvers):
+                    update()
             self.update_sensors()
 
             # Update camera fructum

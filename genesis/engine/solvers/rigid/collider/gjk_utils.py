@@ -52,21 +52,11 @@ def func_triangle_affine_coords(
     """
     Compute the affine coordinates of the point with respect to the triangle.
     """
-    # Compute minors of the triangle vertices
-    ms = gs.qd_vec3(0.0, 0.0, 0.0)
-    for i in qd.static(range(3)):
-        i1, i2 = (i + 1) % 3, (i + 2) % 3
-        if i == 1:
-            i1, i2 = i2, i1
-
-        ms[i] = (
-            tri_v2[i1] * tri_v3[i2]
-            - tri_v2[i2] * tri_v3[i1]
-            - tri_v1[i1] * tri_v3[i2]
-            + tri_v1[i2] * tri_v3[i1]
-            + tri_v1[i1] * tri_v2[i2]
-            - tri_v1[i2] * tri_v2[i1]
-        )
+    edge_1 = tri_v2 - tri_v1
+    edge_2 = tri_v3 - tri_v1
+    point_local = point - tri_v1
+    ms = edge_1.cross(edge_2)
+    ms[1] = -ms[1]
 
     # Exclude one of the axes with the largest projection using the minors of the above linear system. The scan is
     # unrolled so that every read of [ms] carries a compile-time index.
@@ -88,26 +78,10 @@ def func_triangle_affine_coords(
             m_max = ms[i]
             i_x, i_y = i_x_i, i_y_i
 
-    cs = gs.qd_vec3(0.0, 0.0, 0.0)
-    for i in qd.static(range(3)):
-        tv1, tv2 = tri_v2, tri_v3
-        if i == 1:
-            tv1, tv2 = tri_v3, tri_v1
-        elif i == 2:
-            tv1, tv2 = tri_v1, tri_v2
-
-        # Corresponds to the signed area of 2-simplex (triangle): (point, tv1, tv2)
-        cs[i] = (
-            point[i_x] * tv1[i_y]
-            + point[i_y] * tv2[i_x]
-            + tv1[i_x] * tv2[i_y]
-            - point[i_x] * tv2[i_y]
-            - point[i_y] * tv1[i_x]
-            - tv2[i_x] * tv1[i_y]
-        )
-
-    # Affine coordinates are computed as: [ l1, l2, l3 ] = [ C1 / m_max, C2 / m_max, C3 / m_max ]
-    return cs / m_max
+    # Relative coordinates avoid cancellation between products of translated vertices
+    c_1 = (point_local[i_x] * edge_2[i_y] - point_local[i_y] * edge_2[i_x]) / m_max
+    c_2 = (edge_1[i_x] * point_local[i_y] - edge_1[i_y] * point_local[i_x]) / m_max
+    return gs.qd_vec3(1.0 - c_1 - c_2, c_1, c_2)
 
 
 @qd.func

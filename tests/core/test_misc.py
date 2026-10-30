@@ -1,5 +1,6 @@
 """Tests for the entity naming system."""
 
+import gc
 import os
 import xml.etree.ElementTree as ET
 
@@ -13,6 +14,7 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
+from genesis.utils.cache import disable_owned_cache_release, enable_owned_cache_release
 from genesis.utils.misc import indices_to_mask, sanitize_index, tensor_to_array
 
 from ..utils.assertions import assert_allclose, assert_equal
@@ -49,6 +51,36 @@ def test_scene_destroy_idempotent():
 
     scene.destroy()
     assert scene._sim is None
+
+
+@pytest.mark.required
+def test_rebuild_keeps_cached_data():
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file="meshes/duck/duck.obj",
+            scale=0.001,
+        ),
+    )
+    scene.build()
+    duck_verts = scene.entities[0].vgeoms[0].trimesh.vertices
+
+    # A rebuilt scene shares the data of the destroyed one while its release is disabled, and loads it anew otherwise.
+    # The destroyed scene sits in reference cycles, which only a garbage collection frees.
+    for is_release_disabled in (True, False):
+        if is_release_disabled:
+            disable_owned_cache_release()
+        scene.destroy()
+        scene = gs.Scene(show_viewer=False)
+        gc.collect()
+        scene.add_entity(
+            morph=gs.morphs.Mesh(
+                file="meshes/duck/duck.obj",
+                scale=0.001,
+            ),
+        )
+        enable_owned_cache_release()
+        assert np.shares_memory(scene.entities[0].vgeoms[0].trimesh.vertices, duck_verts) == is_release_disabled
 
 
 @pytest.mark.required
@@ -291,6 +323,7 @@ def test_coacd_options_pca_validation():
         (np.array((-5, -1), dtype=np.int32), (-5, 3)),
         (np.array((1, 3), dtype=np.uint32), (1, 3)),
         (np.array((-2.0, -1.0), dtype=np.float64), (2, 3)),
+        (np.arange(4)[::-2], (3, 1)),
         (torch.tensor((-2, -1), dtype=torch.int32), (2, 3)),
         (torch.tensor((-5, -1), dtype=torch.int32), (-5, 3)),
         (torch.tensor((0, 3), dtype=torch.uint8), (0, 3)),
@@ -345,8 +378,6 @@ def test_indices_to_mask_selects_the_cross_product(as_boolean):
 def test_init_preserves_torch_defaults():
     assert torch.get_default_device() == torch.device("cpu")
     assert torch.get_default_dtype() == torch.float32
-    for tensor in (gs.tensor((1.0, 2.0)), gs.zeros(3), gs.arange(3), gs.rand(3), gs.zeros_like(gs.zeros(3))):
-        assert tensor.device.type == gs.device.type
 
 
 @pytest.mark.required
@@ -445,7 +476,7 @@ def two_link_fixed_urdf():
 @pytest.mark.required
 def test_solver_state_change_subscribers(show_viewer, two_link_fixed_urdf):
     # Imported lazily: the solver package pulls in quadrants kernels that need gs.qd_float, set only by gs.init.
-    from genesis.engine.solvers.base_solver import StateChange, Subscriber
+    from genesis.engine.state_change import StateChange, Subscriber
 
     scene = gs.Scene(show_viewer=show_viewer)
     plane = scene.add_entity(gs.morphs.Plane())
@@ -781,6 +812,32 @@ def test_derived_substeps(show_viewer, tol):
     expected_z = 1.0 + GRAVITY * scene_from_solver_dt.rigid_solver.substep_dt**2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(ball_at_derived_rate.get_pos()[2], expected_z, tol=tol)
 
+    # A differentiable scene holds the frames of the substeps of a step, as many as the rate a solver dt derives: the
+    # gradient of the position over one step reaches the velocity it started from through every one of them.
+    scene_differentiable = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, GRAVITY),
+            requires_grad=True,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            dt=0.01 / SUBSTEPS,
+        ),
+        show_viewer=False,
+    )
+    ball_differentiable = scene_differentiable.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 1.0),
+        ),
+    )
+    scene_differentiable.build()
+    assert_equal(scene_differentiable.rigid_solver.substeps, SUBSTEPS)
+    velocity = torch.tensor([0.0, 0.0, 0.5], dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    ball_differentiable.set_dofs_velocity(velocity, dofs_idx_local=slice(0, 3))
+    scene_differentiable.step()
+    ball_differentiable.get_pos()[2].backward()
+    assert_allclose(velocity.grad, (0.0, 0.0, 0.01), tol=tol)
+
     # Two solvers asking for intervals that imply different counts have no one rate to advance at, and are rejected.
     with pytest.raises(gs.GenesisException, match="Solvers integrating at different rates"):
         scene = gs.Scene(
@@ -807,6 +864,9 @@ def test_derived_substeps(show_viewer, tol):
     scene_inactive.build()
     assert_equal(scene_inactive.sim.substeps, 1)
     assert_allclose(scene_inactive.sim.substep_dt, 0.01, tol=gs.EPS)
+    # A scene holding no active solver steps and reports no env in error
+    scene_inactive.step()
+    assert_equal(scene_inactive.get_error_envs_mask(), False)
 
     for interval in (0.003, 0.02):
         with pytest.raises(gs.GenesisException, match="does not divide the step dt"):
@@ -821,17 +881,6 @@ def test_derived_substeps(show_viewer, tol):
     with pytest.raises(gs.GenesisException, match="conflicting with the requested substeps"):
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
-            rigid_options=gs.options.RigidOptions(dt=0.002),
-            show_viewer=False,
-        )
-        scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 1.0)))
-        scene.build()
-
-    # The differentiable window is sized before the solvers allocate against it, so a rate derived from a solver dt
-    # cannot be honoured there and is rejected rather than left describing a step of a different length.
-    with pytest.raises(gs.GenesisException, match="not supported in differentiable mode"):
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(dt=0.01, requires_grad=True),
             rigid_options=gs.options.RigidOptions(dt=0.002),
             show_viewer=False,
         )

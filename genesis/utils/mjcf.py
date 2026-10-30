@@ -1,16 +1,16 @@
 import os
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from itertools import chain
 from bisect import bisect_right
+from itertools import chain
+from pathlib import Path
+
+import numpy as np
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
-
-import numpy as np
 import trimesh
-from trimesh.visual.texture import TextureVisuals
 from PIL import Image
+from trimesh.visual.texture import TextureVisuals
 
 import genesis as gs
 from genesis.constants import XACRO_FORMAT
@@ -19,7 +19,7 @@ from genesis.ext import urdfpy
 from . import geom as gu
 from . import urdf as uu
 from .collision import solve_contype_conaffinity
-from .misc import get_assets_dir, redirect_libc_stderr
+from .misc import get_assets_dir, redirect_libc_stderr, unique_rows
 
 
 MIN_TIMECONST = np.finfo(np.double).eps
@@ -654,7 +654,7 @@ def parse_geom(mj, i_g, scale, surface, xml_path):
             uv = None
 
         pairs = np.stack(index_faces, axis=1)  # (face_num * 3, 2 or 3)
-        uniq, inv = np.unique(pairs, axis=0, return_inverse=True)
+        uniq, _, inv, _ = unique_rows(pairs)
 
         vertices = vertices[uniq[:, 0]]
         normals = normals[uniq[:, 1]]

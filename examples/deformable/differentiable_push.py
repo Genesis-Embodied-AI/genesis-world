@@ -37,17 +37,20 @@ def main():
         )
     )
     stick = scene.add_entity(
-        material=gs.materials.Tool(
-            friction=8.0,
-        ),
         morph=gs.morphs.Mesh(
             file="meshes/stirrer.obj",
-            scale=0.6,
+            scale=1.0,
             pos=(0.5, 0.5, 0.05),
             euler=(90.0, 0.0, 0.0),
         ),
+        # Heavy enough for the explicit coupling impulse of a high friction to stay small next to its momentum
+        material=gs.materials.Rigid(
+            rho=1e6,
+            coup_friction=8.0,
+            gravity_compensation=1.0,
+        ),
         surface=gs.surfaces.Default(
-            color=(1.0, 1.0, 1.0, 1.0),
+            color=(0.85, 0.2, 0.15, 1.0),
         ),
     )
     obj1 = scene.add_entity(
@@ -96,14 +99,19 @@ def main():
 
     # Two independent forward/backward passes, each restarting from the same initial state.
     horizon = 150 if "PYTEST_VERSION" not in os.environ else 5
-    v_list = [gs.tensor([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]], requires_grad=True) for _ in range(horizon)]
+    v_list = [
+        torch.tensor([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]], dtype=gs.tc_float, device=gs.device, requires_grad=True)
+        for _ in range(horizon)
+    ]
     for _ in range(2):
         scene.reset()
-        init_pos = gs.tensor([[0.3, 0.1, 0.28], [0.3, 0.1, 0.5]], requires_grad=True)
-        stick.set_position(init_pos)
-        pos_obj1_init = gs.tensor([0.3, 0.3, 0.1], requires_grad=True)
+        init_pos = torch.tensor(
+            [[0.3, 0.19, 0.1], [0.3, 0.19, 0.5]], dtype=gs.tc_float, device=gs.device, requires_grad=True
+        )
+        stick.set_pos(init_pos)
+        pos_obj1_init = torch.tensor([0.3, 0.3, 0.1], dtype=gs.tc_float, device=gs.device, requires_grad=True)
         obj1.set_position(pos_obj1_init)
-        v_obj1_init = gs.tensor([0.0, -1.0, 0.0], requires_grad=True)
+        v_obj1_init = torch.tensor([0.0, -1.0, 0.0], dtype=gs.tc_float, device=gs.device, requires_grad=True)
         obj1.set_velocity(v_obj1_init)
 
         # forward pass
@@ -111,21 +119,21 @@ def main():
         timer = gs.tools.Timer()
         loss = 0.0
         for i, v_i in enumerate(v_list):
-            stick.set_velocity(vel=v_i)
+            stick.set_dofs_velocity(v_i, dofs_idx_local=slice(0, 3))
 
             scene.step()
 
             # you can use a scene_state
             if i == 25:
                 # compute loss
-                goal = gs.tensor([0.5, 0.8, 0.05])
+                goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
                 mpm_particles = scene.get_state().solvers_state[scene.solvers.index(scene.mpm_solver)]
                 loss += torch.pow(mpm_particles.pos[mpm_particles.active == 1] - goal, 2).sum()
 
             # you can also use an entity's state
             if i == horizon - 1:
                 # compute loss
-                goal = gs.tensor([0.5, 0.8, 0.05])
+                goal = torch.tensor([0.5, 0.8, 0.05], dtype=gs.tc_float, device=gs.device)
                 state = obj1.get_state()
                 loss += torch.pow(state.pos - goal, 2).sum()
 
@@ -136,8 +144,8 @@ def main():
         timer.stamp("backward took: ")
         for v_i in v_list:
             print(v_i.grad)
-            v_i.zero_grad()
-        init_pos.zero_grad()
+            v_i.grad = None
+        init_pos.grad = None
         print(loss.item())
 
 

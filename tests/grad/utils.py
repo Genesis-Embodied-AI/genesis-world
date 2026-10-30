@@ -72,26 +72,26 @@ def make_diff_scene_pair(
 def assert_grad_matches_fd(
     pair, inputs, apply_fn, loss_fn, *, rtol, atol, eps, n_steps=None, setup_fn=None, step_fn=None
 ):
-    """Central finite-difference check of a tracked setter's reverse-mode gradient.
+    """Check the reverse-mode gradient of the inputs given to a rollout against central finite differences (FD).
 
-    Input i of `inputs` is applied via `apply_fn(entity, x)` before step i and receives its own adjoint. The scene
-    runs `n_steps` steps (default len(inputs)); extra steps run without re-applying. `setup_fn(scene, entity)` runs
-    once after reset for untracked initialization; `step_fn(entity, i_step)` runs before every step on both scenes
-    for undifferentiated per-step scenario commands (e.g. PD targets). The FD reference perturbs each input entry in
-    turn, so the cost is O(n_steps * total input size). rtol / atol / eps are per-scenario, pinned to the measured
-    finite-difference floor."""
-    base = [np.array(inp, dtype=np.float64) for inp in inputs]
+    Input i of `inputs` is applied via `apply_fn(entity, x)` before step i and receives its own adjoint, None for a step
+    given no input. The scene runs `n_steps` steps (default len(inputs)), the extra ones without input.
+    `setup_fn(scene, entity)` runs once after reset, for initialization without gradient. `step_fn(entity, i_step)` runs
+    before every step on both scenes, for per-step scenario commands without gradient (e.g. a target overwriting a
+    tracked one). The FD reference perturbs each input entry in turn, so the cost is O(n_steps * total input size).
+    rtol / atol / eps are per-scenario, pinned to the measured finite-difference floor."""
+    base = [None if inp is None else np.array(inp, dtype=np.float64) for inp in inputs]
     total_steps = len(base) if n_steps is None else n_steps
 
     # Analytical pass on the diff-mode scene: apply each tracked input before its step, then backprop the loss.
     pair.scene_ana.reset()
     if setup_fn is not None:
         setup_fn(pair.scene_ana, pair.entity_ana)
-    x_anas = []
+    x_anas = {}
     for i_step in range(total_steps):
-        if i_step < len(base):
-            x = gs.tensor(base[i_step], dtype=gs.tc_float, requires_grad=True)
-            x_anas.append(x)
+        if i_step < len(base) and base[i_step] is not None:
+            x = torch.tensor(base[i_step], dtype=gs.tc_float, device=gs.device, requires_grad=True)
+            x_anas[i_step] = x
             apply_fn(pair.entity_ana, x)
         if step_fn is not None:
             step_fn(pair.entity_ana, i_step)
@@ -99,14 +99,14 @@ def assert_grad_matches_fd(
     loss = loss_fn(pair.scene_ana, pair.entity_ana)
     assert loss.requires_grad, "loss does not require grad - output is not grad-aware"
     loss.backward()
-    ana_grads = []
-    for i_step, x in enumerate(x_anas):
+    ana_grads = {}
+    for i_step, x in x_anas.items():
         assert x.grad is not None, f"input {i_step}: x.grad is None after backward"
-        ana_grads.append(tensor_to_array(x.grad))
+        ana_grads[i_step] = tensor_to_array(x.grad)
 
     # Finite-difference reference on the production scene: perturb each entry of each input by +/- eps, re-run the
     # full trajectory for both signs, and central-difference the loss.
-    for i_input in range(len(base)):
+    for i_input in x_anas:
         fd_grad = np.zeros_like(base[i_input])
         for i_entry in range(base[i_input].size):
             perturbed = []
@@ -115,7 +115,7 @@ def assert_grad_matches_fd(
                 if setup_fn is not None:
                     setup_fn(pair.scene_fd, pair.entity_fd)
                 for i_step in range(total_steps):
-                    if i_step < len(base):
+                    if i_step < len(base) and base[i_step] is not None:
                         inp = base[i_step].copy()
                         if i_step == i_input:
                             inp.reshape(-1)[i_entry] += sign * eps

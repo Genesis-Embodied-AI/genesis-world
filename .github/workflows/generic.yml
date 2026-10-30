@@ -68,12 +68,10 @@ jobs:
       HF_HUB_DOWNLOAD_TIMEOUT: "60"
       FORCE_COLOR: "1"
       PY_COLORS: "1"
-      GS_CACHE_FILE_PATH: ".cache/genesis"
       GS_ENABLE_NDARRAY: ${{ matrix.GS_ENABLE_NDARRAY }}
       GS_TORCH_FORCE_CPU_DEVICE: ${{ startsWith(matrix.OS, 'macos-') && '1' || '0' }}
       QD_OFFLINE_CACHE: "1"
       QD_OFFLINE_CACHE_CLEANING_POLICY: "never"
-      QD_OFFLINE_CACHE_FILE_PATH: ".cache/quadrants"
       QD_ENABLE_CUDA: ${{ matrix.GS_BACKEND == 'gpu' && '1' || '0' }}
       QD_ENABLE_AMDGPU: ${{ matrix.GS_BACKEND == 'gpu' && '1' || '0' }}
       QD_ENABLE_METAL: ${{ matrix.GS_BACKEND == 'gpu' && '1' || '0' }}
@@ -131,7 +129,13 @@ jobs:
           python -m pip install --upgrade pip setuptools pkg-info wheel
 
           # FIXME: Must install torch>2.9.1 to support zerocopy on Apple Metal
-          pip3 install torch --upgrade --index-url https://download.pytorch.org/whl/cpu
+          TORCH_SPEC="torch"
+          if [[ "${{ matrix.OS }}" == macos-* ]] ; then
+            # FIXME: quadrants#1017 - Quadrants Metal interop crashes without Torch MPS device, which torch>=2.15 no
+            # longer exposes on the virtualized GPU of macOS runners.
+            TORCH_SPEC="torch<2.15"
+          fi
+          pip3 install "${TORCH_SPEC}" --upgrade --index-url https://download.pytorch.org/whl/cpu
       - name: Install Genesis
         shell: bash
         run: |
@@ -147,42 +151,18 @@ jobs:
           # (test_recorders.py::test_plotter). Pin below 3.11 until the snapshot is regenerated.
           pip install "matplotlib<3.11"
 
-      - name: Get artifact prefix name
-        id: artifact_prefix
-        shell: bash
-        run: |
-          OS_FAMILY=$(python -c "import platform; print(platform.system())")
-          MACHINE_ARCH=$(python -c "import platform; print(platform.machine())")
-          QUADRANTS_VERSION=$(python -c "import importlib.metadata ; print(importlib.metadata.version('quadrants'))")
-          echo "ARTIFACT_PREFIX=${OS_FAMILY}-${MACHINE_ARCH}-${QUADRANTS_VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Restore Quadrants Kernel Cache
-        if: ${{ always() && steps.artifact_prefix.outputs.ARTIFACT_PREFIX != '' }}
-        uses: actions/cache/restore@v4
-        with:
-          path: .cache
-          key: ${{ steps.artifact_prefix.outputs.ARTIFACT_PREFIX }}
-          restore-keys: |
-            ${{ steps.artifact_prefix.outputs.ARTIFACT_PREFIX }}-
-
       - name: Run unit tests
         run: |
-          pytest -v -ra --logical --dev --backend ${{ matrix.GS_BACKEND }} -m 'required and not slow' --forked ./tests
+          pytest -v -ra --logical ${{ matrix.GS_ENABLE_NDARRAY != '0' && '--dev' || '' }} --backend ${{ matrix.GS_BACKEND }} -m 'required and not slow' --forked --failure-artifacts-dir "${{ runner.temp }}/failure_artifacts" ./tests
 
-      - name: Save Updated Quadrants Kernel Cache
-        if: >-
-          ${{ always() &&
-              (matrix.OS == 'ubuntu-24.04' || matrix.OS == 'ubuntu-24.04-arm' || matrix.OS == 'macos-15' || matrix.OS == 'windows-2025') &&
-              matrix.PYTHON_VERSION == '3.12' &&
-              matrix.GS_BACKEND == 'cpu' &&
-              matrix.GS_ENABLE_NDARRAY == '1' &&
-              steps.artifact_prefix.outputs.ARTIFACT_PREFIX != '' }}
-        uses: actions/cache/save@v4
+      # The image a mismatching snapshot test rendered
+      - name: Upload the artifacts of the failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          path: .cache
-          # Note that it is necessary to create a new archive systematically for now:
-          # See: https://github.com/actions/cache/issues/1594
-          key: ${{ steps.artifact_prefix.outputs.ARTIFACT_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: failure-artifacts-${{ matrix.OS }}-${{ matrix.PYTHON_VERSION }}-${{ matrix.GS_BACKEND }}-${{ matrix.GS_ENABLE_NDARRAY == '0' && 'field' || 'ndarray' }}
+          path: ${{ runner.temp }}/failure_artifacts
+          if-no-files-found: ignore
 
   publish-pypi:
     name: Publish on PyPI

@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import torch
 from go2_env import Go2Env
@@ -131,7 +132,17 @@ def main():
         show_viewer=True,
     )
 
-    policy = torch.jit.load(f"./backflip/{args.exp_name}.pt")
+    policy = torch.nn.Sequential(
+        torch.nn.Linear(obs_cfg["num_obs"], 512),
+        torch.nn.ELU(),
+        torch.nn.Linear(512, 256),
+        torch.nn.ELU(),
+        torch.nn.Linear(256, 128),
+        torch.nn.ELU(),
+        torch.nn.Linear(128, env_cfg["num_actions"]),
+    )
+    checkpoint_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backflip", f"{args.exp_name}.pt")
+    policy.load_state_dict(torch.load(checkpoint_path, weights_only=True))
     policy.to(device=gs.device)
 
     obs = env.reset()

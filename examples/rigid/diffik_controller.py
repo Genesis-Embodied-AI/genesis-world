@@ -67,6 +67,8 @@ def main():
     end_effector_link = robot_config["end_effector_link"]
     ee_link = robot.get_link(end_effector_link)
 
+    # The poses follow the target along a continuous path, so they are shown at the pace of the simulation
+    rate = gs.tools.Rate(1.0 / scene.dt)
     for i in range(0, 2000):
         target_pos = center + np.array([np.cos(i / 360 * np.pi), np.sin(i / 360 * np.pi), 0]) * r
 
@@ -87,7 +89,8 @@ def main():
         q = robot.get_qpos().cpu().numpy() + dq
 
         robot.set_qpos(q)
-        scene.visualizer.update(force=True)
+        if args.vis:
+            rate.sleep()
 
 
 if __name__ == "__main__":

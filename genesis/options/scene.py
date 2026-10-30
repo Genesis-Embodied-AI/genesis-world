@@ -18,7 +18,6 @@ from .solvers import (
     SFOptions,
     SimOptions,
     SPHOptions,
-    ToolOptions,
 )
 from .vis import ViewerOptions, VisOptions
 
@@ -36,7 +35,6 @@ class SceneOptions(Options):
     """
 
     sim: SimOptions = Field(default_factory=SimOptions)
-    tool: ToolOptions = Field(default_factory=ToolOptions)
     rigid: RigidOptions = Field(default_factory=RigidOptions)
     kinematic: KinematicOptions = Field(default_factory=KinematicOptions)
     mpm: MPMOptions = Field(default_factory=MPMOptions)

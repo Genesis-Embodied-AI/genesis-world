@@ -11,10 +11,15 @@ from ..utils.assets import get_hf_dataset
 
 
 @pytest.mark.required
-def test_physics_parity(show_viewer, tol):
+@pytest.mark.parametrize("broadphase_traversal", [gs.broadphase_traversal.SAP, gs.broadphase_traversal.ALL_VS_ALL])
+def test_physics_parity(fixed_base_dual_arm, fixed_base_dual_arm_high_damping, broadphase_traversal, show_viewer, tol):
     # Uses the fixed-child mesh objects from 'test_convexify' (offset center of mass, distinct mass) so the per-env
     # parity check exercises the inertia alignment, not just trivially-symmetric primitives.
     N_STEPS = 100
+    # The arms of every dual arm variant are still falling apart from each other after these steps. Once they press
+    # against each other, friction leaves a whole range of rest configurations to choose from, which the rounding of
+    # each simulation picks, so the dual arms are compared with their references before.
+    N_STEPS_FALLING = 40
     DROP_HEIGHT = 0.2
     VARIANTS = (("mug_1", "output.xml"), ("donut_0", "output.xml"), ("cup_2", "model.xml"), ("apple_15", "model.xml"))
     # Divergent per-variant yaw offset, stripped to identity by the relative getter and carried by the world frame.
@@ -22,16 +27,79 @@ def test_physics_parity(show_viewer, tol):
     OFFSET_EULERS = ((0.0, 0.0, 30.0), (0.0, 0.0, -45.0), (0.0, 0.0, 90.0), (0.0, 0.0, -120.0))
     # Distinct per-variant placement, dispatched per environment.
     POSITIONS = ((0.0, 0.0, DROP_HEIGHT), (0.2, 0.0, DROP_HEIGHT), (0.0, 0.2, DROP_HEIGHT), (0.2, 0.2, DROP_HEIGHT))
-    # The homogeneous references live in the same scene, offset far enough that no entity ever interacts with
-    # another: a single build compiles one kernel set instead of one per scene.
+    # The homogeneous references live in the same scene, offset far enough that no entity interacts with those of
+    # another offset: a single build compiles one kernel set instead of one per scene. The references at the offset
+    # 'i_env' replicate the environment 'i_env' of the heterogeneous entities.
     REFERENCE_OFFSETS = ((10.0, 0.0, 0.0), (20.0, 0.0, 0.0), (30.0, 0.0, 0.0), (40.0, 0.0, 0.0))
+    # Beside the objects, the arms of an articulated heterogeneous entity fall against each other, and cubes of a
+    # heterogeneous pool rest on its torso, whose top lies 0.05 above its center at unit scale. The dual arm variants
+    # differ in their shoulder damping, scale and fixed base pose. The dual arm pool is smaller than the cube pool, so
+    # that every dual arm variant meets several cube variants: environments 0-1 carry the first dual arm variant, and
+    # environments 2-3 the second one. The geoms of a variant an environment does not carry stay at the initial pose of
+    # the variant it carries, so a cube starting on the torso leaves the larger cube variants penetrating the torso in
+    # its environment, where they must not collide.
+    DUAL_ARM_POSITIONS = ((1.0, 0.0, 0.5), (1.0, 0.1, 0.6))
+    DUAL_ARM_EULERS = ((0.0, 0.0, 0.0), (0.0, 0.0, 90.0))
+    DUAL_ARM_SCALES = (1.0, 1.25)
+    CUBE_SIZES = (0.04, 0.05, 0.06, 0.07)
+    CUBE_POSITIONS = tuple(
+        (pos[0], pos[1], pos[2] + 0.05 * scale + 0.5 * cube_size)
+        for pos, scale, cube_size in zip(
+            np.repeat(DUAL_ARM_POSITIONS, 2, axis=0), np.repeat(DUAL_ARM_SCALES, 2), CUBE_SIZES
+        )
+    )
 
+    dual_arm_files = (fixed_base_dual_arm, fixed_base_dual_arm_high_damping)
     asset_files = tuple(f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in VARIANTS)
 
     # One homogeneous reference entity per variant plus a single heterogeneous entity dispatching one variant per
     # environment, all in one scene.
-    scene = gs.Scene(show_viewer=show_viewer)
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            broadphase_traversal=broadphase_traversal,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -1.6, 0.8),
+            camera_lookat=(0.6, 0.05, 0.25),
+        ),
+        show_viewer=show_viewer,
+    )
     scene.add_entity(gs.morphs.Plane())
+    ref_dual_arms = []
+    for i_env, offset in enumerate(REFERENCE_OFFSETS):
+        ref_dual_arms.append(
+            scene.add_entity(
+                gs.morphs.URDF(
+                    file=dual_arm_files[i_env // 2],
+                    pos=np.add(DUAL_ARM_POSITIONS[i_env // 2], offset),
+                    euler=DUAL_ARM_EULERS[i_env // 2],
+                    scale=DUAL_ARM_SCALES[i_env // 2],
+                    fixed=True,
+                ),
+            )
+        )
+    het_dual_arm = scene.add_entity(
+        morph=tuple(
+            gs.morphs.URDF(file=file, pos=pos, euler=euler, scale=scale, fixed=True)
+            for file, pos, euler, scale in zip(dual_arm_files, DUAL_ARM_POSITIONS, DUAL_ARM_EULERS, DUAL_ARM_SCALES)
+        )
+    )
+    ref_cubes = []
+    for cube_size, pos, offset in zip(CUBE_SIZES, CUBE_POSITIONS, REFERENCE_OFFSETS):
+        ref_cubes.append(
+            scene.add_entity(
+                gs.morphs.Box(
+                    size=(cube_size, cube_size, cube_size),
+                    pos=(pos[0] + offset[0], pos[1] + offset[1], pos[2] + offset[2]),
+                ),
+            )
+        )
+    het_cube = scene.add_entity(
+        morph=tuple(
+            gs.morphs.Box(size=(cube_size, cube_size, cube_size), pos=pos)
+            for cube_size, pos in zip(CUBE_SIZES, CUBE_POSITIONS)
+        )
+    )
     ref_objs = []
     for file, pos, offset_euler, offset in zip(asset_files, POSITIONS, OFFSET_EULERS, REFERENCE_OFFSETS):
         ref_objs.append(
@@ -45,11 +113,7 @@ def test_physics_parity(show_viewer, tol):
         )
     het_obj = scene.add_entity(
         morph=tuple(
-            gs.morphs.MJCF(
-                file=file,
-                pos=pos,
-                offset_euler=offset_euler,
-            )
+            gs.morphs.MJCF(file=file, pos=pos, offset_euler=offset_euler)
             for file, pos, offset_euler in zip(asset_files, POSITIONS, OFFSET_EULERS)
         )
     )
@@ -67,17 +131,38 @@ def test_physics_parity(show_viewer, tol):
         )
         assert_allclose(het_obj.get_quat(relative=relative), ref_quats, tol=tol)
 
-    for _ in range(N_STEPS):
+    for _ in range(N_STEPS_FALLING):
+        scene.step()
+
+    # Every environment simulates the link frames and joints of the dual arm variant it carries, as its reference does
+    ref_dual_arm_qpos = torch.cat([ref.get_qpos(envs_idx=[i_env]) for i_env, ref in enumerate(ref_dual_arms)])
+    assert_allclose(het_dual_arm.get_qpos(), ref_dual_arm_qpos, tol=tol)
+    ref_links_pos = torch.cat([ref.get_links_pos(envs_idx=[i_env]) for i_env, ref in enumerate(ref_dual_arms)])
+    assert_allclose(ref_links_pos - het_dual_arm.get_links_pos(), np.expand_dims(REFERENCE_OFFSETS, 1), tol=tol)
+    ref_dofs_damping = torch.cat([ref.get_dofs_damping(envs_idx=[i_env]) for i_env, ref in enumerate(ref_dual_arms)])
+    assert_allclose(het_dual_arm.get_dofs_damping(), ref_dofs_damping, tol=gs.EPS)
+
+    for _ in range(N_STEPS - N_STEPS_FALLING):
         scene.step()
 
     # After the drop each environment matches the homogeneous reference of its variant in pose, velocity and mass.
     ref_pos = torch.cat([ref_obj.get_pos(envs_idx=[i_env]) for i_env, ref_obj in enumerate(ref_objs)])
     ref_vel = torch.cat([ref_obj.get_vel(envs_idx=[i_env]) for i_env, ref_obj in enumerate(ref_objs)])
-    # Both are held loosely, and the rate more so than the pose: sharing one batch with the other variants puts the
-    # heterogeneous entity through a different arithmetic than its own reference.
+    # Batch layout and translation change rounding, which can change which nearly equivalent corners pruning retains.
+    # The velocity comparison allows their accumulated effect over the drop.
     assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
-    assert_allclose(het_obj.get_vel(), ref_vel, tol=2e-4)
+    assert_allclose(het_obj.get_vel(), ref_vel, atol=1e-3)
     assert_allclose(het_obj.get_mass(), torch.cat([ref_obj.get_mass(envs_idx=0) for ref_obj in ref_objs]), tol=tol)
+
+    # The arms stop against each other instead of swinging through each other. FIXME: pytorch#TBD - 'any' over an
+    # empty dimension returns uninitialized memory on MPS, so the contacts are reduced on the host.
+    assert tensor_to_array(het_dual_arm.get_contacts(with_entity=het_dual_arm)["valid_mask"]).any(axis=-1).all()
+
+    # Each cube rests on the torso of the dual arm variant its environment carries, as its reference does
+    ref_cube_pos = torch.cat([ref_cube.get_pos(envs_idx=[i_env]) for i_env, ref_cube in enumerate(ref_cubes)])
+    assert_allclose(ref_cube_pos - het_cube.get_pos(), REFERENCE_OFFSETS, tol=tol)
+    torso_top = het_dual_arm.get_link("torso").get_AABB()[:, 1, 2]
+    assert_allclose(het_cube.get_pos()[:, 2] - torso_top, 0.5 * np.array(CUBE_SIZES), tol=2e-4)
 
     # The variants are genuinely distinct: their masses are not all equal.
     with pytest.raises(AssertionError):
@@ -103,13 +188,7 @@ def test_variant_inertia_matches_standalone(undefined_inertia, implicit_inertial
         for i_file, file in enumerate(files)
     ]
     het_obj = scene.add_entity(
-        morph=tuple(
-            gs.morphs.URDF(
-                file=file,
-                pos=(0.5, 0.5 * i_file, 0.1),
-            )
-            for i_file, file in enumerate(files)
-        ),
+        morph=tuple(gs.morphs.URDF(file=file, pos=(0.5, 0.5 * i_file, 0.1)) for i_file, file in enumerate(files)),
     )
     scene.build(n_envs=len(files))
 
@@ -145,9 +224,14 @@ def test_fewer_envs_than_variants():
 
 @pytest.mark.slow  # ~200s
 @pytest.mark.required
-def test_aabb(tol):
-    scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
+def test_aabb(undefined_inertia, show_viewer, tol):
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.15, -0.2, 0.17),
+            camera_lookat=(0.045, 0.0, 0.12),
+        ),
+        show_viewer=show_viewer,
+    )
 
     # Box and sphere with different sizes and positions
     morphs_heterogeneous = (
@@ -157,13 +241,59 @@ def test_aabb(tol):
     het_obj = scene.add_entity(
         morph=morphs_heterogeneous,
     )
+    # Fixed boxes of different sizes and poses, the second one turned by 45 degrees about the vertical, holding a
+    # single copy of their vertices for every environment
+    FIXED_POSITIONS = ((0.05, 0.08, 0.12), (0.05, 0.12, 0.1))
+    het_fixed = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=FIXED_POSITIONS[0], fixed=True, batch_fixed_verts=False),
+            gs.morphs.Box(
+                size=(0.03, 0.03, 0.03),
+                pos=FIXED_POSITIONS[1],
+                euler=(0.0, 0.0, 45.0),
+                fixed=True,
+                batch_fixed_verts=False,
+            ),
+        ),
+    )
+    # Fixed spheres from a file, which drops their joint, at two scales
+    FIXED_URDF_POS = (0.05, 0.4, 0.1)
+    het_fixed_urdf = scene.add_entity(
+        morph=tuple(
+            gs.morphs.URDF(file=undefined_inertia, pos=FIXED_URDF_POS, scale=scale, fixed=True) for scale in (1.0, 2.0)
+        ),
+    )
+    # A camera rendering a sphere environment follows the entity from before the build
+    CAMERA_POS = (0.3, -0.4, 0.3)
+    camera = scene.add_camera(
+        pos=CAMERA_POS,
+        lookat=(0.1, 0.0, 0.15),
+        env_idx=2,
+    )
+    camera.follow_entity(het_obj)
     # 4 envs: envs 0-1 get box, envs 2-3 get sphere
     scene.build(n_envs=4)
+
+    # Scaling a variant scales its whole geometry about the fixed base
+    urdf_aabb = tensor_to_array(het_fixed_urdf.get_AABB()) - np.array(FIXED_URDF_POS)
+    assert_allclose(urdf_aabb[[2, 3]], 2.0 * urdf_aabb[[0, 1]], tol=tol)
+
+    # The camera keeps its pose, the offset it follows the entity at being measured from the sphere it renders. It
+    # reports its pose in single precision.
+    camera.update_following()
+    assert_allclose(camera.pos, CAMERA_POS, tol=1e-6)
 
     # Per-variant morph.pos should be correctly applied
     pos = het_obj.get_pos()
     assert_allclose(pos[[0, 1]], (0.0, 0.0, 0.1), tol=tol)
     assert_allclose(pos[[2, 3]], (0.1, 0.0, 0.15), tol=tol)
+
+    # The AABB of a fixed heterogeneous entity bounds the box each environment carries
+    envs_center = np.repeat(FIXED_POSITIONS, 2, axis=0)
+    envs_half_extent = np.repeat([(0.01, 0.01, 0.01), (0.015 * np.sqrt(2.0), 0.015 * np.sqrt(2.0), 0.015)], 2, axis=0)
+    fixed_aabb = np.stack((envs_center - envs_half_extent, envs_center + envs_half_extent), axis=-2)
+    assert_allclose(het_fixed.get_AABB(), fixed_aabb, tol=tol)
+    assert_allclose(het_fixed.base_link.get_AABB(), fixed_aabb, tol=tol)
 
     # get_AABB should return correct shapes
     aabb = het_obj.get_AABB()
@@ -200,9 +330,11 @@ def test_aabb(tol):
     vaabb_size_sphere = vaabb[2, 1] - vaabb[2, 0]
     assert_allclose(aabb_size_sphere, vaabb_size_sphere, tol=1e-3)  # Allow small tolerance for decimation
 
+    # The AABBs maintained by the collision detection only bound the variant each environment carries
+    scene.step()
+    assert_allclose(het_obj.get_AABB(allow_fast_approx=True), het_obj.get_AABB(), tol=1e-3)
 
-# 30s
-@pytest.mark.slow  # ~250s
+
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
 def test_pick_heterogenous_objects(show_viewer):
     scene = gs.Scene(show_viewer=show_viewer)
@@ -332,7 +464,6 @@ def test_invalid_variant_specification_raises():
         )
 
 
-@pytest.mark.slow  # ~200s
 @pytest.mark.required
 def test_morph_property_raises():
     scene = gs.Scene(show_viewer=False)
@@ -383,9 +514,8 @@ def test_morph_property_raises():
 
 
 @pytest.mark.required
-def test_articulated_structure_mismatch():
+def test_articulated_structure_mismatch(fixed_base_dual_arm, fixed_base_dual_arm_chained):
     scene = gs.Scene(show_viewer=False)
-    scene.add_entity(gs.morphs.Plane())
 
     # two_cube_revolute has 1 revolute joint; two_link_arm has 2 continuous joints
     with pytest.raises(gs.GenesisException):
@@ -393,5 +523,14 @@ def test_articulated_structure_mismatch():
             morph=[
                 gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1)),
                 gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1)),
+            ]
+        )
+
+    # Every variant shares the kinematic topology of the first one
+    with pytest.raises(gs.GenesisException, match="Link parent mismatch"):
+        scene.add_entity(
+            morph=[
+                gs.morphs.URDF(file=fixed_base_dual_arm, fixed=True),
+                gs.morphs.URDF(file=fixed_base_dual_arm_chained, fixed=True),
             ]
         )

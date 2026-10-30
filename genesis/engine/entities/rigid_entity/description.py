@@ -27,11 +27,13 @@ from genesis.engine.mesh import InertialProperties
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
+from genesis.typing import PositiveVec3FType, PositiveVec3IType
 from genesis.utils import geom as gu
 from genesis.utils import mesh as mu
 from genesis.utils import mjcf as mju
 from genesis.utils import terrain as tu
 from genesis.utils import urdf as uu
+from genesis.utils.cache import MESH_CACHE_MATCH_RTOL
 from genesis.utils.misc import get_assets_dir
 
 from ..base_entity import EntityDescription
@@ -71,6 +73,63 @@ class RigidVisGeomDescription(BaseRigidGeomDescription):
     vmesh: "gs.Mesh"
 
 
+@dataclass(frozen=True, kw_only=True)
+class SignedDistanceFieldDescription:
+    """Describe the grid sampling the signed distance field (SDF) of a geometry (see 'Mesh.get_sdf_grid')."""
+
+    n_nodes: PositiveVec3IType
+    """Number of nodes along each axis of the grid."""
+    cell_size: PositiveVec3FType
+    """Spacing between two nodes along each axis of the grid."""
+    has_grad: bool
+    """Whether the grid carries the gradient of the field."""
+
+    @classmethod
+    def from_geometry(cls, mesh: "gs.Mesh", geom_type: GEOM_TYPE, material: Material) -> Self:
+        """Resolve the grid sampling the signed distance field (SDF) of a geometry, at the resolution its material asks.
+
+        The grid extends past the bounding box of the geometry by a margin along each axis. Its cells have the size the
+        material asks, refined further for a closed non-convex geometry to fit 2 across its thinnest walls, and clipped
+        along each axis to the minimum and maximum resolutions of the material. A terrain carries no gradient, since it
+        derives its gradient from its height field instead.
+        """
+        # The vertices are a trimesh array subclass, which the grid parameters derived from them would carry into an
+        # exported description
+        verts = mesh.verts.view(np.ndarray)
+        lower, upper = verts.min(axis=0), verts.max(axis=0)
+        grid_size = 0.2 * (upper - lower).max() + (upper - lower)
+        # The cell size is anisotropic, each axis being sized to its own extent, so a thin slab gets fine resolution
+        # perpendicular to its surface without bloating the cell count along its long axes. A uniform cell size would
+        # leave primitive-vs-mesh contacts noisy whenever the smallest dimension of the primitive is below it.
+        cell_size_lower = grid_size / (material.sdf_max_res - 1)
+        cell_size_upper = grid_size / max(material.sdf_min_res - 1, 2)
+        # A convex geom has no thin wall to tunnel through, so it keeps the target. A non-convex geom tunnels when the
+        # cell is coarser than its thinnest wall (its area-weighted p25 thickness), on all three axes: the certified
+        # penetration bounds that hold shell contacts apart need lattice points near the contact in every direction,
+        # so a wall is finely sampled along its tangent axes too (see get_wall_thickness). The probe needs a closed
+        # surface, since inward rays escape an open mesh through its holes, and the mesh it probes stands for this
+        # collision mesh, so both share their watertightness.
+        sdf_tmesh = mesh.metadata.get("sdf_mesh", mesh.trimesh)
+        cell_size_target = material.sdf_cell_size
+        if not mesh.is_convex:
+            if mesh.is_watertight:
+                wall_thickness = mu.get_wall_thickness(
+                    np.ascontiguousarray(sdf_tmesh.vertices), np.ascontiguousarray(sdf_tmesh.faces)
+                )
+                cell_size_target = min(cell_size_target, wall_thickness / 2.0)
+            else:
+                mesh_descr = f" ({mesh.metadata['mesh_path']})" if "mesh_path" in mesh.metadata else ""
+                gs.logger.warning(
+                    f"Mesh{mesh_descr} is not watertight. Skipping the refinement of its SDF grid to its walls."
+                )
+        cell_size = gs.EPS + np.clip(cell_size_target, cell_size_lower, cell_size_upper)
+        return cls(
+            n_nodes=tuple((np.ceil(grid_size / cell_size).astype(gs.np_int) + 1).tolist()),
+            cell_size=tuple(cell_size.tolist()),
+            has_grad=geom_type != GEOM_TYPE.TERRAIN,
+        )
+
+
 @dataclass(kw_only=True)
 class RigidGeomDescription(BaseRigidGeomDescription):
     """Describe one geometry a link collides with: where it sits on the link, its shape, and how it is simulated.
@@ -81,11 +140,15 @@ class RigidGeomDescription(BaseRigidGeomDescription):
 
     'density' is the density of this geometry alone, which the link inertial is resolved against. It is None where
     neither the asset nor the material states one, leaving the geom to take the density of its entity.
+
+    'sdf' describes the grid sampling the signed distance field (SDF) of the geometry, resolved from its mesh, its
+    type and its material (see 'SignedDistanceFieldDescription.from_geometry').
     """
 
     type: GEOM_TYPE
     data: np.ndarray | None
     mesh: "gs.Mesh"
+    sdf: SignedDistanceFieldDescription
     contype: int
     conaffinity: int
     density: float | None
@@ -209,8 +272,16 @@ class RigidEqualityDescription:
 
 @dataclass(kw_only=True)
 class KinematicVariantLinkDescription:
-    """What one variant of a heterogeneous entity gives one link to be drawn as."""
+    """What one variant of a heterogeneous entity gives one link: its frame, its joints and its visual geoms.
 
+    Every variant shares the kinematic topology of the primary, so its links hang from the same parents through joints
+    of the same names, types and numbers of degrees of freedom. The frame of the link in its parent and the parameters
+    of its joints are the variant's own, which every environment carrying it simulates.
+    """
+
+    pos: np.ndarray
+    quat: np.ndarray
+    joints: list["RigidJointDescription"]
     vgeoms: list[RigidVisGeomDescription] = field(default_factory=list)
 
 
@@ -447,7 +518,13 @@ class KinematicEntityDescription(EntityDescription):
                         f"Heterogeneous variant has {len(v_l_infos)} links, "
                         f"but primary has {n_links}. All variants must have the same link count."
                     )
-                for i_l, (l_desc, v_j_infos) in enumerate(zip(self.links, v_links_j_infos)):
+                for i_l, (l_desc, v_l_info, v_j_infos) in enumerate(zip(self.links, v_l_infos, v_links_j_infos)):
+                    if v_l_info["parent_idx"] != l_desc.parent_idx:
+                        gs.raise_exception(
+                            f"Link parent mismatch at link {i_l} ('{l_desc.name}'): primary hangs it from link "
+                            f"{l_desc.parent_idx}, variant from link {v_l_info['parent_idx']}. All variants must share "
+                            "the kinematic topology of the primary."
+                        )
                     primary_joints = l_desc.joints
                     if len(v_j_infos) != len(primary_joints):
                         gs.raise_exception(
@@ -502,7 +579,9 @@ class KinematicEntityDescription(EntityDescription):
                 # Resolve each link's inertial for this variant and stash it for the align anchor.
                 is_inertia_recomputed = morph.recompute_inertia
                 variant_links = []
-                for i_link, (v_l_info, (cg_infos, vg_infos)) in enumerate(zip(v_l_infos, cg_vg_infos)):
+                for i_link, (v_l_info, v_j_infos, (cg_infos, vg_infos)) in enumerate(
+                    zip(v_l_infos, v_links_j_infos, cg_vg_infos)
+                ):
                     inertial_info = self._resolve_inertial(
                         None if is_inertia_recomputed else v_l_info.get("inertial_mass"),
                         None if is_inertia_recomputed else v_l_info.get("inertial_pos"),
@@ -514,8 +593,25 @@ class KinematicEntityDescription(EntityDescription):
                         resolution,
                     )
                     resolution.links_inertial_info[i_link].append(inertial_info)
+                    v_joints = [description_from_info(RigidJointDescription, j_info) for j_info in v_j_infos]
+                    # A root link carries the morph pose offset, exactly as '_align_link' composes it for the primary
+                    link_pos, link_quat = v_l_info["pos"], v_l_info["quat"]
+                    if v_l_info["parent_idx"] == -1:
+                        link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
+                            offset_pos, offset_quat, link_pos, link_quat
+                        )
                     variant_links.append(
-                        self._describe_variant_link(i_link, v_l_info, cg_infos, vg_infos, morph, inertial_info)
+                        self._describe_variant_link(
+                            i_link,
+                            v_l_info,
+                            link_pos,
+                            link_quat,
+                            v_joints,
+                            cg_infos,
+                            vg_infos,
+                            morph,
+                            inertial_info,
+                        )
                     )
                 self.variants.append(
                     KinematicVariantDescription(
@@ -544,7 +640,24 @@ class KinematicEntityDescription(EntityDescription):
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
                 inertial_info = self._resolve_inertial(None, None, None, None, cg_infos, vg_infos, False, resolution)
                 resolution.links_inertial_info[0].append(inertial_info)
-                variant_link = self._describe_variant_link(0, None, cg_infos, vg_infos, morph, inertial_info)
+                # Such a morph states no joint parameters, so its variant moves through the joints of the primary
+                link_pos, link_quat = gu.transform_pos_quat_by_trans_quat(
+                    offset_pos,
+                    offset_quat,
+                    np.array(morph.pos, dtype=gs.np_float),
+                    np.array(morph.quat, dtype=gs.np_float),
+                )
+                variant_link = self._describe_variant_link(
+                    i_link=0,
+                    v_l_info=None,
+                    link_pos=link_pos,
+                    link_quat=link_quat,
+                    joints=self.links[0].joints,
+                    cg_infos=cg_infos,
+                    vg_infos=vg_infos,
+                    morph=morph,
+                    inertial_info=inertial_info,
+                )
 
                 if morph.fixed:
                     init_qpos = np.array((), dtype=gs.np_float)
@@ -569,10 +682,15 @@ class KinematicEntityDescription(EntityDescription):
                     f"Heterogeneous morphs only support URDF, MJCF, Primitive, and Mesh, got: {type(morph).__name__}."
                 )
 
-    def _describe_variant_link(self, i_link, v_l_info, cg_infos, vg_infos, morph, inertial_info):
-        """Describe the geoms one variant gives one link. A kinematic entity only ever draws them."""
+    def _describe_variant_link(
+        self, i_link, v_l_info, link_pos, link_quat, joints, cg_infos, vg_infos, morph, inertial_info
+    ):
+        """Describe the frame, the joints and the visual geoms one variant gives one link."""
         return KinematicVariantLinkDescription(
-            vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos]
+            pos=link_pos,
+            quat=link_quat,
+            joints=joints,
+            vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
         )
 
     def _load_primitive(self, morph, resolution: Resolution, load_geom_only_for_heterogeneous=False):
@@ -1092,22 +1210,18 @@ class KinematicEntityDescription(EntityDescription):
             if root.parent_idx != -1 or not root.is_aligned:
                 continue
 
-            # Gather the fixed subtree (root + transitive n_dofs == 0 descendants) and each link's pose in the root
-            # frame; links are in build order so a parent is always visited before its children. A DOF-bearing
-            # descendant makes the root an articulated chain rather than a single rigid body: its joint-space mass is
-            # not diagonal and the frames of its moving children are not re-expressed here, so such roots are skipped.
-            pose_in_root = {i_root: (gu.zero_pos(), gu.identity_quat())}
+            # Gather the fixed subtree (root + transitive n_dofs == 0 descendants); links are in build order so a
+            # parent is always visited before its children. A DOF-bearing descendant makes the root an articulated
+            # chain rather than a single rigid body: its joint-space mass is not diagonal and the frames of its moving
+            # children are not re-expressed here, so such roots are skipped.
             subtree = [i_root]
             is_articulated = False
             for i_l, l_desc in enumerate(links):
-                if i_l == i_root or l_desc.parent_idx not in pose_in_root:
+                if i_l == i_root or l_desc.parent_idx not in subtree:
                     continue
                 if any(j_desc.n_dofs for j_desc in l_desc.joints):
                     is_articulated = True
                     break
-                pose_in_root[i_l] = gu.transform_pos_quat_by_trans_quat(
-                    l_desc.pos, l_desc.quat, *pose_in_root[l_desc.parent_idx]
-                )
                 subtree.append(i_l)
             if is_articulated:
                 root.is_aligned = False
@@ -1118,6 +1232,13 @@ class KinematicEntityDescription(EntityDescription):
             # and principal axes. It re-expresses the variant geoms, so the geometry keeps its world pose, and folds
             # into the variant offset and init_qpos.
             for i_v in range(len(resolution.links_inertial_info[i_root])):
+                variant_links = links if i_v == 0 else variants[i_v].links
+                pose_in_root = {i_root: (gu.zero_pos(), gu.identity_quat())}
+                for i_l in subtree[1:]:
+                    pose_in_root[i_l] = gu.transform_pos_quat_by_trans_quat(
+                        variant_links[i_l].pos, variant_links[i_l].quat, *pose_in_root[links[i_l].parent_idx]
+                    )
+
                 inertial_info = []
                 explicit_mass_flags = set()
                 for i_l in subtree:
@@ -1163,16 +1284,16 @@ class KinematicEntityDescription(EntityDescription):
                 principal_quat = gu.R_to_quat(uu.principal_axes_rot(inertia_root))
 
                 # Re-express the variant's geoms across the subtree so the body frame can move to (com_root, principal
-                # axes) while the world geometry stays fixed. The static link poses are shared across heterogeneous
-                # variants, so the anchoring is undone by a transform conjugated into each link frame, reused below for
-                # the inertial frame of a fixed child. A kinematic link has only visual geoms; a rigid link has both.
+                # axes) while the world geometry stays fixed. The anchoring is undone by a transform conjugated into
+                # each link frame of the variant, reused below for the inertial frame of a fixed child. A kinematic link
+                # has only visual geoms; a rigid link has both.
                 alignment_inv_in_link = {}
                 for i_l in subtree:
                     link_pos, link_quat = pose_in_root[i_l]
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(link_pos, link_quat, com_root, principal_quat)
                     pos, quat = gu.inv_transform_pos_quat_by_trans_quat(pos, quat, link_pos, link_quat)
                     alignment_inv_in_link[i_l] = (pos, quat)
-                    link_desc = links[i_l] if i_v == 0 else variants[i_v].links[i_l]
+                    link_desc = variant_links[i_l]
                     geoms = list(link_desc.vgeoms)
                     if isinstance(link_desc, (RigidLinkDescription, RigidVariantLinkDescription)):
                         geoms += link_desc.geoms
@@ -1185,7 +1306,7 @@ class KinematicEntityDescription(EntityDescription):
                 # '_init_tree_fields').
                 if isinstance(root, RigidLinkDescription):
                     for i_l in subtree:
-                        desc = links[i_l] if i_v == 0 else variants[i_v].links[i_l]
+                        desc = variant_links[i_l]
                         desc.inertial_pos, desc.inertial_quat = gu.transform_pos_quat_by_trans_quat(
                             desc.inertial_pos, desc.inertial_quat, *alignment_inv_in_link[i_l]
                         )
@@ -1320,7 +1441,7 @@ class KinematicEntityDescription(EntityDescription):
                 threshold = g_info.pop("decompose_error_threshold", decompose_error_threshold)
                 for options, options_cg_infos in cg_infos_by_options:
                     if options[:2] == (convexify, decimate) and math.isclose(
-                        options[2], threshold, rel_tol=mu.MESH_CACHE_MATCH_RTOL
+                        options[2], threshold, rel_tol=MESH_CACHE_MATCH_RTOL
                     ):
                         options_cg_infos.append(g_info)
                         break
@@ -1471,7 +1592,9 @@ class RigidEntityDescription(KinematicEntityDescription):
     links: list[RigidLinkDescription] = field(default_factory=list)
     equalities: list[RigidEqualityDescription] = field(default_factory=list)
 
-    def _describe_variant_link(self, i_link, v_l_info, cg_infos, vg_infos, morph, inertial_info):
+    def _describe_variant_link(
+        self, i_link, v_l_info, link_pos, link_quat, joints, cg_infos, vg_infos, morph, inertial_info
+    ):
         """Describe what one variant gives one simulated link, the inertial it is simulated with included.
 
         A variant is resolved against its own file and its own geometry, exactly as the link itself is, so it behaves
@@ -1490,6 +1613,9 @@ class RigidEntityDescription(KinematicEntityDescription):
             mass, com, quat, inertia, *inertial_info.hint, clamp_min_mass=not is_link_fixed(self.links, i_link)
         )
         return RigidVariantLinkDescription(
+            pos=link_pos,
+            quat=link_quat,
+            joints=joints,
             vgeoms=[description_from_info(RigidVisGeomDescription, vg_info) for vg_info in vg_infos],
             mass=inertial.mass,
             inertial_pos=inertial.com,
@@ -1540,6 +1666,7 @@ class RigidEntityDescription(KinematicEntityDescription):
                     friction_torsional=friction_torsional,
                     friction_rolling=friction_rolling,
                     sol_params=g_info.get("sol_params", gu.default_solver_params()),
+                    sdf=SignedDistanceFieldDescription.from_geometry(g_info["mesh"], g_info["type"], self.material),
                 )
             )
         return cg_descs

@@ -155,7 +155,6 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
         super().__init__(options, idx, shared_context, shared_metadata, manager)
 
         self._link: "RigidLink | None" = None
-        self.debug_object: "Mesh | None" = None
 
     def build(self):
         super().build()
@@ -213,25 +212,20 @@ class ContactSensor(SimpleSensor[ContactSensorOptions, None, ContactSensorMetada
     ) -> torch.Tensor:
         return tensor > shared_metadata.thresholds
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        """
-        Draw debug sphere when the sensor detects contact.
-
-        Only draws for first rendered environment.
-        """
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make a sphere at the link of the sensor while it detects a contact, for the first rendered environment."""
+        if 0 not in envs_idx:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
 
         pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
         is_contact = self.read(env_idx)
-
-        if self.debug_object is not None:
-            context.clear_debug_object(self.debug_object)
-            self.debug_object = None
-
-        if is_contact:
-            self.debug_object = context.draw_debug_sphere(
-                pos=pos, radius=self._options.debug_sphere_radius, color=self._options.debug_color
-            )
+        if not is_contact:
+            return []
+        sphere = context.make_debug_sphere(
+            pos=pos, radius=self._options.debug_sphere_radius, color=self._options.debug_color
+        )
+        return [(None, sphere, None)]
 
 
 # ==========================================================================================================
@@ -254,13 +248,6 @@ class ContactForceSensor(
     """
     Sensor that returns the total contact force being applied to the associated RigidLink in its local frame.
     """
-
-    def __init__(
-        self, options: ContactForceSensorOptions, idx: int, shared_context, shared_metadata, manager: "SensorManager"
-    ):
-        super().__init__(options, idx, shared_context, shared_metadata, manager)
-
-        self.debug_object: "Mesh" | None = None
 
     def build(self):
         super().build()
@@ -346,12 +333,10 @@ class ContactForceSensor(
         out = out.masked_fill(out.abs() < shared_metadata.min_force, 0.0)
         return out.reshape(tensor.shape)
 
-    def _draw_debug(self, context: "RasterizerContext"):
-        """
-        Draw debug arrow representing the contact force.
-
-        Only draws for first rendered environment.
-        """
+    def _draw_debug(self, context: "RasterizerContext", envs_idx: list[int]) -> list[tuple[None, "Mesh", None]]:
+        """Make an arrow showing the contact force measured by the sensor, for the first rendered environment."""
+        if 0 not in envs_idx:
+            return []
         env_idx = context.rendered_envs_idx[0] if self._manager._sim.n_envs > 0 else None
 
         pos = self._link.get_pos(env_idx, relative=False).reshape((3,))
@@ -360,8 +345,5 @@ class ContactForceSensor(
         force = self.read(env_idx).reshape((3,))
         vec = tensor_to_array(transform_by_quat(force * self._options.debug_scale, quat))
 
-        if self.debug_object is not None:
-            context.clear_debug_object(self.debug_object)
-            self.debug_object = None
-
-        self.debug_object = context.draw_debug_arrow(pos=pos, vec=vec, color=self._options.debug_color)
+        arrow = context.make_debug_arrow(pos=pos, vec=vec, color=self._options.debug_color)
+        return [] if arrow is None else [(None, arrow, None)]

@@ -8,10 +8,11 @@ that achieve desired end-effector poses.
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.linalg as lu
-import genesis.utils.array_class as array_class
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_forward_kinematics_root
+from genesis.utils.misc import qd_isfinite
 
 
 @qd.func
@@ -643,7 +644,7 @@ def func_inverse_kinematics(
                             if (
                                 dyn_info.joints.type[I_j] == gs.JOINT_TYPE.REVOLUTE
                                 or dyn_info.joints.type[I_j] == gs.JOINT_TYPE.PRISMATIC
-                            ) and not (qd.math.isinf(dof_limit[0]) or qd.math.isinf(dof_limit[1])):
+                            ) and qd_isfinite(dof_limit):
                                 q_start = dyn_info.joints.q_start[I_j]
                                 # Counter-based draw keyed on (env, restart, DOF): a qd.random() per-thread stream
                                 # would order by the parallel schedule, making the resampled - and returned -
