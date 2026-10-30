@@ -208,9 +208,8 @@ class Viewer(pyglet.window.Window):
         self._offscreen_result = None
 
         self._video_recorder = None
-        # Step counter of the last frame written to the video, so a paused (non-advancing) simulation does not fill
-        # the recording with duplicate frozen frames.
-        self._last_recorded_t = -1
+        self._video_size = None
+        self._recorded_frames = 0
 
         self._default_render_flags = {
             "flip_wireframe": False,
@@ -643,8 +642,8 @@ class Viewer(pyglet.window.Window):
             self._video_recorder = VideoEncoder(
                 os.path.join(get_cache_dir(), "tmp_video.mp4"), fps=self.viewer_flags["refresh_rate"], is_threaded=True
             )
-            # Sentinel so the first frame is always captured regardless of the current step counter.
-            self._last_recorded_t = -1
+            self._video_size = None
+            self._recorded_frames = 0
             self.set_caption("{} (RECORDING)".format(self.viewer_flags["window_title"]))
         self.viewer_flags["record"] = not self.viewer_flags["record"]
         return self.viewer_flags["record"]
@@ -1062,15 +1061,9 @@ class Viewer(pyglet.window.Window):
             cv2.imwrite(filename, np.flip(data, axis=-1))
 
     def _read_record_frame(self):
-        """Read the current frame to append to the video, or None if the simulation has not advanced since the last
-        recorded frame (e.g. while paused) so the recording does not accumulate duplicate frozen frames."""
-        t = self.gs_context.scene.sim.cur_step_global
-        if t == self._last_recorded_t:
-            return None
-        self._last_recorded_t = t
+        """Read the current frame to append to the video, including paused redraws and camera edits."""
         data = self._renderer.jit.read_color_buf(*self._viewport_size, rgba=False)
-        if np.all(data == 0.0):
-            return None
+        self._recorded_frames += 1
         return data
 
     def _rotate(self):
