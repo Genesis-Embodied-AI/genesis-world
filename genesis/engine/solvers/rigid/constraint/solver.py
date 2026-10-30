@@ -10,7 +10,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import DataItem, is_tensor_addressable, iter_data
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
 from genesis.engine.solvers.rigid.abd import func_solve_mass_batch, func_vel_at_point
@@ -22,6 +21,7 @@ from genesis.engine.solvers.rigid.abd.misc import (
     linear_to_lower_tri,
 )
 from genesis.grad.bridge import no_grad
+from genesis.utils.data import DataItem, is_tensor_addressable, iter_data
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
 from ..collider.contact import func_add_contacts_force_to_links

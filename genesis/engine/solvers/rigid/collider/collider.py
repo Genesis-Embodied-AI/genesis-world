@@ -18,10 +18,10 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import ConfigItem, DataItem, iter_data
 import genesis.utils.geom as gu
 from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_geom_aabbs
+from genesis.utils.data import ConfigItem, DataItem, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     get_gpu_core_count,

@@ -7,7 +7,6 @@ import torch
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
@@ -22,6 +21,7 @@ from genesis.engine.state_change import MutatedLinks, StateChange, mutates
 from genesis.engine.states.solvers import KinematicSolverState, SolverCheckpoint
 from genesis.options.morphs import Morph
 from genesis.options.solvers import KinematicOptions
+from genesis.utils.data import ConfigItem, DataItem, DataKind, iter_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,

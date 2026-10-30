@@ -6,8 +6,8 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import is_tensor_addressable
 import genesis.utils.geom as gu
+from genesis.utils.data import is_tensor_addressable
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity.description import SignedDistanceFieldDescription
@@ -40,16 +40,13 @@ class SDF:
         self._grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
         self._grids_n_coarse_cells = self._grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
         n_cells = int(self._grids_n_cells.sum())
+        # The sizes of the SDF info (see SDFInfo)
+        self.sizes = dict(sdf_cells=n_cells, sdf_coarse_cells=self._grids_n_coarse_cells.sum())
         if not is_tensor_addressable((n_cells, 3), gs.np_float):
             gs.raise_exception(
                 f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', "
                 "or a smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
             )
-
-    @property
-    def sizes(self) -> dict[str, int]:
-        """The sizes of the SDF info (see SDFInfo)."""
-        return dict(sdf_cells=self._grids_n_cells.sum(), sdf_coarse_cells=self._grids_n_coarse_cells.sum())
 
     def fill(self, sdf_info: array_class.SDFInfo) -> None:
         """Write the grids into the SDF info once allocated."""

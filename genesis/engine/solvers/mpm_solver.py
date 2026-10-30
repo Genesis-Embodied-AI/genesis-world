@@ -7,7 +7,6 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import ArrayItem, DataKind
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
@@ -17,6 +16,7 @@ from genesis.engine.state_change import StateChange, mutates
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.grad.bridge import no_grad, register_custom_backward
 from genesis.options.solvers import MPMOptions
+from genesis.utils.data import ArrayItem, DataKind
 from genesis.utils.misc import DeprecationError, broadcast_tensor, qd_isfinite, qd_to_torch
 
 from .particle_solver import ParticleSolver

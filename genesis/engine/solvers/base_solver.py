@@ -10,13 +10,13 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
-from genesis.utils.data import ArrayItem, CHECKPOINT_KINDS, ConfigItem, DataItem, DataKind, ScalarItem, V, fill_data
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
 from genesis.engine.state_change import StateChange, Subscriber, mutates
 from genesis.engine.states import SolverCheckpoint
 from genesis.grad.bridge import RolloutGraph
 from genesis.repr_base import RBC
+from genesis.utils.data import CHECKPOINT_KINDS, V, ArrayItem, ConfigItem, DataItem, DataKind, ScalarItem, fill_data
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
