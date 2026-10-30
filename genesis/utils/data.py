@@ -4,7 +4,9 @@ import dataclasses
 import math
 import operator
 import types
+import weakref
 from collections.abc import Iterable, Iterator, Mapping
+from contextvars import ContextVar
 from enum import IntEnum
 from typing import Annotated, Any, ClassVar, NamedTuple
 
@@ -235,6 +237,7 @@ class _FieldSpec(NamedTuple):
     grad: bool = False
     ndarray: bool = False
     lazy: bool = False
+    is_required: bool = False
 
 
 def field(
@@ -261,6 +264,51 @@ def field(
     """
     labels = tuple([Label(str(label)) for label in (labels if isinstance(labels, tuple) else (labels,))])
     return dataclasses.field(metadata={_SPEC: _FieldSpec(dtype, shape, kind, labels, grad, ndarray, lazy)})
+
+
+def requires():
+    """Declare a field holding a struct built and owned elsewhere, which the struct binds when built (see Data)."""
+    return dataclasses.field(metadata={_SPEC: _FieldSpec(is_required=True)})
+
+
+# The namespace structs register in and find the structs they require from, set while one is entered (see Namespace)
+_ACTIVE_NAMESPACE: ContextVar["Namespace | None"] = ContextVar("data_namespace", default=None)
+# The structs defined so far by qualified name, and the hooks into those not defined yet (see 'into' in Data)
+_DATA_CLASSES: "weakref.WeakValueDictionary[str, type]" = weakref.WeakValueDictionary()
+_PENDING_HOOKS: dict[str, list[tuple[type, str]]] = {}
+
+
+class Namespace:
+    """
+    A named namespace of the structs built within it (see Data).
+
+    Namespaces form a tree, each child named under its parent and kept, so that a struct registered once serves every
+    struct built later requiring it. Entering a namespace with `with` makes the structs built within it register in it,
+    and find the structs they require in it, else in its ancestors, so a child shadows the structs of the same type of
+    its ancestors and several instances of a struct serve distinct structs requiring it.
+    """
+
+    def __init__(self, name: str, parent: "Namespace | None" = None):
+        self.name, self.parent = name, parent
+        self._structs: dict[type, weakref.WeakSet] = {}
+        self._children: dict[str, Namespace] = {}
+        self._tokens: list = []
+
+    def child(self, name: str) -> "Namespace":
+        """Return the child namespace of the given name, created the first time it is asked for."""
+        if name not in self._children:
+            self._children[name] = Namespace(name, self)
+        return self._children[name]
+
+    def __enter__(self) -> "Namespace":
+        self._tokens.append(_ACTIVE_NAMESPACE.set(self))
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        _ACTIVE_NAMESPACE.reset(self._tokens.pop())
+
+    def __repr__(self):
+        return self.name if self.parent is None else f"{self.parent!r}.{self.name}"
 
 
 class _Node(NamedTuple):
@@ -300,6 +348,15 @@ class Data:
     the struct or member it applies to, and a tie or a label raises. A plain value in place of a table applies to every
     array. `_binds` maps a field, by its name or by a reference, to an array or a struct allocated elsewhere, bound in
     its place: no kernel may access both, since Quadrants assumes distinct kernel arguments never alias.
+
+    A struct may also require structs built and owned elsewhere, which it references without allocating them, so that a
+    kernel reaches the data of several components through one argument. The struct declares the field of each (see
+    'requires'), and a module adds one to a struct it does not own with the class keyword `into`: the struct, or its
+    qualified name for one defined later, and the name of the field, before any instance of it is built. Every struct
+    registers in the namespace entered when it is built (see Namespace), and the constructor binds each required struct
+    to the one of its type in the entered namespace, else in its nearest ancestor holding any, which must hold exactly
+    one. A struct requires one struct per type, and no array or struct appears twice in its tree, which Quadrants could
+    not tell apart.
     """
 
     kind: ClassVar["DataKind | None"] = None
@@ -309,14 +366,23 @@ class Data:
     _size_names: ClassVar[frozenset[str]] = frozenset()
     # The pydantic model validating the values of the struct, by the paths of its unused constants
     _values_models: ClassVar[dict[frozenset, type]] = {}
+    # The type of each struct the struct requires by its field, the hooks being closed once an instance is built
+    _requires: ClassVar[dict[str, type]] = {}
+    _is_sealed: ClassVar[bool] = False
 
-    def __init_subclass__(cls, kind: "DataKind | None" = None, shape: tuple | None = None, **kwargs):
+    def __init_subclass__(
+        cls,
+        kind: "DataKind | None" = None,
+        shape: tuple | None = None,
+        into: "tuple[type[Data] | str, str] | None" = None,
+        **kwargs,
+    ):
         super().__init_subclass__(**kwargs)
         if kind is not None:
             cls.kind = kind
         if shape is not None:
             cls._shape = shape
-        cls._lazy, cls._values_models = dict(cls._lazy), {}
+        cls._lazy, cls._values_models, cls._requires = dict(cls._lazy), {}, {}
         annotations = cls.__dict__.get("__annotations__", {})
         for name in list(annotations):
             default = cls.__dict__.get(name)
@@ -340,9 +406,11 @@ class Data:
         for data_field in dataclasses.fields(cls):
             # An instance shadows them with its arrays and members
             setattr(cls, data_field.name, FieldRef(cls, (data_field.name,)))
-            if isinstance(data_field.type, type) and issubclass(data_field.type, Data):
-                size_names |= data_field.type._size_names
             spec = data_field.metadata.get(_SPEC, _FieldSpec())
+            if spec.is_required:
+                cls._require(data_field.name, data_field.type)
+            elif isinstance(data_field.type, type) and issubclass(data_field.type, Data):
+                size_names |= data_field.type._size_names
             element_shape = spec.dtype[1] if isinstance(spec.dtype, tuple) else ()
             dims += [*(spec.shape or ()), *(element_shape if isinstance(element_shape, tuple) else (element_shape,))]
         while dims:
@@ -352,6 +420,43 @@ class Data:
             elif isinstance(dim, SizeExpr):
                 dims += dim._operands
         cls._size_names = frozenset(size_names)
+        if into is not None:
+            target, field_name = into
+            target = _DATA_CLASSES.get(target) if isinstance(target, str) else target
+            if target is None:
+                _PENDING_HOOKS.setdefault(into[0], []).append((cls, field_name))
+            else:
+                target._hook(field_name, cls)
+        qualified_name = f"{cls.__module__}.{cls.__qualname__}"
+        _DATA_CLASSES[qualified_name] = cls
+        for hook_cls, field_name in _PENDING_HOOKS.pop(qualified_name, []):
+            cls._hook(field_name, hook_cls)
+
+    @classmethod
+    def _hook(cls, field_name: str, hook_cls: type) -> None:
+        # The layout of a struct a kernel took is compiled in, so its fields are final once an instance is built
+        if cls._is_sealed:
+            raise TypeError(
+                f"{hook_cls.__name__} hooks into {cls.__name__} too late, an instance being already built: import the "
+                f"module defining {hook_cls.__name__} before building any scene."
+            )
+        if field_name in cls.__dataclass_fields__:
+            raise TypeError(f"{hook_cls.__name__} hooks into {cls.__name__}.{field_name}, which already exists.")
+        # The field of the hooked struct, taken from a dataclass declaring it alone
+        cls.__dataclass_fields__[field_name] = dataclasses.fields(
+            dataclasses.make_dataclass(field_name, [(field_name, hook_cls)])
+        )[0]
+        setattr(cls, field_name, FieldRef(cls, (field_name,)))
+        cls._require(field_name, hook_cls)
+
+    @classmethod
+    def _require(cls, field_name: str, required_cls: type) -> None:
+        # Two fields bound to one struct would alias it, which Quadrants cannot detect
+        if not (isinstance(required_cls, type) and issubclass(required_cls, Data)):
+            raise TypeError(f"{cls.__name__}.{field_name}: a required field holds a struct.")
+        if required_cls in cls._requires.values():
+            raise TypeError(f"{cls.__name__}.{field_name}: a struct requires one struct per type.")
+        cls._requires[field_name] = required_cls
 
     def __init__(
         self,
@@ -366,6 +471,20 @@ class Data:
     ):
         cls = type(self)
         name = cls.__name__
+        cls._is_sealed = True
+
+        # The required structs are bound in their fields, from the entered namespace, else from the nearest ancestor
+        binds = {}
+        for field_name, required_cls in cls._requires.items():
+            namespace = _ACTIVE_NAMESPACE.get()
+            while namespace is not None and not namespace._structs.get(required_cls):
+                namespace = namespace.parent
+            if namespace is None:
+                raise TypeError(f"{name}() finds no {required_cls.__name__} in {_ACTIVE_NAMESPACE.get()!r}.")
+            structs = list(namespace._structs[required_cls])
+            if len(structs) > 1:
+                raise TypeError(f"{name}() finds {len(structs)} {required_cls.__name__} in {namespace!r}, not one.")
+            binds[(field_name,)] = structs[0]
 
         # The fields of the tree in declaration order, a member before its own fields, walking the holders with the
         # fields each has left
@@ -388,11 +507,13 @@ class Data:
                 continue
             node_shape = next(iter([s for s in (spec.shape, member._shape) if s is not None]), shape)
             nodes.append(_Node(node_path, member, spec, node_kind, node_shape, node_labels))
-            pending.append((node_path, node_labels, node_kind, node_shape, member, iter(dataclasses.fields(member))))
+            if node_path not in binds:
+                pending.append(
+                    (node_path, node_labels, node_kind, node_shape, member, iter(dataclasses.fields(member)))
+                )
         paths = {node.path for node in nodes}
         leaves = [node for node in nodes if node.member is None]
 
-        binds = {}
         for key, bound in (_binds or {}).items():
             key_path = key._path if isinstance(key, FieldRef) else (key,)
             if key_path not in paths:
@@ -475,6 +596,22 @@ class Data:
                     node_sizes.update(sizes.get(node.path[:depth], {}))
                 value = _allocate(name, node, properties[node.path], node_sizes, values, requires_grad)
             object.__setattr__(holder, node.path[-1], value)
+
+        # Quadrants assumes the arrays of a kernel argument distinct, so the structs and arrays bound may share none
+        held, pending = set(), [((), self)]
+        while pending:
+            path, struct = pending.pop()
+            for data_field in dataclasses.fields(struct):
+                value = getattr(struct, data_field.name)
+                if id(value) in held:
+                    raise TypeError(f"{name}() holds {'.'.join((*path, data_field.name))} twice.")
+                held.add(id(value))
+                if isinstance(value, Data):
+                    pending.append(((*path, data_field.name), value))
+
+        namespace = _ACTIVE_NAMESPACE.get()
+        if namespace is not None:
+            namespace._structs.setdefault(cls, weakref.WeakSet()).add(self)
 
 
 def _by_path(struct_name, arg_name, table, paths):

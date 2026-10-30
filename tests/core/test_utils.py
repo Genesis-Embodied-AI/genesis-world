@@ -15,9 +15,12 @@ import trimesh
 from PIL import Image
 from scipy.spatial.transform import Rotation, Slerp
 
+import quadrants as qd
+
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils import warnings
+from genesis.utils.data import Data, DataKind, Namespace, field, requires
 from genesis.utils.image_exporter import FrameImageExporter, as_grayscale_image
 from genesis.utils.misc import tensor_to_array, unique_rows
 from genesis.utils.tools import RunningMean
@@ -1100,6 +1103,61 @@ def test_as_grayscale_image(tmp_path):
             for image_file, depth_env in zip(image_files, depth.reshape(-1, 5, width)):
                 with Image.open(image_file) as image:
                     assert_equal(image, as_grayscale_image(depth_env))
+
+
+@pytest.mark.required
+def test_data_aggregation():
+    class Info(Data, kind=DataKind.CONSTANT, shape=()):
+        value: qd.Tensor = field(float)
+
+    # A struct hooks into a struct defined later by its qualified name
+    aggregate_name = f"{__name__}.test_data_aggregation.<locals>.Aggregate"
+
+    class HookedInfo(Data, kind=DataKind.CONSTANT, shape=(), into=(aggregate_name, "hooked")):
+        value: qd.Tensor = field(float)
+
+    class Aggregate(Data, kind=DataKind.CONSTANT, shape=()):
+        info: Info = requires()
+        value: qd.Tensor = field(float)
+
+    # A struct binds the struct of each required type nearest to the entered namespace, a child shadowing its ancestors
+    namespace = Namespace("root")
+    with namespace:
+        info = Info(values=dict(value=1.0))
+        hooked_info = HookedInfo(values=dict(value=2.0))
+        with namespace.child("child"):
+            child_info = Info(values=dict(value=3.0))
+            child_aggregate = Aggregate(values=dict(value=0.0))
+        aggregate = Aggregate(values=dict(value=0.0))
+    assert aggregate.info is info and aggregate.hooked is hooked_info
+    assert child_aggregate.info is child_info and child_aggregate.hooked is hooked_info
+    with pytest.raises(TypeError, match="finds no Info"):
+        Aggregate(values=dict(value=0.0))
+    with namespace.child("child"):
+        other_child_info = Info(values=dict(value=4.0))
+        with pytest.raises(TypeError, match="finds 2 Info"):
+            Aggregate(values=dict(value=0.0))
+    assert other_child_info is not child_info
+
+    # Hooks close once an instance is built, and a struct requires one struct per type
+    with pytest.raises(TypeError, match="too late"):
+
+        class LateInfo(Data, kind=DataKind.CONSTANT, shape=(), into=(Aggregate, "late")):
+            value: qd.Tensor = field(float)
+
+    with pytest.raises(TypeError, match="one struct per type"):
+
+        class TwiceAggregate(Data):
+            first_info: Info = requires()
+            second_info: Info = requires()
+
+    # A struct reached twice through the structs required by the required structs aliases the tree
+    class OuterAggregate(Data, kind=DataKind.CONSTANT, shape=()):
+        info: Info = requires()
+        aggregate: Aggregate = requires()
+
+    with namespace, pytest.raises(TypeError, match="holds aggregate.info twice"):
+        OuterAggregate()
 
 
 @pytest.mark.required

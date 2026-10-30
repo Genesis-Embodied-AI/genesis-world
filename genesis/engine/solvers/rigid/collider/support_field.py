@@ -33,23 +33,16 @@ class SupportField:
     their list. A lookup runs on the critical path of collision detection, where that wait costs more than the reads.
     """
 
-    def __init__(self, rigid_solver: "RigidSolver") -> None:
+    def __init__(self, rigid_solver: "RigidSolver", is_active: bool) -> None:
+        """Build the support tables of the geoms when active, allocating the support field info and its writer."""
         self.solver = rigid_solver
         # The table is exact at any resolution, which only trades its memory against the length of the lists of its
         # cells. A multiple of four makes the band of rows of each chart span 45 to 135 degrees off its poles exactly.
         self._support_res = 120
-        # The sizes and the constants of the support field info (see ColliderInfo), and the writer of its tables
-        self.sizes: dict[str, int] = {}
-        self.values = dict(support_res=self._support_res)
-        self.fill: Callable[[array_class.SupportFieldInfo], None] | None = None
-
-    @property
-    def is_active(self) -> bool:
-        return self.fill is not None
-
-    def activate(self) -> None:
-        """Build the support tables of the geoms, which sets the sizes of the support field info and its writer."""
-        if self.is_active:
+        # The writer of the tables, once every array of the solver is allocated
+        self.fill: Callable[[], None] | None = None
+        if not is_active:
+            self.support_field_info = array_class.SupportFieldInfo(unused=True)
             return
 
         band_rows = self._support_res // 2
@@ -72,10 +65,17 @@ class SupportField:
         n_support_cells = n_geom_cells * len(tables_geom)
         tables = [geom.mesh.get_support_table(self._support_res) for geom in tables_geom]
         n_extras = sum([len(table_extras_vid) for _, table_extras_vid, _ in tables])
-        self.sizes = dict(support_cells=n_support_cells, support_candidates=2 * n_support_cells + n_extras)
+        self.support_field_info = array_class.SupportFieldInfo(
+            sizes=dict(
+                geoms=self.solver.n_geoms,
+                support_cells=n_support_cells,
+                support_candidates=2 * n_support_cells + n_extras,
+            ),
+            values=dict(support_res=self._support_res),
+        )
 
         # The tables are assembled when written, so that no host copy of them outlives the build
-        def fill(support_field_info):
+        def fill():
             # The records of the cells and the extra candidate counts are written in place, and the extra candidates
             # of every cell start past the records of all cells, in cell order
             records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
@@ -96,12 +96,16 @@ class SupportField:
                     dtype=gs.np_int,
                 ),
                 self.solver.dyn_info,
-                support_field_info,
+                self.support_field_info,
                 self.solver.rigid_config,
                 n_geom_cells,
             )
 
         self.fill = fill
+
+    @property
+    def is_active(self) -> bool:
+        return self.fill is not None
 
 
 @qd.kernel

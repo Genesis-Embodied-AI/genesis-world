@@ -6,7 +6,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field, is_tensor_addressable
+from genesis.utils.data import ENVS, Data, DataKind, Label, Size, StaticConfig, field, is_tensor_addressable, requires
 
 
 def _timer_dtype():
@@ -906,10 +906,10 @@ TERRAIN_COLS = Size("terrain_cols")
 
 
 class ColliderInfo(Data, kind=DataKind.CONSTANT):
-    sdf: SDFInfo
-    mpr: MPRInfo
-    gjk: GJKInfo
-    support_field: SupportFieldInfo
+    sdf: SDFInfo = requires()
+    mpr: MPRInfo = requires()
+    gjk: GJKInfo = requires()
+    support_field: SupportFieldInfo = requires()
     vert_neighbors: qd.Tensor = field(int, shape=(VERT_NEIGHBORS,))
     vert_neighbor_start: qd.Tensor = field(int, shape=(VERTS,))
     vert_n_neighbors: qd.Tensor = field(int, shape=(VERTS,))

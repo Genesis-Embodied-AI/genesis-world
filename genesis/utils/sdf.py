@@ -17,8 +17,8 @@ class SDF:
     """Build the signed distance field (SDF) grids of the rigid geoms once, at their exact size.
 
     The geoms of one trimesh share one grid whenever their grids have the same resolution, cell size and gradient flag
-    (see 'Mesh.tmesh_hash'), as the instances of an asset do. The grids are loaded at construction, which sizes the
-    SDF info (see 'sizes'), and written once it is allocated (see 'fill').
+    (see 'Mesh.tmesh_hash'), as the instances of an asset do. The grids are loaded and the SDF info allocated at
+    construction, the grids being written into it later (see 'fill').
     """
 
     def __init__(self, rigid_solver):
@@ -40,16 +40,17 @@ class SDF:
         self._grids_sdf_coarse_res = (grids_n_nodes - 2) // 4 + 1
         self._grids_n_coarse_cells = self._grids_sdf_coarse_res.prod(axis=-1, dtype=gs.np_int)
         n_cells = int(self._grids_n_cells.sum())
-        # The sizes of the SDF info (see SDFInfo)
-        self.sizes = dict(sdf_cells=n_cells, sdf_coarse_cells=self._grids_n_coarse_cells.sum())
         if not is_tensor_addressable((n_cells, 3), gs.np_float):
             gs.raise_exception(
                 f"SDF Gradient shape (n_cells={n_cells}, 3) is too large. Consider setting a larger 'sdf_cell_size', "
                 "or a smaller 'sdf_max_res', in 'gs.materials.Rigid' options."
             )
+        self.sdf_info = array_class.SDFInfo(
+            sizes=dict(geoms=len(geoms), sdf_cells=n_cells, sdf_coarse_cells=self._grids_n_coarse_cells.sum())
+        )
 
-    def fill(self, sdf_info: array_class.SDFInfo) -> None:
-        """Write the grids into the SDF info once allocated."""
+    def fill(self) -> None:
+        """Write the grids into the SDF info, once every array of the solver is allocated."""
         geoms = self._solver.geoms
         if not geoms:
             return
@@ -81,7 +82,7 @@ class SDF:
             ),
             self._grids_sdf_coarse_res[self._geoms_grid_idx],
             np.concatenate(grids_sdf_coarse_val, dtype=gs.np_float),
-            sdf_info,
+            self.sdf_info,
             self._solver.rigid_config,
         )
 

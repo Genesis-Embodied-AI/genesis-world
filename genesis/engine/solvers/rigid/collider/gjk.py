@@ -67,43 +67,45 @@ class GJK:
 
         self.gjk_config = array_class.GJKStaticConfig(enable_contact_patch=enable_contact_patch)
 
-        # The constants of the GJK info (see ColliderInfo)
         float_min, float_max = 1e-15, 1e15
-        self.values = dict(
-            max_contacts_per_pair=max_contacts_per_pair,
-            max_contact_polygon_verts=max_contact_polygon_verts,
-            gjk_max_iterations=gjk_max_iterations,
-            epa_max_iterations=epa_max_iterations,
-            # When using larger minimum values (e.g. gs.EPS), unstability could occur for some examples (e.g. box
-            # pyramid). Also, since different backends could have different precisions (e.g. computing vector norm),
-            # we use a very small value, so that there is no discrepancy between backends.
-            FLOAT_MIN=float_min,
-            FLOAT_MIN_SQ=float_min**2,
-            FLOAT_MAX=float_max,
-            FLOAT_MAX_SQ=float_max**2,
-            tolerance=1e-6,
-            collision_eps=1e-6,
-            # This value has been experimentally determined based on the examples that we currently have (e.g. pyramid,
-            # tower, ...), but it could be further tuned based on the future examples.
-            simplex_max_degeneracy_sq=1e-5**2,
-            polytope_max_faces=polytope_max_faces,
-            # This value has been experimentally determined based on the examples that we currently have (e.g. pyramid,
-            # tower, ...). We observed the error usually reaches around 5e-4, so we set the threshold to 1e-4 to be
-            # safe. However, this value could be further tuned based on the future examples.
-            polytope_max_rel_reprojection_error=1e-4,
-            polytope_max_abs_reprojection_error=1e-4,
-            # The values are matching MuJoCo for compatibility. Increasing this value could be useful for detecting
-            # contact manifolds even when the normals are not perfectly aligned, but we observed that it leads to more
-            # false positives and thus not a perfect solution for the multi-contact detection.
-            contact_face_tol=math.cos(1.6e-3),
-            contact_edge_tol=math.sin(1.6e-3),
-            # FIXME: Adjust these values based on the case study.
-            diff_contact_eps_boundary=1e-2,
-            diff_contact_eps_distance=1e-2,
-            diff_contact_eps_affine=1e-2,
-            # We apply sqrt to the 10 * EPS value because we often use the square of the normal norm as the denominator.
-            diff_contact_min_normal_norm=math.sqrt(gs.EPS * 10.0),
-            diff_contact_min_penetration=gs.EPS * 100.0,
+        self.gjk_info = array_class.GJKInfo(
+            values=dict(
+                max_contacts_per_pair=max_contacts_per_pair,
+                max_contact_polygon_verts=max_contact_polygon_verts,
+                gjk_max_iterations=gjk_max_iterations,
+                epa_max_iterations=epa_max_iterations,
+                # When using larger minimum values (e.g. gs.EPS), unstability could occur for some examples (e.g. box
+                # pyramid). Also, since different backends could have different precisions (e.g. computing vector norm),
+                # we use a very small value, so that there is no discrepancy between backends.
+                FLOAT_MIN=float_min,
+                FLOAT_MIN_SQ=float_min**2,
+                FLOAT_MAX=float_max,
+                FLOAT_MAX_SQ=float_max**2,
+                tolerance=1e-6,
+                collision_eps=1e-6,
+                # This value has been experimentally determined based on the examples that we currently have (e.g.
+                # pyramid, tower, ...), but it could be further tuned based on the future examples.
+                simplex_max_degeneracy_sq=1e-5**2,
+                polytope_max_faces=polytope_max_faces,
+                # This value has been experimentally determined based on the examples that we currently have (e.g.
+                # pyramid, tower, ...). We observed the error usually reaches around 5e-4, so we set the threshold to
+                # 1e-4 to be safe. However, this value could be further tuned based on the future examples.
+                polytope_max_rel_reprojection_error=1e-4,
+                polytope_max_abs_reprojection_error=1e-4,
+                # The values are matching MuJoCo for compatibility. Increasing this value could be useful for detecting
+                # contact manifolds even when the normals are not perfectly aligned, but we observed that it leads to
+                # more false positives and thus not a perfect solution for the multi-contact detection.
+                contact_face_tol=math.cos(1.6e-3),
+                contact_edge_tol=math.sin(1.6e-3),
+                # FIXME: Adjust these values based on the case study.
+                diff_contact_eps_boundary=1e-2,
+                diff_contact_eps_distance=1e-2,
+                diff_contact_eps_affine=1e-2,
+                # We apply sqrt to the 10 * EPS value because we often use the square of the normal norm as the
+                # denominator.
+                diff_contact_min_normal_norm=math.sqrt(gs.EPS * 10.0),
+                diff_contact_min_penetration=gs.EPS * 100.0,
+            )
         )
 
         # The sizes of the scratch states (see GJKState)

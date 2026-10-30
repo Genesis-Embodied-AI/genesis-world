@@ -11,7 +11,7 @@ from genesis.options.morphs import Morph
 from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAPCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils.array_class import ErrorCode
-from genesis.utils.data import DataItem, DataKind, iter_data
+from genesis.utils.data import DataItem, DataKind, Namespace, iter_data
 from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 from genesis.utils.tools import StepTimer
 
@@ -102,6 +102,9 @@ class Simulator(RBC):
             self._requires_grad, on_pass_start=begin_backward_pass, on_pass_end=end_backward_pass
         )
         self._is_forward_ready = True
+
+        # The root namespace of the parts the solvers build for one another's aggregates (see Namespace)
+        self.namespace = Namespace("simulator")
 
         # solvers
         self.rigid_solver = RigidSolver(self.scene, self, options.rigid)

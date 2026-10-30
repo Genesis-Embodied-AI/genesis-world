@@ -78,12 +78,11 @@ class Collider:
         self._prune_max_contacts_per_link_pair = 32
         self._prune_max_contacts_floor = 512
 
-        # The narrowphase sub-components resolve the options the static configuration reads, and their data sizes the
-        # collider info, so they are built and activated first
+        # The narrowphase sub-components resolve the options the static configuration reads, so they are built first,
+        # each building its part of the collider info (see ColliderInfo)
         self.sdf = SDF(rigid_solver)
         self.mpr = mpr.MPR(rigid_solver)
         self.gjk = gjk.GJK(rigid_solver)
-        self._support_field = support_field.SupportField(rigid_solver)
 
         self._init_static_config()
         self._use_split_narrowphase = (
@@ -108,8 +107,10 @@ class Collider:
                 self.mpr.activate(None, self._n_terrain_threads)
             if self.collider_config.has_non_box_plane_convex_convex:
                 self.gjk.activate()
-        if self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex:
-            self._support_field.activate()
+        self._support_field = support_field.SupportField(
+            rigid_solver,
+            is_active=self.collider_config.has_terrain or self.collider_config.has_non_box_plane_convex_convex,
+        )
 
         self._init_collision_fields()
 
@@ -329,17 +330,12 @@ class Collider:
                 geoms=self._solver.n_geoms,
                 links=self._solver.n_links,
                 verts=self._solver.n_verts,
-                **self.sdf.sizes,
-                **self._support_field.sizes,
                 vert_neighbors=n_vert_neighbors,
                 valid_link_pairs=n_valid_link_pairs,
                 terrain_rows=terrain_hf_shape[0],
                 terrain_cols=terrain_hf_shape[1],
             ),
             values=dict(
-                mpr=self.mpr.values,
-                gjk=self.gjk.values,
-                support_field=self._support_field.values,
                 max_possible_pairs=self._n_possible_pairs,
                 max_collision_pairs=max_collision_pairs,
                 max_candidate_contacts=max_candidate_contacts,
@@ -353,11 +349,10 @@ class Collider:
                 contact_pruning_tolerance=self._solver._options.contact_pruning_tolerance or 0.0,
                 prune_deep_penetration_ratio=self._prune_deep_penetration_ratio,
             ),
-            unused={array_class.ColliderInfo.support_field: not self._support_field.is_active},
         )
-        self.sdf.fill(self.collider_info.sdf)
+        self.sdf.fill()
         if self._support_field.is_active:
-            self._support_field.fill(self.collider_info.support_field)
+            self._support_field.fill()
         self._init_collision_pair_idx(self._collision_pair_idx)
         self.collider_info.link_pair_idx.from_numpy(link_pair_idx)
 

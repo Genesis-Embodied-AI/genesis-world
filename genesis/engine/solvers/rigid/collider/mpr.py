@@ -12,18 +12,19 @@ class MPR:
     def __init__(self, rigid_solver):
         self._solver = rigid_solver
 
-        # The constants of the MPR info (see ColliderInfo)
-        self.values = dict(
-            # Dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
-            # ignore the scene scale; it bounds when a triangle, a segment or a portal counts as degenerate, and the
-            # support lookup scales it by its own factor for tie width.
-            CCD_EPS=1e-5 if gs.qd_float == qd.f32 else 1e-10,
-            # A fraction of the geom pair scale, turned into a length per pair: how close the portal must come to
-            # the surface to count as having reached it, and the magnitude the ray is re-seeded with when the two
-            # geoms' centres coincide.
-            CCD_TOLERANCE=1e-6 if rigid_solver._enable_mujoco_compatibility else 1e-5,
-            # Bounds that refinement, which is not otherwise guaranteed to terminate.
-            CCD_ITERATIONS=50,
+        self.mpr_info = array_class.MPRInfo(
+            values=dict(
+                # Dimensionless, every site scaling it by the magnitudes of its own operands so the degeneracy tests
+                # ignore the scene scale; it bounds when a triangle, a segment or a portal counts as degenerate, and the
+                # support lookup scales it by its own factor for tie width.
+                CCD_EPS=1e-5 if gs.qd_float == qd.f32 else 1e-10,
+                # A fraction of the geom pair scale, turned into a length per pair: how close the portal must come to
+                # the surface to count as having reached it, and the magnitude the ray is re-seeded with when the two
+                # geoms' centres coincide.
+                CCD_TOLERANCE=1e-6 if rigid_solver._enable_mujoco_compatibility else 1e-5,
+                # Bounds that refinement, which is not otherwise guaranteed to terminate.
+                CCD_ITERATIONS=50,
+            )
         )
         self.mpr_state = array_class.MPRState(sizes=dict(envs=self._solver._B))
         # The scratch states of the split narrowphase and of the terrain pass, at the smallest size until 'activate'
