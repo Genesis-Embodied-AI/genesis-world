@@ -214,7 +214,9 @@ class ConstraintSolver:
             # factor when there is one, allocated with its exact shape: the factor only writes it before the constraint
             # solve repopulates it in the same step. Quadrants assumes distinct kernel arguments never alias, so no
             # kernel may access both, the factor living in forward_dynamics.py alone.
-            _binds={("nt_H",): solver.rigid_info.mass_mat_tiled_scratch} if config.enable_register_tiled_mass else None,
+            _binds={array_class.ConstraintState.nt_H: solver.rigid_info.mass_mat_tiled_scratch}
+            if config.enable_register_tiled_mass
+            else None,
         )
         self.constraint_state.qd_n_equalities.from_numpy(
             np.full((self._solver._B,), self._solver.n_equalities, dtype=gs.np_int)
