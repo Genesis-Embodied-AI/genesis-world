@@ -1169,6 +1169,9 @@ def test_mesh_support_exactness(show_viewer, tol):
         )
         for i_e, mesh in enumerate((*meshes, meshes[-1]))
     ]
+    # The support queries run on the GJK state of the monolithic narrowphase, which the split one leaves unused
+    with namespace(scene._namespace):
+        opt_in(array_class.GJKScratch.main, envs=1)
     scene.build()
 
     @qd.kernel
@@ -1236,10 +1239,6 @@ def test_mesh_support_exactness(show_viewer, tol):
     directions_boundary = np.concatenate((directions_meridian, directions_parallel))
     directions_boundary = np.concatenate((directions_boundary, directions_boundary[:, (0, 2, 1)] * (1.0, 1.0, -1.0)))
 
-    # The support functions read the warm start of the mesh support alone
-    gjk_state = array_class.GJKState(
-        sizes=dict(envs=1), unused={None: True, array_class.GJKState.support_mesh_prev_vertex_id: False}
-    )
     for entity in entities:
         geom = entity.geoms[0]
         verts = geom.init_verts
@@ -1281,7 +1280,7 @@ def test_mesh_support_exactness(show_viewer, tol):
             supports_world,
             supports_local,
             scene.rigid_solver.collider.collider_state,
-            gjk_state,
+            scene.rigid_solver.collider.gjk.gjk_state,
             scene.rigid_solver.dyn_info,
             scene.rigid_solver.collider.collider_info,
             scene.rigid_solver.rigid_config,

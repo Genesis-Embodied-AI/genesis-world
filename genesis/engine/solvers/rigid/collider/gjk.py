@@ -91,12 +91,11 @@ class GJK:
             )
         )
 
-        # The sizes of the scratch states (see GJKState)
-        # The scratch GJK runs on, its states sized as the collider opts them in. A state detecting overlaps alone runs
-        # neither EPA nor differentiable contacts.
+        # The scratch states GJK runs on, the fields of one struct so that the collider opts each in by name and with
+        # its own sizes (see GJKScratch). A state detecting overlaps alone runs neither EPA nor differentiable contacts.
         requires_grad = rigid_solver.rigid_config.requires_grad
         full = dict(diff_contacts=not requires_grad)
-        self.scratch = array_class.GJKScratch(
+        scratch = array_class.GJKScratch(
             sizes=dict(
                 polytope_verts=5 + epa_max_iterations,
                 polytope_faces=polytope_max_faces,
@@ -109,6 +108,11 @@ class GJK:
                 array_class.GJKScratch.multicontact: full,
             },
             requires_grad=requires_grad,
+        )
+        self.gjk_state, self.contact0_gjk_state, self.multicontact_gjk_state = (
+            scratch.main,
+            scratch.contact0,
+            scratch.multicontact,
         )
 
 

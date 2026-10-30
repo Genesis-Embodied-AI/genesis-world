@@ -26,7 +26,13 @@ class MPR:
                 CCD_ITERATIONS=50,
             )
         )
-        self.scratch = array_class.MPRScratch(sizes=dict(envs=self._solver._B))
+        # The states are the fields of one struct so that the collider opts each in by name (see MPRScratch)
+        scratch = array_class.MPRScratch(sizes=dict(envs=self._solver._B))
+        self.mpr_state, self.contact0_mpr_state, self.multicontact_mpr_state = (
+            scratch.main,
+            scratch.contact0,
+            scratch.multicontact,
+        )
 
 
 @qd.kernel
