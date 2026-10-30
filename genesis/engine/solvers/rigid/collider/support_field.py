@@ -70,37 +70,38 @@ class SupportField:
                 tables_geom.append(geom)
             geoms_table_idx[geom.idx] = i_t
         n_support_cells = n_geom_cells * len(tables_geom)
-        # The records of the cells and the extra candidate counts are written in place as the tables are built, the
-        # extra candidates alone being collected per table, since their count is unknown beforehand
-        records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
-        support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
-        extras_vid = []
-        for i_t, geom in enumerate(tables_geom):
-            cell_start = i_t * n_geom_cells
+        tables = [geom.mesh.get_support_table(self._support_res) for geom in tables_geom]
+        n_extras = sum([len(table_extras_vid) for _, table_extras_vid, _ in tables])
+        self.sizes = dict(support_cells=n_support_cells, support_candidates=2 * n_support_cells + n_extras)
 
-            slots_vid, table_extras_vid, cells_n_extras = geom.mesh.get_support_table(self._support_res)
-            records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
-            extras_vid.append(table_extras_vid)
-            support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
+        # The tables are assembled when written, so that no host copy of them outlives the build
+        def fill(support_field_info):
+            # The records of the cells and the extra candidate counts are written in place, and the extra candidates
+            # of every cell start past the records of all cells, in cell order
+            records_vid = np.empty((n_support_cells, 2), dtype=gs.np_int)
+            support_list_start = np.empty((n_support_cells + 1,), dtype=gs.np_int)
+            for i_t, (slots_vid, _, cells_n_extras) in enumerate(tables):
+                cell_start = i_t * n_geom_cells
+                records_vid[cell_start : cell_start + n_geom_cells] = slots_vid
+                support_list_start[cell_start + 1 : cell_start + n_geom_cells + 1] = cells_n_extras
+            support_list_start[0] = 2 * n_support_cells
+            np.cumsum(support_list_start, out=support_list_start)
+            _kernel_init_support(
+                n_geom_cells * geoms_table_idx,
+                support_list_start,
+                np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int),
+                records_vid,
+                np.concatenate(
+                    [np.zeros((0,), dtype=gs.np_int), *[table_extras_vid for _, table_extras_vid, _ in tables]],
+                    dtype=gs.np_int,
+                ),
+                self.solver.dyn_info,
+                support_field_info,
+                self.solver.rigid_config,
+                n_geom_cells,
+            )
 
-        # The extra candidates of every cell start past the records of all cells, in cell order
-        support_list_start[0] = 2 * n_support_cells
-        np.cumsum(support_list_start, out=support_list_start)
-        extras_vid = np.concatenate((np.zeros((0,), dtype=gs.np_int), *extras_vid), dtype=gs.np_int)
-
-        self.sizes = dict(support_cells=n_support_cells, support_candidates=2 * n_support_cells + len(extras_vid))
-        tables_vert_start = np.array([geom.vert_start for geom in tables_geom], dtype=gs.np_int)
-        self.fill = lambda support_field_info: _kernel_init_support(
-            n_geom_cells * geoms_table_idx,
-            support_list_start,
-            tables_vert_start,
-            records_vid,
-            extras_vid,
-            self.solver.dyn_info,
-            support_field_info,
-            self.solver.rigid_config,
-            n_geom_cells,
-        )
+        self.fill = fill
 
 
 @qd.kernel
