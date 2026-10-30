@@ -52,7 +52,7 @@ from genesis.options import (
     VisOptions,
 )
 from genesis.options.entities import EntityT, get_entity_options_cls
-from genesis.options.materials import Cloth, Liquid, Material, Sand, Snow
+from genesis.options.materials import Cloth, Kinematic, Liquid, Material, Rigid, Sand, Snow
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
@@ -332,7 +332,7 @@ class Scene(RBC):
     def add_entity(
         self,
         morph: Morph | Iterable[Morph] | None = None,
-        material: Material | None = None,
+        material: Material | Kinematic | None = None,
         surface: Surface | None = None,
         visualize_contact: bool | None = None,
         vis_mode: str | None = None,
@@ -361,7 +361,9 @@ class Scene(RBC):
             inertia, link frames (e.g. a different 'scale', or a different pose for a fixed base) and joint parameters
             may differ.
         material : gs.materials.Material | None, optional
-            The material of the rigid entity. If None, use ``gs.materials.Material()``.
+            The material of the rigid entity. If None, use ``gs.materials.Material()``. The deprecated
+            ``gs.materials.Rigid`` and ``gs.materials.Kinematic`` stand for the options of a rigid and of a kinematic
+            entity respectively.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
         visualize_contact : bool | None, optional
@@ -385,7 +387,7 @@ class Scene(RBC):
         if options is None:
             if morph is None:
                 gs.raise_exception("Entity construction requires a morph.")
-            if material is not None and not isinstance(material, Material):
+            if material is not None and not isinstance(material, (Material, Kinematic)):
                 options_classes = get_entity_options_cls(material)
                 if not options_classes:
                     gs.raise_exception(f"No entity options admit material {type(material).__name__}.")
@@ -402,13 +404,24 @@ class Scene(RBC):
                 if surface is None:
                     surface = gs.surfaces.Default()
                 surface = surface.model_copy(update={"vis_mode": vis_mode})
-            options = RigidEntityOptions(
-                morph=morph,
-                material=material if material is not None else Material(),
-                surface=surface,
-                visualize_contact=visualize_contact if visualize_contact is not None else False,
-                name=name,
-            )
+            if isinstance(material, Kinematic) and not isinstance(material, Rigid):
+                if visualize_contact:
+                    gs.raise_exception("A kinematic entity has no contacts to visualize.")
+                options = KinematicEntityOptions(
+                    morph=morph, surface=surface, name=name, **material.get_entity_options_fields()
+                )
+            else:
+                if isinstance(material, Rigid):
+                    entity_fields = material.get_entity_options_fields()
+                else:
+                    entity_fields = {"material": material if material is not None else Material()}
+                options = RigidEntityOptions(
+                    morph=morph,
+                    surface=surface,
+                    visualize_contact=visualize_contact if visualize_contact is not None else False,
+                    name=name,
+                    **entity_fields,
+                )
         elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
             gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
         if type(options) is EntityOptions:
