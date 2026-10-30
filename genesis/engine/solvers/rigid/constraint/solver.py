@@ -138,7 +138,7 @@ class ConstraintSolver:
         # * 1 constraint per dof frictionloss
         # * up to 6 constraints per equality (weld)
         # * 1 more constraint per dynamic constraint (a screw adds a friction row and a limit row to its 5 equality rows)
-        # The collider resolves the option 'max_contacts' (see 'Collider._compute_max_contacts')
+        # The collider resolves the option 'max_contacts' (see 'max_contacts' in 'Collider._init_collision_fields')
         rows_per_contact = rigid_solver.rigid_config.rows_per_contact
         self.len_constraints = (
             rows_per_contact * rigid_solver._options.max_contacts

@@ -41,24 +41,25 @@ class LegacyCoupler(RBC):
         self.sf_solver = self.sim.sf_solver
 
         # The particles and the FEM vertices collide with the rigid geoms through their SDF
-        opt_in(
-            array_class.SDFInfo,
-            cond=lambda: (
-                self.rigid_solver.is_active
-                and (
-                    (self.mpm_solver.is_active and self.options.rigid_mpm)
-                    or (self.sph_solver.is_active and self.options.rigid_sph)
-                    or (self.pbd_solver.is_active and self.options.rigid_pbd)
-                    or (self.fem_solver.is_active and self.options.rigid_fem)
+        opt_in(array_class.SDFInfo, cond=lambda: any(self.rigid_couplings))
+
+    @property
+    def rigid_couplings(self) -> tuple[bool, bool, bool, bool]:
+        """Whether the rigid geoms couple with the MPM, SPH, PBD and FEM solvers, in this order."""
+        return tuple(
+            [
+                self.rigid_solver.is_active and solver.is_active and is_enabled
+                for solver, is_enabled in (
+                    (self.mpm_solver, self.options.rigid_mpm),
+                    (self.sph_solver, self.options.rigid_sph),
+                    (self.pbd_solver, self.options.rigid_pbd),
+                    (self.fem_solver, self.options.rigid_fem),
                 )
-            ),
+            ]
         )
 
     def build(self) -> None:
-        self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
-        self._rigid_sph = self.rigid_solver.is_active and self.sph_solver.is_active and self.options.rigid_sph
-        self._rigid_pbd = self.rigid_solver.is_active and self.pbd_solver.is_active and self.options.rigid_pbd
-        self._rigid_fem = self.rigid_solver.is_active and self.fem_solver.is_active and self.options.rigid_fem
+        self._rigid_mpm, self._rigid_sph, self._rigid_pbd, self._rigid_fem = self.rigid_couplings
         self._mpm_sph = self.mpm_solver.is_active and self.sph_solver.is_active and self.options.mpm_sph
         self._mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
         self._fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
